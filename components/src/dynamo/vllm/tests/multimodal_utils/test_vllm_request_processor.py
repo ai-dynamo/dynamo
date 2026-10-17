@@ -627,7 +627,12 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
 
     assert is_cached == {"vision_chunk": [True]}
     assert missing_items is empty_items
-    parse_mm_data.assert_called_once_with({"vision_chunk": []}, validate=False)
+    parse_mm_data.assert_called_once()
+    # Both renderer revisions represent an all-hit cache without missing data:
+    # older versions keep the empty modality; 22ba09 omits it entirely.
+    missing_data = parse_mm_data.call_args.args[0]
+    assert missing_data in ({}, {"vision_chunk": []})
+    parse_mm_data.assert_called_once_with(missing_data, validate=False)
 
     cache.is_cached.return_value = [False]
     parse_mm_data.reset_mock()

@@ -2247,9 +2247,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "8.1.0"
+version = "8.2.0-muse-spark-open-dev.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e78ad3396a91e388a6ab6e4e9f66236238793076b5d0b80c37671134f54bcfa5"
+checksum = "bea587bd6537629d52a82b398926c3356ec2812937f22f5e57df015e77e94ef3"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2270,9 +2270,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.3.2"
+version = "0.5.0-muse-spark-open-dev.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e2277648c57af9f41943c1c6abf573ed42ddbad9d05f2e4053e9d66e9a41182"
+checksum = "c2668507b9f41a08a3de468093b04ec896a9e02918970e1333e59fd23c31a14f"
 dependencies = [
  "anyhow",
  "num-traits",
@@ -2287,9 +2287,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "5.4.0"
+version = "6.0.0-muse-spark-open-dev.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d2723c9ec1c3106cd044ca7f3ff7db71e0e347d1190aa2694a7cc7121376a2a"
+checksum = "dc37e3ffb534befac3a462f6c700bb21f3d6943745b652ff142e173e8630174a"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2304,9 +2304,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "5.1.0"
+version = "6.0.0-muse-spark-open-dev.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0a5b79eefdfd2bb2c01f3a187f9367db598db58a4cf17550d20f79c97656b66"
+checksum = "e5525fe33315b8c05c120180f6e45267ade8ddbd08f40ca96a184fae4c38fcba"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2409,9 +2409,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.8.0"
+version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "821c767e896f1f225b6411a5ce41dba7f114c2c97db862a13fd962195665075e"
+checksum = "ed232a9d254149a4e2e14f0a7d77f59bd64161964c0ba55267beea3955650faa"
 dependencies = [
  "aho-corasick",
  "anyhow",

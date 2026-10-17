@@ -33,7 +33,7 @@ from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector
 from torch.cuda import device_count
-from transformers import AutoConfig
+from transformers import AutoConfig, PretrainedConfig
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo import prometheus_names
@@ -102,6 +102,40 @@ def _resolve_model_dir(config: Config) -> str:
     except (HFValidationError, OSError):
         return config.model
     return os.path.dirname(cached) if isinstance(cached, str) else config.model
+
+
+def _resolve_multimodal_model_type(
+    model: str, *, trust_remote_code: bool = False
+) -> str:
+    """Resolve the model type without requiring Transformers model support.
+
+    TRT-LLM can add support for a new architecture before the Transformers
+    version in the runtime image registers its ``model_type``. In that case,
+    ``AutoConfig`` rejects the checkpoint even though TRT-LLM can load it.
+
+    Dynamo does not instantiate the model through Transformers here; it only
+    needs the model-type string to select its multimodal request handling.
+    Reading that string directly from config.json therefore avoids coupling
+    Dynamo startup to Transformers' architecture registry.
+    """
+    try:
+        return AutoConfig.from_pretrained(
+            model, trust_remote_code=trust_remote_code
+        ).model_type
+    except ValueError:
+        # Keep the fallback deliberately narrow. A ValueError is what
+        # AutoConfig raises for an unregistered model type; other loading
+        # failures should still surface instead of being hidden here.
+        raw_config, _ = PretrainedConfig.get_config_dict(model)
+        model_type = raw_config.get("model_type")
+        if not isinstance(model_type, str) or not model_type:
+            raise
+        logging.warning(
+            "Transformers does not recognize model_type=%s; using the raw "
+            "checkpoint value for TRT-LLM multimodal setup",
+            model_type,
+        )
+        return model_type
 
 
 def _resolve_image_token_id(model_type: str, config: Config) -> Optional[int]:
@@ -561,25 +595,25 @@ async def init_llm_worker(
 
     if config.modality == Modality.MULTIMODAL:
         engine_args["skip_tokenizer_init"] = False
-        model_config = AutoConfig.from_pretrained(
+        multimodal_model_type = _resolve_multimodal_model_type(
             config.model,
             trust_remote_code=engine_args.get("trust_remote_code", False),
         )
         # MM-aware KV routing is aggregated-only, so the image marker is resolved
         # only in aggregated mode; disaggregated MM requests are not routed on it.
         if config.disaggregation_mode == DisaggregationMode.AGGREGATED:
-            image_token_id = _resolve_image_token_id(model_config.model_type, config)
+            image_token_id = _resolve_image_token_id(multimodal_model_type, config)
             if image_token_id is not None:
                 logging.info(
                     "MM-aware KV routing enabled (model_type=%s, image_token_id=%d)",
-                    model_config.model_type,
+                    multimodal_model_type,
                     image_token_id,
                 )
             else:
                 logging.warning(
                     "MM-aware KV routing NOT enabled for model_type=%s; multimodal "
                     "requests will fall back to text-prefix routing",
-                    model_config.model_type,
+                    multimodal_model_type,
                 )
         else:
             logging.warning(
@@ -588,7 +622,7 @@ async def init_llm_worker(
                 config.disaggregation_mode.value,
             )
         multimodal_processor = MultimodalRequestProcessor(
-            model_type=model_config.model_type,
+            model_type=multimodal_model_type,
             model_dir=config.model,
             max_file_size_mb=config.max_file_size_mb,
             tokenizer=tokenizer,

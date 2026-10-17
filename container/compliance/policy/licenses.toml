@@ -2367,7 +2367,14 @@ name = "xml-core"
 allow = ["GPL-2.0-only"]
 reason = "Mere aggregation; system component"
 
-# --- Python [[exceptions]] for system / data-only packages ---
+# --- Python [[exceptions]] for reviewed copyleft packages ---
+
+[[exceptions]]
+type = "python"
+name = "soxr"
+version = "1.1.0"
+allow = ["LGPL-2.1-or-later"]
+reason = "Required by the Transformers audio import path. The wheel statically embeds libsoxr and PFFFT; complete python-soxr 1.1.0 source plus rebuild/relink instructions ship at /legal/sources/soxr-1.1.0, and all bundled license texts are included in NOTICES-Python.txt."
 
 [[exceptions]]
 type = "python"

@@ -18,6 +18,7 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
+ARG ENABLE_VLLM_OMNI
 ARG VLLM_OMNI_REF
 ARG TRANSFORMERS_VERSION
 ARG NIXL_REF
@@ -177,15 +178,19 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
 {% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
 
-# The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
-# requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
-# Omni is layered against the installed Transformers version, so install the
-# compatible release first and its dependency solve sees the final Transformers
-# invariant instead of resolving against 5.15.1.
+# An explicit Transformers version supports the standard vLLM-Omni stack.
+# Leave it empty for model-specific bases whose dependency solve must survive.
+# Remove only the optional Omni package when disabled, retaining its dependencies.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install {{ pip_target }} --no-deps \
-        "transformers==${TRANSFORMERS_VERSION}"
+    if [ -n "${TRANSFORMERS_VERSION}" ]; then \
+        uv pip install {{ pip_target }} --no-deps \
+            "transformers==${TRANSFORMERS_VERSION}"; \
+    fi && \
+    if [ "${ENABLE_VLLM_OMNI}" != "true" ] && \
+       {{ python_executable }} -c 'import importlib.metadata as md; md.version("vllm-omni")' >/dev/null 2>&1; then \
+        uv pip uninstall {{ pip_target }} vllm-omni; \
+    fi
 
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
@@ -251,15 +256,16 @@ RUN set -eux; \
     ldconfig -p | grep -q 'libturbojpeg.so.0'; \
     rm -rf /var/lib/apt/lists/*
 
-# Layer the released vLLM-Omni package matching the pinned upstream ref while
-# constraining packages already solved in the upstream vLLM image.
+# Layer vLLM-Omni only when enabled, preserving model-specific base packages.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
-    bash /tmp/install_vllm_omni.sh
+    if [ "${ENABLE_VLLM_OMNI}" = "true" ]; then \
+        bash /tmp/install_vllm_omni.sh; \
+    fi
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
@@ -420,6 +426,19 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 RUN rm -rf /workspace/vllm
 
 {% if device == "cuda" %}
+# The standard ModelOpt Safetensors loader does not use InstantTensor. Remove
+# this optional native package and its metadata instead of shipping an unused
+# dependency with unresolved license metadata.
+RUN set -eux; \
+    python3 -m pip uninstall --yes instanttensor || true; \
+    SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    rm -rf \
+        "${SITE_PACKAGES}"/instanttensor \
+        "${SITE_PACKAGES}"/instanttensor-*.dist-info \
+        "${SITE_PACKAGES}"/instanttensor.libs; \
+    ! python3 -c "import instanttensor" 2>/dev/null; \
+    ! python3 -c "from importlib.metadata import distribution; distribution('instanttensor')" 2>/dev/null
+
 # Transitional: this exists only until the base image stops shipping these.
 # The permanent statement of what may ship is
 # tests/dependencies/test_no_software_video_codecs.py -- when this purge
@@ -477,20 +496,25 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 [ep.load()() for ep in eps]"
 {% endif %}
 
-# vLLM-Omni is installed with the current Transformers version in its protected
-# constraints file, so an incompatible Omni requirement fails during dependency
-# resolution. Check the completed image as well so a later package layer cannot
-# silently replace the vLLM-Omni-compatible Transformers release. A global
-# `uv pip check` is not appropriate here: the upstream runtime and Dynamo's
-# deliberate --no-deps layers contain unrelated package-metadata conflicts.
-RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" <<'PY'
+# Check explicit Transformers pins and ensure disabled Omni stays absent.
+# Model-specific bases leave the Transformers pin empty to retain their solve.
+# A global `uv pip check` is not appropriate here: the upstream runtime and
+# Dynamo's deliberate --no-deps layers contain unrelated metadata conflicts.
+RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" "${ENABLE_VLLM_OMNI}" <<'PY'
 import importlib.metadata as md
 import sys
 
 actual = md.version("transformers")
 expected = sys.argv[1]
-if actual != expected:
+if expected and actual != expected:
     raise RuntimeError(f"expected transformers {expected}, found {actual}")
+if sys.argv[2] != "true":
+    try:
+        md.version("vllm-omni")
+    except md.PackageNotFoundError:
+        pass
+    else:
+        raise RuntimeError("vllm-omni must be absent when disabled")
 PY
 
 USER dynamo

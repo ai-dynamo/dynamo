@@ -526,11 +526,15 @@ async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
     the ndarray carries a valid dict instead (validated end-to-end on gpu-ts
     against the real ``MMEncoder._encode``: before FAIL -> after PASS).
     """
-    es = pytest.importorskip("sglang.srt.disaggregation.encode_server")
+    from dynamo.sglang._compat import get_encoder_preprocessor_module
     from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
         _NVDEC_SHIM_FPS,
         _install_nvdec_video_metadata_shim,
     )
+
+    es = get_encoder_preprocessor_module()
+    if es is None:
+        pytest.skip("SGLang encoder preprocessor is unavailable")
 
     saved = es.preprocess_video
     try:

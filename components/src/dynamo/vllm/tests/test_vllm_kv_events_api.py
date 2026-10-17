@@ -64,6 +64,14 @@ def _has_locality(event_cls):
     return "locality" in event_cls.__struct_fields__
 
 
+def _has_ownership(event_cls):
+    return "ownership" in event_cls.__struct_fields__
+
+
+def _has_session_id(event_cls):
+    return "session_id" in event_cls.__struct_fields__
+
+
 class TestVllmKvEventsApi:
     """Test vLLM KV events API compatibility."""
 
@@ -83,6 +91,8 @@ class TestVllmKvEventsApi:
         10. kv_cache_spec_kind (semantic cache type; optional for older vLLM)
         11. kv_cache_spec_sliding_window (semantic cache window; optional for older vLLM)
         12. locality (per-tier storage locality; optional for older vLLM)
+        13. ownership (producer ownership marker; optional for older vLLM)
+        14. session_id (producer-local metadata; ignored by Dynamo)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
@@ -104,6 +114,10 @@ class TestVllmKvEventsApi:
             expected_fields.append("kv_cache_spec_sliding_window")
         if _has_locality(BlockStored):
             expected_fields.append("locality")
+        if _has_ownership(BlockStored):
+            expected_fields.append("ownership")
+        if _has_session_id(BlockStored):
+            expected_fields.append("session_id")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockStored.__struct_fields__
@@ -131,6 +145,8 @@ class TestVllmKvEventsApi:
             expected_fields.append("kv_cache_spec_sliding_window")
         if _has_locality(BlockRemoved):
             expected_fields.append("locality")
+        if _has_ownership(BlockRemoved):
+            expected_fields.append("ownership")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockRemoved.__struct_fields__
@@ -211,6 +227,10 @@ class TestVllmKvEventsApi:
             event_kwargs["kv_cache_spec_sliding_window"] = 128
         if _has_locality(BlockStored):
             event_kwargs["locality"] = "LOCAL"
+        if _has_ownership(BlockStored):
+            event_kwargs["ownership"] = None
+        if _has_session_id(BlockStored):
+            event_kwargs["session_id"] = None
         event = BlockStored(**event_kwargs)
 
         encoded = msgspec.msgpack.encode(event)
@@ -234,6 +254,12 @@ class TestVllmKvEventsApi:
             assert decoded["kv_cache_spec_sliding_window"] == 128
         if _has_locality(BlockStored):
             assert decoded["locality"] == "LOCAL"
+        if _has_ownership(BlockStored):
+            # The pinned downstream vLLM struct omits fields set to their default.
+            # Dynamo treats a missing ownership field as framework ownership.
+            assert "ownership" not in decoded
+        if _has_session_id(BlockStored):
+            assert "session_id" not in decoded
 
     def test_block_stored_tuple_extra_keys_serialization_format(self):
         """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""
@@ -256,6 +282,10 @@ class TestVllmKvEventsApi:
             event_kwargs["kv_cache_spec_kind"] = "full_attention"
         if _has_kv_cache_spec_sliding_window(BlockStored):
             event_kwargs["kv_cache_spec_sliding_window"] = 128
+        if _has_ownership(BlockStored):
+            event_kwargs["ownership"] = None
+        if _has_session_id(BlockStored):
+            event_kwargs["session_id"] = None
         event = BlockStored(**event_kwargs)
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
@@ -288,6 +318,8 @@ class TestVllmKvEventsApi:
             event_kwargs["kv_cache_spec_sliding_window"] = 128
         if _has_locality(BlockRemoved):
             event_kwargs["locality"] = "REMOTE"
+        if _has_ownership(BlockRemoved):
+            event_kwargs["ownership"] = None
         event = BlockRemoved(**event_kwargs)
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
@@ -305,3 +337,6 @@ class TestVllmKvEventsApi:
             ), "kv_cache_spec_sliding_window has wrong value"
         if _has_locality(BlockRemoved):
             assert decoded["locality"] == "REMOTE"
+        if _has_ownership(BlockRemoved):
+            # See the BlockStored assertion above: omitted None is intentional.
+            assert "ownership" not in decoded

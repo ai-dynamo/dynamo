@@ -12,14 +12,6 @@ from urllib.parse import urlparse
 import numpy as np
 import torch
 from blake3 import blake3
-
-# MMEncoder chain imports compiled CUDA ops; may fail in CPU-only environments.
-try:
-    from sglang.srt.disaggregation.encode_server import MMEncoder
-    from sglang.srt.managers.schedule_batch import Modality
-except (ImportError, OSError):
-    MMEncoder = None  # type: ignore[assignment]
-    Modality = None  # type: ignore[assignment]
 from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoTokenizer
 
@@ -52,6 +44,11 @@ from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.env import env_bool
 from dynamo.llm import MultimodalEmbeddingCachePublisher
+from dynamo.sglang._compat import (
+    get_encoder_preprocessor_module,
+    load_mm_encoder,
+    mm_encode,
+)
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     MultiModalGroup,
@@ -71,6 +68,14 @@ from dynamo.sglang.request_handlers.multimodal.nvdec_video_decoder import (
 )
 
 logger = logging.getLogger(__name__)
+
+# These import chains include optional SGLang and compiled CUDA modules and may
+# fail in CPU-only unit-test environments.
+try:
+    from sglang.srt.managers.schedule_batch import Modality
+except (ImportError, OSError):
+    Modality = None  # type: ignore[assignment]
+MMEncoder = load_mm_encoder()
 
 try:
     import cupy as array_module
@@ -172,9 +177,15 @@ def _install_load_video_passthrough() -> None:
         module.load_video = _load_video_passthrough
 
     patched: list[str] = []
+    encoder_preprocessor = get_encoder_preprocessor_module()
+    if encoder_preprocessor is not None:
+        orig = getattr(encoder_preprocessor, "load_video", None)
+        if orig is not None:
+            if not getattr(orig, "_dynamo_nvdec_passthrough", False):
+                _wrap(encoder_preprocessor, orig)
+            patched.append(encoder_preprocessor.__name__)
+
     for module_path in (
-        # The encode worker's own call site -- the one that matters here.
-        "sglang.srt.disaggregation.encode_server",
         "sglang.srt.multimodal.processors.base_processor",
         "sglang.srt.utils",
     ):
@@ -191,7 +202,7 @@ def _install_load_video_passthrough() -> None:
         _wrap(module, orig)
         patched.append(module_path)
 
-    if "sglang.srt.disaggregation.encode_server" not in patched:
+    if encoder_preprocessor is None or encoder_preprocessor.__name__ not in patched:
         # Without this one the decoder reaches load_video unpatched and the
         # request fails with "Unsupported video input type" rather than falling
         # back, so make the gap visible instead of waiting for a 400.
@@ -228,8 +239,11 @@ def _install_nvdec_video_metadata_shim() -> None:
     genuine pre-decoded arrays.
     """
     try:
-        from sglang.srt.disaggregation import encode_server as es
+        es = get_encoder_preprocessor_module()
     except (ImportError, OSError):
+        return
+
+    if es is None:
         return
 
     orig = getattr(es, "preprocess_video", None)
@@ -786,7 +800,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             encode_inputs = await self._build_encode_inputs(
                 uncached_inputs, modality_name
             )
-            grid_dim, new_embeddings, aux_data = await self.encoder._encode(
+            grid_dim, new_embeddings, aux_data = await self._encode_media(
                 encode_inputs, modality
             )
             # Verify SGLang output is on CPU as expected
@@ -859,6 +873,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
 
         full_embeddings = torch.cat(embedding_parts, dim=0)
         return torch.tensor(all_grid_thw), full_embeddings, all_entries
+
+    async def _encode_media(
+        self, media_inputs: list[Any], modality: Any
+    ) -> tuple[Any, torch.Tensor, dict[str, Any]]:
+        return await mm_encode(self.encoder, media_inputs, modality)
 
     def _extract_media_inputs(
         self, request: Dict[str, Any]
@@ -1120,7 +1139,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                         encode_inputs = await self._build_encode_inputs(
                             media_inputs, modality_name
                         )
-                        grid_dim, embeddings, aux_data = await self.encoder._encode(
+                        grid_dim, embeddings, aux_data = await self._encode_media(
                             encode_inputs, modality_enum
                         )
 

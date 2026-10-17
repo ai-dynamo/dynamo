@@ -13,19 +13,19 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
-)
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams, merge_kwargs
+from vllm.renderers.hf import resolve_chat_template
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
@@ -35,6 +35,8 @@ from vllm.utils.async_utils import make_async
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
+from ._vllm_chat_utils import make_tool_call_id
+from .responses_history import responses_history_template
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 
 if TYPE_CHECKING:
@@ -586,8 +588,18 @@ def _prepare_request(
         else request_for_sampling.messages
     )
 
+    chat_template = responses_history_template(
+        request_for_sampling.chat_template,
+        request.get("responses_history_phases") if isinstance(request, dict) else None,
+        lambda: resolve_chat_template(
+            tokenizer,
+            request_for_sampling.chat_template,
+            tool_dicts,
+            model_config=model_config,
+        ),
+    )
     chat_params = ChatParams(
-        chat_template=request_for_sampling.chat_template,
+        chat_template=chat_template,
         chat_template_content_format="auto",
         # Renderer-managed keys last so a nested duplicate can't raise TypeError.
         chat_template_kwargs={

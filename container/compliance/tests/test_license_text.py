@@ -13,6 +13,7 @@ import tomllib
 from pathlib import Path
 
 from compliance.generators import go as go_gen
+from compliance.generators import python as python_gen
 from compliance.generators import rust as rust_gen
 from compliance.generators.common import (
     Component,
@@ -23,6 +24,7 @@ from compliance.generators.common import (
     write_cyclonedx,
     write_merged_csv,
 )
+from compliance.policy.validate import load_policy, validate_row
 
 _REPO = Path(__file__).resolve().parents[3]
 _POLICY = _REPO / "container/compliance/policy/licenses.toml"
@@ -88,11 +90,36 @@ def test_bundled_text_has_no_disclaimer():
     assert "Real Author" in out
 
 
+def test_python_collects_every_pep639_license_file(tmp_path):
+    dist_info = tmp_path / "soxr-1.1.0.dist-info"
+    licenses = dist_info / "licenses"
+    licenses.mkdir(parents=True)
+    (licenses / "LICENSE.txt").write_text("Python-soxr LGPL notice")
+    (licenses / "COPYING.LGPL").write_text("Full LGPL terms")
+    (licenses / "LICENSE-libsoxr.txt").write_text("libsoxr notice")
+    (licenses / "LICENSE-PFFFT.txt").write_text("PFFFT notice")
+
+    text = python_gen._read_license_text(dist_info)
+
+    assert text is not None
+    assert "Python-soxr LGPL notice" in text
+    assert "Full LGPL terms" in text
+    assert "libsoxr notice" in text
+    assert "PFFFT notice" in text
+    assert text.index("COPYING.LGPL") < text.index("LICENSE-PFFFT.txt")
+
+
+def test_soxr_lgpl_exception_is_version_scoped():
+    policy = load_policy(_POLICY)
+
+    assert validate_row(policy, "python", "soxr", "1.1.0", "LGPL-2.1-or-later") is None
+    violation = validate_row(policy, "python", "soxr", "1.1.1", "LGPL-2.1-or-later")
+    assert violation is not None
+
+
 def test_go_module_path_escaping():
-    assert (
-        go_gen._escape_go_module_path("github.com/Azure/Foo")
-        == "github.com/!azure/!foo"
-    )
+    escaped = go_gen._escape_go_module_path("github.com/Azure/Foo")
+    assert escaped == "github.com/!azure/!foo"
     assert go_gen._escape_go_module_path("golang.org/x/sys") == "golang.org/x/sys"
 
 

@@ -239,7 +239,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn messages(&self) -> Value {
-        let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        let messages_json = self.template_messages_json();
         Value::from_serialize(&messages_json)
     }
 
@@ -248,6 +248,9 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn tools(&self) -> Option<Value> {
+        if let Some(tools) = self.declared_template_tools() {
+            return may_be_fix_tool_schema(tools);
+        }
         if self.inner.tools.is_none() {
             None
         } else {
@@ -256,6 +259,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
                 serde_json::to_value(&self.inner.tools).unwrap(),
             )?)
         }
+    }
+
+    fn template_tools(&self) -> Option<minijinja::value::Value> {
+        self.native_template_tools()
     }
 
     fn tool_choice(&self) -> Option<Value> {

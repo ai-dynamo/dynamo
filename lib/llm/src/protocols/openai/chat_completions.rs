@@ -106,6 +106,11 @@ pub struct NvCreateChatCompletionRequest {
     )]
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
 
+    /// Original Responses definitions, retained for template-capable rendering.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub responses_tools: Option<super::responses::ResponsesToolContext>,
+
     /// OpenAI-style thinking control from client request payloads.
     /// Normalized into `chat_template_args` before preprocessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -261,10 +266,27 @@ fn openai_thinking_mode(value: &serde_json::Value) -> anyhow::Result<Option<Open
     }
 }
 
+/// Frontend-only boundaries supplied by a recipient-aware parser. These never
+/// cross the worker wire or alter Chat Completions JSON.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageBoundary {
+    Start(dynamo_protocols::types::responses::MessagePhase),
+    End,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResponseOutputEvent {
+    Boundary(MessageBoundary),
+    Text(String),
+    ToolCall(String),
+}
+
 /// A response structure for unary chat completion responses, embedding OpenAI's
 /// `CreateChatCompletionResponse` with optional NVIDIA extension metadata.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionResponse {
+    #[serde(skip)]
+    pub response_events: Vec<ResponseOutputEvent>,
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,6 +297,8 @@ pub struct NvCreateChatCompletionResponse {
 /// `CreateChatCompletionStreamResponse` with optional NVIDIA extension metadata.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionStreamResponse {
+    #[serde(skip)]
+    pub message_boundary: Option<MessageBoundary>,
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -296,6 +320,7 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     let data = response.data.as_mut()?;
     data.inner.usage = None;
     data.llm_metrics = None;
+    data.message_boundary = None;
     data.nvext = None;
     Some(())
 }
@@ -623,7 +648,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for stream_options
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
-        validate::validate_tools(&self.inner.tools.as_deref())?;
+        self.validate_responses_tool_definitions()?;
         validate::validate_tool_choice(&self.inner.tool_choice, self.inner.tools.as_deref())?;
         // none for parallel_tool_calls
         validate::validate_user(self.inner.user.as_deref())?;

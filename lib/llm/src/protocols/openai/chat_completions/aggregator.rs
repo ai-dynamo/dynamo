@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
 
-use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse};
+use super::{
+    NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse, ResponseOutputEvent,
+};
 use crate::protocols::{
     Annotated,
     codec::{Message, SseCodecError},
@@ -138,6 +140,9 @@ async fn parse_complete_tool_output(
 /// from a streaming OpenAI API call into a complete final response.
 pub struct DeltaAggregator {
     /// Unique identifier for the chat completion.
+    response_events: Vec<ResponseOutputEvent>,
+    has_message_phases: bool,
+    recorded_calls: std::collections::HashSet<String>,
     id: String,
     /// Model name used for the chat completion.
     model: String,
@@ -308,6 +313,9 @@ impl DeltaAggregator {
     /// Creates a new, empty [`DeltaAggregator`] instance.
     pub fn new() -> Self {
         Self {
+            response_events: Vec::new(),
+            has_message_phases: false,
+            recorded_calls: std::collections::HashSet::new(),
             id: "".to_string(),
             model: "".to_string(),
             created: 0,
@@ -350,6 +358,29 @@ impl DeltaAggregator {
                     }
 
                     merge_response_nvext(&mut aggregator.nvext, delta.nvext);
+
+                    if let Some(boundary) = delta.message_boundary {
+                        aggregator.has_message_phases = true;
+                        aggregator.response_events.push(ResponseOutputEvent::Boundary(boundary));
+                    }
+                    for choice in delta.inner.choices.iter().filter(|choice| choice.index == 0) {
+                        if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                            if let Some(ResponseOutputEvent::Text(previous)) =
+                                aggregator.response_events.last_mut()
+                            {
+                                previous.push_str(text);
+                            } else {
+                                aggregator.response_events.push(ResponseOutputEvent::Text(text.clone()));
+                            }
+                        }
+                        for call in choice.delta.tool_calls.iter().flatten() {
+                            if let Some(id) = &call.id
+                                && aggregator.recorded_calls.insert(id.clone())
+                            {
+                                aggregator.response_events.push(ResponseOutputEvent::ToolCall(id.clone()));
+                            }
+                        }
+                    }
 
                     // Aggregate choices incrementally.
                     for choice in delta.inner.choices {
@@ -577,6 +608,7 @@ impl DeltaAggregator {
                     // block's unconditional assignment, regardless of whether any
                     // tool calls were found.
                     let mut content_is_guided_placeholder = false;
+                    let mut parsed_events = Vec::new();
                     let parse_result = if parsing_options
                         .guided_tool_constraint
                         .installs_guided_json()
@@ -590,12 +622,13 @@ impl DeltaAggregator {
                                 Ok((calls, String::new(), String::new()))
                             }
                             Err(guided_error) => {
-                                match super::tool_parser_v2::parse_complete_unified(
+                                match super::tool_parser_v2::parse_complete_unified_with_events(
                                     &choice.text,
-                                    None,
+                                    Some(parsing_options.tools.as_slice()),
                                     family,
                                 ) {
-                                    Ok((calls, reasoning, content)) => {
+                                    Ok((calls, reasoning, content, events)) => {
+                                        parsed_events = events;
                                         // A GuidedJsonNamed constraint pins one tool
                                         // name; the native fallback must never hand
                                         // back a call for a different tool just
@@ -627,10 +660,22 @@ impl DeltaAggregator {
                             }
                         }
                     } else {
-                        super::tool_parser_v2::parse_complete_unified(&choice.text, None, family)
+                        super::tool_parser_v2::parse_complete_unified_with_events(
+                            &choice.text,
+                            Some(parsing_options.tools.as_slice()),
+                            family,
+                        )
+                        .map(|(calls, reasoning, content, events)| {
+                            parsed_events = events;
+                            (calls, reasoning, content)
+                        })
                     };
                     match parse_result {
                         Ok((calls, reasoning, content)) => {
+                            if choice.index == 0 && !parsed_events.is_empty() {
+                                aggregator.has_message_phases = true;
+                                aggregator.response_events = parsed_events;
+                            }
                             let calls_is_empty = calls.is_empty();
                             // Same rule the streaming path applies: `none` still gets the
                             // reasoning/content split and the marker stripping, but a
@@ -829,6 +874,11 @@ impl DeltaAggregator {
 
         // Construct the final response object.
         let response = NvCreateChatCompletionResponse {
+            response_events: if aggregator.has_message_phases {
+                aggregator.response_events
+            } else {
+                Vec::new()
+            },
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: aggregator.id,
                 created: aggregator.created,
@@ -1018,6 +1068,7 @@ mod tests {
         };
 
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "meta/llama-3.1-8b-instruct".to_string(),
@@ -1066,6 +1117,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "nvidia/nvidia-nemotron-3-ultra".to_string(),
@@ -1187,6 +1239,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "m".to_string(),
@@ -1245,6 +1298,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "meta/llama-3.1-8b-instruct".to_string(),
@@ -1843,6 +1897,7 @@ mod tests {
         // Create a delta with multiple choices
         // ALLOW: function_call is deprecated
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "test_model".to_string(),

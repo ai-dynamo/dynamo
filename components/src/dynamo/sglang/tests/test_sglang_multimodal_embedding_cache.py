@@ -984,15 +984,16 @@ def test_load_video_passthrough_patches_the_encode_server_binding() -> None:
     load_video was never reached -- while the deployed encode worker rejected
     each video request with "Unsupported video input type" and returned 400.
     """
-    encode_server = pytest.importorskip(
-        "sglang.srt.disaggregation.encode_server",
-        reason="SGLang required to verify the patch target",
-    )
     from sglang.srt.utils.video_decoder import VideoDecoderWrapper
 
+    from dynamo.sglang._compat import get_encoder_preprocessor_module
     from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
         _install_load_video_passthrough,
     )
+
+    encode_server = get_encoder_preprocessor_module()
+    if encode_server is None:
+        pytest.skip("SGLang encoder preprocessor is unavailable")
 
     _install_load_video_passthrough()
     patched = encode_server.load_video

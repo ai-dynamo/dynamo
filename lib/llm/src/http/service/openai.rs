@@ -3422,14 +3422,20 @@ async fn responses(
 
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
-    let response_params = ResponseParams {
+    let mut response_params = ResponseParams {
         model: request.inner.model.clone(),
         temperature: request.inner.temperature,
         top_p: request.inner.top_p,
         max_output_tokens: request.inner.max_output_tokens,
         parallel_tool_calls: request.inner.parallel_tool_calls,
         store: request.inner.store,
-        tools: request.inner.tools.clone(),
+        tools: request
+            .inner
+            .tools
+            .as_ref()
+            .map(|tools| tools.iter().map(|tool| tool.inner.clone()).collect()),
+        template_tools: request.inner.tools.clone(),
+        loaded_tools: Vec::new(),
         tool_choice: request.inner.tool_choice.clone(),
         instructions: request.inner.instructions.clone(),
         reasoning: request.inner.reasoning.clone(),
@@ -3468,6 +3474,17 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
+    response_params.loaded_tools = chat_request
+        .responses_tools
+        .as_ref()
+        .map(|context| {
+            context
+                .tools
+                .iter()
+                .map(|tool| tool.inner.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -3656,6 +3673,11 @@ async fn responses(
                 yield terminal_event.map_err(axum::Error::new);
             } else {
                 converter.append_end_events(&mut events);
+                if let Some(error) = converter.conversion_error() {
+                    tracing::warn!(request_id = %request_id, error, "Responses tool output conversion failed");
+                    producer_error_signal.set(ErrorType::Internal);
+                    producer_error_signal.mark_terminal_event_emitted();
+                }
                 for event in events.drain(..) {
                     yield event.map_err(axum::Error::new);
                 }
@@ -6369,6 +6391,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            responses_tools: None,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,
@@ -6403,6 +6426,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            responses_tools: None,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,
@@ -6651,6 +6675,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            responses_tools: None,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,
@@ -6683,6 +6708,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            responses_tools: None,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,
@@ -6714,6 +6740,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            responses_tools: None,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,
@@ -6745,6 +6772,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            responses_tools: None,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,
@@ -6778,6 +6806,7 @@ mod tests {
                 .build()
                 .unwrap(),
             nvext: None,
+            responses_tools: None,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,
@@ -6809,6 +6838,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            responses_tools: None,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,
@@ -7310,6 +7340,7 @@ mod tests {
         .expect("annotation construction should succeed");
         let normal_event = Annotated::<NvCreateChatCompletionStreamResponse> {
             data: Some(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![],
@@ -7350,6 +7381,7 @@ mod tests {
         // Create a normal data event
         let normal_event = Annotated::<NvCreateChatCompletionStreamResponse> {
             data: Some(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![],
@@ -7762,6 +7794,7 @@ mod tests {
         choices: Vec<ChatChoiceStream>,
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices,
@@ -8396,6 +8429,7 @@ mod tests {
             logprobs: None,
         };
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![choice],

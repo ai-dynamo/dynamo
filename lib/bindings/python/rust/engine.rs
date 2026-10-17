@@ -16,6 +16,9 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
+use dynamo_llm::protocols::openai::chat_completions::{
+    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+};
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
@@ -193,8 +196,53 @@ impl PythonAsyncEngine {
 }
 
 impl PythonAsyncEngine {
+    pub(crate) fn chat_engine(&self) -> PythonChatEngine {
+        PythonChatEngine(self.0.clone())
+    }
+
     pub(crate) fn network_engine(&self) -> PythonNetworkEngine {
         PythonNetworkEngine(self.0.clone())
+    }
+}
+
+/// In-process frontend adapter. The generic/network Python engines retain
+/// their normal serialization contract, including the N-2 worker wire.
+pub(crate) struct PythonChatEngine(PythonServerStreamingEngine);
+
+#[async_trait::async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for PythonChatEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        generate_python_stream(
+            &self.0,
+            request,
+            |py, request| {
+                if request
+                    .responses_tools
+                    .as_ref()
+                    .is_some_and(|context| !context.history_phases.is_empty())
+                {
+                    let value = request
+                        .python_chat_processor_request_json()
+                        .map_err(|error| {
+                            pyo3::exceptions::PyValueError::new_err(error.to_string())
+                        })?;
+                    Ok(pythonize(py, &value)?.unbind())
+                } else {
+                    Ok(pythonize(py, &request)?.unbind())
+                }
+            },
+            buffered_typed_response_stream::<NvCreateChatCompletionStreamResponse>,
+        )
+        .await
     }
 }
 

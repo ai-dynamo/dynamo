@@ -292,25 +292,44 @@ def _resolve_site_packages(search_paths: list[Path]) -> list[Path]:
 
 
 def _read_license_text(dist_info_dir: Path) -> str | None:
-    """Return the upstream LICENSE text for a wheel, if present.
+    """Return every upstream license-related text shipped by a wheel.
 
-    Modern wheels put it under <dist-info>/licenses/LICENSE (PEP 639). Older
-    wheels use <dist-info>/LICENSE or LICENSE.txt at the top of the dir.
+    PEP 639 permits multiple files under ``<dist-info>/licenses``. They can
+    cover separately bundled native components, so selecting only a generic
+    ``LICENSE.txt`` can silently discard required third-party notices. Older
+    wheels use a single file at the top of the dist-info directory.
     """
-    candidates = [
-        dist_info_dir / "licenses" / "LICENSE",
-        dist_info_dir / "licenses" / "LICENSE.txt",
-        dist_info_dir / "LICENSE",
-        dist_info_dir / "LICENSE.txt",
-        dist_info_dir / "LICENSE.md",
-    ]
+    licenses_dir = dist_info_dir / "licenses"
+    candidates = (
+        sorted(path for path in licenses_dir.rglob("*") if path.is_file())
+        if licenses_dir.is_dir()
+        else []
+    )
+    if not candidates:
+        candidates = [
+            dist_info_dir / "LICENSE",
+            dist_info_dir / "LICENSE.txt",
+            dist_info_dir / "LICENSE.md",
+            dist_info_dir / "LICENCE",
+            dist_info_dir / "COPYING",
+            dist_info_dir / "NOTICE",
+        ]
+
+    texts: list[tuple[str, str]] = []
     for path in candidates:
         if path.is_file():
             try:
-                return path.read_text(encoding="utf-8", errors="replace")
+                text = path.read_text(encoding="utf-8", errors="replace").strip()
             except OSError:
                 continue
-    return None
+            if text:
+                texts.append((str(path.relative_to(dist_info_dir)), text))
+
+    if not texts:
+        return None
+    if len(texts) == 1:
+        return texts[0][1] + "\n"
+    return "\n\n".join(f"===== {name} =====\n{text}" for name, text in texts) + "\n"
 
 
 def _extract_metadata_field(

@@ -18,6 +18,7 @@ from dynamo.llm import (
     WorkerType,
 )
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import publish_server_args
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
@@ -59,6 +60,11 @@ async def init_multimodal_encode_worker(
     ):
         cache_publisher = MultimodalEmbeddingCachePublisher()
         await cache_publisher.create_endpoint(generate_endpoint)
+
+    # Muse Spark's SGLang runtime requires process-entry publication before
+    # MMEncoder asserts and consumes the encoder configuration. Released SGLang
+    # versions without the runtime-context registry treat this as a no-op.
+    publish_server_args(server_args, role="encoder")
 
     handler = MultimodalEncodeWorkerHandler(
         config,

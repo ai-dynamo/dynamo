@@ -65,6 +65,16 @@ FROM {{ compliance_base_stage }} AS licenses
 
 USER root
 RUN mkdir -p /legal /sboms
+{% if framework in ["vllm", "sglang"] and device == "cuda" %}
+# These model bases may carry python-soxr 1.1.0's statically linked LGPL
+# extension. Ship the exact source and relinking instructions with NOTICES.
+# Keep this shared so both runtime images satisfy the version-scoped policy.
+ADD --checksum=sha256:9f228ae21c78fa9359ca98d8a5e8e91f30639e438e574133dace62c5b5309e44 \
+    https://files.pythonhosted.org/packages/ed/11/27cebce4a108f77afea7c80545115536b45e3f11ebfb914f638fdd9ba847/soxr-1.1.0.tar.gz \
+    /legal/sources/soxr-1.1.0/soxr-1.1.0.tar.gz
+COPY --chown=root:0 container/compliance/sources/soxr-1.1.0/README.md \
+    /legal/sources/soxr-1.1.0/README.md
+{% endif %}
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
 

@@ -6,10 +6,9 @@ use dynamo_parsers::reasoning::get_available_reasoning_parsers;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
 use pyo3::prelude::*;
 
-/// Append the muse unified family names, skipping any already present. fc's v1
-/// registries dropped muse, so it lives only in dynamo's `UNIFIED_FAMILIES`;
-/// `unified_family` routes to the unified pass when EITHER the tool-call or the
-/// reasoning parser is a muse name, so both name lists must accept muse.
+/// Append default-on unified family names, skipping any already present. They live
+/// outside the v1 registries, and either the tool-call or reasoning setting can select
+/// the unified pass, so both option lists must expose them.
 fn with_unified_families(mut names: Vec<&'static str>) -> Vec<&'static str> {
     for &name in unified_family_names() {
         if !names.contains(&name) {
@@ -43,14 +42,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn muse_glimmer_is_selectable_in_both_lists() {
-        assert!(
-            get_tool_parser_names().contains(&"muse_glimmer"),
-            "muse_glimmer must be a selectable tool-call parser name"
-        );
-        assert!(
-            get_reasoning_parser_names().contains(&"muse_glimmer"),
-            "muse_glimmer must be a selectable reasoning parser name"
-        );
+    fn unified_families_are_selectable_in_both_lists() {
+        for parser in ["muse_glimmer", "muse_spark"] {
+            assert!(
+                get_tool_parser_names().contains(&parser),
+                "{parser} must be a selectable tool-call parser name"
+            );
+            assert!(
+                get_reasoning_parser_names().contains(&parser),
+                "{parser} must be a selectable reasoning parser name"
+            );
+        }
     }
 }
