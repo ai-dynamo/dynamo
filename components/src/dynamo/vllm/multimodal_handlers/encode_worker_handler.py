@@ -200,24 +200,31 @@ class EncodeWorkerHandler:
                 f"Invalid embedding transfer mode: {embedding_transfer_mode}"
             )
 
-        self.send_complete_queue: asyncio.Queue[tuple[Any, Any]] = asyncio.Queue()
-        self.send_complete_checker_task = asyncio.create_task(
-            self.check_complete(self.send_complete_queue)
-        )
+        self._pending_sends: set[asyncio.Task] = set()
 
-    async def check_complete(self, queue):
-        while True:
-            transfer_future, embedding = await queue.get()
-            if transfer_future is None:  # Sentinel value to stop the checker
-                queue.task_done()
-                break
-            await transfer_future
-            queue.task_done()
+    def _keep_alive_until_sent(self, transfer_future: Any, tensor: torch.Tensor):
+        """Hold ``tensor`` until its own transfer completes.
+
+        Each transfer is awaited independently: awaiting them in order would let
+        one that never completes pin every later request's transfer buffer.
+        """
+        task = asyncio.create_task(self._wait_sent(transfer_future, tensor))
+        self._pending_sends.add(task)
+        task.add_done_callback(self._on_sent)
+
+    def _on_sent(self, task: asyncio.Task) -> None:
+        self._pending_sends.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.error("Embedding transfer failed", exc_info=error)
+
+    @staticmethod
+    async def _wait_sent(transfer_future: Any, tensor: torch.Tensor) -> None:
+        # ``tensor`` is unused; this frame holding it is what keeps it alive.
+        await transfer_future
 
     def cleanup(self):
-        self.send_complete_queue.put_nowait(
-            (None, None)
-        )  # Send sentinel value to stop the checker
+        for task in list(self._pending_sends):
+            task.cancel()
 
     def _image_cache_key(
         self, group_input, cache_scope: str | None = None
@@ -534,10 +541,7 @@ class EncodeWorkerHandler:
                 for transfer_request, transfer_tensor in zip(
                     transfer_requests, transfer_tensors, strict=True
                 ):
-                    # Keep the transfer buffer alive until the transfer completes.
-                    self.send_complete_queue.put_nowait(
-                        (transfer_request[1], transfer_tensor)
-                    )
+                    self._keep_alive_until_sent(transfer_request[1], transfer_tensor)
 
             payload = request.model_dump_json()
 

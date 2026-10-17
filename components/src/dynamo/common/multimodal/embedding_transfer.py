@@ -23,6 +23,9 @@ from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
 
+# Default seconds a NIXL write receiver waits for buffer space, then for the write.
+NIXL_WRITE_RECEIVE_TIMEOUT_S = 60
+
 
 def _load_nixl_api():
     try:
@@ -400,6 +403,25 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
     """
 
     def __init__(self):
+        # Seconds a prepared tensor may wait for its receiver's handshake before it is
+        # reclaimed. A receiver that gave up (buffer wait timeout, cancelled or failed
+        # request, dead worker) never claims it, so without this the tensor and its
+        # NIXL registration are held forever. A receiver may wait up to its buffer
+        # wait before handshaking, so a shorter timeout would drop live transfers.
+        # Validated before any NIXL agent or background task exists.
+        self.unclaimed_timeout = float(
+            os.getenv("DYN_NIXL_WRITE_UNCLAIMED_TIMEOUT_S", "120")
+        )
+        if not (
+            math.isfinite(self.unclaimed_timeout)
+            and self.unclaimed_timeout > NIXL_WRITE_RECEIVE_TIMEOUT_S
+        ):
+            raise ValueError(
+                "DYN_NIXL_WRITE_UNCLAIMED_TIMEOUT_S must be a finite number of "
+                f"seconds above the receiver's {NIXL_WRITE_RECEIVE_TIMEOUT_S}s "
+                f"buffer wait, got {self.unclaimed_timeout}"
+            )
+
         # NIXL agent setup
         nixl_agent, nixl_agent_config = _load_nixl_api()
         self.sender_id = f"sender_{str(uuid.uuid4())}"
@@ -437,6 +459,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
         """Long-running async task that processes transfer requests."""
         inflight_transfers = {}
         scheduled_transfer_task = None
+        last_unclaimed_sweep = time.perf_counter()
         while True:
             try:
                 # If there is no scheduled transfer task, blocking wait for
@@ -467,8 +490,17 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                             remote_agent_id
                         ] = self.nixl_agent.add_remote_agent(remote_agent_metadata)
 
+                    if tensor_id not in self.transfer_tracker:
+                        # Reclaimed as unclaimed before this handshake arrived; the
+                        # receiver times out waiting for the write.
+                        logger.warning(
+                            f"Ignoring handshake for reclaimed tensor_id {tensor_id} "
+                            f"from {remote_agent_id}"
+                        )
+                        continue
+
                     # initiate NIXL WRITE transfer
-                    source_tensor, source_desc, _ = self.transfer_tracker[tensor_id]
+                    source_tensor, source_desc, _, _ = self.transfer_tracker[tensor_id]
                     target_desc = self.nixl_agent.get_xfer_descs(
                         [
                             (target_buffer, target_byte_size, target_device_id),
@@ -531,6 +563,23 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                         scheduled_transfer_task = None
                         break
 
+                if now_time - last_unclaimed_sweep >= 1.0:
+                    last_unclaimed_sweep = now_time
+                    for tensor_id in self._expired_unclaimed(
+                        now_time, inflight_transfers
+                    ):
+                        logger.warning(
+                            f"Reclaiming tensor_id {tensor_id}: receiver did not claim it "
+                            f"within {self.unclaimed_timeout:.0f} seconds"
+                        )
+                        self._complete_transfer(tensor_id)
+                        # Each tracked tensor owns one scheduled task, same as a
+                        # completed transfer above.
+                        try:
+                            scheduled_transfer_task = self.transfer_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            scheduled_transfer_task = None
+
                 # short pause to yield control and allow cancellation
                 await asyncio.sleep(0.001)
             except Exception as e:
@@ -569,11 +618,19 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                 )
         return write_requests
 
+    def _expired_unclaimed(self, now_time, inflight_transfers) -> list[int]:
+        return [
+            tensor_id
+            for tensor_id, (_, _, _, send_time) in self.transfer_tracker.items()
+            if tensor_id not in inflight_transfers
+            and now_time - send_time > self.unclaimed_timeout
+        ]
+
     def _complete_transfer(self, tensor_id):
         transfer_info = self.transfer_tracker.pop(tensor_id, None)
         if transfer_info is not None:
             # Clean up registered memory after transfer completion
-            embeddings, _, fut = transfer_info
+            embeddings, _, fut, _ = transfer_info
             desc_key = (embeddings.data_ptr(), embeddings.get_device())
             self.registered_descs[desc_key][1] -= 1
             if self.registered_descs[desc_key][1] == 0:
@@ -616,7 +673,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
 
         desc = self.nixl_agent.get_xfer_descs(embeddings)
         # use tracker to also extend lifecycle of transfer-related objects
-        self.transfer_tracker[tensor_id] = (embeddings, desc, fut)
+        self.transfer_tracker[tensor_id] = (embeddings, desc, fut, time.perf_counter())
         self.transfer_queue.put_nowait("task_indicator")
 
         request = TransferRequest(
@@ -664,7 +721,7 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.to_buffer_id = {}
 
     async def receive_embeddings(
-        self, request: TransferRequest, receive_timeout=60
+        self, request: TransferRequest, receive_timeout=NIXL_WRITE_RECEIVE_TIMEOUT_S
     ) -> tuple[int, torch.Tensor]:
         """
         Receive precomputed embeddings for a given request ID.
