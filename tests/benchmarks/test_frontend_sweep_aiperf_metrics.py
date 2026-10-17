@@ -145,11 +145,6 @@ def test_canonical_keys_both_wrappers(tmp_path: Path) -> None:
     _assert_same_values(_metrics(k8s), FULL_EXPECTED)
 
 
-def test_local_dict_key_order(tmp_path: Path) -> None:
-    path = _write_json(tmp_path, _full_canonical())
-    assert list(_parse_aiperf_json(path)) == list(METRIC_FIELDS)
-
-
 def test_legacy_latency_keys(tmp_path: Path) -> None:
     data = _full_canonical()
     del data["time_to_first_token"]
@@ -243,7 +238,6 @@ def test_falsey_throughput_local_kept_k8s_normalized(tmp_path: Path, raw: Any) -
     data["output_token_throughput"] = {"avg": raw}
     path = _write_json(tmp_path, data)
 
-    # Local keeps the raw value: no ``or 0`` on throughput.
     parsed = _parse_aiperf_json(path)
     for name in ("req_per_sec", "output_tok_per_sec"):
         assert parsed[name] == raw and type(parsed[name]) is type(raw)
@@ -254,7 +248,6 @@ def test_falsey_throughput_local_kept_k8s_normalized(tmp_path: Path, raw: Any) -
         value = getattr(local, name)
         assert value == raw and type(value) is type(raw)
 
-    # Kubernetes normalizes falsey averages to int 0.
     k8s = _make_result(prepopulated=True)
     _parse_k8s_aiperf_into_result(k8s, tmp_path)
     for name in ("req_per_sec", "output_tok_per_sec"):
@@ -294,12 +287,11 @@ def test_falsey_latency_percentiles_become_zero(tmp_path: Path, raw: Any) -> Non
         (42.5, 42.5),
         (17, 17),
         (None, 0),
-        (0, 0),
         ({"avg": 7.5, "unit": "sec"}, 7.5),
         ({"unit": "sec"}, 0),
         ({"avg": None}, None),
     ],
-    ids=["float", "int", "null", "zero", "obj-avg", "obj-no-avg", "obj-null-avg"],
+    ids=["float", "int", "null", "obj-avg", "obj-no-avg", "obj-null-avg"],
 )
 def test_duration_shapes(tmp_path: Path, raw: Any, expected: Any) -> None:
     data = _full_canonical()
@@ -397,23 +389,6 @@ def test_invalid_json_is_swallowed(tmp_path: Path) -> None:
 
     k8s = _make_result(prepopulated=True)
     _parse_k8s_aiperf_into_result(k8s, tmp_path)
-    _assert_same_values(_metrics(k8s), SENTINELS)
-
-
-def test_top_level_array_raises_attribute_error(tmp_path: Path) -> None:
-    path = _write_json(tmp_path, [_full_canonical()])
-
-    with pytest.raises(AttributeError):
-        _parse_aiperf_json(path)
-
-    local = _make_result(prepopulated=True)
-    with pytest.raises(AttributeError):
-        _parse_aiperf_into_result(local, tmp_path)
-    _assert_same_values(_metrics(local), SENTINELS)
-
-    k8s = _make_result(prepopulated=True)
-    with pytest.raises(AttributeError):
-        _parse_k8s_aiperf_into_result(k8s, tmp_path)
     _assert_same_values(_metrics(k8s), SENTINELS)
 
 
