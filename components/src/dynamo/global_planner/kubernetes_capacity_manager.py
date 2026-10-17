@@ -16,6 +16,7 @@ a generic ``worker`` — the role hinted by its Planner's
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Optional
 
@@ -35,6 +36,28 @@ from dynamo.planner.monitoring.dgd_services import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Mirrors ComputeDynamoNamespace in deploy/operator/api/v1beta1: the Dynamo
+# namespace is also a label value, so the operator shortens values over 63
+# bytes to a prefix, ``-``, and 16 hex characters of SHA-256 of the original
+# Kubernetes namespace/name pair, separated by ``/``.
+_MAX_DYNAMO_NAMESPACE_LENGTH = 63
+_DYNAMO_NAMESPACE_HASH_LENGTH = 16
+
+
+def compute_dynamo_namespace(k8s_namespace: str, deployment_name: str) -> str:
+    """Return the operator's default Dynamo namespace for a DGD."""
+    value = f"{k8s_namespace}-{deployment_name.replace('.', '-')}"
+    if len(value) <= _MAX_DYNAMO_NAMESPACE_LENGTH:
+        return value
+    identity = f"{k8s_namespace}/{deployment_name}"
+    digest = hashlib.sha256(identity.encode()).hexdigest()[
+        :_DYNAMO_NAMESPACE_HASH_LENGTH
+    ]
+    prefix = value[
+        : _MAX_DYNAMO_NAMESPACE_LENGTH - _DYNAMO_NAMESPACE_HASH_LENGTH - 1
+    ].rstrip("-")
+    return f"{prefix}-{digest}"
 
 
 class KubernetesCapacityManager(CapacityManager):
@@ -57,31 +80,6 @@ class KubernetesCapacityManager(CapacityManager):
     # Discovery / registration                                           #
     # ------------------------------------------------------------------ #
 
-    def _managed_deployment_names(
-        self, managed_deployments: Optional[set[str]]
-    ) -> Optional[set[str]]:
-        """Derive the deployment names this GlobalPlanner manages.
-
-        Returns a set of deployment names in explicit mode, or ``None`` in
-        implicit mode. The operator convention is
-        ``DYN_NAMESPACE = "{namespace}-{deployment_name}"``, so the deployment
-        name is the managed identity with the namespace prefix stripped.
-        """
-        if managed_deployments is None:
-            return None
-
-        prefix = f"{self.namespace}-"
-        names = set()
-        for deployment in managed_deployments:
-            if deployment.startswith(prefix):
-                names.add(deployment[len(prefix) :])
-            else:
-                logger.warning(
-                    f"Managed deployment '{deployment}' does not start with "
-                    f"expected prefix '{prefix}'; cannot derive deployment name"
-                )
-        return names
-
     def discover(self, managed_deployments: Optional[set[str]]) -> list[str]:
         """Pre-populate connectors for deployments managed by this GlobalPlanner.
 
@@ -89,8 +87,9 @@ class KubernetesCapacityManager(CapacityManager):
         startup, even if they haven't sent a scale request yet. In explicit mode
         (``managed_deployments`` set) only matching deployments are discovered; in
         implicit mode (``None``) all deployments in the namespace are discovered.
+        A managed entry is a Dynamo namespace, so each DGD matches when its
+        computed Dynamo namespace is in ``managed_deployments``.
         """
-        managed_deployment_names = self._managed_deployment_names(managed_deployments)
         try:
             kube_api = KubernetesAPI(self.namespace)
             dgds = kube_api.list_graph_deployments()
@@ -101,8 +100,9 @@ class KubernetesCapacityManager(CapacityManager):
                     continue
                 # In explicit mode, skip deployments not in the managed set.
                 if (
-                    managed_deployment_names is not None
-                    and name not in managed_deployment_names
+                    managed_deployments is not None
+                    and compute_dynamo_namespace(self.namespace, name)
+                    not in managed_deployments
                 ):
                     continue
                 participant_id = f"{self.namespace}/{name}"
