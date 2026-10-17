@@ -12,7 +12,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use dynamo_llm::first_token::FirstTokenSource;
@@ -32,6 +32,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::disagg::DisaggregationMode;
 use crate::engine::{FirstTokenNotifier, GenerateContext, LLMEngine, RawEngine};
+
+const ABORT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Test-only override count. Compiled out of release builds — tests acquire
 /// an `OtlpExportOverride` RAII guard to force-enable the recording
@@ -122,7 +124,7 @@ fn record_itl_distribution(span: &tracing::Span, samples: &mut [f64]) {
     );
 }
 
-/// Transfers the engine stream to the monitor so abort finishes before transport teardown.
+/// Holds a dropped engine stream until abort completes or its deadline expires.
 struct CancelMonitorGuard<T> {
     stream: Option<BoxStream<'static, T>>,
     drop_tx: Option<oneshot::Sender<BoxStream<'static, T>>>,
@@ -393,7 +395,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     _ = &mut drop_rx => return,
                 }
             }
-            abort_engine.abort(abort_ctx).await;
+            if tokio::time::timeout(ABORT_TIMEOUT, abort_engine.abort(abort_ctx.clone()))
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    request_id = abort_ctx.id(),
+                    timeout_secs = ABORT_TIMEOUT.as_secs(),
+                    "engine abort timed out; releasing cancelled stream"
+                );
+            }
             drop((dropped_stream, drop_rx));
         });
 
@@ -604,8 +615,16 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
                     abort_ctx.is_stopped() || abort_ctx.is_killed()
                 },
             };
-            if cancelled {
-                abort_engine.abort(abort_ctx).await;
+            if cancelled
+                && tokio::time::timeout(ABORT_TIMEOUT, abort_engine.abort(abort_ctx.clone()))
+                    .await
+                    .is_err()
+            {
+                tracing::warn!(
+                    request_id = abort_ctx.id(),
+                    timeout_secs = ABORT_TIMEOUT.as_secs(),
+                    "engine abort timed out; releasing cancelled stream"
+                );
             }
             drop((dropped_stream, drop_rx));
         });
@@ -680,6 +699,7 @@ mod tests {
         per_chunk_delay_ms: u64,
         abort_calls: Arc<AtomicUsize>,
         abort_calls_at_stream_drop: Arc<AtomicUsize>,
+        pending_abort: Option<Arc<Notify>>,
         setup_err: Option<fn() -> DynamoError>,
     }
 
@@ -691,6 +711,7 @@ mod tests {
                 per_chunk_delay_ms: 0,
                 abort_calls: counter.clone(),
                 abort_calls_at_stream_drop: Arc::new(AtomicUsize::new(usize::MAX)),
+                pending_abort: None,
                 setup_err: None,
             });
             (eng, counter)
@@ -731,6 +752,10 @@ mod tests {
         }
 
         async fn abort(&self, _context: Arc<dyn AsyncEngineContext>) {
+            if let Some(started) = &self.pending_abort {
+                started.notify_one();
+                std::future::pending::<()>().await;
+            }
             tokio::task::yield_now().await;
             self.abort_calls.fetch_add(1, Ordering::SeqCst);
         }
@@ -817,6 +842,40 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn adapter_releases_stream_when_abort_stalls() {
+        for has_started_abort in [false, true] {
+            let (mut engine, _) = MockEngine::new(vec![chunk::token(1)]);
+            let started = Arc::new(Notify::new());
+            Arc::get_mut(&mut engine).unwrap().pending_abort = Some(started.clone());
+            let abort_calls_at_drop = engine.abort_calls_at_stream_drop.clone();
+            let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+            let input = Context::new(make_request(vec![1]));
+            let ctrl = input.context();
+            let mut stream = adapter.generate(input).await.unwrap();
+            stream.next().await.expect("first chunk");
+            ctrl.stop_generating();
+
+            if has_started_abort {
+                started.notified().await;
+                drop(stream);
+            } else {
+                drop(stream);
+                started.notified().await;
+            }
+            tokio::time::advance(ABORT_TIMEOUT - Duration::from_millis(1)).await;
+            assert_eq!(abort_calls_at_drop.load(Ordering::SeqCst), usize::MAX);
+
+            tokio::time::advance(Duration::from_millis(1)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                abort_calls_at_drop.load(Ordering::SeqCst),
+                0,
+                "engine stream must be released when abort exceeds its deadline"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn adapter_engine_setup_error_propagates() {
         let engine = Arc::new(MockEngine {
@@ -824,6 +883,7 @@ mod tests {
             per_chunk_delay_ms: 0,
             abort_calls: Arc::new(AtomicUsize::new(0)),
             abort_calls_at_stream_drop: Arc::new(AtomicUsize::new(usize::MAX)),
+            pending_abort: None,
             setup_err: Some(|| {
                 DynamoError::builder()
                     .error_type(ErrorType::Backend(BackendError::Unknown))
@@ -903,6 +963,7 @@ mod tests {
             per_chunk_delay_ms: 0,
             abort_calls: Arc::new(AtomicUsize::new(0)),
             abort_calls_at_stream_drop: Arc::new(AtomicUsize::new(usize::MAX)),
+            pending_abort: None,
             setup_err: Some(|| {
                 DynamoError::builder()
                     .error_type(ErrorType::Backend(BackendError::InvalidArgument))
@@ -1080,6 +1141,40 @@ mod tests {
 
         release.notify_one();
         while stream.next().await.is_some() {}
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_followed_by_stream_drop_still_aborts() {
+        const REQUESTS: usize = 64;
+        let (engine, _release, abort_calls) = ParkedEngine::new();
+        let engine_lifetime = Arc::downgrade(&engine);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+
+        // Exercise the monitor's randomized select order with both signals ready.
+        for _ in 0..REQUESTS {
+            let input = Context::new(make_request(vec![1]));
+            let ctrl = input.context();
+            let mut stream = adapter.generate(input).await.unwrap();
+            assert!(futures::poll!(stream.next()).is_pending());
+            tokio::task::yield_now().await;
+
+            ctrl.stop_generating();
+            drop(stream);
+        }
+        drop(adapter);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while engine_lifetime.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancellation monitors did not finish");
+        assert_eq!(
+            abort_calls.load(Ordering::SeqCst),
+            REQUESTS,
+            "every cancelled request must call engine.abort despite stream teardown"
+        );
     }
 
     /// Engine that fires the side-channel first-token notify on entry and
@@ -1813,6 +1908,7 @@ mod tests {
         setup_err: Option<fn() -> DynamoError>,
         abort_calls: Arc<AtomicUsize>,
         abort_calls_at_stream_drop: Arc<AtomicUsize>,
+        pending_abort: Option<Arc<Notify>>,
     }
 
     impl RawMockEngine {
@@ -1824,6 +1920,7 @@ mod tests {
                 setup_err: None,
                 abort_calls: Arc::new(AtomicUsize::new(0)),
                 abort_calls_at_stream_drop: Arc::new(AtomicUsize::new(usize::MAX)),
+                pending_abort: None,
             })
         }
     }
@@ -1871,6 +1968,10 @@ mod tests {
         }
 
         async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {
+            if let Some(started) = &self.pending_abort {
+                started.notify_one();
+                std::future::pending::<()>().await;
+            }
             tokio::task::yield_now().await;
             self.abort_calls.fetch_add(1, Ordering::SeqCst);
         }
@@ -1920,6 +2021,7 @@ mod tests {
             }),
             abort_calls: Arc::new(AtomicUsize::new(0)),
             abort_calls_at_stream_drop: Arc::new(AtomicUsize::new(usize::MAX)),
+            pending_abort: None,
         });
         let adapter = RawEngineAdapter::new(engine);
         let input = Context::new(serde_json::json!({"prompt": "x"}));
@@ -1936,6 +2038,7 @@ mod tests {
             setup_err: None,
             abort_calls: Arc::new(AtomicUsize::new(0)),
             abort_calls_at_stream_drop: Arc::new(AtomicUsize::new(usize::MAX)),
+            pending_abort: None,
         });
         let adapter = RawEngineAdapter::new(engine);
         let input = Context::new(serde_json::json!({"prompt": "x"}));
@@ -1952,6 +2055,40 @@ mod tests {
             ErrorType::Backend(BackendError::InvalidArgument)
         );
         assert!(stream.next().await.is_none(), "no items after typed error");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn raw_adapter_releases_stream_when_abort_stalls() {
+        for has_started_abort in [false, true] {
+            let mut engine = RawMockEngine::new(vec![serde_json::json!({"progress": 1})]);
+            let started = Arc::new(Notify::new());
+            Arc::get_mut(&mut engine).unwrap().pending_abort = Some(started.clone());
+            let abort_calls_at_drop = engine.abort_calls_at_stream_drop.clone();
+            let adapter = RawEngineAdapter::new(engine);
+            let input = Context::new(serde_json::json!({"prompt": "x"}));
+            let ctrl = input.context();
+            let mut stream = adapter.generate(input).await.unwrap();
+            stream.next().await.expect("first chunk");
+            ctrl.stop_generating();
+
+            if has_started_abort {
+                started.notified().await;
+                drop(stream);
+            } else {
+                drop(stream);
+                started.notified().await;
+            }
+            tokio::time::advance(ABORT_TIMEOUT - Duration::from_millis(1)).await;
+            assert_eq!(abort_calls_at_drop.load(Ordering::SeqCst), usize::MAX);
+
+            tokio::time::advance(Duration::from_millis(1)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                abort_calls_at_drop.load(Ordering::SeqCst),
+                0,
+                "engine stream must be released when abort exceeds its deadline"
+            );
+        }
     }
 
     #[tokio::test]

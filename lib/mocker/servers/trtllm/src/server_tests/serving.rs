@@ -8,18 +8,22 @@ use dynamo_mocker::live::deterministic_token_id;
 
 #[tokio::test]
 async fn service_requires_a_trtllm_single_rank_aggregated_engine() {
-    let vllm = MockEngineArgsBuilder::default()
-        .engine_type(EngineType::Vllm)
-        .build()
-        .unwrap();
+    let vllm = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Vllm
+        }
+    }))
+    .unwrap();
     let error = construction_error(config(), vllm);
     assert!(error.contains("engine_type"), "{error}");
 
-    let multi_rank = MockEngineArgsBuilder::default()
-        .engine_type(EngineType::Trtllm)
-        .dp_size(2u32)
-        .build()
-        .unwrap();
+    let multi_rank = MockerConfig::from_value(serde_json::json!({
+        "dp_size": 2u32,
+        "engine": {
+            "backend": EngineType::Trtllm
+        }
+    }))
+    .unwrap();
     let error = construction_error(config(), multi_rank);
     assert!(error.contains("dp_size"), "{error}");
 
@@ -61,12 +65,28 @@ async fn text_prompts_fail_with_an_actionable_status() {
     assert!(error.message().contains("token_ids"), "{error}");
 }
 
-#[tokio::test]
-async fn oversized_generation_is_rejected_before_token_planning() {
-    let error = generate_error(&service(), request("req-big", request::MAX_NEW_TOKENS + 1)).await;
+#[test]
+fn generation_output_limit_is_one_million_tokens() {
+    let config = MockerServerConfig {
+        context_length: 1_000_004,
+        ..config()
+    };
+    for max_tokens in [32_769, 1_000_000] {
+        let prepared = PreparedRequest::new(request("req-big", max_tokens), &config).unwrap();
+        assert_eq!(prepared.max_output_tokens, max_tokens as usize);
+    }
+
+    let mut omitted = request("req-default", 1);
+    omitted.stopping.as_mut().unwrap().max_tokens = None;
+    let prepared = PreparedRequest::new(omitted, &config).unwrap();
+    assert_eq!(prepared.max_output_tokens, 20);
+
+    let error = PreparedRequest::new(request("req-too-big", 1_000_001), &config).unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
-    // Without this the context-window check would satisfy the test instead.
-    assert!(error.message().contains("Mocker limit"), "{error}");
+    assert!(
+        error.message().contains("Mocker limit of 1000000"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -262,15 +282,17 @@ async fn capacity_rejection_is_an_in_band_internal_error() {
     for mode in [ServerMode::Aggregated, ServerMode::Decode] {
         let service = TrtllmMockerService::new(
             MockerServerConfig { mode, ..config() },
-            MockEngineArgsBuilder::default()
-                .engine_type(EngineType::Trtllm)
-                .num_gpu_blocks(1usize)
-                .block_size(4usize)
-                .max_num_seqs(Some(8))
-                .max_num_batched_tokens(Some(64))
-                .speedup_ratio(0.0)
-                .build()
-                .unwrap(),
+            MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "backend": EngineType::Trtllm,
+                    "num_gpu_blocks": 1usize,
+                    "block_size": 4usize,
+                    "max_num_seqs": 8,
+                    "max_num_batched_tokens": 64,
+                    "speedup_ratio": 0.0
+                }
+            }))
+            .unwrap(),
         )
         .unwrap();
         let mut oversized = request("req-cap", 4);

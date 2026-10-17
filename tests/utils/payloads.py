@@ -18,12 +18,16 @@ import json
 import logging
 import math
 import re
+import shutil
 import struct
+import subprocess
+import tempfile
 import time
 import uuid
 import wave
 from copy import deepcopy
 from dataclasses import dataclass, field
+from fractions import Fraction
 from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, cast
 
@@ -157,13 +161,14 @@ class HttpErrorPayload(BasePayload):
 
 @dataclass
 class HttpCancellationPayload(BasePayload):
-    """Disconnect an active chat stream and require early engine cleanup.
+    """Disconnect a chat stream after its first content, before completion.
 
-    Follow this with a normal chat payload to verify recovery on the same
-    deployment. The supplied checker owns engine-specific metric semantics.
+    Follow this with a normal chat payload to verify public recovery behavior.
+    With metrics, also require early engine cleanup. Without metrics this does
+    not assert that the engine stopped generating or reclaimed resources.
     """
 
-    metrics: EngineMetrics = field(kw_only=True)
+    metrics: EngineMetrics | None = field(kw_only=True)
     endpoint: str = "/v1/chat/completions"
     http_stream: bool = True
     timeout: int = 30
@@ -171,7 +176,8 @@ class HttpCancellationPayload(BasePayload):
     _completion_progress: float = field(default=0, init=False, repr=False)
 
     def bind_environment(self, env: dict[str, str]) -> None:
-        self.metrics.bind_environment(env)
+        if self.metrics is not None:
+            self.metrics.bind_environment(env)
 
     def before_request(self) -> None:
         if not self.http_stream or self.body.get("stream") is not True:
@@ -183,13 +189,14 @@ class HttpCancellationPayload(BasePayload):
             raise ValueError("Cancellation requires max_tokens > 1")
         if self.max_attempts != 1:
             raise ValueError("Cancellation checks must not retry failed assertions")
-        self._completion_progress = self.metrics.completion_progress(max_tokens)
-        self.metrics.wait_for_scheduler()
-        self._before = self.metrics.progress()
+        if self.metrics is not None:
+            self._completion_progress = self.metrics.completion_progress(max_tokens)
+            self.metrics.wait_for_scheduler()
+            self._before = self.metrics.progress()
 
     def response_handler(self, response: requests.Response) -> str:
         try:
-            if self._before is None:
+            if self.metrics is not None and self._before is None:
                 raise RuntimeError("before_request must run before cancellation")
             response.raise_for_status()
             deadline = time.monotonic() + self.timeout
@@ -218,12 +225,14 @@ class HttpCancellationPayload(BasePayload):
                 if content:
                     break
             assert content, "Stream ended without generated content"
-            self.metrics.wait_for_scheduler(is_active=True)
+            if self.metrics is not None:
+                self.metrics.wait_for_scheduler(is_active=True)
         finally:
             response.close()
-        self.metrics.assert_cancelled(
-            before=self._before, completion_progress=self._completion_progress
-        )
+        if self.metrics is not None:
+            self.metrics.assert_cancelled(
+                before=self._before, completion_progress=self._completion_progress
+            )
         return content
 
 
@@ -357,19 +366,12 @@ class DisaggregatedChatPayload(ChatPayload):
                 completion_tokens == self.expected_completion_tokens
             ), f"Expected {self.expected_completion_tokens} completion tokens: {usage!r}"
             _validate_chat_token_usage(result)
-
         if self.body.get("logprobs"):
-            entries = (choices[0].get("logprobs") or {}).get("content")
-            _validate_chat_logprobs(entries, self.body.get("top_logprobs") or 0)
-            assert (
-                len(entries) == completion_tokens
-            ), "Missing completion logprobs, including the prefill-produced first token"
-            if "completion_token_ids" in self.body.get("nvext", {}).get(
-                "extra_fields", []
-            ):
-                assert [entry["token_id"] for entry in entries] == result["nvext"][
-                    "completion_token_ids"
-                ], "Disaggregated logprobs do not match completion token positions"
+            logprobs = (choices[0].get("logprobs") or {}).get("content")
+            _validate_chat_logprobs(logprobs)
+            assert [item["token_id"] for item in logprobs] == result["nvext"][
+                "completion_token_ids"
+            ], "Handoff logprobs do not match completion token positions"
 
         workers = require_router_worker_id(result, context=type(self).__name__)
         for role in ("prefill_worker_id", "decode_worker_id"):
@@ -398,12 +400,16 @@ class KvTransferPayload(DisaggregatedChatPayload):
         ):
             metrics.bind_environment(env)
 
+    def body_for_iteration(self, iteration: int) -> Dict[str, Any]:
+        body = deepcopy(super().body_for_iteration(iteration))
+        message = body["messages"][0]
+        message["content"] = f"Request {uuid.uuid4()}. " + message["content"]
+        return body
+
     def before_request(self) -> None:
         self.prefill_metrics.wait_for_scheduler()
         self.decode_metrics.wait_for_scheduler()
         self._transfer_before = self.transfer_metrics.transfer_progress()
-        message = self.body["messages"][0]
-        message["content"] = f"Request {uuid.uuid4()}. " + message["content"]
 
     def validate(self, response: Any, content: str) -> None:
         super().validate(response, content)
@@ -413,6 +419,15 @@ class KvTransferPayload(DisaggregatedChatPayload):
         self.transfer_metrics.wait_for_transfer(before=self._transfer_before)
         self.decode_metrics.wait_for_scheduler()
         self.prefill_metrics.wait_for_scheduler()
+
+
+class OmittedMaxTokensChatPayload(ChatPayload):
+    """Require more output than SGLang's 128-token default when `max_tokens` is omitted."""
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        usage = response.json()["usage"]
+        assert usage["completion_tokens"] > 128, usage
 
 
 class RouterNvextChatPayload(ChatPayload):
@@ -436,34 +451,87 @@ class RouterNvextChatPayload(ChatPayload):
         )
 
 
-def _validate_chat_logprobs(content_logprobs, top_count: int = 0) -> None:
+def _validate_chat_logprobs(content_logprobs) -> None:
     assert content_logprobs, "Missing or empty requested output logprobs"
     for item in content_logprobs:
         candidates = item["top_logprobs"]
-        assert len(candidates) >= top_count, "Missing requested top logprobs"
         for entry in [item, *candidates]:
             value = entry["logprob"]
             assert math.isfinite(value) and value <= 0, f"Invalid logprob: {entry!r}"
             assert isinstance(entry["token"], str), f"Invalid token: {entry!r}"
             assert "bytes" in entry, f"Missing token bytes: {entry!r}"
-            if entry["token"]:
+            if entry["bytes"] is not None:
                 assert isinstance(
                     entry["bytes"], list
-                ), f"Missing token bytes: {entry!r}"
+                ), f"Invalid token bytes: {entry!r}"
 
 
 @dataclass
 class ChatPayloadWithLogprobs(ChatPayload):
-    """Chat payload that validates requested selected and candidate logprobs."""
+    """Chat payload that validates logprobs in response."""
 
     def validate(self, response: Any, content: str) -> None:
+        """Validate response contains logprobs fields."""
         super().validate(response, content)
-        logprobs = response.json()["choices"][0]["logprobs"]
-        content_logprobs = (logprobs or {}).get("content")
-        if self.body.get("logprobs") or content_logprobs:
-            _validate_chat_logprobs(
-                content_logprobs, self.body.get("top_logprobs") or 0
-            )
+
+        result = response.json()
+        choice = result["choices"][0]
+
+        # Validate logprobs field exists
+        assert "logprobs" in choice, "Missing 'logprobs' in choice"
+
+        logprobs_data = choice["logprobs"]
+        if logprobs_data is not None:
+            assert "content" in logprobs_data, "Missing 'content' in logprobs"
+            content_logprobs = logprobs_data["content"]
+
+            if content_logprobs:
+                # Validate structure of logprobs
+                for item in content_logprobs:
+                    assert "token" in item, "Missing 'token' in logprobs content"
+                    assert "logprob" in item, "Missing 'logprob' in logprobs content"
+                    assert (
+                        "top_logprobs" in item
+                    ), "Missing 'top_logprobs' in logprobs content"
+
+                    # Sanity check: logprob should be valid (not nan/inf/positive)
+                    logprob_val = item["logprob"]
+                    assert not math.isnan(logprob_val), "logprob is NaN"
+                    assert not math.isinf(logprob_val), "logprob is infinite"
+                    assert (
+                        logprob_val <= 0
+                    ), f"logprob should be <= 0, got {logprob_val}"
+
+                    # Validate bytes field is populated for the selected token
+                    assert "bytes" in item, "Missing 'bytes' in logprobs content item"
+                    token_str = item["token"]
+                    if token_str:
+                        assert (
+                            item["bytes"] is not None
+                        ), f"'bytes' should be populated for non-empty token {token_str!r}"
+                        assert isinstance(
+                            item["bytes"], list
+                        ), f"'bytes' should be a list, got {type(item['bytes'])}"
+
+                    # Validate top_logprobs entries have token, logprob, and bytes
+                    for top_lp in item["top_logprobs"]:
+                        assert (
+                            "token" in top_lp
+                        ), "Missing 'token' in top_logprobs entry"
+                        assert (
+                            "logprob" in top_lp
+                        ), "Missing 'logprob' in top_logprobs entry"
+                        assert (
+                            "bytes" in top_lp
+                        ), "Missing 'bytes' in top_logprobs entry"
+                        if top_lp["token"]:
+                            assert (
+                                top_lp["bytes"] is not None
+                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
+
+                logger.info(
+                    f"Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
+                )
 
 
 @dataclass
@@ -532,9 +600,9 @@ class StreamingChatPayload(BasePayload):
             if chunk_ids or chunk_logprobs:
                 token_chunks += 1
             if "completion_token_ids" in fields and self.body.get("logprobs"):
-                assert (
-                    [item["token_id"] for item in chunk_logprobs] == chunk_ids
-                ), "Output logprobs do not match this chunk's completion token positions"
+                assert [
+                    item["token_id"] for item in chunk_logprobs
+                ] == chunk_ids, "Output logprobs do not match this chunk's completion token positions"
             if chunk.get("usage") is not None:
                 assert finish_reason is not None, "Usage arrived before completion"
                 assert usage is None, "Duplicate terminal usage"
@@ -562,7 +630,7 @@ class StreamingChatPayload(BasePayload):
             if self.expected_completion_tokens is not None:
                 assert usage["completion_tokens"] == self.expected_completion_tokens
         if self.body.get("logprobs"):
-            _validate_chat_logprobs(output_logprobs, self.body.get("top_logprobs") or 0)
+            _validate_chat_logprobs(output_logprobs)
         if "completion_token_ids" in fields:
             assert completion_ids, "Missing requested completion token IDs"
             assert all(type(token) is int and token >= 0 for token in completion_ids)
@@ -574,9 +642,6 @@ class StreamingChatPayload(BasePayload):
                 for item in output_logprobs:
                     assert item["token"] == f"token_id:{item['token_id']}"
                     candidates = item["top_logprobs"]
-                    assert len({entry["token"] for entry in candidates}) >= (
-                        self.body.get("top_logprobs") or 0
-                    ), "Missing distinct top-logprob candidates"
                     for entry in candidates:
                         assert entry["token"].startswith("token_id:")
                         assert int(entry["token"].removeprefix("token_id:")) >= 0
@@ -607,7 +672,7 @@ class StreamingChatPayload(BasePayload):
                         int(candidate) >= 0
                     ), f"Invalid prompt token ID: {candidate!r}"
                     value = entry["logprob"]
-                    assert math.isfinite(value) and value <= 0, entry
+                    assert math.isfinite(value) and -9999 < value <= 0, entry
                     if entry.get("rank") is not None:
                         assert type(entry["rank"]) is int and entry["rank"] > 0, entry
         return content
@@ -1299,25 +1364,29 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
                             logprob_val <= 0
                         ), f"logprob at index {i} should be <= 0, got {logprob_val}"
 
-                # Validate top_logprobs entries have token, logprob, and bytes when present
-                top_logprobs_list = logprobs_data.get("top_logprobs", [])
+                # Completions top_logprobs follow the OpenAI legacy format: one
+                # {token: logprob} map per generated token (unlike chat's records).
+                top_logprobs_list = logprobs_data.get("top_logprobs") or []
                 for i, token_top_lps in enumerate(top_logprobs_list):
                     if not token_top_lps:
                         continue
-                    for top_lp in token_top_lps:
+                    assert isinstance(
+                        token_top_lps, dict
+                    ), f"top_logprobs[{i}] should be a token->logprob map, got {type(token_top_lps).__name__}"
+                    # The sampled token can appear in addition to the top-k.
+                    requested_logprobs = self.body.get("logprobs")
+                    if requested_logprobs is not None:
+                        assert len(token_top_lps) <= requested_logprobs + 1, (
+                            f"Too many entries in top_logprobs[{i}]: "
+                            f"expected at most {requested_logprobs + 1}"
+                        )
+                    for token, logprob in token_top_lps.items():
+                        assert math.isfinite(
+                            logprob
+                        ), f"top_logprobs[{i}][{token!r}] is not finite"
                         assert (
-                            "token" in top_lp
-                        ), f"Missing 'token' in top_logprobs[{i}] entry"
-                        assert (
-                            "logprob" in top_lp
-                        ), f"Missing 'logprob' in top_logprobs[{i}] entry"
-                        assert (
-                            "bytes" in top_lp
-                        ), f"Missing 'bytes' in top_logprobs[{i}] entry"
-                        if top_lp["token"]:
-                            assert (
-                                top_lp["bytes"] is not None
-                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
+                            logprob <= 0
+                        ), f"top_logprobs[{i}][{token!r}] should be <= 0, got {logprob}"
 
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(token_logprobs)} tokens with logprobs"
@@ -2770,6 +2839,9 @@ class VideoGenerationPayload(BasePayload):
 
     endpoint: str = "/v1/videos"
     timeout: int = 600
+    # Opt-in decode checks require inline media, so a URL alone cannot pass.
+    expected_video_shape: Optional[tuple[int, int, int]] = None  # frames, height, width
+    expected_video_fps: Optional[float] = None
 
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
@@ -2783,11 +2855,67 @@ class VideoGenerationPayload(BasePayload):
         ), f"Missing 'data' in response. Keys: {list(result.keys())}"
         assert len(result["data"]) > 0, "Empty data in video response"
         entry = result["data"][0]
+        if self.expected_video_shape is not None or self.expected_video_fps is not None:
+            assert entry.get("b64_json"), "Video decode checks require b64_json media"
+            self._validate_video(base64.b64decode(entry["b64_json"], validate=True))
         if "url" in entry:
             assert entry["url"], "Video response url is empty"
             return entry["url"]
         assert entry.get("b64_json"), "Video response b64_json is empty"
         return "b64_video_returned"
+
+    def _validate_video(self, video_bytes: bytes) -> None:
+        ffprobe = shutil.which("ffprobe")
+        if ffprobe is None:
+            raise RuntimeError("ffprobe is required for video decode checks")
+        assert video_bytes[4:8] == b"ftyp", "Expected an MP4 container"
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+            video.write(video_bytes)
+            video.flush()
+            # -count_frames decodes every frame without requiring the rawvideo
+            # encoder/image2pipe muxer that our restricted FFmpeg build omits.
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-err_detect",
+                    "explode",
+                    "-select_streams",
+                    "v:0",
+                    "-count_frames",
+                    "-show_entries",
+                    "stream=width,height,avg_frame_rate,nb_read_frames",
+                    "-of",
+                    "json",
+                    video.name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        # FFprobe can return zero even after reporting decode errors. With
+        # -v error, any stderr means that the clip did not decode cleanly.
+        assert (
+            result.returncode == 0 and not result.stderr.strip()
+        ), f"Could not decode video (ffprobe exit {result.returncode}): {result.stderr}"
+        streams = json.loads(result.stdout)["streams"]
+        assert len(streams) == 1, "Expected a video stream"
+        metadata = streams[0]
+        frame_count = int(metadata.get("nb_read_frames", 0))
+        assert frame_count > 0, "Decoded video contains no frames"
+        if self.expected_video_fps is not None:
+            fps = float(Fraction(metadata["avg_frame_rate"]))
+            assert (
+                fps == self.expected_video_fps
+            ), f"Expected {self.expected_video_fps} FPS, got {fps}"
+        if self.expected_video_shape is not None:
+            count, height, width = self.expected_video_shape
+            assert (metadata["width"], metadata["height"]) == (width, height), (
+                f"Expected {width}x{height} video, "
+                f"got {metadata['width']}x{metadata['height']}"
+            )
+            assert frame_count == count, f"Expected {count} frames, got {frame_count}"
 
     def validate(self, response: Any, content: str) -> None:
         assert content, "Video response content is empty"

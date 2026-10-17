@@ -249,6 +249,14 @@ def _prepare_deployment(
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
             merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
 
+        # Per-worker listeners of out-of-process engines (sidecar launches).
+        for prefix, engine_ports in (
+            ("DYN_ENGINE_HTTP_PORT", ports.engine_http_ports),
+            ("DYN_ENGINE_GRPC_PORT", ports.engine_grpc_ports),
+        ):
+            for idx, port in enumerate(engine_ports, start=1):
+                merged_env[f"{prefix}{idx}"] = str(port)
+
         # Ensure EngineProcess health checks hit the correct frontend port.
         config = dataclasses.replace(config, frontend_port=dynamic_frontend_port)
 

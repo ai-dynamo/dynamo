@@ -58,6 +58,8 @@ spec:
               volumeMounts:
               - name: model-storage
                 mountPath: /nfs
+              - name: config
+                mountPath: /configs
               resources:
                 claims:
                 - name: gpu
@@ -83,7 +85,6 @@ spec:
               - start
               resources:
                 limits:
-                  lpu.nvidia.com/devices: '1'
                   hugepages-2Mi: 4Gi
                 requests:
                   cpu: '62'

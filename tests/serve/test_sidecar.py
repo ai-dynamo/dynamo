@@ -3,7 +3,6 @@
 
 """E2E coverage for native-gRPC sidecar launch scripts."""
 
-import dataclasses
 import importlib.util
 import json
 import os
@@ -19,27 +18,24 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.utils.constants import DynamoPortRange
-from tests.utils.engine_metrics import EngineMetrics, VllmMetricsChecker
+from tests.utils.engine_metrics import (
+    EngineMetrics,
+    SGLangMetricsChecker,
+    VllmMetricsChecker,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import (
-    chat_payload_default,
-    disaggregated_chat_payload,
+    chat_logprobs_and_structured_output_payloads,
     disaggregated_token_count_payload,
     http_cancellation_payloads,
-    sidecar_compatibility_payloads,
-    streaming_chat_payload_with_logprobs,
 )
 from tests.utils.payloads import (
     ChatPayload,
-    GuidedDecodingChatPayload,
     KvTransferPayload,
+    OmittedMaxTokensChatPayload,
 )
-from tests.utils.port_utils import (
-    allocate_contiguous_ports,
-    deallocate_ports,
-    reserved_ports,
-)
+from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/vllm"
@@ -50,13 +46,6 @@ sglang_sidecar_dir = os.environ.get("SGLANG_SIDECAR_DIR") or os.path.join(
 trtllm_sidecar_dir = os.environ.get("TRTLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/trtllm"
 )
-
-
-def _sidecar_worker_gpu_env(backend: str) -> dict[str, str]:
-    """Assign both workers to the first allocated GPU."""
-    device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
-    assert device != "-1", "One visible GPU is required"
-    return {f"{backend.upper()}_WORKER{index + 1}_GPU": device for index in range(2)}
 
 
 def _trtllm_serves_openengine() -> bool:
@@ -97,7 +86,7 @@ CANCELLATION_CONTEXT_LEN = 4096
 
 def _aggregated_payloads(metrics: EngineMetrics):
     return [
-        *sidecar_compatibility_payloads(),
+        *chat_logprobs_and_structured_output_payloads(),
         *http_cancellation_payloads(metrics, max_tokens=CANCELLATION_MAX_TOKENS),
     ]
 
@@ -124,67 +113,6 @@ def _disaggregated_payloads(
     ]
 
 
-def _trtllm_compatibility_payloads():
-    logprobs = streaming_chat_payload_with_logprobs(
-        content="Count from one to ten.",
-        expected_response=[],
-        max_tokens=8,
-        top_logprobs=2,
-        extra_body={
-            "ignore_eos": True,
-            "chat_template_kwargs": {"enable_thinking": False},
-            "nvext": {"extra_fields": ["prompt_token_ids"]},
-        },
-    )
-    logprobs.expected_finish_reason = "length"
-    logprobs.expected_completion_tokens = 8
-    logprobs.min_token_chunks = 2
-    structured = GuidedDecodingChatPayload(
-        body={
-            "messages": [{"role": "user", "content": "Return a successful status."}],
-            "max_tokens": 64,
-            "temperature": 0,
-            "chat_template_kwargs": {"enable_thinking": False},
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "status",
-                    "schema": {
-                        "type": "object",
-                        "properties": {"ok": {"type": "boolean", "const": True}},
-                        "required": ["ok"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "nvext": {"extra_fields": ["completion_token_ids", "prompt_token_ids"]},
-        },
-        expected_response=[],
-        expected_log=[],
-        expected_json={"ok": True},
-        expected_finish_reason="stop",
-        needs_token_ids=True,
-    )
-    return [chat_payload_default(), logprobs, structured]
-
-
-def _trtllm_handoff_payload():
-    payload = disaggregated_chat_payload()
-    payload.body.update(
-        max_tokens=8,
-        ignore_eos=True,
-        logprobs=True,
-        top_logprobs=0,
-        chat_template_kwargs={"enable_thinking": False},
-        nvext={
-            "extra_fields": ["worker_id", "completion_token_ids", "prompt_token_ids"]
-        },
-    )
-    payload.expected_finish_reason = "length"
-    payload.expected_completion_tokens = 8
-    return payload
-
-
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
 # has not been profiled for the sidecar launch path. Add one once measured, to
 # admit these into the parallel stage alongside the equivalent dynamo.{backend}
@@ -204,17 +132,19 @@ sidecar_configs = {
         model="Qwen/Qwen3-0.6B",
         env={
             "PYTHONUNBUFFERED": "1",
+            "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "VLLM_DATA_PARALLEL_SIZE": "1",
         },
         request_payloads=_aggregated_payloads(
-            VllmMetricsChecker(port_env="VLLM_RS_HTTP_PORT"),
+            VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
         ),
     ),
     "sglang_aggregated": EngineConfig(
         name="sglang_aggregated",
         directory=sglang_sidecar_dir,
         script_name="agg.sh",
+        script_args=["--enable-metrics", "--decode-log-interval", "1"],
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
@@ -222,9 +152,23 @@ sidecar_configs = {
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
-        env={"PYTHONUNBUFFERED": "1"},
+        env={
+            "PYTHONUNBUFFERED": "1",
+            "DYN_REQUEST_PLANE": "tcp",
+            "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
+        },
         request_payloads=[
-            chat_payload_default(),
+            *_aggregated_payloads(
+                SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
+            OmittedMaxTokensChatPayload(
+                body={
+                    "messages": [{"role": "user", "content": "Tell me about rivers."}],
+                    "ignore_eos": True,
+                },
+                expected_response=[],
+                expected_log=[],
+            ),
         ],
     ),
     "trtllm_aggregated": EngineConfig(
@@ -249,7 +193,12 @@ sidecar_configs = {
             "TLLM_ALLOW_N_GREEDY_DECODING": "1",
             "PYTHONUNBUFFERED": "1",
         },
-        request_payloads=_trtllm_compatibility_payloads(),
+        # OpenEngine exposes output logprobs, but not prompt logprobs.
+        request_payloads=[
+            *chat_logprobs_and_structured_output_payloads(prompt_logprobs=None),
+            # Public disconnect/recovery only: no native scheduler observations.
+            *http_cancellation_payloads(None, max_tokens=CANCELLATION_MAX_TOKENS),
+        ],
     ),
     "trtllm_disaggregated": EngineConfig(
         name="trtllm_disaggregated",
@@ -287,6 +236,7 @@ sidecar_configs = {
         env={
             "TLLM_ALLOW_N_GREEDY_DECODING": "1",
             "PYTHONUNBUFFERED": "1",
+            "DYN_REQUEST_PLANE": "tcp",
             # The TensorRT-LLM release image runs as uid 0 and PRTE refuses
             # to run as root unless told twice; without these the engines'
             # worker spawn fails with `MPI_ERR_UNKNOWN` and neither binds its
@@ -294,7 +244,7 @@ sidecar_configs = {
             "PRTE_ALLOW_RUN_AS_ROOT": "1",
             "PRTE_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
         },
-        request_payloads=[_trtllm_handoff_payload()],
+        request_payloads=[disaggregated_token_count_payload(logprobs=True)],
     ),
     "vllm_disaggregated": EngineConfig(
         name="vllm_disaggregated",
@@ -310,18 +260,28 @@ sidecar_configs = {
         model="Qwen/Qwen3-0.6B",
         health_check_workers=True,
         health_check_worker_count=2,
-        env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
+        env={
+            "PYTHONUNBUFFERED": "1",
+            "DYN_REQUEST_PLANE": "tcp",
+            "MAX_MODEL_LEN": "2048",
+        },
+        # disagg.sh launches decode as worker 1 and prefill as worker 2.
         request_payloads=_disaggregated_payloads(
-            prefill_metrics=VllmMetricsChecker(port_env="VLLM_PREFILL_HTTP_PORT"),
-            decode_metrics=VllmMetricsChecker(port_env="VLLM_DECODE_HTTP_PORT"),
-            transfer_metrics=VllmMetricsChecker(port_env="VLLM_DECODE_HTTP_PORT"),
+            prefill_metrics=VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT2"),
+            decode_metrics=VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            transfer_metrics=VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
         ),
     ),
     "sglang_disaggregated": EngineConfig(
         name="sglang_disaggregated",
         directory=sglang_sidecar_dir,
         script_name="disagg.sh",
-        script_args=["--disable-cuda-graph"],
+        script_args=[
+            "--disable-cuda-graph",
+            "--enable-metrics",
+            "--decode-log-interval",
+            "1",
+        ],
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
@@ -332,92 +292,40 @@ sidecar_configs = {
         model="Qwen/Qwen3-0.6B",
         health_check_workers=True,
         health_check_worker_count=2,
-        env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
-        request_payloads=[disaggregated_chat_payload()],
+        env={
+            "PYTHONUNBUFFERED": "1",
+            "DYN_REQUEST_PLANE": "tcp",
+            "MAX_MODEL_LEN": "2048",
+        },
+        request_payloads=_disaggregated_payloads(
+            prefill_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            decode_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT2"),
+            transfer_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+        ),
     ),
 }
 
 
 @pytest.fixture(params=params_with_model_mark(sidecar_configs))
-def sidecar_config_test(request, dynamo_dynamic_ports, monkeypatch, discovery_backend):
+def sidecar_config_test(request, monkeypatch, discovery_backend):
     config = sidecar_configs[request.param]
-    backend, layout = config.name.split("_", 1)
+    monkeypatch.setenv("MODEL", config.model)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
-    num_engine_ports = (
-        {"vllm": 4, "sglang": 5, "trtllm": 2}[backend]
-        if layout == "disaggregated"
-        else 2
-    )
-    with reserved_ports(
-        num_engine_ports, start_port=DynamoPortRange.SERVE.value
-    ) as engine_ports:
-        engine_env = {}
-        if layout == "disaggregated":
-            monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
-            monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
-            roles = (
-                ("DECODE", "PREFILL") if backend == "vllm" else ("PREFILL", "DECODE")
-            )
-            device = map_cuda_visible_devices(
-                [0], os.environ.get("CUDA_VISIBLE_DEVICES")
-            )
-            assert device != "-1", "One visible GPU is required"
-            engine_env = {
-                **{f"{backend.upper()}_{role}_GPU": device for role in roles},
-                "DYN_NAMESPACE": f"sidecar-disagg-{generate_random_suffix()}",
-                "MODEL": config.model,
-            }
-            for index, role in enumerate(roles):
-                prefix = f"{backend.upper()}_{role}"
-                if backend == "trtllm":
-                    engine_env[f"{prefix}_GRPC_PORT"] = str(engine_ports[index])
-                else:
-                    engine_env[f"{prefix}_HTTP_PORT"] = str(engine_ports[index * 2])
-                    engine_env[f"{prefix}_GRPC_PORT"] = str(engine_ports[index * 2 + 1])
-                if backend == "vllm":
-                    engine_env[f"{prefix}_NIXL_SIDE_CHANNEL_PORT"] = str(
-                        dynamo_dynamic_ports.nixl_side_channel_ports[index]
-                    )
-            if backend == "vllm":
-                engine_env["VLLM_PREFILL_KV_EVENT_PORT"] = str(
-                    dynamo_dynamic_ports.kv_event_ports[1]
-                )
-            elif backend == "sglang":
-                engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT"] = str(
-                    engine_ports[4]
-                )
-            elif backend == "trtllm":
-                engine_env["DYN_DISCOVERY_BACKEND"] = discovery_backend
-
-        elif backend == "vllm":
-            namespace = f"sidecar-agg-{generate_random_suffix()}"
-            monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
-            monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
-            http_port_env = "VLLM_RS_HTTP_PORT"
-            engine_env = {
-                "DYN_NAMESPACE": namespace,
-                http_port_env: str(engine_ports[0]),
-                f"{backend.upper()}_GRPC_PORT": str(engine_ports[1]),
-            }
-        if backend == "trtllm":
-            engine_env["_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS"] = os.environ.get(
-                "_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS",
-                str(
-                    request.node.get_closest_marker("requested_trtllm_kv_tokens").args[
-                        0
-                    ]
-                ),
-            )
-        yield dataclasses.replace(
-            config,
-            frontend_port=dynamo_dynamic_ports.frontend_port,
-            env={**config.env, **engine_env},
-        )
+    monkeypatch.setenv("DYN_NAMESPACE", f"sidecar-{generate_random_suffix()}")
+    monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
+    backend, layout = config.name.split("_", 1)
+    if layout == "disaggregated":
+        device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
+        assert device != "-1", "One visible GPU is required"
+        for role in ("PREFILL", "DECODE"):
+            monkeypatch.setenv(f"{backend.upper()}_{role}_GPU", device)
+    return config
 
 
 @pytest.mark.core
 @pytest.mark.sidecar
 @pytest.mark.e2e
+@pytest.mark.engine_ports
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_serve_deployment(
     sidecar_config_test,
@@ -441,6 +349,7 @@ def test_serve_deployment(
 @pytest.mark.router
 @pytest.mark.sidecar
 @pytest.mark.e2e
+@pytest.mark.engine_ports
 @pytest.mark.post_merge
 @pytest.mark.timeout(1200)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
@@ -545,102 +454,84 @@ def test_sidecar_kv_routing(
             "SGLANG_PAGE_SIZE": str(block_size),
         },
     )
-    with reserved_ports(
-        worker_count * 2, start_port=DynamoPortRange.SERVE.value
-    ) as engine_ports:
-        if dep:
-            devices = map_cuda_visible_devices(
-                [0, 1], os.environ.get("CUDA_VISIBLE_DEVICES")
-            ).split(",")
-            assert (
-                len(set(devices)) == 2 and "-1" not in devices
-            ), "DEP requires two distinct GPUs"
-            engine_env = {"CUDA_VISIBLE_DEVICES": ",".join(devices)}
-            # KV publishers offset by rank; SGLang also derives communication ports.
-            dep_ports = allocate_contiguous_ports(
-                1, 12 if backend == "sglang" else 2, DynamoPortRange.SERVE.value
-            )
-            request.addfinalizer(lambda: deallocate_ports(dep_ports))
-            config.script_args += [
-                "--kv-events-config",
-                json.dumps(
-                    {
-                        "publisher": "zmq",
-                        "topic": "kv-events",
-                        "endpoint": f"tcp://*:{dep_ports[0]}",
-                        **(
-                            {"enable_kv_cache_events": True}
-                            if backend == "vllm"
-                            else {}
-                        ),
-                    }
-                ),
-            ]
-            if backend == "vllm":
-                engine_env.update(
-                    VLLM_RS_HTTP_PORT=str(engine_ports[0]),
-                    VLLM_GRPC_PORT=str(engine_ports[1]),
-                    VLLM_DATA_PARALLEL_SIZE="2",
-                )
-                config.script_args += [
-                    "--tensor-parallel-size",
-                    "1",
-                    "--enable-expert-parallel",
-                    "--block-size",
-                    str(block_size),
-                    "--attention-backend",
-                    "TRITON_MLA",
-                ]
-            else:
-                engine_env.update(
-                    SGLANG_HTTP_PORT=str(engine_ports[0]),
-                    SGLANG_GRPC_PORT=str(engine_ports[1]),
-                    # Remove after pinning https://github.com/sgl-project/sglang/pull/35347 and DEP passes on SM86 without it.
-                    SGLANG_OPT_USE_JIT_KERNEL_GROUPED_TOPK="1",
-                )
-                config.script_args += [
-                    "--tp-size",
-                    "2",
-                    "--dp-size",
-                    "2",
-                    "--ep-size",
-                    "2",
-                    "--enable-dp-attention",
-                    "--page-size",
-                    str(block_size),
-                    "--attention-backend",
-                    "triton",
-                    "--moe-runner-backend",
-                    "triton",
-                    "--moe-a2a-backend",
-                    "none",
-                    "--dist-init-addr",
-                    f"127.0.0.1:{dep_ports[2]}",
-                    "--nccl-port",
-                    str(dep_ports[-1]),
-                ]
-        else:
-            engine_env = _sidecar_worker_gpu_env(backend)
-            for worker_index in range(2):
-                prefix = f"{backend.upper()}_WORKER{worker_index + 1}"
-                engine_env[f"{prefix}_HTTP_PORT"] = str(engine_ports[worker_index * 2])
-                engine_env[f"{prefix}_GRPC_PORT"] = str(
-                    engine_ports[worker_index * 2 + 1]
-                )
-                engine_env[f"{prefix}_KV_EVENT_PORT"] = str(
-                    dynamo_dynamic_ports.kv_event_ports[worker_index]
-                )
-        run_serve_deployment(
-            config,
-            request,
-            ports=dynamo_dynamic_ports,
-            extra_env=engine_env,
-            post_validation=lambda: _test_frontend_kv_routing(
-                frontend_port=dynamo_dynamic_ports.frontend_port,
-                system_ports=dynamo_dynamic_ports.system_ports,
-                namespace=namespace,
-                model_name=config.model,
-                block_size=block_size,
-                dp_ranks=(0, 1) if dep else (0,),
-            ),
+    if dep:
+        devices = map_cuda_visible_devices(
+            [0, 1], os.environ.get("CUDA_VISIBLE_DEVICES")
+        ).split(",")
+        assert (
+            len(set(devices)) == 2 and "-1" not in devices
+        ), "DEP requires two distinct GPUs"
+        engine_env = {"CUDA_VISIBLE_DEVICES": ",".join(devices)}
+        # KV publishers offset by rank; SGLang also derives communication ports.
+        dep_ports = allocate_contiguous_ports(
+            1, 12 if backend == "sglang" else 2, DynamoPortRange.SERVE.value
         )
+        request.addfinalizer(lambda: deallocate_ports(dep_ports))
+        config.script_args += [
+            "--kv-events-config",
+            json.dumps(
+                {
+                    "publisher": "zmq",
+                    "topic": "kv-events",
+                    "endpoint": f"tcp://*:{dep_ports[0]}",
+                    **({"enable_kv_cache_events": True} if backend == "vllm" else {}),
+                }
+            ),
+        ]
+        if backend == "vllm":
+            engine_env.update(VLLM_DATA_PARALLEL_SIZE="2")
+            config.script_args += [
+                "--tensor-parallel-size",
+                "1",
+                "--enable-expert-parallel",
+                "--block-size",
+                str(block_size),
+                "--attention-backend",
+                "TRITON_MLA",
+            ]
+        else:
+            engine_env.update(
+                # Remove after pinning https://github.com/sgl-project/sglang/pull/35347 and DEP passes on SM86 without it.
+                SGLANG_OPT_USE_JIT_KERNEL_GROUPED_TOPK="1",
+            )
+            config.script_args += [
+                "--tp-size",
+                "2",
+                "--dp-size",
+                "2",
+                "--ep-size",
+                "2",
+                "--enable-dp-attention",
+                "--page-size",
+                str(block_size),
+                "--attention-backend",
+                "triton",
+                "--moe-runner-backend",
+                "triton",
+                "--moe-a2a-backend",
+                "none",
+                "--dist-init-addr",
+                f"127.0.0.1:{dep_ports[2]}",
+                "--nccl-port",
+                str(dep_ports[-1]),
+            ]
+    else:
+        device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
+        assert device != "-1", "One visible GPU is required"
+        engine_env = {
+            f"{backend.upper()}_WORKER{worker}_GPU": device for worker in (1, 2)
+        }
+    run_serve_deployment(
+        config,
+        request,
+        ports=dynamo_dynamic_ports,
+        extra_env=engine_env,
+        post_validation=lambda: _test_frontend_kv_routing(
+            frontend_port=dynamo_dynamic_ports.frontend_port,
+            system_ports=dynamo_dynamic_ports.system_ports,
+            namespace=namespace,
+            model_name=config.model,
+            block_size=block_size,
+            dp_ranks=(0, 1) if dep else (0,),
+        ),
+    )
