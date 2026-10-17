@@ -12,7 +12,8 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from types import MappingProxyType
+from typing import Any, Mapping, Optional
 
 import pytest
 
@@ -50,32 +51,42 @@ METRIC_FIELDS = (
 LATENCY_FIELDS = ("ttft_p50_ms", "ttft_p99_ms", "itl_p50_ms", "itl_p99_ms")
 
 # Distinct nonzero values so an untouched field is easy to tell from an overwrite.
-SENTINELS = {
-    "req_per_sec": 101.0,
-    "output_tok_per_sec": 102.0,
-    "ttft_p50_ms": 103.0,
-    "ttft_p99_ms": 104.0,
-    "itl_p50_ms": 105.0,
-    "itl_p99_ms": 106.0,
-    "duration_sec": 107.0,
-}
+SENTINELS = MappingProxyType(
+    {
+        "req_per_sec": 101.0,
+        "output_tok_per_sec": 102.0,
+        "ttft_p50_ms": 103.0,
+        "ttft_p99_ms": 104.0,
+        "itl_p50_ms": 105.0,
+        "itl_p99_ms": 106.0,
+        "duration_sec": 107.0,
+    }
+)
 
-FULL_CANONICAL = {
-    "request_throughput": {"avg": 10.5},
-    "output_token_throughput": {"avg": 250.25},
-    "time_to_first_token": {"p50": 1.5, "p99": 2.5},
-    "inter_token_latency": {"p50": 3.5, "p99": 4.5},
-    "benchmark_duration": 30.0,
-}
-FULL_EXPECTED = {
-    "req_per_sec": 10.5,
-    "output_tok_per_sec": 250.25,
-    "ttft_p50_ms": 1.5,
-    "ttft_p99_ms": 2.5,
-    "itl_p50_ms": 3.5,
-    "itl_p99_ms": 4.5,
-    "duration_sec": 30.0,
-}
+FULL_EXPECTED = MappingProxyType(
+    {
+        "req_per_sec": 10.5,
+        "output_tok_per_sec": 250.25,
+        "ttft_p50_ms": 1.5,
+        "ttft_p99_ms": 2.5,
+        "itl_p50_ms": 3.5,
+        "itl_p99_ms": 4.5,
+        "duration_sec": 30.0,
+    }
+)
+
+
+def _full_canonical(**overrides: Any) -> dict:
+    """Return a fresh canonical AIPerf payload, so tests never share nested dicts."""
+    data = {
+        "request_throughput": {"avg": 10.5},
+        "output_token_throughput": {"avg": 250.25},
+        "time_to_first_token": {"p50": 1.5, "p99": 2.5},
+        "inter_token_latency": {"p50": 3.5, "p99": 4.5},
+        "benchmark_duration": 30.0,
+    }
+    data.update(overrides)
+    return data
 
 
 def _make_result(prepopulated: bool = False) -> RunResult:
@@ -110,7 +121,7 @@ def _write_json(
     return path
 
 
-def _assert_same_values(actual: dict, expected: dict) -> None:
+def _assert_same_values(actual: dict, expected: Mapping[str, Any]) -> None:
     """Compare values and their types, so 0 vs 0.0 vs None vs False is pinned."""
     assert actual == expected
     for key, value in expected.items():
@@ -121,7 +132,7 @@ def _assert_same_values(actual: dict, expected: dict) -> None:
 
 
 def test_canonical_keys_both_wrappers(tmp_path: Path) -> None:
-    path = _write_json(tmp_path, FULL_CANONICAL)
+    path = _write_json(tmp_path, _full_canonical())
 
     _assert_same_values(_parse_aiperf_json(path), FULL_EXPECTED)
 
@@ -135,12 +146,12 @@ def test_canonical_keys_both_wrappers(tmp_path: Path) -> None:
 
 
 def test_local_dict_key_order(tmp_path: Path) -> None:
-    path = _write_json(tmp_path, FULL_CANONICAL)
+    path = _write_json(tmp_path, _full_canonical())
     assert list(_parse_aiperf_json(path)) == list(METRIC_FIELDS)
 
 
 def test_legacy_latency_keys(tmp_path: Path) -> None:
-    data = dict(FULL_CANONICAL)
+    data = _full_canonical()
     del data["time_to_first_token"]
     del data["inter_token_latency"]
     data["ttft"] = {"p50": 1.5, "p99": 2.5}
@@ -159,7 +170,7 @@ def test_legacy_latency_keys(tmp_path: Path) -> None:
 
 
 def test_canonical_latency_key_wins_over_legacy(tmp_path: Path) -> None:
-    data = dict(FULL_CANONICAL)
+    data = _full_canonical()
     data["ttft"] = {"p50": 901.0, "p99": 902.0}
     data["itl"] = {"p50": 903.0, "p99": 904.0}
     path = _write_json(tmp_path, data)
@@ -180,7 +191,7 @@ def test_non_dict_canonical_latency_does_not_fall_back_to_legacy(
 ) -> None:
     # The canonical key is present (null), so the legacy key is never consulted
     # and the percentile fields are skipped entirely.
-    data = dict(FULL_CANONICAL)
+    data = _full_canonical()
     data["time_to_first_token"] = None
     data["inter_token_latency"] = None
     data["ttft"] = {"p50": 901.0, "p99": 902.0}
@@ -227,7 +238,7 @@ def test_missing_fields_default_to_zero(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("raw", [None, 0, 0.0, False])
 def test_falsey_throughput_local_kept_k8s_normalized(tmp_path: Path, raw: Any) -> None:
-    data = dict(FULL_CANONICAL)
+    data = _full_canonical()
     data["request_throughput"] = {"avg": raw}
     data["output_token_throughput"] = {"avg": raw}
     path = _write_json(tmp_path, data)
@@ -256,7 +267,7 @@ def test_falsey_throughput_local_kept_k8s_normalized(tmp_path: Path, raw: Any) -
 
 @pytest.mark.parametrize("raw", [None, 0, 0.0])
 def test_falsey_latency_percentiles_become_zero(tmp_path: Path, raw: Any) -> None:
-    data = dict(FULL_CANONICAL)
+    data = _full_canonical()
     data["time_to_first_token"] = {"p50": raw, "p99": raw}
     data["inter_token_latency"] = {"p50": raw}  # p99 absent
     path = _write_json(tmp_path, data)
@@ -291,7 +302,7 @@ def test_falsey_latency_percentiles_become_zero(tmp_path: Path, raw: Any) -> Non
     ids=["float", "int", "null", "zero", "obj-avg", "obj-no-avg", "obj-null-avg"],
 )
 def test_duration_shapes(tmp_path: Path, raw: Any, expected: Any) -> None:
-    data = dict(FULL_CANONICAL)
+    data = _full_canonical()
     data["benchmark_duration"] = raw
     path = _write_json(tmp_path, data)
 
@@ -313,7 +324,7 @@ def test_duration_shapes(tmp_path: Path, raw: Any, expected: Any) -> None:
 
 @pytest.mark.parametrize("raw", [None, 5, "fast", [1, 2]])
 def test_non_dict_latency_local_zeroes_k8s_preserves(tmp_path: Path, raw: Any) -> None:
-    data = dict(FULL_CANONICAL)
+    data = _full_canonical()
     data["time_to_first_token"] = raw
     data["inter_token_latency"] = raw
     path = _write_json(tmp_path, data)
@@ -338,9 +349,9 @@ def test_non_dict_latency_local_zeroes_k8s_preserves(tmp_path: Path, raw: Any) -
 
 
 def test_local_model_subdirectory_fallback_uses_sorted_first(tmp_path: Path) -> None:
-    second = dict(FULL_CANONICAL, request_throughput={"avg": 999.0})
+    second = _full_canonical(request_throughput={"avg": 999.0})
     _write_json(tmp_path, second, model="b-model")
-    _write_json(tmp_path, FULL_CANONICAL, model="a-model")
+    _write_json(tmp_path, _full_canonical(), model="a-model")
 
     local = _make_result(prepopulated=True)
     _parse_aiperf_into_result(local, tmp_path)
@@ -353,10 +364,8 @@ def test_local_model_subdirectory_fallback_uses_sorted_first(tmp_path: Path) -> 
 
 
 def test_local_top_level_file_wins_over_subdirectory(tmp_path: Path) -> None:
-    _write_json(tmp_path, FULL_CANONICAL)
-    _write_json(
-        tmp_path, dict(FULL_CANONICAL, request_throughput={"avg": 999.0}), model="a"
-    )
+    _write_json(tmp_path, _full_canonical())
+    _write_json(tmp_path, _full_canonical(request_throughput={"avg": 999.0}), model="a")
 
     local = _make_result()
     _parse_aiperf_into_result(local, tmp_path)
@@ -393,7 +402,7 @@ def test_invalid_json_is_swallowed(tmp_path: Path, raw: str) -> None:
 
 
 def test_top_level_array_raises_attribute_error(tmp_path: Path) -> None:
-    path = _write_json(tmp_path, [FULL_CANONICAL])
+    path = _write_json(tmp_path, [_full_canonical()])
 
     with pytest.raises(AttributeError):
         _parse_aiperf_json(path)
@@ -416,7 +425,7 @@ def test_top_level_array_raises_attribute_error(tmp_path: Path) -> None:
 def test_malformed_throughput_raises_attribute_error(
     tmp_path: Path, field: str
 ) -> None:
-    data = dict(FULL_CANONICAL)
+    data = _full_canonical()
     data[field] = 5
     path = _write_json(tmp_path, data)
 
@@ -435,7 +444,7 @@ def test_malformed_throughput_raises_attribute_error(
 
 
 def test_truthy_non_dict_duration_passes_through(tmp_path: Path) -> None:
-    data = dict(FULL_CANONICAL, benchmark_duration="30s")
+    data = _full_canonical(benchmark_duration="30s")
     path = _write_json(tmp_path, data)
     assert _parse_aiperf_json(path)["duration_sec"] == "30s"
 
@@ -450,7 +459,7 @@ def test_truthy_non_dict_duration_passes_through(tmp_path: Path) -> None:
 def test_k8s_partial_update_before_uncaught_error(tmp_path: Path) -> None:
     # Only AttributeError (``.get`` on a non-dict) can fail mid-decode, and it escapes;
     # Kubernetes keeps fields assigned before it and leaves later ones unchanged.
-    data = dict(FULL_CANONICAL)
+    data = _full_canonical()
     data["request_throughput"] = {"avg": 7}
     data["output_token_throughput"] = 5
     _write_json(tmp_path, data)
