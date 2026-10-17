@@ -55,9 +55,12 @@ class StaticSecretAuth(AuthValidator):
             raise AuthError("static_secret: empty token")
         # Constant-time comparison avoids leaking "first N chars matched"
         # via timing. Python dict lookup is fast-path but not constant;
-        # for N small secrets, iterating + compare_digest is fine.
+        # for N small secrets, iterating + compare_digest is fine. Compare
+        # bytes: on str, compare_digest raises TypeError for non-ASCII
+        # input, which would escape the callers' ``except AuthError``.
+        token_bytes = token.encode()
         for secret, subject in self._secrets.items():
-            if hmac.compare_digest(token, secret):
+            if hmac.compare_digest(token_bytes, secret.encode()):
                 return AuthIdentity(source="static_secret", subject=subject)
         raise AuthError("static_secret: token not in trusted set")
 

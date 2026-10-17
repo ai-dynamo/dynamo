@@ -60,6 +60,24 @@ async def test_constant_time_compare_prefix_mismatch_still_rejects():
         await auth.validate("secret-alice-extra")
 
 
+@pytest.mark.asyncio
+async def test_non_ascii_token_rejected_with_auth_error():
+    # The token comes from a proto string field, so any UTF-8 reaches here.
+    # Callers only catch AuthError, so anything else is not a rejection.
+    auth = StaticSecretAuth({"secret-alice": "alice"})
+    with pytest.raises(AuthError, match="not in trusted set"):
+        await auth.validate("secret-alicé")
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_secret_still_matches_its_token():
+    auth = StaticSecretAuth({"sécret": "alice", "secret-bob": "bob"})
+    assert (await auth.validate("sécret")).subject == "alice"
+    assert (await auth.validate("secret-bob")).subject == "bob"
+    with pytest.raises(AuthError, match="not in trusted set"):
+        await auth.validate("secret")
+
+
 def test_construction_rejects_empty_subject():
     """Empty subject is rejected at construction time so the gateway's
     ``authenticated_unregister`` subject-match check cannot be bypassed
