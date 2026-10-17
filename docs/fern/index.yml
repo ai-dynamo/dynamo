@@ -204,6 +204,8 @@ navigation:
             path: pages/kubernetes/fault-tolerance/request-migration.md
           - page: Request Rejection
             path: pages/kubernetes/fault-tolerance/request-rejection.md
+          - page: Validation Gates
+            path: pages/kubernetes/fault-tolerance/validation-gates.md
           - page: Graceful Shutdown
             path: pages/kubernetes/fault-tolerance/graceful-shutdown.md
 

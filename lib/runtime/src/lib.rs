@@ -55,6 +55,7 @@ pub mod tls_utils;
 pub mod traits;
 pub mod transports;
 pub mod utils;
+pub mod validation;
 pub mod worker;
 
 pub use distributed::{DistributedRuntime, distributed_test_utils};

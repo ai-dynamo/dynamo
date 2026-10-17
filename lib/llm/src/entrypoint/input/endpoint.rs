@@ -142,7 +142,7 @@ pub async fn run(
 
             // The frontend owns tokenization and detokenization. Send raw engine
             // output so distributed token workers exercise that same path.
-            let ingress = Ingress::for_engine(inner_engine)?;
+            let ingress = Ingress::for_engine(inner_engine.clone())?;
 
             // The disaggregation role is carried by `worker_type`, not
             // `model_type`. Prefill workers register with an empty
@@ -164,7 +164,13 @@ pub async fn run(
                 )
                 .await?;
 
-            let fut = endpoint.endpoint_builder().handler(ingress).start();
+            let mut builder = endpoint.endpoint_builder().handler(ingress);
+            // Validation gates reach the engine through the local registry.
+            if distributed_runtime.worker_validation().is_some() {
+                builder = builder
+                    .register_local_engine(super::local_openai::JsonEngine::local(inner_engine))?;
+            }
+            let fut = builder.start();
             Box::pin(fut)
         }
         EngineConfig::Dynamic { .. } => {
