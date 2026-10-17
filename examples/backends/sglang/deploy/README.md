@@ -168,7 +168,7 @@ All templates use **DeepSeek-R1-Distill-Llama-8B** as the default model. But you
 - **Deployment Guide**: [Deploy with DGD](../../../../docs/fern/pages/kubernetes/model-deployment/deploy-with-dgd.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
 - **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md)
-- **Kubernetes Templates**: [SGLang Deployment Templates](../../../../docs/fern/pages/recipes/kubernetes-templates/dgd/sglang.mdx)
+- **Deployment Examples**: [Examples catalog](../../../../docs/fern/pages/recipes/examples/overview.mdx)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 
 ## Troubleshooting

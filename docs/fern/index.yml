@@ -1051,6 +1051,9 @@ navigation:
               - page: FlexKV
                 path: pages/recipes/examples/flexkv.mdx
                 slug: flexkv
+              - page: KV Cache Runner
+                path: pages/recipes/examples/kvcr.mdx
+                slug: kvcr
           - section: Multimodal Serving
             skip-slug: true
             collapsed: true
@@ -1092,6 +1095,9 @@ navigation:
               - page: Sequence Classification
                 path: pages/recipes/examples/classification.mdx
                 slug: classification
+              - page: Reranking
+                path: pages/recipes/examples/rerank.mdx
+                slug: rerank
               - page: Audio and Realtime Serving
                 path: pages/recipes/examples/audio.mdx
                 slug: audio
@@ -1133,6 +1139,9 @@ navigation:
               - page: Global Planner
                 path: pages/recipes/examples/global-planner.mdx
                 slug: global-planner
+              - page: GPU Sharing
+                path: pages/recipes/examples/gpu-sharing.mdx
+                slug: gpu-sharing
           - section: Observability and Recovery
             skip-slug: true
             collapsed: true
@@ -1165,9 +1174,12 @@ navigation:
               - page: Cloud Deployments
                 path: pages/recipes/examples/cloud-deployments.mdx
                 slug: cloud-deployments
-              - page: llm-d Batch Gateway
+              - page: Offline Batch Inference
                 path: pages/recipes/examples/batch-gateway.mdx
                 slug: batch-gateway
+              - page: Slime RL Rollouts
+                path: pages/recipes/examples/slime.mdx
+                slug: slime
           - section: Development Examples
             skip-slug: true
             collapsed: true

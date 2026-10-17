@@ -12,7 +12,6 @@ import { ExampleSelector } from "@/components/ExampleSelector";
   variants={[
     {"id": "local-sglang-disagg-dp-attn-sh", "target": "local:sglang", "label": "disagg_dp_attn.sh", "description": "Disaggregated Data-Parallel Attention"},
     {"id": "local-trtllm-gpt-oss-disagg-sh", "target": "local:trtllm", "label": "gpt_oss_disagg.sh", "description": "GPT-OSS on Multiple GPUs"},
-    {"id": "local-vllm-dep-sh", "target": "local:vllm", "label": "dep.sh", "description": "Data-Parallel Attention and Expert Parallelism"},
     {"id": "local-vllm-dsr1-dep-sh", "target": "local:vllm", "label": "dsr1_dep.sh", "description": "Multi-Node DeepSeek-R1 Expert Parallelism"},
     {"id": "local-vllm-multi-node-tp-sh", "target": "local:vllm", "label": "multi_node_tp.sh", "description": "Tensor Parallelism Across Nodes"}
   ]}
@@ -39,18 +38,6 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 [Source: `gpt_oss_disagg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/gpt_oss_disagg.sh)
 
 <Code src="../../../../../examples/backends/trtllm/launch/gpt_oss_disagg.sh" title="gpt_oss_disagg.sh" language="bash" maxLines={0} />
-
-</div>
-
-<div className="dynamo-example-variant" data-example-variant="local-vllm-dep-sh">
-
-```bash
-(cd examples/backends/vllm && bash launch/dep.sh)
-```
-
-[Source: `dep.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/dep.sh)
-
-<Code src="../../../../../examples/backends/vllm/launch/dep.sh" title="dep.sh" language="bash" maxLines={0} />
 
 </div>
 

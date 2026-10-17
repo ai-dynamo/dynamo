@@ -1,0 +1,46 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "KV Cache Runner"
+subtitle: "Cross-node KV-cache tier over RDMA for aggregated vLLM workers."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+**Prerequisites:** [KVCR README](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/kvcr/README.md)
+
+<Warning>
+**Experimental.** KVCR is an early-stage project. Both manifests place one worker on each of two GPU
+nodes with RDMA, and require the Grove workload provider and a KVCR-capable vLLM runtime image.
+</Warning>
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-kvcr-agg-yaml", "target": "kubernetes:vllm", "label": "kvcr/agg.yaml", "description": "KVCR with process-local host memory"},
+    {"id": "kubernetes-vllm-kvcr-agg-memory-service-yaml", "target": "kubernetes:vllm", "label": "kvcr/agg-memory-service.yaml", "description": "KVCR memory service that survives an engine restart"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-kvcr-agg-yaml">
+
+Requires an operator-configured etcd endpoint. The KV pool does not survive a worker restart.
+
+[Source: `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/kvcr/agg.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/kvcr/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-kvcr-agg-memory-service-yaml">
+
+Set `DYNAMO_KVCR_COMPATIBILITY_DIGEST` and change it whenever the model, dtype, block layout, or KVCR
+integration changes. The memory service needs Linux 6.5 or equivalent `SO_PEERPIDFD` support.
+
+[Source: `agg-memory-service.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/kvcr/agg-memory-service.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/kvcr/agg-memory-service.yaml" title="agg-memory-service.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

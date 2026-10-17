@@ -1,0 +1,33 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Slime RL Rollouts"
+subtitle: "Slime external rollouts through a Dynamo-managed SGLang worker set."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+**Prerequisites:** [Slime Integration](../../use-cases/reinforcement-learning/slime.md)
+
+<Warning>
+**Experimental.** Use a Slime revision that contains
+[THUDM/slime#2272](https://github.com/THUDM/slime/pull/2272). Keep each worker component at one replica,
+and restart Slime if you change the worker set.
+</Warning>
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-sglang-dynamo-yaml", "target": "kubernetes:sglang", "label": "dynamo.yaml", "description": "Two SGLang engines with stable Services for Slime"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-dynamo-yaml">
+
+[Source: `dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/rl/slime/dynamo.yaml)
+
+<Code src="../../../../../examples/rl/slime/dynamo.yaml" title="dynamo.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

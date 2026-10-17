@@ -1,0 +1,29 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Reranking"
+subtitle: "Cross-encoder reranking through the /v1/rerank endpoint."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+<ExampleSelector
+  variants={[
+    {"id": "local-sglang-agg-rerank-sh", "target": "local:sglang", "label": "agg_rerank.sh", "description": "Cross-Encoder Reranking"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-agg-rerank-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/agg_rerank.sh)
+```
+
+[Source: `agg_rerank.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_rerank.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/agg_rerank.sh" title="agg_rerank.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

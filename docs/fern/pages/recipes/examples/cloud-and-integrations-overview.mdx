@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 title: Cloud and Integration Examples
 sidebar-title: Overview
-subtitle: Explore managed Kubernetes and batch gateway deployment examples
+subtitle: Explore managed Kubernetes, offline batch, and RL integration examples
 hide-toc: true
 ---
 
@@ -32,13 +32,27 @@ DynamoGraphDeployment manifests for Amazon EKS and Google GKE.
 
 <span className="dynamo-example-icon"><Icon icon="boxes-stacked" /></span>
 
-### llm-d Batch Gateway
+### Offline Batch Inference
 
-Batch inference on a dedicated Dynamo worker pool.
+Batch jobs through the Dynamo frontend on a dedicated worker pool.
 
 <ExampleTargets targets="kubernetes:vllm" />
 
-<a className="dynamo-example-card-link" href="batch-gateway.mdx">Open llm-d Batch Gateway example</a>
+<a className="dynamo-example-card-link" href="batch-gateway.mdx">Open Offline Batch Inference example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="slime" data-topic="cloud-and-integrations" data-topic-label="Cloud and Integrations" data-targets="kubernetes:sglang" data-keywords="dynamo.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="brain" /></span>
+
+### Slime RL Rollouts
+
+Slime external rollouts through a Dynamo-managed SGLang worker set.
+
+<ExampleTargets targets="kubernetes:sglang" />
+
+<a className="dynamo-example-card-link" href="slime.mdx">Open Slime RL Rollouts example</a>
 
 </div>
 
