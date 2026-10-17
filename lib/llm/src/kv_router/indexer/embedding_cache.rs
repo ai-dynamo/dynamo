@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_kv_router::protocols::WorkerId;
 use dynamo_runtime::{
     component::Endpoint, pipeline::MultimodalCacheIndex, traits::DistributedRuntimeProvider,
@@ -157,13 +157,16 @@ impl EmbeddingCacheIndexer {
     }
 
     pub fn remove_worker(&self, worker_id: WorkerId) {
-        let Some((_, keys)) = self.worker_cache_keys.remove(&worker_id) else {
+        let Entry::Occupied(entry) = self.worker_cache_keys.entry(worker_id) else {
             return;
         };
 
-        for key in keys {
-            self.remove_worker_from_key(&key, worker_id);
+        // Keep the forward entry locked until its reverse memberships are gone,
+        // so a later delta cannot be erased by this removal's remaining work.
+        for key in entry.get() {
+            self.remove_worker_from_key(key, worker_id);
         }
+        entry.remove();
     }
 
     pub async fn start_subscriber(self: &Arc<Self>, endpoint: &Endpoint) -> anyhow::Result<()> {
@@ -412,5 +415,99 @@ mod tests {
 
         assert_eq!(indexer.workers_with_cached_keys(["a"]), vec![3, 4]);
         assert_eq!(indexer.workers_with_cached_keys(["a", "b"]), vec![3, 4]);
+    }
+
+    #[test]
+    fn concurrent_worker_removal_preserves_later_cache_updates() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        use dashmap::try_result::TryResult;
+
+        let indexer = Arc::new(EmbeddingCacheIndexer::default());
+        indexer.apply_delta(
+            7,
+            (0..64).map(|i| format!("key-{i}")).collect(),
+            HashSet::new(),
+        );
+        let keys = indexer
+            .worker_cache_keys
+            .get(&7)
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        // Block the first reverse-map removal, but choose a refresh key on a
+        // different shard so its reverse update can make independent progress.
+        let first_key = indexer.key_workers.get_mut(&keys[0]).unwrap();
+        let refreshed_key = keys
+            .iter()
+            .skip(1)
+            .find(|key| matches!(indexer.key_workers.try_get(*key), TryResult::Present(_)))
+            .expect("cache keys must span multiple reverse-map shards")
+            .clone();
+        indexer.apply_delta(8, HashSet::from([refreshed_key.clone()]), HashSet::new());
+
+        let remover = {
+            let indexer = Arc::clone(&indexer);
+            std::thread::spawn(move || indexer.remove_worker(7))
+        };
+        // An implementation that releases the forward entry before cleaning
+        // the reverse map exposes its absence here. If removal retains the
+        // entry lock instead, release the gate after this bounded observation.
+        let observe_until = Instant::now() + Duration::from_millis(100);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let removal_stage = loop {
+            match indexer.worker_cache_keys.try_get(&7) {
+                TryResult::Absent => break Some(true),
+                TryResult::Locked if Instant::now() >= observe_until => break Some(false),
+                _ => {}
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::yield_now();
+        };
+        let Some(removed_forward) = removal_stage else {
+            drop(first_key);
+            remover.join().unwrap();
+            panic!("worker removal did not acquire the forward entry");
+        };
+        let (updated_tx, updated_rx) = mpsc::channel();
+        let updater = {
+            let indexer = Arc::clone(&indexer);
+            let key = refreshed_key.clone();
+            std::thread::spawn(move || {
+                indexer.apply_delta(7, HashSet::from([key]), HashSet::new());
+                let _ = updated_tx.send(());
+            })
+        };
+        let updated_before_cleanup =
+            removed_forward.then(|| updated_rx.recv_timeout(Duration::from_secs(5)));
+        // Release all gates and join before asserting, including on the old code.
+        drop(first_key);
+        remover.join().unwrap();
+        updater.join().unwrap();
+        if let Some(result) = updated_before_cleanup {
+            result.expect("refresh must proceed while the forward entry is absent");
+        }
+
+        assert_eq!(
+            indexer.workers_with_cached_keys([refreshed_key.as_str()]),
+            vec![7, 8],
+            "old removal must not erase the refreshed worker or another worker"
+        );
+        // Repeating an add must not leave the forward/reverse indexes disagreeing.
+        indexer.apply_delta(7, HashSet::from([refreshed_key.clone()]), HashSet::new());
+        assert_eq!(
+            indexer.workers_with_cached_keys([refreshed_key.as_str()]),
+            vec![7, 8]
+        );
+        indexer.remove_worker(7);
+        assert_eq!(
+            indexer.workers_with_cached_keys([refreshed_key.as_str()]),
+            vec![8]
+        );
     }
 }
