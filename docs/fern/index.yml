@@ -233,6 +233,8 @@ navigation:
             path: pages/kubernetes/operations/performance-tuning.md
           - page: LoRA Adapters
             path: pages/kubernetes/operations/lora-adapters.md
+          - page: Rolling Updates
+            path: pages/kubernetes/operations/rolling-updates.mdx
 
   # ==================== Local Guide ====================
   - tab: cli-guide
@@ -330,6 +332,8 @@ navigation:
               - page: KV-Aware Routing
                 slug: system-architecture/kv-aware-routing
                 path: pages/developer-guide/knowledge-base/concepts/system-architecture/kv-aware-routing.md
+              - page: Rolling Update Architecture
+                path: pages/developer-guide/knowledge-base/concepts/system-architecture/rolling-updates.md
               - page: Observability Architecture
                 path: pages/developer-guide/knowledge-base/concepts/observability-architecture.md
               - section: Simulation

@@ -1,0 +1,502 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Rolling Updates
+subtitle: Plan zero-downtime DGD updates, roll back safely, and troubleshoot stalled rollouts.
+---
+
+This guide shows how to plan and perform zero-downtime updates to a `DynamoGraphDeployment` (DGD), roll back safely, and troubleshoot a stalled rollout. It covers worker and frontend updates, availability requirements, and version compatibility. For details on the design and architecture of NVIDIA Dynamo DGD rolling updates, see [Rolling Update Architecture](../../developer-guide/knowledge-base/concepts/system-architecture/rolling-updates.md).
+
+## Before You Start
+
+Start with a healthy DGD deployed in your cluster. If it is receiving traffic, follow this guide to plan and perform a zero-downtime upgrade. If you need a deployment first, follow [Model Deployment](../model-deployment/introduction.mdx).
+
+<Note>
+Commands use `vllm-disagg` in namespace `dynamo`, with `Frontend`, `PrefillWorker`, and `DecodeWorker` components and a source manifest named `vllm-disagg.yaml`. Substitute your own names.
+</Note>
+
+### What Does Zero Downtime Require?
+
+<Anchor id="zero-downtime-updates" />
+
+During live traffic, keep enough serving capacity available to accept new requests while existing requests finish.
+
+| Deployment | What must remain available |
+|---|---|
+| Aggregated | At least one Ready aggregated worker replica. |
+| Disaggregated | At least one Ready prefill replica and one Ready decode replica **in the same generation**. Workers from different generations cannot form a serving pair. |
+| Both | At least one Ready frontend, with existing connections allowed to drain during replacement. |
+
+<Tip>
+These are minimum availability requirements. Keep enough capacity to handle your traffic while replicas are replaced; one remaining replica may not sustain your normal throughput or latency. For multinode workers, count complete serving replicas, not individual Ready pods.
+</Tip>
+
+## Plan the Rollout
+
+### Check Version Compatibility
+
+Use these commands to check deployed versions, then compare them with your target and rollback versions.
+
+<Tabs>
+<Tab title="Explicit runtime override">
+
+Check for overrides, which take precedence over image tags. A `null` value means the operator uses the image tag.
+
+```bash
+kubectl get dgd vllm-disagg -n dynamo -o json \
+  | jq '.spec.components[] | {name, runtimeVersionOverride}'
+```
+
+For custom tags, declare the contained Dynamo version on the component:
+
+```yaml
+runtimeVersionOverride: "1.4.0"
+```
+
+Update the override with the image, or remove it when the tag identifies the runtime correctly. The override declares a version; it does not change the image. See [Runtime Version Compatibility](../../reference/kubernetes-api/dynamo-component-deployment.mdx#runtime-version-compatibility).
+
+</Tab>
+<Tab title="Runtime image tag">
+
+Without an override, the operator reads the runtime version from the `main` container's semantic-version image tag.
+
+```bash
+kubectl get dgd vllm-disagg -n dynamo -o json \
+  | jq '.spec.components[] | {name,
+      image: (.podTemplate.spec.containers[] | select(.name == "main") | .image)}'
+```
+
+For example, `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0` identifies Dynamo runtime `1.4.0`.
+
+</Tab>
+<Tab title="Operator version">
+
+For a Helm-installed operator, inspect its image tag and the `--operator-version` argument:
+
+```bash
+kubectl get deployment -A -l app.kubernetes.io/part-of=dynamo-operator -o json \
+  | jq '.items[].spec.template.spec.containers[] | select(.name == "manager") | {image, args}'
+```
+
+</Tab>
+</Tabs>
+
+| Components | Compatibility requirement |
+|---|---|
+| Operator → runtime | **N−2 through N+1:** operator release N supports runtime release lines N−2, N−1, N, and N+1. Current, target, and rollback runtimes must fit this window. Upgrade the operator first if needed; use intermediate releases to stay within the window. |
+| Frontend ↔ workers | **N−2 in either age direction.** Check [Mixed-Version Compatibility](../../reference/general/compatibility.mdx#mixed-version-compatibility) for feature exceptions. |
+| Prefill ↔ decode | The frontend/worker guarantee does not cover these protocols. Update prefill and decode together in one manifest, using a validated backend/runtime combination within each generation. Old and new generations are isolated; see [Generation Isolation](../../developer-guide/knowledge-base/concepts/system-architecture/rolling-updates.md#generation-isolation). |
+
+<Tip>
+For operator-to-runtime compatibility, N refers to the operator’s minor release version (MINOR in MAJOR.MINOR.PATCH).
+</Tip>
+
+### Identify the Backing Resources
+
+List the controller kind for each component:
+
+```bash
+kubectl get dgd vllm-disagg -n dynamo -o json | jq -r '
+  ["COMPONENT", "KIND"],
+  (.status.components | to_entries[] | [.key, .value.componentKind])
+  | @tsv'
+```
+
+Example outputs by provider:
+
+<Tabs>
+<Tab title="Deployment">
+
+```text
+COMPONENT       KIND
+Frontend        Deployment
+PrefillWorker   Deployment
+DecodeWorker    Deployment
+```
+
+</Tab>
+<Tab title="Grove">
+
+```text
+COMPONENT       KIND
+Frontend        PodClique
+PrefillWorker   PodClique
+DecodeWorker    PodCliqueScalingGroup
+```
+
+Grove reports `PodClique` or `PodCliqueScalingGroup`, depending on the component's topology.
+
+</Tab>
+<Tab title="LeaderWorkerSet">
+
+```text
+COMPONENT       KIND
+Frontend        Deployment
+PrefillWorker   LeaderWorkerSet
+DecodeWorker    LeaderWorkerSet
+```
+
+</Tab>
+</Tabs>
+
+See [Multinode Orchestration](../installation/multinode-orchestration.md) for provider selection.
+
+### Choose an Update Strategy
+
+<Tabs>
+<Tab title="Deployment">
+
+| Strategy | Behavior | Zero-downtime rollout? |
+|---|---|---|
+| **`RollingUpdate` (default)** | Gradually replaces replicas. | Recommended, with sufficient capacity and draining. |
+| `Recreate` | Stops existing replicas before starting replacements. | No; permits a component outage. |
+
+See [Deployment Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#deployment-backed-components) to select a strategy.
+
+</Tab>
+<Tab title="Grove">
+
+| Strategy | Behavior | Zero-downtime rollout? |
+|---|---|---|
+| **`RollingRecreate` (default)** | Automatically replaces pods progressively. | Recommended, with sufficient capacity and draining. |
+| `OnDelete` | Replaces existing pods only after manual deletion. | Requires manual coordination; outside this walkthrough. |
+
+This walkthrough uses `RollingRecreate`. See [Grove Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-backed-components) to select a strategy.
+
+</Tab>
+<Tab title="LeaderWorkerSet">
+
+DGD uses the default rolling update to gradually replace worker replicas; it does not expose a strategy selection. This supports zero-downtime updates with sufficient capacity and draining.
+
+For the frontend, follow the Deployment tab. See [LWS Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#lws-backed-workers).
+
+</Tab>
+</Tabs>
+
+<Note>
+Changing any worker pod template rolls all worker components. A frontend-only change does not create a new worker generation.
+</Note>
+
+### Choose the Update Order
+
+Frontend and worker updates can run in parallel. During live traffic, update them separately and verify each rollout before starting the next. Choose frontend-first or workers-first based on the compatible intermediate versions and features identified above.
+
+For a worker rollout, keep the frontend pod template unchanged. For a frontend rollout, preserve the current worker configuration. Keep a known-good manifest after each successful stage so rollback can target the affected components.
+
+### Plan Capacity and Rollout Pace
+
+<Anchor id="capacity-and-spare-gpus" />
+<Anchor id="capacity-during-the-rollout" />
+<Anchor id="control-the-pace" />
+
+<Tabs>
+<Tab title="Deployment">
+
+<Anchor id="deployment-backed-workers-1" />
+
+`maxSurge` allows extra replicas above the desired count. `maxUnavailable` limits how many desired replicas can be unavailable during replacement.
+
+| Budget | Availability | Spare resources |
+|---|---|---|
+| **Surge `1`, unavailable `0` (recommended)** | Retains the desired number of available replicas. | One extra replica per component. |
+| Surge `0`, unavailable `1` | Allows one unavailable replica per component; a single-replica component has an outage. | Reuses existing resources. |
+
+Budget GPUs across all worker components: each surge worker needs its requested GPUs on one node. A four-GPU worker needs four free GPUs on the same node. Frontend surge pods need extra CPU and memory.
+
+**Rollout pace:** larger budgets allow more concurrent replacements, subject to readiness and available resources. Larger unavailable budgets also reduce serving capacity. Set budgets per component using the [Deployment annotations](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#deployment-backed-components) shown in the update procedure.
+
+</Tab>
+<Tab title="Grove">
+
+<Anchor id="grove-backed-workers-1" />
+
+| Setting | Effect |
+|---|---|
+| No surge | Existing pods are replaced using their released resources. |
+| Default `maxUnavailable: 1` per PodClique | One pod per PodClique can be unavailable; DGD does not expose this budget. |
+| Replica count | Use at least two replicas per component, including the frontend, with enough remaining capacity to serve traffic. |
+
+For multinode workers, budget complete serving replicas: losing a constituent pod can make its replica unavailable. See [Multinode Orchestration](../installation/multinode-orchestration.md).
+
+**Rollout pace:** replacements advance under Grove's default budget; DGD exposes no concurrency knob. To retain more serving capacity, scale up and wait for readiness before updating. See [Grove Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-backed-components).
+
+</Tab>
+<Tab title="LeaderWorkerSet">
+
+<Anchor id="lws-backed-workers-1" />
+
+| Setting | Effect |
+|---|---|
+| No surge | Replaces workers using existing resources. |
+| One replica replaced at a time | A component with `R` replicas has `R - 1` remaining during replacement. |
+| Replica count | Use at least two replicas per worker component, with enough remaining capacity to serve traffic. A multinode replica includes the entire leader/worker group. |
+
+**Rollout pace:** replicas are replaced sequentially; DGD exposes no update-budget knobs. Scale up before updating if additional serving capacity is needed. Follow the Deployment tab for frontend capacity. See [LWS Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#lws-backed-workers).
+
+</Tab>
+</Tabs>
+
+Scheduling, model loading, readiness, and request draining determine how long each replacement takes.
+
+<Tip>
+For disaggregated serving, check that prefill and decode remain available **within the same generation** throughout replacement. Per-component replica counts alone do not guarantee uninterrupted service. Verify application traffic; see [generation readiness](../../developer-guide/knowledge-base/concepts/system-architecture/rolling-updates.md#readiness-gates).
+</Tip>
+
+<Anchor id="warm-up-and-latency" />
+
+<Note>
+Roll during low traffic when possible. Replacement workers can start with an empty KV cache, so allow for higher latency while they warm up. See [KV Cache Offloading](../kv-cache-offloading/overview.mdx) if you rely on cache reuse across pods.
+</Note>
+
+### Request Draining
+
+Check request durations and the current pods' shutdown settings before starting. Follow [Graceful Shutdown](../fault-tolerance/graceful-shutdown.md) for worker draining and the frontend's HTTP/streaming drain timeout. Allow frontend requests to finish within `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`, with enough additional pod termination time for cleanup.
+
+Readiness must remove draining frontends from new traffic while healthy replicas remain reachable. New frontend replicas do not take over existing client connections. [Request Migration](../fault-tolerance/request-migration.md) can recover eligible worker interruptions; it does not preserve a stream whose frontend connection has closed.
+
+## Update the Workers
+
+<Steps toc={true} tocDepth={3}>
+
+<Step title="Prepare workers to drain" id="graceful-shutdown">
+
+Check whether each worker's `podTemplate.spec.terminationGracePeriodSeconds` accommodates your request durations and cleanup time. Use the worker's P99 request duration as a starting point and add a buffer; configure the internal drain timeouts using the [graceful shutdown guide](../fault-tolerance/graceful-shutdown.md).
+
+If changes are needed, make them in `vllm-disagg.yaml` before applying it in step 3. New settings apply to replacement pods; existing pods drain using their current settings.
+
+</Step>
+
+<Step title="Edit the worker configuration">
+
+For a configuration-only example, add `--max-model-len, "32768"` to the `DecodeWorker` main container's existing `args` list in the same manifest. Preserve its other arguments, resource requests, and shutdown settings. Check that the model and GPU memory support the new context length.
+
+For a protocol or backend/runtime upgrade, instead update both `PrefillWorker` and `DecodeWorker` images and any associated version overrides in this edit. Apply them together in step 3; do not apply a prefill-only intermediate manifest for that upgrade.
+
+For Deployment-backed workers, merge the budget selected above into each worker's `podTemplate.metadata.annotations`. This example keeps the desired number of available workers and permits one extra worker per component:
+
+```yaml
+podTemplate:
+  metadata:
+    annotations:
+      nvidia.com/deployment-strategy: RollingUpdate
+      nvidia.com/deployment-rolling-update-max-surge: "1"
+      nvidia.com/deployment-rolling-update-max-unavailable: "0"
+```
+
+Grove and LWS do not use these Deployment annotations. Keep their replica counts consistent with the capacity plan.
+
+</Step>
+
+<Step title="Apply the updated manifest">
+
+```bash
+kubectl apply -n dynamo -f vllm-disagg.yaml
+```
+
+Both worker components roll, even when only the decode configuration changes. The frontend does not restart when its pod template is unchanged.
+
+</Step>
+
+<Step title="Verify the rollout" id="watch-the-rollout">
+
+Inspect pod readiness and the generation label; rerun these commands as the rollout progresses:
+
+```bash
+kubectl get pods -n dynamo -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg \
+  -L nvidia.com/dynamo-worker-hash
+kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.status.state}{"\n"}'
+```
+
+Select the progress check for your backing resource:
+
+<Tabs>
+<Tab title="Deployment">
+
+<Anchor id="deployment-backed-workers" />
+
+```bash
+kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.status.rollingUpdate}{"\n"}'
+```
+
+Expect `Pending`, then `InProgress`, then `Completed`. `updatedComponents` lists worker components that have finished.
+
+</Tab>
+<Tab title="Grove">
+
+<Anchor id="grove-backed-workers" />
+
+```bash
+kubectl get podcliqueset vllm-disagg -n dynamo -o jsonpath='{.status.updateProgress}{"\n"}'
+```
+
+Check the current update's progress; `updateEndedAt` is set when Grove finishes replacing pods. Also verify pod readiness and generation labels.
+
+</Tab>
+<Tab title="LWS">
+
+<Anchor id="lws-backed-workers" />
+
+```bash
+kubectl get leaderworkerset -n dynamo -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg
+```
+
+Check each worker's LeaderWorkerSet for ready and updated replicas, alongside pod readiness and generation labels.
+
+</Tab>
+</Tabs>
+
+When the backing controller finishes, confirm `status.state` is `successful`, the expected worker replicas are Ready, and all worker pods carry the new generation hash. Inspect the completed generation with:
+
+```bash
+kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.metadata.annotations.nvidia\.com/current-worker-hash-v2}{"\n"}'
+```
+
+Keep sending requests through your application during the update. Confirm requests succeed and latency recovers before treating the update as complete.
+
+</Step>
+</Steps>
+
+## Update the Frontend
+
+Use this procedure for a separate frontend rollout after completing any worker rollout, or before it when the planned intermediate versions are compatible. Keep worker templates unchanged.
+
+<Steps toc={true} tocDepth={3}>
+
+<Step title="Prepare frontend capacity and draining">
+
+Confirm the remaining Ready frontend replicas can carry the traffic while one is replaced. If you need more replicas, increase the `Frontend` component's `replicas` in the manifest, apply it, and wait for those replicas to become Ready before changing the image. Grove requires at least two replicas for replacement without a frontend availability gap.
+
+For a Deployment-backed frontend, merge these settings into the `Frontend` component's `podTemplate.metadata.annotations`, preserving other annotations:
+
+```yaml
+nvidia.com/deployment-strategy: RollingUpdate
+nvidia.com/deployment-rolling-update-max-surge: "1"
+nvidia.com/deployment-rolling-update-max-unavailable: "0"
+```
+
+Check the existing frontend pods' HTTP drain timeout and termination grace period against long-running and streaming requests. Timeout changes in the manifest affect replacement pods; existing pods still drain using their current settings.
+
+</Step>
+
+<Step title="Edit the frontend configuration">
+
+In `vllm-disagg.yaml`, change the `Frontend` component's `podTemplate.spec.containers[name=main].image` or the intended frontend arguments. Preserve worker templates and other frontend settings. If the Dynamo runtime version changes, align any `runtimeVersionOverride` and confirm compatibility with every worker version that the frontend will discover.
+
+</Step>
+
+<Step title="Apply the frontend update">
+
+```bash
+kubectl apply -n dynamo -f vllm-disagg.yaml
+```
+
+Only the frontend's backing workload rolls when only its pod template changes. A frontend rollout does not advance the worker generation.
+
+</Step>
+
+<Step title="Verify the frontend rollout" id="verify-the-frontend-rollout">
+
+Inspect the frontend pods and component status:
+
+```bash
+kubectl get pods -n dynamo \
+  -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg,nvidia.com/dynamo-component=Frontend
+kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.status.components.Frontend}{"\n"}'
+```
+
+<Tabs>
+<Tab title="Deployment">
+
+```bash
+kubectl rollout status deployment -n dynamo \
+  -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg,nvidia.com/dynamo-component=Frontend \
+  --timeout=10m
+```
+
+</Tab>
+<Tab title="Grove">
+
+```bash
+kubectl get podclique -n dynamo \
+  -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg,nvidia.com/dynamo-component=Frontend \
+  -o yaml
+```
+
+Check the frontend PodClique's observed generation and ready/updated replica counts against its desired state.
+
+</Tab>
+</Tabs>
+
+Confirm all desired frontend replicas are Ready with the intended configuration. Through the normal Service or load-balancer endpoint, verify model discovery, new inference requests, and completion of requests and streams admitted before the update. Check error rates and latency throughout replacement.
+
+`status.rollingUpdate` tracks Dynamo's managed worker rollout, not frontend replacement. Use the frontend's backing workload status and application traffic to verify this update.
+
+</Step>
+</Steps>
+
+## Roll Back
+
+<Warning>
+For Deployment-backed workers, rolling back an update that is still in progress requires operator 1.5.0 or later. Earlier releases could delete the serving generation during a mid-rollout rollback.
+</Warning>
+
+<Steps toc={true} tocDepth={3}>
+
+<Step title="Restore the previous manifest">
+
+Restore the affected components from the last known-good `vllm-disagg.yaml`, including their image, arguments, version overrides, and rollout settings. Preserve unrelated successful changes. Roll back prefill and decode together after a protocol or backend/runtime upgrade.
+
+Recheck compatibility with the operator and every component that remains upgraded. If restoring only one stage would exceed a supported version window, plan a compatible sequence of reversions rather than applying that intermediate combination.
+
+</Step>
+
+<Step title="Apply the previous manifest">
+
+```bash
+kubectl apply -n dynamo -f vllm-disagg.yaml
+```
+
+Rollback replaces the affected workers or frontend through the same mechanism as a forward update. Allow for draining and, for workers, model loading.
+
+</Step>
+
+<Step title="Verify recovery">
+
+For workers, repeat [Verify the rollout](#watch-the-rollout) and confirm the expected replicas are Ready on the restored generation. For the frontend, repeat [Verify the frontend rollout](#verify-the-frontend-rollout). In both cases, confirm the backing controller has finished and application requests succeed.
+
+</Step>
+</Steps>
+
+## Troubleshoot a Stalled Rollout
+
+Inspect the DGD and pods before changing the rollout budget:
+
+```bash
+kubectl describe dgd vllm-disagg -n dynamo
+kubectl describe pods -n dynamo -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg
+```
+
+| Symptom | Check |
+|---|---|
+| Replacement pods remain Pending | Read scheduling events; verify spare GPUs, placement constraints, and volume availability. |
+| Pods start but do not become Ready | Read worker logs and probe failures; check model loading and the changed engine arguments. |
+| Frontend replacement stalls | Check its backing workload, CPU/memory scheduling, and readiness failures; worker `status.rollingUpdate` does not track this update. |
+| Old pods remain Terminating | Inspect their drain logs and termination grace periods; forced deletion can interrupt requests. |
+| Grove templates change but pods do not | Check whether `nvidia.com/grove-update-strategy` is `OnDelete`, which requires manual replacement. |
+| Ready workers exist but requests fail | Check that prefill and decode are available in the same generation and inspect frontend discovery/routing logs. |
+| Discovery or protocol errors appear after a version change | Recheck operator/runtime and frontend/worker compatibility, actual image versions, and `runtimeVersionOverride`; confirm prefill and decode were upgraded together. |
+| Streams disconnect during frontend replacement | Inspect HTTP drain timeouts, pod termination, and load-balancer connection draining; Ready replacement pods cannot resume an existing client connection. |
+| A `RollingUpdateNotSupported` event appears | On Grove or LWS, use that controller's progress checks; the event means Dynamo's managed Deployment rollout does not apply. |
+
+See [Health Checks](../../reference/observability/health-checks.mdx) for probe behavior and [Graceful Shutdown](../fault-tolerance/graceful-shutdown.md) for draining diagnostics.
+
+## Related Documentation
+
+<Anchor id="how-it-works" />
+<Anchor id="worker-generations" />
+<Anchor id="deployment-backed-rollout" />
+<Anchor id="grove-backed-and-lws-backed-rollout" />
+<Anchor id="limitations" />
+
+- [Rolling Update Architecture](../../developer-guide/knowledge-base/concepts/system-architecture/rolling-updates.md): generation identity, routing, controller sequences, rollback behavior, and limitations.
+- [DGD Reference](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#rolling-update-controls): rollout annotations, defaults, and status fields.

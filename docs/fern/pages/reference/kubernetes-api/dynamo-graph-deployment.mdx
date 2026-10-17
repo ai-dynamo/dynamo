@@ -251,6 +251,43 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
   </Indent>
 </Indent>
 
+## Rolling Update Controls
+
+For the update and rollback procedure, see [Rolling Updates](../../kubernetes/operations/rolling-updates.mdx). For generation identity and controller behavior, see [Rolling Update Architecture](../../developer-guide/knowledge-base/concepts/system-architecture/rolling-updates.md).
+
+### Deployment-Backed Components
+
+<Anchor id="deployment-backed-workers" />
+
+These annotations configure Kubernetes Deployment replacement, including frontends. Dynamo also uses them for operator-managed worker generation updates on single-node deployments without Grove. Set them in the selected component's `podTemplate.metadata.annotations`, or in `spec.annotations` to apply them across components. Component annotations take precedence.
+
+For a frontend-only update, set the annotations on the frontend component. Graph-level annotations can also change rendered worker templates and trigger a worker rollout. Frontend progress is reported by its backing Deployment; DGD `status.rollingUpdate` tracks managed workers only.
+
+| Annotation | Values | Default | Meaning |
+|---|---|---|---|
+| `nvidia.com/deployment-strategy` | `RollingUpdate`, `Recreate` | `RollingUpdate` | `Recreate` terminates the component's old pods before starting replacements. |
+| `nvidia.com/deployment-rolling-update-max-surge` | Integer or percentage string | `25%` | Extra replicas allowed above the component's desired replica count during a rolling update. |
+| `nvidia.com/deployment-rolling-update-max-unavailable` | Integer or percentage string | `25%` | Replicas allowed to be unavailable during a rolling update. |
+
+Quote annotation values, for example `"1"`, `"0"`, or `"25%"`. Percentages resolve against the component's desired replicas: surge rounds up and unavailable rounds down. For managed worker generation updates, if both resolve to zero, the operator uses one surge replica. For frontend Deployments, specify at least one nonzero budget. `Recreate` ignores both budgets and permits a full component outage.
+
+### Grove-Backed Components
+
+<Anchor id="grove-backed-workers" />
+
+Set `nvidia.com/grove-update-strategy` on the DGD's `metadata.annotations`. The strategy applies to the PodCliqueSet, including frontend and worker PodCliques. Values are case-sensitive.
+
+| Value | Behavior |
+|---|---|
+| `RollingRecreate` | Replace pods within each PodClique without surge; Grove's default when the annotation is absent. |
+| `OnDelete` | Update pod templates but replace existing pods only after they are deleted. |
+
+DGD does not expose Grove's per-PodClique `maxUnavailable`; Grove's default is 1. Deployment rollout annotations do not control Grove updates.
+
+### LWS-Backed Workers
+
+DGD does not expose LWS update budgets. Operator-rendered LeaderWorkerSets use the default rolling update: one replica at a time, without surge.
+
 ## Status
 
 The operator maintains observed state under `status`.
