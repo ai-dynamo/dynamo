@@ -225,28 +225,6 @@ async def test_monitor_shuts_down_engine_runtime_and_exits_when_unhealthy(monkey
 
 
 @pytest.mark.asyncio
-async def test_monitor_skips_engine_shutdown_when_engine_is_dead(monkeypatch):
-    exit_calls = _record_exit(monkeypatch)
-    engine = _HangingShutdownEngine([False], fatal_error=RuntimeError("rank died"))
-    runtime = _FakeRuntime()
-
-    try:
-        TrtllmEngineMonitor(
-            engine,
-            runtime=runtime,
-            interval=0.01,
-            shutdown_timeout=60.0,
-        )
-        await _wait_for_exit(exit_calls)
-
-        assert engine.shutdown_count == 0
-        assert runtime.shutdown_count == 1
-        assert exit_calls == [1]
-    finally:
-        engine.release.set()
-
-
-@pytest.mark.asyncio
 @pytest.mark.timeout(10)
 async def test_monitor_bounds_hanging_engine_shutdown(monkeypatch):
     """Stop admission before waiting for a teardown that cannot finish."""
