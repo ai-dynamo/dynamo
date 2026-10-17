@@ -9,6 +9,8 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
+use super::kv_hint::KvHintPolicyRegistry;
+use super::kv_hint::{KvHintPolicyConstructor, KvHintPolicyRegistryError};
 use super::request_classifier::RequestClassifierRegistry;
 use super::request_classifier::{
     RequestClassifierFactory, RequestClassifierProvider, RequestClassifierRegistryError,
@@ -64,11 +66,12 @@ impl WorkerSelectionPolicyProviderError {
     }
 }
 
-/// A startup-only registry of worker-selection and request-classifier plugins linked into an image.
+/// A startup-only registry of router plugins linked into an image.
 #[derive(Clone, Default)]
 pub struct RouterPluginRegistry {
     providers: HashMap<String, WorkerSelectionPolicyProvider>,
     request_classifiers: RequestClassifierRegistry,
+    kv_hint_policies: KvHintPolicyRegistry,
     default_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
@@ -120,6 +123,7 @@ impl RouterPluginRegistry {
                 .map_err(WorkerSelectionPolicyRegistryError::from)?
                 .is_some(),
             request_classifier: self.resolve_request_classifier(config)?,
+            kv_hint_policy: self.kv_hint_policies.resolve(config)?,
         })
     }
 
@@ -160,9 +164,20 @@ impl RouterPluginRegistry {
         self.request_classifiers.resolve(config)
     }
 
+    /// Register a post-selection KV-hint policy through the common plugin catalog.
+    pub fn register_kv_hint_policy(
+        &mut self,
+        name: impl Into<String>,
+        constructor: KvHintPolicyConstructor,
+    ) -> Result<(), KvHintPolicyRegistryError> {
+        self.kv_hint_policies.register(name, constructor)
+    }
+
     /// Whether this image has no linked router plugin types.
     pub fn is_empty(&self) -> bool {
-        self.providers.is_empty() && self.request_classifiers.is_empty()
+        self.providers.is_empty()
+            && self.request_classifiers.is_empty()
+            && self.kv_hint_policies.is_empty()
     }
 
     /// Compatibility entry point for worker-only catalogs.

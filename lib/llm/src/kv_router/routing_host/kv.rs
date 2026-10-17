@@ -6,6 +6,30 @@ use crate::kv_router::{
     FindBestMatchAdmission,
     routing_host::{kv_selection::SelectionOutcome, request_guard::RouteObservation},
 };
+use dynamo_kv_router::kv_hints::{KvHint, KvHintAction};
+
+fn compose_kv_hint(
+    request_id: &str,
+    request_hint: Option<KvHint>,
+    selection_hint: Option<KvHint>,
+    policy_actions: Vec<KvHintAction>,
+) -> Option<KvHint> {
+    let mut combined = request_hint;
+    if let Some(mut selected) = selection_hint {
+        if let Some(existing) = &mut combined {
+            existing.actions.append(&mut selected.actions);
+        } else {
+            combined = Some(selected);
+        }
+    }
+    if !policy_actions.is_empty() {
+        combined
+            .get_or_insert_with(|| KvHint::new(request_id, Vec::new()))
+            .actions
+            .extend(policy_actions);
+    }
+    combined
+}
 
 impl RoutingHost {
     #[allow(clippy::too_many_arguments)]
@@ -545,12 +569,31 @@ impl RoutingHost {
         let phase = request.phase();
         let staged_kv = StagedKv::for_request(request.content());
         let phase_label = phase.to_string();
-        guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
+        let policy_actions = if self.kv_router().has_kv_hint_policy() {
+            let session_context = request
+                .agent_context
+                .as_ref()
+                .map(to_worker_selection_session_context);
+            self.kv_router().formulate_kv_hint_actions(
+                &context_id,
+                session_context.as_ref(),
+                selection.worker,
+            )
+        } else {
+            Vec::new()
+        };
+
+        guard.start_dispatch(&phase_label);
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
-        backend_input.kv_hint = selection.kv_hint;
+        backend_input.kv_hint = compose_kv_hint(
+            &context_id,
+            backend_input.kv_hint.take(),
+            selection.kv_hint,
+            policy_actions,
+        );
         let updated_request = context.map(|_| backend_input);
         guard.record_prefill_start(updated_request.content());
 
@@ -699,5 +742,45 @@ impl RoutingHost {
             metadata,
             self.bind_affinity(operation, selected_target, stream)?,
         ))
+    }
+}
+
+#[cfg(test)]
+mod kv_hint_tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    fn action(id: &str) -> KvHintAction {
+        KvHintAction::new(id, "kv.test", "1.0", BTreeMap::new())
+    }
+
+    #[test]
+    fn composes_request_selection_and_policy_actions_in_order() {
+        let hint = compose_kv_hint(
+            "request-id",
+            Some(KvHint::new("incoming-message", vec![action("incoming")])),
+            Some(KvHint::new("selection-message", vec![action("fetch")])),
+            vec![action("policy")],
+        )
+        .unwrap();
+
+        assert_eq!(hint.message_id, "incoming-message");
+        assert_eq!(
+            hint.actions
+                .iter()
+                .map(|action| action.action_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["incoming", "fetch", "policy"]
+        );
+    }
+
+    #[test]
+    fn policy_actions_create_an_envelope_only_when_nonempty() {
+        assert!(compose_kv_hint("request-id", None, None, Vec::new()).is_none());
+
+        let hint = compose_kv_hint("request-id", None, None, vec![action("policy")]).unwrap();
+        assert_eq!(hint.message_id, "request-id");
+        assert_eq!(hint.actions, vec![action("policy")]);
     }
 }
