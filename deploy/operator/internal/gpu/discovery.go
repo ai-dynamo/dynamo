@@ -443,6 +443,14 @@ func buildDCGMEndpoint(podIP string) string {
 	if template == "" {
 		template = defaultDCGMEndpointTemplate
 	}
+
+	// IPv6 URL hosts need brackets, including in custom endpoint templates.
+	// Normalize an already bracketed placeholder to avoid double brackets.
+	if strings.Contains(podIP, ":") {
+		template = strings.ReplaceAll(template, "[{POD_IP}]", "{POD_IP}")
+		podIP = "[" + podIP + "]"
+	}
+
 	return strings.ReplaceAll(template, "{POD_IP}", podIP)
 }
 func listDCGMExporterPods(ctx context.Context, k8sClient client.Reader) ([]corev1.Pod, error) {
