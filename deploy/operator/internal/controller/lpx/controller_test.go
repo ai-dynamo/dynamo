@@ -855,7 +855,7 @@ func TestLPXDownloadsBeforePublication(t *testing.T) {
 				}
 				require.Empty(t, observedRegistry.calls)
 			}
-			require.Zero(t, observedRegistry.acquireBuildSnapshotCalls)
+			require.Zero(t, observedRegistry.acquireBuildCalls)
 			pcs := &grovev1alpha1.PodCliqueSetList{}
 			requests := &lpxv1alpha1.LPUPipelineRequestList{}
 			require.NoError(t, r.List(t.Context(), pcs))
@@ -1576,7 +1576,7 @@ func TestLPXInvalidEditsPreserveExistingWorkload(t *testing.T) {
 		{name: "render", message: "model storage volume mount"},
 		{name: "invalid source", message: "source"},
 		{name: "transient snapshot", message: "temporary snapshot timeout", preserve: true},
-		{name: "inconsistent snapshot", message: "immutable LPX build snapshot"},
+		{name: "unavailable snapshot", message: "immutable LPX build snapshot"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			t.Log("Create a PCS, its scaling groups, and a discovery endpoint before publishing requests")
@@ -1612,10 +1612,10 @@ func TestLPXInvalidEditsPreserveExistingWorkload(t *testing.T) {
 				component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].VolumeMounts = nil
 			case "invalid source":
 				child.OwnerReferences[0].UID = "replaced-source"
-			case "transient snapshot", "inconsistent snapshot":
+			case "transient snapshot", "unavailable snapshot":
 				cause := errors.New("temporary snapshot timeout")
 				if !scenario.preserve {
-					cause = lpx.ErrBuildSnapshotInconsistent
+					cause = errors.New("build source unavailable")
 				}
 				r.modelRegistry = &snapshotFailureRegistry{ModelRegistry: registry, err: cause}
 			}
@@ -2719,7 +2719,7 @@ type snapshotFailureRegistry struct {
 	err error
 }
 
-func (r *snapshotFailureRegistry) AcquireBuildSnapshot(context.Context, string) (*lpx.BuildSnapshot, error) {
+func (r *snapshotFailureRegistry) AcquireBuild(context.Context, string) (*lpx.Build, error) {
 	return nil, r.err
 }
 
@@ -2730,15 +2730,15 @@ type downloadOrderedLPXRegistry struct {
 	calls      []string
 }
 
-func (r *downloadOrderedLPXRegistry) AcquireBuildSnapshot(
+func (r *downloadOrderedLPXRegistry) AcquireBuild(
 	ctx context.Context,
 	buildID string,
-) (*lpx.BuildSnapshot, error) {
+) (*lpx.Build, error) {
 	r.calls = append(r.calls, "snapshot")
 	if !r.downloaded {
 		return nil, errors.New("LPX snapshot acquired before Model Express download")
 	}
-	return r.ModelRegistry.AcquireBuildSnapshot(ctx, buildID)
+	return r.ModelRegistry.AcquireBuild(ctx, buildID)
 }
 
 func (r *downloadOrderedLPXRegistry) BuildURL(string) (*url.URL, error) {
@@ -2796,7 +2796,7 @@ func TestLPXPublishedWorkloadCleanupAfterFailure(t *testing.T) {
 		name          string
 		snapshotError error
 	}{
-		{name: "inconsistent snapshot", snapshotError: fmt.Errorf("%w: compiler metadata changed during duplicate reads", lpx.ErrBuildSnapshotInconsistent)},
+		{name: "unavailable snapshot", snapshotError: fmt.Errorf("%w: compiler contract could not be read", errors.New("build source unavailable"))},
 		{name: "transient snapshot", snapshotError: errors.New("temporary object-store timeout")},
 		{name: "render failure"},
 	} {

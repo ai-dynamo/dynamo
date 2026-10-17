@@ -42,7 +42,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid-all-local
         nvidia.com/extra-resources-hash: fd884c294bcb84009f3f599f5ab8f4dc6a696089567f23f0a5864a094c7614b6
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:86221f5873ab3d250870ad952d4b016da98c13c4d1075faddf2c77ceeceb9db8
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:dbe02bf7d719e308add913d411468aa7e28029df4e0d97fe047ea3e4edf62331
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
         lpx.nvidia.com/serving: "true"
@@ -183,7 +183,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid-all-local
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:86221f5873ab3d250870ad952d4b016da98c13c4d1075faddf2c77ceeceb9db8
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:dbe02bf7d719e308add913d411468aa7e28029df4e0d97fe047ea3e4edf62331
       cliqueNames:
       - cond
       minAvailable: 1
