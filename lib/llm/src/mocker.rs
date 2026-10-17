@@ -27,7 +27,7 @@ use anyhow::{Context, Result, bail};
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEventSink,
+    DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEventSink,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, RequestOutputBuffering};
 use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
@@ -355,6 +355,14 @@ impl MockerExecutionContext {
     fn resolve_dp_rank(&self, request: &PreprocessedRequest) -> u32 {
         if let Some(dp_rank) = request.routing.as_ref().and_then(|routing| routing.dp_rank) {
             return dp_rank;
+        }
+
+        // SGLang's default auto policy follows the bootstrap room on prefill workers.
+        if self.engine_args.backend == EngineType::Sglang
+            && self.engine_args.is_prefill()
+            && let Some(bootstrap_info) = request.bootstrap_info.as_ref()
+        {
+            return (bootstrap_info.bootstrap_room % u64::from(self.engine_args.dp_size)) as u32;
         }
 
         self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed) % self.engine_args.dp_size
@@ -1455,6 +1463,132 @@ mod tests {
             .annotations(vec![])
             .build()
             .unwrap()
+    }
+
+    fn dp_rank_engine(
+        backend: EngineType,
+        worker_type: WorkerType,
+        dp_size: u32,
+    ) -> MockerExecutionContext {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "dp_size": dp_size,
+            "engine": { "backend": backend, "worker_type": worker_type }
+        }))
+        .unwrap();
+        MockerExecutionContext::new(args)
+    }
+
+    fn dp_rank_request(room: Option<u64>, rank: Option<u32>) -> PreprocessedRequest {
+        use crate::protocols::common::preprocessor::{BootstrapInfo, RoutingHints};
+
+        let mut request = prefill_request();
+        request.routing = Some(RoutingHints {
+            dp_rank: rank,
+            ..Default::default()
+        });
+        request.bootstrap_info = room.map(|bootstrap_room| BootstrapInfo {
+            bootstrap_host: "127.0.0.1".to_string(),
+            bootstrap_port: 0,
+            bootstrap_room,
+            handoff_id: None,
+        });
+
+        let wire = serde_json::to_vec(&request).unwrap();
+        let received: PreprocessedRequest = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(
+            received
+                .bootstrap_info
+                .as_ref()
+                .map(|info| info.bootstrap_room),
+            room
+        );
+        received
+    }
+
+    #[test]
+    fn sglang_prefill_dp_rank_follows_bootstrap_room() {
+        // SGLang v0.5.21 resolves prefill auto to follow_bootstrap_room.
+        let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 4);
+        let ranks: Vec<_> = [6, 10, 15, 19, 10]
+            .into_iter()
+            .map(|room| engine.resolve_dp_rank(&dp_rank_request(Some(room), None)))
+            .collect();
+        assert_eq!(ranks, [2, 2, 3, 3, 2]);
+    }
+
+    #[test]
+    fn sglang_prefill_dp_rank_preserves_large_rooms_and_single_rank() {
+        let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 3);
+        for (room, expected) in [(0, 0), ((1_u64 << 32) + 2, 0), (i64::MAX as u64, 1)] {
+            assert_eq!(
+                engine.resolve_dp_rank(&dp_rank_request(Some(room), None)),
+                expected,
+                "room={room}"
+            );
+        }
+
+        let single = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 1);
+        for room in [Some(0), Some(19), Some(i64::MAX as u64), None] {
+            assert_eq!(single.resolve_dp_rank(&dp_rank_request(room, None)), 0);
+        }
+    }
+
+    #[test]
+    fn dp_rank_explicit_hint_takes_precedence_without_advancing_counter() {
+        for backend in [EngineType::Sglang, EngineType::Vllm, EngineType::Trtllm] {
+            for worker_type in [
+                WorkerType::Prefill,
+                WorkerType::Decode,
+                WorkerType::Aggregated,
+            ] {
+                let engine = dp_rank_engine(backend, worker_type, 4);
+                assert_eq!(
+                    engine.resolve_dp_rank(&dp_rank_request(Some(10), Some(3))),
+                    3
+                );
+                assert_eq!(engine.resolve_dp_rank(&dp_rank_request(None, None)), 0);
+                assert_eq!(
+                    engine.resolve_dp_rank(&dp_rank_request(Some(19), Some(1))),
+                    1
+                );
+                assert_eq!(engine.resolve_dp_rank(&dp_rank_request(None, None)), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn dp_rank_other_backends_and_roles_keep_round_robin() {
+        for backend in [EngineType::Sglang, EngineType::Vllm, EngineType::Trtllm] {
+            for worker_type in [
+                WorkerType::Prefill,
+                WorkerType::Decode,
+                WorkerType::Aggregated,
+            ] {
+                if backend == EngineType::Sglang && worker_type == WorkerType::Prefill {
+                    continue;
+                }
+                let engine = dp_rank_engine(backend, worker_type, 4);
+                let ranks: Vec<_> = [6, 10, 15, 19, 6]
+                    .into_iter()
+                    .map(|room| engine.resolve_dp_rank(&dp_rank_request(Some(room), None)))
+                    .collect();
+                assert_eq!(ranks, [0, 1, 2, 3, 0], "{backend:?} {worker_type:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn sglang_prefill_dp_rank_room_does_not_advance_fallback_cursor() {
+        let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 4);
+        let mut no_routing = dp_rank_request(Some(10), None);
+        no_routing.routing = None;
+        assert_eq!(engine.resolve_dp_rank(&no_routing), 2);
+        no_routing.bootstrap_info = None;
+        assert_eq!(engine.resolve_dp_rank(&no_routing), 0);
+        assert_eq!(engine.resolve_dp_rank(&dp_rank_request(Some(10), None)), 2);
+        assert_eq!(engine.resolve_dp_rank(&dp_rank_request(None, None)), 1);
+        assert_eq!(engine.resolve_dp_rank(&dp_rank_request(Some(10), None)), 2);
+        assert_eq!(engine.resolve_dp_rank(&dp_rank_request(None, None)), 2);
     }
 
     #[tokio::test(start_paused = true)]
