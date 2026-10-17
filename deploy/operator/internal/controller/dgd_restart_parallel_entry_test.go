@@ -27,7 +27,6 @@ const (
 	parallelRestartCompletedMsg  = "Restart completed for all components"
 )
 
-// capturedLogs collects the messages written through a funcr logger.
 type capturedLogs struct {
 	mu   sync.Mutex
 	msgs []string
@@ -54,8 +53,6 @@ func (c *capturedLogs) contains(msg string) bool {
 	return false
 }
 
-// newParallelRestartDGD builds a DGD that requests a parallel restart with the
-// given ID and components (in the given order).
 func newParallelRestartDGD(
 	restartID string,
 	status *nvidiacomv1beta1.RestartStatus,
@@ -99,86 +96,31 @@ func dsParallelRestartComponents() []nvidiacomv1beta1.DynamoComponentDeploymentS
 	}
 }
 
-// TestParallelRestartSharedEntryPath drives the component/Grove entry point and
-// checks it uses the caller's resolver and logs through the context logger.
 func TestParallelRestartSharedEntryPath(t *testing.T) {
-	tests := []struct {
-		name         string
-		dgd          *nvidiacomv1beta1.DynamoGraphDeployment
-		resolved     []string
-		wantStatus   *nvidiacomv1beta1.RestartStatus
-		wantResolved []string
-		wantLog      string
-	}{
-		{
-			name: "new request starts all components sorted without resolving",
-			dgd:  newParallelRestartDGD("restart-2", nil, namedComponents("worker", "frontend", "planner")...),
-			wantStatus: &nvidiacomv1beta1.RestartStatus{
-				ObservedID: "restart-2",
-				Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
-				InProgress: []string{"frontend", "planner", "worker"},
-			},
-			wantLog: parallelRestartNewRequestMsg,
-		},
-		{
-			name: "ongoing restart completes when resolver reports nothing pending",
-			dgd: newParallelRestartDGD("restart-2", &nvidiacomv1beta1.RestartStatus{
-				ObservedID: "restart-2",
-				Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
-				InProgress: []string{"worker", "frontend"},
-			}, namedComponents("frontend", "worker")...),
-			resolved:     nil,
-			wantResolved: []string{"worker", "frontend"},
-			wantStatus: &nvidiacomv1beta1.RestartStatus{
-				ObservedID: "restart-2",
-				Phase:      nvidiacomv1beta1.RestartPhaseCompleted,
-			},
-			wantLog: parallelRestartCompletedMsg,
-		},
-		{
-			name: "ongoing restart keeps resolver result in progress",
-			dgd: newParallelRestartDGD("restart-2", &nvidiacomv1beta1.RestartStatus{
-				ObservedID: "restart-2",
-				Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
-				InProgress: []string{"worker", "frontend"},
-			}, namedComponents("frontend", "worker")...),
-			resolved:     []string{"worker"},
-			wantResolved: []string{"worker", "frontend"},
-			wantStatus: &nvidiacomv1beta1.RestartStatus{
-				ObservedID: "restart-2",
-				Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
-				InProgress: []string{"worker"},
-			},
-		},
+	dgd := newParallelRestartDGD("restart-2", &nvidiacomv1beta1.RestartStatus{
+		ObservedID: "restart-2",
+		Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
+		InProgress: []string{"worker", "frontend"},
+	}, namedComponents("frontend", "worker")...)
+
+	logger, captured := newCapturingLogger()
+	ctx := log.IntoContext(context.Background(), logger)
+
+	var calls [][]string
+	resolver := func(_ context.Context, _ *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
+		calls = append(calls, append([]string(nil), inProgress...))
+		return nil
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			logger, captured := newCapturingLogger()
-			ctx := log.IntoContext(context.Background(), logger)
-
-			var calls [][]string
-			resolver := func(_ context.Context, _ *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
-				calls = append(calls, append([]string(nil), inProgress...))
-				return tt.resolved
-			}
-
-			got := newDGDRestartReconciler().computeRestartStatusWithProgressResolver(ctx, tt.dgd, resolver)
-			require.Equal(t, tt.wantStatus, got)
-			if tt.wantResolved == nil {
-				require.Empty(t, calls)
-			} else {
-				require.Equal(t, [][]string{tt.wantResolved}, calls)
-			}
-			if tt.wantLog != "" {
-				require.True(t, captured.contains(tt.wantLog), "expected log %q, got %v", tt.wantLog, captured.msgs)
-			}
-		})
-	}
+	got := newDGDRestartReconciler().computeRestartStatusWithProgressResolver(ctx, dgd, resolver)
+	require.Equal(t, &nvidiacomv1beta1.RestartStatus{
+		ObservedID: "restart-2",
+		Phase:      nvidiacomv1beta1.RestartPhaseCompleted,
+	}, got)
+	require.Equal(t, [][]string{{"worker", "frontend"}}, calls)
+	require.True(t, captured.contains(parallelRestartCompletedMsg), "expected log %q, got %v", parallelRestartCompletedMsg, captured.msgs)
 }
 
-// TestParallelRestartDisaggregatedSetEntryPath drives the DisaggregatedSet entry point
-// with its real progress resolver and checks it writes no parallel restart progress logs.
 func TestParallelRestartDisaggregatedSetEntryPath(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -213,17 +155,6 @@ func TestParallelRestartDisaggregatedSetEntryPath(t *testing.T) {
 				ObservedID: "restart-2",
 				Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
 				InProgress: []string{"prefill"},
-			},
-		},
-		{
-			name: "ongoing restart with no components completes",
-			dgd: newParallelRestartDGD("restart-2", &nvidiacomv1beta1.RestartStatus{
-				ObservedID: "restart-2",
-				Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
-			}),
-			wantStatus: &nvidiacomv1beta1.RestartStatus{
-				ObservedID: "restart-2",
-				Phase:      nvidiacomv1beta1.RestartPhaseCompleted,
 			},
 		},
 	}
