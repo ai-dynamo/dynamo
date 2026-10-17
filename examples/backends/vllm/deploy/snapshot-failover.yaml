@@ -1,0 +1,256 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Single-node TP1 eager snapshotfailover. See the Shadow Engine Recovery guide.
+# Replace my-registry/vllm-runtime:my-tag and your-rwx-storage-class.
+# Use the same immutable runtime image for capture, GMS, and both restored engines.
+# Change the GMS artifact directory when changing the model/image/capture settings.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vllm-snapshot-model-cache
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: your-rwx-storage-class
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vllm-snapshot-gms-artifacts
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: your-rwx-storage-class
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-snapshot-failover
+  annotations:
+    nvidia.com/enable-grove: 'false'
+    nvidia.com/dynamo-kube-discovery-mode: container
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: my-registry/vllm-runtime:my-tag
+          env:
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: DYN_EVENT_PLANE
+            value: zmq
+  - name: worker
+    type: worker
+    replicas: 1
+    sharedMemorySize: 2Gi
+    experimental:
+      gpuMemoryService:
+        mode: IntraPod
+      failover:
+        mode: IntraPod
+      checkpoint:
+        enabled: true
+        startupPolicy: WaitForCheckpoint
+        targetContainerName: main
+        deletionPolicy: Delete
+        job:
+          gmsClientContainers: [gms-saver]
+          podTemplate:
+            spec:
+              initContainers:
+              # Capture starts with empty GMS memory; serving loads saved weights.
+              - name: gms-server
+                image: my-registry/vllm-runtime:my-tag
+                restartPolicy: Always
+                command: [python3, -m, gpu_memory_service.cli.server]
+                args: [--device-type, cuda]
+                env:
+                - name: DYN_GMS_USE_V1
+                  value: 'true'
+                - name: GMS_SOCKET_DIR
+                  value: /gms-intrapod-control
+                resources:
+                  requests:
+                    cpu: '1'
+                    memory: 2Gi
+                  limits:
+                    cpu: '4'
+                    memory: 8Gi
+                  claims:
+                  - name: intrapod-shared-gpu
+                volumeMounts:
+                - name: gms-intrapod-control
+                  mountPath: /gms-intrapod-control
+              containers:
+              - name: gms-saver
+                image: my-registry/vllm-runtime:my-tag
+                command: [bash, -lc]
+                args:
+                - |
+                  set -euo pipefail
+                  while [ ! -f /snapshot-control/ready-for-snapshot ]; do sleep 0.2; done
+                  python3 -m gpu_memory_service.cli.snapshot.saver \
+                    --checkpoint-dir /gms-artifacts/qwen3-0.6b/vllm/weights \
+                    --max-workers 2
+                resources:
+                  requests:
+                    cpu: '1'
+                    memory: 2Gi
+                  limits:
+                    cpu: '4'
+                    memory: 8Gi
+                volumeMounts:
+                - name: gms-artifacts
+                  mountPath: /gms-artifacts
+                # The Snapshot agent creates this volume. Share main's sentinels.
+                - name: snapshot-control
+                  mountPath: /snapshot-control
+                  subPath: main
+    podTemplate:
+      spec:
+        runtimeClassName: nvidia
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+        initContainers:
+        # Download outside the process tree that Snapshot captures.
+        - name: model-cache
+          image: my-registry/vllm-runtime:my-tag
+          command: [bash, -lc]
+          args:
+          - |
+            set -euo pipefail
+            if [ ! -f /model-cache/.qwen3-0.6b-ready ]; then
+              python3 -c 'from huggingface_hub import snapshot_download; snapshot_download("Qwen/Qwen3-0.6B")'
+              touch /model-cache/.qwen3-0.6b-ready
+            fi
+          env:
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_DISABLE_XET
+            value: '1'
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+        - name: gms-server
+          image: my-registry/vllm-runtime:my-tag
+          restartPolicy: Always
+          command: [python3, -m, gpu_memory_service.cli.server]
+          args:
+          - --enable-loader
+          - --checkpoint-dir
+          - /gms-artifacts/qwen3-0.6b/vllm/weights
+          - --max-workers
+          - '2'
+          env:
+          - name: DYN_GMS_USE_V1
+            value: 'true'
+          - name: GMS_SOCKET_DIR
+            value: /gms-intrapod-control
+          resources:
+            requests:
+              cpu: '1'
+              memory: 2Gi
+            limits:
+              cpu: '4'
+              memory: 8Gi
+            claims:
+            - name: intrapod-shared-gpu
+          volumeMounts:
+          - name: gms-artifacts
+            mountPath: /gms-artifacts
+          - name: gms-intrapod-control
+            mountPath: /gms-intrapod-control
+        containers:
+        - name: main
+          image: my-registry/vllm-runtime:my-tag
+          command: [python3, -m, dynamo.vllm]
+          args:
+          - '--model'
+          - 'Qwen/Qwen3-0.6B'
+          - '--tensor-parallel-size'
+          - '1'
+          - '--max-model-len'
+          - '512'
+          - '--max-num-seqs'
+          - '2'
+          - '--kv-cache-memory-bytes'
+          - '268435456'
+          - '--gpu-memory-utilization'
+          - '0.2'
+          - '--enforce-eager'
+          env:
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: HF_TOKEN_PATH
+            value: /tmp/hf-token
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: DYN_EVENT_PLANE
+            value: zmq
+          - name: TORCHINDUCTOR_CACHE_DIR
+            value: /gms-artifacts/compile/vllm
+          - name: CUDA_CACHE_PATH
+            value: /gms-artifacts/compile/vllm/cuda
+          - name: VLLM_CACHE_ROOT
+            value: /gms-artifacts/compile/vllm/vllm
+          securityContext:
+            seccompProfile:
+              type: Localhost
+              localhostProfile: profiles/block-iouring.json
+            appArmorProfile:
+              type: Unconfined
+          resources:
+            requests:
+              cpu: '4'
+              memory: 16Gi
+              ephemeral-storage: 5Gi
+              nvidia.com/gpu: '1'
+            limits:
+              cpu: '8'
+              memory: 32Gi
+              nvidia.com/gpu: '1'
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
+          - name: gms-artifacts
+            mountPath: /gms-artifacts
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: vllm-snapshot-model-cache
+        - name: gms-artifacts
+          persistentVolumeClaim:
+            claimName: vllm-snapshot-gms-artifacts
