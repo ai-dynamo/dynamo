@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::Semaphore;
+use tracing::Instrument;
 
 use dynamo_kv_router::services::selection::{SelectionError, WorkerSelectionPolicyRegistry};
 use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
@@ -340,16 +341,43 @@ impl EndpointPicker for EppRouter {
             });
         }
 
+        // The logging layer inherits distributed trace context from the current
+        // root; instrumenting the future enters the phase only while polled.
         let TokenizeResult {
             token_ids: tokens,
             priority_jump,
             strict_priority,
             cache_namespace,
             expected_output_tokens,
-        } = self
-            .tokenize(req.body.clone(), &req.headers)
-            .await
-            .map_err(|e| e.into_pick_error(&req.request_id))?;
+        } = {
+            let span = match req.parent_span.as_ref() {
+                Some(root) => root.in_scope(|| {
+                    tracing::info_span!(
+                        target: "request_span",
+                        "epp-tokenize",
+                        input_tokens = tracing::field::Empty,
+                        cache_namespace = tracing::field::Empty,
+                    )
+                }),
+                None => tracing::info_span!(
+                    target: "request_span",
+                    "epp-tokenize",
+                    input_tokens = tracing::field::Empty,
+                    cache_namespace = tracing::field::Empty,
+                ),
+            };
+            let result = self
+                .tokenize(req.body.clone(), &req.headers)
+                .instrument(span.clone())
+                .await
+                .map_err(|e| e.into_pick_error(&req.request_id))?;
+            span.record("input_tokens", result.token_ids.len() as u64);
+            span.record(
+                "cache_namespace",
+                result.cache_namespace.as_deref().unwrap_or(""),
+            );
+            result
+        };
         let policy_class = requested_policy_class(&req.headers)?;
 
         // EPP-minted booking key (not the reused `x-request-id`): stays
@@ -383,12 +411,38 @@ impl EndpointPicker for EppRouter {
 
         // On either error return below the guard (still armed) frees the booking.
 
-        let resp = match self.selector.select_and_reserve(select_req).await {
-            Ok(resp) => resp,
-            Err(SelectionError::BadRequest(message)) => {
-                return Err(PickError::InvalidRequest(message));
-            }
-            Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
+        let resp = {
+            let span = match req.parent_span.as_ref() {
+                Some(root) => root.in_scope(|| {
+                    tracing::info_span!(
+                        target: "request_span",
+                        "epp-decode-pick",
+                        decode_worker_id = tracing::field::Empty,
+                        endpoint = tracing::field::Empty,
+                    )
+                }),
+                None => tracing::info_span!(
+                    target: "request_span",
+                    "epp-decode-pick",
+                    decode_worker_id = tracing::field::Empty,
+                    endpoint = tracing::field::Empty,
+                ),
+            };
+            let resp = match self
+                .selector
+                .select_and_reserve(select_req)
+                .instrument(span.clone())
+                .await
+            {
+                Ok(resp) => resp,
+                Err(SelectionError::BadRequest(message)) => {
+                    return Err(PickError::InvalidRequest(message));
+                }
+                Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
+            };
+            span.record("decode_worker_id", resp.worker_id);
+            span.record("endpoint", resp.endpoint.as_str());
+            resp
         };
 
         // The reflector owns the address + readiness. If it can no longer resolve
