@@ -120,6 +120,16 @@ pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 
+/// Takes the encoder's token buffer rather than copying it. The tokenizer cache and fastokens
+/// return `Encoding::Sp` with an exactly sized buffer, so a copy only adds a prompt-sized
+/// allocation per request; the Hugging Face encoding still needs one.
+fn into_token_ids(encoding: Encoding) -> Vec<TokenIdType> {
+    match encoding {
+        Encoding::Sp(token_ids) => token_ids,
+        encoding => encoding.token_ids().to_vec(),
+    }
+}
+
 fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, Option<i32>) {
     let priority_jump = hints.and_then(|h| {
         h.priority
@@ -358,6 +368,36 @@ pub(crate) fn decode_base64_to_floats(encoded: &str) -> Result<Vec<f32>, String>
         .chunks_exact(std::mem::size_of::<f32>())
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect())
+}
+
+#[cfg(test)]
+mod into_token_ids_tests {
+    use super::{Encoding, into_token_ids};
+
+    #[test]
+    fn takes_the_encoder_buffer_without_copying() {
+        let token_ids = vec![1, 2, 3];
+        let buffer = token_ids.as_ptr();
+        let taken = into_token_ids(Encoding::Sp(token_ids));
+        assert_eq!(taken, vec![1, 2, 3]);
+        assert_eq!(taken.as_ptr(), buffer);
+    }
+
+    #[test]
+    fn copies_hugging_face_ids() {
+        let encoding = Encoding::Hf(Box::new(tokenizers::tokenizer::Encoding::new(
+            vec![7, 8],
+            vec![0, 0],
+            vec!["a".to_string(), "b".to_string()],
+            vec![None, None],
+            vec![(0, 1), (1, 2)],
+            vec![0, 0],
+            vec![1, 1],
+            vec![],
+            Default::default(),
+        )));
+        assert_eq!(into_token_ids(encoding), vec![7, 8]);
+    }
 }
 
 #[cfg(test)]
@@ -1706,6 +1746,7 @@ pub struct OpenAIPreprocessor {
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
+    structural_tag_reasoning_boundary: structural_tag::ResolvedReasoningBoundary,
     /// KV cache block size published in the model deployment card.
     kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
@@ -2582,6 +2623,8 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+        let structural_tag_reasoning_boundary =
+            structural_tag::validate_runtime_config(&runtime_config)?;
         let token_budget = match runtime_config
             .get_engine_specific::<TokenBudget>(TOKEN_BUDGET_RUNTIME_KEY)
         {
@@ -2894,6 +2937,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             lora_name,
             runtime_config,
+            structural_tag_reasoning_boundary,
             kv_cache_block_size,
             tool_call_parser,
             parser_requires_special_tokens,
@@ -4743,7 +4787,7 @@ impl OpenAIPreprocessor {
                                         tracker,
                                     )
                                     .await?;
-                                (encoding.token_ids().to_vec(), false)
+                                (into_token_ids(encoding), false)
                             } else {
                                 let encoding = self
                                     .encode_prompt_with_timing(
@@ -4752,7 +4796,7 @@ impl OpenAIPreprocessor {
                                         tracker,
                                     )
                                     .await?;
-                                (encoding.token_ids().to_vec(), false)
+                                (into_token_ids(encoding), false)
                             };
 
                             if request.has_annotation(ANNOTATION_TOKEN_IDS)
@@ -4769,8 +4813,7 @@ impl OpenAIPreprocessor {
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
                                 let encoding = self.encode_with_timing(&texts[0], tracker).await?;
-                                let tokens = encoding.token_ids().to_vec();
-                                tokens_out = tokens;
+                                tokens_out = into_token_ids(encoding);
                             } else {
                                 bail!(
                                     "Batch text input not supported for more than one text in requests (got {})",
@@ -5154,11 +5197,11 @@ impl OpenAIPreprocessor {
             && tool_parser_v2::enabled()
             && selected_version == tool_parser_v2::ParserVersion::V2
             && tool_parser_v2::supports_family(parser_name)
-            && !uses_tool_call_structural_tag
-            && matches!(
-                request.inner.tool_choice.as_ref(),
-                None | Some(ChatCompletionToolChoiceOption::Auto)
-            )
+            && (uses_tool_call_structural_tag
+                || matches!(
+                    request.inner.tool_choice.as_ref(),
+                    None | Some(ChatCompletionToolChoiceOption::Auto)
+                ))
         {
             let parser_name = match parser_name {
                 "deepseek-v4" | "deepseekv4" => "deepseek_v4",
@@ -7691,7 +7734,7 @@ impl
             tool_processing_route.uses_legacy_jail(),
         )?;
 
-        tracing::trace!(request = ?common_request, ?prompt_injected_reasoning, "Pre-processed request");
+        tracing::trace!(model = %common_request.model, token_count = common_request.token_ids.len(), ?prompt_injected_reasoning, "Pre-processed request");
         let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
             &tracker,
@@ -12653,6 +12696,22 @@ mod tests {
             extra_args["sampling_options"]["logprob_token_ids"],
             serde_json::json!([14, 15])
         );
+    }
+
+    #[test]
+    fn metadata_upload_artifact_passes_to_backend_without_rewriting_grant() {
+        let upload = serde_json::json!({
+            "kind": "generation_artifact", "contents": ["moe_routes"], "mode": "object_store",
+            "destination": {"kind": "presigned_http_put", "url": "https://storage.example/a%2Fb?sig=secret&x=2&x=1", "required_headers": {"X-Token": "secret"}, "expires_at": "2030-01-01T00:00:00Z", "max_bytes": 1024, "object_id": "object-1"}
+        });
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model", "messages": [{"role": "user", "content": "hi"}],
+            "nvext": {"metadata_upload": upload}
+        }))
+        .unwrap();
+        let extra_args = OpenAIPreprocessor::backend_extra_args(&request, false, None).unwrap();
+        assert_eq!(extra_args["nvext"]["metadata_upload"], upload);
+        assert!(extra_args["nvext"].get("generation_artifact").is_none());
     }
 
     #[test]
