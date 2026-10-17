@@ -3,7 +3,11 @@
 
 //! Synchronous adapter for direct selection and deterministic replay.
 
-use dynamo_kv_router::plugins::worker_selection::{WorkerInputs, WorkerSelectionPolicy};
+use dynamo_kv_router::RoutingPartitionRef;
+use dynamo_kv_router::WorkerType;
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerInputs, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
+};
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerSelectionResult};
 use dynamo_kv_router::{KvRouterConfig, KvSchedulerError, WorkerSelectionInput, WorkerSelector};
 use parking_lot::Mutex;
@@ -18,6 +22,9 @@ pub struct DefaultWorkerSelector {
     worker_type: &'static str,
     policy: Mutex<WorkerSelectionPolicy>,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
+    /// Set when the policy came from a registry-resolved custom factory, which treats session
+    /// affinity as advisory rather than exclusive.
+    custom_factory: Option<(WorkerType, WorkerSelectionPolicyFactory)>,
 }
 impl DefaultWorkerSelector {
     pub fn new(config: Option<KvRouterConfig>, worker_type: &'static str) -> Self {
@@ -35,6 +42,27 @@ impl DefaultWorkerSelector {
             Some(Arc::new(Mutex::new(fastrand::Rng::with_seed(seed)))),
         )
     }
+    /// Wrap a registry-resolved custom worker-selection policy for hosts that only hold a
+    /// `DefaultWorkerSelector`, such as offline replay.
+    pub fn from_custom_factory(
+        config: KvRouterConfig,
+        worker_type: &'static str,
+        role: WorkerType,
+        factory: WorkerSelectionPolicyFactory,
+    ) -> Self {
+        let policy = factory(
+            &config,
+            role,
+            RoutingPartitionRef::new(worker_type, "default"),
+        );
+        Self {
+            policy: Mutex::new(policy),
+            kv_router_config: config,
+            worker_type,
+            rng: None,
+            custom_factory: Some((role, factory)),
+        }
+    }
     fn with_rng(
         config: KvRouterConfig,
         worker_type: &'static str,
@@ -51,11 +79,20 @@ impl DefaultWorkerSelector {
             kv_router_config: config,
             worker_type,
             rng,
+            custom_factory: None,
         }
     }
 }
 impl Clone for DefaultWorkerSelector {
     fn clone(&self) -> Self {
+        if let Some((role, factory)) = &self.custom_factory {
+            return Self::from_custom_factory(
+                self.kv_router_config.clone(),
+                self.worker_type,
+                *role,
+                Arc::clone(factory),
+            );
+        }
         Self::with_rng(
             self.kv_router_config.clone(),
             self.worker_type,
@@ -76,7 +113,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         <WorkerSelectionPolicy as WorkerSelector<C>>::required_worker_inputs(&self.policy.lock())
     }
     fn uses_exclusive_affinity_target(&self) -> bool {
-        true
+        self.custom_factory.is_none()
     }
     fn select_worker(
         &self,

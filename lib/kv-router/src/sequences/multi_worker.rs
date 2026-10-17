@@ -2771,6 +2771,7 @@ mod tests {
             Some(WorkerLoadProjection {
                 active_prefill_tokens: 0,
                 active_decode_blocks: 2,
+                active_sequence_blocks: 4,
                 active_requests: 1,
                 additional_active_blocks: 1,
             })
@@ -2780,6 +2781,7 @@ mod tests {
             Some(WorkerLoadProjection {
                 active_prefill_tokens: 12,
                 active_decode_blocks: 3,
+                active_sequence_blocks: 3,
                 active_requests: 1,
                 additional_active_blocks: 2,
             })

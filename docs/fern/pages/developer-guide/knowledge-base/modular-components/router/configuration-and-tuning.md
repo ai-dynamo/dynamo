@@ -110,6 +110,7 @@ link no catalog and reject a configured policy type at startup.
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+| `dynamo-sglang-ep-balance` | For SGLang attention-DP workers, where one `worker_id` is one expert-parallel group and its DP ranks sync before every MoE phase. Keeps a request on a rank that already holds at least half of its prompt in device cache; otherwise picks the least-loaded EP group by mean active requests (within a tolerance), then the DP rank in that group with the least per-rank context (`active_sequence_blocks`). Moves a bound session only when that lowers the total DP idle time enough: the time faster ranks wait for the slowest rank. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -245,6 +246,22 @@ for that scope, which makes it a quick way to A/B a policy against the default.
 
 To write your own policy instead of using a built-in one, see
 [Write Custom Routing Strategies](custom-worker-selection.mdx).
+
+`dynamo-sglang-ep-balance` balances per-rank context (`active_sequence_blocks`), not the
+deduplicated KV footprint, because attention time follows the context every request reads. It
+accepts these parameters:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `group_load_tolerance` | `0.1` | EP groups whose mean active requests per rank is within this relative distance of the least-loaded group stay candidates. |
+| `cache_affinity_min_fraction` | `0.5` | A rank that holds at least this fraction of the prompt in device cache keeps the request. A value above `1.0` disables this step. |
+| `affinity_min_dp_idle_saving` | `0.5` | A session bound to a rank moves only if the move lowers the total DP idle time (the sum over ranks of the slowest rank's attention time minus this rank's) by more than this value times the request's own context times the move cost. `0` moves whenever another rank is better; a large value (for example `1e9`) gives hard stickiness. A long request that would make any destination the new slowest rank stays. A move to another EP group is allowed only when that group is within `group_load_tolerance`, so rebalancing a group never overloads another one. |
+| `dp_ranks_per_host` | `0` | DP ranks per host. Ranks are assumed contiguous: ranks `[k*n, (k+1)*n)` share host `k`. `0` means unknown, and every move costs `1`. |
+| `same_host_move_cost` | `0.22` | Cost of a move to a rank on the same host, relative to a cross-host move. Such a rank reloads the session from a host-memory KV tier shared by the host's ranks (for example Mooncake). The default is the 50 GB/s network to 225 GB/s chip-to-host ratio on GB200. |
+
+The session rule needs `--router-session-affinity-mode soft`. With `hard`, the host pins the
+session before the policy runs. Staying avoids re-sending the session's KV to a decode rank that
+already caches it (SGLang `--disaggregation-decode-enable-radix-cache`); moving lowers the DP idle time.
 
 ### Policy-Class Queues
 

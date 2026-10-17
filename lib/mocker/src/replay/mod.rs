@@ -12,7 +12,7 @@ mod validate;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::common::protocols::{DirectRequest, MockerConfig};
+use crate::common::protocols::{DirectRequest, MockerConfig, WorkerType};
 use dynamo_kv_router::PrefillLoadEstimator;
 
 pub use agentic::AgenticReplayOptions;
@@ -184,6 +184,61 @@ pub fn with_kv_event_lag_ms<T>(lag_ms: f64, replay: impl FnOnce() -> T) -> anyho
 
 pub(crate) fn kv_event_lag_ms() -> f64 {
     KV_EVENT_LAG_MS.with(std::cell::Cell::get)
+}
+
+/// Which replay worker roles bind each session to the worker/DP rank that served its previous
+/// turn (the production router's session affinity). All roles default to `true`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ReplaySessionAffinity {
+    pub aggregated: bool,
+    pub prefill: bool,
+    pub decode: bool,
+}
+
+impl Default for ReplaySessionAffinity {
+    fn default() -> Self {
+        Self::ON
+    }
+}
+
+impl ReplaySessionAffinity {
+    const ON: Self = Self {
+        aggregated: true,
+        prefill: true,
+        decode: true,
+    };
+
+    pub(crate) fn enabled_for(self, worker_type: WorkerType) -> bool {
+        match worker_type {
+            WorkerType::Prefill => self.prefill,
+            WorkerType::Decode => self.decode,
+            _ => self.aggregated,
+        }
+    }
+}
+
+thread_local! {
+    static SESSION_AFFINITY: std::cell::Cell<ReplaySessionAffinity> =
+        const { std::cell::Cell::new(ReplaySessionAffinity::ON) };
+}
+
+/// Run `replay` with session affinity enabled only for the given roles in offline KV-router
+/// replays constructed on this thread inside `replay`. Disabling it for a role lets the
+/// selected policy place every turn of a session anew (a disaggregated decode pool holds no
+/// prefix cache to protect, so re-placement costs nothing there).
+pub fn with_session_affinity<T>(affinity: ReplaySessionAffinity, replay: impl FnOnce() -> T) -> T {
+    struct Restore(ReplaySessionAffinity);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SESSION_AFFINITY.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(SESSION_AFFINITY.with(|cell| cell.replace(affinity)));
+    replay()
+}
+
+pub(crate) fn session_affinity() -> ReplaySessionAffinity {
+    SESSION_AFFINITY.with(std::cell::Cell::get)
 }
 
 pub(crate) fn normalize_trace_requests(
