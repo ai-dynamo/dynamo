@@ -7,6 +7,8 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from huggingface_hub import ModelInfo as HubModelInfo
+from requests import exceptions as request_exceptions
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -19,9 +21,261 @@ try:
     from dynamo.profiler.utils.model_info import (
         get_mamba_cache_align_block_size,
         get_model_context_length,
+        get_model_weight_size_from_hub,
     )
 except ImportError as e:
     pytest.skip(f"Skip (missing dependency): {e}", allow_module_level=True)
+
+
+@pytest.mark.parametrize(
+    "weight_files",
+    [
+        [("model.safetensors", 768148704)],
+        [("gptq_model-4bit-128g.safetensors", 768148704)],
+        [("pytorch_model.bin", 768148704)],
+        [("model.pt", 768148704)],
+        [("consolidated.00.pth", 768148704)],
+        [
+            ("model-00001-of-00002.safetensors", 512 * 1024**2),
+            ("model-00002-of-00002.safetensors", 256 * 1024**2),
+        ],
+    ],
+)
+def test_hub_weight_size_uses_checkpoint_metadata(monkeypatch, weight_files) -> None:
+    def hub_model_info(model_name, *, token=None, files_metadata=False):
+        assert model_name == "test/quantized-model"
+        assert token == "test-token"
+        siblings = [
+            {"rfilename": filename, **({"size": size} if files_metadata else {})}
+            for filename, size in weight_files
+        ]
+        siblings.append({"rfilename": "tokenizer.json", "size": 1024**2})
+        for filename in (
+            "training_args.bin",
+            "optimizer.pt",
+            "optimizer.bin",
+            "scheduler.pt",
+            "scaler.pt",
+            "rng_state.pth",
+            "sentencepiece.bpe.bin",
+        ):
+            siblings.append({"rfilename": filename, "size": 1024**2})
+        # Packed integer parameter counts do not represent checkpoint bytes.
+        return HubModelInfo(
+            id=model_name,
+            siblings=siblings,
+            safetensors={"parameters": {"I32": 1000000000}, "total": 1000000000},
+        )
+
+    monkeypatch.setattr("dynamo.profiler.utils.model_info.model_info", hub_model_info)
+
+    expected_mib = sum(size for _, size in weight_files) / 1024**2
+    assert (
+        get_model_weight_size_from_hub("test/quantized-model", token="test-token")
+        == expected_mib
+    )
+
+
+@pytest.mark.parametrize(
+    "siblings",
+    [
+        None,
+        [{"rfilename": "model.safetensors"}],
+        [
+            {"rfilename": "model.safetensors"},
+            {"rfilename": "optimizer.pt", "size": 1024**2},
+        ],
+    ],
+)
+def test_hub_weight_size_falls_back_when_sizes_are_unavailable(
+    monkeypatch, siblings
+) -> None:
+    info = HubModelInfo(
+        id="test/model",
+        siblings=siblings,
+        safetensors={"parameters": {"BF16": 1024**2}, "total": 1024**2},
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.model_info", lambda *args, **kwargs: info
+    )
+
+    assert get_model_weight_size_from_hub("test/model") == 2
+
+
+@pytest.mark.parametrize("extension", [".safetensors", ".bin", ".pt", ".pth"])
+def test_hub_weight_size_uses_index_references(
+    monkeypatch, tmp_path, extension
+) -> None:
+    index_name = "checkpoint/custom" + extension + ".index.json"
+    index_path = tmp_path / "checkpoint.index.json"
+    index_path.write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "layer0": "custom-part-1" + extension,
+                    "layer1": "custom-part-1" + extension,
+                    "layer2": "custom-part-2" + extension,
+                }
+            }
+        )
+    )
+    info = HubModelInfo(
+        id="test/model",
+        sha="test-revision",
+        siblings=[
+            {"rfilename": index_name},
+            {"rfilename": "checkpoint/custom-part-1" + extension, "size": 1024**2},
+            {"rfilename": "checkpoint/custom-part-2" + extension, "size": 1024**2},
+            {"rfilename": "unused.safetensors", "size": 1024**2},
+            {"rfilename": "training_args.bin", "size": 1024**2},
+            {"rfilename": "optimizer.pt", "size": 1024**2},
+        ],
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.model_info", lambda *args, **kwargs: info
+    )
+
+    def download_index(*, repo_id, filename, revision, token):
+        assert repo_id == "test/model"
+        assert filename == index_name
+        assert revision == "test-revision"
+        assert token == "test-token"
+        return index_path
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.hf_hub_download", download_index
+    )
+
+    assert get_model_weight_size_from_hub("test/model", token="test-token") == 2
+
+
+@pytest.mark.parametrize("index_data", [None, "invalid-json", '{"weight_map": []}'])
+def test_hub_weight_size_falls_back_when_index_is_unavailable(
+    monkeypatch, tmp_path, index_data
+) -> None:
+    info = HubModelInfo(
+        id="test/model",
+        sha="test-revision",
+        siblings=[
+            {"rfilename": "model.safetensors.index.json"},
+            {"rfilename": "model-00001-of-00002.safetensors", "size": 1024**2},
+            {"rfilename": "optimizer.pt", "size": 1024**2},
+        ],
+        safetensors={"parameters": {"BF16": 2 * 1024**2}, "total": 2 * 1024**2},
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.model_info", lambda *args, **kwargs: info
+    )
+    index_path = tmp_path / "checkpoint.index.json"
+    if index_data is not None:
+        index_path.write_text(index_data)
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.hf_hub_download",
+        lambda **kwargs: index_path,
+    )
+
+    assert get_model_weight_size_from_hub("test/model") == 4
+
+
+@pytest.mark.parametrize(
+    "indexed, shard_metadata, has_estimate",
+    [
+        (True, "missing-size", True),
+        (True, "missing-shard", True),
+        (True, "missing-size", False),
+        (True, "missing-shard", False),
+        (False, "missing-size", True),
+        (False, "complete", True),
+    ],
+)
+def test_hub_weight_size_requires_complete_checkpoint_sizes(
+    monkeypatch, tmp_path, indexed, shard_metadata, has_estimate
+) -> None:
+    filenames = [
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+    ]
+    siblings = [{"rfilename": filenames[0], "size": 1024**2}]
+    if shard_metadata != "missing-shard":
+        sibling = {"rfilename": filenames[1]}
+        if shard_metadata == "complete":
+            sibling["size"] = 1024**2
+        siblings.append(sibling)
+    if indexed:
+        siblings.append({"rfilename": "model.safetensors.index.json"})
+        index_path = tmp_path / "model.safetensors.index.json"
+        index_path.write_text(
+            json.dumps({"weight_map": {"layer0": filenames[0], "layer1": filenames[1]}})
+        )
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.model_info.hf_hub_download",
+            lambda **kwargs: index_path,
+        )
+    info = HubModelInfo(
+        id="test/model",
+        sha="test-revision",
+        siblings=siblings,
+        safetensors=(
+            {"parameters": {"BF16": 2 * 1024**2}, "total": 2 * 1024**2}
+            if has_estimate
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.model_info", lambda *args, **kwargs: info
+    )
+
+    expected = 2 if shard_metadata == "complete" else 4 if has_estimate else 0
+    assert get_model_weight_size_from_hub("test/model") == expected
+
+
+@pytest.mark.parametrize(
+    "error_name",
+    ["ConnectionError", "Timeout", "SSLError", "ProxyError", "LocalEntryNotFoundError"],
+)
+def test_hub_weight_size_falls_back_when_index_download_fails(
+    monkeypatch, error_name
+) -> None:
+    if error_name == "LocalEntryNotFoundError":
+        # Marker collection stubs Hub's top-level module without its errors module.
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        error_type = LocalEntryNotFoundError
+    else:
+        error_type = getattr(request_exceptions, error_name)
+    info = HubModelInfo(
+        id="test/model",
+        sha="test-revision",
+        siblings=[{"rfilename": "model.safetensors.index.json"}],
+        safetensors={"parameters": {"BF16": 2 * 1024**2}, "total": 2 * 1024**2},
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.model_info", lambda *args, **kwargs: info
+    )
+
+    def download_index(**kwargs):
+        raise error_type("index unavailable")
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.hf_hub_download", download_index
+    )
+
+    assert get_model_weight_size_from_hub("test/model") == 4
+
+
+def test_hub_weight_size_prefers_one_checkpoint_format(monkeypatch) -> None:
+    info = HubModelInfo(
+        id="test/model",
+        siblings=[
+            {"rfilename": "model.safetensors", "size": 1024**2},
+            {"rfilename": "pytorch_model.bin", "size": 2 * 1024**2},
+        ],
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.model_info", lambda *args, **kwargs: info
+    )
+
+    assert get_model_weight_size_from_hub("test/model") == 1
 
 
 def test_mamba_cache_align_block_size_from_local_config(tmp_path) -> None:
