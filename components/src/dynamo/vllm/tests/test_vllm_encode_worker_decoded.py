@@ -570,3 +570,110 @@ def test_non_contiguous_embedding_is_stored():
     item = handler._lookup_embedding_item("k")
     assert item is not None
     assert torch.equal(item.embeddings, view)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("outcome", ["failure", "cancel", "success"])
+async def test_local_transfer_batch_owns_completed_children(
+    monkeypatch, tmp_path, outcome
+):
+    import asyncio
+    from pathlib import Path
+    from unittest.mock import AsyncMock
+
+    from vllm.sampling_params import SamplingParams
+
+    from dynamo.common.multimodal import embedding_transfer
+    from dynamo.vllm.multimodal_utils.protocol import (
+        MultiModalGroup,
+        vLLMMultimodalRequest,
+    )
+
+    monkeypatch.setattr(embedding_transfer.tempfile, "tempdir", str(tmp_path))
+    first_finished = asyncio.Event()
+    second_started = asyncio.Event()
+    release_second = asyncio.Event()
+    failure = RuntimeError("controlled sibling transfer failure")
+    send_tasks = []
+
+    class GatedLocalSender(embedding_transfer.LocalEmbeddingSender):
+        async def send_embeddings(self, embeddings, stage_embeddings=False):
+            value = int(embeddings.flatten()[0])
+            if value != 99:
+                send_tasks.append(asyncio.current_task())
+            if value == 2:
+                await first_finished.wait()
+                second_started.set()
+                if outcome == "failure":
+                    raise failure
+                await release_second.wait()
+            result = await super().send_embeddings(embeddings, stage_embeddings)
+            if value == 1:
+                first_finished.set()
+            return result
+
+    sender = GatedLocalSender()
+    unrelated, _ = await sender.send_embeddings(torch.full((1, 2, 4), 99))
+    unrelated_path = Path(unrelated.serialized_request)
+    handler = _handler(frontend_decoding=False)
+    handler.model = "llava"
+    handler.embedding_sender = sender
+    handler.send_complete_queue = asyncio.Queue()
+    handler._processed_requests = 0
+    handler._accumulated_time = 0
+    handler.image_loader.load_image_batch = AsyncMock(return_value=[])
+    urls = ["https://example.com/first.png", "https://example.com/second.png"]
+    for value, url in enumerate(urls, 1):
+        handler._store_embedding_item(
+            EmbeddingItem(get_embedding_hash(url), [], torch.full((1, 2, 4), value))
+        )
+    request = vLLMMultimodalRequest(
+        request_id="local-batch",
+        engine_prompt={"prompt_token_ids": [1]},
+        sampling_params=SamplingParams(),
+        multimodal_inputs=[
+            MultiModalGroup(multimodal_input=MultiModalInput(image_url=url))
+            for url in urls
+        ],
+    )
+    stream = handler.generate(request, None)
+    task = asyncio.create_task(anext(stream))
+    receiver = embedding_transfer.LocalEmbeddingReceiver()
+    try:
+        await asyncio.wait_for(second_started.wait(), timeout=2)
+        if outcome == "cancel":
+            task.cancel()
+        elif outcome == "success":
+            release_second.set()
+        if outcome == "success":
+            payload = await asyncio.wait_for(task, timeout=2)
+            response = vLLMMultimodalRequest.model_validate_json(payload)
+            assert len(list(tmp_path.iterdir())) == 3
+            for value, group in enumerate(response.multimodal_inputs, 1):
+                tensor_id, tensor = await receiver.receive_embeddings(
+                    group.serialized_request
+                )
+                assert torch.equal(tensor, torch.full((1, 2, 4), value))
+                receiver.release_tensor(tensor_id)
+        else:
+            expected = asyncio.CancelledError if outcome == "cancel" else RuntimeError
+            with pytest.raises(expected) as caught:
+                await asyncio.wait_for(task, timeout=2)
+            if outcome == "failure":
+                assert caught.value is failure
+            assert all(child.done() for child in send_tasks)
+        assert list(tmp_path.iterdir()) == [unrelated_path]
+        tensor_id, tensor = await receiver.receive_embeddings(unrelated)
+        assert torch.equal(tensor, torch.full((1, 2, 4), 99))
+        receiver.release_tensor(tensor_id)
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        release_second.set()
+        task.cancel()
+        for child in send_tasks:
+            child.cancel()
+        await asyncio.gather(task, *send_tasks, return_exceptions=True)
+        await stream.aclose()
+        for path in tmp_path.iterdir():
+            path.unlink()
