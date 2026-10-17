@@ -69,8 +69,16 @@ func (r *dgdGMSResourceClaimsReconciler) Reconcile(
 		gpuCount := 0
 		deviceClassName := ""
 		if gmsSpec != nil {
+			resourceComponent := component
+			if dynamo.HasRolePodTemplates(component) {
+				var err error
+				resourceComponent, err = dynamo.EffectiveComponentForRole(component, dynamo.RoleLeader)
+				if err != nil {
+					return fmt.Errorf("resolve leader GPU resources for GMS ResourceClaimTemplate for %s: %w", componentName, err)
+				}
+			}
 			var err error
-			gpuCount, err = dra.ExtractGPUCountFromResourceRequirements(dynamo.GetMainContainerResources(component))
+			gpuCount, err = dra.ExtractGPUCountFromResourceRequirements(dynamo.GetMainContainerResources(resourceComponent))
 			if err != nil {
 				return fmt.Errorf("invalid GPU resource requirements for GMS ResourceClaimTemplate for %s: %w", componentName, err)
 			}

@@ -229,7 +229,7 @@ def test_convert_vllm_disagg_decode_removes_disaggregation_role() -> None:
             "--disaggregation-mode",
             "decode",
             "--kv-transfer-config",
-            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}',
         ]
     )
 
@@ -242,7 +242,7 @@ def test_convert_vllm_disagg_decode_removes_disaggregation_role() -> None:
     assert "--disaggregation-mode" not in converted_args
     assert not any(arg.startswith("--disaggregation-mode=") for arg in converted_args)
     assert converted_args[converted_args.index("--kv-transfer-config") + 1] == (
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+        '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
     )
 
 
@@ -264,18 +264,20 @@ def test_build_dgd_config_vllm_disagg_restores_runtime_args() -> None:
     assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
     assert (
         prefill_args[prefill_args.index("--kv-transfer-config") + 1]
-        == '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+        == '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
     )
     assert decode_args[decode_args.index("--tensor-parallel-size") + 1] == "4"
     assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
-    assert "--kv-transfer-config" not in decode_args
+    assert (
+        decode_args[decode_args.index("--kv-transfer-config") + 1]
+        == '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+    )
 
 
 def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
     """An explicit connector remains authoritative while worker roles are canonical."""
-    custom_kv_config = (
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu"}'
-    )
+    custom_prefill_kv_config = '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cpu"}'
+    custom_decode_kv_config = '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cpu"}'
     modifier = CONFIG_MODIFIERS["vllm"]
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
@@ -283,9 +285,13 @@ def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
         image="example/vllm:test",
         prefill_cli_args=[
             "--disaggregation-mode=decode",
-            f"--kv-transfer-config '{custom_kv_config}'",
+            f"--kv-transfer-config '{custom_prefill_kv_config}'",
         ],
-        decode_cli_args=["--disaggregation-mode", "prefill"],
+        decode_cli_args=[
+            "--disaggregation-mode",
+            "prefill",
+            f"--kv-transfer-config '{custom_decode_kv_config}'",
+        ],
     )
 
     prefill_args = next(
@@ -303,10 +309,16 @@ def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
     assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
     assert prefill_args.count("--kv-transfer-config") == 1
     assert (
-        prefill_args[prefill_args.index("--kv-transfer-config") + 1] == custom_kv_config
+        prefill_args[prefill_args.index("--kv-transfer-config") + 1]
+        == custom_prefill_kv_config
     )
     assert decode_args.count("--disaggregation-mode") == 1
     assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
+    assert decode_args.count("--kv-transfer-config") == 1
+    assert (
+        decode_args[decode_args.index("--kv-transfer-config") + 1]
+        == custom_decode_kv_config
+    )
 
 
 def test_build_dgd_config_vllm_disagg_removes_legacy_role_flags() -> None:
@@ -464,7 +476,7 @@ def test_build_dgd_config_sglang_prefill_mrr_one_sets_dp_safe_cuda_graph_bs() ->
         decode_cli_args=[
             "--max-running-requests",
             "512",
-            "--cuda-graph-bs",
+            "--cuda-graph-bs-decode",
             "1",
         ],
         decode_replicas=2,
@@ -476,8 +488,8 @@ def test_build_dgd_config_sglang_prefill_mrr_one_sets_dp_safe_cuda_graph_bs() ->
 
     assert prefill_args.count("--max-running-requests") == 1
     assert prefill_args[prefill_args.index("--max-running-requests") + 1] == "2"
-    assert prefill_args.count("--cuda-graph-bs") == 1
-    assert prefill_args[prefill_args.index("--cuda-graph-bs") + 1] == "2"
+    assert prefill_args.count("--cuda-graph-bs-decode") == 1
+    assert prefill_args[prefill_args.index("--cuda-graph-bs-decode") + 1] == "2"
 
 
 @pytest.mark.parametrize(
@@ -506,7 +518,7 @@ def test_sglang_prefill_dp_limits_normalize_shell_joined_args() -> None:
     assert "--max-running-requests 1" not in normalized
     assert normalized.count("--max-running-requests") == 1
     assert normalized[normalized.index("--max-running-requests") + 1] == "2"
-    assert normalized[normalized.index("--cuda-graph-bs") + 1] == "2"
+    assert normalized[normalized.index("--cuda-graph-bs-decode") + 1] == "2"
 
 
 @pytest.mark.parametrize(
@@ -547,7 +559,7 @@ def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
         prefill_cli_args=[
             "--max-running-requests",
             "1",
-            "--cuda-graph-bs=1",
+            "--cuda-graph-bs-decode=1",
         ],
         prefill_replicas=2,
         prefill_gpus=4,
@@ -562,9 +574,9 @@ def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
     cuda_graph_bs_args = [
         arg
         for arg in prefill_args
-        if arg == "--cuda-graph-bs" or arg.startswith("--cuda-graph-bs=")
+        if arg == "--cuda-graph-bs-decode" or arg.startswith("--cuda-graph-bs-decode=")
     ]
-    assert cuda_graph_bs_args == ["--cuda-graph-bs=1"]
+    assert cuda_graph_bs_args == ["--cuda-graph-bs-decode=1"]
 
 
 def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
@@ -590,8 +602,8 @@ def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
 
     assert args.count("--max-running-requests") == 1
     assert args[args.index("--max-running-requests") + 1] == "2"
-    assert args.count("--cuda-graph-bs") == 1
-    assert args[args.index("--cuda-graph-bs") + 1] == "2"
+    assert args.count("--cuda-graph-bs-decode") == 1
+    assert args[args.index("--cuda-graph-bs-decode") + 1] == "2"
 
 
 def test_vllm_mamba_align_raises_max_num_batched_tokens() -> None:

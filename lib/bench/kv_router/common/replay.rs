@@ -4,7 +4,7 @@
 #[allow(unused_imports)]
 pub use dynamo_kv_router::NoopSequencePublisher;
 use dynamo_kv_router::protocols::KvCacheEventData;
-use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_mocker::common::protocols::MockerConfig;
 use dynamo_mocker::loadgen::{SessionPartitionSpec, Trace};
 use dynamo_mocker::replay::ReplayKvEventVisibility;
 pub use dynamo_mocker::replay::ReplayWorkerArtifacts as WorkerReplayArtifacts;
@@ -40,24 +40,26 @@ pub fn maybe_rescale_ready_span(
     }
 }
 
-/// Build default MockEngineArgs suitable for event generation.
+/// Build default MockerConfig suitable for event generation.
 pub fn default_mock_engine_args(
     num_gpu_blocks: usize,
     block_size: usize,
-) -> anyhow::Result<MockEngineArgs> {
-    Ok(MockEngineArgs::builder()
-        .num_gpu_blocks(num_gpu_blocks)
-        .block_size(block_size)
-        .speedup_ratio(10.0)
-        .enable_prefix_caching(true)
-        .max_num_batched_tokens(None)
-        .max_num_seqs(None)
-        .build()?)
+) -> anyhow::Result<MockerConfig> {
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "num_gpu_blocks": num_gpu_blocks,
+            "block_size": block_size,
+            "speedup_ratio": 10.0,
+            "enable_prefix_caching": true,
+            "max_num_batched_tokens": usize::MAX,
+            "max_num_seqs": usize::MAX
+        }
+    }))
 }
 
 fn replay_worker_trace(
     trace: Trace,
-    sched_args: MockEngineArgs,
+    sched_args: MockerConfig,
     trace_simulation_duration_ms: Option<u64>,
     kv_event_visibility_override: Option<ReplayKvEventVisibility>,
     progress: ProgressBar,
@@ -81,7 +83,7 @@ fn replay_worker_trace(
 
 pub async fn generate_replay_artifacts_with_args_and_visibility(
     traces: &[Trace],
-    sched_args: MockEngineArgs,
+    sched_args: MockerConfig,
     trace_simulation_duration_ms: Option<u64>,
     kv_event_visibility_override: Option<ReplayKvEventVisibility>,
 ) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
@@ -162,7 +164,7 @@ pub async fn generate_replay_artifacts_with_args_and_visibility(
 
 pub async fn generate_replay_artifacts_with_args(
     traces: &[Trace],
-    sched_args: MockEngineArgs,
+    sched_args: MockerConfig,
     trace_simulation_duration_ms: Option<u64>,
 ) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
     generate_replay_artifacts_with_args_and_visibility(

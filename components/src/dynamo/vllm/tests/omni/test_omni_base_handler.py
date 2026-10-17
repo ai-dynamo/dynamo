@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests that every DiffusionParallelConfig field is either exposed in Dynamo or intentionally skipped."""
+"""Tests for the configuration passed from Dynamo to vLLM-Omni."""
 
 import dataclasses
 from types import SimpleNamespace
@@ -11,6 +11,7 @@ import pytest
 
 try:
     from vllm_omni.config import DeployConfig, VllmOmniConfig
+    from vllm_omni.config.config_factory import StageConfigFactory
     from vllm_omni.diffusion.data import DiffusionParallelConfig
     from vllm_omni.model_executor.models.qwen3_tts.pipeline import QWEN3_TTS_PIPELINE
 
@@ -22,6 +23,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.xpu_1,
     pytest.mark.pre_merge,
@@ -83,6 +85,18 @@ def _parallel_config_without(*excluded_fields):
         if field.name not in excluded_fields
     ]
     return dataclasses.make_dataclass("LegacyDiffusionParallelConfig", fields)
+
+
+def test_init_initializes_pause_state():
+    config = _make_config()
+    with (
+        patch.object(BaseOmniHandler, "_build_omni_kwargs", return_value={}),
+        patch("dynamo.vllm.omni.base_handler.AsyncOmni", return_value=MagicMock()),
+    ):
+        handler = BaseOmniHandler(None, config, {})
+
+    assert handler._paused is False
+    assert not handler._pause_lock.locked()
 
 
 class TestDiffusionParallelConfigCoverage:
@@ -169,6 +183,26 @@ class TestDiffusionParallelConfigCoverage:
 
         assert kwargs["output_modalities"] == ["image"]
 
+    @pytest.mark.parametrize("output_modality", ["image", "video"])
+    @pytest.mark.parametrize("layerwise_offload", [None, False, True])
+    def test_diffusion_kwargs_accepted_by_upstream(
+        self, output_modality, layerwise_offload
+    ):
+        """Exercise Omni's real validator without loading weights or using a GPU."""
+        config = _make_config()
+        config.output_modalities = [output_modality]
+        config.diffusion.enable_layerwise_offload = layerwise_offload
+
+        stages = StageConfigFactory.create_default_diffusion(_build_kwargs(config))
+
+        assert len(stages) == 1
+        assert stages[0]["stage_type"] == "diffusion"
+        if layerwise_offload is not None:
+            assert (
+                stages[0]["engine_args"]["enable_layerwise_offload"]
+                is layerwise_offload
+            )
+
     def test_tts_kwargs_accepted_by_upstream_pipeline(self):
         config = _make_config()
         config.diffusion.enforce_eager = True
@@ -181,6 +215,17 @@ class TestDiffusionParallelConfigCoverage:
             cli_overrides=kwargs,
         )
         assert kwargs["enforce_eager"] is True
+
+    @pytest.mark.parametrize("stage_type", ["diffusion", None])
+    def test_guardrail_settings_reach_upstream_diffusion_config(self, stage_type):
+        config = _make_config()
+        config.diffusion.model_config = {"guardrails": False}
+
+        kwargs = _build_kwargs(config, stage_type=stage_type)
+        stages = StageConfigFactory.create_default_diffusion(kwargs)
+
+        assert stages[0]["engine_args"]["model_config"] == {"guardrails": False}
+        assert "no_guardrails" not in kwargs
 
     def test_diffusion_kwargs_preserved_when_stage_detection_is_deferred(self):
         config = _make_config()
@@ -213,7 +258,9 @@ class TestDiffusionParallelConfigCoverage:
         kwargs = _build_kwargs(_make_config())
 
         for field in (
+            "model_config",
             "enable_layerwise_offload",
+            "layerwise_num_gpu_layers",
             "vae_use_slicing",
             "vae_use_tiling",
             "boundary_ratio",

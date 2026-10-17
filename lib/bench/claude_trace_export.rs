@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use dynamo_bench::coding::claude::discovery::discover_trace_files;
 use dynamo_bench::coding::claude::export::{ExportConfig, write_streamed_request_trace_rows};
-use dynamo_bench::coding::claude::parser::load_trace_records;
+use dynamo_bench::coding::claude::parser::TraceIndex;
 use dynamo_bench::coding::common::{
     DEFAULT_BLOCK_SIZE, DEFAULT_OUTPUT_NAME, DEFAULT_TOKENIZER, expand_user_path, sidecar_path_for,
 };
@@ -55,7 +55,7 @@ fn main() -> Result<()> {
     }
 
     let tokenizer_factory = HfTokenizerFactory::resolve(&args.tokenizer)?;
-    let sessions = load_trace_records(&trace_files)?;
+    let sessions = TraceIndex::build(&trace_files, default_tokenizer_workers())?;
     if sessions.is_empty() {
         bail!("no parseable Claude session rows were found in the discovered files");
     }

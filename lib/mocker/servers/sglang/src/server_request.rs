@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::{BoxedStatusResult, DP_RANK, MockerServerConfig, ServerMode};
 
-const DEFAULT_MAX_NEW_TOKENS: i32 = 20;
+const DEFAULT_MAX_NEW_TOKENS: i32 = 128;
 const MAX_NEW_TOKENS: i32 = 1_000_000;
 
 #[derive(Debug)]
@@ -21,7 +21,9 @@ pub(super) struct PreparedRequest {
     uuid: Uuid,
     prompt_tokens: Vec<u32>,
     pub(super) max_output_tokens: usize,
+    pub(super) has_decode_handoff: bool,
     output_token_ids: Vec<u32>,
+    stop_token: Option<u32>,
     response_metadata: ResponseMetadata,
 }
 
@@ -62,6 +64,17 @@ impl PreparedRequest {
             ))
             .into());
         }
+        let min_new_tokens = request
+            .sampling_params
+            .as_ref()
+            .and_then(|params| params.min_new_tokens)
+            .unwrap_or(0);
+        if !(0..=requested_max).contains(&min_new_tokens) {
+            return Err(Status::invalid_argument(
+                "min_new_tokens must be between 0 and max_new_tokens",
+            )
+            .into());
+        }
         let max_output_tokens = if config.mode == ServerMode::Prefill {
             1
         } else {
@@ -94,14 +107,33 @@ impl PreparedRequest {
             .filter(|request_id| !request_id.trim().is_empty())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let uuid = stable_request_uuid(config.seed, &request_id);
-        let output_token_ids =
+        let mut output_token_ids =
             deterministic_output_tokens(config.seed, &request_id, max_output_tokens);
+        let stop_position = request.sampling_params.as_ref().and_then(|params| {
+            if params.stop_token_ids.is_empty() || params.ignore_eos.unwrap_or(false) {
+                return None;
+            }
+            output_token_ids
+                .iter()
+                .enumerate()
+                .skip(min_new_tokens as usize)
+                .find(|(_, token)| params.stop_token_ids.contains(&(**token as i32)))
+                .map(|(position, _)| position)
+        });
+        let stop_token = stop_position.map(|position| {
+            output_token_ids.truncate(position + 1);
+            output_token_ids[position]
+        });
+        let max_output_tokens = output_token_ids.len();
         let response_metadata = ResponseMetadata::new(request_id, &prompt_tokens, logprob_options);
         Ok(Self {
             uuid,
             prompt_tokens,
             max_output_tokens,
+            has_decode_handoff: config.mode == ServerMode::Decode
+                && request.disaggregated_params.is_some(),
             output_token_ids,
+            stop_token,
             response_metadata,
         })
     }
@@ -128,7 +160,10 @@ impl PreparedRequest {
             .meta_info(
                 output_tokens,
                 completion_tokens,
-                terminal.then(|| json!({"type": "length"})),
+                terminal.then(|| match self.stop_token {
+                    Some(token) => json!({"type": "stop", "matched": token}),
+                    None => json!({"type": "length", "length": self.max_output_tokens}),
+                }),
             )
             .into_iter()
             .map(|(key, value)| (key, value.to_string()))
