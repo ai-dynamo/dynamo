@@ -262,6 +262,8 @@ The operator maintains observed state under `status`.
 <ParamField path="status.conditions" type="[]metav1.Condition">
   Latest observed conditions, merged by type. Includes `Available` and `DynamoComponentReady`.
 
+  `GroveCompatibilityWarning=True` records the last generation for which a namespace-restricted operator warned that Grove compatibility could not be verified. The condition's `observedGeneration` prevents repeated warnings for that generation, even when later workload reconciliation fails. It records a warning already issued, not the current compatibility verdict, and does not block deployment. A new generation can produce another warning.
+
   <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition" target="_blank">metav1.Condition</a>
 </ParamField>
 

@@ -31,10 +31,14 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -478,6 +482,101 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
 	assert.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
 	assert.Equal(t, previous, dgd.Status)
+}
+
+// TestGroveProgramPersistsCompatibilityWarningOnError covers warning retries across status writes and generations.
+func TestGroveProgramPersistsCompatibilityWarningOnError(t *testing.T) {
+	t.Log("Create a namespace-restricted multinode DGD with unreadable Grove and failing resource writes")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "graph",
+			Namespace:   "default",
+			Generation:  7,
+			Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"},
+		},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "decode",
+				ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
+				Replicas:      ptr.To(int32(1)),
+				Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+			}},
+		},
+		Status: nvidiacomv1beta1.DynamoGraphDeploymentStatus{ObservedGeneration: 6},
+	}
+	resourceErr := errors.New("service account creation failed")
+	statusErr := errors.New("status update failed")
+	failStatusWrite := true
+	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(dgd).WithObjects(dgd).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+				return resourceErr
+			},
+			SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if failStatusWrite {
+					return statusErr
+				}
+				return c.SubResource(subresource).Update(ctx, obj, opts...)
+			},
+		}).Build()
+	recorder := events.NewFakeRecorder(10)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: kubeClient, Recorder: recorder,
+		Config: &configv1alpha1.OperatorConfiguration{
+			Namespace: configv1alpha1.NamespaceConfiguration{Restricted: dgd.Namespace},
+		},
+		RuntimeConfig: &commonController.RuntimeConfig{
+			Gate: features.Gates{Grove: true}, GroveCompatibility: features.NewGroveCompatibilityProbe(kubeClient),
+		},
+	}
+	reconciler.Config.Discovery.Backend = "kubernetes"
+	steps := []struct {
+		generation      int64
+		failStatusWrite bool
+		wantEvents      int
+	}{
+		{generation: 7, failStatusWrite: true},
+		{generation: 7, wantEvents: 1},
+		{generation: 7},
+		{generation: 8, wantEvents: 1},
+		{generation: 8},
+	}
+	for _, step := range steps {
+		t.Logf("Reconcile generation %d with failed status write %t", step.generation, step.failStatusWrite)
+		require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dgd), dgd))
+		if dgd.Generation != step.generation {
+			dgd.Generation = step.generation
+			require.NoError(t, kubeClient.Update(t.Context(), dgd))
+		}
+		previous := dgd.Status.DeepCopy()
+		result, err := reconciler.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+		require.ErrorIs(t, err, resourceErr)
+		assert.Equal(t, *previous, dgd.Status, "the program must not mutate the input status")
+		assert.Equal(t, int64(6), result.Status.ObservedGeneration, "failed workloads remain unobserved")
+		warning := meta.FindStatusCondition(result.Status.Conditions, groveCompatibilityWarningCondition)
+		require.NotNil(t, warning)
+		assert.Equal(t, step.generation, warning.ObservedGeneration)
+
+		t.Log("Consume the resource creation error event before checking status-transition events")
+		require.Len(t, recorder.Events, 1)
+		assert.Contains(t, <-recorder.Events, "CreateServiceAccount")
+
+		t.Log("Persist through the outer controller and verify warning publication")
+		failStatusWrite = step.failStatusWrite
+		err = reconciler.persistWorkloadProgramResult(t.Context(), dgd, result)
+		if step.failStatusWrite {
+			require.ErrorIs(t, err, statusErr)
+		} else {
+			require.NoError(t, err)
+		}
+		require.Len(t, recorder.Events, step.wantEvents)
+		for range step.wantEvents {
+			assert.Contains(t, <-recorder.Events, string(reasonUnverifiableGroveVersion))
+		}
+	}
 }
 
 func TestGroveRendererFailsWhenResolvedDRADependencyDisappears(t *testing.T) {
@@ -1210,4 +1309,213 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 	require.NotNil(t, gotDCD.Spec.Replicas, "decode old DCD must have an explicit replica count")
 	assert.Equal(t, int32(0), *gotDCD.Spec.Replicas,
 		"decode old DCD must be scaled to zero so completeRollingUpdate can drain and delete it")
+}
+
+func TestGroveProgramBlocksMultinodeAliasesOnIncompatibleGrove(t *testing.T) {
+	oldGroveCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "podcliquesets.grove.io"},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "grove.io",
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
+				Name:    "v1alpha1",
+				Served:  true,
+				Storage: true,
+				Schema: &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+					Type: "object",
+					Properties: map[string]apiextensionsv1.JSONSchemaProps{
+						"spec": {Type: "object", Properties: map[string]apiextensionsv1.JSONSchemaProps{
+							"template": {Type: "object", Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"cliques": {Type: "array", Items: &apiextensionsv1.JSONSchemaPropsOrArray{Schema: &apiextensionsv1.JSONSchemaProps{
+									Type:       "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{"name": {Type: "string"}},
+								}}},
+							}},
+						}},
+					},
+				}},
+			}},
+		},
+	}
+	newGroveCRD := oldGroveCRD.DeepCopy()
+	cliqueItem := newGroveCRD.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["template"].Properties["cliques"].Items.Schema
+	cliqueItem.Properties["rollingUpdate"] = apiextensionsv1.JSONSchemaProps{Type: "object"}
+
+	tests := []struct {
+		name                string
+		groveCRD            *apiextensionsv1.CustomResourceDefinition
+		nodeCount           int32
+		originVersion       string
+		groveImage          string
+		crdReadErr          error
+		namespaceRestricted bool
+		wantReason          Reason
+		wantEvent           bool
+		wantErr             bool
+	}{
+		{
+			name:          "1.6.0 multinode DGD on old Grove is blocked",
+			groveCRD:      oldGroveCRD,
+			nodeCount:     2,
+			originVersion: "1.6.0",
+			wantReason:    reasonIncompatibleGroveVersion,
+			wantEvent:     true,
+		},
+		{
+			name:          "1.6.0 multinode DGD with unreadable Grove CRD is blocked",
+			nodeCount:     2,
+			originVersion: "1.6.0",
+			wantReason:    reasonUnverifiableGroveVersion,
+			wantEvent:     true,
+		},
+		{
+			name:                "namespace-restricted operator warns but does not block unverifiable Grove",
+			nodeCount:           2,
+			originVersion:       "1.6.0",
+			namespaceRestricted: true,
+			wantEvent:           true,
+		},
+		{
+			name:          "1.6.0 multinode DGD on old Grove controller with new CRDs is blocked",
+			groveCRD:      newGroveCRD,
+			groveImage:    "ghcr.io/ai-dynamo/grove/grove-operator:v0.1.0-alpha.11",
+			nodeCount:     2,
+			originVersion: "1.6.0",
+			wantReason:    reasonIncompatibleGroveVersion,
+			wantEvent:     true,
+		},
+		{
+			name:          "transient CRD read error is retried without failing the DGD",
+			groveCRD:      newGroveCRD,
+			crdReadErr:    apierrors.NewServiceUnavailable("etcd leader changed"),
+			nodeCount:     2,
+			originVersion: "1.6.0",
+			wantErr:       true,
+		},
+		{
+			name:          "1.6.0 multinode DGD on compatible Grove is not blocked",
+			groveCRD:      newGroveCRD,
+			nodeCount:     2,
+			originVersion: "1.6.0",
+		},
+		{
+			name:          "single-node DGD on old Grove is not blocked",
+			groveCRD:      oldGroveCRD,
+			nodeCount:     1,
+			originVersion: "1.6.0",
+		},
+		{
+			name:          "pre-1.6.0 multinode DGD on old Grove is not blocked",
+			groveCRD:      oldGroveCRD,
+			nodeCount:     2,
+			originVersion: "1.5.0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a Grove DGD and a cluster with the fixture Grove CRD")
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "graph",
+					Namespace:   "default",
+					Generation:  2,
+					Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tt.originVersion},
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: "decode",
+						ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
+						Replicas:      ptr.To(int32(1)),
+						Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: tt.nodeCount},
+					}},
+				},
+			}
+			objects := []client.Object{dgd}
+			if tt.groveCRD != nil {
+				objects = append(objects, tt.groveCRD.DeepCopy())
+			}
+			if tt.groveImage != "" {
+				objects = append(objects, &appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "grove-operator",
+						Namespace: "grove-system",
+						Labels:    map[string]string{"app.kubernetes.io/name": "grove-operator"},
+					},
+					Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "grove-operator", Image: tt.groveImage}},
+					}}},
+				})
+			}
+			scheme := newDynamoGraphDeploymentControllerTestScheme(t)
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			builder := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...)
+			if tt.crdReadErr != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if _, ok := obj.(*apiextensionsv1.CustomResourceDefinition); ok {
+							return tt.crdReadErr
+						}
+						return c.Get(ctx, key, obj, opts...)
+					},
+				})
+			}
+			kubeClient := builder.Build()
+			restricted := ""
+			if tt.namespaceRestricted {
+				restricted = dgd.Namespace
+			}
+			reconciler := &DynamoGraphDeploymentReconciler{
+				Client:   kubeClient,
+				Recorder: events.NewFakeRecorder(10),
+				Config:   &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: restricted}},
+				RuntimeConfig: &commonController.RuntimeConfig{
+					Gate:               features.Gates{Grove: true},
+					GroveCompatibility: features.NewGroveCompatibilityProbe(kubeClient),
+				},
+			}
+
+			t.Log("Reconcile the Grove program")
+			result, err := reconciler.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+
+			t.Log("Verify the compatibility gate outcome")
+			ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+			gotEvent := false
+			for _, event := range result.Events {
+				if event.Type == corev1.EventTypeWarning &&
+					(event.Reason == string(reasonIncompatibleGroveVersion) || event.Reason == string(reasonUnverifiableGroveVersion)) {
+					gotEvent = true
+				}
+			}
+			assert.Equal(t, tt.wantEvent, gotEvent)
+			if tt.wantErr {
+				require.ErrorIs(t, err, tt.crdReadErr)
+				assert.NotEqual(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+				assert.Nil(t, ready, "a transient probe error must not touch the Ready condition")
+				return
+			}
+			if tt.wantReason == "" {
+				if ready != nil {
+					assert.NotEqual(t, string(reasonIncompatibleGroveVersion), ready.Reason)
+					assert.NotEqual(t, string(reasonUnverifiableGroveVersion), ready.Reason)
+				}
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, ready)
+			assert.Equal(t, metav1.ConditionFalse, ready.Status)
+			assert.Equal(t, string(tt.wantReason), ready.Reason)
+			assert.Equal(t, dgd.Generation, ready.ObservedGeneration)
+			assert.Contains(t, ready.Message, features.GroveMinimumVersion)
+			assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+			assert.Positive(t, result.RequeueAfter)
+
+			t.Log("Verify no Grove workload was written")
+			podCliqueSets := &grovev1alpha1.PodCliqueSetList{}
+			require.NoError(t, kubeClient.List(t.Context(), podCliqueSets))
+			assert.Empty(t, podCliqueSets.Items)
+		})
+	}
 }

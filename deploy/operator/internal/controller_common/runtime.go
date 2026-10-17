@@ -24,6 +24,9 @@ import "github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 type RuntimeConfig struct {
 	// Gate contains the resolved operator features.
 	Gate features.Gates
+	// GroveCompatibility checks external Grove CRDs before multinode Grove
+	// rollout. Nil skips the check.
+	GroveCompatibility *features.GroveCompatibilityProbe
 	// ExcludedNamespaces for cluster-wide mode namespace filtering
 	ExcludedNamespaces ExcludedNamespacesInterface
 }
