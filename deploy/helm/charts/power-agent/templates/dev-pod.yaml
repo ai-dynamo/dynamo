@@ -6,8 +6,9 @@
 #
 # In-cluster dev-iteration harness. Renders a single Pod that mounts
 # power_agent.py, actuator.py, and managed_state.py from an
-# externally-created ConfigMap, pinned to one GPU node (dev.nodeName)
-# and one namespace (Release.Namespace).
+# externally-created ConfigMap, placed on one GPU node via
+# dev.nodeName (pinned) or dev.affinity (scheduler), and scoped to
+# one namespace (Release.Namespace).
 #
 # PREREQUISITE (NOT validated by Helm — validateMutex only checks
 # daemonset/dev exclusivity, not this ConfigMap's existence. If it is
@@ -46,7 +47,18 @@ spec:
   restartPolicy: Never                   # let it stay Failed if it crashes so we can read logs
   terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}  # graceful shutdown restores TGP
   runtimeClassName: {{ .Values.runtimeClassName | quote }}
+  {{- if .Values.dev.nodeName }}
+  # Explicit pin: bypasses the scheduler entirely, so dev.affinity (if any)
+  # is intentionally not rendered here — Kubernetes would ignore it anyway.
   nodeName: {{ .Values.dev.nodeName | quote }}
+  {{- else }}
+  {{- with .Values.dev.affinity }}
+  # No nodeName: let the scheduler place the dev pod using these affinity
+  # rules. validateMutex guarantees one of nodeName/affinity is set.
+  affinity:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
   {{- with .Values.tolerations }}
   tolerations:
     {{- toYaml . | nindent 4 }}
