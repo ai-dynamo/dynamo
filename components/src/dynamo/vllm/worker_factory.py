@@ -2429,13 +2429,6 @@ class WorkerFactory:
         if kv_publishers:
             handler.kv_publishers = kv_publishers
 
-        # Set up forward pass metrics relay (child ZMQ -> event plane).
-        # In checkpoint mode _sync_fpm_worker_id() has already set the child's
-        # ForwardPassMetrics.worker_id.
-        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
-        if fpm_relays:
-            handler.fpm_relays = fpm_relays
-
         self.setup_metrics_collection(config, generate_endpoint, logger)
 
         _register_request_cache_metrics(generate_endpoint, handler, config)
@@ -2468,6 +2461,12 @@ class WorkerFactory:
             was_failover = await self._maybe_wait_for_failover_lock(
                 handler, runtime, config, failover_metrics
             )
+
+        # A sleeping shadow has no discovery card; relay only after it is elected.
+        # Snapshot restore already elected and synchronized the child's worker ID.
+        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
+        if fpm_relays:
+            handler.fpm_relays = fpm_relays
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -2726,13 +2725,6 @@ class WorkerFactory:
         if kv_publishers:
             handler.kv_publishers = kv_publishers
 
-        # Set up forward pass metrics relay (child ZMQ -> event plane).
-        # In checkpoint mode _sync_fpm_worker_id() has already set the child's
-        # ForwardPassMetrics.worker_id.
-        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
-        if fpm_relays:
-            handler.fpm_relays = fpm_relays
-
         self.setup_metrics_collection(config, generate_endpoint, logger)
 
         _register_request_cache_metrics(generate_endpoint, handler, config)
@@ -2750,6 +2742,12 @@ class WorkerFactory:
             was_failover = await self._maybe_wait_for_failover_lock(
                 handler, runtime, config, failover_metrics
             )
+
+        # A sleeping shadow has no discovery card; relay only after it is elected.
+        # Snapshot restore already elected and synchronized the child's worker ID.
+        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
+        if fpm_relays:
+            handler.fpm_relays = fpm_relays
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
