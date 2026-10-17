@@ -1538,10 +1538,15 @@ pub(super) fn materialize_mocker_config(
     mut args: MockerConfig,
 ) -> PyResult<MockerConfig> {
     resolve_mocker_capacity(py, &mut args)?;
-    if let Some(config) = args.ais_perf_config() {
+    if let Some(config) = args.ais_perf_config().cloned() {
         args.perf_model = Arc::new(PerfModel::from_ais_callback(create_ais_callback(
-            py, config,
+            py,
+            &config,
+            &mut args.engine.aic_nextn,
         )?));
+        args.engine
+            .validate()
+            .map_err(|error| PyValueError::new_err(format!("{error:#}")))?;
     }
     Ok(args)
 }

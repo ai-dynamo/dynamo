@@ -77,6 +77,8 @@ class DynamoReplayRunnerFactory:
             supports_disaggregated_attention_dp=(
                 engine_capabilities.supports_disaggregated_attention_dp
             ),
+            supports_mtp_expected_acceptance=True,
+            supports_generic_speculation=True,
             supported_execution_modes=("offline",),
             supported_trace_formats=(
                 "mooncake",

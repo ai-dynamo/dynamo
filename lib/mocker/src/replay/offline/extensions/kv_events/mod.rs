@@ -265,6 +265,7 @@ mod tests {
             dp_rank: 0,
             tier,
             data: KvEventData::Stored(StoredBlocks {
+                session_id: None,
                 parent_hash: None,
                 start_position: Some(0),
                 blocks: vec![KvBlock {
