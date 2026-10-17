@@ -211,6 +211,19 @@ Schema generation and permissive parsing belong to the source-contract layer. Th
 behavioral compatibility. Source inspection can explain a result or identify a likely gap, but it
 does not replace either acceptance layer.
 
+## Investigate Compatibility Gaps
+
+Bound an investigation to a client workflow and pinned server configuration. Use
+schema differences to identify candidates, then controlled requests to establish
+client-visible behavior. Distinguish runtime defects, declaration gaps, comparison
+false positives, intentional divergences, and reference limitations. Schema equality
+is not the completion criterion, and a deferred difference is not compatibility.
+
+The [protocol compatibility investigation skill](https://github.com/ai-dynamo/dynamo/blob/main/.agents/skills/investigate-protocol-compatibility/SKILL.md)
+provides the agent workflow for prioritizing candidates, collecting evidence, and
+verifying authorized focused fixes. This guide remains the owner of field-handling
+contracts and lifecycle requirements.
+
 ## Development Checklist
 
 Before merging a protocol-field change:
