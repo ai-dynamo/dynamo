@@ -49,11 +49,20 @@ impl RouterPluginBuilder {
                 "request_classifier is configured but not installed; supply a resolved RouterPlugins bundle"
             );
         }
+        // A bypassed turn skips the prefill hop where the classifier admits it.
+        // Checked on every worker set's effective config, not just the frontend's.
+        if self.has_request_classifier() && config.conditional_disagg_enabled {
+            anyhow::bail!("request classifiers are not supported with conditional disaggregation");
+        }
         Ok(())
     }
 
     pub(crate) fn has_custom_worker_selection(&self) -> bool {
         self.plugins.has_custom_worker_selection()
+    }
+
+    pub(crate) fn has_request_classifier(&self) -> bool {
+        self.plugins.request_classifier().is_some()
     }
 
     pub(crate) fn selection_policy(&self) -> SelectionPolicySource {

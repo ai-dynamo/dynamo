@@ -100,8 +100,7 @@ impl RoutingHost {
         if is_query_only {
             return select().await;
         }
-        self.select_with_request_lifecycle(request, phase, select)
-            .await
+        self.select_with_request_lifecycle(request, select).await
     }
 
     /// Claim or begin the classifier lifecycle for `request`, run the selection
@@ -116,23 +115,17 @@ impl RoutingHost {
     async fn select_with_request_lifecycle<Fut>(
         &self,
         request: &SingleIn<PreprocessedRequest>,
-        phase: RequestPhase,
         select: impl FnOnce() -> Fut,
     ) -> Result<(WorkerSelection, Option<Hold>), Error>
     where
         Fut: Future<Output = Result<(WorkerSelection, Option<Hold>), Error>>,
     {
-        // Decode/aggregated routing owns the logical request's classifier.
-        // A retry can run prefill again with the same MigrationState; that hop
-        // must leave the parked decode lifecycle for the decode host to resume.
-        match phase {
-            RequestPhase::Prefill => return select().await,
-            RequestPhase::Decode | RequestPhase::Aggregated => {}
-        }
-        let mut lifecycle = request
-            .migration_state
-            .as_ref()
-            .and_then(|state| state.take_request_lifecycle());
+        // The host with the classifier begins the logical request's lifecycle:
+        // the aggregated router, or the prefill hop in disaggregated serving.
+        // An existing lifecycle travels with the request instead: the decode
+        // leg claims the one its prefill hop handed off, and a retry resumes
+        // the one a failed attempt parked.
+        let mut lifecycle = claim_request_lifecycle(request.content());
         if lifecycle.is_none() {
             lifecycle = self
                 .kv_router()
@@ -152,18 +145,7 @@ impl RoutingHost {
                             classifier_error,
                         ));
                     }
-                    if crate::migration::is_migratable(error.as_ref())
-                        && let Some(state) = request.migration_state.as_ref()
-                    {
-                        lifecycle.prepare_retry();
-                        state.store_request_lifecycle(lifecycle);
-                    } else {
-                        lifecycle.abort(Some(
-                            crate::protocols::common::preprocessor::owned_abort_error(
-                                error.as_ref(),
-                            ),
-                        ));
-                    }
+                    settle_failed_lifecycle(lifecycle, request.content(), &error);
                 }
                 return Err(error);
             }
@@ -277,9 +259,7 @@ impl RoutingHost {
                 }
             })
         };
-        let (mut selection, affinity) = self
-            .select_with_request_lifecycle(request, phase, select)
-            .await?;
+        let (mut selection, affinity) = self.select_with_request_lifecycle(request, select).await?;
         let signals = self.route_signals(&selection);
         drop(route_guard);
         Ok(RoutePlan {
@@ -544,6 +524,10 @@ impl RoutingHost {
         let route_trace_context = get_route_trace_context(&request);
         let phase = request.phase();
         let staged_kv = StagedKv::for_request(request.content());
+        let lifecycle_handoff = match phase {
+            RequestPhase::Prefill => request.lifecycle_handoff.clone(),
+            RequestPhase::Decode | RequestPhase::Aggregated => None,
+        };
         let phase_label = phase.to_string();
         guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
@@ -610,6 +594,9 @@ impl RoutingHost {
         };
 
         guard.mark_dispatched();
+        if let Some(handoff) = lifecycle_handoff {
+            guard.hand_off_request_lifecycle(&handoff);
+        }
         Ok(wrap_route_span(
             into_monitored_response(response_stream, guard),
             route_span,
@@ -651,6 +638,7 @@ impl RoutingHost {
     pub(super) async fn select_and_dispatch_kv_prefill<M, F>(
         &self,
         mut request: SingleIn<PreprocessedRequest>,
+        client: &dyn AsyncEngineContext,
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
@@ -661,9 +649,18 @@ impl RoutingHost {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-        let (mut selection, mut operation) = self
-            .select_with_affinity(&request, phase, is_query_only, &budget)
-            .await?;
+        // The prefill context outlives the client so dispatched prefill can hand
+        // its KV to decode. Nothing is staged before dispatch, so selection,
+        // including a request classifier's admission wait, still ends with it.
+        let (mut selection, mut operation) = await_with_cleanup_policy(
+            client,
+            phase,
+            StagedKv::Absent,
+            "kv.prefill_select",
+            &budget,
+            self.select_with_affinity(&request, phase, is_query_only, &budget),
+        )
+        .await??;
         let mut guard = match self
             .track_selection(&request, &mut selection, phase, is_query_only, &budget)
             .await

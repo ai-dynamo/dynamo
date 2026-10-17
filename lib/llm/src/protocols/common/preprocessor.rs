@@ -227,6 +227,41 @@ impl MigrationState {
     }
 }
 
+/// Carries the request-classifier lifecycle from the prefill hop to the decode
+/// leg of one disaggregated attempt.
+///
+/// In disaggregated serving the classifier lives on the prefill router, so
+/// admission and placement happen before any GPU work. The logical request
+/// continues on decode, which supplies its progress and completion: the prefill
+/// hop deposits the lifecycle here once dispatched, and the decode host claims it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LifecycleHandoff {
+    inner: Arc<Mutex<Option<Box<RequestLifecycle>>>>,
+}
+
+impl LifecycleHandoff {
+    pub(crate) fn take(&self) -> Option<Box<RequestLifecycle>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    pub(crate) fn store(&self, lifecycle: Box<RequestLifecycle>) {
+        let replaced = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(lifecycle);
+        if let Some(replaced) = replaced {
+            tracing::warn!(
+                replaced = ?replaced,
+                "Replacing an unclaimed request-classifier handoff lifecycle"
+            );
+        }
+    }
+}
+
 /// Owned abort payload for classifier lifecycle events: the typed
 /// [`DynamoError`] from the chain when one exists, else the whole chain
 /// converted so the root cause survives.
@@ -380,6 +415,12 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(skip)]
     pub(crate) migration_state: Option<MigrationState>,
+
+    /// Classifier lifecycle passed from the prefill hop to the decode leg.
+    /// Frontend-only, like `migration_state`; set by the prefill router.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) lifecycle_handoff: Option<LifecycleHandoff>,
 
     /// Set when remote prefill has staged KV blocks that only this request's
     /// decode worker can release, so the decode leg must reach that worker even

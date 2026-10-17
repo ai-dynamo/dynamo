@@ -14,7 +14,7 @@ use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
-        preprocessor::MigrationState,
+        preprocessor::{LifecycleHandoff, MigrationState},
         timing::{RequestPhase, RequestTracker},
     },
 };
@@ -427,9 +427,6 @@ pub(super) struct KvRequestCleanup {
     worker: WorkerWithDpRank,
     approximate_lru: Option<ApproximateRequestLease>,
     lifecycle: Option<RequestAttemptLease>,
-    /// Classifier lifecycle for this attempt. Living here keeps it structurally
-    /// tied to KV routing: builtin and occupancy cleanups cannot hold one.
-    request_lifecycle: Option<Box<RequestLifecycle>>,
 }
 
 impl KvRequestCleanup {
@@ -459,7 +456,6 @@ impl KvRequestCleanup {
             worker,
             approximate_lru,
             lifecycle,
-            request_lifecycle: None,
         }
     }
 
@@ -532,20 +528,6 @@ impl RequestCleanup {
         }
     }
 
-    fn request_lifecycle_mut(&mut self) -> Option<&mut RequestLifecycle> {
-        match self {
-            Self::Kv(cleanup) => cleanup.request_lifecycle.as_deref_mut(),
-            Self::Stateless { .. } | Self::Occupancy { .. } => None,
-        }
-    }
-
-    fn take_request_lifecycle(&mut self) -> Option<Box<RequestLifecycle>> {
-        match self {
-            Self::Kv(cleanup) => cleanup.request_lifecycle.take(),
-            Self::Stateless { .. } | Self::Occupancy { .. } => None,
-        }
-    }
-
     async fn finish(&mut self) {
         match self {
             Self::Kv(cleanup) => cleanup.finish().await,
@@ -600,6 +582,9 @@ impl OutputBlockTracker {
 /// `AffinityLease` own binding commit, release, and invalidation.
 pub(super) struct RequestGuard {
     cleanup: RequestCleanup,
+    /// Classifier lifecycle for this attempt: begun by the KV host that owns
+    /// the classifier, or claimed by the decode leg its prefill hop handed off to.
+    request_lifecycle: Option<Box<RequestLifecycle>>,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
     approximate_lru: Option<ApproximateRequestLease>,
@@ -614,7 +599,7 @@ pub(super) struct RequestGuard {
 impl RequestGuard {
     pub(super) fn new_kv_with_cleanup(
         request_metrics: Arc<RouterRequestMetrics>,
-        mut cleanup: KvRequestCleanup,
+        cleanup: KvRequestCleanup,
         request: &PreprocessedRequest,
         kv_route: Option<RouteObservation>,
         mut request_lifecycle: Option<Box<RequestLifecycle>>,
@@ -622,7 +607,6 @@ impl RequestGuard {
         if let Some(lifecycle) = request_lifecycle.as_mut() {
             lifecycle.observe_context_tokens(request.expanded_prompt_token_count());
         }
-        cleanup.request_lifecycle = request_lifecycle;
         let chooser = &cleanup.chooser;
         let block_size = chooser.block_size() as usize;
         let isl_tokens = request.token_ids.len();
@@ -653,6 +637,7 @@ impl RequestGuard {
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
         Self {
             cleanup: RequestCleanup::Kv(cleanup),
+            request_lifecycle,
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,
@@ -676,8 +661,12 @@ impl RequestGuard {
         occupancy_reservation: Option<OccupancyReservation>,
         lora_load: Option<LoraLoadGuard>,
         request: &PreprocessedRequest,
+        mut request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
         request_metrics.requests_started_total.inc();
+        if let Some(lifecycle) = request_lifecycle.as_mut() {
+            lifecycle.observe_context_tokens(request.expanded_prompt_token_count());
+        }
         Self {
             cleanup: match occupancy_reservation {
                 Some(reservation) => RequestCleanup::Occupancy {
@@ -686,6 +675,7 @@ impl RequestGuard {
                 },
                 None => RequestCleanup::Stateless { worker_id },
             },
+            request_lifecycle,
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             // Builtin policies do not track scheduler blocks. Emit one final ITL sample
             // when the request completes rather than observing every streamed token.
@@ -724,11 +714,20 @@ impl RequestGuard {
 
     pub(super) fn mark_dispatched(&mut self) {
         self.observability.mark_dispatched();
-        if let RequestCleanup::Kv(cleanup) = &mut self.cleanup {
-            let worker = cleanup.worker;
-            if let Some(lifecycle) = cleanup.request_lifecycle.as_mut() {
-                lifecycle.sent(worker);
-            }
+        // A lifecycle a decode leg claimed is already Sent with its prefill worker.
+        if let RequestCleanup::Kv(cleanup) = &self.cleanup
+            && let Some(lifecycle) = self.request_lifecycle.as_mut()
+        {
+            lifecycle.sent(cleanup.worker);
+        }
+    }
+
+    /// Pass the classifier lifecycle to the decode leg once prefill is
+    /// dispatched. The logical request continues there, so prefill completion
+    /// or failure must no longer end it.
+    pub(super) fn hand_off_request_lifecycle(&mut self, handoff: &LifecycleHandoff) {
+        if let Some(lifecycle) = self.request_lifecycle.take() {
+            handoff.store(lifecycle);
         }
     }
 
@@ -768,7 +767,7 @@ impl RequestGuard {
         {
             lifecycle.touch();
         }
-        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+        if let Some(lifecycle) = self.request_lifecycle.as_deref_mut() {
             lifecycle.responding();
             lifecycle.observe_output_tokens(new_tokens);
             if let Some(total_tokens) = item
@@ -858,7 +857,7 @@ impl RequestGuard {
     }
 
     pub(super) async fn finish(&mut self) {
-        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+        if let Some(lifecycle) = self.request_lifecycle.as_deref_mut() {
             lifecycle.complete();
         }
         // Metrics must observe the completed request before cleanup releases its state.
@@ -875,7 +874,7 @@ impl RequestGuard {
         let Some(migration_state) = self.migration_state.as_ref() else {
             return false;
         };
-        let Some(mut lifecycle) = self.cleanup.take_request_lifecycle() else {
+        let Some(mut lifecycle) = self.request_lifecycle.take() else {
             return false;
         };
         lifecycle.prepare_retry();
@@ -885,7 +884,7 @@ impl RequestGuard {
     }
 
     pub(super) async fn abort_with_error(&mut self, error: Option<&AbortCause>) {
-        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+        if let Some(lifecycle) = self.request_lifecycle.as_deref_mut() {
             lifecycle.abort(error.map(crate::protocols::common::preprocessor::owned_abort_error));
         }
         self.cleanup.finish().await;
