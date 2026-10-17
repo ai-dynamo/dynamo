@@ -75,8 +75,6 @@ spec:
       value: "1"
     - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
       value: "1"
-    - name: DYN_VLLM_APPEND_PREFILL_OUTPUT_TOKENS
-      value: "0"
     - name: DYN_LOG
       value: info,dynamo_kv_router=debug,dynamo_llm::kv_router=debug
     - name: NCCL_CUMEM_ENABLE
