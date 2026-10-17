@@ -315,9 +315,9 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
 
 ## Event and request transport
 
-<ParamField path="--event-plane" type="string" default="auto">
-  Event transport. When the environment does not set a value, Mocker uses ZMQ with file or memory
-  discovery and NATS with etcd or Kubernetes discovery.
+<ParamField path="--event-plane" type="string" default="env-driven (zmq)">
+  Event transport. When neither this flag nor `DYN_EVENT_PLANE` sets a value, Mocker uses ZMQ with
+  every discovery backend. Set `nats` to opt into NATS Core.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>zmq</Badge></span>
 </ParamField>
