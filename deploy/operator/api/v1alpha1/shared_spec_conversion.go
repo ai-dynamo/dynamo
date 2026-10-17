@@ -1442,7 +1442,8 @@ func convertExperimentalFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec
 // fields (Resources, Envs, Probes, EnvFromSecret, ExtraPodSpec,
 // ExtraPodMetadata, FrontendSidecar) following the same merge precedence the
 // v1alpha1 controller uses at reconcile time: ExtraPodSpec.MainContainer wins
-// over dedicated fields, except for env and volumeMounts which are additive.
+// over dedicated fields, except for env, envFrom, and volumeMounts which are
+// additive.
 func buildPodTemplateToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, ctx DynamoComponentDeploymentSharedSpecConversionContext) error {
 	podTpl, err := buildSharedPodTemplateFromAlpha(src, ctx.PodTemplateOrigin, false)
 	if err != nil {
@@ -1497,6 +1498,7 @@ func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, ma
 	main := src.ExtraPodSpec.MainContainer.DeepCopy()
 	baseEnvs := mainBase.Env
 	dedicatedVolumeMounts := slices.Clone(mainBase.VolumeMounts)
+	dedicatedEnvFrom := slices.Clone(mainBase.EnvFrom)
 	// Name must be "main" regardless of what MainContainer carried.
 	main.Name = mainContainerName
 	if err := mergo.Merge(mainBase, *main, mergo.WithOverride); err != nil {
@@ -1507,6 +1509,16 @@ func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, ma
 	// appended the dedicated service-level mounts. Preserve that ordering rather
 	// than allowing mergo to replace the VolumeMounts slice.
 	mainBase.VolumeMounts = append(slices.Clone(main.VolumeMounts), dedicatedVolumeMounts...)
+	// The v1alpha1 renderer likewise appended envFromSecret after
+	// extraPodSpec.mainContainer.envFrom; skip an entry the main list already has.
+	mainBase.EnvFrom = slices.Clone(main.EnvFrom)
+	for _, envFrom := range dedicatedEnvFrom {
+		if !slices.ContainsFunc(mainBase.EnvFrom, func(existing corev1.EnvFromSource) bool {
+			return apiequality.Semantic.DeepEqual(existing, envFrom)
+		}) {
+			mainBase.EnvFrom = append(mainBase.EnvFrom, envFrom)
+		}
+	}
 	if main.Ports != nil {
 		mainBase.Ports = main.Ports
 	}
@@ -2414,6 +2426,7 @@ func restoreMainContainerFieldOrigins(dst, preserved *DynamoComponentDeploymentS
 	}
 	if apiequality.Semantic.DeepEqual(currentMain.EnvFrom, preservedSemanticMain.EnvFrom) && preserved.EnvFromSecret != nil {
 		dst.EnvFromSecret = ptr.To(*preserved.EnvFromSecret)
+		ensureExtraPodSpecMainContainer(dst).EnvFrom = slices.Clone(preservedMain.EnvFrom)
 	}
 	if resourceRequirementsEqual(currentMain.Resources, preservedSemanticMain.Resources) &&
 		(preserved.Resources != nil || !resourceRequirementsEqual(preservedMain.Resources, corev1.ResourceRequirements{})) {
