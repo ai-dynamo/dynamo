@@ -15,6 +15,7 @@ use dynamo_runtime::{
     component::Endpoint, pipeline::MultimodalCacheIndex, traits::DistributedRuntimeProvider,
     transports::event_plane::EventSubscriber,
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::kv_router::{
@@ -51,6 +52,32 @@ pub fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<
     keys.sort();
     keys.dedup();
     keys
+}
+
+/// Cache-key alternatives for each distinct image, including session-scoped workers.
+///
+/// Workers choose their cache policy locally. Retaining the unscoped key also
+/// supports global-cache workers and older workers in a mixed deployment.
+/// A scoped worker only publishes the scoped key, so another session cannot match it.
+pub fn preprocessed_multimodal_cache_key_alternatives(
+    request: &PreprocessedRequest,
+) -> Vec<Vec<String>> {
+    let keys = preprocessed_multimodal_cache_keys(request);
+    let scope = request
+        .image_cache_scope
+        .as_deref()
+        .map(|scope| {
+            // Python str.strip also treats the ASCII information separators as whitespace.
+            scope.trim_matches(|c: char| c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}'))
+        })
+        .filter(|scope| !scope.is_empty());
+    let Some(scope) = scope else {
+        return keys.into_iter().map(|key| vec![key]).collect();
+    };
+    let scope_digest = format!("{:x}", Sha256::digest(scope.as_bytes()));
+    keys.into_iter()
+        .map(|key| vec![format!("{scope_digest}:{key}"), key])
+        .collect()
 }
 
 #[derive(Clone, Default)]
@@ -313,6 +340,232 @@ mod tests {
     use crate::kv_router::publisher::{
         MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCacheUpdate,
     };
+
+    #[tokio::test]
+    async fn scoped_embedding_cache_routing_matches_worker_cache_policies() {
+        use crate::protocols::common::llm_backend::LLMEngineOutput;
+        use dynamo_runtime::{
+            DistributedRuntime, Runtime,
+            distributed::DistributedConfig,
+            pipeline::{PushRouter, RouterMode},
+        };
+        use sha2::{Digest, Sha256};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("scoped_embedding_cache_probe")
+            .unwrap()
+            .component("encoder")
+            .unwrap()
+            .endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        let mut failures = Vec::new();
+
+        for (name, request_scope, worker_scope, images, cached_images, expected_full_hit) in [
+            ("legacy global", None, None, vec!["one"], vec!["one"], true),
+            (
+                "global worker with scoped request",
+                Some("session-a"),
+                None,
+                vec!["one"],
+                vec!["one"],
+                true,
+            ),
+            (
+                "same scope",
+                Some("session-a"),
+                Some("session-a"),
+                vec!["one"],
+                vec!["one"],
+                true,
+            ),
+            (
+                "other scope",
+                Some("session-a"),
+                Some("session-b"),
+                vec!["one"],
+                vec!["one"],
+                false,
+            ),
+            (
+                "duplicate image",
+                Some("session-a"),
+                Some("session-a"),
+                vec!["one", "one"],
+                vec!["one"],
+                true,
+            ),
+            (
+                "partial hit",
+                Some("session-a"),
+                Some("session-a"),
+                vec!["one", "two"],
+                vec!["one"],
+                false,
+            ),
+            (
+                "full two-image hit",
+                Some("session-a"),
+                Some("session-a"),
+                vec!["one", "two"],
+                vec!["one", "two"],
+                true,
+            ),
+        ] {
+            let indexer = Arc::new(EmbeddingCacheIndexer::default());
+            let added_keys = cached_images
+                .iter()
+                .map(|image| {
+                    let key =
+                        multimodal_cache_key_from_url(&format!("https://example.com/{image}.png"));
+                    match worker_scope {
+                        Some(scope) => format!("{:x}:{key}", Sha256::digest(scope.as_bytes())),
+                        None => key,
+                    }
+                })
+                .collect();
+            indexer.apply_event(&MultimodalEmbeddingCacheEvent {
+                worker_id,
+                update: MultimodalEmbeddingCacheUpdate {
+                    added_keys,
+                    removed_keys: vec![],
+                },
+            });
+            if name == "partial hit" {
+                indexer.apply_event(&MultimodalEmbeddingCacheEvent {
+                    worker_id,
+                    update: MultimodalEmbeddingCacheUpdate {
+                        added_keys: vec![multimodal_cache_key_from_url(
+                            "https://example.com/one.png",
+                        )],
+                        removed_keys: vec![],
+                    },
+                });
+            }
+            let request = PreprocessedRequest::builder()
+                .model("model".to_string())
+                .token_ids(vec![1])
+                .multi_modal_data(Some(HashMap::from([(
+                    "image_url".to_string(),
+                    images
+                        .iter()
+                        .map(|image| {
+                            MultimodalData::RawUrl(format!("https://example.com/{image}.png"))
+                        })
+                        .collect(),
+                )])))
+                .image_cache_scope(request_scope.map(str::to_owned))
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .build()
+                .unwrap();
+            let router =
+                PushRouter::<PreprocessedRequest, LLMEngineOutput>::from_client_with_state(
+                    client.clone(),
+                    RouterMode::DeviceAwareWeighted,
+                    None,
+                    Some(indexer),
+                    Some(Arc::new(preprocessed_multimodal_cache_keys)),
+                )
+                .await
+                .unwrap()
+                .with_multimodal_cache_key_alternatives(
+                    preprocessed_multimodal_cache_key_alternatives,
+                );
+            let selection = router
+                .select_device_aware_and_reserve(&request, None)
+                .unwrap();
+            let hit = selection.embedding_cache_hit();
+            let key_count = selection.request_cache_keys();
+            let full_hit = selection.into_reservation().is_none();
+            eprintln!(
+                "{name}: cache_hit={hit}, distinct_images={key_count}, full_hit={full_hit}, expected_full_hit={expected_full_hit}"
+            );
+            if full_hit != expected_full_hit {
+                failures.push(name);
+            }
+        }
+        runtime.shutdown();
+        assert!(
+            failures.is_empty(),
+            "incorrect cache selection/admission: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn scoped_cache_key_alternatives_preserve_media_identity_and_global_fallback() {
+        use crate::preprocessor::media::RdmaMediaDataDescriptor;
+        use dynamo_memory::nixl::{MemType, NixlDescriptor};
+
+        let url = "https://example.com/one.png";
+        let descriptor: RdmaMediaDataDescriptor = serde_json::from_value(serde_json::json!({
+            "nixl_metadata": "",
+            "nixl_descriptor": NixlDescriptor { addr: 0, size: 3, mem_type: MemType::Dram, device_id: 0 },
+            "shape": [1, 1, 3],
+            "dtype": "UINT8",
+            "content_hash": "0123456789abcdef",
+        })).unwrap();
+        let mut missing_hash_descriptor = descriptor.clone();
+        missing_hash_descriptor.content_hash = None;
+        let mut request = PreprocessedRequest::builder()
+            .model("model".into())
+            .token_ids(vec![1])
+            .multi_modal_data(Some(HashMap::from([(
+                "image_url".into(),
+                vec![
+                    MultimodalData::Url(url.parse().unwrap()),
+                    MultimodalData::RawUrl(url.into()),
+                    MultimodalData::Decoded(descriptor.clone()),
+                    MultimodalData::Decoded(missing_hash_descriptor),
+                    MultimodalData::UuidOnly("backend-owned".into()),
+                ],
+            )])))
+            .image_cache_scope(Some(" session-a ".into()))
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+        let raw_keys = preprocessed_multimodal_cache_keys(&request);
+        assert_eq!(raw_keys.len(), 2);
+        // Matches scope_image_cache_key in the Python worker for session-a.
+        let scope_digest = "fa57a52dbf08190218529730a3e99db6946c6c29220fb6e0551e21598b0b05db";
+        assert_eq!(
+            preprocessed_multimodal_cache_key_alternatives(&request),
+            raw_keys
+                .iter()
+                .map(|key| vec![format!("{scope_digest}:{key}"), key.clone()])
+                .collect::<Vec<_>>()
+        );
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            request.image_cache_scope = Some(format!("{separator}session-a{separator}"));
+            assert_eq!(
+                preprocessed_multimodal_cache_key_alternatives(&request),
+                raw_keys
+                    .iter()
+                    .map(|key| vec![format!("{scope_digest}:{key}"), key.clone()])
+                    .collect::<Vec<_>>()
+            );
+        }
+        for scope in [None, Some("  ".into()), Some("\u{1c}\u{1f}".into())] {
+            request.image_cache_scope = scope;
+            assert_eq!(
+                preprocessed_multimodal_cache_key_alternatives(&request),
+                raw_keys
+                    .iter()
+                    .map(|key| vec![key.clone()])
+                    .collect::<Vec<_>>()
+            );
+        }
+        request.multi_modal_data = None;
+        assert!(preprocessed_multimodal_cache_key_alternatives(&request).is_empty());
+    }
 
     #[test]
     fn shared_indexer_cache_prunes_dropped_entries() {
