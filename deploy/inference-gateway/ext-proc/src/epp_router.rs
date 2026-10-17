@@ -35,6 +35,10 @@ use dynamo_llm::protocols::common::extensions::{
 use serde::Deserialize;
 
 use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
+use crate::metrics::{
+    LifecycleOperation, Metrics, Phase, RoutingErrorCode, RoutingStage, StageResult,
+    record_lifecycle_callback, record_routing_failed,
+};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
     resolve_cache_namespace,
@@ -90,6 +94,9 @@ pub struct EppRouter {
     /// and released (RAII) when it returns or is dropped/cancelled; when none are
     /// available the request is shed with `PickError::Overloaded` (not queued).
     inflight: Arc<Semaphore>,
+    /// Metric families the EPP exposes. Injected rather than reached through a
+    /// global so a unit test can assert on an isolated registry.
+    metrics: Arc<Metrics>,
 }
 
 /// Routing inputs parsed from a standalone EPP request.
@@ -106,6 +113,7 @@ impl EppRouter {
     pub async fn from_selector(
         cfg: EppStandaloneConfig,
         policy_registry: WorkerSelectionPolicyRegistry,
+        metrics: Arc<Metrics>,
     ) -> Result<Self> {
         let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
         let timeout = Duration::from_millis(cfg.tokenization_timeout_ms);
@@ -139,6 +147,7 @@ impl EppRouter {
             reflector_ready,
             model_name: cfg.model_name,
             inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
+            metrics,
         })
     }
 
@@ -146,6 +155,27 @@ impl EppRouter {
     /// synced workers and resolved its InferencePool. Polled by the health mirror in `main`.
     pub fn is_ready(&self) -> bool {
         self.reflector_ready.load(Ordering::Acquire)
+    }
+
+    /// Run the renderer call and record the `render_tokenize` phase.
+    ///
+    /// The phase covers the renderer call and its wait, including the upstream
+    /// renderer's own latency, so it is not pure tokenizer CPU time. The
+    /// `InvalidBody` failure of the surrounding parse is a client error, not a
+    /// renderer failure, so it is not recorded here.
+    async fn observe_render(&self, request_body: bytes::Bytes) -> Result<Vec<u32>, RenderError> {
+        let started = std::time::Instant::now();
+        let result = self.renderer.render_chat(request_body).await;
+        self.metrics.observe_phase(
+            Phase::RenderTokenize,
+            if result.is_ok() {
+                StageResult::Ok
+            } else {
+                StageResult::Error
+            },
+            started.elapsed(),
+        );
+        result
     }
 
     /// Tokenize a chat body and resolve its routing inputs.
@@ -182,8 +212,7 @@ impl EppRouter {
         );
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
         let token_ids = self
-            .renderer
-            .render_chat(request_body)
+            .observe_render(request_body)
             .await
             .map_err(TokenizeError::Render)?;
         Ok(TokenizeResult {
@@ -270,12 +299,24 @@ impl EndpointPicker for EppRouter {
         _endpoints: &[Endpoint],
     ) -> Result<PickResult, PickError> {
         if !self.reflector_ready.load(Ordering::Acquire) {
+            record_routing_failed(
+                &req.request_id,
+                RoutingStage::Catalog,
+                RoutingErrorCode::RoutingFailed,
+                false,
+            );
             return Err(PickError::RoutingFailed(
                 "pod reflector cache not ready".to_string(),
             ));
         }
 
         if !self.reflector.has_ready_workers() {
+            record_routing_failed(
+                &req.request_id,
+                RoutingStage::Catalog,
+                RoutingErrorCode::NoEndpoints,
+                false,
+            );
             return Err(PickError::NoEndpoints);
         }
 
@@ -286,11 +327,15 @@ impl EndpointPicker for EppRouter {
         // `try_acquire_owned` sheds (never blocks/awaits) so we don't grow an
         // unbounded wait queue; the permit is held until `pick()` returns or the
         // future is dropped/cancelled, releasing it (RAII).
-        let _inflight_permit = self
-            .inflight
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| PickError::Overloaded)?;
+        let _inflight_permit = self.inflight.clone().try_acquire_owned().map_err(|_| {
+            record_routing_failed(
+                &req.request_id,
+                RoutingStage::Capacity,
+                RoutingErrorCode::Overloaded,
+                false,
+            );
+            PickError::Overloaded
+        })?;
 
         // Ordinary path: pass `None` so the SelectionService schedules over its
         // own catalog ("selector owns eligibility") — no O(worker-count) id set is
@@ -313,6 +358,12 @@ impl EndpointPicker for EppRouter {
                 tracing::warn!(
                     subset = ?req.candidate_subset,
                     "No Ready pod matches the subset hint; refusing to route outside the subset"
+                );
+                record_routing_failed(
+                    &req.request_id,
+                    RoutingStage::EndpointSubset,
+                    RoutingErrorCode::NoEndpoints,
+                    false,
                 );
                 return Err(PickError::NoEndpoints);
             }
@@ -349,7 +400,29 @@ impl EndpointPicker for EppRouter {
         } = self
             .tokenize(req.body.clone(), &req.headers)
             .await
-            .map_err(|e| e.into_pick_error(&req.request_id))?;
+            .map_err(|e| {
+                let error = e.into_pick_error(&req.request_id);
+                record_routing_failed(
+                    &req.request_id,
+                    RoutingStage::RenderTokenize,
+                    match error {
+                        PickError::InvalidRequest(_) => RoutingErrorCode::InvalidRequest,
+                        PickError::TokenizerUnavailable => RoutingErrorCode::TokenizerUnavailable,
+                        PickError::TokenizerTimeout => RoutingErrorCode::TokenizerTimeout,
+                        PickError::TokenizerUpstreamError => {
+                            RoutingErrorCode::TokenizerUpstreamError
+                        }
+                        PickError::MetadataHeadersTooLarge(_) => {
+                            RoutingErrorCode::MetadataHeadersTooLarge
+                        }
+                        PickError::NoEndpoints => RoutingErrorCode::NoEndpoints,
+                        PickError::Overloaded => RoutingErrorCode::Overloaded,
+                        PickError::RoutingFailed(_) => RoutingErrorCode::RoutingFailed,
+                    },
+                    false,
+                );
+                error
+            })?;
         let policy_class = requested_policy_class(&req.headers)?;
 
         // EPP-minted booking key (not the reused `x-request-id`): stays
@@ -383,12 +456,38 @@ impl EndpointPicker for EppRouter {
 
         // On either error return below the guard (still armed) frees the booking.
 
-        let resp = match self.selector.select_and_reserve(select_req).await {
+        // The `selection` phase covers the call and its wait inside the
+        // selection service. Queue wait cannot be separated from scoring work at
+        // this layer, so the metric is deliberately not named a compute time.
+        let select_started = std::time::Instant::now();
+        let selected = self.selector.select_and_reserve(select_req).await;
+        self.metrics.observe_phase(
+            Phase::Selection,
+            if selected.is_ok() {
+                StageResult::Ok
+            } else {
+                StageResult::Error
+            },
+            select_started.elapsed(),
+        );
+        let resp = match selected {
             Ok(resp) => resp,
-            Err(SelectionError::BadRequest(message)) => {
-                return Err(PickError::InvalidRequest(message));
+            Err(e) => {
+                let error = match e {
+                    SelectionError::BadRequest(message) => PickError::InvalidRequest(message),
+                    e => PickError::RoutingFailed(e.to_string()),
+                };
+                record_routing_failed(
+                    &req.request_id,
+                    RoutingStage::Selection,
+                    match error {
+                        PickError::InvalidRequest(_) => RoutingErrorCode::InvalidRequest,
+                        _ => RoutingErrorCode::RoutingFailed,
+                    },
+                    false,
+                );
+                return Err(error);
             }
-            Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
         };
 
         // The reflector owns the address + readiness. If it can no longer resolve
@@ -398,6 +497,12 @@ impl EndpointPicker for EppRouter {
             tracing::warn!(
                 worker_id = resp.worker_id,
                 "Selected worker no longer resolvable in reflector; treating selection as stale"
+            );
+            record_routing_failed(
+                &req.request_id,
+                RoutingStage::EndpointResolve,
+                RoutingErrorCode::NoEndpoints,
+                true,
             );
             return Err(PickError::NoEndpoints);
         };
@@ -425,7 +530,20 @@ impl EndpointPicker for EppRouter {
     /// Response complete: release the booking from `pick`. `booking_id` is that
     /// reservation id; `free_reservation` is idempotent (body-less pick → no-op).
     async fn on_request_complete(&self, booking_id: &str) {
-        if let Err(e) = self.selector.free_reservation(booking_id).await {
+        // Recorded as a callback invocation and its return, never as an
+        // authoritative reservation transition: `free_reservation` is idempotent
+        // and returns success for an unknown id without releasing anything, so
+        // this counter must not drive an active-reservation gauge.
+        let result = self.selector.free_reservation(booking_id).await;
+        let outcome = if result.is_ok() {
+            StageResult::Ok
+        } else {
+            StageResult::Error
+        };
+        self.metrics
+            .observe_lifecycle_callback(LifecycleOperation::RequestComplete, outcome);
+        record_lifecycle_callback(LifecycleOperation::RequestComplete, outcome, booking_id);
+        if let Err(e) = result {
             tracing::warn!(reservation_id = booking_id, error = %e, "Failed to free reservation");
         }
     }
@@ -433,7 +551,19 @@ impl EndpointPicker for EppRouter {
     /// First token: release prefill load, keep decode booked until completion.
     /// `booking_id` is `pick`'s reservation id; `prefill_complete` is idempotent.
     async fn on_prefill_complete(&self, booking_id: &str) {
-        if let Err(e) = self.selector.prefill_complete(booking_id).await {
+        // Same rule as `on_request_complete`: the callback is idempotent for an
+        // unknown id and may be re-sent for replica convergence, so this counts
+        // calls, not state changes.
+        let result = self.selector.prefill_complete(booking_id).await;
+        let outcome = if result.is_ok() {
+            StageResult::Ok
+        } else {
+            StageResult::Error
+        };
+        self.metrics
+            .observe_lifecycle_callback(LifecycleOperation::PrefillComplete, outcome);
+        record_lifecycle_callback(LifecycleOperation::PrefillComplete, outcome, booking_id);
+        if let Err(e) = result {
             tracing::warn!(reservation_id = booking_id, error = %e, "Failed to mark prefill complete");
         }
     }

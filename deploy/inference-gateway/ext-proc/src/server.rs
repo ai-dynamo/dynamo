@@ -19,6 +19,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::envoy_helpers::{self, metadata};
+use crate::metrics::{Metrics, Outcome, RequestObservation};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage,
 };
@@ -69,6 +70,13 @@ struct RequestContext {
     request_headers: Vec<(String, String)>,
     request_metadata: HashMap<String, prost_types::Struct>,
     response_headers: HashMap<String, String>,
+    /// `:status` of the upstream response, when the gateway forwarded response
+    /// headers. Used only to classify the attempt's terminal outcome.
+    upstream_status: Option<u16>,
+    /// True once this layer wrote an immediate rejection for the attempt.
+    /// Tracked on the context because the gRPC handler still returns `Ok(())`
+    /// after writing it.
+    early_reject: bool,
 
     req_header_resp: Option<ProcessingResponse>,
     req_body_resp: Vec<ProcessingResponse>,
@@ -83,6 +91,34 @@ struct RequestContext {
 
     /// Incomplete trailing SSE bytes awaiting the next chunk / EOS.
     sse_usage_buf: Vec<u8>,
+
+    /// Owns this attempt's terminal accounting. `None` only after the closing
+    /// code path takes it. Held by value so a dropped context (disconnect, task
+    /// cancellation) still records exactly one terminal through the
+    /// observation's own `Drop`.
+    observation: Option<RequestObservation>,
+}
+
+/// Terminal classification for one attempt, in priority order.
+///
+/// `result.is_ok()` is deliberately not consulted: the gRPC handler returns
+/// `Ok` both for a completed response and for an immediate rejection it already
+/// wrote, so success cannot be inferred from the return value.
+fn classify_request_outcome(ctx: &RequestContext, ext_proc_error: bool) -> Outcome {
+    if ext_proc_error {
+        Outcome::ExtProcError
+    } else if ctx.early_reject {
+        Outcome::EarlyReject
+    } else if ctx.response_complete {
+        match ctx.upstream_status {
+            Some(status) if status >= 400 => Outcome::UpstreamHttpError,
+            _ => Outcome::ResponseEos,
+        }
+    } else {
+        // No provable backend terminal: disconnect, force shutdown, or a stream
+        // that simply stopped delivering.
+        Outcome::Incomplete
+    }
 }
 
 impl RequestContext {
@@ -112,6 +148,9 @@ impl RequestContext {
             resp_trailer_resp: None,
             parsed_usage: None,
             sse_usage_buf: Vec::new(),
+            upstream_status: None,
+            early_reject: false,
+            observation: None,
         }
     }
 
@@ -202,11 +241,12 @@ impl RequestContext {
 /// pod reflector), so pickers always receive an empty endpoint slice.
 pub struct ExtProcServer<P: EndpointPicker> {
     picker: Arc<P>,
+    metrics: Arc<Metrics>,
 }
 
 impl<P: EndpointPicker> ExtProcServer<P> {
-    pub fn new(picker: Arc<P>) -> Self {
-        Self { picker }
+    pub fn new(picker: Arc<P>, metrics: Arc<Metrics>) -> Self {
+        Self { picker, metrics }
     }
 
     /// Create a `tonic` service ready for registration on a gRPC server.
@@ -377,6 +417,12 @@ impl<P: EndpointPicker> ExtProcServer<P> {
                 if key == "content-type" && value.contains("text/event-stream") {
                     ctx.model_server_streaming = true;
                 }
+                // Envoy forwards the upstream status as the `:status`
+                // pseudo-header; absent on gateways that strip it, in which case
+                // the attempt is classified without it.
+                if key == ":status" {
+                    ctx.upstream_status = value.trim().parse::<u16>().ok();
+                }
                 ctx.response_headers.insert(key, value);
             }
         }
@@ -546,8 +592,11 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
         let (tx, rx) = mpsc::channel::<Result<ProcessingResponse, Status>>(32);
         let output_stream = ReceiverStream::new(rx);
 
+        let metrics = self.metrics.clone();
+
         tokio::spawn(async move {
             let mut ctx = RequestContext::new();
+            ctx.observation = Some(metrics.start_request());
             let mut body_buf: Vec<u8> = Vec::new();
             let mut resp_body_buf: Vec<u8> = Vec::new();
 
@@ -601,6 +650,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                     ) => result,
                                 };
                                 if let Err(e) = routed {
+                                    ctx.early_reject = true;
                                     let resp = e.into_processing_response();
                                     let _ = tx.send(Ok(resp)).await;
                                     return Ok(());
@@ -645,6 +695,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                     ) => result,
                                 };
                                 if let Err(e) = routed {
+                                    ctx.early_reject = true;
                                     let resp = e.into_processing_response();
                                     let _ = tx.send(Ok(resp)).await;
                                     return Ok(());
@@ -656,6 +707,16 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             ExtProcServer::<P>::handle_response_headers(&mut ctx, hdr);
                         }
                         Some(processing_request::Request::ResponseBody(ref body)) => {
+                            // Observed on the same edge as the prefill-complete
+                            // signal: the first non-empty body chunk. That chunk
+                            // may still be SSE metadata or a role chunk, so the
+                            // histogram is not a time-to-first-token metric.
+                            if !body.body.is_empty()
+                                && let Some(observation) = ctx.observation.as_ref()
+                            {
+                                observation.observe_first_response_body();
+                            }
+
                             // Signal prefill completion on the first non-empty
                             // response body chunk (the first generated token).
                             // In streaming mode the upstream flushes HTTP
@@ -732,6 +793,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                     }
 
                     if ctx.state == StreamState::RequestEvicted {
+                        ctx.early_reject = true;
                         break;
                     }
                 }
@@ -740,7 +802,12 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
             }
             .await;
 
+            // Protocol/transport failure: the attempt is an ext_proc error. The
+            // flag is set before the terminal record below so classification
+            // never depends on the order of these two blocks.
+            let mut ext_proc_error = false;
             if let Err(e) = result {
+                ext_proc_error = true;
                 let _ = tx.send(Err(e)).await;
             }
 
@@ -760,6 +827,11 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                 picker
                     .on_request_complete_with_usage(&booking_id, usage)
                     .await;
+            }
+
+            // Close the attempt exactly once, whether or not a body was routed.
+            if let Some(observation) = ctx.observation.take() {
+                observation.finish(classify_request_outcome(&ctx, ext_proc_error));
             }
         });
 
@@ -1014,8 +1086,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
 
+    use prometheus::Registry;
     use tokio::sync::Notify;
 
+    use crate::metrics::Metrics;
     use crate::picker::{PickError, PickResult};
     use crate::proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
     use crate::proto::envoy::service::ext_proc::v3::{
@@ -1251,6 +1325,9 @@ mod tests {
         pick_started: Arc<Notify>,
         /// Set when a blocked `pick` future is dropped (cancelled).
         pick_cancelled: Arc<AtomicBool>,
+        /// Isolated recorder for every stream this tracker served. One registry
+        /// per tracker, so a test reads back exactly the attempts it drove.
+        recorder: Arc<Metrics>,
     }
 
     impl Tracker {
@@ -1267,7 +1344,13 @@ mod tests {
                 block: None,
                 pick_started: Arc::new(Notify::new()),
                 pick_cancelled: Arc::new(AtomicBool::new(false)),
+                recorder: Arc::new(Metrics::with_registry(Registry::new())),
             }
+        }
+
+        /// The isolated recorder every stream through this tracker reports to.
+        fn metrics(&self) -> &Metrics {
+            &self.recorder
         }
         fn agg() -> Self {
             Self::new(false)
@@ -1325,11 +1408,90 @@ mod tests {
         }
     }
 
+    /// Value of one gathered series: counter and gauge report their value, a
+    /// histogram reports its sample count.
+    fn series_value(metric: &prometheus::proto::Metric) -> f64 {
+        if let Some(counter) = metric.counter.as_ref() {
+            counter.value()
+        } else if let Some(gauge) = metric.gauge.as_ref() {
+            gauge.value()
+        } else {
+            metric
+                .histogram
+                .as_ref()
+                .map_or(0.0, |h| h.get_sample_count() as f64)
+        }
+    }
+
+    /// Sum of every series in `family`, so a test can assert on the total
+    /// across outcomes without hardcoding which outcome fired.
+    fn family_total(registry: &Registry, family: &str) -> f64 {
+        registry
+            .gather()
+            .iter()
+            .find(|f| f.name() == family)
+            .map_or(0.0, |f| f.get_metric().iter().map(series_value).sum())
+    }
+
+    /// Value of the series in `family` carrying `outcome`, summed over labels
+    /// other than `outcome`.
+    fn outcome_samples(registry: &Registry, family: &str, outcome: &str) -> f64 {
+        registry
+            .gather()
+            .iter()
+            .find(|f| f.name() == family)
+            .map_or(0.0, |f| {
+                f.get_metric()
+                    .iter()
+                    .filter(|m| {
+                        m.get_label()
+                            .iter()
+                            .any(|l| l.name() == "outcome" && l.value() == outcome)
+                    })
+                    .map(series_value)
+                    .sum()
+            })
+    }
+
+    /// Assert the single stream in `metrics` terminated with `outcome` exactly
+    /// once and left no stream inflight.
+    fn assert_terminal(metrics: &Metrics, outcome: &str) {
+        assert_eq!(
+            outcome_samples(metrics.registry(), "dynamo_epp_requests_total", outcome),
+            1.0,
+            "expected exactly one {outcome} terminal"
+        );
+        assert_eq!(
+            family_total(metrics.registry(), "dynamo_epp_requests_total"),
+            1.0,
+            "an attempt must be counted exactly once"
+        );
+        assert_eq!(
+            family_total(metrics.registry(), "dynamo_epp_streams_inflight"),
+            0.0,
+            "the inflight gauge must return to zero"
+        );
+    }
+
+    /// Assert every stream this tracker served terminated and none is inflight.
+    fn assert_all_terminated(metrics: &Metrics, expected_attempts: f64) {
+        assert_eq!(
+            family_total(metrics.registry(), "dynamo_epp_requests_total"),
+            expected_attempts,
+            "every attempt must be counted exactly once"
+        );
+        assert_eq!(
+            family_total(metrics.registry(), "dynamo_epp_streams_inflight"),
+            0.0,
+            "the inflight gauge must return to zero"
+        );
+    }
+
     // Spin up a GRPC server and create a gRPC bi-directional stream
     async fn connect(t: Arc<Tracker>) -> ExternalProcessorClient<tonic::transport::Channel> {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
-        let svc = ExtProcServer::new(t).into_service();
+        let svc = ExtProcServer::new(t.clone(), t.recorder.clone()).into_service();
         tokio::spawn(
             tonic::transport::Server::builder()
                 .add_service(svc)
@@ -1720,5 +1882,223 @@ mod tests {
     fn inject_body_extensions_rejects_non_object_nvext() {
         let body = br#"{"nvext": "bad"}"#;
         assert!(inject_body_extensions(body, Some(&[1]), None).is_err());
+    }
+    // -----------------------------------------------------------------------
+    // Request lifecycle observation (metric contract, not wire behaviour)
+    // -----------------------------------------------------------------------
+
+    /// R01: a complete non-streaming exchange terminates once, records one
+    /// `response_eos`, and leaves the inflight gauge at zero.
+    #[tokio::test]
+    async fn terminal_outcome_is_response_eos_for_a_full_stream() {
+        let t = Arc::new(Tracker::agg());
+        let mut c = connect(t.clone()).await;
+        run(&mut c).await;
+
+        assert_terminal(t.metrics(), "response_eos");
+    }
+
+    /// R01/R02 for SSE: several body chunks still produce exactly one
+    /// first-body sample and one terminal.
+    #[tokio::test]
+    async fn streaming_body_records_one_first_body_sample() {
+        let t = Arc::new(Tracker::agg());
+        let mut c = connect(t.clone()).await;
+
+        let mut requests = stream();
+        // Turn the response into an SSE stream: content-type plus split chunks.
+        if let Some(ProcReq::ResponseHeaders(hdr)) = requests[2].request.as_mut() {
+            hdr.headers = Some(HeaderMap {
+                headers: vec![
+                    HeaderValue {
+                        key: "content-type".into(),
+                        value: "text/event-stream".into(),
+                        raw_value: vec![],
+                    },
+                    HeaderValue {
+                        key: ":status".into(),
+                        value: "200".into(),
+                        raw_value: vec![],
+                    },
+                ],
+            });
+        }
+        requests[3] = ProcessingRequest {
+            request: Some(ProcReq::ResponseBody(HttpBody {
+                body: b"data: {\"choices\":[]}\n\n".to_vec(),
+                end_of_stream: false,
+            })),
+            ..Default::default()
+        };
+        requests[4] = ProcessingRequest {
+            request: Some(ProcReq::ResponseBody(HttpBody {
+                body: b"data: {\"usage\":{\"total_tokens\":3}}\n\ndata: [DONE]\n\n".to_vec(),
+                end_of_stream: true,
+            })),
+            ..Default::default()
+        };
+        run_stream(&mut c, requests).await;
+
+        assert_terminal(t.metrics(), "response_eos");
+        assert_eq!(
+            family_total(
+                t.metrics().registry(),
+                "dynamo_epp_first_response_body_seconds"
+            ),
+            1.0,
+            "several body chunks are still one first-body observation"
+        );
+    }
+
+    /// R03/R04: a response whose only body is an empty chunk followed by a
+    /// non-empty one records the first body on the non-empty chunk, and an
+    /// empty chunk alone records nothing.
+    #[tokio::test]
+    async fn first_body_skips_empty_chunks() {
+        let t = Arc::new(Tracker::agg());
+        let mut c = connect(t.clone()).await;
+
+        let mut requests = stream();
+        requests.insert(
+            3,
+            ProcessingRequest {
+                request: Some(ProcReq::ResponseBody(HttpBody {
+                    body: Vec::new(),
+                    end_of_stream: false,
+                })),
+                ..Default::default()
+            },
+        );
+        run_stream(&mut c, requests).await;
+
+        assert_eq!(
+            family_total(
+                t.metrics().registry(),
+                "dynamo_epp_first_response_body_seconds"
+            ),
+            1.0,
+            "the empty chunk is not the first body; the non-empty one is"
+        );
+    }
+
+    /// R04: an upstream HTTP error status is attributed to the upstream, not
+    /// folded into `response_eos`, and the stream still terminates once.
+    #[tokio::test]
+    async fn upstream_error_status_is_classified_separately() {
+        let t = Arc::new(Tracker::agg());
+        let mut c = connect(t.clone()).await;
+
+        let mut requests = stream();
+        if let Some(ProcReq::ResponseHeaders(hdr)) = requests[2].request.as_mut() {
+            hdr.headers = Some(HeaderMap {
+                headers: vec![HeaderValue {
+                    key: ":status".into(),
+                    value: "503".into(),
+                    raw_value: vec![],
+                }],
+            });
+        }
+        run_stream(&mut c, requests).await;
+
+        assert_terminal(t.metrics(), "upstream_http_error");
+    }
+
+    /// R05: an immediate rejection is `early_reject`, never `response_eos`,
+    /// even though the handler returns `Ok(())` after writing it.
+    #[tokio::test]
+    async fn immediate_rejection_is_early_reject() {
+        struct Rejecting;
+        #[tonic::async_trait]
+        impl EndpointPicker for Rejecting {
+            async fn pick(&self, _: &RequestInfo, _: &[Endpoint]) -> Result<PickResult, PickError> {
+                Err(PickError::NoEndpoints)
+            }
+        }
+
+        let metrics = Arc::new(Metrics::with_registry(Registry::new()));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let svc = ExtProcServer::new(Arc::new(Rejecting), metrics.clone()).into_service();
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(svc)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(l)),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut c = ExternalProcessorClient::new(
+            tonic::transport::Channel::from_shared(format!("http://{addr}"))
+                .unwrap()
+                .connect()
+                .await
+                .unwrap(),
+        );
+        run(&mut c).await;
+
+        assert_terminal(&metrics, "early_reject");
+    }
+
+    /// R08/R09: the client closing the stream mid-response is `incomplete`, and
+    /// the inflight gauge returns to zero without a leak.
+    #[tokio::test]
+    async fn aborted_stream_is_incomplete_and_leaves_no_inflight() {
+        let t = Arc::new(Tracker::agg());
+        let mut c = connect(t.clone()).await;
+
+        // Request phase plus response headers only: no body, no EOS.
+        let requests = vec![
+            ProcessingRequest {
+                request: Some(ProcReq::RequestHeaders(HttpHeaders {
+                    headers: Some(HeaderMap {
+                        headers: vec![HeaderValue {
+                            key: "x-request-id".into(),
+                            value: "aborted".into(),
+                            raw_value: vec![],
+                        }],
+                    }),
+                    end_of_stream: false,
+                })),
+                ..Default::default()
+            },
+            ProcessingRequest {
+                request: Some(ProcReq::RequestBody(HttpBody {
+                    body: br#"{"model":"m","messages":[]}"#.to_vec(),
+                    end_of_stream: true,
+                })),
+                ..Default::default()
+            },
+            ProcessingRequest {
+                request: Some(ProcReq::ResponseHeaders(HttpHeaders {
+                    headers: Some(HeaderMap { headers: vec![] }),
+                    end_of_stream: false,
+                })),
+                ..Default::default()
+            },
+        ];
+        run_stream(&mut c, requests).await;
+
+        assert_terminal(t.metrics(), "incomplete");
+    }
+
+    /// R10: the terminal is recorded once even when a body-free stream also runs
+    /// its stream-end bookkeeping path.
+    #[tokio::test]
+    async fn header_only_stream_terminates_exactly_once() {
+        let t = Arc::new(Tracker::agg());
+        let mut c = connect(t.clone()).await;
+        run_stream(&mut c, header_only_stream()).await;
+
+        assert_all_terminated(t.metrics(), 1.0);
+    }
+
+    /// Two streams sharing one client-supplied request id are still two
+    /// attempts, and neither leaks an inflight stream.
+    #[tokio::test]
+    async fn duplicate_request_ids_are_two_attempts() {
+        let t = Arc::new(Tracker::agg().minting());
+        let mut c = connect(t.clone()).await;
+        run_stream(&mut c, stream_with_request_id("same-id")).await;
+        run_stream(&mut c, stream_with_request_id("same-id")).await;
+
+        assert_all_terminated(t.metrics(), 2.0);
     }
 }
