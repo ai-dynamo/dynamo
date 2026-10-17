@@ -16,7 +16,7 @@ from typing import Any, Optional
 from unittest.mock import MagicMock
 
 import pytest
-import tritonclient.grpc.model_config_pb2 as mc
+import tritonclient.grpc.model_config_pb2 as TritonModelConfigPb
 import tritonserver
 
 from dynamo.health_check import HEALTH_CHECK_KEY
@@ -71,7 +71,9 @@ def _make_handler(
         side_effect=AssertionError("async_infer must not be called")
     )
 
-    return handlers.RequestHandler(server, model, mc.ModelConfig(max_batch_size=0))
+    return handlers.RequestHandler(
+        server, model, TritonModelConfigPb.ModelConfig(max_batch_size=0)
+    )
 
 
 def _probe_request(model_name: str = "test-model") -> dict[str, Any]:

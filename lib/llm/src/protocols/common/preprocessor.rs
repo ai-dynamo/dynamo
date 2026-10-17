@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::extensions::{AgentContext, RouterParams};
+use super::llm_backend::DecoderCheckpoint;
 use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
@@ -363,7 +364,7 @@ pub type MultimodalUuidMap = std::collections::HashMap<String, Vec<Option<String
 
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The `dynamo.llm-preprocessor`
 /// crate is responsible for converting request from the public APIs to this internal representation.
-#[derive(Serialize, Deserialize, Debug, Clone, Builder)]
+#[derive(Serialize, Deserialize, Clone, Builder)]
 pub struct PreprocessedRequest {
     /// ID of the model to use.
     ///
@@ -493,19 +494,14 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_link: Option<TraceLink>,
 
-    /// Text withheld by the previous attempt's decoder as a possible (but
-    /// unresolved) prefix of a hidden stop sequence, carried into a migration
-    /// retry so the new attempt's decoder does not silently drop it and can
-    /// still complete the match if the continuation supplies the rest of the
-    /// sequence. Set by the migration `RetryManager` (in-process, on its own
-    /// in-memory `PreprocessedRequest`) from the last successfully processed
-    /// response before a retry, and consumed once by `Backend` -- also
-    /// in-process, one hop later in the same pipeline -- when seeding the
-    /// retry's decoder. `#[serde(skip)]` keeps it that way: it never needs to,
-    /// and must not, reach a remote worker over the wire.
+    /// Decoder state from the previous attempt, carried into a migration retry so the
+    /// fresh decoder can restore withheld stop-filter text and replay any token IDs still
+    /// buffered by incremental detokenization. `RetryManager` sets it and `Backend`
+    /// consumes it in the same frontend process; `#[serde(skip)]` prevents it from reaching
+    /// a remote worker.
     #[builder(default)]
     #[serde(skip)]
-    pub(crate) jail_seed: Option<String>,
+    pub(crate) jail_seed: Option<DecoderCheckpoint>,
 
     /// Bootstrap info for disaggregated serving
     #[builder(default)]
@@ -712,6 +708,17 @@ where
         ));
     }
     Ok(value)
+}
+
+impl std::fmt::Debug for PreprocessedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreprocessedRequest")
+            .field("model", &self.model)
+            .field("token_count", &self.token_ids.len())
+            .field("output_options", &self.output_options)
+            .field("extra_args", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl PreprocessedRequest {
@@ -1103,6 +1110,20 @@ mod tests {
         assert!(!Arc::ptr_eq(&request.token_ids, &cloned.token_ids));
         assert_eq!(request.token_ids.as_slice(), &[1, 2, 3]);
         assert_eq!(cloned.token_ids.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn metadata_upload_capability_is_serialized_but_never_debug_logged() {
+        let mut request = request_with_tokens(vec![1, 2, 3]);
+        request.extra_args = Some(
+            serde_json::json!({"nvext": {"metadata_upload": {"destination": {"url": "https://storage.example?sig=secret", "required_headers": {"x-token": "private-token"}}}}}),
+        );
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("secret"));
+        assert!(!debug.contains("private-token"));
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert!(serialized.contains("sig=secret"));
+        assert!(serialized.contains("private-token"));
     }
 
     #[test]
