@@ -137,3 +137,11 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
+
+# Keep frontend crate identities aligned until these GPT-OSS versions are published.
+[patch.crates-io]
+dynamo-parsers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "012c5344a0739928896529ea182d152f91df2714" }
+dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "012c5344a0739928896529ea182d152f91df2714" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "012c5344a0739928896529ea182d152f91df2714" }
+dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "012c5344a0739928896529ea182d152f91df2714" }
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "012c5344a0739928896529ea182d152f91df2714" }

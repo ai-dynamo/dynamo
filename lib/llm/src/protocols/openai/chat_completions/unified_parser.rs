@@ -777,6 +777,7 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
                 _ => UnifiedParserStartingState::None,
             },
         ),
+        "gpt_oss" => Ok(UnifiedParserStartingState::None),
         "muse_glimmer" => Ok(infer_marker_prefill(content, "<|start|>", "<|eom|>")),
         other => anyhow::bail!("no prefill detector for unified parser family '{other}'"),
     }
@@ -1658,7 +1659,13 @@ impl ChoiceState {
         // it is inert in `UnifiedToolOutputMode::Native`, where the parser builds no
         // guided state at all.
         parser.initialize_request(UnifiedParserInit {
-            prompt_token_ids: Vec::new(),
+            prompt_token_ids: if family == "gpt_oss"
+                && matches!(&tool_output_mode, UnifiedToolOutputMode::Native)
+            {
+                dynamo_parsers_v2::unified::harmony::encode_harmony("<|start|>assistant")?
+            } else {
+                Vec::new()
+            },
             starting_state: if prefill.prefix.is_some() {
                 UnifiedParserStartingState::None
             } else {
@@ -2391,6 +2398,14 @@ fn parse_complete_in_mode(
     .flatten();
     let content = &content[..incomplete_start.unwrap_or(content.len())];
     parser.initialize_request(UnifiedParserInit {
+        prompt_token_ids: if family == "gpt_oss"
+            && matches!(&effective_mode, UnifiedToolOutputMode::Native)
+            && content.trim_start().starts_with("to=")
+        {
+            dynamo_parsers_v2::unified::harmony::encode_harmony("<|start|>assistant")?
+        } else {
+            Vec::new()
+        },
         starting_state: policy.batch_starting_state(family, content)?,
         tool_output_mode: effective_mode,
         ..UnifiedParserInit::default()
