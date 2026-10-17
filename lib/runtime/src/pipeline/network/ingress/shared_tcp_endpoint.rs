@@ -88,6 +88,7 @@ struct WorkItem {
     namespace: String,
     component_name: String,
     endpoint_name: String,
+    system_health: Arc<Mutex<SystemHealth>>,
 }
 
 /// Shared TCP server that handles multiple endpoints on a single port
@@ -332,6 +333,11 @@ impl SharedTcpServer {
             );
         }
 
+        // a finished request is engine progress, whatever its outcome
+        work_item
+            .system_health
+            .lock()
+            .note_endpoint_progress(&work_item.endpoint_name);
         work_item.inflight.fetch_sub(1, Ordering::SeqCst);
         work_item.notify.notify_one();
     }
@@ -465,10 +471,17 @@ impl SharedTcpServer {
             notify: Arc::new(Notify::new()),
         });
 
+        // Share the in-flight counter with the health checker: a busy endpoint is judged by
+        // progress instead of probed with a canary that would queue behind its work.
+        let inflight_for_health = handler.inflight.clone();
+
         // Insert handler FIRST to ensure it's ready to receive requests
         self.handlers.insert(endpoint_path, handler);
 
         system_health.lock().set_endpoint_registered(&endpoint_name);
+        system_health
+            .lock()
+            .register_endpoint_inflight(&endpoint_name, inflight_for_health);
 
         tracing::info!(
             "Registered endpoint '{fqn_endpoint}' with shared TCP server on {}",
@@ -650,6 +663,7 @@ impl SharedTcpServer {
                 instance_id: handler.instance_id,
                 namespace: handler.namespace.clone(),
                 component_name: handler.component_name.clone(),
+                system_health: handler.system_health.clone(),
                 endpoint_name: handler.endpoint_name.clone(),
             };
 
@@ -1265,6 +1279,7 @@ mod tests {
                 namespace: "test".to_string(),
                 component_name: "test".to_string(),
                 endpoint_name: "test".to_string(),
+                system_health: ready_system_health(),
             };
             work_tx.send(work_item).await.expect("send should succeed");
         }
@@ -1344,6 +1359,7 @@ mod tests {
                 namespace: "test".to_string(),
                 component_name: "test".to_string(),
                 endpoint_name: "test".to_string(),
+                system_health: ready_system_health(),
             };
             work_tx.send(work_item).await.expect("send should succeed");
         }
