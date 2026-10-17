@@ -444,7 +444,7 @@ impl KvIndexer {
 
         let cancel_clone = token.clone();
 
-        std::thread::spawn(move || {
+        let indexer_loop = move || {
             let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -645,7 +645,11 @@ impl KvIndexer {
                 );
                 std::panic::resume_unwind(panic_payload);
             }
-        });
+        };
+        std::thread::Builder::new()
+            .name("kv-indexer".to_string())
+            .spawn(indexer_loop)
+            .expect("failed to spawn KV indexer thread");
 
         Self {
             cancel: token,
