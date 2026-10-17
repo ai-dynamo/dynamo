@@ -56,6 +56,7 @@ def test_image_loader_import_does_not_import_torch():
 
 def test_lazy_members_resolve_and_torch_loads_on_access():
     """Lazy members still resolve via `from` imports, and only then load torch."""
+    pytest.importorskip("torch")
     _run_in_subprocess(
         "import sys\n"
         "import dynamo.common.multimodal as mm\n"
@@ -70,6 +71,7 @@ def test_lazy_members_resolve_and_torch_loads_on_access():
 
 def test_factory_dicts_resolve_lazily_with_stable_identity():
     """Factory dicts build on first access, keep identity, and stay consistent."""
+    pytest.importorskip("torch")
     _run_in_subprocess(
         "import sys\n"
         "import dynamo.common.multimodal as mm\n"
