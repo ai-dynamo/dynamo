@@ -7,8 +7,12 @@ use std::time::Duration;
 
 use super::*;
 use crate::common::handoff::HandoffId;
-use crate::common::protocols::{EngineType, FpmPublisher, FpmSink, WorkerType};
-use dynamo_kv_router::protocols::StorageTier;
+use crate::common::protocols::{
+    EngineType, FpmPublisher, FpmSink, NativeHostOffloadConfig, WorkerType,
+};
+use dynamo_kv_router::protocols::{
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, StorageTier,
+};
 
 struct NoopKvSink;
 
@@ -1370,4 +1374,200 @@ async fn shutdown_surfaces_admission_forwarding_failure() {
         format!("{repeated_error:#}").contains("admission receiver closed"),
         "{repeated_error:#}"
     );
+}
+
+#[derive(Default)]
+struct CapturedKvEvents(std::sync::Mutex<Vec<(KvCacheEvent, StorageTier)>>);
+
+impl crate::common::protocols::KvCacheEventSink for CapturedKvEvents {
+    fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
+        self.publish_with_storage_tier(event, StorageTier::Device)
+    }
+
+    fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
+        self.0.lock().unwrap().push((event, storage_tier));
+        Ok(())
+    }
+}
+
+impl CapturedKvEvents {
+    /// Stored/removed history of `block_hash` in `tier`.
+    fn residency(&self, tier: StorageTier, block_hash: ExternalSequenceBlockHash) -> Vec<&str> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, event_tier)| *event_tier == tier)
+            .filter_map(|(event, _)| match &event.data {
+                KvCacheEventData::Stored(stored)
+                    if stored
+                        .blocks
+                        .iter()
+                        .any(|block| block.block_hash == block_hash) =>
+                {
+                    Some("stored")
+                }
+                KvCacheEventData::Removed(removed)
+                    if removed.block_hashes.contains(&block_hash) =>
+                {
+                    Some("removed")
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn first_stored_block(&self) -> ExternalSequenceBlockHash {
+        let events = self.0.lock().unwrap();
+        let KvCacheEventData::Stored(stored) = &events[0].0.data else {
+            panic!("the first KV event must store a block");
+        };
+        stored.blocks[0].block_hash
+    }
+}
+
+/// Private G2 with 1 MB host blocks: one block takes 100 ms in either
+/// direction at 0.01 GB/s. Zero-latency passes keep the engine otherwise idle.
+fn host_offload_args(d2h_bandwidth_gbps: f64) -> MockEngineArgs {
+    MockEngineArgs::builder()
+        .engine_type(EngineType::Vllm)
+        .block_size(4)
+        .num_gpu_blocks(4)
+        .max_num_seqs(Some(4))
+        .max_num_batched_tokens(Some(16))
+        .kv_cache_bytes_per_token(Some(250_000))
+        .native_host_offload(Some(
+            NativeHostOffloadConfig::new(8).with_bandwidths(d2h_bandwidth_gbps, 0.01),
+        ))
+        .perf_model(Arc::new(crate::common::perf_model::PerfModel::Fixed {
+            prefill_ms: 0.0,
+            decode_ms: 0.0,
+        }))
+        .dp_size(1)
+        .build()
+        .unwrap()
+}
+
+/// One full cacheable block plus one token vLLM must compute.
+fn five_token_request(id: u128, first: u32) -> DirectRequest {
+    DirectRequest {
+        tokens: (first..first + 5).collect(),
+        max_output_tokens: 1,
+        uuid: Some(Uuid::from_u128(id)),
+        ..Default::default()
+    }
+}
+
+async fn last_output(request: &mut LiveRequest) -> OutputSignal {
+    let mut last = None;
+    while let Some(output) = tokio::time::timeout(Duration::from_secs(5), request.recv())
+        .await
+        .expect("live output timed out")
+    {
+        let completed = output.completed;
+        last = Some(output);
+        if completed {
+            break;
+        }
+    }
+    last.expect("live request closed without output")
+}
+
+fn start_captured(
+    args: MockEngineArgs,
+    gate_rx: watch::Receiver<bool>,
+) -> (LiveEngine, Arc<CapturedKvEvents>) {
+    let capture = Arc::new(CapturedKvEvents::default());
+    let engine = LiveEngine::start_with_options(
+        args,
+        0,
+        LiveEngineOptions {
+            kv_event_publishers: KvEventPublishers::new(
+                Some(Arc::clone(&capture) as Arc<dyn crate::common::protocols::KvCacheEventSink>),
+                None,
+            ),
+            output_gate: Some(gate_rx),
+            ..LiveEngineOptions::default()
+        },
+    )
+    .unwrap();
+    (engine, capture)
+}
+
+/// B waits on a 100 ms G2 restore while A's final output is held at its pass
+/// boundary. Dropping A after 200 ms makes delivery fail, so the dispatcher
+/// applies a boundary CancelRequest at that wall time, when the restore is due,
+/// and that command must publish it.
+#[tokio::test(start_paused = true)]
+async fn boundary_cancel_publishes_a_due_g2_restore() {
+    let (gate_tx, gate_rx) = watch::channel(true);
+    let (engine, capture) = start_captured(host_offload_args(0.0), gate_rx);
+
+    // Seed S, then three fillers evict S from G1; private G2 keeps a copy.
+    for (id, first) in [(1, 1), (2, 11), (3, 21), (4, 31)] {
+        let mut request = engine.submit(five_token_request(id, first)).await.unwrap();
+        assert!(last_output(&mut request).await.completed);
+    }
+    let mut restored = engine.submit(five_token_request(5, 1)).await.unwrap();
+    gate_tx.send(false).unwrap();
+    // A's three tokens fill no block, so no G2 store wakes B at A's pass
+    // boundary and the engine is idle there.
+    let dropped = engine
+        .submit(DirectRequest {
+            tokens: vec![41, 42, 43],
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(6)),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(dropped);
+    gate_tx.send(true).unwrap();
+
+    let output = last_output(&mut restored).await;
+    engine.shutdown().await.unwrap();
+    assert_eq!(output.cached_tokens, Some(4), "B must reuse S from G2");
+    assert_eq!(
+        capture.residency(StorageTier::Device, capture.first_stored_block()),
+        ["stored", "removed", "stored"],
+        "the restore must re-publish S as G1-resident"
+    );
+}
+
+/// A's block starts a 100 ms G2 store at A's pass end while A's final output
+/// is held at that boundary. Dropping A after `drop_after_ms` makes delivery
+/// fail, so the dispatcher applies a boundary CancelRequest at that wall time.
+/// Past 100 ms the store is due there and that command must publish it.
+async fn store_due_at_boundary_cancel(drop_after_ms: u64) {
+    let (gate_tx, gate_rx) = watch::channel(false);
+    let (engine, capture) = start_captured(host_offload_args(0.01), gate_rx);
+
+    let dropped = engine.submit(five_token_request(1, 1)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(drop_after_ms)).await;
+    drop(dropped);
+    gate_tx.send(true).unwrap();
+    // Let a store still in flight finish through the timer path.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    engine.shutdown().await.unwrap();
+
+    assert_eq!(
+        capture.residency(StorageTier::HostPinned, capture.first_stored_block()),
+        ["stored"],
+        "the finished store must publish A's block as G2-resident"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn boundary_cancel_publishes_a_due_g2_store() {
+    store_due_at_boundary_cancel(200).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn timer_publishes_a_g2_store_due_after_the_boundary_cancel() {
+    store_due_at_boundary_cancel(50).await;
 }
