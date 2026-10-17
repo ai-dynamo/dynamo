@@ -1325,7 +1325,7 @@ mod tests {
         }
     }
 
-    // Spin up a GRPC server and create a gRPC bi-directional stream
+    /// Bind before spawning so callers can connect without a startup sleep.
     async fn start_server(t: Arc<Tracker>) -> std::net::SocketAddr {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
@@ -1338,6 +1338,7 @@ mod tests {
         addr
     }
 
+    /// Allow disconnect tests to insert a TCP proxy without duplicating client setup.
     async fn connect_to(
         addr: std::net::SocketAddr,
     ) -> ExternalProcessorClient<tonic::transport::Channel> {
@@ -1350,6 +1351,7 @@ mod tests {
         )
     }
 
+    /// Give each lifecycle test its own loopback server.
     async fn connect(t: Arc<Tracker>) -> ExternalProcessorClient<tonic::transport::Channel> {
         connect_to(start_server(t).await).await
     }
@@ -1519,6 +1521,7 @@ mod tests {
         assert_eq!(t.free.load(Ordering::SeqCst), 1);
     }
 
+    /// Transport loss frees the booking while both client RPC handles remain alive.
     #[tokio::test]
     async fn test_stream_close_after_selection_frees_its_reservation() {
         let tracker = Arc::new(Tracker::agg().minting());

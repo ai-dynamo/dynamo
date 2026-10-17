@@ -1648,6 +1648,7 @@ mod tests {
     use dynamo_kv_router::config::KvRouterConfig;
     use k8s_openapi::api::core::v1::Pod;
 
+    /// Disable cache credit and KV reuse so load alone drives concurrent picks.
     async fn decode_test_router() -> Router {
         decode_test_router_with_config(KvRouterConfig {
             overlap_score_credit: 0.0,
@@ -1660,6 +1661,7 @@ mod tests {
         .await
     }
 
+    /// Use a local worker watch and tokenizer fixture without external services.
     async fn decode_test_router_with_config(config: KvRouterConfig) -> Router {
         use dynamo_llm::discovery::LoadThresholdHandle;
         use dynamo_llm::kv_router::{
@@ -1747,6 +1749,7 @@ mod tests {
         }
     }
 
+    /// Reuse a client ID with pretokenized input to exercise reservation isolation.
     fn decode_test_request() -> RequestInfo {
         RequestInfo {
             request_id: "client-request".into(),
@@ -1757,6 +1760,7 @@ mod tests {
         }
     }
 
+    /// Probe per-worker accounting without adding any prompt load to the projection.
     async fn decode_test_loads(router: &Router) -> Vec<dynamo_kv_router::protocols::PotentialLoad> {
         let loads = router
             .decode_router
@@ -1767,6 +1771,7 @@ mod tests {
         loads
     }
 
+    /// First output clears prefill load; completion releases the decode booking.
     #[tokio::test]
     async fn decode_selection_books_before_returning() {
         let router = decode_test_router().await;
@@ -1812,6 +1817,7 @@ mod tests {
         }
     }
 
+    /// Duplicate client IDs must yield distinct bookings and an even worker split.
     #[tokio::test]
     async fn concurrent_decode_picks_account_for_previous_selections() {
         let router = decode_test_router().await;
@@ -1853,6 +1859,7 @@ mod tests {
         assert!(loads.iter().all(|load| load.active_requests == 0));
     }
 
+    /// A selected worker missing from the pod index must leave no booked load.
     #[tokio::test]
     async fn decode_pick_without_endpoint_releases_booking() {
         let router = decode_test_router().await;
@@ -1865,6 +1872,7 @@ mod tests {
         assert!(loads.iter().all(|load| load.active_requests == 0));
     }
 
+    /// Predicted cache residency survives completion and remains isolated by tenant.
     #[tokio::test]
     async fn decode_selection_records_namespaced_approximate_cache() {
         let router = decode_test_router_with_config(KvRouterConfig {
