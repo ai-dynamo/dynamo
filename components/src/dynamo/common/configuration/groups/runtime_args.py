@@ -89,9 +89,7 @@ class DynamoRuntimeConfig(ConfigBase):
     # Honored only by the unified backend's `Worker`, where it overrides the engine's
     # default `health_check_payload()` for the runtime canary.
     health_check_payload: Optional[str] = None
-    # Worker-side request admission/rejection knobs. Disabled (None) by
-    # default; when set, these surface env vars that the Rust runtime reads
-    # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
+    # Per-DP-rank capacity override advertised by worker registration to the KV router.
     engine_request_limit: Optional[int] = None
     tcp_tls_cert_path: Optional[str] = None
     tcp_tls_key_path: Optional[str] = None
@@ -140,6 +138,9 @@ class DynamoRuntimeConfig(ConfigBase):
             raise ValueError(
                 f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
             )
+
+        if self.engine_request_limit is not None:
+            os.environ["DYN_ENGINE_REQUEST_LIMIT"] = str(self.engine_request_limit)
 
         os.environ["DYN_RESPONSE_PLANE"] = self.response_plane
 
@@ -439,21 +440,16 @@ class DynamoRuntimeArgGroup(ArgGroup):
             "default health_check_payload(). Unified backend only.",
         )
 
-        # Worker-side request admission/rejection. Defaults to None (disabled);
-        # when unset the worker behaves exactly as before. Surfaces an env var —
-        # the Rust runtime reads DYN_ENGINE_REQUEST_LIMIT directly. The Dynamo-side
-        # overflow queue is a small fixed burst (default 16, hard cap N+16) and is
-        # not a user-facing knob; advanced users may override it via the
-        # DYN_DYNAMO_REQUEST_QUEUE_LIMIT env var.
         add_argument(
             g,
             flag_name="--engine-request-limit",
             env_var="DYN_ENGINE_REQUEST_LIMIT",
             default=None,
             arg_type=int,
-            help="Max requests handled concurrently by the engine (worker-pool "
-            "semaphore size). Enables worker-side request rejection when set. "
-            "Disabled by default.",
+            help="Per-DP-rank concurrent request limit advertised to the KV router. "
+            "Overrides reported native engine request capacity; when unset, the "
+            "router uses that native capacity if known. Counts are scheduler-local; "
+            "this option does not enable a worker-side admission gate.",
         )
 
         add_argument(

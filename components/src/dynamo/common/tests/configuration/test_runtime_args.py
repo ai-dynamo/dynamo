@@ -81,6 +81,15 @@ def test_kv_state_endpoint_supports_cli_and_env(monkeypatch):
     assert "DYN_KV_STATE_ENDPOINT" in help_text
 
 
+def test_engine_request_limit_cli_is_published_to_native_registration(monkeypatch):
+    monkeypatch.setenv("DYN_ENGINE_REQUEST_LIMIT", "8")
+    env_config, _ = _parse_runtime_args([])
+    assert env_config.engine_request_limit == 8
+    cli_config, _ = _parse_runtime_args(["--engine-request-limit", "2"])
+    assert cli_config.engine_request_limit == 2
+    assert os.environ["DYN_ENGINE_REQUEST_LIMIT"] == "2"
+
+
 def test_response_plane_defaults_to_tcp_and_accepts_quic(monkeypatch):
     monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
 

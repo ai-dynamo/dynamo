@@ -10,12 +10,20 @@ rather than accepting work that could exhaust GPU memory or degrade latency for 
 Dynamo returns **HTTP 529** for overload by default so clients can distinguish an available but busy
 service from **HTTP 503**, which indicates that the service is unavailable.
 
-Rejection is **off by default**. Each threshold is independently opt-in: setting one numeric threshold
-enables only that check. You do not need `--admission-control`; that compatibility flag is ignored.
+Token and KV-load thresholds are independently opt-in: setting one numeric threshold enables only that check. KV routing also checks each worker's advertised concurrent request capacity by default. You do not need `--admission-control`; that compatibility flag is ignored.
 
-> **How it works:** The busy-detection formulas, data-parallel rank aggregation, worker-load event
-> processing, and worker-side overflow queue are documented in
-> [Request Rejection Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md).
+> **How it works:** The busy-detection formulas, data-parallel rank aggregation, and worker-load event processing are documented in [Request Rejection Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md).
+
+## Request Capacity in KV Routing
+
+The KV router excludes a data-parallel (DP) rank when the scheduler's booked requests reach that rank's advertised request limit. The worker's `--engine-request-limit` or `DYN_ENGINE_REQUEST_LIMIT` overrides its reported native capacity, such as vLLM's `max_num_seqs` or SGLang's normalized `max_running_requests`. Without an override, the router uses the native capacity when known, including capacity reported by older workers. If neither an override nor a usable native limit is advertised, request-capacity filtering is unavailable for that worker. Explicit overrides must be positive.
+
+Limits apply independently to each DP rank. A worker advertising four ranks and `--engine-request-limit 2` has two request slots per rank, eight in total. The router keeps a full rank out of selection while another eligible rank has room. If all eligible ranks are full, selection rejects through the existing overload path: HTTP 529 by default at the Frontend, or HTTP 429 with `DYN_HTTP_OVERLOAD_STATUS_CODE=429`; standalone selection returns 429.
+
+> [!IMPORTANT]
+> Upgrading to request-capacity-aware routing can produce overload responses above advertised native concurrency even when no busy threshold or explicit request limit is configured. Previously, those requests could enter an engine's internal queue. Leaving `--engine-request-limit` unset does not disable the router's native-capacity check.
+
+Request counts cover reservations visible to the scheduler. Independent Frontends and model partitions can race or have different counts. Router eligibility does not enforce a global engine semaphore or enable a worker-side gate. The current pass-through worker admission boundary does not implement a hard cap or a bounded overflow queue; backend admission is a separate capability.
 
 <Steps toc={true} tocDepth={2}>
 
@@ -70,9 +78,7 @@ output-block tracking so generated tokens contribute to the observed KV cache lo
 `--router-track-output-blocks` is especially important for long generations. Without it, a workload
 can fill KV cache with generated tokens without crossing the load value observed by the router.
 
-You can configure just one signal. For example, a prefill-only deployment can omit the decode-block
-threshold and KV-specific options. To disable rejection, remove all three threshold settings or set
-their environment-variable values to `None`.
+You can configure just one signal. For example, a prefill-only deployment can omit the decode-block threshold and KV-specific options. To disable token and KV-load threshold rejection, remove all three threshold settings or set their environment-variable values to `None`. This leaves request-capacity filtering enabled when a worker advertises a known limit.
 
 See [Frontend Configuration](../../reference/components/frontend-configuration.mdx#fault-tolerance)
 for the complete flag, environment-variable, and validation reference.
@@ -114,10 +120,9 @@ decision immediately. This endpoint does not enable `--router-mode kv` or
 
 </Step>
 
-<Step title="Add a worker-side hard cap">
+<Step title="Override advertised request capacity">
 
-Optional. A worker can independently cap concurrent engine work and queue only a small burst. Set
-`--engine-request-limit N` (or `DYN_ENGINE_REQUEST_LIMIT`) on the **worker** component:
+Optional. To override the native capacity used by the KV router, set `--engine-request-limit N` (or `DYN_ENGINE_REQUEST_LIMIT`) on the **worker** component. `N` is the concurrent request limit for each DP rank:
 
 ```yaml
 - name: worker
@@ -131,18 +136,9 @@ Optional. A worker can independently cap concurrent engine work and queue only a
             - "32"
 ```
 
-When all `N` engine slots and the overflow queue are full, the worker rejects the request and the
-Frontend returns HTTP 529 when migration is disabled or its retry attempts do not find capacity.
-With a positive `--migration-limit`, an unpinned request using in-process KV routing retries on another
-eligible worker first. Split or standalone routing uses global overload and fault state, so its
-retry is best-effort and can select the same worker again.
-`DYN_DYNAMO_REQUEST_QUEUE_LIMIT` controls the advanced overflow-queue size, defaults to `16`, must be
-at least `2`, and has an effect only when the engine limit is set. The effective cap is `N + Q`
-in-flight requests per worker.
+The worker publishes the resolved value to the router. A full rank is excluded before dispatch; the override does not allocate engine slots or change the engine's own scheduler. Worker-side hard admission requires a backend implementation that enforces it separately. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` does not add an overflow queue to the current pass-through worker boundary.
 
-See [Runtime Configuration](../../reference/components/runtime-configuration.mdx#operations) for the exact
-fields and [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission)
-for the queue implementation.
+See [Request Capacity in KV Routing](#request-capacity-in-kv-routing) for limit scope and all-full behavior.
 
 </Step>
 
@@ -160,8 +156,6 @@ Generate enough load to exceed the configured threshold, then confirm:
 
 - The client receives HTTP 529.
 - `dynamo_frontend_model_rejection_total` increases for the affected `model` and `endpoint`.
-- Worker-side hard-cap tests increase `dynamo_rejection_request_total` when both the engine and queue
-  are full.
 
 For all metric fields and labels, see
 [Cancellation and Rejection](../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection).

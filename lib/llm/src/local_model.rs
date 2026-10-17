@@ -496,7 +496,23 @@ pub async fn register_model_card(
     let model_suffix = derive_lora_suffix(lora_name);
 
     let discovery = endpoint.drt().discovery();
-    let wire_card = card.for_mdc_wire();
+    let mut wire_card = card.for_mdc_wire();
+    wire_card.runtime_config.engine_request_limit = match std::env::var("DYN_ENGINE_REQUEST_LIMIT")
+    {
+        Ok(value) => {
+            let limit = value
+                .parse::<u64>()
+                .context("DYN_ENGINE_REQUEST_LIMIT must be a positive integer")?;
+            anyhow::ensure!(limit > 0, "DYN_ENGINE_REQUEST_LIMIT must be positive");
+            Some(limit)
+        }
+        Err(std::env::VarError::NotPresent) => card
+            .runtime_config
+            .engine_request_limit
+            .or(card.runtime_config.max_num_seqs)
+            .filter(|limit| *limit > 0),
+        Err(error) => return Err(error.into()),
+    };
     let spec = DiscoverySpec::from_model_with_suffix(
         endpoint.component().namespace().name().to_string(),
         endpoint.component().name().to_string(),

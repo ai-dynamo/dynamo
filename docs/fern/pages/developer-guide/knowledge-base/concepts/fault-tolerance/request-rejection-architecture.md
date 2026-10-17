@@ -123,6 +123,9 @@ for state, label, and lifetime semantics.
 
 ## Worker-Side Request Admission
 
+> [!IMPORTANT]
+> The current worker admission boundary is pass-through. The engine slots, overflow queue, and worker-admission metrics described below belong to the separate worker-side gate design and are not enforced by this boundary. Current KV routing uses `--engine-request-limit` as a per-DP-rank advertised capacity override, falls back to reported native capacity when unset, and rejects an all-full pool independently of worker admission. See [Request Capacity in KV Routing](../../../../kubernetes/fault-tolerance/request-rejection.md#request-capacity-in-kv-routing) for current behavior and scope.
+
 A worker can impose a hard cap independently of Frontend busy detection. Setting
 `--engine-request-limit N` creates `N` engine slots. Requests that arrive while those slots are full
 enter a small Dynamo overflow queue of size `Q`. When the engine and queue are both full, the worker
