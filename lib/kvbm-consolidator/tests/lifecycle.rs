@@ -15,6 +15,7 @@ use kvbm_consolidator::{ConsolidatorBuilder, EventSource};
 
 fn bs(hash: u64, tokens: Vec<u32>, block_size: usize) -> RawKvEvent {
     RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: vec![BlockHashValue::Unsigned(hash)],
         parent_block_hash: None,
         token_ids: tokens,
