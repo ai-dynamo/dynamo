@@ -280,10 +280,14 @@ spec:
               value: "8192"
             # Replication: watch THIS Deployment's own Service
             # (EndpointSlices) to find sibling EPP replicas and sync active load
-            # over the shared replica-sync port (9092 by default). Omit this env
-            # to run a single fully-local replica (and set replicas: 1).
+            # over the shared replica-sync port (9092 by default). The optional
+            # HTTP port enables subscribe-first KV-index recovery from a serving
+            # sibling. Omit the peer Service to run a single fully-local replica
+            # (and set replicas: 1).
             - name: DYN_EPP_PEER_SERVICE
               value: dynamo-epp
+            - name: DYN_EPP_SELECTION_HTTP_PORT
+              value: "9093"
             # The reflector watches pods in the EPP's own namespace.
             - name: POD_NAMESPACE
               valueFrom:
@@ -299,6 +303,9 @@ spec:
               containerPort: 9002
             - name: grpc-health
               containerPort: 9003
+            # Internal HTTP dump endpoint for joining EPP KV-index recovery.
+            - name: selection-http
+              containerPort: 9093
           readinessProbe:
             grpc:
               port: 9003
