@@ -9,7 +9,10 @@ import socket
 import socketserver
 import threading
 from contextlib import contextmanager
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
+
+if TYPE_CHECKING:
+    import requests
 
 
 class _Handler(socketserver.BaseRequestHandler):
@@ -58,6 +61,24 @@ class ConnectionCanary(socketserver.ThreadingTCPServer):
             raise AssertionError(
                 f"blocked destination received {self.connection_count} connection(s)"
             )
+
+
+def assert_blocked_url_refused(
+    response: requests.Response,
+    canary: ConnectionCanary,
+    private_detail: str,
+    label: str = "",
+) -> None:
+    """Assert a 4xx that hides the policy detail and never reached the canary."""
+    prefix = f"[{label}] " if label else ""
+    assert 400 <= response.status_code < 500, (
+        f"{prefix}expected a 4xx for a blocked media URL, got "
+        f"HTTP {response.status_code}: {response.text[:2000]}"
+    )
+    # The frontend returns only the sanitized class message.
+    assert response.json()["message"] == "Invalid request", response.text
+    assert private_detail not in response.text, response.text
+    canary.assert_no_connection()
 
 
 @contextmanager

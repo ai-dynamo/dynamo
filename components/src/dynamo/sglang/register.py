@@ -5,11 +5,19 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from typing import Any, List, Optional
 
 import sglang as sgl
+import yaml
+from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 from dynamo._core import Endpoint
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -30,7 +38,11 @@ from dynamo.llm import (
     WorkerType,
     register_model,
 )
-from dynamo.sglang._compat import sglang_uses_mla_backend
+from dynamo.sglang._compat import (
+    filter_supported_async_generate_kwargs,
+    sglang_uses_mla_backend,
+    supports_disagg_prefill_cancel_anytime,
+)
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
@@ -40,10 +52,58 @@ from dynamo.sglang.capacity import (
     model_card_dp_rank_bounds,
     runtime_capacity,
 )
-from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
+from dynamo.sglang.engine_generate import (
+    DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+    SGLANG_GENERATE_CAPABILITY,
+)
+from dynamo.sglang.gateway import (
+    GATEWAY_ENGINE_ID_KEY,
+    GATEWAY_WORKERS_KEY,
+    effective_gateway_workers,
+    gateway_engine_id,
+)
+from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY = (
+    "tool_call_structural_tag_reasoning_gate"
+)
+
+
+def publish_sglang_structural_tag_reasoning_policy(
+    runtime_config: ModelRuntimeConfig,
+    engine: Optional[sgl.Engine],
+    server_args: ServerArgs,
+) -> None:
+    """Advertise the native gate that consumes reasoning before guided output."""
+    # vLLM also publishes grammar timing through runtime metadata.
+    # SGLang's exclusion additionally depends on require_reasoning per request.
+    parser = getattr(server_args, "reasoning_parser", None)
+    if (
+        engine is None
+        or not parser
+        or getattr(server_args, "skip_tokenizer_init", False)
+    ):
+        return
+    tokenizer = getattr(engine.tokenizer_manager, "tokenizer", None)
+    if (
+        tokenizer is None
+        or "require_reasoning"
+        not in filter_supported_async_generate_kwargs(
+            engine, {"require_reasoning": True}
+        )
+    ):
+        return
+    # Match the scheduler's gate initialization, including disabled gates when
+    # the reasoning terminator cannot be encoded by the initialized tokenizer.
+    reasoner = ReasoningParser(
+        model_type=parser, stream_reasoning=False, tokenizer=tokenizer
+    )
+    if tokenizer.encode(reasoner.detector.think_end_token, add_special_tokens=False):
+        runtime_config.set_engine_specific(
+            TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, json.dumps(True)
+        )
 
 
 def _supports_engine_generate(
@@ -146,14 +206,14 @@ async def _register_model_with_runtime_config(
     """
     runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
 
-    if dynamo_args.use_sglang_tokenizer:
+    if dynamo_args.use_sglang_tokenizer and not (
+        output_type.supports_embedding() or output_type.supports_rerank()
+    ):
         logging.warning(
             "Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
         )
         input_type = ModelInput.Text
-        # Only override output_type for chat models, not for embeddings
-        if output_type != ModelType.Embedding:
-            output_type = ModelType.Chat
+        output_type = ModelType.Chat
 
     if runtime_config is not None and _supports_engine_generate(
         input_type, output_type, worker_type
@@ -209,7 +269,8 @@ async def _register_model_with_runtime_config(
             input_type,
             output_type,
             endpoint,
-            _register_model_source_path(engine, server_args),
+            dynamo_args.model_source_uri
+            or _register_model_source_path(engine, server_args),
             server_args.served_model_name,
             kv_cache_block_size=kv_cache_block_size,
             runtime_config=runtime_config,
@@ -244,6 +305,24 @@ def _get_bootstrap_info_for_config(
     return compute_bootstrap_address(engine)
 
 
+def _load_hicache_storage_extra_config_file(path: str) -> Any:
+    """Load an ``@path`` extra config the way SGLang's HiCache does.
+
+    SGLang accepts ``.json``, ``.toml``, ``.yaml`` and ``.yml`` files.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".json":
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    if ext == ".toml":
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    if ext in (".yaml", ".yml"):
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    raise ValueError(f"unsupported config file {path!r} (format {ext!r})")
+
+
 def _parse_hicache_storage_extra_config(
     raw_extra_config: Optional[Any],
 ) -> dict[str, Any]:
@@ -258,10 +337,13 @@ def _parse_hicache_storage_extra_config(
         if not raw_extra_config:
             return {}
         try:
-            parsed = json.loads(raw_extra_config)
-        except json.JSONDecodeError as e:
+            if raw_extra_config.startswith("@"):
+                parsed = _load_hicache_storage_extra_config_file(raw_extra_config[1:])
+            else:
+                parsed = json.loads(raw_extra_config)
+        except (OSError, ValueError, yaml.YAMLError) as e:
             logging.warning(
-                f"Failed to parse hicache_storage_backend_extra_config JSON: {e}"
+                "Failed to parse hicache_storage_backend_extra_config: %s", e
             )
             return {}
 
@@ -269,7 +351,7 @@ def _parse_hicache_storage_extra_config(
             return parsed
 
         logging.warning(
-            "hicache_storage_backend_extra_config JSON was not an object; ignoring it."
+            "hicache_storage_backend_extra_config was not an object; ignoring it."
         )
         return {}
 
@@ -278,6 +360,25 @@ def _parse_hicache_storage_extra_config(
         type(raw_extra_config).__name__,
     )
     return {}
+
+
+def _mooncake_key_prefix(
+    extra_config: dict[str, Any], served_model_name: Optional[str]
+) -> Optional[str]:
+    """Return the prefix SGLang's MooncakeStore prepends to every stored key.
+
+    Mirrors ``config_prefix`` in SGLang's
+    ``srt/mem_cache/storage/mooncake_store/mooncake_store.py``: the backend tag
+    (when not ``None``) and the served model name with ``/`` replaced by ``-``,
+    joined with ``_``.
+    """
+    parts = []
+    extra_backend_tag = extra_config.get("extra_backend_tag")
+    if extra_backend_tag is not None:
+        parts.append(str(extra_backend_tag))
+    if served_model_name:
+        parts.append("-".join(served_model_name.split("/")))
+    return "_".join(parts) if parts else None
 
 
 def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
@@ -293,8 +394,8 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
 
     try:
         is_mla_model = sglang_uses_mla_backend(server_args)
-    except Exception as e:
-        logging.warning(f"Failed to determine whether model uses MLA backend: {e}")
+    except Exception:
+        logging.warning("Failed to determine whether model uses MLA backend")
         is_mla_model = False
 
     try:
@@ -302,15 +403,15 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
             getattr(server_args, "speculative_algorithm", None)
         )
         is_eagle = bool(spec_algorithm.is_eagle())
-    except Exception as e:
-        logging.warning(f"Failed to determine speculative algorithm: {e}")
+    except Exception:
+        logging.warning("Failed to determine speculative algorithm")
         is_eagle = False
 
     tp_lcm_size = extra_config.get("tp_lcm_size")
     try:
         tp_lcm_size = int(tp_lcm_size) if tp_lcm_size is not None else None
-    except (TypeError, ValueError):
-        logging.warning("Ignoring non-integer Mooncake tp_lcm_size=%r", tp_lcm_size)
+    except (TypeError, ValueError, OverflowError):
+        logging.warning("Ignoring non-integer Mooncake tp_lcm_size")
         tp_lcm_size = None
 
     should_split_heads = (
@@ -335,8 +436,145 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "tp_lcm_size": tp_lcm_size,
         "should_split_heads": should_split_heads,
         "extra_backend_tag": extra_backend_tag,
-        "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
+        "key_prefix": _mooncake_key_prefix(
+            extra_config, getattr(server_args, "served_model_name", None)
+        ),
+        "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT")
+        or (
+            extra_config.get("kv_events_endpoint")
+            if isinstance(extra_config.get("kv_events_endpoint"), str)
+            else None
+        )
+        or None,
     }
+
+
+def _validate_hicache_layout(envelope: Any, server_args: ServerArgs) -> dict[str, Any]:
+    """Validate one startup envelope; errors contain paths, never config values."""
+    if not isinstance(envelope, dict) or envelope.get("enabled") is not True:
+        raise ValueError("hicache_object_layout.enabled is disabled or invalid")
+    if envelope.get("backend") != "mooncake":
+        raise ValueError("hicache_object_layout.backend must be mooncake")
+    page_size = envelope.get("page_size")
+    if (
+        type(page_size) is not int
+        or not 0 < page_size <= 2**32 - 1
+        or page_size != server_args.page_size
+    ):
+        raise ValueError("hicache_object_layout.page_size is invalid or inconsistent")
+    layout = envelope.get("hicache_object_layout")
+    if not isinstance(layout, dict):
+        raise ValueError(
+            "hicache_object_layout.hicache_object_layout must be an object"
+        )
+    if "key_prefix" not in layout or not (
+        layout["key_prefix"] is None or isinstance(layout["key_prefix"], str)
+    ):
+        raise ValueError("hicache_object_layout.key_prefix must be a string or null")
+    pp_size, pp_rank = layout.get("pp_size"), layout.get("pp_rank")
+    if (
+        type(pp_size) is not int
+        or type(pp_rank) is not int
+        or not 0 <= pp_rank < pp_size <= 2**32 - 1
+        or pp_size != (getattr(server_args, "pp_size", 1) or 1)
+    ):
+        raise ValueError(
+            "hicache_object_layout.pp_rank/pp_size is invalid or inconsistent"
+        )
+    if layout.get("is_mla_backend") is not True or pp_size != 1:
+        raise ValueError(
+            "hicache_object_layout requires single-PP rank-replicated pools"
+        )
+    pools = layout.get("pools")
+    if not isinstance(pools, list) or not pools:
+        raise ValueError("hicache_object_layout.pools must be a non-empty list")
+    for index, pool in enumerate(pools):
+        field = f"hicache_object_layout.pools[{index}]"
+        if (
+            not isinstance(pool, dict)
+            or not isinstance(pool.get("pool"), str)
+            or not pool["pool"]
+        ):
+            raise ValueError(f"{field}.pool must be a non-empty string")
+        suffixes = pool.get("suffixes")
+        if (
+            not isinstance(suffixes, list)
+            or not suffixes
+            or not all(isinstance(suffix, str) and suffix for suffix in suffixes)
+        ):
+            raise ValueError(f"{field}.suffixes must contain non-empty strings")
+        if pool.get("hit_policy") not in ("all_pages", "trailing_pages"):
+            raise ValueError(f"{field}.hit_policy is unsupported")
+        if pool["hit_policy"] == "trailing_pages" or "trailing_pages" in pool:
+            trailing = pool.get("trailing_pages")
+            if type(trailing) is not int or not 0 < trailing <= 2**32 - 1:
+                raise ValueError(f"{field}.trailing_pages must be a positive uint32")
+    return layout
+
+
+def _get_registration_mooncake_runtime_data(
+    engine: Optional[sgl.Engine], server_args: ServerArgs
+) -> Optional[dict[str, Any]]:
+    # Startup messages already carry server_info's envelope. No HTTP request.
+    layout = None
+    if engine is not None:
+        init_result = getattr(engine, "_scheduler_init_result", None)
+        infos = getattr(init_result, "scheduler_infos", [])
+        if not isinstance(infos, (list, tuple)) or not all(
+            isinstance(info, dict) for info in infos
+        ):
+            logging.warning(
+                "Invalid scheduler_infos HiCache metadata; disabling L3 lookup"
+            )
+            return None
+        if any("hicache_object_layout" in info for info in infos):
+            try:
+                for info in infos:
+                    if "hicache_object_layout" not in info:
+                        raise ValueError(
+                            "scheduler_infos HiCache availability is inconsistent"
+                        )
+                    envelope = info["hicache_object_layout"]
+                    if isinstance(envelope, dict) and envelope.get("enabled") is False:
+                        logging.debug("SGLang HiCache is disabled; disabling L3 lookup")
+                        return None
+                    current = _validate_hicache_layout(envelope, server_args)
+                    if layout is not None and current != layout:
+                        raise ValueError(
+                            "scheduler_infos HiCache layouts are inconsistent"
+                        )
+                    layout = current
+            except ValueError as error:
+                logging.warning("SGLang %s; disabling L3 lookup", error)
+                return None
+    # Only absent envelopes (legacy engines), or engine=None, retain the old
+    # static path. Explicit disabled/invalid envelopes returned above.
+    try:
+        metadata = _get_mooncake_runtime_data(server_args)
+    except (TypeError, ValueError, OverflowError):
+        logging.warning("Invalid Mooncake static runtime metadata; disabling L3 lookup")
+        return None
+    if layout is not None:
+        if (
+            metadata is None
+            or not all(
+                type(metadata[key]) is int and 0 < metadata[key] <= 2**32 - 1
+                for key in ("page_size", "tp_size", "pp_size")
+            )
+            or (
+                metadata["tp_lcm_size"] is not None
+                and not 0 < metadata["tp_lcm_size"] <= 2**32 - 1
+            )
+        ):
+            logging.warning(
+                "HiCache layout/static metadata mismatch; disabling L3 lookup"
+            )
+            return None
+        # Keep legacy fields, including is_mla_model. Physical pools are
+        # authoritative even for DSV4's non-MLA model config.
+        metadata["hicache_object_layout"] = layout
+        metadata["should_split_heads"] = False
+    return metadata
 
 
 def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
@@ -401,13 +639,43 @@ async def get_runtime_config(
     runtime_config = ModelRuntimeConfig()
     runtime_config.kv_state_endpoint = dynamo_args.kv_state_endpoint
     runtime_config.context_length = server_args.context_length
+    llm_handler = not dynamo_args.enable_multimodal
+    # Both disaggregated legs implement exact-RID cancellation before output,
+    # including waiting until the scheduler has accepted the request.
+    if (
+        server_args.disaggregation_mode
+        in {
+            "prefill",
+            "decode",
+        }
+        and llm_handler
+        and supports_disagg_prefill_cancel_anytime(engine)
+    ):
+        runtime_config.set_engine_specific(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+            json.dumps(True),
+        )
     # Multimodal encode workers have no tokenizer manager and delegate
     # generation overflow handling to their downstream backend.
     if engine is not None:
         publish_token_budget(runtime_config, _get_token_budget(engine, server_args))
+        # Hash forwarding currently exists on SGLang's aggregated generation
+        # path. Do not advertise exact video routing to disaggregated workers,
+        # whose prefill/decode handlers would otherwise publish incompatible
+        # KV-event placeholder hashes.
+        if dynamo_args.frontend_decoding and server_args.disaggregation_mode in (
+            None,
+            "null",
+        ):
+            publish_sglang_qwen_video_processor_contract(runtime_config, engine)
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    # Multimodal and diffusion handlers do not forward the per-request gate.
+    if llm_handler and not getattr(server_args, "dllm_algorithm", None):
+        publish_sglang_structural_tag_reasoning_policy(
+            runtime_config, engine, server_args
+        )
     if dynamo_args.dyn_default_thinking_mode is not None:
         runtime_config.set_engine_specific(
             "default_thinking_mode",
@@ -416,11 +684,7 @@ async def get_runtime_config(
     runtime_config.exclude_tools_when_tool_choice_none = (
         dynamo_args.exclude_tools_when_tool_choice_none
     )
-    runtime_config.set_structural_tag_mode(
-        "on" if dynamo_args.dyn_enable_structural_tag else "off"
-    )
-    runtime_config.set_structural_tag_scope(dynamo_args.dyn_structural_tag_scope)
-    runtime_config.set_structural_tag_schema(dynamo_args.dyn_structural_tag_schema)
+    runtime_config.set_structural_tag(dynamo_args.structural_tag)
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (
@@ -455,6 +719,16 @@ async def get_runtime_config(
                 "Failed to attach SGLang worker group metadata to registration: %s",
                 e,
             )
+
+    gateway_engine = gateway_engine_id()
+    if gateway_engine is not None:
+        runtime_config.set_engine_specific(
+            GATEWAY_ENGINE_ID_KEY, json.dumps(gateway_engine)
+        )
+        runtime_config.set_engine_specific(
+            GATEWAY_WORKERS_KEY,
+            json.dumps(effective_gateway_workers(server_args, dynamo_args)),
+        )
 
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
@@ -497,7 +771,7 @@ async def get_runtime_config(
                 f"Failed to attach SGLang spec decode runtime metadata: {e}"
             )
 
-    mooncake_runtime_data = _get_mooncake_runtime_data(server_args)
+    mooncake_runtime_data = _get_registration_mooncake_runtime_data(engine, server_args)
     if mooncake_runtime_data is not None:
         try:
             runtime_config.set_engine_specific(
@@ -505,9 +779,9 @@ async def get_runtime_config(
                 json.dumps(mooncake_runtime_data),
             )
             logging.info("Published Mooncake HiCache runtime metadata for router use.")
-        except Exception as e:
+        except Exception:
             logging.warning(
-                f"Failed to attach Mooncake HiCache runtime metadata to registration: {e}"
+                "Failed to attach Mooncake HiCache runtime metadata to registration"
             )
 
     if engine is None:

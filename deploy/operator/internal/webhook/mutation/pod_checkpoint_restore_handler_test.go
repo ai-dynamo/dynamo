@@ -128,9 +128,9 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 				wantErr: "UID changed",
 			},
 			{
-				name: "worker generation mismatch",
+				name: "snapshot compatibility mismatch",
 				mutate: func(pod *corev1.Pod) {
-					pod.Labels[consts.KubeLabelDynamoWorkerHash] = "worker-v2"
+					pod.Annotations[consts.SnapshotCandidateCompatibilityHashAnnotation] = "compatibility-v2"
 				},
 				wantErr: "does not match expected hash",
 			},
@@ -246,6 +246,7 @@ func TestPodCheckpointRestoreMutatorAutomaticSnapshotJob(t *testing.T) {
 		assert.Equal(t, snapshot.Name, shaped.Annotations[podcontract.RestoreFromAnnotation])
 		assert.NotContains(t, shaped.Annotations, consts.RestoreCandidateSourceKindAnnotation)
 		assert.NotContains(t, shaped.Annotations, consts.SnapshotJobCandidateUIDAnnotation)
+		assert.NotContains(t, shaped.Annotations, consts.SnapshotCandidateCompatibilityHashAnnotation)
 	})
 
 	t.Run("recreated SnapshotJob never restores through the stale candidate", func(t *testing.T) {
@@ -405,7 +406,7 @@ func nativeRestoreTestSnapshot() *snapshotv1alpha1.PodSnapshot {
 			UID:       types.UID("snapshot-uid"),
 			Annotations: map[string]string{
 				consts.SnapshotCompatibilityVersionAnnotation: consts.SnapshotCompatibilityVersion,
-				consts.SnapshotWorkerHashAnnotation:           "worker-v1",
+				consts.SnapshotCompatibilityHashAnnotation:    "compatibility-v1",
 				consts.SnapshotGMSModeAnnotation:              consts.SnapshotGMSModeDisabled,
 			},
 		},
@@ -440,14 +441,15 @@ func nativeRestoreCandidatePod(snapshot *snapshotv1alpha1.PodSnapshot) *corev1.P
 				consts.KubeLabelDynamoWorkerHash:    "worker-v1",
 			},
 			Annotations: map[string]string{
-				consts.CheckpointRestoreCandidateAnnotation:       consts.KubeLabelValueTrue,
-				consts.CheckpointNameAnnotation:                   snapshot.Name,
-				consts.RestoreCandidateSourceKindAnnotation:       consts.RestoreCandidateSourcePodSnapshot,
-				consts.SnapshotCandidateUIDAnnotation:             string(snapshot.UID),
-				consts.SnapshotCandidateContentAnnotation:         "content-a",
-				consts.SnapshotCandidateGMSModeAnnotation:         consts.SnapshotGMSModeDisabled,
-				consts.SnapshotCandidateVersionAnnotation:         consts.SnapshotCompatibilityVersion,
-				consts.RestoreCandidateTargetContainersAnnotation: "engine-0,engine-1",
+				consts.CheckpointRestoreCandidateAnnotation:         consts.KubeLabelValueTrue,
+				consts.CheckpointNameAnnotation:                     snapshot.Name,
+				consts.RestoreCandidateSourceKindAnnotation:         consts.RestoreCandidateSourcePodSnapshot,
+				consts.SnapshotCandidateUIDAnnotation:               string(snapshot.UID),
+				consts.SnapshotCandidateContentAnnotation:           "content-a",
+				consts.SnapshotCandidateGMSModeAnnotation:           consts.SnapshotGMSModeDisabled,
+				consts.SnapshotCandidateVersionAnnotation:           consts.SnapshotCompatibilityVersion,
+				consts.SnapshotCandidateCompatibilityHashAnnotation: "compatibility-v1",
+				consts.RestoreCandidateTargetContainersAnnotation:   "engine-0,engine-1",
 			},
 		},
 		Spec: corev1.PodSpec{

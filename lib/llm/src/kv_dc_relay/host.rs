@@ -39,11 +39,13 @@ use tokio_util::sync::CancellationToken;
 
 use super::actor::{ActorFault, DEFAULT_FAULT_CAPACITY, KvDcRelayHandle, KvDcRelayRecoveryTarget};
 use super::discovery::{
-    DcMembershipView, DcMembershipWatch, EndpointMembership, KvCacheDomainKey,
-    KvDcRelayDiscoveryConfig, MaterializationConflict, MaterializationConflictSubject,
+    DcMembershipView, EndpointMembership, KvCacheDomainKey, MaterializationConflict,
+    MaterializationConflictSubject,
 };
 use super::identity::{CanonicalModelRegistration, DcPoolCatalog, DcRelayIdentity, WorkerRole};
 use super::load::PoolLoadSnapshot;
+use super::membership_watch::DcMembershipWatch;
+use super::namespace_source::discovery::KvDcRelayDiscoveryConfig;
 use super::pool_registry::{
     PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolRetirementMode,
     drain_faults_while,
@@ -134,8 +136,14 @@ impl Default for KvDcRelayProducerConfig {
 }
 
 #[derive(Debug, Clone)]
+pub enum KvDcRelaySources {
+    Discovery(KvDcRelayDiscoveryConfig),
+    File(super::namespace_source::file::KvDcRelaySourcesFile),
+}
+
+#[derive(Debug, Clone)]
 pub struct KvDcRelayConfig {
-    pub discovery: KvDcRelayDiscoveryConfig,
+    pub sources: KvDcRelaySources,
     pub producer: KvDcRelayProducerConfig,
     pub transport: Option<KvDcRelayGrpcConfig>,
 }
@@ -143,10 +151,10 @@ pub struct KvDcRelayConfig {
 impl Default for KvDcRelayConfig {
     fn default() -> Self {
         Self {
-            discovery: KvDcRelayDiscoveryConfig {
+            sources: KvDcRelaySources::Discovery(KvDcRelayDiscoveryConfig {
                 watch_all: true,
                 ..Default::default()
-            },
+            }),
             producer: KvDcRelayProducerConfig::default(),
             transport: None,
         }
@@ -286,6 +294,7 @@ pub struct KvDcRelayActorStats {
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayHealth {
+    pub sources: super::namespace_source::KvDcRelaySourcesStatus,
     pub healthy: bool,
     pub shutting_down: bool,
     pub host_last_error: Option<String>,
@@ -631,7 +640,9 @@ impl KvDcRelay {
             dc_id.trim() == dc_id,
             "KV DC Relay dc_id must not contain leading or trailing whitespace"
         );
-        config.discovery.validate()?;
+        if let KvDcRelaySources::Discovery(discovery) = &config.sources {
+            discovery.validate()?;
+        }
         validate_publication_capacity(config.producer.expected_unique_blocks)?;
         anyhow::ensure!(
             config.producer.publication_threshold != 0,
@@ -656,9 +667,9 @@ impl KvDcRelay {
         let relay_identity =
             DcRelayIdentity::new(component.drt().connection_id(), new_relay_incarnation()?);
         let cancel = component.drt().child_token();
-        let membership = DcMembershipWatch::start(
+        let membership = DcMembershipWatch::start_sources(
             component.drt().discovery(),
-            config.discovery,
+            config.sources,
             cancel.clone(),
         )
         .await?;
@@ -913,6 +924,12 @@ impl KvDcRelay {
             || (transport_health.serving && transport_health.last_error.is_none());
         let host_last_error = self.terminal.last_error();
         KvDcRelayHealth {
+            sources: self
+                .membership
+                .lock()
+                .as_ref()
+                .map(|m| m.sources_status())
+                .unwrap_or_default(),
             healthy: !self.cancel.is_cancelled()
                 && host_last_error.is_none()
                 && fenced_endpoint_count == 0

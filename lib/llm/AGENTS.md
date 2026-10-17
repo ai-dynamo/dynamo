@@ -1,3 +1,10 @@
+# Protocol Field Handling
+
+Before changing request or response fields, validation, preprocessing, backend translation, or
+response projection, read the
+[protocol field handling contract](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/protocol-field-handling.md).
+Identify every semantic owner and preserve the field's documented end-to-end behavior.
+
 # N-2 Worker / Frontend Compatibility
 
 Assume N-2 mixed-version operation between workers and frontends during rolling
@@ -6,8 +13,15 @@ previous releases may coexist in any combination and must interoperate across
 the worker/frontend boundary. This includes a single frontend concurrently
 discovering worker cards from multiple supported releases for the same logical
 deployment or worker set. Differences caused only by supported wire evolution
-must not split otherwise compatible workers, fail discovery closed, or remove
-healthy serving state. N-3 and older combinations are unsupported unless a
+must remain decodable through the supported boundary normalization and
+compatibility shims. Within one WorkerSet, admission requires equal MDC
+checksums after that normalization and tokenizer overrides. The first accepted
+configuration retains the set while any of its workers remain; a mismatched
+newcomer receives no traffic and must not remove healthy serving state.
+Equivalent serving behavior or supported wire representations do not grant a
+separate exemption from checksum equality. See
+[`src/discovery/AGENTS.md`](src/discovery/AGENTS.md) for the admission and
+succession contract. N-3 and older combinations are unsupported unless a
 narrower temporary exception is explicitly documented.
 
 Treat model deployment cards, discovery metadata, and worker/frontend wire

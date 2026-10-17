@@ -22,6 +22,42 @@
 # the cluster-wide operator.
 upgradeCRD: true
 
+# External Grove validation runs before Helm install/upgrade and Argo CD sync.
+grovePreflight:
+  # Disable only when compatibility is checked by a separate deployment gate.
+  enabled: true
+  # Python standard library only; override with an internal mirror for restricted clusters.
+  image: docker.io/library/python:3.12-slim
+  imagePullSecrets: []
+  activeDeadlineSeconds: 120
+  # Independent of controller affinity: the Job runs before the controller exists.
+  affinity: {}
+  # Null uses runAsNonRoot=true, runAsUser=65532, seccompProfile.type=RuntimeDefault.
+  # A map replaces the entire context; omit runAsUser on OpenShift for admission to assign it.
+  podSecurityContext: null
+  # Empty namespace discovers the controller across all namespaces.
+  namespace: ""
+  # Requires namespace; empty discovers Deployments containing containerName.
+  deploymentName: ""
+
+# The LPX scheduler and its CRDs must be installed separately.
+lpx:
+  # -- EXPERIMENTAL: Enable the Dynamo operator's LPX integration. Startup requires the
+  # externally installed scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API.
+  enabled: false
+  # -- Configure the LPU model registry used by the LPX integration.
+  modelRegistryURL: ""
+
+dgdrV1Beta2:
+  # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2
+  # API schemas. DynamoGraphDeploymentRun and DynamoGraphDeploymentCandidate objects
+  # created through these schemas are persisted in etcd. Incompatible schema changes
+  # may make stored objects unreadable or block future CRD upgrades. When false, the
+  # CRD init container omits those resources and removes v1beta2 from
+  # DynamoGraphDeploymentRequest before installation. The operator does not reconcile
+  # v1beta2 resources.
+  enabled: false
+
 # Environment variables to pass to operator Deployment.
 env: []
 
@@ -44,6 +80,21 @@ gpuDiscovery:
 controllerManager:
   tolerations: []
   affinity: {}
+  # Soft spread of controller-manager replicas across nodes (ScheduleAnyway
+  # never blocks small clusters). Hostname-only on purpose: bare-metal nodes
+  # without zone labels would otherwise be excluded from spread scoring. Set []
+  # to restore scheduler defaults; add a zone constraint for zoned clusters.
+  #
+  # matchLabelKeys is deliberately omitted: pod-spec rewriters that inject
+  # pod-template-hash into the labelSelector (e.g. vcluster's syncer) fail
+  # the API validation forbidding matchLabelKeys/labelSelector overlap.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          control-plane: controller-manager
 
   # -- Extra labels to add to the controller-manager pod template.
   # Useful for unified service tagging conventions
@@ -90,22 +141,17 @@ controllerManager:
       requests:
         cpu: 512m
         memory: 1Gi
+    volumeMounts: []
+    volumes: []
   replicas: 1
   serviceAccount:
     annotations: {}
 
 planner:
   powerAwareness:
-    # -- Grant the Planner's ServiceAccount pods/list in the DGD namespace.
-    # Required for power-annotation settlement checks during startup when
-    # enable_power_awareness=true. Leaving this false avoids granting an
-    # unnecessary namespace-level permission to power-disabled Planners.
-    # Note: this is an installation-wide capability flag; per-instance
-    # power awareness is still controlled by enable_power_awareness in the
-    # Planner config. In clusters where multiple Planner instances share
-    # the standard ServiceAccount, enabling this flag grants pods/list to
-    # all of them. A separate ServiceAccount per Planner is needed for
-    # truly per-instance least privilege.
+    # -- Deprecated compatibility value. Planner pods/list is now always granted
+    # in the DGD namespace for startup/drain detection. Per-instance power
+    # awareness remains controlled by enable_power_awareness in Planner config.
     enabled: false
 
 dynamo:

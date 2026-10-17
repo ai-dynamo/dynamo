@@ -17,7 +17,7 @@ print_launch_banner "Launching Disaggregated Serving + LMCache (2 GPUs)" "$MODEL
 python -m dynamo.frontend --router-mode kv &
 
 # run decode worker on GPU 0, without enabling LMCache
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --disaggregation-mode decode --disable-hybrid-kv-cache-manager --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --disaggregation-mode decode --disable-hybrid-kv-cache-manager --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' &
 
 # wait for decode worker to initialize
 sleep 20
@@ -29,7 +29,7 @@ CUDA_VISIBLE_DEVICES=1 \
     --model "$MODEL" \
     --disaggregation-mode prefill \
     --disable-hybrid-kv-cache-manager \
-    --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
+    --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_producer"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

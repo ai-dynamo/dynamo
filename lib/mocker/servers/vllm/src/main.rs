@@ -1,11 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use tonic_health_v14 as tonic_health;
+use tonic_v14 as tonic;
+
 use std::net::SocketAddr;
 
 use anyhow::Context;
 use clap::Parser;
-use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_mocker::common::protocols::MockerConfig;
+use dynamo_sidecar_common::DEFAULT_MAX_GRPC_MESSAGE_SIZE;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::proto::control_server::ControlServer;
 use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
@@ -17,12 +21,16 @@ use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
 )]
 struct Args {
     /// Address on which to expose the vLLM-compatible gRPC service.
-    #[arg(long, default_value = "127.0.0.1:50051")]
+    #[arg(long, default_value = "127.0.0.1:30001")]
     listen: SocketAddr,
 
     /// Model name exposed by the mock server.
     #[arg(long, default_value = "mocker-model")]
     model: String,
+
+    /// Accept opaque image payloads and advertise multimodal support.
+    #[arg(long)]
+    supports_multimodal: bool,
 
     /// Wire-level serving role to emulate.
     #[arg(long, value_enum, default_value_t = ServerMode::Aggregated)]
@@ -41,17 +49,17 @@ struct Args {
     extra_engine_args: Option<String>,
 }
 
-fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockEngineArgs> {
+fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockerConfig> {
     let args = match value {
-        None => MockEngineArgs::default(),
+        None => MockerConfig::default(),
         Some(value) if value.trim_start().starts_with('{') => {
-            MockEngineArgs::from_json_str(value).map_err(anyhow::Error::msg)?
+            MockerConfig::from_json_str(value).map_err(anyhow::Error::msg)?
         }
-        Some(path) => MockEngineArgs::from_json_file(std::path::Path::new(path))
+        Some(path) => MockerConfig::from_json_file(std::path::Path::new(path))
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("failed to load --extra-engine-args from {path}"))?,
     };
-    args.normalized().context("invalid Mocker engine arguments")
+    Ok(args)
 }
 
 #[tokio::main]
@@ -69,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
         MockerServerConfig {
             model: args.model,
             mode: args.disaggregation_mode,
+            supports_multimodal: args.supports_multimodal,
             seed: args.seed,
             max_concurrent_requests: args.max_concurrent_requests,
         },
@@ -89,7 +98,11 @@ async fn main() -> anyhow::Result<()> {
         .set_serving::<InferenceServer<VllmMockerService>>()
         .await;
     tonic::transport::Server::builder()
-        .add_service(InferenceServer::new(service.clone()))
+        .add_service(
+            InferenceServer::new(service.clone())
+                .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+                .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE),
+        )
         .add_service(ControlServer::new(service))
         .add_service(health_service)
         .serve_with_shutdown(args.listen, async {

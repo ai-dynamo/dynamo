@@ -60,6 +60,41 @@ function checkFilter(file, patterns) {
 // Test cases: [file, expectations, description]
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
+  {
+    file: 'components/src/dynamo/artifacts/storage.py',
+    expect: { core: true, frontend: true, vllm: false },
+    desc: 'generic artifact transport keeps shared runtime CI'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/tests/test_operations.py',
+    expect: { core: true, frontend: true, vllm: false },
+    desc: 'generic artifact tests keep shared runtime CI'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/vllm/capture.py',
+    expect: { core: false, frontend: false, vllm: true },
+    desc: 'vllm artifact capture triggers its backend CI'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/vllm/tests/test_format.py',
+    expect: { core: false, frontend: false, vllm: true },
+    desc: 'vllm artifact codec tests trigger their backend CI'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/README.md',
+    expect: { core: false, frontend: false, vllm: false, ignore: true },
+    desc: 'artifact documentation alone avoids runtime builds'
+  },
+  {
+    file: 'lib/llm/tests/fixtures/openapi/requests.json',
+    expect: { rust: true },
+    desc: 'native request schema fixtures trigger Rust checks'
+  },
+  {
+    file: 'lib/llm/tests/fixtures/openapi/responses.json',
+    expect: { rust: true },
+    desc: 'native response schema fixtures trigger Rust checks'
+  },
   // dev/local-dev templates build only the dev images -- they must NOT pull in
   // `core` (all runtime builds + the GPU test matrix), and must not be silently
   // uncovered the way they were when they sat in `ignore`.
@@ -90,6 +125,21 @@ const testCases = [
     desc: 'trtllm script triggers only trtllm'
   },
   {
+    file: 'examples/backends/tokenspeed/tests/test_validate_disagg.py',
+    expect: { core: true },
+    desc: 'TokenSpeed validator tests trigger the runtime test lane'
+  },
+  {
+    file: 'examples/backends/tokenspeed/launch_disagg.sh',
+    expect: { core: true },
+    desc: 'TokenSpeed example code triggers runtime validation'
+  },
+  {
+    file: 'examples/backends/tokenspeed/README.md',
+    expect: { core: false },
+    desc: 'TokenSpeed documentation alone avoids runtime builds'
+  },
+  {
     file: 'recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml',
     expect: { core: false, examples: true },
     desc: 'recipe matrix dotfile triggers recipe check without core'
@@ -110,9 +160,19 @@ const testCases = [
     desc: 'any docs/tests descendant triggers recipe check without core'
   },
   {
+    file: 'deploy/operator/config/crd/bases/nvidia.com_dynamomodels.yaml',
+    expect: { core: false, docs: false, examples: true, operator: true },
+    desc: 'every operator CRD base triggers generated recipe OpenAPI checks'
+  },
+  {
     file: 'components/src/dynamo/vllm/worker.py',
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
+  },
+  {
+    file: 'components/src/dynamo/aisimulate/output/dgd/adapter.py',
+    expect: { core: false, planner: true },
+    desc: 'AISimulate Dynamo adapter triggers planner validation'
   },
 
   // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
@@ -122,9 +182,9 @@ const testCases = [
     desc: 'common sidecar source avoids unrelated build and E2E filters'
   },
   {
-    file: 'lib/sidecar/vllm/proto/vllm_grpc.proto',
+    file: 'lib/sidecar/trtllm/proto/openengine/v1/generation.proto',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
-    desc: 'vllm sidecar proto triggers Rust checks without backend E2E'
+    desc: 'sidecar proto contracts trigger Rust checks without backend E2E'
   },
   {
     file: 'lib/sidecar/sglang/src/lib.rs',
@@ -170,18 +230,18 @@ const testCases = [
   // Doc files should be excluded from core (negation patterns)
   {
     file: 'lib/README.md',
-    expect: { core: false, vllm: false, docs: true },
-    desc: 'lib README excluded from core, matches docs'
+    expect: { core: false, vllm: false, docs: false, ignore: true },
+    desc: 'lib README is classification-only and excluded from core'
   },
   {
     file: 'tests/README.md',
-    expect: { core: false, docs: true },
-    desc: 'tests README excluded from core'
+    expect: { core: false, docs: false, ignore: true },
+    desc: 'tests README is classification-only and excluded from core'
   },
   {
     file: 'lib/docs/guide.txt',
-    expect: { core: false, docs: true },
-    desc: 'txt file excluded from core'
+    expect: { core: false, docs: false, ignore: true },
+    desc: 'txt file is classification-only and excluded from core'
   },
   {
     file: 'docs/guide.md',
@@ -281,6 +341,16 @@ const testCases = [
     desc: 'sglang snapshot.py gates only sglang checkpoint tests'
   },
   {
+    file: 'container/context.yaml',
+    expect: {
+      snapshot: false,
+      snapshot_vllm: false,
+      snapshot_sglang: true,
+      snapshot_trtllm: false,
+    },
+    desc: 'runtime tag changes gate the SGLang checkpoint tests'
+  },
+  {
     file: 'components/src/dynamo/trtllm/snapshot.py',
     expect: {
       trtllm: true,
@@ -317,7 +387,7 @@ const testCases = [
     desc: 'Operator CRD changes trigger snapshot contract tests'
   },
   {
-    file: 'deploy/operator/config/rbac/role.yaml',
+    file: 'deploy/helm/charts/platform/components/operator/files/role.yaml',
     expect: { snapshot: true, operator: true },
     desc: 'Operator RBAC changes trigger snapshot contract tests'
   },

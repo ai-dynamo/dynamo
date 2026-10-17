@@ -51,7 +51,7 @@ spec:
             requests:
               cpu: "16"
               memory: 128Gi
-  - name: PrefillWorker
+  - name: prefill
     type: prefill
     replicas: 1
     multinode:
@@ -111,7 +111,7 @@ spec:
           - --disaggregation-mode
           - prefill
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           - --speculative-config
           - '{"model":"Inferact/Kimi-K3-DSpark","attention_backend":"TOKENSPEED_MLA","method":"dspark","num_speculative_tokens":7}'
           # For perf benchmarking only, replace the two entries above with:
@@ -125,6 +125,8 @@ spec:
           - name: HF_HUB_OFFLINE
             value: "1"
           - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: DYN_SELF_HOST_METADATA
             value: "1"
           - name: DYN_REQUEST_PLANE
             value: tcp
@@ -187,7 +189,7 @@ spec:
           persistentVolumeClaim:
             claimName: shared-model-cache
 
-  - name: DecodeWorker
+  - name: decode
     type: decode
     replicas: 1
     multinode:
@@ -247,7 +249,7 @@ spec:
           - --disaggregation-mode
           - decode
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
           - --speculative-config
           - '{"model":"Inferact/Kimi-K3-DSpark","attention_backend":"TOKENSPEED_MLA","method":"dspark","num_speculative_tokens":7}'
           # For perf benchmarking only, replace the two entries above with:
@@ -259,6 +261,8 @@ spec:
           - name: HF_HUB_OFFLINE
             value: "1"
           - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: DYN_SELF_HOST_METADATA
             value: "1"
           - name: DYN_REQUEST_PLANE
             value: tcp

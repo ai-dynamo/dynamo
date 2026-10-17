@@ -32,7 +32,7 @@ from dynamo.common.utils.prometheus import gather_with_labels
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
 
-    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
+    from dynamo._core import backend as _backend
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ def ensure_prometheus_multiproc_dir(
 
 
 def register_engine_registry(
-    metrics: "EngineMetrics",
+    metrics: _backend.EngineMetrics,
     registry: "CollectorRegistry",
     *,
     prefix_filters: Optional[list[str]] = None,
@@ -79,6 +79,10 @@ def register_engine_registry(
     multiproc-conflict case.
     """
     labels = metrics.auto_labels
+    from dynamo.common.utils.prometheus import get_prometheus_typed
+
+    # /metrics renders the engine's exposition text; OTLP exports the same
+    # metrics handed over typed. Register both so neither surface is missed.
     metrics.register_prometheus_expfmt_callback(
         lambda: gather_with_labels(
             registry,
@@ -87,10 +91,18 @@ def register_engine_registry(
             exclude_prefixes=exclude_prefixes,
         )
     )
+    metrics.register_prometheus_typed_callback(
+        lambda: get_prometheus_typed(
+            registry,
+            metric_prefix_filters=prefix_filters,
+            exclude_prefixes=exclude_prefixes,
+            inject_custom_labels=dict(labels) if labels else None,
+        )
+    )
 
 
 def register_global_registry(
-    metrics: "EngineMetrics",
+    metrics: _backend.EngineMetrics,
     *,
     engine_prefix: str,
     multiproc_only_prefixes: Optional[list[str]] = None,

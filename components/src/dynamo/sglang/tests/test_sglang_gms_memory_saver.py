@@ -19,9 +19,15 @@ from gpu_memory_service.common.locks import (  # noqa: E402
     GrantedLockType,
     RequestedLockType,
 )
+from gpu_memory_service.common.vmm import VMMDeviceType  # noqa: E402
 from gpu_memory_service.integrations.sglang.memory_saver import (  # noqa: E402
     GMSMemorySaverImpl,
 )
+
+# Expected device type for parametrized assertions — matches what
+# GMSMemorySaverImpl will produce via get_vmm_device_type().
+_HAS_XPU = hasattr(torch, "xpu") and torch.xpu.is_available()
+_EXPECTED_DEVICE = torch.device("xpu", 0) if _HAS_XPU else torch.device("cuda", 0)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -53,12 +59,12 @@ def test_setup_gms_declares_memory_saver(monkeypatch, fake_gms_model_loader):
             raise AssertionError(f"unexpected direct assignment: {name}={value!r}")
 
     server_args = ReadOnlyServerArgs()
-    declare_late_resolution = Mock()
-    monkeypatch.setattr(gms_sglang, "declare_late_resolution", declare_late_resolution)
+    declare_resolution = Mock()
+    monkeypatch.setattr(gms_sglang, "declare_resolution", declare_resolution)
 
     loader = gms_sglang.setup_gms(server_args)
 
-    declare_late_resolution.assert_called_once_with(
+    declare_resolution.assert_called_once_with(
         server_args,
         "dynamo.gms",
         enable_memory_saver=True,
@@ -67,25 +73,12 @@ def test_setup_gms_declares_memory_saver(monkeypatch, fake_gms_model_loader):
     assert gms_sglang.is_gms_active()
 
 
-def test_setup_gms_uses_override_when_declaration_is_unavailable(
-    monkeypatch,
-    fake_gms_model_loader,
-):
-    override = Mock()
-    server_args = SimpleNamespace(override=override)
-    monkeypatch.setattr(gms_sglang, "declare_late_resolution", None)
-
-    gms_sglang.setup_gms(server_args)
-
-    override.assert_called_once_with("dynamo.gms", enable_memory_saver=True)
-
-
 def test_setup_gms_assigns_memory_saver_for_legacy_args(
     monkeypatch,
     fake_gms_model_loader,
 ):
     server_args = SimpleNamespace(enable_memory_saver=False)
-    monkeypatch.setattr(gms_sglang, "declare_late_resolution", None)
+    monkeypatch.setattr(gms_sglang, "declare_resolution", None)
 
     gms_sglang.setup_gms(server_args)
 
@@ -126,6 +119,14 @@ class _FakeManager:
 
 @pytest.fixture
 def build_impl(monkeypatch, tmp_path):
+    # Ensure get_vmm_device_type() returns the correct type for
+    # GMSMemorySaverImpl.__init__ which calls it to determine self._device.
+    _dev_type = VMMDeviceType.XPU if _HAS_XPU else VMMDeviceType.CUDA
+    monkeypatch.setattr(
+        gms_memory_saver,
+        "get_vmm_device_type",
+        lambda: _dev_type,
+    )
     monkeypatch.setattr(
         gms_memory_saver,
         "get_socket_path",
@@ -168,9 +169,9 @@ def build_impl(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     ("tag", "weights_lock", "expected_pool_calls"),
     [
-        ("weights", GrantedLockType.RW, [("weights", torch.device("cuda", 0))]),
+        ("weights", GrantedLockType.RW, [("weights", _EXPECTED_DEVICE)]),
         ("weights", GrantedLockType.RO, []),
-        ("kv_cache", GrantedLockType.RW, [("kv_cache", torch.device("cuda", 0))]),
+        ("kv_cache", GrantedLockType.RW, [("kv_cache", _EXPECTED_DEVICE)]),
         ("cuda_graph", GrantedLockType.RW, []),
     ],
 )

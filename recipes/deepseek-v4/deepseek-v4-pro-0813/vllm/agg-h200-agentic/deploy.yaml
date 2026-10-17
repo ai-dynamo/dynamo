@@ -34,7 +34,7 @@ spec:
               port: 8000
             periodSeconds: 15
             failureThreshold: 200
-  - name: VllmDecodeWorker
+  - name: worker
     type: worker
     replicas: 1
     podTemplate:

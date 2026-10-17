@@ -937,11 +937,23 @@ impl Placement {
 pub struct PlacementEvent {
     pub placement: Placement,
     pub event: KvCacheEvent,
+    /// Session that triggered this store or reuse report, if provided by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl PlacementEvent {
     pub fn new(placement: Placement, event: KvCacheEvent) -> Self {
-        Self { placement, event }
+        Self {
+            placement,
+            event,
+            session_id: None,
+        }
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
     }
 
     pub fn local_gpu(worker_id: WorkerId, event: KvCacheEvent) -> Self {
@@ -952,12 +964,14 @@ impl PlacementEvent {
         let PlacementOwner::LocalWorker(worker) = self.placement.owner else {
             return None;
         };
-        Some(RouterEvent::with_residency_domain(
+        let mut event = RouterEvent::with_residency_domain(
             worker.worker_id,
             self.event,
             self.placement.tier,
             self.placement.residency_domain,
-        ))
+        );
+        event.session_id = self.session_id;
+        Some(event)
     }
 }
 
@@ -1075,9 +1089,47 @@ pub struct WorkerSelectionResult {
     /// Approximate cached-token count derived from the weighted cache hit.
     pub cached_tokens: usize,
 
+    /// Greatest raw router-visible overlap among eligible workers, in tokens,
+    /// for tracked requests.
+    pub max_raw_cached_tokens: Option<usize>,
+
+    /// Selected worker's raw router-visible overlap, in tokens, for tracked requests.
+    pub selected_raw_cached_tokens: Option<usize>,
+
     /// Selected worker's projected decode load after adding this request's
     /// prompt blocks, in scheduler-tracked block units.
     pub potential_decode_blocks: usize,
+}
+
+/// How many candidates a selection trace retains: the `top_k` lowest-cost rows
+/// plus the selected worker, or every candidate when `top_k` is zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionTraceSpec {
+    pub top_k: usize,
+}
+
+/// A scored candidate: the worker and its total cost after every scorer ran, in
+/// the policy's cost units (scheduler-tracked KV blocks for the builtin policy).
+/// Lower is better.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelectionTraceRow {
+    pub worker: WorkerWithDpRank,
+    pub cost: f64,
+}
+
+/// Per-candidate costs captured for one worker selection.
+///
+/// Rows are unordered. When `rows.len() < candidate_count`, the selection was
+/// truncated to the `top_k` lowest-cost candidates plus the selected worker,
+/// which is always present.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectionTrace {
+    /// Eligible candidates the policy scored, before truncation.
+    pub candidate_count: usize,
+    /// Whether the host pinned the selection to one worker and rank.
+    pub pinned: bool,
+    /// Retained candidates, unordered.
+    pub rows: Vec<SelectionTraceRow>,
 }
 
 /// Active load metrics for a worker, used for overload detection.
@@ -1470,10 +1522,13 @@ pub struct RouterEvent {
     ///
     /// This is absent on the legacy Worker-only wire. CacheOwner events are
     /// valid only on a versioned, residency-aware source where this field is
-    /// present; they must never be sent to legacy consumers. Keep this field
-    /// last so legacy positional MessagePack remains prefix-compatible.
+    /// present; they must never be sent to legacy consumers. MessagePack
+    /// compatibility relies on `to_vec_named`; positional encoding is unsupported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_source: Option<CacheOwnerId>,
+    /// Session that triggered this store or reuse report, if provided by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl RouterEvent {
@@ -1510,6 +1565,7 @@ impl RouterEvent {
         Self {
             worker_id,
             state_source: None,
+            session_id: None,
             storage_tier,
             residency_domain: WireResidencyDomain::explicit(residency_domain),
             event,
@@ -1530,6 +1586,11 @@ impl RouterEvent {
     /// Attach an explicit stable source to a residency-aware event.
     pub fn with_state_source(mut self, state_source: CacheOwnerId) -> Self {
         self.state_source = Some(state_source);
+        self
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
         self
     }
 
@@ -1896,6 +1957,7 @@ mod tests {
             ];
             let decoded: Vec<RouterEvent> =
                 rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy).unwrap()).unwrap();
+            assert_eq!(decoded[0].session_id, None);
             assert_eq!(
                 decoded[0].resolved_residency_domain(),
                 Ok(ResidencyDomain::Worker)
@@ -1907,11 +1969,16 @@ mod tests {
                 stored(3),
                 StorageTier::Disk,
                 ResidencyDomain::Worker,
-            );
+            )
+            .with_session_id("session-1");
             let old_reader: LegacyRouterEvent =
                 rmp_serde::from_slice(&rmp_serde::to_vec_named(&explicit_worker).unwrap()).unwrap();
             assert_eq!(old_reader.event.event_id, 3);
             assert_eq!(old_reader.storage_tier, StorageTier::Disk);
+
+            let round_trip: RouterEvent =
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&explicit_worker).unwrap()).unwrap();
+            assert_eq!(round_trip.session_id.as_deref(), Some("session-1"));
 
             let mixed = vec![
                 ExplicitDomainEvent {

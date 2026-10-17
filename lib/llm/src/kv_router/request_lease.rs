@@ -4,7 +4,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Weak,
+        Arc, OnceLock, Weak,
         atomic::{AtomicU8, Ordering},
     },
     time::Duration,
@@ -12,15 +12,15 @@ use std::{
 
 use dynamo_kv_router::{
     multi_worker_sequence::{ReplicaRequestLeaseObserver, active_request_expiry_duration},
-    scheduling::AttemptId,
+    scheduling::{
+        AttemptId,
+        queue::{SchedulerBookingCleanup, SchedulerBookingDescriptor},
+    },
 };
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    indexer::ApproximateRequestLease,
-    scheduler::{SchedulerBookingCleanup, SchedulerBookingDescriptor},
-};
+use super::indexer::ApproximateRequestLease;
 
 const LEASE_QUIET: u8 = 0;
 const LEASE_TOUCHED: u8 = 1;
@@ -97,7 +97,9 @@ impl RequestLeaseRecord {
 
 struct RequestLeaseManagerInner {
     active: Mutex<ActiveRequestLeases>,
-    scheduler: SchedulerBookingCleanup,
+    /// Set once the scheduler exists (`set_scheduler`); the manager is built
+    /// first because the scheduler takes it as its lease observer.
+    scheduler: OnceLock<SchedulerBookingCleanup>,
 }
 
 #[derive(Default)]
@@ -168,8 +170,29 @@ impl RequestLeaseManagerInner {
         }
     }
 
+    /// The scheduler cleanup, or `None` (logged) for an event that arrives
+    /// before `set_scheduler`; that is a wiring bug and the booking is not
+    /// released here.
+    fn scheduler(
+        &self,
+        event: &str,
+        booking: &SchedulerBookingDescriptor,
+    ) -> Option<&SchedulerBookingCleanup> {
+        let scheduler = self.scheduler.get();
+        if scheduler.is_none() {
+            tracing::error!(
+                request_id = %booking.request_id,
+                event,
+                "request lifecycle event before the lease manager's scheduler was set; the booking will not be released"
+            );
+        }
+        scheduler
+    }
+
     fn enqueue_completion(&self, record: &RequestLeaseRecord) {
-        self.scheduler.enqueue(record.booking.clone());
+        if let Some(scheduler) = self.scheduler("completed", &record.booking) {
+            scheduler.enqueue(record.booking.clone());
+        }
         if let Some(approximate_lru) = &record.approximate_lru {
             approximate_lru.release_now();
         }
@@ -179,7 +202,9 @@ impl RequestLeaseManagerInner {
         // NOTE: Request-liveness expiry is deliberately isolated to this router.
         // Local and mirrored scheduler copies expire independently, and only an
         // explicit lifecycle completion publishes `Free` to peer routers.
-        self.scheduler.enqueue_expired(record.booking.clone());
+        if let Some(scheduler) = self.scheduler("expired", &record.booking) {
+            scheduler.enqueue_expired(record.booking.clone());
+        }
         if let Some(approximate_lru) = &record.approximate_lru {
             approximate_lru.release_now();
         }
@@ -210,10 +235,10 @@ pub(crate) struct RequestLeaseManager {
 }
 
 impl RequestLeaseManager {
-    pub(crate) fn new(scheduler: SchedulerBookingCleanup, cancellation: CancellationToken) -> Self {
+    pub(crate) fn new(cancellation: CancellationToken) -> Self {
         let inner = Arc::new(RequestLeaseManagerInner {
             active: Mutex::new(ActiveRequestLeases::default()),
-            scheduler,
+            scheduler: OnceLock::new(),
         });
         start_reaper(
             Arc::downgrade(&inner),
@@ -221,6 +246,21 @@ impl RequestLeaseManager {
             cancellation,
         );
         Self { inner }
+    }
+
+    /// Install the scheduler cleanup. Must run before any lifecycle event can
+    /// reach this manager (the replica ingress starts after it).
+    pub(crate) fn set_scheduler(&self, scheduler: SchedulerBookingCleanup) {
+        let installed = self.inner.scheduler.set(scheduler).is_ok();
+        debug_assert!(installed, "request lease manager scheduler set twice");
+    }
+
+    pub(crate) fn replica_observer(&self) -> Arc<dyn ReplicaRequestLeaseObserver> {
+        // The scheduler actor owns slots and their observer. A strong manager reference
+        // here would keep the actor's own command sender alive through booking cleanup.
+        Arc::new(WeakRequestLeaseObserver {
+            manager: Arc::downgrade(&self.inner),
+        })
     }
 
     pub(crate) fn register_local(
@@ -298,19 +338,21 @@ impl RequestLeaseManager {
         }
         self.inner.remove(record);
 
-        // Enqueue both subsystem commands before the first await. Cancellation of
-        // the finishing future therefore cannot strand either cleanup.
+        // Release the scheduler booking and start LRU cleanup before the first
+        // await. Cancellation of this future cannot strand either cleanup.
         let scheduler_ack = self
             .inner
-            .scheduler
-            .enqueue_acknowledged(record.booking.clone());
+            .scheduler("finished", &record.booking)
+            .map(|scheduler| scheduler.enqueue_acknowledged(record.booking.clone()));
         let lru_ack = record
             .approximate_lru
             .as_ref()
             .map(ApproximateRequestLease::begin_finish)
             .transpose();
 
-        if let Err(error) = scheduler_ack.wait().await {
+        if let Some(scheduler_ack) = scheduler_ack
+            && let Err(error) = scheduler_ack.wait().await
+        {
             tracing::warn!(
                 request_id = %record.booking.request_id,
                 worker = ?record.booking.worker,
@@ -343,17 +385,27 @@ impl RequestLeaseManager {
     }
 }
 
-impl ReplicaRequestLeaseObserver for RequestLeaseManager {
+struct WeakRequestLeaseObserver {
+    manager: Weak<RequestLeaseManagerInner>,
+}
+
+impl ReplicaRequestLeaseObserver for WeakRequestLeaseObserver {
     fn admitted(&self, booking: SchedulerBookingDescriptor) {
-        self.register_remote(booking);
+        if let Some(inner) = self.manager.upgrade() {
+            RequestLeaseManager { inner }.register_remote(booking);
+        }
     }
 
     fn progressed(&self, booking: &SchedulerBookingDescriptor) {
-        self.touch_booking(booking);
+        if let Some(inner) = self.manager.upgrade() {
+            RequestLeaseManager { inner }.touch_booking(booking);
+        }
     }
 
     fn completed(&self, booking: &SchedulerBookingDescriptor) {
-        self.complete_remote(booking);
+        if let Some(inner) = self.manager.upgrade() {
+            RequestLeaseManager { inner }.complete_remote(booking);
+        }
     }
 }
 
@@ -443,6 +495,77 @@ fn start_reaper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn replica_observer_forwards_live_callbacks_without_retaining_manager() {
+        use dynamo_kv_router::protocols::WorkerWithDpRank;
+
+        use crate::kv_router::{sequence::SequenceRequest, tests::tracked_router};
+
+        let router = tracked_router("replica-lease-observer").await;
+        let request_id = "replica-lease-callbacks".to_string();
+        let worker = WorkerWithDpRank::new(0, 0);
+        let attempt_id = router
+            .selection
+            .scheduler()
+            .add_request_admitted(SequenceRequest {
+                request_id: request_id.clone(),
+                token_sequence: None,
+                track_prefill_tokens: false,
+                expected_output_tokens: None,
+                prefill_load_hint: None,
+                worker,
+                lora_name: None,
+            })
+            .await
+            .unwrap();
+        let booking = SchedulerBookingDescriptor {
+            request_id: request_id.clone(),
+            worker,
+            attempt_id,
+        };
+        let manager = Arc::downgrade(&router.request_leases.inner);
+        let observer = router.request_leases.replica_observer();
+        assert!(
+            router
+                .request_leases
+                .inner
+                .matching_record(&booking)
+                .is_none()
+        );
+        observer.admitted(booking.clone());
+        let record = router
+            .request_leases
+            .inner
+            .matching_record(&booking)
+            .unwrap();
+        assert!(!record.clock.reap());
+        observer.progressed(&booking);
+        assert!(!record.clock.reap());
+        assert!(record.clock.is_active());
+        observer.completed(&booking);
+        assert!(!record.clock.is_active());
+        assert!(
+            router
+                .request_leases
+                .inner
+                .matching_record(&booking)
+                .is_none()
+        );
+        router
+            .selection
+            .scheduler()
+            .free(&request_id)
+            .await
+            .unwrap();
+        router.cancellation_token.cancel();
+        drop(router);
+        assert!(manager.upgrade().is_none());
+        observer.admitted(booking.clone());
+        observer.progressed(&booking);
+        observer.completed(&booking);
+        assert!(manager.upgrade().is_none());
+    }
 
     #[test]
     fn clock_coalesces_progress_and_cannot_resurrect_a_claimed_lease() {

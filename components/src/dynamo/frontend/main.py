@@ -27,11 +27,12 @@ from argparse import Namespace
 from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
+from packaging.version import Version
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.llm import (
-    AicPerfConfig,
+    AisPerfConfig,
     EngineType,
     EntrypointArgs,
     FrontendRoute,
@@ -41,6 +42,7 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from .cpu_affinity import warn_if_frontend_cpu_affinity_spans_numa_nodes
 from .frontend_args import FrontendArgGroup, FrontendConfig
 
 if TYPE_CHECKING:
@@ -259,6 +261,15 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
     config = FrontendConfig.from_cli_args(args)
     config.validate()
 
+    if config.chat_processor != "dynamo" and (
+        config.interactive or config.kserve_grpc_server
+    ):
+        mode_flag = "--interactive" if config.interactive else "--kserve-grpc-server"
+        parser.error(
+            f"--dyn-chat-processor {config.chat_processor} is only supported by the "
+            f"HTTP frontend, so it cannot be combined with {mode_flag}"
+        )
+
     vllm_flags = None
     sglang_flags = None
 
@@ -291,7 +302,11 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
-            from vllm.entrypoints.openai.cli_args import FrontendArgs
+
+            if Version(importlib.metadata.version("vllm")).release >= (0, 29):
+                from vllm.entrypoints.launchers.cli_args import FrontendArgs
+            else:
+                from vllm.entrypoints.openai.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)
@@ -391,6 +406,7 @@ async def async_main():
     # it connects to NATS eagerly, so NATS (m)TLS env vars must already be set or
     # the CLI flags are silently ignored (unlike the lazily-dialed TCP planes).
     _export_transport_tls_env(config)
+    warn_if_frontend_cpu_affinity_spans_numa_nodes(logger)
     runtime = DistributedRuntime(
         loop,
         config.discovery_backend,
@@ -419,6 +435,7 @@ async def async_main():
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,
         "http_port": config.http_port,
+        "batch_gateway_url": config.batch_gateway_url,
         "kv_cache_block_size": config.kv_cache_block_size,
         "router_config": router_config,
         "migration_limit": config.migration_limit,
@@ -442,6 +459,8 @@ async def async_main():
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
         kwargs["tls_key_path"] = config.tls_key_path
+    if config.tls_client_ca_cert_path:
+        kwargs["tls_client_ca_cert_path"] = config.tls_client_ca_cert_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:
@@ -463,8 +482,8 @@ async def async_main():
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
 
-    if config.router_prefill_load_model == "aic":
-        kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
+    if config.router_prefill_load_model == "ais":
+        kwargs["ais_perf_config"] = AisPerfConfig(**config.ais_perf_kwargs())
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

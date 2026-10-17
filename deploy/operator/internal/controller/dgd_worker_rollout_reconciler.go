@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -1331,10 +1332,14 @@ func (r *dgdWorkerRolloutReconciler) aggregateOldWorkerComponentStatuses(
 	for componentName, dcds := range oldDCDsByComponent {
 		sortOldWorkerDCDsNewestFirst(dcds)
 		status := aggregateOldWorkerDCDStatuses(dcds)
-		status.RuntimeNamespace = selectOldWorkerRuntimeNamespace(
+		activeDCD := selectActiveOldWorkerDCD(
 			dcds,
 			rollingUpdateCtx.OldWorkerReplicaTargetsByDCD,
 		)
+		if activeDCD != nil {
+			copyActiveWorkerProjection(&status, activeDCD.Status.Component)
+			status.RuntimeNamespace = oldWorkerRuntimeNamespace(*activeDCD)
+		}
 		oldStatuses[componentName] = status
 	}
 
@@ -1371,20 +1376,21 @@ func aggregateOldWorkerDCDStatuses(
 	return status
 }
 
-func selectOldWorkerRuntimeNamespace(
+func selectActiveOldWorkerDCD(
 	dcds []nvidiacomv1beta1.DynamoComponentDeployment,
 	replicaTargets map[string]int32,
-) string {
-	for _, dcd := range dcds {
+) *nvidiacomv1beta1.DynamoComponentDeployment {
+	for i := range dcds {
+		dcd := &dcds[i]
 		if replicaTargets[dcd.Name] > 0 {
-			return oldWorkerRuntimeNamespace(dcd)
+			return dcd
 		}
 	}
 
 	if len(dcds) == 0 {
-		return ""
+		return nil
 	}
-	return oldWorkerRuntimeNamespace(dcds[0])
+	return &dcds[0]
 }
 
 func oldWorkerRuntimeNamespace(dcd nvidiacomv1beta1.DynamoComponentDeployment) string {
@@ -1563,10 +1569,8 @@ func mergeWorkerComponentStatuses(
 			continue
 		}
 
-		if oldStatus.RuntimeNamespace != "" {
-			// Keep routing consumers on the old active worker namespace until rollout cutover.
-			newStatus.RuntimeNamespace = oldStatus.RuntimeNamespace
-		}
+		// Keep consumers on the old active worker projection until rollout cutover.
+		copyActiveWorkerProjection(&newStatus, &oldStatus)
 
 		// Build sorted ComponentNames from old and new DCD names.
 		componentNames := append(slices.Clone(oldStatus.ComponentNames), newStatus.ComponentNames...)
@@ -1581,6 +1585,28 @@ func mergeWorkerComponentStatuses(
 
 		componentStatuses[componentName] = newStatus
 	}
+}
+
+func copyActiveWorkerProjection(
+	dst *nvidiacomv1beta1.ComponentReplicaStatus,
+	src *nvidiacomv1beta1.ComponentReplicaStatus,
+) {
+	if dst == nil || src == nil {
+		return
+	}
+	dst.RuntimeNamespace = src.RuntimeNamespace
+	dst.ServedModelName = src.ServedModelName
+	dst.RuntimeComponentName = src.RuntimeComponentName
+	dst.GPUPowerLimitWatts = cloneInt64(src.GPUPowerLimitWatts)
+	dst.GPUsPerEngine = cloneInt64(src.GPUsPerEngine)
+	dst.GPUsPerReplica = cloneInt64(src.GPUsPerReplica)
+}
+
+func cloneInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	return ptr.To(*value)
 }
 
 func componentReplicaResourceNames(status *nvidiacomv1beta1.ComponentReplicaStatus, fallback string) []string {
