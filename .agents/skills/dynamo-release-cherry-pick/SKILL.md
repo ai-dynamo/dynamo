@@ -1,5 +1,5 @@
 ---
-name: release-cherry-pick
+name: dynamo-release-cherry-pick
 description: Describes how a fix reaches a Dynamo release branch after code freeze - cherry-picking a merged main fix into release/X.Y.Z, landing a release-only fix, or sponsoring an external contributor's Cherry-Pick Request - with the cherry-pick Linear labels, the Releases field, non-closing issue links, and the daily RC cutoff. Use when backporting a fix to a release branch, opening a PR against release/X.Y.Z, filing or sponsoring a Cherry-Pick Request, or asking how the cherry-pick labels work.
 license: Apache-2.0
 metadata:
@@ -141,6 +141,6 @@ following the internal steps above.
 
 ## Related
 
-- `issue-first` for linking work to issues on `main`. For QA bugs, the
+- `dynamo-issue-first` for linking work to issues on `main`. For QA bugs, the
   non-closing rule above overrides both its `Fixes` form and its convention
   of putting the issue key in the branch name.
