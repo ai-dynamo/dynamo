@@ -655,7 +655,8 @@ async fn sglang_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<support::sglang::Fixture>(),
     )
     .await;
-    failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Unknown);
+    assert!(error.to_string().contains("Generate"));
 }
 
 #[tokio::test]
