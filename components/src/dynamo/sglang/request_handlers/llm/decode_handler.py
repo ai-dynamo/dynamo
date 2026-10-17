@@ -41,6 +41,7 @@ from dynamo.sglang.engine_generate import (
     new_sglang_request_id,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.request_handlers.cancellation import ResponseStreamState
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     AUDIO_URL_KEY,
@@ -954,11 +955,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id_future: asyncio.Future[str] = asyncio.Future()
         request_ids: set[str] = set()
         first_output_seen = False
+        stream_state = ResponseStreamState()
         async with self._cancellation_monitor(
             request_id_future,
             context,
             submitted_request_id,
             request_ids=request_ids,
+            stream_state=stream_state,
         ) as cancellation_task:
             async for chunk in self._stream_until_cancelled(
                 stream_source, cancellation_task
@@ -966,6 +969,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 native_response = chunk["engine_data"]["sglang_response"]
                 output = chunk
                 meta_info = native_response.get("meta_info", {})
+                if meta_info.get("finish_reason"):
+                    stream_state.response_processed = True
                 sglang_request_id = meta_info.get("id")
                 if sglang_request_id:
                     request_ids.add(sglang_request_id)
@@ -1026,6 +1031,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             },
                         }
                 if not context.is_stopped():
+                    stream_state.response_processed = True
                     yield output
 
     async def _process_token_stream(
@@ -1054,16 +1060,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id_future: asyncio.Future[str] = asyncio.Future()
         request_ids: set[str] = set()
         first_output_seen = False
+        stream_state = ResponseStreamState()
         async with self._cancellation_monitor(
             request_id_future,
             context,
             submitted_request_id,
             request_ids=request_ids,
+            stream_state=stream_state,
         ) as cancellation_task:
             async for res in self._stream_until_cancelled(
                 stream_source, cancellation_task
             ):
                 meta_info = res.get("meta_info", {})
+                if meta_info.get("finish_reason"):
+                    stream_state.response_processed = True
                 sglang_request_id = meta_info.get("id")
                 if sglang_request_id:
                     request_ids.add(sglang_request_id)
@@ -1171,6 +1181,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if engine_data:
                     out["engine_data"] = engine_data
                 if not context.is_stopped():
+                    stream_state.response_processed = True
                     yield out
 
     async def _process_text_stream(
@@ -1197,16 +1208,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id_future: asyncio.Future[str] = asyncio.Future()
         request_ids: set[str] = set()
         first_output_seen = False
+        stream_state = ResponseStreamState()
         async with self._cancellation_monitor(
             request_id_future,
             context,
             submitted_request_id,
             request_ids=request_ids,
+            stream_state=stream_state,
         ) as cancellation_task:
             async for res in self._stream_until_cancelled(
                 stream_source, cancellation_task
             ):
                 meta_info = res.get("meta_info", {})
+                if meta_info.get("finish_reason"):
+                    stream_state.response_processed = True
                 sglang_request_id = meta_info.get("id")
                 if sglang_request_id:
                     request_ids.add(sglang_request_id)
@@ -1296,4 +1311,5 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if response_nvext:
                     response["nvext"] = response_nvext
                 if not context.is_stopped():
+                    stream_state.response_processed = True
                     yield response
