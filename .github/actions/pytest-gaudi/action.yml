@@ -1,0 +1,168 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Pytest (Gaudi)'
+description: |
+  Run pytest inside a Gaudi (HPU) runtime container. This is the Intel Gaudi
+  counterpart to .github/actions/pytest for NVIDIA GPUs and
+  .github/actions/pytest-xpu for Intel discrete GPUs.
+
+inputs:
+  image_tag:
+    description: 'Container image tag to run tests in'
+    required: true
+  pytest_marks:
+    description: 'Pytest -m marker expression'
+    required: true
+  test_suite_name:
+    description: 'Test suite name (used in artifact names)'
+    required: false
+    default: 'vllm-gaudi'
+  test_type:
+    description: 'Test type label'
+    required: false
+    default: 'pre_merge'
+  parallel_mode:
+    description: 'Parallelization mode: auto, none/0, or a number'
+    required: false
+    default: 'auto'
+  hf_token:
+    description: 'HuggingFace token'
+    required: false
+  docker_device_flags:
+    description: 'docker run flags from setup-gaudi'
+    required: false
+    default: ''
+  docker_env_flags:
+    description: 'docker run -e flags from setup-gaudi'
+    required: false
+    default: ''
+  pytest_ignore:
+    description: 'Space-separated list of paths to --ignore'
+    required: false
+    default: ''
+  pytest_deselect:
+    description: 'Space-separated list of test IDs to --deselect'
+    required: false
+    default: ''
+  hf_cache_path:
+    description: 'Host path to pre-populated HF model cache'
+    required: false
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run pytest in Gaudi container
+      shell: bash
+      env:
+        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_pytest
+        PYTEST_XML_FILE: pytest_test_report.xml
+        HF_TOKEN: ${{ inputs.hf_token }}
+      run: |
+        set +e
+
+        mkdir -p test-results
+
+        case "${{ inputs.parallel_mode }}" in
+          "auto") PARALLEL_OPTS="-n auto" ;;
+          "none"|"0") PARALLEL_OPTS="-n 0" ;;
+          *) PARALLEL_OPTS="-n ${{ inputs.parallel_mode }}" ;;
+        esac
+
+        IGNORE_ARGS=""
+        for p in ${{ inputs.pytest_ignore }}; do
+          IGNORE_ARGS="${IGNORE_ARGS} --ignore=${p}"
+        done
+        DESELECT_ARGS=""
+        for n in ${{ inputs.pytest_deselect }}; do
+          DESELECT_ARGS="${DESELECT_ARGS} --deselect=${n}"
+        done
+
+        PYTEST_CMD="mkdir -p /workspace/test-results /workspace/test-results/allure-results && pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${PYTEST_XML_FILE} --alluredir=/workspace/test-results/allure-results --durations=10 ${IGNORE_ARGS} ${DESELECT_ARGS} -m \"${{ inputs.pytest_marks }}\""
+
+        echo "Pytest command: ${PYTEST_CMD}"
+
+        DOCKER_ENV_FLAGS=()
+        if [[ -n "${HF_TOKEN:-}" ]]; then
+          DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
+        fi
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=vllm")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=gaudi")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
+
+        HF_CACHE_MOUNT=""
+        HF_OFFLINE_FLAG=""
+        if [[ -n "${{ inputs.hf_cache_path }}" ]]; then
+          HF_CACHE_MOUNT="-v ${{ inputs.hf_cache_path }}:/home/dynamo/.cache/huggingface/hub"
+          HF_OFFLINE_FLAG="-e HF_HUB_OFFLINE=1"
+          echo "Mounting HF cache from ${{ inputs.hf_cache_path }} (offline mode)"
+        fi
+
+        docker rm -f "${CONTAINER_ID}" 2>/dev/null || true
+        docker run \
+          ${{ inputs.docker_device_flags }} \
+          ${{ inputs.docker_env_flags }} \
+          ${HF_CACHE_MOUNT} \
+          ${HF_OFFLINE_FLAG} \
+          --shm-size=200m \
+          --ulimit memlock=-1 \
+          --ulimit stack=67108864 \
+          -w /workspace \
+          --network host \
+          "${DOCKER_ENV_FLAGS[@]}" \
+          --name "${CONTAINER_ID}" \
+          ${{ inputs.image_tag }} \
+          sh -c "umask 0022 && ${PYTEST_CMD}"
+
+        TEST_EXIT_CODE=$?
+        if [ "${TEST_EXIT_CODE}" -eq 5 ]; then
+          echo "No tests were selected — treating as success"
+          TEST_EXIT_CODE=0
+        fi
+        echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> "${GITHUB_ENV}"
+        echo "Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+        docker cp "${CONTAINER_ID}:/workspace/test-results/." test-results/ 2>&1 || \
+          echo "WARNING: failed to docker cp test-results"
+        docker rm -f "${CONTAINER_ID}" 2>/dev/null || true
+        ls -la test-results/ || true
+        exit 0
+
+    - name: Process test results
+      shell: bash
+      run: |
+        STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
+        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> "${GITHUB_ENV}"
+
+        JUNIT_FILE="test-results/pytest_test_report.xml"
+        if [[ -f "${JUNIT_FILE}" ]]; then
+          TOTAL=$(grep -o 'tests="[0-9]*"' "${JUNIT_FILE}" | grep -o '[0-9]*' | head -1 || echo "0")
+          FAILED=$(grep -o 'failures="[0-9]*"' "${JUNIT_FILE}" | grep -o '[0-9]*' | head -1 || echo "0")
+          ERRORS=$(grep -o 'errors="[0-9]*"' "${JUNIT_FILE}" | grep -o '[0-9]*' | head -1 || echo "0")
+          echo "${TOTAL} tests (${FAILED} failed, ${ERRORS} errors)"
+          JUNIT_NAME="pytest_test_report_${{ inputs.test_suite_name }}_${STR_TEST_TYPE}_gaudi_${{ github.run_id }}.xml"
+          mv "${JUNIT_FILE}" "test-results/${JUNIT_NAME}"
+        else
+          echo "WARNING: JUnit XML not found"
+          FAILED=1
+        fi
+        exit ${TEST_EXIT_CODE}
+
+    - name: Upload test results
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-gaudi-${{ github.run_id }}
+        path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_gaudi_${{ github.run_id }}.xml
+        retention-days: 7
+
+    - name: Upload allure results
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: allure-results-vllm-gaudi-${{ env.STR_TEST_TYPE }}-${{ github.run_id }}
+        path: test-results/allure-results/
+        retention-days: 7
+        if-no-files-found: ignore

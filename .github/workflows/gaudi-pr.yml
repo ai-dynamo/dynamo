@@ -1,0 +1,258 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Gaudi PR
+
+# NOTE: when upstreaming, switch trigger to:
+#   on:
+#     push:
+#       branches: ["pull-request/[0-9]+"]
+on:
+  push:
+    branches:
+      - main
+      - 'gaudi-ci-*'
+  pull_request:
+    paths:
+      - 'container/**'
+      - 'components/**'
+      - 'lib/**'
+      - '.github/workflows/gaudi-pr.yml'
+      - '.github/actions/setup-gaudi/**'
+      - '.github/actions/pytest-gaudi/**'
+  workflow_dispatch:
+
+concurrency:
+  group: gaudi-pr-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  GAUDI_RUNTIME_IMAGE: dynamo-vllm-gaudi:${{ github.sha }}
+  GAUDI_TEST_IMAGE: dynamo-vllm-gaudi-test:${{ github.sha }}
+
+  # Host path to pre-populated HuggingFace model cache.
+  # Runner administrator populates this with required models.
+  GAUDI_HF_CACHE_PATH: ""
+
+  # Tests to skip on Gaudi. Adjust as tests are validated.
+  GAUDI_PYTEST_IGNORE: >-
+    tests/serve
+    tests/kvbm_integration
+    tests/test_predownload_models.py
+    tests/frontend/test_vllm_prepost_integration.py
+    tests/fault_tolerance
+    tests/frontend/test_vllm.py
+    tests/mm_router
+    tests/router
+
+  GAUDI_PYTEST_DESELECT: ""
+
+jobs:
+  # ============================================================================
+  # SETUP & DETECTION
+  # ============================================================================
+  changed-files:
+    runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.changes.outputs.core }}
+      vllm: ${{ steps.changes.outputs.vllm }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          fetch-depth: 0
+      - name: Check for changes
+        id: changes
+        uses: ./.github/actions/changed-files
+        with:
+          gh_token: ${{ github.token }}
+
+  # ============================================================================
+  # BUILD
+  # ============================================================================
+  vllm-gaudi-build:
+    name: vllm-gaudi Build
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    runs-on: [self-hosted, gaudi]
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
+
+      # TODO: Replace with proper Gaudi Dockerfile build.
+      # The Gaudi image build uses vllm-gaudi (HPU fork) instead of
+      # upstream vllm. The Dockerfile should be based on the Habana
+      # base image (vault.habana.ai/gaudi-docker) with dynamo installed.
+      - name: Build Gaudi runtime image
+        shell: bash
+        run: |
+          echo "TODO: Implement Gaudi image build"
+          echo "Base image: vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-2.9.0:latest"
+          echo "vllm-gaudi: install from vllm-gaudi repo"
+          echo "dynamo: install ai-dynamo wheel"
+          # Placeholder — replace with actual build once Dockerfile is ready
+          # docker build ... -t ${{ env.GAUDI_RUNTIME_IMAGE }} .
+          # docker tag ${{ env.GAUDI_RUNTIME_IMAGE }} ${{ env.GAUDI_TEST_IMAGE }}
+          exit 0
+
+  # ============================================================================
+  # SANITY CHECK
+  # ============================================================================
+  vllm-gaudi-sanity:
+    name: vllm-gaudi Sanity
+    needs: [changed-files, vllm-gaudi-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    runs-on: [self-hosted, gaudi]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Setup Gaudi runtime flags
+        id: setup-gaudi
+        uses: ./.github/actions/setup-gaudi
+
+      - name: Gaudi smoke test (HPU device detection)
+        shell: bash
+        run: |
+          docker run --rm \
+            ${{ steps.setup-gaudi.outputs.docker_device_flags }} \
+            ${{ steps.setup-gaudi.outputs.docker_env_flags }} \
+            ${{ env.GAUDI_RUNTIME_IMAGE }} \
+            python3 -c "
+          import torch
+          import habana_frameworks.torch as ht
+          print('PyTorch:', torch.__version__)
+          print('HPU available:', torch.hpu.is_available())
+          print('HPU device count:', torch.hpu.device_count())
+          for i in range(torch.hpu.device_count()):
+              print(f'  Device {i}: {torch.hpu.get_device_name(i)}')
+          assert torch.hpu.is_available(), 'HPU not available!'
+          t = torch.randn(2, 3).to('hpu')
+          print('Tensor on HPU:', t.device)
+          print('PASS: Gaudi smoke test')
+          "
+
+  # ============================================================================
+  # CPU-ONLY TESTS
+  # ============================================================================
+  vllm-gaudi-cpu-tests:
+    name: vllm-gaudi CPU Tests
+    needs: [changed-files, vllm-gaudi-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    runs-on: [self-hosted, gaudi]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Setup Gaudi runtime flags
+        id: setup-gaudi
+        uses: ./.github/actions/setup-gaudi
+
+      - name: Run CPU-only pre_merge tests
+        uses: ./.github/actions/pytest-gaudi
+        with:
+          image_tag: ${{ env.GAUDI_TEST_IMAGE }}
+          pytest_marks: 'pre_merge and vllm and gpu_0'
+          test_suite_name: vllm-gaudi
+          test_type: pre_merge_cpu
+          parallel_mode: 'auto'
+          hf_token: ${{ secrets.HF_TOKEN }}
+          docker_device_flags: ${{ steps.setup-gaudi.outputs.docker_device_flags }}
+          docker_env_flags: ${{ steps.setup-gaudi.outputs.docker_env_flags }}
+          pytest_ignore: ${{ env.GAUDI_PYTEST_IGNORE }}
+          pytest_deselect: ${{ env.GAUDI_PYTEST_DESELECT }}
+          hf_cache_path: ${{ env.GAUDI_HF_CACHE_PATH }}
+
+  # ============================================================================
+  # SINGLE-GPU TESTS (1 Gaudi)
+  # ============================================================================
+  vllm-gaudi-gpu-tests:
+    name: vllm-gaudi Single-GPU Tests
+    needs: [changed-files, vllm-gaudi-build, vllm-gaudi-sanity]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    runs-on: [self-hosted, gaudi]
+    timeout-minutes: 35
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Setup Gaudi runtime flags
+        id: setup-gaudi
+        uses: ./.github/actions/setup-gaudi
+        with:
+          min_gpus: '1'
+
+      - name: Run single-GPU pre_merge tests
+        uses: ./.github/actions/pytest-gaudi
+        with:
+          image_tag: ${{ env.GAUDI_TEST_IMAGE }}
+          pytest_marks: 'pre_merge and vllm and gpu_1'
+          test_suite_name: vllm-gaudi
+          test_type: pre_merge_gpu_1
+          parallel_mode: 'none'
+          hf_token: ${{ secrets.HF_TOKEN }}
+          docker_device_flags: ${{ steps.setup-gaudi.outputs.docker_device_flags }}
+          docker_env_flags: ${{ steps.setup-gaudi.outputs.docker_env_flags }}
+          pytest_ignore: ${{ env.GAUDI_PYTEST_IGNORE }}
+          pytest_deselect: ${{ env.GAUDI_PYTEST_DESELECT }}
+          hf_cache_path: ${{ env.GAUDI_HF_CACHE_PATH }}
+
+  # ============================================================================
+  # MULTI-GPU TESTS
+  # ============================================================================
+  # Gaudi3 nodes typically have 8 accelerators.
+  # TODO: adjust markers for gpu_2/gpu_4/gpu_8 as needed.
+  vllm-gaudi-multi-gpu-tests:
+    name: vllm-gaudi Multi-GPU Tests
+    needs: [changed-files, vllm-gaudi-build, vllm-gaudi-sanity]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    runs-on: [self-hosted, gaudi, multi-gpu]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Setup Gaudi runtime flags
+        id: setup-gaudi
+        uses: ./.github/actions/setup-gaudi
+        with:
+          min_gpus: '2'
+
+      - name: Run multi-GPU pre_merge tests
+        uses: ./.github/actions/pytest-gaudi
+        with:
+          image_tag: ${{ env.GAUDI_TEST_IMAGE }}
+          pytest_marks: 'pre_merge and vllm and gpu_2'
+          test_suite_name: vllm-gaudi
+          test_type: pre_merge_gpu_2
+          parallel_mode: 'none'
+          hf_token: ${{ secrets.HF_TOKEN }}
+          docker_device_flags: ${{ steps.setup-gaudi.outputs.docker_device_flags }}
+          docker_env_flags: ${{ steps.setup-gaudi.outputs.docker_env_flags }}
+          pytest_ignore: ${{ env.GAUDI_PYTEST_IGNORE }}
+          pytest_deselect: ${{ env.GAUDI_PYTEST_DESELECT }}
+          hf_cache_path: ${{ env.GAUDI_HF_CACHE_PATH }}
+
+  # ============================================================================
+  # STATUS CHECK
+  # ============================================================================
+  gaudi-pr-status-check:
+    name: Gaudi PR Status
+    runs-on: ubuntu-latest
+    needs:
+      - changed-files
+      - vllm-gaudi-build
+      - vllm-gaudi-sanity
+      - vllm-gaudi-cpu-tests
+      - vllm-gaudi-gpu-tests
+      - vllm-gaudi-multi-gpu-tests
+    if: always()
+    steps:
+      - name: Aggregate job results
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $r | ["success", "skipped"] | any($r == .))'
