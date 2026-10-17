@@ -51,6 +51,30 @@ the change exists; an agent pointed at the issue first inherits all of it.
   Linear with its work issues linked as Related, so that ticket is where to
   look up which feature a work issue belongs to.
 
+### Sort the Issue (NVIDIA Engineers)
+
+When you create or update the Linear issue for your work, set its release and
+feature project yourself. You have the context; nobody sorts it after you.
+
+- **Release.** Look up the Linear "Dynamo" release pipeline every time (Linear
+  MCP `list_releases`, archived off) and take the release in "In Development".
+  Never hardcode it or derive it from the version on `main`, which lags after a
+  branch cut. Two exceptions: a QA bug against the release in QA takes that
+  release, and a cherry-pick takes each release it ships in, patch releases
+  included (see `dynamo-release-cherry-pick`). Never add a patch release
+  otherwise.
+- **Project.** Feature projects carry the newest label in the DYNO "Dynamo
+  Roadmap" project label group and are named `<window>-AREA-NN Title`. Pick the
+  one in the current window whose scope matches the work. If none clearly fits,
+  or the window has no projects yet, leave it empty; never guess or create one.
+  Add a milestone only when the project has one named exactly like the release.
+- **Write.** Use the Linear MCP `save_issue` with `project` and `addReleases`
+  (pass `id` for an existing issue), or `issueUpdate` with `addedReleaseIds`.
+  Never `setReleases` or a replacing `labels` / `labelIds`, which drop what
+  others added. Read the issue back to confirm the project and release stuck.
+- The project is the feature: do not mark it with labels or sub-issues, and ask
+  before moving an issue out of a project someone else set.
+
 ### Name the Branch
 
 When a Linear issue exists, include its ID in the branch name
