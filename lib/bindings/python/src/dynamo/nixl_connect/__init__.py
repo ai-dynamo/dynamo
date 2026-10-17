@@ -624,6 +624,7 @@ class Connection:
 
         self._remote_refs: dict[str, int] = {}  # ref-count remote agents
         self._remote_refs_lock = threading.Lock()
+        self._notifications_lock = threading.Lock()
 
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
@@ -1569,39 +1570,59 @@ class PassiveOperation(AbstractOperation):
             ):
                 return self._status
 
-        old_status = self._status
+        # NIXL polls without the GIL and returns an updated notification map.
+        # Serialize polling and consumption so another poll cannot restore an
+        # older snapshot after a completion has been consumed.
+        with self._connection._notifications_lock:
+            if self._status in (
+                OperationStatus.COMPLETE,
+                OperationStatus.ERRORED,
+                OperationStatus.CANCELLED,
+            ):
+                return self._status
 
-        # Query NIXL for any notifications.
-        notifications = self._connection._nixl.update_notifs()
+            old_status = self._status
 
-        if isinstance(notifications, dict):
-            remote_state = OperationStatus.IN_PROGRESS
-            logger.debug(
-                f"dynamo.nixl_connect.{self.__class__.__name__}: NIXL reported notifications: {len(notifications)}."
-            )
+            # Query NIXL for any notifications.
+            notifications = self._connection._nixl.update_notifs()
 
-            for key, values in notifications.items():
-                if not isinstance(values, list):
-                    raise TypeError(
-                        f"Expected `dict[str, list[bytes]]` from NIXL notification query; got {type(notifications)}."
-                    )
-                for value in values:
-                    if not isinstance(value, bytes):
-                        continue
-                    notification_key = value.decode("utf-8")
-
-                    # Once we've found the notification key, we know the operation is complete.
-                    if notification_key == self._notification_key:
-                        remote_state = OperationStatus.COMPLETE
-                        break
-
-            if remote_state == OperationStatus.COMPLETE:
-                self._status = remote_state
+            if isinstance(notifications, dict):
+                remote_state = OperationStatus.IN_PROGRESS
                 logger.debug(
-                    f"dynamo.nixl_connect.{self.__class__.__name__}: {{ remote: '{self._connection.name}' status: '{old_status}' => '{self._status}' }}."
+                    "dynamo.nixl_connect.%s: NIXL reported notifications: %d.",
+                    self.__class__.__name__,
+                    len(notifications),
                 )
 
-        return self._status
+                for values in notifications.values():
+                    if not isinstance(values, list):
+                        raise TypeError(
+                            f"Expected `dict[str, list[bytes]]` from NIXL notification query; got {type(notifications)}."
+                        )
+                    for index, value in enumerate(values):
+                        if not isinstance(value, bytes):
+                            continue
+                        notification_key = value.decode("utf-8")
+
+                        # Once we've found the notification key, we know the operation is complete.
+                        if notification_key == self._notification_key:
+                            remote_state = OperationStatus.COMPLETE
+                            break
+                    if remote_state == OperationStatus.COMPLETE:
+                        del values[index]
+                        break
+
+                if remote_state == OperationStatus.COMPLETE:
+                    self._status = remote_state
+                    logger.debug(
+                        "dynamo.nixl_connect.%s: { remote: '%s' status: '%s' => '%s' }.",
+                        self.__class__.__name__,
+                        self._connection.name,
+                        old_status,
+                        self._status,
+                    )
+
+            return self._status
 
     @abstractmethod
     async def wait_for_completion(self) -> None:
