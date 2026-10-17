@@ -56,7 +56,9 @@ spec:
             metadata:
               type: object
             spec:
-              description: DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+              description: |-
+                DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+                Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
               properties:
                 aisimulate:
                   description: AISimulate selects the execution artifact and supplies native AISimulate input.
@@ -222,6 +224,12 @@ spec:
                       minimum: 1
                       type: integer
                   type: object
+                v1beta1:
+                  description: |-
+                    V1Beta1 losslessly preserves a native v1beta1 spec while this object is
+                    represented through v1beta2. It is mutually exclusive with native fields.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
                 workload:
                   default: {}
                   description: Workload defines the synthetic traffic model used for every candidate evaluation.
@@ -279,9 +287,12 @@ spec:
                         - message: at most one of requestRate, concurrency, or kvLoadRatio may be specified
                           rule: '(has(self.requestRate) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvLoadRatio) ? 1 : 0) <= 1'
                   type: object
-              required:
-                - model
               type: object
+              x-kubernetes-validations:
+                - message: exactly one of native v1beta2 fields or v1beta1 must be specified
+                  rule: has(self.v1beta1) != has(self.model)
+                - message: v1beta1 is mutually exclusive with native v1beta2 fields
+                  rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))'
             status:
               description: DynamoGraphDeploymentRunStatus represents one search execution's observed state.
               properties:

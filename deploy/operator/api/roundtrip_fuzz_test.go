@@ -65,6 +65,7 @@ import (
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 )
 
 var (
@@ -181,6 +182,8 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		fuzzAlphaDGDRStatus,
 		fuzzBetaDGDRSpec,
 		fuzzBetaDGDRStatus,
+		fuzzBeta2DGDRSpec,
+		fuzzBeta2DGDRStatus,
 		fuzzBetaDGDROverrides,
 		// PlacementStatus (v1alpha1 + v1beta1): pick admissible values so the
 		// round-trip fuzzer exercises Placement without producing shapes the CRD
@@ -267,6 +270,7 @@ func fuzzAlphaDGDRStatus(s *v1alpha1.DynamoGraphDeploymentRequestStatus, c randf
 
 func fuzzBetaDGDRSpec(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
 	c.FillNoCustom(s)
+	s.V1Beta2 = nil
 
 	s.Backend = oneOf(c, v1beta1.BackendTypeAuto, v1beta1.BackendTypeVllm, v1beta1.BackendTypeSglang, v1beta1.BackendTypeTrtllm)
 
@@ -389,6 +393,7 @@ func fuzzDGDRProfilingContainerNames(c randfill.Continue) []string {
 
 func fuzzBetaDGDRStatus(s *v1beta1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
 	c.FillNoCustom(s)
+	s.V1Beta2 = nil
 
 	s.Phase = oneOf(c, v1beta1.DGDRPhasePending, v1beta1.DGDRPhaseProfiling, v1beta1.DGDRPhaseReady, v1beta1.DGDRPhaseDeploying, v1beta1.DGDRPhaseDeployed, v1beta1.DGDRPhaseFailed)
 
@@ -404,6 +409,16 @@ func fuzzBetaDGDRStatus(s *v1beta1.DynamoGraphDeploymentRequestStatus, c randfil
 			s.ProfilingResults = nil
 		}
 	}
+}
+
+func fuzzBeta2DGDRSpec(s *v1beta2.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
+	c.FillNoCustom(s)
+	s.V1Beta1 = nil
+}
+
+func fuzzBeta2DGDRStatus(s *v1beta2.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
+	c.FillNoCustom(s)
+	s.V1Beta1 = nil
 }
 
 func newRoundTripFiller(seed int64) *randfill.Filler {
@@ -601,6 +616,18 @@ func TestFuzzRoundTrip_DGDR_HubSpokeHub(t *testing.T) {
 
 func TestFuzzRoundTrip_DGDR_SpokeHubSpoke(t *testing.T) {
 	fuzzSpokeHubSpoke[*v1beta1.DynamoGraphDeploymentRequest, v1alpha1.DynamoGraphDeploymentRequest](t, "DGDR",
+		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
+	)
+}
+
+func TestFuzzRoundTrip_DGDRV1Beta2_HubSpokeHub(t *testing.T) {
+	fuzzHubSpokeHub[*v1beta1.DynamoGraphDeploymentRequest, v1beta2.DynamoGraphDeploymentRequest](t, "DGDR v1beta2",
+		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
+	)
+}
+
+func TestFuzzRoundTrip_DGDRV1Beta2_SpokeHubSpoke(t *testing.T) {
+	fuzzSpokeHubSpoke[*v1beta1.DynamoGraphDeploymentRequest, v1beta2.DynamoGraphDeploymentRequest](t, "DGDR v1beta2",
 		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
 	)
 }

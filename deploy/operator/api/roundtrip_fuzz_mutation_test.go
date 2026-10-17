@@ -18,6 +18,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"reflect"
@@ -30,9 +31,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
+	"sigs.k8s.io/randfill"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
 type roundTripHubObject interface {
@@ -164,6 +168,163 @@ func fuzzMutatedHubCarrier[
 	}
 }
 
+func fuzzMutatedV1Beta2SpokeEnvelope(t *testing.T) {
+	t.Helper()
+	ops := v1Beta2SpokeEnvelopeMutationOps{
+		t: t,
+		f: newRoundTripFiller(*fuzzSeed),
+	}
+	fuzzMutatedDGDRCarrier(
+		t,
+		"hub->v1beta2-envelope-(mutation)->hub->v1beta2-envelope",
+		ops.buildCarrier,
+		ops.mutateCarrier,
+		ops.convertAway,
+		ops.convertBack,
+	)
+}
+
+func fuzzMutatedV1Beta1HubEnvelope(t *testing.T) {
+	t.Helper()
+	ops := v1Beta1HubEnvelopeMutationOps{
+		t: t,
+		f: newRoundTripFiller(*fuzzSeed),
+	}
+	fuzzMutatedDGDRCarrier(
+		t,
+		"v1beta2->hub-envelope-(mutation)->v1beta2->hub-envelope",
+		ops.buildCarrier,
+		ops.mutateCarrier,
+		ops.convertAway,
+		ops.convertBack,
+	)
+}
+
+type v1Beta2SpokeEnvelopeMutationOps struct {
+	t *testing.T
+	f *randfill.Filler
+}
+
+func (ops v1Beta2SpokeEnvelopeMutationOps) buildCarrier() (*v1beta2.DynamoGraphDeploymentRequest, error) {
+	in := &v1beta1.DynamoGraphDeploymentRequest{}
+	ops.f.Fill(in)
+	carrier := &v1beta2.DynamoGraphDeploymentRequest{}
+	return carrier, carrier.ConvertFrom(in)
+}
+
+func (ops v1Beta2SpokeEnvelopeMutationOps) mutateCarrier(carrier *v1beta2.DynamoGraphDeploymentRequest) {
+	patch := &v1beta1.DynamoGraphDeploymentRequest{}
+	ops.f.Fill(patch)
+	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
+	mutateJSONEnvelope(ops.t, carrier.Spec.V1Beta1, &v1beta1.DynamoGraphDeploymentRequestSpec{}, &patch.Spec)
+	mutateJSONEnvelope(ops.t, carrier.Status.V1Beta1, &v1beta1.DynamoGraphDeploymentRequestStatus{}, &patch.Status)
+}
+
+func (v1Beta2SpokeEnvelopeMutationOps) convertAway(
+	carrier *v1beta2.DynamoGraphDeploymentRequest,
+) (*v1beta1.DynamoGraphDeploymentRequest, error) {
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	return hub, carrier.ConvertTo(hub)
+}
+
+func (v1Beta2SpokeEnvelopeMutationOps) convertBack(
+	hub *v1beta1.DynamoGraphDeploymentRequest,
+) (*v1beta2.DynamoGraphDeploymentRequest, error) {
+	out := &v1beta2.DynamoGraphDeploymentRequest{}
+	return out, out.ConvertFrom(hub)
+}
+
+type v1Beta1HubEnvelopeMutationOps struct {
+	t *testing.T
+	f *randfill.Filler
+}
+
+func (ops v1Beta1HubEnvelopeMutationOps) buildCarrier() (*v1beta1.DynamoGraphDeploymentRequest, error) {
+	in := &v1beta2.DynamoGraphDeploymentRequest{}
+	ops.f.Fill(in)
+	carrier := &v1beta1.DynamoGraphDeploymentRequest{}
+	return carrier, in.ConvertTo(carrier)
+}
+
+func (ops v1Beta1HubEnvelopeMutationOps) mutateCarrier(carrier *v1beta1.DynamoGraphDeploymentRequest) {
+	patch := &v1beta2.DynamoGraphDeploymentRequest{}
+	ops.f.Fill(patch)
+	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
+	mutateJSONEnvelope(ops.t, carrier.Spec.V1Beta2, &v1beta2.DynamoGraphDeploymentRequestSpec{}, &patch.Spec)
+	mutateJSONEnvelope(ops.t, carrier.Status.V1Beta2, &v1beta2.DynamoGraphDeploymentRequestStatus{}, &patch.Status)
+}
+
+func (v1Beta1HubEnvelopeMutationOps) convertAway(
+	carrier *v1beta1.DynamoGraphDeploymentRequest,
+) (*v1beta2.DynamoGraphDeploymentRequest, error) {
+	spoke := &v1beta2.DynamoGraphDeploymentRequest{}
+	return spoke, spoke.ConvertFrom(carrier)
+}
+
+func (v1Beta1HubEnvelopeMutationOps) convertBack(
+	spoke *v1beta2.DynamoGraphDeploymentRequest,
+) (*v1beta1.DynamoGraphDeploymentRequest, error) {
+	out := &v1beta1.DynamoGraphDeploymentRequest{}
+	return out, spoke.ConvertTo(out)
+}
+
+func fuzzMutatedDGDRCarrier[C, A any](
+	t *testing.T,
+	flow string,
+	buildCarrier func() (C, error),
+	mutateCarrier func(C),
+	convertAway func(C) (A, error),
+	convertBack func(A) (C, error),
+) {
+	t.Helper()
+	t.Logf("%s seed=%d iters=%d", flow, *fuzzSeed, *fuzzIters)
+	for i := 0; i < *fuzzIters; i++ {
+		carrier, err := buildCarrier()
+		if err != nil {
+			t.Fatalf("iter %d build carrier: %v", i, err)
+		}
+
+		mutateCarrier(carrier)
+		carrierBeforeYAML := toYAML(t, carrier)
+
+		away, err := convertAway(carrier)
+		if err != nil {
+			t.Fatalf("iter %d convert away from carrier: %v\ninput=%s", i, err, mustJSON(carrier))
+		}
+		if diff := cmp.Diff(carrierBeforeYAML, toYAML(t, carrier)); diff != "" {
+			t.Fatalf("iter %d conversion mutated input (-before +after):\n%s", i, diff)
+		}
+
+		out, err := convertBack(away)
+		if err != nil {
+			t.Fatalf("iter %d convert back to carrier: %v", i, err)
+		}
+		if diff := cmp.Diff(carrier, out, cmpopts.EquateEmpty()); diff != "" {
+			t.Fatalf("iter %d mutated envelope mismatch (-want +got):\n%s", i, diff)
+		}
+	}
+}
+
+func mutateJSONEnvelope(t *testing.T, envelope *apiextensionsv1.JSON, payload, patch any) {
+	t.Helper()
+
+	// Require and decode the complete typed payload carried by the envelope.
+	if envelope == nil {
+		t.Fatal("conversion did not create an envelope")
+	}
+	if err := json.Unmarshal(envelope.Raw, payload); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+
+	// Mutate nested payload values and write the complete payload back to the envelope.
+	sparseFuzzInto(payload, patch)
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	envelope.Raw = raw
+}
+
 func TestFuzzRoundTripMutability(t *testing.T) {
 	t.Run("DGD/hub-to-mutated-spoke", func(t *testing.T) {
 		fuzzMutatedSpokeCarrier[*v1beta1.DynamoGraphDeployment, v1alpha1.DynamoGraphDeployment](t, "DGD",
@@ -195,6 +356,8 @@ func TestFuzzRoundTripMutability(t *testing.T) {
 			func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
 		)
 	})
+	t.Run("DGDR-v1beta2/hub-to-mutated-spoke-envelope", fuzzMutatedV1Beta2SpokeEnvelope)
+	t.Run("DGDR-v1beta2/spoke-to-mutated-hub-envelope", fuzzMutatedV1Beta1HubEnvelope)
 	t.Run("DGDSA/hub-to-mutated-spoke", func(t *testing.T) {
 		fuzzMutatedSpokeCarrier[*v1beta1.DynamoGraphDeploymentScalingAdapter, v1alpha1.DynamoGraphDeploymentScalingAdapter](t, "DGDSA",
 			func() *v1beta1.DynamoGraphDeploymentScalingAdapter {
