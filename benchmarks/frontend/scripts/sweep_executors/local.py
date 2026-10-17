@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from sweep_core.aiperf_metrics import iter_aiperf_metrics
 from sweep_core.models import DeployDimension, RunResult, RunSpec, SweepConfig
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -151,20 +152,8 @@ def _parse_aiperf_json(json_path: Path) -> dict:
     try:
         data = json.loads(json_path.read_text())
         result = {}
-        rt = data.get("request_throughput", {})
-        result["req_per_sec"] = rt.get("avg", 0)
-        ot = data.get("output_token_throughput", {})
-        result["output_tok_per_sec"] = ot.get("avg", 0)
-        ttft = data.get("time_to_first_token", data.get("ttft", {}))
-        if isinstance(ttft, dict):
-            result["ttft_p50_ms"] = ttft.get("p50", 0) or 0
-            result["ttft_p99_ms"] = ttft.get("p99", 0) or 0
-        itl = data.get("inter_token_latency", data.get("itl", {}))
-        if isinstance(itl, dict):
-            result["itl_p50_ms"] = itl.get("p50", 0) or 0
-            result["itl_p99_ms"] = itl.get("p99", 0) or 0
-        bd = data.get("benchmark_duration", 0)
-        result["duration_sec"] = bd.get("avg", 0) if isinstance(bd, dict) else (bd or 0)
+        for field, value in iter_aiperf_metrics(data):
+            result[field] = value
         return result
     except (json.JSONDecodeError, KeyError, TypeError):
         return {}

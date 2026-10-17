@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from sweep_core.aiperf_metrics import iter_aiperf_metrics
 from sweep_core.models import DeployDimension, RunResult, RunSpec, SweepConfig
 from sweep_k8s import aiperf as k8s_aiperf
 from sweep_k8s import dgd as k8s_dgd
@@ -251,19 +252,11 @@ def _parse_k8s_aiperf_into_result(result: RunResult, run_dir: Path) -> None:
 
     try:
         data = json.loads(aiperf_json.read_text())
-        rt = data.get("request_throughput", {})
-        result.req_per_sec = rt.get("avg", 0) or 0
-        ot = data.get("output_token_throughput", {})
-        result.output_tok_per_sec = ot.get("avg", 0) or 0
-        ttft = data.get("time_to_first_token", data.get("ttft", {}))
-        if isinstance(ttft, dict):
-            result.ttft_p50_ms = ttft.get("p50", 0) or 0
-            result.ttft_p99_ms = ttft.get("p99", 0) or 0
-        itl = data.get("inter_token_latency", data.get("itl", {}))
-        if isinstance(itl, dict):
-            result.itl_p50_ms = itl.get("p50", 0) or 0
-            result.itl_p99_ms = itl.get("p99", 0) or 0
-        bd = data.get("benchmark_duration", 0)
-        result.duration_sec = bd.get("avg", 0) if isinstance(bd, dict) else (bd or 0)
+        # Assign as each pair is decoded so a mid-sequence error keeps earlier
+        # fields; throughput falls back to 0 for falsey averages.
+        for field, value in iter_aiperf_metrics(data):
+            if field in ("req_per_sec", "output_tok_per_sec"):
+                value = value or 0
+            setattr(result, field, value)
     except (json.JSONDecodeError, KeyError, TypeError):
         pass
