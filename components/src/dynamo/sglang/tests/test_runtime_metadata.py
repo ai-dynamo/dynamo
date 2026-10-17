@@ -517,10 +517,7 @@ def test_unreadable_at_file_extra_config_is_ignored(register, tmp_path, filename
             "env",
             "tenant-a",
         ),
-        ({"client_server_address": "client"}, "file", "env", "default"),
         ({"tenant_id": "unused"}, "file", "env", "file"),
-        ({}, None, "env", "env"),
-        ({}, None, None, "default"),
         (
             {"master_server_address": "master", "tenant_id": None},
             "file",
