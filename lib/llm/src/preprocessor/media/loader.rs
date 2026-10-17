@@ -63,6 +63,14 @@ pub fn max_data_url_bytes() -> usize {
 // 0.0.0.0/8), RFC4193 (ULA), RFC4291 (IPv6 loopback / link-local), RFC6890
 // (reserved). Link-local 169.254/16 covers the AWS / OpenStack metadata IP.
 //
+// IPv6 special-purpose ranges that can reach or embed a non-public address:
+// local-use NAT64 64:ff9b:1::/48 (RFC 8215), discard 100::/64 (RFC 6666),
+// IETF protocol assignments 2001::/23 incl. Teredo (RFC 2928, 4380),
+// documentation 2001:db8::/32 (RFC 3849), and 6to4 2002::/16 (RFC 3056,
+// deprecated by RFC 7526), which embeds an IPv4 address such as 10.0.0.1.
+// The well-known NAT64 prefix 64:ff9b::/96 is deliberately absent: on an
+// IPv6-only cluster every IPv4 destination is reached through it.
+//
 // Keep this list in sync with the Python counterpart
 // (components/src/dynamo/common/http/url_validator.py::_BLOCKED_IP_NETWORKS).
 static BLOCKED_IP_NETWORKS: LazyLock<Vec<IpNet>> = LazyLock::new(|| {
@@ -85,6 +93,11 @@ static BLOCKED_IP_NETWORKS: LazyLock<Vec<IpNet>> = LazyLock::new(|| {
         "::/128",
         "::1/128",
         "::ffff:0:0/96",
+        "64:ff9b:1::/48",
+        "100::/64",
+        "2001::/23",
+        "2001:db8::/32",
+        "2002::/16",
         "fc00::/7",
         "fe80::/10",
         "ff00::/8",
@@ -1115,6 +1128,11 @@ mod tests_non_nixl {
             "::1",
             "fe80::1",
             "fc00::1",
+            "64:ff9b:1::a00:1", // local-use NAT64
+            "2002:a00:1::1",    // 6to4 embedding 10.0.0.1
+            "2001::1",          // Teredo
+            "2001:db8::1",      // documentation
+            "100::1",           // discard-only
         ] {
             let addr: IpAddr = ip.parse().unwrap();
             assert!(is_blocked_ip(&addr), "{ip} should be blocked");
