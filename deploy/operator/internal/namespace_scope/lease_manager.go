@@ -29,6 +29,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -54,6 +55,12 @@ type LeaseManager struct {
 	failureCount    int
 	maxFailures     int
 	logger          logr.Logger
+
+	// renewCancel is nil until Start creates the renewal context.
+	renewCancel  context.CancelFunc
+	expiryMu     sync.Mutex
+	expiresAt    time.Time
+	leaseUpdated chan struct{}
 }
 
 // NewLeaseManager creates a new lease manager for namespace scope marking
@@ -74,9 +81,8 @@ func NewLeaseManager(config *rest.Config, namespace string, operatorVersion stri
 		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
 
-	// Create holder identity with operator version
-	// No need for pod name since there's only one operator instance in namespace-restricted mode
-	holderIdentity := fmt.Sprintf("namespace-restricted-operator-%s", operatorVersion)
+	// Identify this manager instance so failed acquisition cleanup cannot delete another holder.
+	holderIdentity := fmt.Sprintf("namespace-restricted-operator-%s-%s", operatorVersion, uuid.NewUUID())
 
 	// Calculate max failures with buffer to ensure operator exits BEFORE lease expires
 	// This prevents split-brain: if we allow failures for the full lease duration,
@@ -116,6 +122,11 @@ func (lm *LeaseManager) Start(ctx context.Context) error {
 
 	// Initialize error channel
 	lm.errCh = make(chan error, 1) // buffered to avoid blocking
+	lm.leaseUpdated = make(chan struct{}, 1)
+
+	// Own the request context so Stop can interrupt an in-flight renewal.
+	renewCtx, cancelRenew := context.WithCancel(ctx)
+	lm.renewCancel = cancelRenew
 
 	lm.logger.Info("Starting namespace scope marker lease manager",
 		"leaseName", LeaseName,
@@ -125,7 +136,8 @@ func (lm *LeaseManager) Start(ctx context.Context) error {
 		"maxFailures", lm.maxFailures)
 
 	// Create or update the lease initially
-	if err := lm.createOrUpdateLease(ctx); err != nil {
+	if err := lm.createOrUpdateLease(renewCtx); err != nil {
+		cancelRenew()
 		return fmt.Errorf("failed to create initial lease: %w", err)
 	}
 
@@ -133,7 +145,7 @@ func (lm *LeaseManager) Start(ctx context.Context) error {
 
 	// Start renewal loop in background
 	lm.wg.Add(1)
-	go lm.renewalLoop(ctx)
+	go lm.renewalLoop(renewCtx)
 
 	return nil
 }
@@ -142,15 +154,40 @@ func (lm *LeaseManager) Start(ctx context.Context) error {
 func (lm *LeaseManager) Stop(ctx context.Context) error {
 	lm.logger.Info("Stopping namespace scope marker lease manager")
 
-	// Signal renewal loop to stop
+	// Cancel requests before waiting, including when acquisition failed before the loop started.
 	close(lm.stopCh)
+	if lm.renewCancel != nil {
+		lm.renewCancel()
+	}
 
-	// Wait for renewal loop to complete to avoid race condition
-	// where we delete the lease while a renewal is in progress
-	lm.wg.Wait()
+	// Bound the wait even if a client transport ignores cancellation. Never race deletion
+	// against a renewal that has not finished; TTL expiry remains the fallback in that case.
+	renewDone := make(chan struct{})
+	go func() {
+		lm.wg.Wait()
+		close(renewDone)
+	}()
+	select {
+	case <-renewDone:
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for lease renewal to stop: %w", ctx.Err())
+	}
 
-	// Delete the lease to signal we're no longer managing this namespace
-	err := lm.client.CoordinationV1().Leases(lm.namespace).Delete(ctx, LeaseName, metav1.DeleteOptions{})
+	// A failed create/update may have committed. Read ownership even on that path,
+	// and condition deletion on this exact version so a concurrent takeover is preserved.
+	lease, err := lm.client.CoordinationV1().Leases(lm.namespace).Get(ctx, LeaseName, metav1.GetOptions{})
+	if k8sErrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading lease ownership before cleanup: %w", err)
+	}
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != lm.holderIdentity {
+		return nil
+	}
+	err = lm.client.CoordinationV1().Leases(lm.namespace).Delete(ctx, LeaseName, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &lease.UID, ResourceVersion: &lease.ResourceVersion},
+	})
 	if err != nil {
 		// If lease is already deleted (TTL expiry, manual cleanup, etc.), that's fine
 		// The goal is achieved - the lease is gone
@@ -170,7 +207,13 @@ func (lm *LeaseManager) Stop(ctx context.Context) error {
 // createOrUpdateLease creates or updates the namespace scope marker lease
 func (lm *LeaseManager) createOrUpdateLease(ctx context.Context) error {
 	now := metav1.NewMicroTime(time.Now())
-	leaseDurationSeconds := int32(lm.leaseDuration.Seconds())
+
+	// Kubernetes stores whole seconds; round up so sub-second configurations never
+	// publish an already-expired lease, and account for this exact TTL in Guard.
+	leaseDurationSeconds := int32(lm.leaseDuration / time.Second)
+	if lm.leaseDuration%time.Second != 0 {
+		leaseDurationSeconds++
+	}
 
 	lease := &coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{
@@ -196,6 +239,7 @@ func (lm *LeaseManager) createOrUpdateLease(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to create lease: %w", err)
 		}
+		lm.recordRenewal(now.Time, leaseDurationSeconds)
 		lm.logger.Info("Created namespace scope marker lease")
 		return nil
 	}
@@ -210,6 +254,7 @@ func (lm *LeaseManager) createOrUpdateLease(ctx context.Context) error {
 		return fmt.Errorf("failed to update lease: %w", err)
 	}
 
+	lm.recordRenewal(now.Time, leaseDurationSeconds)
 	lm.logger.V(1).Info("Refreshed namespace scope marker lease")
 	return nil
 }
@@ -269,4 +314,27 @@ func (lm *LeaseManager) renewalLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// recordRenewal records the expiry encoded in the successful request, including time
+// spent waiting for its response. The notification coalesces updates; the mutex holds the latest.
+func (lm *LeaseManager) recordRenewal(renewedAt time.Time, durationSeconds int32) {
+	lm.expiryMu.Lock()
+	lm.expiresAt = renewedAt.Add(time.Duration(durationSeconds) * time.Second)
+	lm.expiryMu.Unlock()
+
+	// Calls made without Start have no watcher; a nil channel simply takes default.
+	select {
+	case lm.leaseUpdated <- struct{}{}:
+	default:
+	}
+}
+
+// leaseDeadlines reserves two safety margins before the confirmed lease expires:
+// stop waiting for renewal first, then finish work and cleanup before the final margin.
+func (lm *LeaseManager) leaseDeadlines() (renewal, shutdown time.Time) {
+	lm.expiryMu.Lock()
+	defer lm.expiryMu.Unlock()
+	margin := min(time.Second, lm.leaseDuration/10)
+	return lm.expiresAt.Add(-2 * margin), lm.expiresAt.Add(-margin)
 }
