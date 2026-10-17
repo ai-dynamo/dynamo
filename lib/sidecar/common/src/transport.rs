@@ -294,7 +294,9 @@ where
 /// answer, discovering the model -- must be done. Every sidecar bounds its whole
 /// startup path by this one deadline rather than by per-RPC constants, so
 /// `--grpc-startup-deadline-secs` actually governs how long a slow-loading engine is
-/// given.
+/// given. One exception: TensorRT-LLM with `--context-length` set makes a single
+/// `GetModelInfo` cross-check under that crate's fixed 30 s RPC timeout instead,
+/// and carries on with the configured window if it fails.
 pub fn startup_deadline(duration: Duration) -> Result<Instant, DynamoError> {
     checked_instant_add(Instant::now(), duration, "gRPC startup deadline")
 }

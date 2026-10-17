@@ -180,9 +180,8 @@ impl LLMEngine for TrtllmSidecarEngine {
             connections = self.transport.connections.get(),
             "connecting to TensorRT-LLM gRPC"
         );
-        // One deadline for the whole startup path. `GrpcChannelPool::connect`
-        // derives its own from the same duration, so taking this before
-        // connecting is what stops the two stages spending a full budget each.
+        // Taken before connecting so connect and `wait_for_model_limits` share one
+        // budget; the configured-context `model_limits` call uses `RPC_TIMEOUT` instead.
         let deadline = startup_deadline(self.transport.startup_deadline)?;
         let client = TrtllmClient::connect(&self.endpoint, self.transport).await?;
         let connection_count = client.connection_count();
@@ -196,7 +195,8 @@ impl LLMEngine for TrtllmSidecarEngine {
             // Configured: the engine is consulted once, to cross-check the
             // value and to learn its output cap. It may not answer at all --
             // an older server has no Control service -- and that must not stop
-            // a worker whose window the operator already supplied.
+            // a worker whose window the operator already supplied. That call is
+            // bounded by `RPC_TIMEOUT` (30 s), not `--grpc-startup-deadline-secs`.
             //
             // Neither branch waits for the engine to be *ready*, only to answer.
             // Readiness belongs to the engine's health service, which is what
