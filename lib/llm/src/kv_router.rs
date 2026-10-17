@@ -1660,6 +1660,27 @@ impl KvRouter {
         self.selection.scheduler().pending_isl_tokens()
     }
 
+    /// Sum this replica's per-class admission counters. Reads do not enter the queue.
+    pub fn queue_stats(&self) -> dynamo_kv_router::queue::ClassQueueStats {
+        let mut total = dynamo_kv_router::queue::ClassQueueStats {
+            pending_count: 0,
+            pending_isl_tokens: 0,
+            pending_cached_tokens: 0,
+            received_total: 0,
+            rejected_due_time_passed_total: 0,
+        };
+        let mut index = 0;
+        while let Some(stats) = self.selection.scheduler().class_queue_stats(index) {
+            total.pending_count += stats.pending_count;
+            total.pending_isl_tokens += stats.pending_isl_tokens;
+            total.pending_cached_tokens += stats.pending_cached_tokens;
+            total.received_total += stats.received_total;
+            total.rejected_due_time_passed_total += stats.rejected_due_time_passed_total;
+            index += 1;
+        }
+        total
+    }
+
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
@@ -1763,6 +1784,15 @@ impl KvRouter {
         let tiered_matches = self.indexer.find_matches_by_tier(block_hashes).await?;
         let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
         Ok(self.cache_hit_for_worker(&cache_hit_estimates, worker))
+    }
+
+    /// Inspect this router's selection state without admission or a reservation.
+    pub async fn probe(
+        &self,
+        request: dynamo_kv_router::services::selection::SelectRequest,
+        policy_class: Option<String>,
+    ) -> Result<dynamo_kv_router::services::selection::SelectResponse> {
+        self.selection.probe(request, policy_class).await
     }
 
     /// Get potential prefill and decode loads for all workers

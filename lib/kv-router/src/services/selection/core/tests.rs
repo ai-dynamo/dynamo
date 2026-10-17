@@ -2372,6 +2372,8 @@ async fn advisory_select_reports_worker_load_and_busy_evaluation() {
     assert_eq!(load.prefill_token_capacity, 1024);
     assert_eq!(load.active_prefill_tokens, 0);
     assert_eq!(load.prefill_busy, Some(false));
+    assert_eq!(load.active_requests, Some(0));
+    assert_eq!(load.active_decode_blocks, Some(0));
 
     // Advisory selection does not book.
     assert!(core.reservation_index.read().is_empty());
@@ -2379,6 +2381,29 @@ async fn advisory_select_reports_worker_load_and_busy_evaluation() {
         core.loads(Some("model"), Some("default"))[0].loads[0].potential_prefill_tokens,
         0
     );
+
+    core.select_and_reserve(reserve_request("inflight"))
+        .await
+        .expect("reserve");
+    let before = core.loads(Some("model"), Some("default"));
+    let mut request = select_request();
+    request.advisory = true;
+    let load = core
+        .select(request)
+        .await
+        .expect("loaded probe")
+        .worker_load
+        .expect("load snapshot");
+    assert_eq!(load.active_requests, Some(1));
+    assert_eq!(
+        load.active_decode_blocks,
+        Some(before[0].loads[0].potential_decode_blocks)
+    );
+    assert_eq!(
+        core.loads(Some("model"), Some("default"))[0].loads[0].active_requests,
+        1
+    );
+    core.free_reservation("inflight").await.expect("release");
 }
 
 #[tokio::test]
