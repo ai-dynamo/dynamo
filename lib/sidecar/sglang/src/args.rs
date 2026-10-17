@@ -15,6 +15,10 @@ pub struct Args {
     #[command(flatten)]
     pub sidecar: SidecarArgs,
 
+    /// Bearer token for the local SGLang HTTP server, including readiness and cancellation.
+    #[arg(long, env = "DYN_SGLANG_API_KEY", hide_env_values = true)]
+    pub sglang_api_key: Option<String>,
+
     /// Reachable host that decode workers use to connect to a prefill worker's
     /// SGLang disaggregation bootstrap port. By default this is derived from
     /// SGLang's concrete `host`, then `dist_init_addr`, then a routable local

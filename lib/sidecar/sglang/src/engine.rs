@@ -35,6 +35,7 @@ const POLICY_TAINT_PREFIX: &str = "dynamo.policy/";
 pub struct SglangSidecarEngine {
     endpoint: GrpcEndpoint,
     transport: GrpcTransportConfig,
+    http_api_key: Option<String>,
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
@@ -148,6 +149,7 @@ impl SglangSidecarEngine {
             Self {
                 endpoint,
                 transport,
+                http_api_key: args.sglang_api_key,
                 disaggregation_mode,
                 bootstrap_host,
                 bootstrap_port,
@@ -234,6 +236,10 @@ impl LLMEngine for SglangSidecarEngine {
             self.transport.connect_attempt_timeout,
         )? {
             Some(native_http) => {
+                let native_http = native_http.with_api_key(
+                    self.http_api_key.as_deref(),
+                    self.transport.connect_attempt_timeout,
+                )?;
                 match native_http
                     .await_ready(deadline, self.transport.retry_interval)
                     .await
@@ -1624,6 +1630,7 @@ mod tests {
         let engine = SglangSidecarEngine {
             endpoint: GrpcEndpoint::parse("http://127.0.0.1:1", "test").unwrap(),
             transport: GrpcTransportConfig::default(),
+            http_api_key: None,
             disaggregation_mode: DisaggregationMode::Aggregated,
             bootstrap_host: None,
             bootstrap_port: None,
