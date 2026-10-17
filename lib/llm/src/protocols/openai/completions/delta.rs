@@ -158,8 +158,10 @@ impl DeltaGenerator {
 
     /// Echo the prompt back on every choice (`echo: true`). `prompt_text` is the
     /// client's prompt when it was text; token prompts are decoded with `tokenizer`.
-    /// The echo rides the chunk that carries the engine's prompt logprobs, or the
-    /// choice's final chunk (text only) when the engine reports none.
+    /// The echo rides the first chunk of each choice, so a streaming client sees the
+    /// prompt before any generated text: with the engine's prompt logprobs when that
+    /// chunk carries them (engines report them with the first token), text only
+    /// otherwise.
     pub fn enable_echo(
         &mut self,
         prompt_token_ids: Arc<Vec<TokenIdType>>,
@@ -400,7 +402,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         } else {
             None
         };
-        if wants_echo && (prompt_logprobs.is_some() || finish_reason.is_some()) {
+        if wants_echo {
             let enable_logprobs = self.state.options().enable_logprobs;
             let return_as_ids = self.state.options().return_tokens_as_token_ids;
             let echo = self.echo.as_mut().expect("checked by wants_echo");
@@ -408,7 +410,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
                 Some(payload) if enable_logprobs => Some(echo.logprobs(payload, return_as_ids)),
                 None if enable_logprobs => {
                     tracing::warn!(
-                        "completions echo: the engine reported no prompt logprobs; echoing the prompt text only"
+                        "completions echo: the choice's first chunk carries no prompt logprobs; echoing the prompt text only"
                     );
                     None
                 }
@@ -1075,7 +1077,6 @@ mod tests {
         }
     }
 
-    /// Decodes a fixed vocabulary; `<s>` (id 1) is the only special token.
     struct MapTokenizer;
 
     impl crate::tokenizers::traits::Encoder for MapTokenizer {
@@ -1211,19 +1212,18 @@ mod tests {
         let response = generator
             .choice_from_postprocessor(partial)
             .expect("choice generation");
-        assert!(
-            response.echo.is_none(),
-            "nothing to echo before the engine's prompt logprobs or the end of the choice"
-        );
+        let echo = response
+            .echo
+            .expect("the choice's first chunk echoes the prompt, ahead of any generated text");
+        assert_eq!(echo.text, "Hello world", "a text prompt is echoed verbatim");
+        assert!(echo.logprobs.is_none());
 
         let mut last = final_backend_output();
         last.engine_data = None;
         let response = generator
             .choice_from_postprocessor(last)
             .expect("choice generation");
-        let echo = response.echo.expect("the final chunk echoes the prompt");
-        assert_eq!(echo.text, "Hello world", "a text prompt is echoed verbatim");
-        assert!(echo.logprobs.is_none());
+        assert!(response.echo.is_none(), "a choice echoes its prompt once");
     }
 
     #[test]

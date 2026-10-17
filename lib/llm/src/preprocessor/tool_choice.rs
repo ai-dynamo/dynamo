@@ -262,7 +262,6 @@ impl OpenAIPreprocessor {
 }
 
 impl OpenAIPreprocessor {
-    /// The model is served by the Beam unified family in either parser slot.
     fn is_beam(&self) -> bool {
         is_beam_parser(self.tool_call_parser.as_deref())
             || is_beam_parser(self.runtime_config.reasoning_parser.as_deref())
@@ -338,7 +337,6 @@ pub(crate) fn relax_noncompliant_strict_tools_for_beam(
     relaxed.len()
 }
 
-/// Install a structural tag in place of any JSON or regex constraint.
 fn install_structural_tag(
     common_request: &mut PreprocessedRequest,
     structural_tag: serde_json::Value,

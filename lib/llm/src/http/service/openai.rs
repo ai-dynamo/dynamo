@@ -1658,6 +1658,10 @@ async fn completions_batch(
                 for choice in &mut data.inner.choices {
                     choice.index += prompt_idx_u32 * n_u32;
                 }
+                // The echo names its choice by index too; keep them together.
+                if let Some(echo) = data.echo.as_mut() {
+                    echo.choice_index += prompt_idx_u32 * n_u32;
+                }
             }
             response
         });
