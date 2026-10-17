@@ -681,3 +681,19 @@ generate-helm-docs: ## Generate Helm chart README from values.yaml and template
 .PHONY: coverage
 coverage: test
 	go tool cover -func=cover.out
+
+.PHONY: install-upgrade-crds upgrade-contract regen-upgrade-fixtures
+install-upgrade-crds: ## Install prerequisites into an exclusively owned upgrade test cluster.
+	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "DYNAMO_CLUSTERTEST_CONTEXT is required"; exit 1; }
+	kubectl --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f config/crd/bases
+	go mod download sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION) github.com/ai-dynamo/grove/operator/api@$(CLUSTERTEST_GROVE_VERSION)
+	kubectl --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f '$(CLUSTERTEST_LWS_CRD_DIR)' -f '$(CLUSTERTEST_GROVE_CRD_DIR)'
+	curl --fail --location --silent --show-error --max-time 60 --retry 3 '$(CLUSTERTEST_VOLCANO_PODGROUP_CRD_URL)' | kubectl --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f -
+	kubectl --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" wait --for=condition=Established crd --all --timeout=2m
+
+upgrade-contract: ## Replay frozen predecessor state with production admission and controllers.
+	python3 hack/generate_upgrade_fixtures.py --check
+	go test -tags='clustertest upgradecontract' ./internal/controller -run '^TestClusterOperatorUpgrade$$' -count=1 -v -timeout=15m
+
+regen-upgrade-fixtures: ## Capture this checkout before advancing the operator appVersion.
+	python3 hack/generate_upgrade_fixtures.py --regenerate
