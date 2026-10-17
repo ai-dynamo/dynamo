@@ -22,6 +22,28 @@ type SGLangBackend struct {
 	roleLaunchOwnership roleLaunchOwnership
 }
 
+// sglangSidecarNeedsWorker resolves placement only for an explicit native launch.
+// Scripts and config files can hide topology flags and require complete role templates.
+// container must not be nil.
+func sglangSidecarNeedsWorker(container *corev1.Container) (bool, error) {
+	command := append(append([]string(nil), container.Command...), container.Args...)
+	if len(command) < 3 || !isPythonCommand(command[0]) || command[1] != "-m" || command[2] != "sglang.launch_server" {
+		return false, fmt.Errorf("multinode SGLang sidecar requires an explicit python -m sglang.launch_server command; use complete leader and worker podTemplates for other launchers")
+	}
+
+	// Hidden or expanded arguments cannot reliably determine follower placement.
+	worker := false
+	for _, arg := range command[3:] {
+		if arg == "--config" || strings.HasPrefix(arg, "--config=") || strings.Contains(arg, "$(") || strings.HasPrefix(arg, "--enable-dp-attention=") {
+			return false, fmt.Errorf("cannot determine SGLang sidecar placement from config files or expanded arguments; use complete leader and worker podTemplates")
+		}
+		if arg == "--enable-dp-attention" {
+			worker = true
+		}
+	}
+	return worker, nil
+}
+
 // isPythonCommand checks if the command is a Python interpreter
 func isPythonCommand(cmd string) bool {
 	if cmd == "python" || cmd == "python3" {
@@ -71,7 +93,7 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		role,
 		serviceName,
 		multinodeDeployer,
-		usesMultinodeTopologyAliases(GetPodTemplateAnnotations(component)),
+		GetDynamoSidecar(component) != nil || usesMultinodeTopologyAliases(GetPodTemplateAnnotations(component)),
 	)
 	if flags == "" {
 		return nil

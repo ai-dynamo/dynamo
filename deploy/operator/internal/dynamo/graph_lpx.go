@@ -399,7 +399,7 @@ func renderSelectedLPXRole(
 	// Capture authored precedence before PodSpec defaults fill the role's metadata.
 	metadata := generatePodMetadata(component, dgd, alphaComponent, componentName, discoveryContext)
 	metadata.Labels[commonconsts.KubeLabelDynamoWorkerHash] = defaults.servingHash
-	applyDGDTemplateDefaults(component, dgd, nil)
+	applyDGDTemplateDefaults(component, dgd, nil, false)
 	basePodSpec, err := generateBasePodSpecWithDefaults(
 		component,
 		BackendFrameworkNoop,
