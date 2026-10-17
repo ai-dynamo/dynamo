@@ -511,6 +511,15 @@ impl RoutingHost {
                 transport_fallback = target.worker_id != initial_worker,
                 "Selected worker"
             );
+        } else if target_constraint.is_some() && (!is_direct || has_affinity_session) {
+            // `dispatch_exact` (session-affinity hits and explicit targets) logs nothing, while
+            // the other non-occupancy paths log from `PushRouter`; keep one line per request.
+            tracing::info!(
+                router_mode = self.inner.router_mode().telemetry_label(),
+                worker_id = target.worker_id,
+                dp_rank = ?target.dp_rank,
+                "Selected worker"
+            );
         }
         if let Some(tracker) = tracker {
             let worker_type = if tracker.phase() == RequestPhase::Prefill {

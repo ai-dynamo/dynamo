@@ -78,6 +78,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
     fn uses_exclusive_affinity_target(&self) -> bool {
         true
     }
+    fn applies_worker_filters(&self) -> bool {
+        <WorkerSelectionPolicy as WorkerSelector<C>>::applies_worker_filters(&self.policy.lock())
+    }
     fn select_worker(
         &self,
         input: WorkerSelectionInput<'_, C>,

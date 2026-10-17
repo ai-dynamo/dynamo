@@ -336,7 +336,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 ### Router request metrics
 
-`dynamo_component_router_*` histograms and counters for aggregate request-level statistics. On the frontend, exposed at `/metrics` on the HTTP port; on the standalone router, exposed on `DYN_SYSTEM_PORT`. Populated per-request when `--router-mode kv` is active; registered with zero values in non-KV modes.
+`dynamo_component_router_*` histograms and counters for aggregate request-level statistics. On the frontend, exposed at `/metrics` on the HTTP port; on the standalone router, exposed on `DYN_SYSTEM_PORT`. Request-level metrics (request counts, TTFT, ITL, ISL, and OSL) are populated per-request in every router mode. KV metrics (`kv_hit_rate`, `non_max_overlap_selections_total`, `overlap_blocks_lost`, and the [KV-cache reuse counters](#kv-cache-reuse-telemetry)) are populated only when `--router-mode kv` is active and stay at zero in non-KV modes.
 
 <ParamField path="dynamo_component_router_requests_started_total" type="counter">
   Requests admitted by the router scheduler.
@@ -367,7 +367,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
-  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
+  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. [Explicitly pinned requests](../../developer-guide/knowledge-base/modular-components/router/worker-filtering.md#candidate-eligibility) (direct routing or an explicit worker target) and equal-overlap ties are excluded. Session-affinity selections are compared against the best eligible worker when the selection policy has no worker filters of its own (the default); otherwise they are excluded like pinned requests. Labeled by `worker_type` (`prefill`).
 </ParamField>
 
 <ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
@@ -387,7 +387,7 @@ All metric names below start with `dynamo_component_router_`.
 | **F3 — Selected worker's match** | Prefix the router estimates is cached on the worker it chooses. | `kv_selected_cached_prefix_tokens_total` |
 | **F4 — Reported reuse** | Tokens the worker reports reusing. Missing reports count as zero. | `kv_worker_reused_tokens_total` |
 
-These counters need no enable flag.
+The KV-cache reuse counters (F2, F3, and F4) are populated only with `--router-mode kv`; they need no additional enable flag. Incoming tokens (F0) are recorded in every router mode.
 
 Compare token increases over the same time window and matching KV-routing traffic. Use a long enough window: the steps are recorded at different times, and F4 depends on worker reports arriving after routing. Short windows may therefore compare different requests. Divide each step by F0 to express it as a percentage of incoming tokens.
 
@@ -462,7 +462,7 @@ Not all router metrics appear in every deployment. This matrix shows which group
 
 | Metric group | Frontend + KV (agg) | Frontend + KV (disagg) | Frontend + non-KV | Standalone router |
 |---|---|---|---|---|
-| `dynamo_component_router_*` | Registered and populated | Registered and populated | Registered, **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
+| `dynamo_component_router_*` | Registered and populated | Registered and populated | Registered; request-level metrics populated, KV metrics **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
 | `dynamo_router_overhead_*` | Registered and populated | Registered and populated | **Not registered** | **Not created** |
 | `dynamo_frontend_router_queue_*` | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
 | `dynamo_component_kv_cache_events_applied` | Populated when KV events received | Populated when KV events received | **Not registered** | Populated when KV events received |
