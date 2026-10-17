@@ -1438,9 +1438,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _reset_prefix_cache(self, **kwargs: Any) -> None:
         reset_successful = await self.engine_client.reset_prefix_cache(**kwargs)
         if reset_successful is False:
-            raise RuntimeError(
-                "Prefix cache reset was declined because KV blocks are still in use"
-            )
+            raise RuntimeError("vLLM declined the prefix-cache reset")
 
     def init_embedding_loader(
         self, config: Config, encode_worker_client: Optional[Client] = None
@@ -2050,27 +2048,34 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     ),
                 }
             try:
+                legacy_pause = False
                 try:
-                    await self.engine_client.pause_generation(
-                        mode=mode, clear_cache=clear_cache
-                    )
-                except TypeError:
-                    await self.engine_client.pause_generation()
-                    # The legacy API pauses before cache invalidation. Record
-                    # that state even if vLLM subsequently declines the reset.
-                    self._paused = True
-                    if clear_cache:
+                    try:
+                        await self.engine_client.pause_generation(
+                            mode=mode, clear_cache=clear_cache
+                        )
+                    except TypeError:
+                        await self.engine_client.pause_generation()
+                        legacy_pause = True
+                except EngineDeadError:
+                    raise
+                except Exception:
+                    # vLLM pauses the scheduler before clearing its caches, so
+                    # pause_generation() can raise after the engine is paused.
+                    self._paused = await self.engine_client.is_paused()
+                    raise
+
+                self._paused = True
+                if clear_cache:
+                    if legacy_pause:
                         await self._reset_prefix_cache()
-                else:
-                    # Current vLLM discards a declined cache-reset result inside
-                    # pause_generation(), so verify it explicitly while paused.
-                    self._paused = True
-                    if clear_cache:
+                    else:
+                        # Current vLLM discards a declined cache-reset result inside
+                        # pause_generation(), so verify it explicitly while paused.
                         await self._reset_prefix_cache(
                             reset_running_requests=True,
                             reset_connector=True,
                         )
-                self._paused = True
                 logger.info(
                     f"[RL] Engine paused (mode={mode}, clear_cache={clear_cache})"
                 )

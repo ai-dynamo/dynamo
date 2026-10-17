@@ -248,7 +248,7 @@ async def test_hot_swap_rolls_back_when_cache_reset_is_declined(monkeypatch):
     ]
 
     assert results[-1]["status"] == "error"
-    assert "KV blocks are still in use" in results[-1]["message"]
+    assert "vLLM declined the prefix-cache reset" in results[-1]["message"]
     handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
     assert handler.engine_client.remove_lora.await_count == 2
     assert handler.engine_client.add_lora.await_count == 2

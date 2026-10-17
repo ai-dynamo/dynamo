@@ -3090,7 +3090,7 @@ class TestRLAdminRouteHardening:
         resp = await handler.flush_cache({})
 
         assert resp["status"] == "error"
-        assert "KV blocks are still in use" in resp["message"]
+        assert "vLLM declined the prefix-cache reset" in resp["message"]
         handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
 
     @pytest.mark.asyncio
@@ -3109,7 +3109,7 @@ class TestRLAdminRouteHardening:
         resp = await handler.pause_generation({"clear_cache": True})
 
         assert resp["status"] == "error"
-        assert "KV blocks are still in use" in resp["message"]
+        assert "vLLM declined the prefix-cache reset" in resp["message"]
         assert handler._paused is True
         assert handler.engine_client.pause_generation.await_count == 2
         handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
@@ -3128,7 +3128,7 @@ class TestRLAdminRouteHardening:
         resp = await handler.pause_generation({"mode": "abort", "clear_cache": True})
 
         assert resp["status"] == "error"
-        assert "KV blocks are still in use" in resp["message"]
+        assert "vLLM declined the prefix-cache reset" in resp["message"]
         assert handler._paused is True
         handler.engine_client.pause_generation.assert_awaited_once_with(
             mode="abort", clear_cache=True
@@ -3137,6 +3137,29 @@ class TestRLAdminRouteHardening:
             reset_running_requests=True,
             reset_connector=True,
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("engine_paused", [True, False])
+    async def test_pause_reconciles_state_when_cache_clear_raises(self, engine_paused):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler._lora_state = mod.LoRAState()
+        handler.engine_client = SimpleNamespace(
+            pause_generation=AsyncMock(side_effect=RuntimeError("cache reset failed")),
+            is_paused=AsyncMock(return_value=engine_paused),
+            reset_prefix_cache=AsyncMock(),
+        )
+
+        resp = await handler.pause_generation({"mode": "abort", "clear_cache": True})
+
+        assert resp == {"status": "error", "message": "cache reset failed"}
+        assert handler._paused is engine_paused
+        handler.engine_client.pause_generation.assert_awaited_once_with(
+            mode="abort", clear_cache=True
+        )
+        handler.engine_client.is_paused.assert_awaited_once_with()
+        handler.engine_client.reset_prefix_cache.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_keep_pause_rejects_active_lora_requests(self):
@@ -3252,7 +3275,7 @@ class TestRLAdminRouteHardening:
         resp = await getattr(handler, route)({**body, "weight_version": "new-version"})
 
         assert resp["status"] == "error"
-        assert "KV blocks are still in use" in resp["message"]
+        assert "vLLM declined the prefix-cache reset" in resp["message"]
         handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
         handler.engine_client.collective_rpc.assert_not_awaited()
         assert handler._weight_version == "old-version"
