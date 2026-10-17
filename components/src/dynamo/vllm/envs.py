@@ -65,13 +65,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
 }
 
 
-def __getattr__(name: str):
-    """
-    Gets environment variables lazily.
-    """
-    if name in environment_variables:
-        return environment_variables[name]()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+# Hidden from the type checker on purpose. A module-level `__getattr__` tells
+# mypy this module may have any attribute, so `envs.DYN_TYPO` would check clean
+# in every module that imports it. The `TYPE_CHECKING` block above already
+# declares the real names, so the checker loses nothing by not seeing this.
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str):
+        """
+        Gets environment variables lazily.
+        """
+        if name in environment_variables:
+            return environment_variables[name]()
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def __dir__():
