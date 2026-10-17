@@ -139,7 +139,7 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 
 func xtShape(partition BuildPartition) (lpxv1alpha1.Xt8888PartitionShape, error) {
 	// These chip capacities name registered XT shapes; node width comes from the manifest.
-	chips := max(partition.Topology.ChipCount, partition.DevicesPerNode)
+	chips := max(partition.NumChips, partition.DevicesPerNode)
 	switch chips {
 	case 8, 16, 24, 32, 40, 48, 56, 64, 96, 128:
 		return lpxv1alpha1.Xt8888PartitionShape(fmt.Sprintf("c%d", chips)), nil

@@ -66,7 +66,7 @@ func TestResolvedPartitionDataUsesModelCount(t *testing.T) {
 			name: "single model", models: []string{"default"},
 			want: map[string]string{
 				"nodes_per_partition": "2\n1", "partition_ids": "7\n9",
-				"partition_node_offsets": "0\n2", "partition_paths": "part-7\npart-9", "topologies": "topology-7\ntopology-9",
+				"partition_node_offsets": "0\n2", "partition_paths": "part-7\npart-9",
 			},
 		},
 		{
@@ -74,13 +74,13 @@ func TestResolvedPartitionDataUsesModelCount(t *testing.T) {
 			want: map[string]string{
 				"nodes_per_partition": "2\n1\n2\n1", "partition_ids": "7\n9\n7\n9",
 				"partition_indices": "0\n1\n0\n1", "partition_models": "draft0\ndraft0\ntarget\ntarget",
-				"partition_node_offsets": "0\n2\n0\n2", "partition_paths": "part-7\npart-9\npart-7\npart-9", "topologies": "topology-7\ntopology-9\ntopology-7\ntopology-9",
+				"partition_node_offsets": "0\n2\n0\n2", "partition_paths": "part-7\npart-9\npart-7\npart-9",
 			},
 		},
 		{
 			name: "single all-local model", models: []string{"default"}, allLocal: true,
 			want: map[string]string{
-				"nodes_per_partition": "", "partition_ids": "", "partition_node_offsets": "", "partition_paths": "", "topologies": "",
+				"nodes_per_partition": "", "partition_ids": "", "partition_node_offsets": "", "partition_paths": "",
 			},
 		},
 	} {
@@ -93,8 +93,8 @@ func TestResolvedPartitionDataUsesModelCount(t *testing.T) {
 				projection := &ModelProjection{model: model}
 				if !test.allLocal {
 					projection.configuredBuild.Partitions = []BuildPartition{
-						{SourcePartitionID: 7, PartPath: "part-7", Topology: Topology{ChipCount: 16, Raw: "topology-7"}, DevicesPerNode: 8},
-						{SourcePartitionID: 9, PartPath: "part-9", Topology: Topology{ChipCount: 8, Raw: "topology-9"}, DevicesPerNode: 8},
+						{SourcePartitionID: 7, PartPath: "part-7", NumChips: 16, topology: "topology-7", DevicesPerNode: 8},
+						{SourcePartitionID: 9, PartPath: "part-9", NumChips: 8, topology: "topology-9", DevicesPerNode: 8},
 					}
 				}
 				projections[index] = projection

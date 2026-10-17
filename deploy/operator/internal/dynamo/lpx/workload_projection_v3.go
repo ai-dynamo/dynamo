@@ -56,7 +56,7 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		case nodes == 32:
 			partition.HXExtent = []int64{width, 8, 2, 2}
 		default:
-			return nil, fmt.Errorf("packed chain chip count %d does not fit a supported HX extent", partition.Topology.ChipCount)
+			return nil, fmt.Errorf("packed chain chip count %d does not fit a supported HX extent", partition.NumChips)
 		}
 	}
 
