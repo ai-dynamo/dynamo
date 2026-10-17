@@ -27,6 +27,7 @@ from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown
 
+from .perf_instrumentation import enter_generator, exit_generator
 from .sglang_prepost import (
     ReasoningParser,
     SglangStreamingPostProcessor,
@@ -582,11 +583,6 @@ class SglangProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Main entry point: preprocess, route, post-process a chat request."""
         if self.debug_perf:
-            from .perf_instrumentation import (  # type: ignore[import-not-found, import-untyped]
-                enter_generator,
-                exit_generator,
-            )
-
             active = enter_generator()
             t_start = time.monotonic()
             logger.info("[perf] sglang generator enter: active_requests=%d", active)
