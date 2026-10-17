@@ -124,8 +124,9 @@ pub struct KvTransferScope {
     /// Whether some target takes a source from any island: it has no
     /// transfer domain, or `preferred` enforcement allows a fallback.
     any_island: bool,
-    /// The transfer domains whose islands targets fetch within; `None` for all.
-    domains: Option<Vec<u64>>,
+    /// The transfer domains targets fetch within, each with its island while
+    /// every target in it shares one; `None` for all.
+    domains: Option<Vec<(u64, Option<u64>)>>,
 }
 
 impl KvTransferScope {
@@ -146,10 +147,12 @@ impl KvTransferScope {
         for (target, local_prefix_blocks) in targets {
             min_local_prefix_blocks = min_local_prefix_blocks.min(local_prefix_blocks);
             any_island |= target.transfer_domain.is_none() || target.preferred;
-            if let (Some(domain), Some(_)) = (target.transfer_domain, target.transfer_island)
-                && !domains.contains(&domain)
-            {
-                domains.push(domain);
+            if let (Some(domain), Some(island)) = (target.transfer_domain, target.transfer_island) {
+                match domains.iter_mut().find(|(known, _)| *known == domain) {
+                    Some((_, only)) if *only != Some(island) => *only = None,
+                    Some(_) => {}
+                    None => domains.push((domain, Some(island))),
+                }
             }
         }
         Self {
@@ -159,10 +162,12 @@ impl KvTransferScope {
         }
     }
 
-    fn covers(&self, domain: u64) -> bool {
-        self.domains
-            .as_ref()
-            .is_none_or(|domains| domains.contains(&domain))
+    fn covers(&self, domain: u64, island: u64) -> bool {
+        self.domains.as_ref().is_none_or(|domains| {
+            domains
+                .iter()
+                .any(|&(known, only)| known == domain && only.is_none_or(|only| only == island))
+        })
     }
 }
 
@@ -299,6 +304,10 @@ impl KvTransferSourceSummary {
         scope: KvTransferScope,
     ) -> Self {
         let min_local_prefix_blocks = scope.min_local_prefix_blocks;
+        let needs_islands = scope
+            .domains
+            .as_ref()
+            .is_none_or(|domains| !domains.is_empty());
         let mut summary = Self {
             by_type: FxHashMap::default(),
             by_island: FxHashMap::default(),
@@ -339,7 +348,7 @@ impl KvTransferSourceSummary {
                         continue;
                     }
                     // An owner that publishes no topology is in its attached worker's island.
-                    let topology = if keys.topology.is_empty() {
+                    let topology = if keys.topology.is_empty() && needs_islands {
                         attached_worker_keys = owner
                             .attached_worker
                             .and_then(|worker| workers.get(&worker.worker_id))
@@ -364,7 +373,7 @@ impl KvTransferSourceSummary {
                 TopSources::offer(summary.by_type.entry(worker_type), ranked);
             }
             for &(domain, value) in topology {
-                if summary.scope.covers(domain) {
+                if summary.scope.covers(domain, value) {
                     TopSources::offer(
                         summary.by_island.entry((worker_type, domain, value)),
                         ranked,
@@ -497,6 +506,20 @@ mod tests {
             source_for(&candidates, target, 0),
             Some((other_rank.into(), 2))
         );
+    }
+
+    #[test]
+    fn scope_keeps_one_island_until_targets_differ() {
+        let target = |island| KvTransferTarget {
+            worker_type: 1,
+            transfer_domain: Some(2),
+            transfer_island: Some(island),
+            preferred: false,
+        };
+        let one = KvTransferScope::of([(target(3), 0), (target(3), 1)]);
+        assert!(one.covers(2, 3) && !one.covers(2, 4) && !one.covers(5, 3));
+        let both = KvTransferScope::of([(target(3), 0), (target(4), 0)]);
+        assert!(both.covers(2, 3) && both.covers(2, 6));
     }
 
     #[test]
