@@ -170,7 +170,7 @@ If no packing brings totals into the band, the request is rejected (`REJECTED`) 
 
 When the selected partners span multiple DGDs:
 
-- **Intra-DGD partners** (same DGD as the request) are merged into the request's atomic `set_component_replicas` call — one patch updates request-side and intra-DGD partner pools together.
+- **Intra-DGD partners** (same DGD as the request) share the request's `set_component_replicas` call, which patches component targets separately rather than transactionally.
 - **Cross-DGD partners** (different DGD) get their own per-DGD patch.
 - **Direction-aware order**: scale-down DGDs apply first (freeing GPUs), then scale-up DGDs. If any second-or-later patch fails, the first has already landed and the system self-corrects from the new state on the next tick.
 
