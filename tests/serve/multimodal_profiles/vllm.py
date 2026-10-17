@@ -740,6 +740,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_custom": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=300,
+                # Without a cap, agg_custom.sh falls back to 0.8 utilization, and
+                # vLLM's startup check then fails while a previous test still holds VRAM.
+                requested_vllm_kv_cache_bytes=939_525_000,  # 2x safety over min=469_762_048
                 directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
                 env={
                     # The single-GPU test container exposes its GPU at device 0,
