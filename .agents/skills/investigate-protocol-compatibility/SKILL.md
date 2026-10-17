@@ -62,10 +62,12 @@ Optional OpenAPI tooling is being introduced by
 [the comparator PR](https://github.com/ai-dynamo/dynamo/pull/15914) and
 [the vLLM assessment PR](https://github.com/ai-dynamo/dynamo/pull/15921).
 Check availability in the selected checkout; these are not prerequisites for this
-skill. When present, read `scripts/protocol_compatibility/README.md` for commands,
-the frontend `openapi-request-contract-comparison.md` guide for interpretation,
-and `lib/llm/docs/dynamo-vllm-openapi32-assessment.md` for the pinned assessment's
-scope and evidence. Treat historical results as revision-scoped observations.
+skill. When present, read `scripts/protocol_compatibility/README.md` for commands
+and links to maintained backend assessment recipes, and the frontend
+`openapi-request-contract-comparison.md` guide for interpretation. Read the
+selected assessment's completion record for its actual scope, pins, and evidence;
+a recipe alone does not establish that an assessment ran. Treat historical
+results as revision-scoped observations.
 After those resources merge, prefer checkout-relative links to their maintained
 owners rather than copying commands or pinning the skill to their original PRs.
 
@@ -76,8 +78,19 @@ are all valid entry points. Skip discovery when a useful reproducer already
 exists. Reuse evidence only when its source, configuration, and claim match.
 
 For schema inputs, record provenance and check reference resolution, composition,
-normalization, and comparator coverage. An unsupported construct or missing
-schema is a coverage gap, not proof of a runtime defect or compatibility.
+normalization, and comparator coverage before selecting candidates. Distinguish
+the raw comparison, augmented or rendered report, reviewed assessment, and newer
+capture recipe. Preserve their source/configuration pins and artifact identities.
+When using another representation, record an explicit crosswalk and verify the
+selected declarations and deltas; added metadata can change bytes without changing
+comparison evidence. Do not assume byte identity or silently regenerate the report.
+
+An unsupported construct or missing schema is a coverage gap, not proof of a
+runtime defect or compatibility. If coarse root findings or gaps hide individual
+candidates, retain them and, within the authorized investigation scope, define a
+bounded source-first candidate set with pointers to each parent finding or gap
+and pinned source. Keep these candidates distinct from generated findings; an
+empty generated category does not establish that no migration risk exists.
 
 | Candidate | First question |
 | --- | --- |
@@ -94,8 +107,27 @@ investigation, but a chat result does not establish completion behavior.
 Trace parsing, admission/validation, normalization, frontend semantics, worker
 transport, backend effect, and response serialization as applicable. Inspect the
 reference implementation too: an exposed option can be ignored or overridden by
-its pinned execution path. CPU tests can resolve declaration/mapping questions;
-they cannot by themselves prove an engine's generation behavior.
+its pinned execution path.
+
+## Match Evidence to the Claim
+
+Label what each result establishes rather than treating all checks as equivalent:
+
+- **Source expectation:** the pinned implementation suggests a path or effect;
+  it does not show that a request exercised it.
+- **Isolated helper execution:** demonstrates the tested helper's behavior, not
+  that production callers supply those inputs or preserve its result.
+- **Full-path CPU test:** exercises the included admission, transformation, and
+  serialization path. State mocked or omitted layers; it does not automatically
+  establish engine/model effects.
+- **Paired HTTP/inference probe:** compares direct-framework and Dynamo behavior
+  for the pinned request and configuration. State whether inference actually ran;
+  HTTP-only or mock-backed checks do not establish generation-effect parity.
+
+Choose evidence for the decision, not a mandatory progression through every level.
+Use the field-handling contract above to identify which semantic owners a check
+covers. Before gathering more evidence, state which possible outcome would change
+the scoped disposition, priority, or next action.
 
 ## Establish a Controlled Counterexample
 
@@ -164,5 +196,10 @@ evidence location rather than an invented public support matrix.
 
 Finish when the agreed scope has dispositions and explicit unresolved limits, or
 report the specific authority/resource blocker. List untested candidates as such.
+Triage may finish with ranked, source-supported unknowns and concrete next checks;
+this is not a runtime compatibility claim or permission to implement a fix.
+Gather more evidence only when it could change the scoped decision. Stronger
+runtime claims and authorized fixes still need witnesses covering the claimed
+behavior, including the parent-failing regression for a fix.
 Do not turn a successful focused test into a whole-field, combined-stack, or
 all-backend compatibility claim, and do not keep searching for exhaustive parity.
