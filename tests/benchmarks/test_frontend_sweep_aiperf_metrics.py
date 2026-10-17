@@ -448,12 +448,8 @@ def test_truthy_non_dict_duration_passes_through(tmp_path: Path) -> None:
 
 
 def test_k8s_partial_update_before_uncaught_error(tmp_path: Path) -> None:
-    # The wrappers catch (JSONDecodeError, KeyError, TypeError). Every lookup on
-    # this path is ``.get`` and ``or``/``isinstance`` never raise, so KeyError and
-    # TypeError are unreachable from JSON input; the only reachable mid-sequence
-    # failure is AttributeError from ``.get`` on a non-dict, which escapes.
-    # Kubernetes assigns each field as it is decoded, so fields before the
-    # failure are already updated and later fields keep their old values.
+    # Only AttributeError (``.get`` on a non-dict) can fail mid-decode, and it escapes;
+    # Kubernetes keeps fields assigned before it and leaves later ones unchanged.
     data = dict(FULL_CANONICAL)
     data["request_throughput"] = {"avg": 7}
     data["output_token_throughput"] = 5
