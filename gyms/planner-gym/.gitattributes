@@ -1,0 +1,2 @@
+# CQL checkpoints are binary torch exports; never normalize their line endings.
+*.pt binary
