@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import faulthandler
 import os
 import subprocess
 import sys
@@ -40,6 +41,12 @@ pytestmark = [
 ]
 
 
+# The child's own watchdog bounds the scenario after imports; the parent budget also covers
+# interpreter and planner-import start-up, which can exceed 25 s on a contended CPU.
+_SCENARIO_TIMEOUT_S = 30
+_CHILD_TIMEOUT_S = 120
+
+
 class _PlannerSources:
     def __init__(self, namespace: str, state: DeploymentState) -> None:
         self._namespace = namespace
@@ -66,17 +73,19 @@ class _DecodePlanner(NativePlannerBase):
 
 
 def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path):
+    """Check FPM delivery and scale-up in a child process with bounded runtime."""
     # Keep binding runtimes out of pytest's process without pytest-forked, whose parent setup
     # stack is not advanced when a forked item is the last test in its module.
     subprocess.run(
         [sys.executable, __file__],
         check=True,
         env={**os.environ, "DYN_FILE_KV": str(tmp_path)},
-        timeout=30,
+        timeout=_CHILD_TIMEOUT_S,
     )
 
 
 async def _endpoint_fpm_reaches_planner_and_drives_scale_up():
+    """Verify endpoint isolation and that serving-worker FPM drives scale-up."""
     namespace = "fpm-test"
     endpoint_path = f"{namespace}.worker.generate"
     async with AsyncExitStack() as stack:
@@ -228,4 +237,7 @@ async def _endpoint_fpm_reaches_planner_and_drives_scale_up():
 
 
 if __name__ == "__main__":
+    # Dumps every thread's stack to the inherited stderr, which pytest captures, then exits
+    # non-zero.
+    faulthandler.dump_traceback_later(_SCENARIO_TIMEOUT_S, exit=True)
     asyncio.run(_endpoint_fpm_reaches_planner_and_drives_scale_up())
