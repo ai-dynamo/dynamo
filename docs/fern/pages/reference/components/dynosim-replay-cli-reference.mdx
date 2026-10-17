@@ -5,6 +5,10 @@ title: DynoSim Replay CLI Reference
 subtitle: Command options, YAML sections, constraints, and output for aisimulate predict
 ---
 
+import { EnumStyles } from "@/components/EnumStyles";
+
+<EnumStyles />
+
 `aisimulate predict --stack dynamo` evaluates one concrete workload and deployment configuration
 through the Dynamo simulation stack. AISimulate owns the traffic and engine schema. The `ai-dynamo`
 package supplies the Dynamo runner and the optional `router` and `planner` configuration adapters.
