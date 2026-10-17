@@ -397,6 +397,13 @@ pub(crate) fn to_worker_selection_session_context(
     .with_agent_headers(agent_headers.clone())
 }
 
+/// Whether a policy reads the KV index: its overlaps (`CACHE`) or the prefixes
+/// workers could fetch (`KV_TRANSFER`). Each component still reads only the
+/// inputs it declares.
+pub(crate) fn needs_kv_index(inputs: WorkerInputs) -> bool {
+    inputs.contains(WorkerInputs::CACHE) || inputs.contains(WorkerInputs::KV_TRANSFER)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvEventSourceRequirement {
     NotRequired,
@@ -411,10 +418,7 @@ impl KvEventSourceRequirement {
         config: &KvRouterConfig,
         inputs: WorkerInputs,
     ) -> Self {
-        if !inputs.contains(WorkerInputs::CACHE)
-            || config.use_remote_indexer
-            || !config.use_kv_events
-        {
+        if !needs_kv_index(inputs) || config.use_remote_indexer || !config.use_kv_events {
             return Self::NotRequired;
         }
 
@@ -2099,7 +2103,11 @@ mod tests {
             Some(WorkerType::Decode),
             Some(WorkerType::Encode),
         ] {
-            for inputs in [WorkerInputs::LOAD, WorkerInputs::CACHE | WorkerInputs::LOAD] {
+            for inputs in [
+                WorkerInputs::LOAD,
+                WorkerInputs::CACHE | WorkerInputs::LOAD,
+                WorkerInputs::KV_TRANSFER | WorkerInputs::LOAD,
+            ] {
                 for overlap_score_credit in [0.0, 1.0, 2.0] {
                     for use_kv_events in [false, true] {
                         for use_remote_indexer in [false, true] {
@@ -2111,28 +2119,26 @@ mod tests {
                                     conditional_disagg_enabled,
                                     ..Default::default()
                                 };
-                                let expected = if !inputs.contains(WorkerInputs::CACHE)
-                                    || !use_kv_events
-                                    || use_remote_indexer
-                                {
-                                    KvEventSourceRequirement::NotRequired
-                                } else if role.is_none() {
-                                    KvEventSourceRequirement::Unknown
-                                } else if role == Some(WorkerType::Decode)
-                                    && conditional_disagg_enabled
-                                {
-                                    KvEventSourceRequirement::ConditionalDisaggDecodeCache
-                                } else {
-                                    KvEventSourceRequirement::CacheAwareRouting
-                                };
+                                let reads_index = inputs.contains(WorkerInputs::CACHE)
+                                    || inputs.contains(WorkerInputs::KV_TRANSFER);
+                                let expected =
+                                    if !reads_index || !use_kv_events || use_remote_indexer {
+                                        KvEventSourceRequirement::NotRequired
+                                    } else if role.is_none() {
+                                        KvEventSourceRequirement::Unknown
+                                    } else if role == Some(WorkerType::Decode)
+                                        && conditional_disagg_enabled
+                                    {
+                                        KvEventSourceRequirement::ConditionalDisaggDecodeCache
+                                    } else {
+                                        KvEventSourceRequirement::CacheAwareRouting
+                                    };
                                 let actual =
                                     KvEventSourceRequirement::derive(role, &config, inputs);
                                 assert_eq!(actual, expected);
                                 assert_eq!(
                                     actual.should_subscribe(),
-                                    inputs.contains(WorkerInputs::CACHE)
-                                        && use_kv_events
-                                        && !use_remote_indexer,
+                                    reads_index && use_kv_events && !use_remote_indexer,
                                 );
                             }
                         }
