@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Published AISimulate wheel staged into planner and framework runtime wheelhouses.
-# Keep in sync with the aisimulate-core pins in Cargo.toml and lib/bindings/python/Cargo.toml.
-aisimulate==0.13.0.dev2
+# Development source pin shared with Cargo.toml and lib/bindings/python/Cargo.toml.
+# Replace all pins together when matching Python and Rust packages are published.
+aisimulate==0.13.0; python_version >= '3.11' and python_version < '3.14'
+aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@e407510d20901b7f32400a63634a2f9949864966#subdirectory=python/aisimulate ; python_version >= '3.11' and python_version < '3.14'

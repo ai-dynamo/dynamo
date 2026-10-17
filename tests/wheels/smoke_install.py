@@ -271,7 +271,8 @@ def create_venv(python_spec: str) -> Path:
     return venv_dir / "bin" / "python"
 
 
-# Stage the pinned AISimulate wheel directly from NVIDIA's package index.
+# Published-wheel source used once the matching AISimulate release is available.
+# Source-pinned builds must instead ship their matching wheel in the wheelhouse.
 AISIMULATE_FIND_LINKS = "https://pypi.nvidia.com/aisimulate/"
 
 
@@ -282,12 +283,15 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
             find_links.extend(["--find-links", str(path)])
-    # Planner and framework runtime wheelhouses stage their own aisimulate wheel. Offer
-    # NVIDIA's index only when that staged wheel is absent: pip ranks equal candidates
-    # without regard to where they came from, so registering both risks installing the
-    # remote copy in place of the artifact the image actually ships.
-    if not find_wheels(wheelhouse, "aisimulate"):
-        find_links.extend(["--find-links", AISIMULATE_FIND_LINKS])
+    # The matching source-pinned release is not published. Select the wheel built
+    # alongside the runtime explicitly, even if an index later offers this version.
+    # Keep ai-dynamo's Python support marker: its Python 3.10 smoke excludes AISimulate.
+    aisimulate = require_one_wheel(wheelhouse, "aisimulate")
+    requirements = [
+        *requirements,
+        f"aisimulate @ {aisimulate.resolve().as_uri()}; "
+        "python_version >= '3.11' and python_version < '3.14'",
+    ]
     run(
         [
             str(venv_python),
@@ -499,6 +503,7 @@ def install_core(
 def install_mocker_support(wheelhouse: Path, python_spec: str) -> None:
     ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
     runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
+    aisimulate = require_one_wheel(wheelhouse, "aisimulate")
 
     venv_python = create_venv(python_spec)
     try:
@@ -511,6 +516,7 @@ def install_mocker_support(wheelhouse: Path, python_spec: str) -> None:
         )
         pip_check(venv_python)
         assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
+        assert_local_direct_url(venv_python, "aisimulate", aisimulate, wheelhouse)
         run_ais_core_import_smoke(venv_python)
     finally:
         shutil.rmtree(venv_python.parent.parent, ignore_errors=True)

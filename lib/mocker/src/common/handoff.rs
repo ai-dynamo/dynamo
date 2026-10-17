@@ -57,6 +57,9 @@ impl From<HandoffId> for aisimulate_core::replay::HandoffId {
 pub struct HandoffTransferTiming {
     pub mode: KvTransferTimingMode,
     pub full_prompt_tokens: usize,
+    /// Non-token state transferred once, including when the destination has all KV blocks.
+    #[serde(default)]
+    pub state_bytes: usize,
     pub kv_bytes_per_token: Option<usize>,
     pub bandwidth_gb_s: Option<f64>,
 }
@@ -257,6 +260,7 @@ fn replay_timing(timing: HandoffTransferTiming) -> aisimulate_core::replay::Hand
             }
         },
         full_prompt_tokens: timing.full_prompt_tokens,
+        state_bytes: timing.state_bytes,
         kv_bytes_per_token: timing.kv_bytes_per_token,
         bandwidth_gb_s: timing.bandwidth_gb_s,
     }

@@ -9,8 +9,9 @@ subtitle: Install and compose Planner, Router, and Dynamo Replay with AISimulate
 > **Experimental.** The AISimulate CLI, adapter ABI, and replay contracts may change without a
 > standard deprecation period.
 
-AISimulate's Sweeper core does not depend on Dynamo. Dynamo owns its optional Planner and Router
-sweep configuration providers and `DynamoReplayRunnerFactory`.
+AISimulate can run conversation-aware simulation using its bundled native Dynamo policy
+without installing Dynamo's Python packages. Dynamo supplies the optional Planner and Router
+sweep configuration providers and `DynamoReplayRunnerFactory` described here.
 
 ## Install
 
@@ -55,8 +56,10 @@ aisimulate predict --stack dynamo --config prediction.yaml
 aisimulate recommend --stack dynamo --config recommendation.yaml
 ```
 
-The `--stack` option defaults to `engine`. Without `--stack dynamo`, top-level `router` and
-`planner` sections have no matching adapter and fail configuration resolution.
+The `--stack` option defaults to `engine`. Its built-in `engine.router` adapter accepts
+fixed routing configuration, including conversation affinity. Select `--stack dynamo`
+for the Planner, router parameter search, or a custom AIS prefill-load estimator.
+Conversation affinity requires static worker pools and the default scoring/load model.
 
 The `ai-dynamo` distribution registers:
 
@@ -135,9 +138,10 @@ hook.
 ## Replay Composition
 
 `DynamoReplayRunnerFactory` converts each serializable `ReplaySpec` into an invocation of the
-shared AISimulate Replayer. It resolves materialized Planner and Router hooks into Dynamo-owned
-scaling and placement policies, while the Replayer continues to own traffic execution and report
-generation.
+shared AISimulate Replayer. It resolves Planner hooks into Dynamo scaling callbacks and
+Router hooks into AISimulate's native routing composition. AISimulate owns traffic
+execution, affinity lifecycle, KV feedback, and report generation. The default engine
+runner uses the same composition without this optional integration.
 
 | Load | No Planner hook | Dynamo Planner hook |
 |---|---|---|

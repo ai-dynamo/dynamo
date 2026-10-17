@@ -54,6 +54,17 @@ class PrefillLoadRecommendationModel(BaseModel):
     )
 
 
+class ConversationAffinityConfig(BaseModel):
+    """Conversation affinity composed with native KV-aware worker selection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["session", "sibling_group"]
+    ttl_seconds: float = Field(
+        default=3600, strict=True, ge=1, le=31_536_000, allow_inf_nan=False
+    )
+
+
 class RouterPredictionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -62,6 +73,7 @@ class RouterPredictionConfig(BaseModel):
     overlap_score_credit: StrictFiniteFloat | None = None
     prefill_load_scale: StrictFiniteFloat | None = None
     temperature: StrictFiniteFloat | None = None
+    affinity: ConversationAffinityConfig | None = None
 
     @field_validator(
         "overlap_score_credit",
@@ -78,6 +90,8 @@ class RouterPredictionConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_policy(self) -> RouterPredictionConfig:
         if self.policy == "round_robin":
+            if self.affinity is not None:
+                raise ValueError("router.affinity requires policy='kv_router'")
             conflicts = {
                 "overlap_score_credit",
                 "prefill_load_scale",

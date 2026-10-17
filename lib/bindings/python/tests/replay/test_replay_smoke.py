@@ -37,6 +37,51 @@ pytestmark = [
 ]
 
 
+@pytest.mark.parametrize("entrypoint", ["trace", "synthetic"])
+@pytest.mark.parametrize(
+    ("lag_ms", "replay_mode", "router_mode", "message"),
+    [
+        (-1.0, "offline", "kv_router", "finite and non-negative"),
+        (float("inf"), "offline", "kv_router", "finite and non-negative"),
+        (float("nan"), "offline", "kv_router", "finite and non-negative"),
+        (1.0, "online", "kv_router", "only supports replay_mode='offline'"),
+        (1.0, "offline", "round_robin", "only supports router_mode='kv_router'"),
+    ],
+)
+def test_legacy_replay_rejects_invalid_kv_event_lag(
+    tmp_path, entrypoint, lag_ms, replay_mode, router_mode, message
+):
+    kwargs = {
+        "extra_engine_args": _vllm_args(),
+        "kv_event_lag_ms": lag_ms,
+        "replay_mode": replay_mode,
+        "router_mode": router_mode,
+    }
+    with pytest.raises(ValueError, match=message):
+        if entrypoint == "trace":
+            run_trace_replay(_write_trace_and_args(tmp_path), **kwargs)
+        else:
+            run_synthetic_trace_replay(64, 2, 2, **kwargs)
+
+
+@pytest.mark.parametrize("entrypoint", ["trace", "synthetic"])
+@pytest.mark.parametrize("lag_ms", [None, 0.0, 10.0])
+def test_legacy_kv_event_lag_preserves_replay_completions(tmp_path, entrypoint, lag_ms):
+    kwargs = {
+        "extra_engine_args": _vllm_args(),
+        "kv_event_lag_ms": lag_ms,
+        "router_mode": "kv_router",
+        "num_workers": 2,
+    }
+    if entrypoint == "trace":
+        report = run_trace_replay(_write_trace_and_args(tmp_path), **kwargs)
+    else:
+        report = run_synthetic_trace_replay(64, 2, 2, request_rate=10.0, **kwargs)
+    _assert_basic_report_counts(
+        report, num_requests=2, input_tokens=64, output_tokens=2
+    )
+
+
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 @pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])

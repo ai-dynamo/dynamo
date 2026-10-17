@@ -130,6 +130,7 @@ impl CompatibilityState {
                         }
                     },
                     full_prompt_tokens: transfer_timing.full_prompt_tokens,
+                    state_bytes: transfer_timing.state_bytes,
                     kv_bytes_per_token: transfer_timing.kv_bytes_per_token,
                     bandwidth_gb_s: transfer_timing.bandwidth_gb_s,
                 },
@@ -270,6 +271,34 @@ mod tests {
 
     fn handoff(value: u128) -> DynamoHandoffId {
         DynamoHandoffId::from(Uuid::from_u128(value))
+    }
+
+    #[test]
+    fn source_held_preserves_non_token_transfer_state() {
+        let state = CompatibilityState::new(MockerConfig::default());
+        let id = handoff(5);
+        let native_id = state.engine_handoff(id).unwrap();
+        let event = state
+            .lifecycle_event(LifecycleEvent::SourceHeld {
+                handoff_id: native_id,
+                request_id: Uuid::from_u128(12),
+                transfer_timing: aisimulate_core::engine::HandoffTransferTiming {
+                    mode: EngineTransferTimingMode::DestinationMissing,
+                    full_prompt_tokens: 8,
+                    state_bytes: 2_000_000,
+                    kv_bytes_per_token: Some(1_000_000),
+                    bandwidth_gb_s: Some(1.0),
+                },
+            })
+            .unwrap();
+        let SchedulerLifecycleEvent::SourceHeld {
+            transfer_timing, ..
+        } = event
+        else {
+            panic!("source-held lifecycle event changed type");
+        };
+        assert_eq!(transfer_timing.state_bytes, 2_000_000);
+        assert_eq!(transfer_timing.delay_ms(0), Some(2.0));
     }
 
     #[test]

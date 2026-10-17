@@ -240,14 +240,19 @@ class PlannerEnginePerfModel:
     def _build_ais_config(self) -> dict[str, Any]:
         spec = self._config.ais_perf_model
         if spec is None:
+            if self._config.backend == "mocker":
+                raise ValueError(
+                    "online regression for mocker requires ais_perf_model with its "
+                    "underlying vllm, sglang, or trtllm backend"
+                )
+            model_name = self._config.model_name or (
+                f"dynamo-planner:{self._config.namespace}"
+            )
             config = asdict(
                 ForwardPassPerfModelConfig(
-                    model=self._config.model_name
-                    or f"dynamo-planner:{self._config.namespace}",
+                    model=model_name,
                     system="unprofiled",
-                    backend="vllm"
-                    if self._config.backend == "mocker"
-                    else self._config.backend,
+                    backend=self._config.backend,
                     worker_type=self._worker_type,
                     estimation_mode="fpm_regression",
                 )

@@ -34,15 +34,15 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0879b3cfd9847c74cafe0dfdac8109e1afb326f15e2bfd468d45b07c7e4d0ea0"
+version = "0.13.0"
+source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=e407510d20901b7f32400a63634a2f9949864966#e407510d20901b7f32400a63634a2f9949864966"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
  "blake3",
  "ddsketchy",
  "derive_builder",
+ "fixedbitset",
  "flate2",
  "indicatif 0.18.4",
  "log",
@@ -64,6 +64,25 @@ dependencies = [
  "tracing",
  "uuid",
  "xxhash-rust",
+]
+
+[[package]]
+name = "aisimulate-python"
+version = "0.13.0"
+source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=e407510d20901b7f32400a63634a2f9949864966#e407510d20901b7f32400a63634a2f9949864966"
+dependencies = [
+ "aisimulate-core",
+ "anyhow",
+ "dynamo-custom-policy-builtin 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
+ "dynamo-kv-router 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
+ "dynamo-tokens 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2080,7 +2099,22 @@ name = "dynamo-custom-policy-builtin"
 version = "1.6.0"
 dependencies = [
  "async-trait",
- "dynamo-kv-router",
+ "dynamo-kv-router 1.6.0",
+ "fastrand",
+ "parking_lot",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dynamo-custom-policy-builtin"
+version = "1.6.0"
+source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
+dependencies = [
+ "async-trait",
+ "dynamo-kv-router 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
  "fastrand",
  "parking_lot",
  "serde",
@@ -2094,7 +2128,19 @@ name = "dynamo-kv-hashing"
 version = "1.6.0"
 dependencies = [
  "derive_builder",
- "dynamo-tokens",
+ "dynamo-tokens 1.6.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dynamo-kv-hashing"
+version = "1.6.0"
+source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
+dependencies = [
+ "derive_builder",
+ "dynamo-tokens 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2114,10 +2160,10 @@ dependencies = [
  "crossbeam-utils",
  "dashmap",
  "derive_builder",
- "dynamo-kv-hashing",
+ "dynamo-kv-hashing 1.6.0",
  "dynamo-runtime",
- "dynamo-tokens",
- "dynamo-truthy",
+ "dynamo-tokens 1.6.0",
+ "dynamo-truthy 1.6.0",
  "fastrand",
  "flume",
  "futures-util",
@@ -2126,6 +2172,50 @@ dependencies = [
  "ordered-float 4.6.0",
  "parking_lot",
  "prometheus",
+ "reqwest 0.12.28",
+ "rmp-serde",
+ "rustc-hash 2.1.2",
+ "seqlock",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "slotmap",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-appender",
+ "uuid",
+ "xxhash-rust",
+ "zeroize",
+ "zmq",
+]
+
+[[package]]
+name = "dynamo-kv-router"
+version = "1.6.0"
+source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "axum",
+ "blake3",
+ "chrono",
+ "crossbeam-queue",
+ "crossbeam-utils",
+ "dashmap",
+ "derive_builder",
+ "dynamo-kv-hashing 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
+ "dynamo-tokens 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
+ "dynamo-truthy 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
+ "fastrand",
+ "flume",
+ "futures-util",
+ "indexmap 2.14.0",
+ "once_cell",
+ "ordered-float 4.6.0",
+ "parking_lot",
  "reqwest 0.12.28",
  "rmp-serde",
  "rustc-hash 2.1.2",
@@ -2173,8 +2263,8 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
- "dynamo-custom-policy-builtin",
- "dynamo-kv-router",
+ "dynamo-custom-policy-builtin 1.6.0",
+ "dynamo-kv-router 1.6.0",
  "dynamo-memory",
  "dynamo-mocker",
  "dynamo-parsers",
@@ -2184,7 +2274,7 @@ dependencies = [
  "dynamo-rl",
  "dynamo-runtime",
  "dynamo-tokenizers",
- "dynamo-tokens",
+ "dynamo-tokens 1.6.0",
  "either",
  "flate2",
  "futures",
@@ -2253,7 +2343,7 @@ version = "1.6.0"
 dependencies = [
  "anyhow",
  "cudarc",
- "dynamo-truthy",
+ "dynamo-truthy 1.6.0",
  "libc",
  "libloading 0.8.9",
  "nix 0.30.1",
@@ -2269,13 +2359,14 @@ name = "dynamo-mocker"
 version = "1.6.0"
 dependencies = [
  "aisimulate-core",
+ "aisimulate-python",
  "anyhow",
  "blake3",
  "bytes",
  "dashmap",
- "dynamo-custom-policy-builtin",
- "dynamo-kv-router",
- "dynamo-tokens",
+ "dynamo-custom-policy-builtin 1.6.0",
+ "dynamo-kv-router 1.6.0",
+ "dynamo-tokens 1.6.0",
  "futures",
  "ndarray",
  "ndarray-interp",
@@ -2407,7 +2498,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
- "dynamo-truthy",
+ "dynamo-truthy 1.6.0",
  "educe",
  "either",
  "etcd-client",
@@ -2505,8 +2596,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-tokens"
+version = "1.6.0"
+source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
+dependencies = [
+ "bs58",
+ "bytemuck",
+ "dashmap",
+ "derive-getters",
+ "rustc-hash 2.1.2",
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "dynamo-truthy"
 version = "1.6.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "dynamo-truthy"
+version = "1.6.0"
+source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
 dependencies = [
  "anyhow",
 ]
@@ -3649,7 +3764,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -6376,7 +6491,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6414,7 +6529,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]

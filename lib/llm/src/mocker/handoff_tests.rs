@@ -59,6 +59,7 @@ fn transfer_timing(delay_ms: Option<f64>) -> HandoffTransferTiming {
     HandoffTransferTiming {
         mode: KvTransferTimingMode::FullPrompt,
         full_prompt_tokens: 1,
+        state_bytes: 0,
         kv_bytes_per_token: delay_ms.map(|delay_ms| (delay_ms * 1_000_000.0) as usize),
         bandwidth_gb_s: delay_ms.map(|_| 1.0),
     }
@@ -69,6 +70,7 @@ fn timeout_delay_resolves_at_the_mode_specific_boundary() {
     let full = HandoffTransferTiming {
         mode: KvTransferTimingMode::FullPrompt,
         full_prompt_tokens: 8,
+        state_bytes: 0,
         kv_bytes_per_token: Some(1_000_000),
         bandwidth_gb_s: Some(1.0),
     };

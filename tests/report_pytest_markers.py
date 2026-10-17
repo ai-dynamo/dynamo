@@ -111,6 +111,7 @@ STUB_MODULES = [
     "numpy",
     "aisimulate",
     "aisimulate.capacity",
+    "aisimulate.compiler",
     "aisimulate.config",
     "aisimulate.config.cli",
     "aisimulate.config.common",

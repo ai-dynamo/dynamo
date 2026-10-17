@@ -101,6 +101,8 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         benchmark_project = tomllib.load(handle)["project"]
     with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
         bindings_cargo = tomllib.load(handle)
+    with (ROOT / "Cargo.toml").open("rb") as handle:
+        workspace_cargo = tomllib.load(handle)
     requirement_sets = [
         (
             "pyproject.toml project.dependencies",
@@ -137,12 +139,12 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         with lockfile.open("rb") as handle:
             packages = tomllib.load(handle)["package"]
         assert all(package["name"] != "aiconfigurator-core" for package in packages)
-    assert features["ais-forward-pass"] == ["dep:aisimulate-core"]
+    assert features["ais-forward-pass"] == [
+        "dep:aisimulate-core",
+        "dynamo-mocker/python-replay",
+    ]
     assert "aic-forward-pass" not in features
-    with (ROOT / "Cargo.toml").open("rb") as handle:
-        canonical_core = tomllib.load(handle)["workspace"]["dependencies"][
-            "aisimulate-core"
-        ]
+    canonical_core = workspace_cargo["workspace"]["dependencies"]["aisimulate-core"]
     assert dependencies["aisimulate-core"] == {
         **canonical_core,
         "optional": True,
@@ -153,16 +155,11 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         for item in root_project["dependencies"]
         if canonicalize_name(Requirement(item).name) == "aisimulate"
     )
-    if "git" in canonical_core:
-        assert requirement.url == (
-            f"git+{canonical_core['git']}@{canonical_core['rev']}"
-            "#subdirectory=python/aisimulate"
-        )
-    else:
-        assert (
-            str(requirement.specifier).replace("==", "=").replace(".dev", "-dev.")
-            == canonical_core["version"]
-        )
+    assert requirement.url is None
+    assert (
+        str(requirement.specifier).replace("==", "=").replace(".dev", "-dev.")
+        == canonical_core["version"]
+    )
 
 
 def test_aisimulate_wheel_uses_canonical_import_namespaces() -> None:

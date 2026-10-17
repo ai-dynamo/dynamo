@@ -163,7 +163,8 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_FIND_LINKS=/opt/dynamo/wheelhouse/extra && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+    /opt/dynamo/wheelhouse/aisimulate*.whl && \
     # The meta package requires both backends unconditionally (its cu12/cu13
     # extras are vestigial), so install the backend first and the meta module
     # --no-deps to keep a single CUDA build and one libnixl_capi.so.

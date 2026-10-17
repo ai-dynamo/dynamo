@@ -24,11 +24,153 @@ use crate::common::handoff::NormalizedHandoffConformance;
 use crate::common::protocols::{DirectRequest, EngineType, MockerConfig, WorkerType};
 use crate::engine_adapter::{aggregated_replay_setup, disaggregated_replay_setup};
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
+#[cfg(feature = "python-replay")]
+use crate::replay::ReplayAffinityConfig;
 use crate::replay::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode,
     ReplayTelemetryOptions, ReplayWorkerArtifacts, SlaThresholds, TraceSimulationReport,
 };
 use crate::scheduler::RouterEventVisibility;
+
+// Dynamo and AISimulate can link separately pinned policy crates. This adapter
+// forwards the existing estimator without sharing crate-specific trait objects.
+#[cfg(feature = "python-replay")]
+struct CompatiblePrefillLoadEstimator(ReplayPrefillLoadEstimator);
+
+#[cfg(feature = "python-replay")]
+impl aisimulate_python::native_router::PrefillLoadEstimator for CompatiblePrefillLoadEstimator {
+    fn predict_prefill_duration(
+        &self,
+        batch_size: usize,
+        effective_isl: usize,
+        prefix: usize,
+    ) -> anyhow::Result<std::time::Duration> {
+        self.0
+            .predict_prefill_duration(batch_size, effective_isl, prefix)
+    }
+}
+
+/// Lower a serialized offline input to the same executor used by the legacy
+/// materialized entrypoints, selecting only placement and observers here.
+#[cfg(feature = "python-replay")]
+#[allow(clippy::too_many_arguments)]
+pub fn run_canonical_replay_json(
+    payload: &str,
+    router_mode: ReplayRouterMode,
+    router_config: Option<ReplayKvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    affinity: Option<ReplayAffinityConfig>,
+    capture: ReplayCaptureOptions,
+    scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
+) -> Result<String> {
+    anyhow::ensure!(
+        affinity.is_none() || router_mode == ReplayRouterMode::KvRouter,
+        "conversation affinity requires KV routing"
+    );
+    anyhow::ensure!(
+        affinity.is_none() || scaling_policy.is_none(),
+        "conversation affinity requires static worker pools without a Planner"
+    );
+    if affinity.is_some() {
+        anyhow::ensure!(
+            prefill_load_estimator.is_none(),
+            "conversation affinity does not support a custom or AIS router prefill-load estimator"
+        );
+    }
+    let mut payload: serde_json::Value = serde_json::from_str(payload)?;
+    let spec = if payload.get("spec").is_some() {
+        payload.get_mut("spec").expect("checked above")
+    } else {
+        &mut payload
+    };
+    let placement = spec.pointer_mut("/adapters/placement").ok_or_else(|| {
+        anyhow::anyhow!("offline replay requires an explicit placement descriptor")
+    })?;
+    let native_provider = provider_spec();
+    let requested_provider = placement.get("provider").and_then(|v| v.as_str());
+    anyhow::ensure!(
+        (requested_provider == Some("round_robin")
+            || requested_provider == Some(native_provider.provider.as_str()))
+            && placement
+                .get("config")
+                .is_none_or(serde_json::Value::is_null),
+        "Dynamo replay cannot replace an unknown placement provider or config"
+    );
+    anyhow::ensure!(
+        router_mode == ReplayRouterMode::KvRouter || requested_provider == Some("round_robin"),
+        "native KV placement requires router_mode='kv_router'"
+    );
+    *placement = serde_json::to_value(match router_mode {
+        ReplayRouterMode::RoundRobin => ProviderSpec::round_robin(),
+        ReplayRouterMode::KvRouter => ProviderSpec {
+            provider: native_provider.provider,
+            config: serde_json::json!({"router_config": router_config, "affinity": affinity}),
+        },
+    })?;
+    let scaling = spec
+        .pointer_mut("/adapters/scaling")
+        .ok_or_else(|| anyhow::anyhow!("offline replay requires an explicit scaling descriptor"))?;
+    anyhow::ensure!(
+        matches!(
+            scaling.get("provider").and_then(|v| v.as_str()),
+            Some("none" | "dynamo_planner")
+        ) && scaling.get("config").is_none_or(serde_json::Value::is_null),
+        "Dynamo replay cannot replace an unknown scaling provider or config"
+    );
+    anyhow::ensure!(
+        scaling_policy.is_some() || scaling["provider"] == "none",
+        "dynamo_planner scaling requires a scaling_policy callback"
+    );
+    let capture_planner_details = scaling_policy.is_some() && capture.capture_lifecycle_evidence;
+    *scaling = serde_json::to_value(if scaling_policy.is_some() {
+        ProviderSpec {
+            provider: "dynamo_planner".into(),
+            config: serde_json::Value::Null,
+        }
+    } else {
+        ProviderSpec::no_scaling()
+    })?;
+    let capture_per_request = capture.effective_per_request()
+        || spec
+            .get("record_per_request")
+            .and_then(|value| value.as_bool())
+            // ReplaySpec v1 retains per-request records by default.
+            .unwrap_or(true);
+    let payload = serde_json::to_string(&payload)?;
+    let telemetry = telemetry.map(|options| (options.sample_interval_ms, options.observer));
+    let mut result = match router_mode {
+        ReplayRouterMode::RoundRobin => aisimulate_core::execute_replay_with_composition(
+            &payload,
+            RoundRobinReplayComposition::new(scaling_policy),
+            capture,
+            telemetry,
+        )?,
+        ReplayRouterMode::KvRouter => aisimulate_python::execute_native_router_replay(
+            &payload,
+            capture,
+            scaling_policy,
+            telemetry,
+            prefill_load_estimator.map(|estimator| {
+                std::sync::Arc::new(CompatiblePrefillLoadEstimator(estimator))
+                    as aisimulate_python::native_router::ReplayPrefillLoadEstimator
+            }),
+        )?,
+    };
+    result.report_fields.insert(
+        "lifecycle_operations".into(),
+        serde_json::to_value(&result.report.runtime_evidence.lifecycle_operations)?,
+    );
+    result.report_fields.insert(
+        "coverage".into(),
+        serde_json::json!({
+            "capture_per_request": capture_per_request,
+            "capture_planner_details": capture_planner_details,
+            "per_request_records": result.report.per_request.len(),
+        }),
+    );
+    result.into_json()
+}
 
 fn startup_delay_ms(args: &MockerConfig) -> f64 {
     args.startup_time
@@ -1146,5 +1288,118 @@ mod agentic_host_offload_tests {
         let input =
             ReplayRuntimeInput::Workload(trace.into_trace_driver_with_block_size(4).unwrap());
         validate_agentic_host_offload(&input, &[(2, &offloaded)], true).unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "python-replay"))]
+mod canonical_tests {
+    #[test]
+    fn serialized_replay_preserves_scaling_capture_and_optional_telemetry() {
+        use crate::replay::{
+            ReplayCaptureOptions, ReplayRouterMode, ReplayScalingDecision, ReplayScalingPolicy,
+            ReplayScalingSnapshot, ReplayTelemetryObserver, ReplayTelemetryOptions,
+            ReplayTelemetrySnapshot,
+        };
+        use serde_json::json;
+        use std::sync::{Arc, Mutex};
+
+        struct GrowOnce;
+        impl ReplayScalingPolicy for GrowOnce {
+            fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+                Ok(1.0)
+            }
+
+            fn on_tick(
+                &mut self,
+                _: ReplayScalingSnapshot,
+            ) -> anyhow::Result<ReplayScalingDecision> {
+                Ok(ReplayScalingDecision {
+                    target_prefill: Some(2),
+                    target_decode: Some(2),
+                    next_tick_ms: None,
+                })
+            }
+        }
+
+        struct Samples(Arc<Mutex<Vec<ReplayTelemetrySnapshot>>>);
+        impl ReplayTelemetryObserver for Samples {
+            fn on_sample(&mut self, sample: ReplayTelemetrySnapshot) -> anyhow::Result<()> {
+                self.0.lock().unwrap().push(sample);
+                Ok(())
+            }
+        }
+
+        for topology in [
+            json!({"kind":"aggregated", "workers":{"initial_workers":1}}),
+            json!({"kind":"disaggregated", "prefill":{"initial_workers":1}, "decode":{"initial_workers":1}}),
+        ] {
+            for mode in [ReplayRouterMode::RoundRobin, ReplayRouterMode::KvRouter] {
+                for capture in [false, true] {
+                    for telemetry in [false, true] {
+                        for authored_capture in [None, Some(false), Some(true)] {
+                            let samples = Arc::new(Mutex::new(Vec::new()));
+                            let mut payload = json!({
+                                "version":1, "topology":topology,
+                                "engine":{"rank":{"block_size":16,"num_gpu_blocks":64,
+                                    "timing_model":{"type":"fixed","prefill_ms":10.0,"decode_ms":1.0}}},
+                                "adapters":{"placement":{"provider":"round_robin"},"scaling":{"provider":"none"}},
+                                "requests":[{"id":"first","arrival_time_ms":0.0,"input_tokens":64,"output_tokens":2,"input_token_ids":vec![7;64]}]
+                            });
+                            if let Some(authored_capture) = authored_capture {
+                                payload["record_per_request"] = authored_capture.into();
+                            }
+                            let effective_capture = capture || authored_capture.unwrap_or(true);
+                            let report: serde_json::Value = serde_json::from_str(
+                                &crate::replay::run_canonical_replay_json(
+                                    &payload.to_string(),
+                                    mode,
+                                    None,
+                                    None,
+                                    None,
+                                    ReplayCaptureOptions {
+                                        capture_per_request: capture,
+                                        capture_lifecycle_evidence: capture,
+                                        ..Default::default()
+                                    },
+                                    Some(Box::new(GrowOnce)),
+                                    telemetry.then(|| ReplayTelemetryOptions {
+                                        sample_interval_ms: 3.0,
+                                        observer: Box::new(Samples(Arc::clone(&samples))),
+                                    }),
+                                )
+                                .unwrap(),
+                            )
+                            .unwrap();
+                            assert_eq!(report["completed_requests"], 1);
+                            assert_eq!(
+                                report["coverage"]["capture_per_request"],
+                                effective_capture
+                            );
+                            assert_eq!(report["coverage"]["capture_planner_details"], capture);
+                            assert_eq!(
+                                report["coverage"]["per_request_records"],
+                                usize::from(effective_capture)
+                            );
+                            assert_eq!(
+                                report["lifecycle_operations"]
+                                    .as_array()
+                                    .unwrap()
+                                    .is_empty(),
+                                !capture
+                            );
+                            let samples = samples.lock().unwrap();
+                            assert_eq!(samples.is_empty(), !telemetry);
+                            if telemetry {
+                                assert!(samples.len() >= 2);
+                                assert_eq!(
+                                    samples[1].sampled_at_ms - samples[0].sampled_at_ms,
+                                    3.0
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

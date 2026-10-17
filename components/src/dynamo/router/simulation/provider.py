@@ -203,15 +203,19 @@ class DynamoRouterSweepConfigProvider:
         if public.policy == "round_robin":
             return AdapterReplaySpec(config=concrete)
         router_config: dict[str, JSONValue] = {
-            "overlap_score_credit": public.overlap_score_credit
-            if public.overlap_score_credit is not None
-            else 1.0,
-            "prefill_load_scale": public.prefill_load_scale
-            if public.prefill_load_scale is not None
-            else 1.0,
-            "router_temperature": public.temperature
-            if public.temperature is not None
-            else 0.0,
+            "overlap_score_credit": (
+                public.overlap_score_credit
+                if public.overlap_score_credit is not None
+                else 1.0
+            ),
+            "prefill_load_scale": (
+                public.prefill_load_scale
+                if public.prefill_load_scale is not None
+                else 1.0
+            ),
+            "router_temperature": (
+                public.temperature if public.temperature is not None else 0.0
+            ),
             "router_prefill_load_model": public.prefill_load_model.type,
         }
         return AdapterReplaySpec(
@@ -224,6 +228,11 @@ class DynamoRouterSweepConfigProvider:
                     config={
                         "router_mode": public.policy,
                         "router_config": router_config,
+                        **(
+                            {"affinity": public.affinity.model_dump(mode="json")}
+                            if public.affinity is not None
+                            else {}
+                        ),
                         "ais_perf_config": _ais_perf_config_from_prediction(
                             context,
                             enabled=public.prefill_load_model.type == "ais",
