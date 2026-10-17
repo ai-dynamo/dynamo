@@ -33,7 +33,7 @@ func TestBuildFromGbuildManifestV2ProjectsRuntimeIO(t *testing.T) {
 }
 
 func TestManifestReadersIgnoreExecutionMetadata(t *testing.T) {
-	for _, field := range []string{"batch size", "node count", "protocol", "FPGA mode", "runtime assets", "partition selection"} {
+	for _, field := range []string{"batch size", "node count", "compilation mode", "protocol", "FPGA mode", "runtime assets", "partition selection"} {
 		t.Run(field, func(t *testing.T) {
 			t.Log("Normalize equivalent legacy and split deployment contracts")
 			legacy := newManifestV2ContractFixture(t)
@@ -59,6 +59,9 @@ func TestManifestReadersIgnoreExecutionMetadata(t *testing.T) {
 			case "node count":
 				legacyConfig.SetNumLpuNodes(99)
 				splitConfig.SetNumLpuNodes(99)
+			case "compilation mode":
+				legacyConfig.SetCompilationMode(manifestcapnpv2.CompilationMode(99))
+				splitConfig.SetCompilationMode(deploymentcapnpv1.CompilationMode(99))
 			case "protocol":
 				legacyIO, err := legacyConfig.RuntimeIo()
 				require.NoError(t, err)
@@ -162,7 +165,7 @@ func TestBuildFromGbuildManifestV2ValidatesPartitionGeometry(t *testing.T) {
 	}
 }
 
-func TestBuildFromGbuildManifestV2RejectsNonLPUArtifactForLPUOnly(t *testing.T) {
+func TestBuildFromGbuildManifestV2DetectsCUDAPartitions(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Build an lpuOnly manifest with one LPU and one CUDA artifact")
@@ -180,7 +183,9 @@ func TestBuildFromGbuildManifestV2RejectsNonLPUArtifactForLPUOnly(t *testing.T) 
 	cudaRef.SetPartitionId(1)
 	cudaRef.SetDeviceType(manifestcapnpv2.DeviceType_cuda)
 
-	t.Log("Reject the mixed-device lpuOnly artifact set")
-	_, err = buildFromGbuildManifestV2("gs://bucket/registry/build-id", manifest)
-	require.ErrorContains(t, err, "deployment.compilationMode lpuOnly requires every artifact partition to use deviceType lpu")
+	t.Log("Retain CUDA requirements independently of the compilation mode label")
+	build, err := buildFromGbuildManifestV2("gs://bucket/registry/build-id", manifest)
+	require.NoError(t, err)
+	require.True(t, build.HasCUDAPartitions)
+	require.Len(t, build.Partitions, 1)
 }

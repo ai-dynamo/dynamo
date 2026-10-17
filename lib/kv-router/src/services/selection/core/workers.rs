@@ -174,6 +174,14 @@ impl SelectionCore {
         previous: Option<WorkerCatalogRecord>,
         deferred: Option<&mut HashSet<RoutingPartitionId>>,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
+        // A cancelled removal can leave a committed Draining record. Finish
+        // withdrawing its indexer registration before reusing the worker ID.
+        if let Some(old) = previous
+            .as_ref()
+            .filter(|old| old.lifecycle == WorkerLifecycle::Draining)
+        {
+            self.cleanup_indexer_registration(old).await;
+        }
         let previous = previous.filter(|old| old.lifecycle == WorkerLifecycle::Schedulable);
         let moved_partition = previous
             .as_ref()
@@ -413,11 +421,10 @@ impl SelectionCore {
                 true
             }
         });
-        #[cfg(test)]
         if modified {
+            entry.scheduler.apply_published_worker_configs();
+            #[cfg(test)]
             self.publish_count.fetch_add(1, Ordering::SeqCst);
         }
-        #[cfg(not(test))]
-        let _ = modified;
     }
 }

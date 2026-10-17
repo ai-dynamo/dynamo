@@ -53,15 +53,17 @@ impl Node {
         Self::from_state_and_children(CrtcNodeState::new(Vec::new()), FxHashMap::default())
     }
 
+    /// A leaf for `blocks` that `worker` fully covers, attached under the node whose edge
+    /// ends with `parent_tail` (`None` under the root).
     pub(super) fn from_blocks_for_worker(
         blocks: &[KvCacheStoredBlockData],
         worker: WorkerWithDpRank,
+        parent_tail: Option<ExternalSequenceBlockHash>,
     ) -> Self {
         debug_assert!(!blocks.is_empty());
-        Self::from_state_and_children(
-            CrtcNodeState::for_blocks(blocks, worker),
-            FxHashMap::default(),
-        )
+        let mut state = CrtcNodeState::for_blocks(blocks, worker);
+        state.parent_tail = parent_tail.unwrap_or(ExternalSequenceBlockHash(0));
+        Self::from_state_and_children(state, FxHashMap::default())
     }
 
     pub(super) fn from_anchor(
@@ -162,6 +164,7 @@ impl Node {
         self.children.extend_values(queue);
     }
 
+    #[cfg(test)]
     pub(super) fn child_edges_snapshot(&self) -> Vec<(LocalBlockHash, SharedNode)> {
         self.children.entries_snapshot()
     }
@@ -572,13 +575,14 @@ impl Node {
     }
 
     /// Removes `worker` from the leading run of `hashes` found in this edge, under one
-    /// exclusive shape gate. Returns how many hashes the run consumed and the newly
-    /// uncovered hashes, or `None` if the first hash is no longer in this edge.
+    /// exclusive shape gate. Returns how many hashes the run consumed, the newly uncovered
+    /// hashes and whether the removal took the node's last holder, or `None` if the first
+    /// hash is no longer in this edge.
     pub(super) fn remove_worker_for_leading_hashes(
         &self,
         worker: WorkerWithDpRank,
         hashes: &[ExternalSequenceBlockHash],
-    ) -> Option<(usize, Vec<ExternalSequenceBlockHash>)> {
+    ) -> Option<(usize, Vec<ExternalSequenceBlockHash>, bool)> {
         // The exclusive gate keeps every other writer off this node, so the run is read
         // alongside readers, and only a coverage change upgrades to the write lock.
         let _gate = self.shape_gate.write();
@@ -599,17 +603,22 @@ impl Node {
         }
 
         let (pos, block_hash) = min_match?;
-        let (stale_hashes, should_clear_children) = if pos >= state.current_cutoff(worker) {
-            let should_clear_children = state.full_edge_workers.is_empty();
-            drop(state);
-            (vec![block_hash], should_clear_children)
-        } else {
-            let mut state = RwLockUpgradableReadGuard::upgrade(state);
-            let outcome = state.remove_worker_at_pos(worker, pos, block_hash);
-            (outcome.stale_hashes, state.full_edge_workers.is_empty())
-        };
+        let (stale_hashes, should_clear_children, became_dead) =
+            if pos >= state.current_cutoff(worker) {
+                let should_clear_children = state.full_edge_workers.is_empty();
+                drop(state);
+                (vec![block_hash], should_clear_children, false)
+            } else {
+                let mut state = RwLockUpgradableReadGuard::upgrade(state);
+                let outcome = state.remove_worker_at_pos(worker, pos, block_hash);
+                (
+                    outcome.stale_hashes,
+                    state.full_edge_workers.is_empty(),
+                    !state.has_any_workers(),
+                )
+            };
         self.clear_children_if_unreachable(should_clear_children);
-        Some((consumed, stale_hashes))
+        Some((consumed, stale_hashes, became_dead))
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
@@ -736,28 +745,70 @@ impl Node {
         }
     }
 
-    pub(super) fn remove_child_if_stale_leaf(&self, key: LocalBlockHash, child: &SharedNode) {
-        let _parent_gate = self.shape_gate.write();
-        let still_attached = self
-            .children
+    /// The child-map key and parent tail of a node that no worker covers and that has no
+    /// children, or `None` if it is still live.
+    pub(super) fn dead_leaf_key_and_tail(
+        &self,
+    ) -> Option<(LocalBlockHash, ExternalSequenceBlockHash)> {
+        let state = self.state.read();
+        if state.has_any_workers() || state.edge.is_empty() || !self.children.is_empty() {
+            return None;
+        }
+        Some((state.edge[0].0, state.parent_tail))
+    }
+
+    pub(super) fn is_holderless(&self) -> bool {
+        !self.state.read().has_any_workers()
+    }
+
+    pub(super) fn has_children(&self) -> bool {
+        !self.children.is_empty()
+    }
+
+    pub(super) fn for_each_child(&self, visit: impl FnMut(LocalBlockHash, &SharedNode)) {
+        self.children.for_each_child(visit);
+    }
+
+    pub(super) fn has_child(&self, key: LocalBlockHash, child: &SharedNode) -> bool {
+        self.children
             .get(&key)
-            .is_some_and(|current| Arc::ptr_eq(&current, child));
-        if !still_attached {
-            return;
-        }
+            .is_some_and(|current| Arc::ptr_eq(&current, child))
+    }
 
-        let Some(_child_gate) = child.shape_gate.try_write() else {
-            return;
-        };
-        if child.state.read().has_any_workers() || !child.children.is_empty() {
-            return;
+    /// Unlinks every child in `batch` that is still attached, holder-less, childless and
+    /// referenced by nothing else, under one exclusive gate and one version bump. Returns
+    /// how many it unlinked, or `None` without waiting if the gate is taken.
+    pub(super) fn try_remove_stale_children(
+        &self,
+        batch: &[(LocalBlockHash, Weak<Node>)],
+    ) -> Option<usize> {
+        let _gate = self.shape_gate.try_write()?;
+        let mut removed = 0;
+        for (key, child) in batch {
+            let Some(child) = child.upgrade() else {
+                continue;
+            };
+            if !self.has_child(*key, &child) {
+                continue;
+            }
+            let Some(_child_gate) = child.shape_gate.try_write() else {
+                continue;
+            };
+            if child.state.read().has_any_workers() || !child.children.is_empty() {
+                continue;
+            }
+            // The parent's map and this upgrade. Any other reference is a lane lookup
+            // that still names the child or a reader mid-walk.
+            if Arc::strong_count(&child) != 2 {
+                continue;
+            }
+            let _ = self.children.remove(key);
+            removed += 1;
         }
-        if Arc::strong_count(child) != 2 {
-            return;
+        if removed > 0 {
+            self.shape_version.fetch_add(1, Ordering::Release);
         }
-
-        let _ = self.children.remove(&key);
-        self.shape_version.fetch_add(1, Ordering::Release);
+        Some(removed)
     }
 }
 
