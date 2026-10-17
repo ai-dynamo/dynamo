@@ -113,6 +113,9 @@ conflicts = [
 [tool.uv.dependency-groups]
 docs = { requires-python = ">=3.11" }
 
+[project.entry-points."vllm.general_plugins"]
+dynamo_nixl_telemetry = "dynamo.vllm.nixl_telemetry:allow_nixl_telemetry_capture"
+
 [project.entry-points.pytest11]
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"

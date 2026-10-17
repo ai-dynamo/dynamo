@@ -30,8 +30,8 @@ use super::disconnect::{
 use super::error::SanitizedError;
 use super::metrics::{CancellationLabels, ErrorType};
 use super::openai::{
-    check_model_serving_ready, check_ready, context_from_headers, find_invalid_argument_in_chain,
-    get_body_limit, get_or_create_request_id,
+    check_model_serving_ready, check_ready, find_invalid_argument_in_chain, get_body_limit,
+    get_or_create_request_id, preprocessed_context_from_headers,
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
@@ -340,7 +340,7 @@ async fn handler(
 
     let request_id = request_context.request_id;
     let context: Context<PreprocessedRequest> =
-        match context_from_headers(preprocessed, request_id.clone(), &headers) {
+        match preprocessed_context_from_headers(preprocessed, request_id.clone(), &headers) {
             Ok(context) => context,
             Err(response) => return adapt_openai_error(response),
         };
