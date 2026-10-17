@@ -77,9 +77,8 @@ func isNewRestartRequest(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
 	return dgd.Spec.Restart.ID != dgd.Status.Restart.ObservedID
 }
 
-// computeParallelRestartStatus handles parallel restart where all components
-// restart together. It is shared by every workload program; each caller supplies
-// its own progress resolver and logger.
+// computeParallelRestartStatus handles parallel restart where all components restart
+// together. Each workload program supplies its own progress resolver and logger.
 func computeParallelRestartStatus(
 	ctx context.Context,
 	logger logr.Logger,

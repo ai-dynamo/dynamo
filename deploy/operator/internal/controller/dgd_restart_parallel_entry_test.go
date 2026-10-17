@@ -177,9 +177,8 @@ func TestParallelRestartSharedEntryPath(t *testing.T) {
 	}
 }
 
-// TestParallelRestartDisaggregatedSetEntryPath drives the DisaggregatedSet
-// entry point with the real DisaggregatedSet progress resolver and checks that
-// it does not write the parallel restart progress messages.
+// TestParallelRestartDisaggregatedSetEntryPath drives the DisaggregatedSet entry point
+// with its real progress resolver and checks it writes no parallel restart progress logs.
 func TestParallelRestartDisaggregatedSetEntryPath(t *testing.T) {
 	tests := []struct {
 		name       string
