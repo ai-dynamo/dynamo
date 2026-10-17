@@ -35,16 +35,18 @@ today, required from the date named in its failure message.
 
 ### Start From an Issue
 
-Before writing code, find or create the issue for the work and start from it.
+Before writing code, search for an existing GitHub or Linear issue for the
+work and start from it. Reuse the existing ticket, including a Linear ticket,
+rather than filing a duplicate. Create an issue only when none tracks the work.
 The issue carries the context, the discussion history, and the record of why
 the change exists; an agent pointed at the issue first inherits all of it.
 
-- **Community contributors**: create or claim a GitHub issue on
-  `ai-dynamo/dynamo` (`gh issue create`). Contributions are expected to have
-  one.
+- **Community contributors**: use an existing GitHub or Linear issue. If none
+  exists, create a GitHub issue on `ai-dynamo/dynamo` (`gh issue create`).
 - **NVIDIA engineers**: start from the Linear issue. Creating the issue in the
   DGH Linear team mirrors it to GitHub automatically, and GitHub issues mirror
-  back into DGH, so either side works.
+  back into DGH, so either side works. Do not create a second ticket just
+  to obtain a reference on the other side.
 - Bug found mid-task that needs its own fix: create an issue for it rather
   than folding untracked work into the current PR.
 - **Release features**: each feature in a release has a tracking ticket in
@@ -81,8 +83,17 @@ work issue for the change as well.
 ### Remediate a Failing Check
 
 The `PR Issue Link` check failing means no verifiable reference was found.
-Add one using the table above and edit the PR description; editing re-triggers
-the check. If no issue exists yet, create one first (see Start From an Issue).
+Check the failure message before creating an issue:
+
+- **Missing reference**: reference the existing ticket using the table above
+  and edit the PR description; editing re-triggers the check. If no issue
+  exists yet, create one first (see Start From an Issue).
+- **Linear verification blocked for an outside-org fork**: keep the existing
+  Linear reference and ask a maintainer for read collaborator access to the
+  repository, then re-run the check. If the ticket already has a GitHub mirror,
+  referencing that issue also works. Do not file a duplicate GitHub issue to
+  work around the verification restriction.
+
 While the check is advisory it does not block merges; its failure message
 names the date it becomes required.
 
