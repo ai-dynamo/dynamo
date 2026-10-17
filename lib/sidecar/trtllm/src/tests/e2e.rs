@@ -28,6 +28,7 @@ async fn e2e_real_disagg_handoff() {
     let configured = |source: String| ConfiguredModel {
         source,
         context_length: None,
+        ..Default::default()
     };
     let prefill = TrtllmSidecarEngine::new(
         GrpcEndpoint::parse(&prefill_endpoint, "--grpc-endpoint").expect("valid endpoint"),
@@ -134,6 +135,7 @@ async fn e2e_real_openengine_server() {
         ConfiguredModel {
             source: model.clone(),
             context_length: None,
+            ..Default::default()
         },
         AGG,
     );

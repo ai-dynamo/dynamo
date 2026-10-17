@@ -29,7 +29,10 @@ use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
     kv_router::{RoutingHost, SelectionPolicySource},
     protocols::common::{
-        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        extensions::{
+            AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId,
+        },
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
@@ -54,6 +57,28 @@ enum PrefillLifecycleState {
     Pending = 0,
     Active = 1,
     Unavailable = 2,
+}
+
+fn prefill_affinity_id<T: Send + Sync + 'static>(
+    context: &Context<T>,
+) -> Result<Option<SessionAffinityId>> {
+    let child = context
+        .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+        .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))?;
+    let parent = context
+        .get_optional::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+        .map_err(|message| anyhow::anyhow!("invalid agent context: {message}"))?
+        .and_then(|agent| {
+            agent
+                .parent_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|parent| !parent.is_empty() && *parent != agent.session_id.as_str())
+                .map(str::to_owned)
+        });
+    Ok(parent
+        .map(SessionAffinityId::new)
+        .or_else(|| child.map(|id| id.as_ref().clone())))
 }
 
 impl TryFrom<u8> for PrefillLifecycleState {
@@ -378,9 +403,7 @@ impl
             return next.generate(context.map(|_| req)).await;
         }
 
-        let session_affinity = context
-            .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
-            .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))?;
+        let session_affinity = prefill_affinity_id(&context)?;
 
         if self.conditional_disagg_policy.is_enabled() {
             let conditional_request = context.map(|_| req);
@@ -471,10 +494,7 @@ impl
         let tracker = prefill_req.tracker.clone();
         let mut prefill_context = independent_prefill_context(prefill_req, &context)?;
         if let Some(session_affinity) = session_affinity {
-            prefill_context.insert(
-                SESSION_AFFINITY_CONTEXT_KEY,
-                session_affinity.as_ref().clone(),
-            );
+            prefill_context.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
         }
         let Some(binding) = self.binding.load_full() else {
             return next.generate(context.map(|_| req)).await;
@@ -795,6 +815,34 @@ mod tests {
     };
 
     const MAX_ROOM: u64 = i64::MAX as u64;
+
+    #[test]
+    fn child_context_uses_parent_affinity_while_decode_retains_child() {
+        let (_, mut context) = SingleIn::new(query_only_request()).into_parts();
+        context.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new("child-a"),
+        );
+        context.insert(
+            AGENT_CONTEXT_CONTEXT_KEY,
+            serde_json::from_value::<AgentContext>(serde_json::json!({
+                "session_id": "child-a",
+                "parent_session_id": "parent-1"
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            prefill_affinity_id(&context).unwrap().unwrap().as_str(),
+            "parent-1"
+        );
+        assert_eq!(
+            context
+                .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+                .unwrap()
+                .as_str(),
+            "child-a"
+        );
+    }
 
     #[derive(Default)]
     struct QueryOnlyDecodeHost {

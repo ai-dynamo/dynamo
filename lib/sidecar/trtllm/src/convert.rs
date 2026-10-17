@@ -28,6 +28,7 @@ use crate::proto as pb;
 /// per-token top-k alternatives, all aligned with each other.
 type MappedTokens = (Vec<u32>, Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>);
 
+#[cfg(test)]
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
     request_id: &str,
@@ -35,7 +36,18 @@ pub(crate) fn build_generate_request(
     limits: Option<ModelLimits>,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    validate_request(request, mode)?;
+    build_generate_request_with_routing(request, request_id, model, limits, mode, false)
+}
+
+pub(crate) fn build_generate_request_with_routing(
+    request: &PreprocessedRequest,
+    request_id: &str,
+    model: &str,
+    limits: Option<ModelLimits>,
+    mode: DisaggregationMode,
+    allow_dp_rank: bool,
+) -> Result<pb::GenerateRequest, DynamoError> {
+    validate_request(request, mode, allow_dp_rank)?;
 
     let sampling = &request.sampling_options;
     let stop = &request.stop_conditions;
@@ -332,6 +344,7 @@ fn json_guide(value: &serde_json::Value) -> String {
 fn validate_request(
     request: &PreprocessedRequest,
     mode: DisaggregationMode,
+    allow_dp_rank: bool,
 ) -> Result<(), DynamoError> {
     if request.token_ids.is_empty() {
         return Err(client::invalid_argument("token_ids must not be empty"));
@@ -417,17 +430,14 @@ fn validate_request(
             "request priority is not supported by the TensorRT-LLM sidecar",
         ));
     }
-    if request.routing.as_ref().is_some_and(|routing| {
-        routing.dp_rank.is_some_and(|rank| rank != 0)
-            || routing.prefill_dp_rank.is_some_and(|rank| rank != 0)
-    }) {
-        // This sidecar advertises one logical worker (rank 0). The KV router
-        // attaches that rank even when KV events are disabled. It selects the
-        // endpoint, not an internal TRT-LLM attention-DP rank: the engine owns
-        // internal placement through conversation affinity. Nonzero logical
-        // ranks are not registered and must never be silently ignored.
+    if !allow_dp_rank
+        && request
+            .routing
+            .as_ref()
+            .is_some_and(|routing| routing.dp_rank.is_some() || routing.prefill_dp_rank.is_some())
+    {
         return Err(client::invalid_argument(
-            "nonzero data-parallel rank targeting is not supported by the TensorRT-LLM sidecar",
+            "data-parallel rank targeting was not advertised by the OpenEngine server",
         ));
     }
     if request.stop_conditions.max_thinking_tokens.is_some() {
@@ -731,7 +741,7 @@ impl ResponseState {
         };
         let mut log_probs = Vec::with_capacity(tokens.len());
         // `logprobs=0` keeps the selected-token logprob but omits the top
-        // alternatives, matching the vLLM sidecar contract.
+        // alternatives.
         let wants_candidates = count != 0;
         let mut top_logprobs = Vec::with_capacity(if wants_candidates { tokens.len() } else { 0 });
         for info in tokens {

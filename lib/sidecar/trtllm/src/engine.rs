@@ -3,26 +3,44 @@
 
 //! Dynamo backend for TensorRT-LLM's OpenEngine (`openengine.v1`) gRPC server.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
+    AsyncEngineContext, ComponentSnapshot, DisaggregationMode, DynamoError, EngineConfig,
+    GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
+    MetricsBindings, MetricsCtx, PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
 };
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, ModelLimits, TrtllmClient};
-use crate::convert::{ResponseState, build_generate_request};
+use crate::convert::{ResponseState, build_generate_request_with_routing};
 use crate::model::ConfiguredModel;
+use crate::proto as pb;
 
 const ALREADY_STARTED: &str = "TensorRT-LLM sidecar has already started";
+const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_INITIAL_LOAD_AGE: Duration = Duration::from_secs(5);
+const METRICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+struct RoutingState {
+    node: Option<crate::node::NodeMetadata>,
+    dp_size: u32,
+    dp_targeting: bool,
+    heartbeat_timeout: Option<Duration>,
+    sources: Vec<pb::KvEventSource>,
+    initial_snapshots: Vec<ComponentSnapshot>,
+}
 
 /// Terminal output emitted when a request is cancelled, carrying the usage
 /// accumulated so far.
@@ -37,11 +55,14 @@ pub struct TrtllmSidecarEngine {
     /// Disaggregation role this worker plays. Selects the `context_only` /
     /// `kv.session` divergence in `convert`.
     mode: DisaggregationMode,
+    subagent_affinity_auth_key: Option<String>,
     client: OnceCell<TrtllmClient>,
     /// Engine limits resolved at `start` from `--context-length` and
     /// `Control.GetModelInfo`, so `generate` can derive a default `max_tokens`
     /// for requests that omit one.
     limits: OnceCell<ModelLimits>,
+    routing: OnceCell<RoutingState>,
+    metrics_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     cancel: CancellationToken,
 }
 
@@ -57,8 +78,11 @@ impl TrtllmSidecarEngine {
             transport,
             model,
             mode,
+            subagent_affinity_auth_key: None,
             client: OnceCell::new(),
             limits: OnceCell::new(),
+            routing: OnceCell::new(),
+            metrics_task: Arc::new(Mutex::new(None)),
             cancel: CancellationToken::new(),
         }
     }
@@ -111,9 +135,14 @@ impl TrtllmSidecarEngine {
         ))
     }
 
-    fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+    pub(crate) fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         if args.model_path.trim().is_empty() {
             return Err(client::invalid_argument("model-path must not be empty"));
+        }
+        if args.subagent_affinity_auth_key.as_deref() == Some("") {
+            return Err(client::invalid_argument(
+                "subagent-affinity-auth-key must not be empty",
+            ));
         }
         let mode = args.sidecar.common.disaggregation_mode;
         if mode.is_encode() {
@@ -134,8 +163,15 @@ impl TrtllmSidecarEngine {
             // Absent unless `--context-length` supplied one; `start` falls back
             // to the server's `Control.GetModelInfo` report.
             context_length: args.context_length,
+            kv_cache_block_size: None,
+            total_kv_blocks: None,
+            max_num_seqs: None,
+            max_num_batched_tokens: None,
+            data_parallel_size: None,
+            data_parallel_start_rank: None,
         };
-        let engine = Self::new(endpoint, transport, model.clone(), mode);
+        let mut engine = Self::new(endpoint, transport, model.clone(), mode);
+        engine.subagent_affinity_auth_key = args.subagent_affinity_auth_key;
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -158,7 +194,9 @@ impl TrtllmSidecarEngine {
                 .sidecar
                 .common
                 .exclude_tools_when_tool_choice_none,
-            enable_kv_routing: false,
+            // Framework wiring is available; discovered source declarations
+            // independently decide whether any event or metrics work starts.
+            enable_kv_routing: true,
             disaggregation_mode: mode,
             route_to_encoder: false,
             enable_rl: args.sidecar.common.enable_rl,
@@ -185,6 +223,12 @@ impl LLMEngine for TrtllmSidecarEngine {
         // connecting is what stops the two stages spending a full budget each.
         let deadline = startup_deadline(self.transport.startup_deadline)?;
         let client = TrtllmClient::connect(&self.endpoint, self.transport).await?;
+        if self.subagent_affinity_auth_key.is_some() && !client.supports_subagent_affinity().await?
+        {
+            return Err(client::invalid_argument(
+                "OpenEngine does not advertise signed subagent affinity; upgrade or configure the server",
+            ));
+        }
         let connection_count = client.connection_count();
 
         // `--context-length` wins over what the engine reports, and is the
@@ -262,6 +306,89 @@ impl LLMEngine for TrtllmSidecarEngine {
         model.context_length = limits.context_length;
         let _ = self.limits.set(limits);
 
+        {
+            let routing_deadline = startup_deadline(self.transport.startup_deadline)?;
+            let routing_discovery = async {
+                let server = client.server_info().await?.unwrap_or_default();
+                let node = crate::node::NodeMetadata::from_info(Some(&server))?;
+                if node.as_ref().is_some_and(|node| !node.leader) {
+                    return Err(client::protocol_error(
+                        "Follower endpoint cannot serve inference; use the automatic sidecar launcher",
+                    ));
+                }
+                let metadata = server.extra.unwrap_or_default().fields;
+                let dp_targeting = matches!(
+                    metadata
+                        .get("trtllm_supports_dp_rank_targeting")
+                        .and_then(|value| value.kind.as_ref()),
+                    Some(prost_types::value::Kind::BoolValue(true))
+                );
+                let heartbeat_timeout =
+                    kv_heartbeat_timeout(metadata.get("kv_event_heartbeat_interval_ms"));
+                let mut sources = client.kv_event_sources().await?;
+                let events_enabled = !sources.is_empty();
+                let load = client.get_load(true).await?;
+                let load_enabled = load.used_kv_blocks.is_some()
+                    || load.total_kv_blocks.is_some()
+                    || !load.ranks.is_empty();
+                let parallelism = server.parallelism.unwrap_or_default();
+                let dp_size = parallelism.data_parallel_size.unwrap_or(1).max(1);
+                let capacity = server.capacity.unwrap_or_default();
+                model.kv_cache_block_size = capacity.kv_block_size.filter(|value| *value > 0);
+                model.total_kv_blocks = capacity.total_kv_blocks.filter(|value| *value > 0);
+                model.max_num_seqs = capacity.max_running_requests.filter(|value| *value > 0);
+                model.max_num_batched_tokens =
+                    capacity.max_batched_tokens.filter(|value| *value > 0);
+                model.data_parallel_size = Some(dp_size);
+                model.data_parallel_start_rank =
+                    Some(parallelism.data_parallel_start_rank.unwrap_or(0));
+                if (events_enabled || load_enabled)
+                    && (model.kv_cache_block_size.is_none() || model.total_kv_blocks.is_none())
+                {
+                    return Err(client::protocol_error(
+                        "KV routing requires positive kv_block_size and total_kv_blocks",
+                    ));
+                }
+
+                if events_enabled {
+                    validate_kv_sources(&sources, dp_size)?;
+                }
+                if let Some(node) = &node {
+                    node.select_local_sources(&mut sources)?;
+                }
+                let initial_snapshots = if load_enabled {
+                    load_snapshots(load, dp_size)?
+                } else {
+                    Vec::new()
+                };
+                tracing::info!(
+                    events_enabled,
+                    load_enabled,
+                    dp_targeting,
+                    dp_size,
+                    "Discovered OpenEngine routing capabilities"
+                );
+                Ok::<RoutingState, DynamoError>(RoutingState {
+                    node,
+                    dp_size,
+                    dp_targeting,
+                    heartbeat_timeout,
+                    sources,
+                    initial_snapshots,
+                })
+            };
+            let routing = tokio::time::timeout_at(routing_deadline, routing_discovery)
+                .await
+                .map_err(|_| {
+                    client::protocol_error(
+                        "KV routing discovery exceeded the gRPC startup deadline",
+                    )
+                })??;
+            self.routing
+                .set(routing)
+                .map_err(|_| client::engine_shutdown(ALREADY_STARTED))?;
+        }
+
         self.client
             .set(client)
             .map_err(|_| client::engine_shutdown(ALREADY_STARTED))?;
@@ -273,7 +400,15 @@ impl LLMEngine for TrtllmSidecarEngine {
             max_output_tokens = ?limits.max_output_tokens,
             "TensorRT-LLM gRPC is ready"
         );
-        Ok(model.engine_config())
+        let mut config = model.engine_config();
+        if let Some(node) = self.routing.get().and_then(|routing| routing.node.as_ref()) {
+            config.runtime_data.insert(
+                crate::node::NODE_METADATA_KEY.to_string(),
+                serde_json::to_value(node)
+                    .map_err(|error| client::protocol_error(error.to_string()))?,
+            );
+        }
+        Ok(config)
     }
 
     async fn generate(
@@ -286,13 +421,53 @@ impl LLMEngine for TrtllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let proto_request = build_generate_request(
+        let proto_request = build_generate_request_with_routing(
             &request,
             &request_id,
             &self.model.source,
             self.limits.get().copied(),
             self.mode,
+            self.routing
+                .get()
+                .is_some_and(|routing| routing.dp_targeting),
         )?;
+        let target_dp_rank = request.routing.as_ref().and_then(|routing| {
+            if self.mode.is_prefill() {
+                routing.prefill_dp_rank.or(routing.dp_rank)
+            } else {
+                routing.dp_rank
+            }
+        });
+        if let Some(rank) = target_dp_rank {
+            let dp_size = self.routing.get().map_or(1, |routing| routing.dp_size);
+            if rank >= dp_size {
+                return Err(client::invalid_argument(format!(
+                    "data-parallel rank {rank} is outside the engine range 0..{dp_size}",
+                )));
+            }
+        }
+        let parent_affinity = if self.mode.is_prefill() && self.subagent_affinity_auth_key.is_some()
+        {
+            request.agent_context.as_ref().and_then(|agent| {
+                agent
+                    .parent_session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|parent| !parent.is_empty() && *parent != agent.session_id.trim())
+            })
+        } else {
+            None
+        };
+        if parent_affinity.is_some()
+            && request
+                .agent_context
+                .as_ref()
+                .is_none_or(|agent| agent.session_id.trim().is_empty())
+        {
+            return Err(client::invalid_argument(
+                "subagent affinity requires a stable child session ID",
+            ));
+        }
         let mut state = ResponseState::new(&request, self.mode);
         // A decode request that took a handoff has KV transferred into it, and
         // the transceiver releases those blocks when the engine finishes the
@@ -322,7 +497,11 @@ impl LLMEngine for TrtllmSidecarEngine {
             biased;
             _ = &mut request_cancellation, if !needs_cancellation_deferral => None,
             _ = &mut shutdown_cancellation => None,
-            result = client.generate(proto_request) => Some(result?),
+            result = client.generate(
+                proto_request,
+                target_dp_rank,
+                parent_affinity.zip(self.subagent_affinity_auth_key.as_deref()),
+            ) => Some(result?),
         };
         let Some(mut stream) = stream else {
             let output = cancelled(&state);
@@ -394,7 +573,241 @@ impl LLMEngine for TrtllmSidecarEngine {
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
         self.cancel.cancel();
+        let task = self
+            .metrics_task
+            .lock()
+            .expect("metrics task mutex poisoned")
+            .take();
+        if let Some(task) = task {
+            let mut task = task;
+            if timeout(METRICS_SHUTDOWN_TIMEOUT, &mut task).await.is_err() {
+                task.abort();
+            }
+        }
         tracing::info!("TensorRT-LLM sidecar shutdown complete");
         Ok(())
     }
+
+    async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        let routing = self
+            .routing
+            .get()
+            .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
+        routing
+            .sources
+            .iter()
+            .map(|source| to_kv_event_source(source, routing.heartbeat_timeout))
+            .collect()
+    }
+
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        let routing = self
+            .routing
+            .get()
+            .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
+        if routing.initial_snapshots.is_empty() {
+            return Ok(MetricsBindings::default());
+        }
+        let client = self
+            .client
+            .get()
+            .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?
+            .clone();
+        let dp_size = routing.dp_size;
+        let initial = routing.initial_snapshots.clone();
+        let cancel = self.cancel.clone();
+        let task_slot = Arc::clone(&self.metrics_task);
+
+        let bindings = MetricsBindings {
+            dp_ranks: (0..dp_size).collect(),
+            on_publisher_ready: Some(Box::new(move |publisher| {
+                for snapshot in initial {
+                    publisher.publish(snapshot.dp_rank, snapshot);
+                }
+                let task = tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(LOAD_POLL_INTERVAL);
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    let mut warned = false;
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => break,
+                            _ = interval.tick() => {
+                                let load = tokio::select! {
+                                    biased;
+                                    _ = cancel.cancelled() => break,
+                                    load = client.get_load(true) => load,
+                                };
+                                match load.and_then(|load| {
+                                    load_snapshots(load, dp_size)
+                                }) {
+                                    Ok(snapshots) => {
+                                        warned = false;
+                                        for snapshot in snapshots {
+                                            publisher.publish(snapshot.dp_rank, snapshot);
+                                        }
+                                    }
+                                    Err(error) if !warned => {
+                                        warned = true;
+                                        tracing::warn!(%error, "GetLoad poll failed; suppressing repeated warnings");
+                                    }
+                                    Err(error) => tracing::debug!(%error, "GetLoad poll failed"),
+                                }
+                            }
+                        }
+                    }
+                });
+                *task_slot.lock().expect("metrics task mutex poisoned") = Some(task);
+                Ok(())
+            })),
+        };
+        Ok(bindings)
+    }
+}
+
+pub(crate) fn validate_kv_sources(
+    sources: &[pb::KvEventSource],
+    dp_size: u32,
+) -> Result<(), DynamoError> {
+    let mut ranks = HashSet::new();
+    for source in sources {
+        let rank = validate_kv_source(source, dp_size)?;
+        if !ranks.insert(rank) {
+            return Err(client::protocol_error(format!(
+                "GetKvEventSources returned duplicate rank {rank}",
+            )));
+        }
+    }
+    if ranks.len() != dp_size as usize {
+        return Err(client::protocol_error(format!(
+            "GetKvEventSources returned {} sources for {dp_size} data-parallel ranks",
+            ranks.len(),
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_kv_source(
+    source: &pb::KvEventSource,
+    dp_size: u32,
+) -> Result<u32, DynamoError> {
+    if source.transport != "zmq" || source.encoding != "msgpack" {
+        return Err(client::protocol_error(
+            "KV routing requires ZMQ sources with msgpack encoding",
+        ));
+    }
+    if source.schema_version != Some(1) {
+        return Err(client::protocol_error(
+            "GetKvEventSources returned an unsupported schema_version",
+        ));
+    }
+    let rank = source
+        .data_parallel_rank
+        .ok_or_else(|| client::protocol_error("GetKvEventSources omitted data_parallel_rank"))?;
+    if rank >= dp_size {
+        return Err(client::protocol_error(format!(
+            "GetKvEventSources returned invalid rank {rank}",
+        )));
+    }
+    let endpoint = source
+        .endpoint_addr
+        .as_ref()
+        .ok_or_else(|| client::protocol_error("GetKvEventSources omitted endpoint_addr"))?;
+    if endpoint.protocol != "tcp"
+        || endpoint.host.trim().is_empty()
+        || matches!(endpoint.host.as_str(), "*" | "0.0.0.0" | "::")
+        || endpoint.port == 0
+    {
+        return Err(client::protocol_error(
+            "GetKvEventSources returned an invalid TCP endpoint",
+        ));
+    }
+    Ok(rank)
+}
+
+pub(crate) fn kv_heartbeat_timeout(value: Option<&prost_types::Value>) -> Option<Duration> {
+    match value.and_then(|value| value.kind.as_ref()) {
+        Some(prost_types::value::Kind::NumberValue(ms))
+            if ms.is_finite() && *ms > 0.0 && *ms <= u32::MAX as f64 =>
+        {
+            Some(Duration::from_millis(*ms as u64 * 3))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn to_kv_event_source(
+    source: &pb::KvEventSource,
+    heartbeat_timeout: Option<Duration>,
+) -> Result<KvEventSource, DynamoError> {
+    let endpoint = source
+        .endpoint_addr
+        .as_ref()
+        .ok_or_else(|| client::protocol_error("GetKvEventSources omitted endpoint_addr"))?;
+    let host = if endpoint.host.contains(':') {
+        format!("[{}]", endpoint.host)
+    } else {
+        endpoint.host.clone()
+    };
+    Ok(KvEventSource::Zmq {
+        heartbeat_timeout,
+        image_token_id: None,
+        endpoint: format!("tcp://{host}:{}", endpoint.port),
+        topic: source.topic.clone(),
+        dp_rank: source.data_parallel_rank.ok_or_else(|| {
+            client::protocol_error("GetKvEventSources omitted data_parallel_rank")
+        })?,
+    })
+}
+
+fn load_snapshots(load: pb::LoadInfo, dp_size: u32) -> Result<Vec<ComponentSnapshot>, DynamoError> {
+    let timestamp = load
+        .timestamp_unix_nanos
+        .ok_or_else(|| client::protocol_error("GetLoad omitted timestamp_unix_nanos"))?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| client::protocol_error(error.to_string()))?
+        .as_nanos();
+    let timestamp = u128::from(timestamp);
+    let future_tolerance = Duration::from_secs(1).as_nanos();
+    if now.saturating_sub(timestamp) > MAX_INITIAL_LOAD_AGE.as_nanos()
+        || timestamp.saturating_sub(now) > future_tolerance
+    {
+        return Err(client::protocol_error("GetLoad returned a stale snapshot"));
+    }
+    let mut ranks = HashSet::new();
+    let mut snapshots = Vec::with_capacity(load.ranks.len());
+    for rank in load.ranks {
+        let dp_rank = rank
+            .data_parallel_rank
+            .ok_or_else(|| client::protocol_error("GetLoad rank omitted data_parallel_rank"))?;
+        let used = rank
+            .used_kv_blocks
+            .ok_or_else(|| client::protocol_error("GetLoad rank omitted used_kv_blocks"))?;
+        let total = rank
+            .total_kv_blocks
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                client::protocol_error("GetLoad rank omitted positive total_kv_blocks")
+            })?;
+        if dp_rank >= dp_size || !ranks.insert(dp_rank) || used > total {
+            return Err(client::protocol_error(format!(
+                "GetLoad returned invalid rank {dp_rank} counters",
+            )));
+        }
+        snapshots.push(ComponentSnapshot {
+            kv_used_blocks: used,
+            kv_total_blocks: total,
+            gpu_cache_usage: used as f32 / total as f32,
+            kv_cache_hit_rate: None,
+            dp_rank,
+        });
+    }
+    if ranks.len() != dp_size as usize {
+        return Err(client::protocol_error(format!(
+            "GetLoad returned {} snapshots for {dp_size} data-parallel ranks",
+            ranks.len(),
+        )));
+    }
+    Ok(snapshots)
 }

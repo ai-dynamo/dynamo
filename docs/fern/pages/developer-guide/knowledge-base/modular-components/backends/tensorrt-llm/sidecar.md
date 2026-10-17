@@ -27,7 +27,7 @@ for the architecture.
 |---|---|
 | Aggregated | Yes |
 | Disaggregated | Yes |
-| KV routing | No |
+| KV routing | Yes, with a compatible OpenEngine server and KVCM2 |
 
 ## Launch Locally
 
@@ -66,8 +66,8 @@ kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 ## Topologies
 
 The frontend reaches each sidecar over Dynamo's request, discovery, and event
-planes; the sidecar reaches the engine over its native gRPC API. The
-TensorRT-LLM sidecar does not publish KV cache events.
+planes; the sidecar reaches the engine over its native gRPC API. The sidecar
+discovers per-rank KV event sources and routing load from OpenEngine.
 
 ### Single-Node TP
 
@@ -84,7 +84,8 @@ node holds the remaining TP ranks.
 
 ### Multi-Node DP
 
-Not supported yet. The TensorRT-LLM sidecar does not target DP ranks or
-publish KV events.
+The sidecar forwards the selected attention-DP rank to OpenEngine when the
+server advertises rank targeting. KV routing requires a TensorRT-LLM build
+with native KVCM2 event streaming and routing load support.
 
 ![TensorRT-LLM data parallelism across two nodes. Only the leader sidecar serves requests: the Dynamo Frontend router picks a DP rank and sends requests over the request plane to the node 0 Dynamo Sidecar, which registers DP ranks 0-3 and calls its local TensorRT-LLM over native gRPC.](../../../../../../assets/img/sidecar-trtllm-multinode-dp.svg)
