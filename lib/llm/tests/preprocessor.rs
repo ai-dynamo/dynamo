@@ -1221,6 +1221,46 @@ mod context_length_validation {
     }
 }
 
+/// `nvext.disable_caching` reaches the worker as a typed `PreprocessedRequest` field.
+mod disable_caching_forwarding {
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_llm::protocols::common::extensions::DisableCaching;
+    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+    const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+
+    async fn preprocessed_mode(nvext: serde_json::Value) -> Option<DisableCaching> {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        mdc.set_name("test-model");
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "nvext": nvext,
+        }))
+        .unwrap();
+        let (preprocessed, _, _) = OpenAIPreprocessor::new(mdc)
+            .unwrap()
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+        preprocessed.disable_caching
+    }
+
+    #[tokio::test]
+    async fn nvext_disable_caching_maps_to_preprocessed_request() {
+        assert_eq!(
+            preprocessed_mode(serde_json::json!({"disable_caching": "decode-only"})).await,
+            Some(DisableCaching::DecodeOnly)
+        );
+        assert_eq!(
+            preprocessed_mode(serde_json::json!({"disable_caching": true})).await,
+            Some(DisableCaching::NewBlocks)
+        );
+        assert_eq!(preprocessed_mode(serde_json::json!({})).await, None);
+    }
+}
+
 mod embedding_without_chat_template {
     use dynamo_llm::local_model::runtime_config::TokenizerBackend;
     use dynamo_llm::model_card::ModelDeploymentCard;

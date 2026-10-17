@@ -7,7 +7,7 @@ use base64::Engine as _;
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
-    common::extensions::NvExt,
+    common::extensions::{DisableCaching, NvExt},
     convert_sse_stream,
     openai::{
         audios::{AudioData, NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
@@ -1715,8 +1715,8 @@ async fn test_model_ready_endpoint_non_displayable_shadow() {
     task.await.unwrap().unwrap();
 }
 
-/// With nvext disabled, cache salting reaches the engine while all other NvExt
-/// behavior stays disabled, including response `extra_fields`.
+/// With nvext disabled, cache controls (salt and `disable_caching`) reach the engine
+/// while all other NvExt behavior stays disabled, including response `extra_fields`.
 #[tokio::test]
 async fn test_nvext_disabled_strips_request_and_response() {
     dynamo_runtime::logging::init();
@@ -1748,6 +1748,7 @@ async fn test_nvext_disabled_strips_request_and_response() {
         .header("x-dynamo-dp-rank", "3")
         .header("x-dynamo-request-priority", "7")
         .header("x-tenant-id", "tenant-header")
+        .header("x-dynamo-disable-caching", "yes")
         .json(&serde_json::json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "hi"}],
@@ -1769,7 +1770,8 @@ async fn test_nvext_disabled_strips_request_and_response() {
         .take_nvext()
         .expect("cache salt must reach the engine");
     assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-header"));
-    assert!(!nvext.has_non_cache_salt_fields());
+    assert_eq!(nvext.disable_caching, Some(DisableCaching::NewBlocks));
+    assert!(!nvext.has_non_cache_control_fields());
     assert!(
         !body.contains("\"nvext\""),
         "nvext gate off: response must not contain an `nvext` field, got: {body}"
