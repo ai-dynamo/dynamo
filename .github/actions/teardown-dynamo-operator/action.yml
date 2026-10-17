@@ -68,7 +68,11 @@ runs:
         echo "::group::Delete vCluster ${VCLUSTER_NAME}"
         set -euo pipefail
 
-        if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+        # Cleanup success gates the next checkpoint lifecycle. API errors must
+        # fail the job rather than be treated as an absent namespace.
+        namespace=$(kubectl get namespace "${NAMESPACE}" --ignore-not-found \
+          --request-timeout=30s -o name)
+        if [ -z "${namespace}" ]; then
           echo "Namespace ${NAMESPACE} does not exist; nothing to delete"
           echo "::endgroup::"
           exit 0
@@ -123,7 +127,9 @@ runs:
           exit 1
         fi
 
-        if kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+        namespace=$(kubectl get namespace "${NAMESPACE}" --ignore-not-found \
+          --request-timeout=30s -o name)
+        if [ -n "${namespace}" ]; then
           echo "::error::Namespace ${NAMESPACE} still exists after delete completed"
           kubectl get daemonset,pods,pvc,svc -n "${NAMESPACE}" -o wide || true
           exit 1
