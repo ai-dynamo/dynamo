@@ -5,7 +5,7 @@ import asyncio
 import subprocess
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
@@ -129,12 +129,15 @@ async def test_shutdown_without_artifact_config_does_not_touch_runtime(
     monkeypatch.setattr(
         vllm_main, "close_configured_artifact_runtime", close_artifact_runtime
     )
+    engine_monitor = Mock()
+    monkeypatch.setattr(vllm_main, "VllmEngineMonitor", engine_monitor)
 
     await vllm_main.worker([])
 
     lifecycle.close.assert_awaited_once_with()
     vllm_main.initialize_configured_artifact_runtime.assert_not_awaited()
     close_artifact_runtime.assert_not_awaited()
+    engine_monitor.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -189,3 +192,59 @@ async def test_factory_failure_closes_state_agent_and_artifact_runtime(
 
     lifecycle.close.assert_awaited_once_with()
     close_artifact_runtime.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wake_failure", [False, True])
+async def test_snapshot_election_is_monitored_before_factory_startup(
+    monkeypatch, tmp_path, vllm_main, wake_failure
+) -> None:
+    monitor = MagicMock()
+    monitor.__aexit__.return_value = False
+
+    async def serve_noop(*_args, **_kwargs):
+        monitor.__aexit__.assert_awaited_once()
+
+    _patch_worker_startup(vllm_main, monkeypatch, tmp_path, factory_create=serve_noop)
+    config = vllm_main.parse_args_with_model_fetch.return_value
+    engine_client = Mock()
+    controller = SimpleNamespace(
+        engine=((engine_client, Mock(), Mock(), Mock(), Mock()), Mock()),
+        pause_controller=Mock(),
+    )
+    vllm_main.prepare_snapshot_engine.return_value = controller
+    monkeypatch.setattr(
+        vllm_main,
+        "refresh_snapshot_restore_config",
+        AsyncMock(return_value=config),
+    )
+    monitor_type = Mock(return_value=monitor)
+    monkeypatch.setattr(vllm_main, "VllmEngineMonitor", monitor_type)
+
+    async def elect_and_wake(pause_controller, runtime):
+        assert pause_controller is controller.pause_controller
+        assert runtime is vllm_main.create_runtime.return_value[0]
+        monitor.__aenter__.assert_awaited_once()
+        monitor.__aexit__.assert_not_awaited()
+        vllm_main.WorkerFactory.assert_not_called()
+        if wake_failure:
+            raise RuntimeError("wake failed")
+
+    election = AsyncMock(side_effect=elect_and_wake)
+    monkeypatch.setattr(vllm_main, "elect_and_wake", election)
+
+    if wake_failure:
+        with pytest.raises(RuntimeError, match="wake failed"):
+            await vllm_main.worker([])
+        vllm_main.WorkerFactory.assert_not_called()
+    else:
+        await vllm_main.worker([])
+        vllm_main.WorkerFactory.return_value.create.assert_awaited_once()
+
+    assert monitor_type.call_args.args[:2] == (
+        vllm_main.create_runtime.return_value[0],
+        engine_client,
+    )
+    assert isinstance(monitor_type.call_args.args[2], asyncio.Event)
+    election.assert_awaited_once()
+    monitor.__aexit__.assert_awaited_once()
