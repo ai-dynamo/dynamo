@@ -10,6 +10,7 @@ from typing import Optional, Union
 import torch
 
 from dynamo._core import Context
+from dynamo.common.backend.push_egress import push_egress_capable
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
@@ -19,7 +20,6 @@ from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
     RequestHandlerConfig,
 )
-from dynamo.trtllm.request_handlers.push_egress import push_egress_capable
 
 
 class AggregatedHandler(HandlerBase):
