@@ -92,6 +92,27 @@ def handler_with_router():
 
 
 @pytest.mark.asyncio
+async def test_generate_forwards_context_to_kv_router() -> None:
+    handler, router = handler_with_router()
+    context = object()
+    request = {"model": "test-model", "token_ids": [1, 2, 3]}
+
+    async def responses():
+        yield {"token_ids": [4], "finish_reason": "stop"}
+
+    router.generate_from_request.return_value = responses()
+
+    results = [output async for output in handler.generate(request, context=context)]
+
+    assert len(results) == 1
+    assert results[0]["token_ids"] == [4]
+    assert results[0]["finish_reason"] == "stop"
+    router.generate_from_request.assert_awaited_once()
+    _, kwargs = router.generate_from_request.await_args
+    assert kwargs == {"context": context}
+
+
+@pytest.mark.asyncio
 async def test_best_worker_id_forwards_cache_namespace() -> None:
     handler, router = handler_with_router()
     router.best_worker.return_value = (7, 0, 3)
@@ -142,6 +163,7 @@ async def test_get_overlap_scores_forwards_cache_namespace() -> None:
 @pytest.mark.asyncio
 async def test_generate_forwards_request_and_response_fields() -> None:
     handler, router = handler_with_router()
+    context = object()
     worker_output = {
         "token_ids": [5],
         "output_type": "image",
@@ -161,10 +183,11 @@ async def test_generate_forwards_request_and_response_fields() -> None:
         "agent_context": {"session_id": "s"},
     }
 
-    results = [output async for output in handler.generate(request)]
+    results = [output async for output in handler.generate(request, context=context)]
 
     assert results == [worker_output]
-    (forwarded,), _ = router.generate_from_request.call_args
+    (forwarded,), kwargs = router.generate_from_request.call_args
+    assert kwargs == {"context": context}
     assert forwarded == {
         **request,
         "model": "unknown",
@@ -175,6 +198,7 @@ async def test_generate_forwards_request_and_response_fields() -> None:
 @pytest.mark.asyncio
 async def test_generate_forwards_packed_token_ids_untouched() -> None:
     handler, router = handler_with_router()
+    context = object()
 
     async def worker_stream():
         yield {"token_ids": [5]}
@@ -182,8 +206,9 @@ async def test_generate_forwards_packed_token_ids_untouched() -> None:
     router.generate_from_request.return_value = worker_stream()
     packed = b"".join(i.to_bytes(4, "little") for i in (1, 2, 3, 4))
 
-    async for _ in handler.generate({"token_ids": packed}):
+    async for _ in handler.generate({"token_ids": packed}, context=context):
         pass
 
-    (forwarded,), _ = router.generate_from_request.call_args
+    (forwarded,), kwargs = router.generate_from_request.call_args
+    assert kwargs == {"context": context}
     assert forwarded["token_ids"] is packed
