@@ -16,7 +16,6 @@ Both paths emit the same Dynamo wire format on ``GenerateChunk``:
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -234,73 +233,30 @@ def extract_prompt_logprobs_from_sglang_meta(
     return payload
 
 
-_SGLANG_TOP_LOGPROBS_UNSUPPORTED_MSG = (
-    "Dynamo's SGLang backend does not currently support logprobs >= 1 due to "
-    "an O(N) per-position detokenization in the upstream sglang tokenizer "
-    "manager. Use logprobs=0 for chosen-token logprobs, or set "
-    "DYN_SGL_ALLOW_TOP_LOGPROBS=1 to override at your own risk. "
-    "Track the upstream fix at https://github.com/sgl-project/sglang/pull/24447."
-)
-
-DYN_SGL_ALLOW_TOP_LOGPROBS_ENV = "DYN_SGL_ALLOW_TOP_LOGPROBS"
-
-
-def sglang_top_logprobs_allowed() -> bool:
-    """Read the ``DYN_SGL_ALLOW_TOP_LOGPROBS`` env-var gate."""
-    return os.environ.get(DYN_SGL_ALLOW_TOP_LOGPROBS_ENV, "").lower() not in (
-        "",
-        "0",
-        "false",
-    )
-
-
-def validate_sglang_top_logprobs(
-    top_logprobs_num: Optional[int], *, allow_top_logprobs: bool
-) -> None:
-    """Reject expensive SGLang top-k logprobs unless explicitly enabled."""
-    if top_logprobs_num is None:
-        return
-    if top_logprobs_num < 1 or allow_top_logprobs:
-        return
-    raise ValueError(_SGLANG_TOP_LOGPROBS_UNSUPPORTED_MSG)
-
-
-def build_sglang_logprob_kwargs(
-    output_options: dict[str, Any],
-    *,
-    allow_top_logprobs: bool,
-) -> dict[str, Any]:
+def build_sglang_logprob_kwargs(output_options: dict[str, Any]) -> dict[str, Any]:
     """Map ``output_options`` to SGLang's
     ``return_logprob`` / ``top_logprobs_num`` / ``logprob_start_len`` kwargs.
 
-    Raises ``ValueError`` for ``logprobs >= 1`` when
-    ``allow_top_logprobs`` is ``False``. SGLang's tokenizer manager
-    detokenizes top-k tokens serially (O(N) per generated token), so
-    enabling it without a batched detokenize path degrades latency
-    badly.
+    Top-k values (``logprobs >= 1``) are passed through. Dynamo never sets
+    ``return_text_in_logprobs``, so SGLang returns top-k token ids without
+    text and skips its per-position top-k detokenization; the frontend
+    fills candidate text.
     """
     if not output_options:
         return {}
 
     kwargs: dict[str, Any] = {}
 
-    def _parse(name: str, value: Any) -> Optional[int]:
-        parsed = _parse_non_negative_int(value, name)
-        if parsed is None:
-            return None
-        validate_sglang_top_logprobs(parsed, allow_top_logprobs=allow_top_logprobs)
-        return parsed
-
     logprobs_value = output_options.get("logprobs")
     if logprobs_value is not None:
-        parsed = _parse("logprobs", logprobs_value)
+        parsed = _parse_non_negative_int(logprobs_value, "logprobs")
         if parsed is not None:
             kwargs["return_logprob"] = True
             kwargs["top_logprobs_num"] = parsed
 
     prompt_logprobs_value = output_options.get("prompt_logprobs")
     if prompt_logprobs_value is not None:
-        parsed = _parse("prompt_logprobs", prompt_logprobs_value)
+        parsed = _parse_non_negative_int(prompt_logprobs_value, "prompt_logprobs")
         if parsed is not None:
             kwargs["return_logprob"] = True
             kwargs["top_logprobs_num"] = max(kwargs.get("top_logprobs_num", 0), parsed)
