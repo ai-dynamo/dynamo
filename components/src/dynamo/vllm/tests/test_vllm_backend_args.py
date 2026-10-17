@@ -199,6 +199,24 @@ def test_removed_multimodal_env_var_falsy_value_is_ignored(monkeypatch):
     _reject_removed_multimodal_env_vars()
 
 
+def test_mm_prompt_template_flag_is_deprecated():
+    parser = argparse.ArgumentParser()
+    DynamoVllmArgGroup().add_arguments(parser)
+
+    with pytest.warns(FutureWarning, match="--mm-prompt-template is deprecated"):
+        args = parser.parse_args(["--mm-prompt-template", "USER: <image> <prompt>"])
+
+    assert args.mm_prompt_template == "USER: <image> <prompt>"
+
+
+def test_mm_prompt_template_env_var_is_deprecated(monkeypatch):
+    monkeypatch.setenv("DYN_VLLM_MM_PROMPT_TEMPLATE", "USER: <image> <prompt>")
+    parser = argparse.ArgumentParser()
+
+    with pytest.warns(FutureWarning, match="DYN_VLLM_MM_PROMPT_TEMPLATE is deprecated"):
+        DynamoVllmArgGroup().add_arguments(parser)
+
+
 class TestResolveDisaggregationMode:
     def test_pd_alias_resolves_to_aggregated(self):
         config = create_config()
