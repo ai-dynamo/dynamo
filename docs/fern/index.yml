@@ -395,6 +395,8 @@ navigation:
               - section: Fault Tolerance
                 collapsed: true
                 contents:
+                  - page: Fault Tolerance Architecture
+                    path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/fault-tolerance-architecture.md
                   - page: Request Migration Architecture
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md
                   - page: Request Cancellation Architecture
