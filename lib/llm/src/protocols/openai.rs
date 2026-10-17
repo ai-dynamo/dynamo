@@ -31,6 +31,7 @@ pub mod responses;
 pub mod stream_aggregator;
 mod strict_schema;
 pub mod tools;
+pub mod transcriptions;
 pub mod validate;
 pub mod videos;
 
