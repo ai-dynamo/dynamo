@@ -142,6 +142,14 @@ For the standalone indexer, the gate runs before the HTTP listener is bound, so 
 only be satisfied by initial `--workers` and workers recovered through `--peers`; `/register`
 cannot satisfy it. Leave the variable unset or set it to `0` to disable the startup wait.
 
+### Host Memory Allocator
+
+Set `DYN_JEMALLOC=1` to preload jemalloc into the indexer process. The entry point adds the library
+to `LD_PRELOAD` and re-executes itself once before it loads the indexer. If the library is not
+found, the indexer prints a warning and starts with the default allocator. See
+[Host memory allocator](../../../../reference/components/frontend-configuration.mdx#host-memory-allocator)
+for the accepted values and for which container images ship `libjemalloc2`.
+
 ## HTTP API
 
 ### `GET /health` — Liveness check
