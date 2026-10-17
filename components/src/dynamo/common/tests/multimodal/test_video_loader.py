@@ -103,6 +103,73 @@ async def test_load_video_uses_vllm_media_connector():
     assert loaded_metadata == metadata
 
 
+@pytest.mark.parametrize(
+    "video_backend,backend,configured_backend,expected_video_backend,expected_backend",
+    [
+        (None, None, "pynvvideocodec", "opencv", None),
+        ("pynvvideocodec", None, "opencv", "opencv", None),
+        (None, "pynvvideocodec", "opencv", None, "opencv"),
+        ("torchcodec", None, "pynvvideocodec", "torchcodec", None),
+    ],
+)
+def test_vllm_pynv_backend_disabled_by_default(
+    monkeypatch,
+    video_backend,
+    backend,
+    configured_backend,
+    expected_video_backend,
+    expected_backend,
+):
+    monkeypatch.delenv("DYN_DISABLE_NVDEC", raising=False)
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", configured_backend)
+
+    class FakeVideoMediaIO:
+        @staticmethod
+        def merge_kwargs(default, requested):
+            return {**default, **requested}
+
+        def __init__(self, image_io, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        video_loader_module,
+        "_require_vllm_video_media",
+        lambda: (None, FakeVideoMediaIO, lambda **kwargs: None),
+    )
+    requested = {}
+    if video_backend is not None:
+        requested["video_backend"] = video_backend
+    if backend is not None:
+        requested["backend"] = backend
+
+    media_io = VideoLoader()._create_vllm_video_io(requested)
+    assert media_io.kwargs.get("video_backend") == expected_video_backend
+    assert media_io.kwargs.get("backend") == expected_backend
+
+
+def test_vllm_pynv_backend_enabled_when_requested(monkeypatch):
+    monkeypatch.setenv("DYN_DISABLE_NVDEC", "0")
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", "pynvvideocodec")
+
+    class FakeVideoMediaIO:
+        @staticmethod
+        def merge_kwargs(default, requested):
+            return {**default, **requested}
+
+        def __init__(self, image_io, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        video_loader_module,
+        "_require_vllm_video_media",
+        lambda: (None, FakeVideoMediaIO, lambda **kwargs: None),
+    )
+    media_io = VideoLoader()._create_vllm_video_io(
+        {"video_backend": "pynvvideocodec"}
+    )
+    assert media_io.kwargs["video_backend"] == "pynvvideocodec"
+
+
 @pytest.mark.asyncio
 async def test_http_fetch_honors_configured_media_limit(monkeypatch):
     monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")

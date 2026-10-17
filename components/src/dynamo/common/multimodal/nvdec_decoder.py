@@ -22,10 +22,10 @@ The returned frames match the existing ``VideoLoader`` contract: a host numpy
 array of shape ``(T, H, W, 3)``, dtype ``uint8``, RGB, C-contiguous, plus a
 metadata dict ``{"fps", "frames_indices", "total_num_frames"}``.
 
-Gating: NVDEC is used when PyNvVideoCodec is importable and ``DYN_DISABLE_NVDEC``
-is not set. When it is unavailable (CPU image, unsupported profile) the caller
-raises the actionable unsupported-codec error built by
-``common.multimodal.codec_errors``.
+Gating: NVDEC is used when PyNvVideoCodec is importable and
+``DYN_DISABLE_NVDEC=0``. When it is disabled or unavailable (CPU image,
+unsupported profile) and no other decoder is available, the caller raises the
+actionable unsupported-codec error built by ``common.multimodal.codec_errors``.
 """
 
 from __future__ import annotations
@@ -39,8 +39,6 @@ import tempfile
 import warnings
 
 import numpy as np
-
-from dynamo.common.utils.env import env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -98,15 +96,21 @@ def should_use_nvdec(codec: str | None) -> bool:
     return codec in HW_ROUTED_CODECS and nvdec_available()
 
 
+def is_nvdec_disabled() -> bool:
+    """True unless DYN_DISABLE_NVDEC explicitly enables NVDEC."""
+    return os.environ.get(DISABLE_ENV, "").lower() not in {"0", "false", "no"}
+
+
 @functools.lru_cache(maxsize=1)
 def nvdec_available() -> bool:
     """True if NVDEC decode can run in this process.
 
     Cached: PyNvVideoCodec is only installed in GPU images, and the import is the
-    reliable signal. ``DYN_DISABLE_NVDEC`` forces the software path. A GPU that is
-    absent at decode time still raises and is caught by the caller's fallback.
+    reliable signal. NVDEC is disabled by default; set ``DYN_DISABLE_NVDEC=0``
+    to enable it. A GPU that is absent at decode time still raises and
+    is caught by the caller's fallback.
     """
-    if env_bool(DISABLE_ENV):
+    if is_nvdec_disabled():
         return False
     try:
         with warnings.catch_warnings():
