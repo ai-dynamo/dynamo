@@ -32,7 +32,7 @@ func selectRemotePartitions(
 	if selection == nil {
 		return partitions, nil, nil
 	}
-	if pipeline != PipelineLPX {
+	if pipeline != PipelineHybrid {
 		return nil, nil, fmt.Errorf("%w: localPartitions requires a hybrid build with a Cyborg conductor", ErrUnsupportedRuntime)
 	}
 

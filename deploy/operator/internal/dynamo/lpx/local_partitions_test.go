@@ -36,35 +36,35 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 		wantLocalIDs    []int
 	}{
 		{
-			name: "independent partition runs locally", pipeline: PipelineLPX,
+			name: "independent partition runs locally", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{11}},
 			wantAgents: 9, wantCompilerIDs: []int64{7, 8}, wantConnectors: 1,
 			wantRuntimeIDs: "7", wantLocalIDs: []int{11},
 		},
 		{
-			name: "selected chain runs locally as one runtime partition", pipeline: PipelineLPX,
+			name: "selected chain runs locally as one runtime partition", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{7}},
 			wantAgents: 8, wantCompilerIDs: []int64{11}, wantConnectors: 0,
 			wantRuntimeIDs: "11", wantLocalIDs: []int{7},
 		},
 		{
-			name: "every partition runs locally", pipeline: PipelineLPX,
+			name: "every partition runs locally", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
 			wantAgents: 0, wantCompilerIDs: []int64{}, wantConnectors: 0,
 			wantRuntimeIDs: "", wantLocalIDs: []int{7, 11},
 		},
 		{
-			name: "chain member is not a runtime partition", pipeline: PipelineLPX,
+			name: "chain member is not a runtime partition", pipeline: PipelineHybrid,
 			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{8}},
 			wantErr:   "localPartitions references partition 8 of the prop-sync chain that starts at partition 7; select 7",
 		},
 		{
-			name: "unknown partition", pipeline: PipelineLPX,
+			name: "unknown partition", pipeline: PipelineHybrid,
 			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{99}},
 			wantErr:   "localPartitions references partition 99, which the build does not contain",
 		},
 		{
-			name: "unsupported mode", pipeline: PipelineLPX,
+			name: "unsupported mode", pipeline: PipelineHybrid,
 			selection: &dynamov1beta1.LPXLocalPartitions{Mode: "Roles"},
 			wantErr:   `localPartitions has unsupported mode "Roles"`,
 		},
@@ -120,7 +120,7 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
 
 			t.Log("Change the workload digest when partitions move to the GPU")
-			baseline := projectTestBuild(t, normalized, PipelineLPX)
+			baseline := projectTestBuild(t, normalized, PipelineHybrid)
 			require.NotEqual(t, baseline.Digest(), projection.Digest())
 		})
 	}
@@ -231,7 +231,7 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 			build.partitions = append(build.partitions, third)
 			build.selectedPropSyncChains = [][]int{{7, 8}}
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: PipelineLPX, Models: []string{"default"}, Build: normalized,
+				Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
 				RuntimeBuildRef: "model-build", LocalPartitions: test.selection,
 			})
 			require.NoError(t, err)
@@ -283,7 +283,7 @@ func TestProjectModelV2LocalPartitionsKeepsPhysicalBuildBound(t *testing.T) {
 
 	t.Log("Reject the oversized build even when every partition runs locally")
 	_, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: PipelineLPX, Models: []string{"default"}, Build: normalized,
+		Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
 		LocalPartitions: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
 	})
 	require.EqualError(t, err, "LPX projection has 257 partitions, limit is 1..256")
@@ -305,7 +305,7 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 		wantPropSyncInfo string
 	}{
 		{
-			name: "partition before the chain runs locally", pipeline: PipelineLPX,
+			name: "partition before the chain runs locally", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{1}},
 			wantAgents: 3, wantCompilerIDs: []int64{2, 3, 4},
 			wantConnectors: [][2]string{{"partition-000", "partition-001"}},
@@ -319,7 +319,7 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 				"num_supported_lanes":[4,2,1]}]}`,
 		},
 		{
-			name: "selected chain runs locally as one runtime partition", pipeline: PipelineLPX,
+			name: "selected chain runs locally as one runtime partition", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{2}},
 			wantAgents: 2, wantCompilerIDs: []int64{1, 4}, wantConnectors: [][2]string{},
 			wantRuntimeIDs: "1\n4", wantLocalIDs: []int{2},
@@ -329,7 +329,7 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			wantPropSyncInfo: `{"version":1,"prop_sync_pairs":[]}`,
 		},
 		{
-			name: "every partition runs locally", pipeline: PipelineLPX,
+			name: "every partition runs locally", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
 			wantAgents: 0, wantCompilerIDs: []int64{}, wantConnectors: [][2]string{},
 			wantRuntimeIDs: "", wantLocalIDs: []int{1, 2, 4},
@@ -337,12 +337,12 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			wantPropSyncInfo: `{"version":1,"prop_sync_pairs":[]}`,
 		},
 		{
-			name: "chain member is not a runtime partition", pipeline: PipelineLPX,
+			name: "chain member is not a runtime partition", pipeline: PipelineHybrid,
 			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{3}},
 			wantErr:   "localPartitions references partition 3 of the prop-sync chain that starts at partition 2; select 2",
 		},
 		{
-			name: "unknown partition", pipeline: PipelineLPX,
+			name: "unknown partition", pipeline: PipelineHybrid,
 			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{5}},
 			wantErr:   "localPartitions references partition 5, which the build does not contain",
 		},
@@ -406,7 +406,7 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
 
 			t.Log("Change the workload digest when partitions move to the GPU")
-			baseline := projectTestBuild(t, normalized, PipelineLPX)
+			baseline := projectTestBuild(t, normalized, PipelineHybrid)
 			require.NotEqual(t, baseline.Digest(), projection.Digest())
 		})
 	}
@@ -425,7 +425,7 @@ func TestProjectModelV3LocalPartitionsRejectsUnsupportedBuilds(t *testing.T) {
 			wantErr: "unsupported LPX runtime: localPartitions requires a hybrid build with a Cyborg conductor",
 		},
 		{
-			name: "packed prop-sync partitions cannot be split", pipeline: PipelineLPX, numChips: 8,
+			name: "packed prop-sync partitions cannot be split", pipeline: PipelineHybrid, numChips: 8,
 			wantErr: "unsupported LPX runtime: localPartitions cannot split packed HX prop-sync partitions, which require an LPU-only workload",
 		},
 	}
@@ -469,7 +469,7 @@ func TestProjectModelV3LocalPartitionsKeepsPhysicalBuildBound(t *testing.T) {
 
 	t.Log("Reject the oversized build even when every partition runs locally")
 	_, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: PipelineLPX, Models: []string{"default"}, Build: normalized,
+		Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
 		LocalPartitions: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
 	})
 	require.EqualError(t, err, "LPX projection has 257 partitions, limit is 1..256")

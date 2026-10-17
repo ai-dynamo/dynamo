@@ -96,7 +96,7 @@ func ResolveWorkload(
 			if len(components) == 2 {
 				pipeline = PipelineSpecDecode
 			} else if snapshot.hasCUDAPartitions {
-				pipeline = PipelineLPX
+				pipeline = PipelineHybrid
 			}
 		}
 

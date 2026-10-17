@@ -26,7 +26,7 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	fixture.selectedPropSyncChains = nil
 	snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline:        PipelineLPX,
+		Pipeline:        PipelineHybrid,
 		Models:          []string{"default"},
 		RuntimeBuildRef: "model-build",
 		Build:           snapshot,
@@ -98,7 +98,7 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 				fixture.partitions[index].id = uint32(index)
 			}
 			snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-			projection := projectTestBuild(t, snapshot, PipelineLPX)
+			projection := projectTestBuild(t, snapshot, PipelineHybrid)
 			projection.stage = testRenderComponentName
 
 			t.Log("Render only projected endpoints without compressing their physical Agent offsets")
@@ -164,7 +164,7 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 			fixture.selectedPropSyncChains = [][]uint32{{2, 3}}
 			normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: PipelineLPX, Models: []string{"default"}, Build: normalized,
+				Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
 				RuntimeBuildRef: "model-build", LocalPartitions: test.selection,
 			})
 			require.NoError(t, err)
