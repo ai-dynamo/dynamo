@@ -34,8 +34,13 @@ Every candidate is verified against the corresponding API; a reference to an
 issue that does not exist does not count. Verification failures caused by API
 outages are treated as unverified-but-present so that an upstream outage never
 fails anyone's PR (fail open).
+
+From the blocking date on, a pull request that fails the check is also moved
+back to draft. The script only asks for that, through a `draft=true` step
+output; the workflow job that acts on it holds the write token.
 """
 
+import datetime
 import json
 import os
 import re
@@ -120,6 +125,19 @@ def summary_title(title: object) -> str:
     if len(flat) > MAX_TITLE_LEN:
         flat = flat[: MAX_TITLE_LEN - 3].rstrip() + "..."
     return f"`{flat}`"
+
+
+def today() -> str:
+    """Return the current UTC date in ISO form, the shape `BLOCKING_DATE` takes."""
+    return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+
+
+def request_draft() -> None:
+    """Ask the workflow to move the pull request back to draft."""
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if output_path:
+        with open(output_path, "a") as f:
+            f.write("draft=true\n")
 
 
 def http_json(
@@ -443,6 +461,8 @@ def main() -> int:
         else []
     )
 
+    # ISO dates compare correctly as strings.
+    required = today() >= blocking_date
     summarize(
         [
             (
@@ -465,7 +485,12 @@ def main() -> int:
             "  `ai-dynamo/enhancements#12`.",
             "",
             "If no issue exists yet, create one first and start the work from it.",
-            f"This check is advisory today and becomes required on {blocking_date}.",
+            (
+                f"This check is required as of {blocking_date}, so this PR is moved "
+                "to draft. Mark it ready for review once an issue is linked."
+                if required
+                else f"This check is advisory today and becomes required on {blocking_date}."
+            ),
         ]
         + (
             [
@@ -488,6 +513,8 @@ def main() -> int:
             else []
         )
     )
+    if required:
+        request_draft()
     return 1
 
 
