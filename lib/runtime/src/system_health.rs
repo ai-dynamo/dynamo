@@ -18,7 +18,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
 
@@ -96,7 +96,16 @@ pub struct SystemHealth {
     live_path: String,
     start_time: Instant,
     uptime_gauge: OnceLock<prometheus::Gauge>,
+    /// Endpoint-specific canary timeout extensions with absolute expiry times.
+    canary_maintenance: HashMap<CanaryMaintenanceLease, (String, Instant)>,
+    /// Source of lease identifiers, monotonic so a released lease is never reused.
+    next_canary_lease: CanaryMaintenanceLease,
 }
+
+/// Identifies one open canary maintenance window. Returned by
+/// [`SystemHealth::begin_canary_maintenance`] and surrendered to
+/// [`SystemHealth::end_canary_maintenance`].
+pub type CanaryMaintenanceLease = u64;
 
 impl SystemHealth {
     pub fn new(
@@ -134,6 +143,8 @@ impl SystemHealth {
             live_path,
             start_time: Instant::now(),
             uptime_gauge: OnceLock::new(),
+            canary_maintenance: HashMap::new(),
+            next_canary_lease: 0,
         }
     }
 
@@ -196,6 +207,53 @@ impl SystemHealth {
     pub fn set_endpoint_health_status(&self, endpoint: &str, status: HealthStatus) {
         let mut endpoint_health = self.endpoint_health.write().unwrap();
         endpoint_health.insert(endpoint.to_string(), status);
+    }
+
+    /// Extend an endpoint's canary deadline for at most `max_duration`.
+    /// Probes and health status updates continue throughout the lease.
+    /// Returns an error if the deadline cannot be represented.
+    pub fn begin_canary_maintenance(
+        &mut self,
+        endpoint: &str,
+        max_duration: Duration,
+    ) -> anyhow::Result<CanaryMaintenanceLease> {
+        let now = Instant::now();
+        let deadline = now.checked_add(max_duration).ok_or_else(|| {
+            anyhow::anyhow!("Canary maintenance duration exceeds the supported deadline range")
+        })?;
+        self.prune_expired_canary_maintenance(now);
+        let lease = self.next_canary_lease;
+        self.next_canary_lease += 1;
+        self.canary_maintenance
+            .insert(lease, (endpoint.to_string(), deadline));
+        Ok(lease)
+    }
+
+    /// Release `lease`, leaving other timeout extensions in place.
+    /// Releasing an expired or already released lease is a no-op.
+    pub fn end_canary_maintenance(&mut self, lease: CanaryMaintenanceLease) {
+        self.canary_maintenance.remove(&lease);
+    }
+
+    fn prune_expired_canary_maintenance(&mut self, now: Instant) {
+        self.canary_maintenance
+            .retain(|_, (_, deadline)| now < *deadline);
+    }
+
+    /// Extend a probe's normal deadline to the latest active lease for its endpoint.
+    /// Using the operation's absolute deadline avoids granting a fresh timeout to
+    /// each probe, including one sent just before the lease expires.
+    pub fn canary_request_deadline(
+        &mut self,
+        endpoint: &str,
+        default_deadline: Instant,
+    ) -> Instant {
+        self.prune_expired_canary_maintenance(Instant::now());
+        self.canary_maintenance
+            .values()
+            .filter(|(name, _)| name == endpoint)
+            .map(|(_, deadline)| *deadline)
+            .fold(default_deadline, Instant::max)
     }
 
     /// Returns the overall health status and endpoint health statuses
@@ -577,5 +635,109 @@ mod tests {
             health.get_health_status().0,
             "after the canary marks it ready the worker is healthy"
         );
+    }
+
+    fn verified_health() -> SystemHealth {
+        let health = system_health(true);
+        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.set_endpoint_registered(ENDPOINT);
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+        health
+    }
+
+    #[test]
+    fn maintenance_extends_deadline_without_hiding_notready() {
+        let mut health = verified_health();
+        let normal = Instant::now() + Duration::from_secs(3);
+        health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
+
+        assert!(health.canary_request_deadline(ENDPOINT, normal) > normal);
+        assert_eq!(health.canary_request_deadline("other", normal), normal);
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::NotReady);
+        assert!(!health.get_health_status().0);
+    }
+
+    #[test]
+    fn ending_maintenance_restores_normal_deadline() {
+        let mut health = verified_health();
+        let normal = Instant::now() + Duration::from_secs(3);
+        let lease = health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
+        health.end_canary_maintenance(lease);
+
+        assert_eq!(health.canary_request_deadline(ENDPOINT, normal), normal);
+    }
+
+    #[test]
+    fn ending_one_extension_leaves_an_overlapping_extension_active() {
+        let mut health = verified_health();
+        let normal = Instant::now() + Duration::from_secs(3);
+        let first = health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(60))
+            .unwrap();
+        let first_deadline = health.canary_request_deadline(ENDPOINT, normal);
+        let second = health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
+        assert_eq!(
+            health.canary_request_deadline(ENDPOINT, normal),
+            first_deadline
+        );
+
+        health.end_canary_maintenance(first);
+        let second_deadline = health.canary_request_deadline(ENDPOINT, normal);
+        assert!(second_deadline > normal);
+        assert!(second_deadline < first_deadline);
+
+        health.end_canary_maintenance(second);
+        assert_eq!(health.canary_request_deadline(ENDPOINT, normal), normal);
+    }
+
+    #[test]
+    fn releasing_a_lease_twice_leaves_other_extensions_alone() {
+        let mut health = verified_health();
+        let normal = Instant::now() + Duration::from_secs(3);
+        let first = health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
+        let second = health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
+
+        health.end_canary_maintenance(first);
+        health.end_canary_maintenance(first);
+        assert!(health.canary_request_deadline(ENDPOINT, normal) > normal);
+
+        health.end_canary_maintenance(second);
+        assert_eq!(health.canary_request_deadline(ENDPOINT, normal), normal);
+    }
+
+    #[test]
+    fn maintenance_extension_expires_on_its_own() {
+        let mut health = verified_health();
+        let normal = Instant::now() + Duration::from_secs(3);
+        let lease = health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
+        // Expire the existing lease without a wall-clock sleep.
+        health.canary_maintenance.get_mut(&lease).unwrap().1 = Instant::now();
+
+        assert_eq!(health.canary_request_deadline(ENDPOINT, normal), normal);
+        assert!(health.canary_maintenance.is_empty());
+    }
+
+    #[test]
+    fn maintenance_extension_still_lets_ready_through() {
+        let mut health = verified_health();
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::NotReady);
+        health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
+
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+        assert!(health.get_health_status().0);
     }
 }
