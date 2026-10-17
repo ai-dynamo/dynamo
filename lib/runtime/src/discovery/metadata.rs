@@ -280,25 +280,28 @@ impl DiscoveryMetadata {
             .collect()
     }
 
-    /// Filter this metadata by query
+    /// Filter this metadata by query, cloning only the instances the query selects.
     pub fn filter(&self, query: &DiscoveryQuery) -> Vec<DiscoveryInstance> {
-        let all_instances = match query {
+        let candidates = match query {
             DiscoveryQuery::AllEndpoints
             | DiscoveryQuery::NamespacedEndpoints { .. }
             | DiscoveryQuery::ComponentEndpoints { .. }
-            | DiscoveryQuery::Endpoint { .. } => self.get_all_endpoints(),
+            | DiscoveryQuery::Endpoint { .. } => &self.endpoints,
 
             DiscoveryQuery::AllModels
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
-            | DiscoveryQuery::EndpointModels { .. } => self.get_all_model_cards(),
+            | DiscoveryQuery::EndpointModels { .. } => &self.model_cards,
 
-            // EventChannel queries now return actual event channels
-            DiscoveryQuery::EventChannels(_) => self.get_all_event_channels(),
-            DiscoveryQuery::EventSources(_) => self.get_all_event_sources(),
+            DiscoveryQuery::EventChannels(_) => &self.event_channels,
+            DiscoveryQuery::EventSources(_) => &self.event_sources,
         };
 
-        filter_instances(all_instances, query)
+        candidates
+            .values()
+            .filter(|instance| instance.matches(query))
+            .cloned()
+            .collect()
     }
 }
 
@@ -306,14 +309,6 @@ impl Default for DiscoveryMetadata {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Filter instances by query predicate
-fn filter_instances(
-    instances: Vec<DiscoveryInstance>,
-    query: &DiscoveryQuery,
-) -> Vec<DiscoveryInstance> {
-    instances.into_iter().filter(|i| i.matches(query)).collect()
 }
 
 /// Snapshot of all discovered instances and their metadata
@@ -539,6 +534,105 @@ mod tests {
         assert_eq!(metadata.get_all_endpoints().len(), 3);
         assert_eq!(metadata.get_all_model_cards().len(), 2);
         assert_eq!(metadata.get_all().len(), 5);
+    }
+
+    #[test]
+    fn filter_selects_exactly_what_the_query_predicate_matches() {
+        let mut metadata = DiscoveryMetadata::new();
+        for (namespace, component, endpoint, instance_id) in [
+            ("ns-a", "worker", "generate", 1),
+            ("ns-a", "worker", "embed", 2),
+            ("ns-a", "prefill", "generate", 3),
+            ("ns-b", "worker", "generate", 4),
+        ] {
+            metadata
+                .register_endpoint(DiscoveryInstance::Endpoint(Instance {
+                    namespace: namespace.to_string(),
+                    component: component.to_string(),
+                    endpoint: endpoint.to_string(),
+                    instance_id,
+                    transport: TransportType::Nats("nats://localhost:4222".to_string()),
+                    device_type: None,
+                    request_plane_codec: None,
+                }))
+                .unwrap();
+            metadata
+                .register_model_card(DiscoveryInstance::Model {
+                    namespace: namespace.to_string(),
+                    component: component.to_string(),
+                    endpoint: endpoint.to_string(),
+                    instance_id: instance_id + 10,
+                    card_json: serde_json::json!({"model": namespace}),
+                    model_suffix: None,
+                })
+                .unwrap();
+        }
+        let s = |value: &str| value.to_string();
+        let queries = [
+            (DiscoveryQuery::AllEndpoints, 4usize),
+            (
+                DiscoveryQuery::NamespacedEndpoints {
+                    namespace: s("ns-a"),
+                },
+                3,
+            ),
+            (
+                DiscoveryQuery::ComponentEndpoints {
+                    namespace: s("ns-a"),
+                    component: s("worker"),
+                },
+                2,
+            ),
+            (
+                DiscoveryQuery::Endpoint {
+                    namespace: s("ns-a"),
+                    component: s("worker"),
+                    endpoint: s("generate"),
+                },
+                1,
+            ),
+            (DiscoveryQuery::AllModels, 4),
+            (
+                DiscoveryQuery::NamespacedModels {
+                    namespace: s("ns-b"),
+                },
+                1,
+            ),
+            (
+                DiscoveryQuery::NamespacedModels {
+                    namespace: s("ns-c"),
+                },
+                0,
+            ),
+            (
+                DiscoveryQuery::ComponentModels {
+                    namespace: s("ns-a"),
+                    component: s("prefill"),
+                },
+                1,
+            ),
+            (
+                DiscoveryQuery::EndpointModels {
+                    namespace: s("ns-a"),
+                    component: s("worker"),
+                    endpoint: s("embed"),
+                },
+                1,
+            ),
+        ];
+        for (query, expected) in queries {
+            let filtered = metadata.filter(&query);
+            assert_eq!(filtered.len(), expected, "{query:?}");
+            let selected: HashSet<DiscoveryInstanceId> =
+                filtered.iter().map(DiscoveryInstance::id).collect();
+            let predicate: HashSet<DiscoveryInstanceId> = metadata
+                .get_all()
+                .iter()
+                .filter(|instance| instance.matches(&query))
+                .map(DiscoveryInstance::id)
+                .collect();
+            assert_eq!(selected, predicate, "{query:?}");
+        }
     }
 
     #[test]
