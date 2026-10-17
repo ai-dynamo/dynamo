@@ -381,16 +381,7 @@ fn beam_turn_grammar_constraint<R: OAIChatLikeRequest + CommonExtProvider>(
 pub(crate) const BEAM_TURN_GRAMMAR_ENV: &str = "DYN_BEAM_TURN_GRAMMAR";
 
 fn beam_turn_grammar_enabled() -> bool {
-    beam_turn_grammar_enabled_by(std::env::var(BEAM_TURN_GRAMMAR_ENV).ok().as_deref())
-}
-
-fn beam_turn_grammar_enabled_by(value: Option<&str>) -> bool {
-    !value.is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
-        )
-    })
+    !dynamo_runtime::config::env_is_falsey(BEAM_TURN_GRAMMAR_ENV)
 }
 
 /// The Beam turn grammar from the parsers crate's family registry, built for the channel
