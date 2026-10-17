@@ -35,12 +35,12 @@ spec:
         spec:
           containers:
             - name: main
-              image: ${CUSTOM_SPEECH_ADAPTER_IMAGE}
-              command: [python3, -m, nemotron_speech.asr.worker]
+              image: ${DYNAMO_SPEECH_NIM_SIDECAR_IMAGE}
+              command: [dynamo-speech-nim-sidecar, asr]
               args:
-                - --nim-server
-                - localhost:50052
-                - --nim-startup-timeout-s
+                - --grpc-endpoint
+                - "127.0.0.1:50052"
+                - --grpc-startup-deadline-secs
                 - "3600"
                 - --commit-padding-ms
                 - "400"
@@ -87,7 +87,7 @@ spec:
                 - {mountPath: /opt/nim/.cache, name: model-cache, subPath: nemotron-speech-cascaded-asr}
                 - {mountPath: /dev/shm, name: shared-memory}
           imagePullSecrets: &speechImagePullSecrets
-            - name: custom-adapter-image-pull-secret
+            - name: speech-nim-sidecar-image-pull-secret
             - name: ngc-secret
           volumes:
             - name: model-cache
@@ -147,12 +147,12 @@ spec:
         spec:
           containers:
             - name: main
-              image: ${CUSTOM_SPEECH_ADAPTER_IMAGE}
-              command: [python3, -m, nemotron_speech.tts.worker]
+              image: ${DYNAMO_SPEECH_NIM_SIDECAR_IMAGE}
+              command: [dynamo-speech-nim-sidecar, tts]
               args:
-                - --nim-server
-                - localhost:50051
-                - --nim-startup-timeout-s
+                - --grpc-endpoint
+                - "127.0.0.1:50051"
+                - --grpc-startup-deadline-secs
                 - "3600"
                 - --model-name
                 - nvidia/magpie-tts-multilingual
