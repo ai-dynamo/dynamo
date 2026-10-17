@@ -486,7 +486,7 @@ Kubernetes: `>=1.30.0-0`
 | kaiQueueWait.imagePullSecrets | list | `[]` | Existing pull secrets for the wait image. |
 | kaiQueueWait.activeDeadlineSeconds | int | `600` | Maximum Job duration in seconds, including retries. The Helm timeout still bounds the hook. |
 | kaiQueueWait.affinity | object | `{}` | Affinity for the wait Job. Tolerations are inherited from kai-scheduler.global.tolerations. |
-| kaiQueueWait.podSecurityContext | string | `nil` | Full replacement of the wait pod security context. Null defaults to runAsNonRoot=true, runAsUser=65532 and seccompProfile.type=RuntimeDefault. On OpenShift, supply a context without runAsUser for admission to assign it. |
+| kaiQueueWait.podSecurityContext | object | `nil` | Full replacement of the wait pod security context. Null defaults to runAsNonRoot=true, runAsUser=65532 and seccompProfile.type=RuntimeDefault. On OpenShift, supply a context without runAsUser for admission to assign it. |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
 
 ### LPX Integration

@@ -336,8 +336,9 @@ kai-scheduler:
     affinity: {}
 
 # Bundled KAI starts its queue-controller webhook after Helm's resources are ready, so the
-# dynamo-default and dynamo Queues wait for it in a post-install/post-upgrade hook Job.
-# Rendered only when global.kai-scheduler.install is true.
+# dynamo-default and dynamo Queues wait for it in a post-install/post-upgrade hook Job that
+# confirms the webhook admits a server-side dry-run Queue. Rendered only when
+# global.kai-scheduler.install is true and kai-scheduler.queuecontroller.enabled is not false.
 kaiQueueWait:
   # -- Wait for the bundled KAI queue-controller before creating the Dynamo Queues. Disable only when the webhook is known to be serving.
   enabled: true
@@ -349,7 +350,7 @@ kaiQueueWait:
   activeDeadlineSeconds: 600
   # -- Affinity for the wait Job. Tolerations are inherited from kai-scheduler.global.tolerations.
   affinity: {}
-  # -- Full replacement of the wait pod security context. Null defaults to runAsNonRoot=true, runAsUser=65532 and seccompProfile.type=RuntimeDefault. On OpenShift, supply a context without runAsUser for admission to assign it.
+  # -- (object) Full replacement of the wait pod security context. Null defaults to runAsNonRoot=true, runAsUser=65532 and seccompProfile.type=RuntimeDefault. On OpenShift, supply a context without runAsUser for admission to assign it.
   podSecurityContext: null
 
 # etcd configuration - distributed key-value store
