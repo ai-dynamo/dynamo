@@ -25,12 +25,14 @@ class TestEnvBool:
         assert env_bool("FOO") is False
         assert env_bool("FOO", default=True) is True
 
-    @pytest.mark.parametrize("value", ["true", "True", "TRUE", "1", "yes", "YES"])
+    @pytest.mark.parametrize(
+        "value", ["true", "True", "TRUE", "1", "yes", "YES", "on", "ON", " true "]
+    )
     def test_truthy_values(self, monkeypatch, value):
         monkeypatch.setenv("FOO", value)
         assert env_bool("FOO") is True
 
-    @pytest.mark.parametrize("value", ["false", "0", "no", "on", "off", "anything"])
+    @pytest.mark.parametrize("value", ["false", "0", "no", "off", "anything"])
     def test_falsy_values(self, monkeypatch, value):
         monkeypatch.setenv("FOO", value)
         assert env_bool("FOO") is False
