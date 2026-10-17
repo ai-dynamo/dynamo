@@ -4,6 +4,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -247,5 +248,28 @@ func TestDockerSecretIndexer_RefreshIndexRespectsNamespaceScope(t *testing.T) {
 	}
 	if len(secrets) != 0 {
 		t.Fatalf("DockerSecretIndexer.GetSecrets() = %v, want no out-of-scope secrets", secrets)
+	}
+}
+
+func TestDockerSecretIndexer_HubAliasesAreDeduplicated(t *testing.T) {
+	t.Log("Index both Docker Hub auth key spellings, including a secret containing both")
+	a := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "a-credential", Namespace: "workload"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"docker.io":{},"https://index.docker.io/v1/":{}}}`)},
+	}
+	b := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "b-credential", Namespace: "workload"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"https://index.docker.io/v1/":{}}}`)},
+	}
+	reader := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(b, a).Build()
+	index := NewDockerSecretIndexer(reader, "workload")
+	require.NoError(t, index.RefreshIndex(t.Context()))
+	t.Log("Both registry spellings must return the same sorted, unique credentials")
+	for _, registry := range []string{"docker.io", "index.docker.io", "https://index.docker.io/v1/"} {
+		names, err := index.GetSecrets("workload", registry)
+		require.NoError(t, err)
+		require.Equal(t, []string{"a-credential", "b-credential"}, names)
 	}
 }
