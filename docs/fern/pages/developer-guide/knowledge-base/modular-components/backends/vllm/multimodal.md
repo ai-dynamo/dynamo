@@ -491,7 +491,7 @@ vLLM serves streaming transcription for Qwen3-ASR through its `Qwen3ASRRealtimeG
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
-bash launch/agg_realtime_transcription.sh --model Qwen/Qwen3-ASR-1.7B \
+bash launch/agg_asr_realtime.sh --model Qwen/Qwen3-ASR-1.7B \
   --hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}'
 ```
 
