@@ -38,7 +38,7 @@ spec:
           name: main
     replicas: 1
     type: frontend
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         containers:
@@ -76,7 +76,7 @@ spec:
           resourceClaimTemplateName: gpu-template
     replicas: 1
     type: decode
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       spec:
         containers:
@@ -86,7 +86,7 @@ spec:
           - --disaggregation-mode
           - prefill
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"xpu"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"xpu"}'
           - --block-size
           - "64"
           command:

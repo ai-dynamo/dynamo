@@ -98,8 +98,8 @@ COPY --from=epp /rust-licenses /tmp/rust-licenses
 # its OWN-arch floor — the amd64 baseline would otherwise under-attribute a
 # package present in the amd64 base but not the arm64 base that we install on
 # arm64. Rendered from context.yaml's baseline_sbom by render.py; empty when no
-# baseline is captured (NOTICES then cover the full image — correct but
-# unfiltered).
+# baseline is captured, which leaves the whole base image attributed and fails
+# the policy gate below on any denied license the base carries.
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
 ARG TARGETARCH
 # Resolve where this image's Python packages live at runtime rather than per

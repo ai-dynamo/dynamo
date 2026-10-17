@@ -14,17 +14,20 @@
 # limitations under the License.
 
 import asyncio
+import functools
 import logging
 import os
+import re
 from typing import Any, Awaitable, Dict, Final, List
 from urllib.parse import urlparse
 
 import numpy as np
 
-from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
+    describe_media_source,
     validate_media_url,
 )
 from dynamo.common.multimodal.codec_errors import (
@@ -42,7 +45,37 @@ from dynamo.common.multimodal.nvdec_decoder import (
 )
 from dynamo.common.utils.runtime import run_async
 
+from dynamo.common.http.media_reference import max_media_bytes  # isort: skip
+
 logger = logging.getLogger(__name__)
+
+
+def _attributable_to_cv2(exc: BaseException, media_io: Any | None = None) -> bool:
+    """Identify OpenCV errors without relabeling failures from other video backends."""
+    if getattr(exc, "name", None) == "cv2" or "cv2" in str(exc):
+        return True
+    return (
+        isinstance(exc, ValueError)
+        and str(exc) == "Could not open video stream"
+        and (getattr(media_io, "kwargs", None) or {}).get("backend", "opencv")
+        == "opencv"
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _cv2_lacks_video_backend() -> bool:
+    """Return whether OpenCV is broken or lacks FFmpeg and GStreamer."""
+    try:
+        import cv2
+    except ImportError:
+        return False
+    except Exception:  # noqa: BLE001 - a broken import has no usable video backend
+        return True
+    build_info = cv2.getBuildInformation()
+    return not any(
+        re.search(rf"^\s*{backend}:\s*YES", build_info, re.MULTILINE | re.IGNORECASE)
+        for backend in ("FFMPEG", "GSTREAMER")
+    )
 
 
 URL_VARIANT_KEY: Final = "Url"
@@ -141,7 +174,10 @@ class VideoLoader:
         # data: and file:// never touch the network, so vLLM can handle them.
         if urlparse(normalized_url).scheme in ("http", "https"):
             content = await fetch_bytes(
-                normalized_url, self._http_timeout, policy=self._url_policy
+                normalized_url,
+                self._http_timeout,
+                policy=self._url_policy,
+                max_bytes=max_media_bytes(),
             )
             return await self._decode_video_bytes(content, media_io)
 
@@ -165,13 +201,8 @@ class VideoLoader:
     ) -> tuple[np.ndarray, Dict[str, Any]]:
         """Decode video bytes: H.264/H.265 on NVDEC, all else software.
 
-        The runtime images purge the software decode wheels (opencv/av/decord/
-        torchcodec) for codec compliance, so the software fallback only
-        resolves where a decoder was installed separately. When it is absent,
-        vLLM's lazy import surfaces a bare ``No module named 'cv2'`` with no
-        codec and no remedy -- convert that into the actionable
-        unsupported-codec error, which can name the codec because the probe
-        already ran here.
+        vLLM ships OpenCV for still images without video backends. Translate
+        its decode failures into install guidance; preserve other backends.
 
         The NVDEC path honors the two ``media_io_kwargs`` that decide *which*
         frames come back -- ``num_frames`` and ``fps`` -- because it samples
@@ -198,8 +229,21 @@ class VideoLoader:
         try:
             return await asyncio.to_thread(media_io.load_bytes, content)
         except ImportError as exc:
+            if not _attributable_to_cv2(exc):
+                raise
             raise video_decoder_missing(
                 "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
+            ) from exc
+        except (OSError, SystemError, ValueError) as exc:
+            # Confirm both the error source and missing video support.
+            if not (_attributable_to_cv2(exc, media_io) and _cv2_lacks_video_backend()):
+                raise
+            raise video_decoder_missing(
+                "vllm",
+                "opencv-python-headless",
+                "cv2",
+                codec,
+                cause=str(exc),
             ) from exc
 
     def _extract_nvdec_args(self, media_io: Any) -> dict[str, Any]:
@@ -233,11 +277,13 @@ class VideoLoader:
             return np.ascontiguousarray(frames), metadata
         except FileNotFoundError:
             raise
-        except (UrlValidationError, HttpStatusError):
+        except (UrlValidationError, HttpStatusError, HttpConfigurationError):
             # Preserve deliberate client-error verdicts. UrlValidationError is
             # a ValueError, so the generic handler below would otherwise erase
             # its type and prevent the frontend from returning a 4xx.
-            logger.error("URL rejected loading video: '%s'", video_url)
+            logger.error(
+                "URL rejected loading video: '%s'", describe_media_source(video_url)
+            )
             raise
         except MissingMediaDecoderError:
             # Already actionable (names the codec and the install); a missing
@@ -314,22 +360,42 @@ class VideoLoader:
         video_mm_items: List[Dict[str, Any]],
         media_io_kwargs: Dict[str, Any] | None = None,
     ) -> List[tuple[np.ndarray, Dict[str, Any]]]:
+        """Load URL or frontend-decoded videos after validating the full batch.
+
+        Raises ``ValueError`` for malformed items or decoded items when frontend
+        decoding is disabled. Validation happens before any load coroutine is
+        created so an invalid item cannot leave earlier loads unawaited.
+        """
         video_futures: List[Awaitable[tuple[np.ndarray, Dict[str, Any]]]] = []
 
+        # Validate the whole batch before creating coroutines so an invalid
+        # later item cannot leave earlier load coroutines unawaited.
+        for idx, item in enumerate(video_mm_items):
+            if not isinstance(item, dict) or not (
+                URL_VARIANT_KEY in item or DECODED_VARIANT_KEY in item
+            ):
+                raise ValueError(
+                    f"Invalid video multimodal item at index {idx}. "
+                    "Expected dict with 'Url' or 'Decoded' key."
+                )
+            if (
+                URL_VARIANT_KEY not in item
+                and DECODED_VARIANT_KEY in item
+                and not self._enable_frontend_decoding
+            ):
+                raise ValueError(
+                    "Received decoded video data but enable_frontend_decoding=False. "
+                    "Enable frontend decoding to transfer decoded video frames via NIXL."
+                )
+
         for item in video_mm_items:
-            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+            if URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
                 video_futures.append(self.load_video(url, media_io_kwargs))
                 logger.debug("Preparing to load video from URL: %s...", url[:80])
-            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
-                if self._enable_frontend_decoding:
-                    metadata = item[DECODED_VARIANT_KEY]
-                    video_futures.append(self._load_decoded_video(metadata))
-                else:
-                    raise ValueError(
-                        "Received decoded video data but enable_frontend_decoding=False. "
-                        "Enable frontend decoding to transfer decoded video frames via NIXL."
-                    )
+            else:
+                metadata = item[DECODED_VARIANT_KEY]
+                video_futures.append(self._load_decoded_video(metadata))
 
         results = await asyncio.gather(*video_futures, return_exceptions=True)
         loaded_videos: list[tuple[np.ndarray, Dict[str, Any]]] = []

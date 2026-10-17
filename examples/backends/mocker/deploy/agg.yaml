@@ -1,11 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Internal test fixture. The public online Mocker CLI is temporarily unavailable.
-
 # NOTE: There is no dedicated `mocker-runtime` image. The published
 # `dynamo-planner` image includes the ai-dynamo wheel, ai-dynamo-runtime, and
-# Planner/profiler dependencies needed by the internal Mocker worker launcher.
+# Planner/profiler dependencies needed by the Mocker worker launcher.
 # Replace `my-tag` below with the Dynamo release tag you deploy.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -37,7 +35,7 @@ spec:
           command:
           - python3
           - -m
-          - dynamo.mocker._worker
+          - dynamo.mocker
           envFrom:
           - secretRef:
               name: hf-token-secret

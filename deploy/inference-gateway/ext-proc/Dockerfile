@@ -69,6 +69,7 @@ COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom
 
 # Copy the ext-proc crate itself
 COPY --from=dynamo deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
+COPY --from=dynamo deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 
 # Compliance: emits the CycloneDX SBOM for /epp in the build step below.
 COPY --from=dynamo container/compliance/cargo_sbom.py /tmp/cargo_sbom.py

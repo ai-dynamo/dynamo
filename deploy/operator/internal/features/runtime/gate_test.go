@@ -65,3 +65,23 @@ func TestCanaryHealthChecksThreshold(t *testing.T) {
 		t.Fatalf("MinRuntimeVersion = %s, want 1.5.0", got)
 	}
 }
+
+func TestIncreasedWorkerFailureThreshold(t *testing.T) {
+	t.Log("inspect the central worker liveness feature gate")
+	got := IncreasedWorkerFailureThreshold.MinRuntimeVersion.String()
+
+	t.Log("verify the increased failure threshold is introduced by runtime 1.5.0")
+	if got != "1.5.0" {
+		t.Fatalf("MinRuntimeVersion = %s, want 1.5.0", got)
+	}
+}
+
+func TestPlannerDGDComponentStatusThreshold(t *testing.T) {
+	t.Log("inspect the central Planner DGD component-status feature gate")
+	got := PlannerDGDComponentStatus.MinRuntimeVersion.String()
+
+	t.Log("verify DGD component-status discovery is introduced by runtime 1.6.0")
+	if got != "1.6.0" {
+		t.Fatalf("MinRuntimeVersion = %s, want 1.6.0", got)
+	}
+}

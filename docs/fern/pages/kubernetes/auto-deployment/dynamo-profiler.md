@@ -173,7 +173,7 @@ spec:
       enabled: true
 ```
 
-Mocker is a testing and experimentation path, not a serving deployment. It is independent of `searchStrategy` — enabling it does not change or override rapid versus thorough, and the profiler still runs the search strategy you set. The one interaction is with the Planner: when you enable mocker **alongside the Planner**, the Planner's pre-deployment sweeping cannot be `none`, because the mocker needs the simulated performance data that sweeping produces. Without a Planner, mocker carries no such requirement. The public direct Mocker CLI is removed, but Profiler-managed Mocker deployments continue to use the retained internal worker runtime.
+Mocker is a testing and experimentation path, not a serving deployment. It is independent of `searchStrategy` — enabling it does not change or override rapid versus thorough, and the profiler still runs the search strategy you set. The one interaction is with the Planner: when you enable mocker **alongside the Planner**, the Planner's pre-deployment sweeping cannot be `none`, because the mocker needs the simulated performance data that sweeping produces. Without a Planner, mocker carries no such requirement. Profiler-managed deployments and the public `python3 -m dynamo.mocker` command use the same live Mocker worker runtime.
 
 ## Accessing profiling artifacts
 

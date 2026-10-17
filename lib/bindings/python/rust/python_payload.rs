@@ -7,7 +7,7 @@ use bytes::Bytes;
 use dynamo_runtime::pipeline::PipelineError;
 use dynamo_runtime::pipeline::network::{
     EncodedResponseFrame, IngressRequestDecoder, IngressResponseEncoder, NetworkStreamWrapper,
-    RequestPlanePayloadCodec,
+    RESPONSE_ENCODE_CAPACITY_HINT, RequestPlanePayloadCodec,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
@@ -189,11 +189,9 @@ pub(crate) fn encode_annotated_response<T: Serialize>(
     codec: RequestPlanePayloadCodec,
     annotated: Annotated<T>,
 ) -> Result<(Vec<u8>, bool), anyhow::Error> {
-    // `with_capacity`, not `new`: this is still the pull path's encoder, and
-    // `serde_json::to_vec` — which it used before — starts at 128 bytes. Growing
-    // from zero here would regress JSON responses to pay the reallocations this
-    // change exists to remove.
-    let mut bytes = Vec::with_capacity(128);
+    // `with_capacity`, not `new`: starting from zero would regress JSON
+    // responses to pay the reallocations this change exists to remove.
+    let mut bytes = Vec::with_capacity(RESPONSE_ENCODE_CAPACITY_HINT);
     let is_error = write_annotated_response(codec, annotated, &mut bytes)?;
     Ok((bytes, is_error))
 }

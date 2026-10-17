@@ -130,7 +130,6 @@ runs:
         GIT_SHA: ${{ inputs.git_sha }}
         EPP_IMAGE: ${{ inputs.epp_image }}
       run: |
-        mkdir -p /tmp/compliance
         # Reuse the warm cache the build just populated by matching ALL the
         # cache-key-affecting build-args the build passed. Otherwise the shared
         # stages rebuild here instead of cache-hitting:
@@ -174,7 +173,8 @@ runs:
         # --build-arg (it would clear the ARG and reintroduce the failure).
         EPP_IMAGE_ARG=""
         [ -n "${EPP_IMAGE:-}" ] && EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
-        docker buildx build \
+        bash "${{ github.action_path }}/extract-with-retry.sh" /tmp/compliance \
+            docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \
             --target compliance_artifact \
@@ -183,7 +183,6 @@ runs:
             --build-arg SCCACHE_BUCKET="${SCCACHE_BUCKET}" \
             --build-arg SCCACHE_REGION="${SCCACHE_REGION}" \
             $EPP_IMAGE_ARG \
-            --output type=local,dest=/tmp/compliance \
             --progress=plain \
             -f "${DOCKERFILE_PATH}" \
             $SECRET_ARGS \
@@ -357,7 +356,6 @@ runs:
         GIT_SHA: ${{ inputs.git_sha }}
         EPP_IMAGE: ${{ inputs.epp_image }}
       run: |
-        mkdir -p /tmp/sources
         # ENABLE_SOURCE_ARCHIVAL=true to actually run sources_collect; the other
         # build-args match the build so this shares the warm cache (same reason
         # as the compliance_artifact extract above). Same IRSA secrets too, so a
@@ -385,7 +383,8 @@ runs:
         # resolves the GC'd default staging tag. Empty for non-frontend targets.
         EPP_IMAGE_ARG=""
         [ -n "${EPP_IMAGE:-}" ] && EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
-        docker buildx build \
+        bash "${{ github.action_path }}/extract-with-retry.sh" /tmp/sources \
+            docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \
             --target sources_archive \
@@ -395,7 +394,6 @@ runs:
             --build-arg SCCACHE_REGION="${SCCACHE_REGION}" \
             --build-arg ENABLE_SOURCE_ARCHIVAL=true \
             $EPP_IMAGE_ARG \
-            --output type=local,dest=/tmp/sources \
             --progress=plain \
             -f "${DOCKERFILE_PATH}" \
             $SECRET_ARGS \

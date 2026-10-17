@@ -78,7 +78,7 @@ Dynamo + SGLang chat deployment profiles:
 | **Routing**              | KV-aware                                             | KV-aware                                                  | KV-aware                                             | KV-aware, load-balanced across prefill replicas           |
 | **Prefix caching**       | Enabled (radix cache)                                | Prefill-side only                                         | Enabled (radix cache)                                | Prefill-side only                                         |
 | **KV transfer**          | —                                                    | NIXL over MNNVL                                           | —                                                    | NIXL over cuda_ipc + MNNVL (~900 GB/s/GPU)               |
-| **Context length**       | 278,528                                              | 278,528 both roles                                        | 262,144                                              | 262,144                                                   |
+| **Context length**       | 262,144                                              | 262,144                                                   | 262,144                                              | 262,144                                                   |
 | **Watchdog timeout**     | 900s                                                 | 900s                                                      | 900s                                                 | 7200s (breakable graph capture takes 30–60 min)           |
 
 ## Supported features

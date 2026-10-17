@@ -127,12 +127,16 @@ pytest tests/serve/test_dynamo_serve.py -v
 pytest tests/serve/test_dynamo_serve.py::test_serve_deployment[agg] -v
 ```
 
-**Operator Integration Tests:**
+**Operator API-Only Integration Tests:**
 
 ```bash
 cd deploy/operator
-make test-e2e
+make envtest
 ```
+
+For the Kind-backed `make integration` workflow, including the required local image
+builds and environment variables, follow the
+[cluster environment setup](operator/internal/testing/clusterenv/DESIGN.md#external-setup).
 
 ### Writing Tests
 

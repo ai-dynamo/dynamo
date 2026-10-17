@@ -350,6 +350,6 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
   </Accordion>
 </AccordionGroup>
 
-<Info title="Optional: structural tags">
-You can enable **xgrammar structural tags** so guided decoding matches the parser's tool-call format at token granularity. See [Structural Tag (Guided Decoding for Tool Calls)](structural-tag.md).
+<Info title="Structural tags are enabled by default">
+For parser and backend combinations that support them, Dynamo enables **xgrammar structural tags** by default so guided decoding matches the parser's tool-call format at token granularity. See [Structural Tag (Guided Decoding for Tool Calls)](structural-tag.md) for the activation policy, compatibility fallbacks, and opt-out settings.
 </Info>

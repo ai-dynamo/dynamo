@@ -84,11 +84,11 @@ For full documentation, see the [AIPerf docs](https://github.com/ai-dynamo/aiper
 
 ---
 
-# Client-Side Benchmarking (Local)
+## Client-Side Benchmarking (Local)
 
 Client-side benchmarking runs on your local machine and connects to Kubernetes deployments via port-forwarding.
 
-## Prerequisites
+### Prerequisites
 
 1. **Dynamo container environment** - You must be running inside a Dynamo container with AIPerf pre-installed, or install it locally:
    ```bash
@@ -100,9 +100,9 @@ Client-side benchmarking runs on your local machine and connects to Kubernetes d
    - External services (vLLM, llm-d, AIBrix, etc.)
    - Any HTTP endpoint serving OpenAI-compatible models
 
-## User Workflow
+### User Workflow
 
-### Step 1: Set Up Cluster and Deploy
+#### Step 1: Set Up Cluster and Deploy
 
 Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Kubernetes Platform following the [installation guide](../../kubernetes/installation/install-dynamo.md). Then deploy your `DynamoGraphDeployment`.
 
@@ -113,7 +113,7 @@ benchmark jobs that you can run or adapt. If no recipe matches, start from the
 [Model Deployment](../../kubernetes/model-deployment/introduction.mdx) or the backend
 examples in [examples/backends](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends).
 
-### Step 2: Port-Forward and Run a Single Benchmark
+#### Step 2: Port-Forward and Run a Single Benchmark
 
 > **Wait for model readiness.** Before benchmarking, ensure your deployment has fully loaded the model. Check pod logs or hit the health endpoint (`curl http://localhost:8000/health`) — it should return `200 OK` before you proceed.
 
@@ -155,7 +155,7 @@ This produces results in `artifacts/` and prints a summary table to the console:
 
 To stop the port-forward when done: `kill %1` (or `kill <PID>`).
 
-### Step 3: Concurrency Sweep for Pareto Analysis
+#### Step 3: Concurrency Sweep for Pareto Analysis
 
 To understand how your deployment behaves across load levels, run a concurrency sweep. Each concurrency level sends enough requests for stable measurements (`max(c*3, 10)`):
 
@@ -179,7 +179,7 @@ done
 
 **Note**: Adjust concurrency levels to match your deployment's capacity. Very high concurrency on a small deployment (e.g., c250 on a single GPU) will cause server errors. Start with lower values and increase until you find the saturation point.
 
-### Step 4: [If Comparative] Benchmark a Second Deployment
+#### Step 4: [If Comparative] Benchmark a Second Deployment
 
 Teardown deployment A and deploy deployment B with a different configuration. Kill the previous port-forward (`kill %1`), then repeat:
 
@@ -200,7 +200,7 @@ for c in 1 2 5 10 50 100; do
 done
 ```
 
-### Step 5: Generate Visualizations
+#### Step 5: Generate Visualizations
 
 ```bash
 # Compare all runs — auto-detects multi-run directories
@@ -224,7 +224,7 @@ Here is an example Pareto frontier from a concurrency sweep of Qwen3-0.6B on 8x 
 
 See the [AIPerf Visualization Guide](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/plot.md) for full details on plot customization, experiment classification, and themes.
 
-## Use Cases
+### Use Cases
 
 - **Compare DynamoGraphDeployments** (e.g., aggregated vs disaggregated configurations)
 - **Compare different backends** (e.g., SGLang vs TensorRT-LLM vs vLLM)
@@ -233,9 +233,9 @@ See the [AIPerf Visualization Guide](https://github.com/ai-dynamo/aiperf/blob/ma
 - **Compare different hardware configurations** (e.g., H100 vs A100 vs H200)
 - **Compare different parallelization strategies** (e.g., different GPU counts or memory configurations)
 
-## AIPerf Quick Reference
+### AIPerf Quick Reference
 
-### Commonly Used Options
+#### Commonly Used Options
 
 ```text
 aiperf profile [OPTIONS]
@@ -260,7 +260,7 @@ COMMON OPTIONS:
 
 For the complete CLI reference, see `aiperf profile --help` or the [CLI docs](https://github.com/ai-dynamo/aiperf/blob/main/docs/cli-options.md).
 
-### Output Sequence Length
+#### Output Sequence Length
 
 To enforce a specific output length, pass `ignore_eos` and `min_tokens` via `--extra-inputs`:
 
@@ -277,7 +277,7 @@ aiperf profile \
     --extra-inputs ignore_eos:true
 ```
 
-### Understanding Results
+#### Understanding Results
 
 Each `aiperf profile` run produces an artifact directory containing:
 - **`profile_export_aiperf.json`** — Structured metrics (latency, throughput, TTFT, ITL, etc.)
@@ -308,19 +308,19 @@ artifacts/
 
 ---
 
-# Server-Side Benchmarking (In-Cluster)
+## Server-Side Benchmarking (In-Cluster)
 
 Server-side benchmarking runs directly within the Kubernetes cluster, eliminating port-forwarding overhead and enabling high-load testing.
 
-## Prerequisites
+### Prerequisites
 
 1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Kubernetes Platform docs](../../kubernetes/getting-started/quickstart.mdx))
 2. **Storage**: PersistentVolumeClaim configured with appropriate permissions (see [deploy/utils README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/utils/README.md))
 3. **Docker image** containing AIPerf (Dynamo runtime images include it)
 
-## Quick Start
+### Quick Start
 
-### Step 1: Deploy Your DynamoGraphDeployment
+#### Step 1: Deploy Your DynamoGraphDeployment
 Deploy a `DynamoGraphDeployment` using a matching
 [Dynamo Recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes), the
 [Model Deployment](../../kubernetes/model-deployment/introduction.mdx), or the backend
@@ -329,7 +329,7 @@ Ensure it has a frontend service exposed and the model is fully loaded before
 running benchmarks — check pod logs or verify the health endpoint returns
 `200 OK`.
 
-### Step 2: Configure and Run Benchmark Job
+#### Step 2: Configure and Run Benchmark Job
 
 If your recipe includes a `perf.yaml`, start from that benchmark job because it
 already encodes the model, endpoint, workload shape, and result collection
@@ -354,7 +354,7 @@ kubectl apply -f benchmarks/incluster/benchmark_job.yaml -n $NAMESPACE
 kubectl logs -f job/dynamo-benchmark -n $NAMESPACE
 ```
 
-### Step 3: Retrieve Results
+#### Step 3: Retrieve Results
 ```bash
 # Create access pod (skip if already running)
 kubectl apply -f deploy/utils/manifests/pvc-access-pod.yaml -n $NAMESPACE
@@ -367,12 +367,12 @@ kubectl cp $NAMESPACE/pvc-access-pod:/data/results ./results
 kubectl delete pod pvc-access-pod -n $NAMESPACE
 ```
 
-### Step 4: Generate Plots
+#### Step 4: Generate Plots
 ```bash
 aiperf plot ./results
 ```
 
-## Cross-Namespace Service Access
+### Cross-Namespace Service Access
 
 When referencing services in other namespaces, use full Kubernetes DNS:
 
@@ -384,7 +384,7 @@ When referencing services in other namespaces, use full Kubernetes DNS:
 --url http://vllm-agg-frontend.production.svc.cluster.local:8000
 ```
 
-## Monitoring and Debugging
+### Monitoring and Debugging
 
 ```bash
 # Check job status
@@ -400,7 +400,7 @@ kubectl get pods -n $NAMESPACE -l job-name=dynamo-benchmark
 kubectl describe pod <pod-name> -n $NAMESPACE
 ```
 
-### Troubleshooting
+#### Troubleshooting
 
 1. **Service not found**: Ensure your DynamoGraphDeployment frontend service is running
 2. **PVC access**: Check that `dynamo-pvc` is properly configured and accessible
@@ -418,7 +418,7 @@ kubectl get endpoints <service-name> -n $NAMESPACE
 
 ---
 
-## Testing with DynoSim / Mocker
+### Testing with DynoSim / Mocker
 
 For development and testing purposes, Dynamo provides DynoSim and the [mocker backend](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker) to simulate LLM inference without requiring actual GPU resources. This is useful for:
 
@@ -431,12 +431,13 @@ The Mocker engine models backend behavior without running inference. Use
 [DynoSim Runs](../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx) for one offline
 workload/configuration trial and
 [DynoSim Sweeps](../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx) to search candidate
-configurations. The direct online Mocker CLI is temporarily unavailable and will return in a future
-release.
+configurations. Use [Mocker Live Simulation](../../cli/operations/simulation-with-dynosim/mocker-live-simulation.mdx)
+to launch live simulated workers through the Dynamo runtime. The former public Replay online CLI
+remains unavailable, although the Python replay SDK retains online mode.
 
 ---
 
-## Advanced AIPerf Features
+### Advanced AIPerf Features
 
 AIPerf has many capabilities beyond basic profiling. Here are some particularly useful for Dynamo benchmarking:
 

@@ -3,15 +3,14 @@
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
-use validator::Validate;
 
 mod aggregator;
 mod nvext;
 
-pub use nvext::{NvExt, NvExtProvider};
+pub use nvext::NvExt;
 
 /// Request for video generation (/v1/videos endpoint)
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NvCreateVideoRequest {
     /// The text prompt for video generation
     pub prompt: String,
@@ -35,9 +34,10 @@ pub struct NvCreateVideoRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
-    /// How the generated data should be returned: "url" or "b64_json" (default: "url")
+    /// Delivery mode of the generated video. If absent, the worker applies its
+    /// own default.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_format: Option<String>,
+    pub response_format: Option<VideoResponseFormat>,
 
     /// Output container format: "mp4", "webm", "gif", etc.
     /// This field is used as model hint and the model may not
@@ -53,6 +53,41 @@ pub struct NvCreateVideoRequest {
     /// NVIDIA extensions
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
+
+    /// Worker-boundary contract, not a public field: the frontend moves
+    /// `passthrough` under `extra_args["media_passthrough"]` before
+    /// dispatch (see [`Self::nest_passthrough`]) so workers read one
+    /// explicit nested entry. A client-sent `extra_args` lands in
+    /// `passthrough` like any other unknown field.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub extra_args: Option<serde_json::Map<String, serde_json::Value>>,
+
+    /// Unknown top-level fields are retained here and forwarded to the
+    /// backend without strict validation. This matches the OpenAI client's
+    /// extra_body option, which merges into the top level of the body.
+    /// Stable knobs can be promoted to typed fields over time.
+    #[serde(default, flatten)]
+    pub passthrough: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Delivery mode of the generated video.
+///
+/// The set has two values. A request with an unknown value fails to parse.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoResponseFormat {
+    /// The response carries a URL to the video file.
+    Url,
+    /// The response carries the video bytes as base64 text.
+    B64Json,
+}
+
+impl NvCreateVideoRequest {
+    /// Nest captured top-level unknowns under `extra_args["media_passthrough"]`
+    /// for dispatch to a worker.
+    pub fn nest_passthrough(&mut self) {
+        super::nest_media_passthrough(&mut self.passthrough, &mut self.extra_args);
+    }
 }
 
 /// Video data in response
@@ -68,10 +103,18 @@ pub struct VideoData {
     /// Base64-encoded video (if response_format is "b64_json")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub b64_json: Option<String>,
+
+    /// Actual video frame rate when reported by the model
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fps: Option<i32>,
+
+    /// Muxed audio sample rate when the generated video contains audio
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_sample_rate: Option<i32>,
 }
 
 /// Response structure for video generation
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NvVideosResponse {
     /// Unique identifier for the response
     pub id: String,
@@ -132,15 +175,6 @@ impl NvVideosResponse {
             error: None,
             inference_time_s: None,
         }
-    }
-}
-
-/// Implements `NvExtProvider` for `NvCreateVideoRequest`,
-/// providing access to NVIDIA-specific extensions.
-impl NvExtProvider for NvCreateVideoRequest {
-    /// Returns a reference to the optional `NvExt` extension, if available.
-    fn nvext(&self) -> Option<&NvExt> {
-        self.nvext.as_ref()
     }
 }
 
@@ -213,9 +247,98 @@ mod tests {
             output_format: None,
             stream: None,
             nvext: None,
+            extra_args: None,
+            passthrough: serde_json::Map::new(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("stream"));
+    }
+
+    #[test]
+    fn video_request_response_format_round_trips() {
+        let json = r#"{"prompt":"cat","model":"wan","response_format":"b64_json"}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.response_format, Some(VideoResponseFormat::B64Json));
+
+        let out = serde_json::to_string(&req).unwrap();
+        assert!(out.contains("\"response_format\":\"b64_json\""));
+    }
+
+    #[test]
+    fn video_request_unknown_response_format_is_rejected() {
+        let json = r#"{"prompt":"cat","model":"wan","response_format":"ftp"}"#;
+        let err = serde_json::from_str::<NvCreateVideoRequest>(json).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("url") && message.contains("b64_json"),
+            "expected the parse error to list the valid values; got: {message}"
+        );
+    }
+
+    #[test]
+    fn video_request_captures_unknown_top_level_fields() {
+        // The OpenAI client's extra_body option merges into the top level of
+        // the body, so that is where backend knobs arrive.
+        let json = r#"{"prompt":"cat","model":"cosmos","generate_sound":true,"strength":0.7}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.passthrough["generate_sound"], serde_json::json!(true));
+        assert_eq!(req.passthrough["strength"], serde_json::json!(0.7));
+
+        let out = serde_json::to_string(&req).unwrap();
+        let back: NvCreateVideoRequest = serde_json::from_str(&out).unwrap();
+        assert_eq!(back.passthrough, req.passthrough);
+        assert!(out.contains("\"generate_sound\":true"));
+    }
+
+    #[test]
+    fn video_request_typed_fields_stay_out_of_passthrough() {
+        let json = r#"{"prompt":"cat","model":"wan","stream":true,"custom_knob":1}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.stream, Some(true));
+        assert!(!req.passthrough.contains_key("prompt"));
+        assert!(!req.passthrough.contains_key("stream"));
+        assert_eq!(req.passthrough["custom_knob"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn video_request_empty_passthrough_adds_nothing() {
+        let json = r#"{"prompt":"cat","model":"wan"}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert!(req.passthrough.is_empty());
+        let out: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(out, serde_json::json!({"prompt":"cat","model":"wan"}));
+    }
+
+    #[test]
+    fn video_request_nests_passthrough_for_workers() {
+        let json = r#"{"prompt":"cat","model":"cosmos","generate_sound":true}"#;
+        let mut req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        req.nest_passthrough();
+        assert!(req.passthrough.is_empty());
+        let out = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            out["extra_args"]["media_passthrough"]["generate_sound"],
+            serde_json::json!(true)
+        );
+        assert!(out.get("generate_sound").is_none());
+    }
+
+    #[test]
+    fn video_request_nest_without_unknowns_adds_nothing() {
+        let json = r#"{"prompt":"cat","model":"wan"}"#;
+        let mut req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        req.nest_passthrough();
+        let out = serde_json::to_value(&req).unwrap();
+        assert!(out.get("extra_args").is_none());
+    }
+
+    #[test]
+    fn video_request_client_extra_args_is_not_the_worker_field() {
+        let json = r#"{"prompt":"cat","model":"wan","extra_args":{"x":1}}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert!(req.extra_args.is_none());
+        assert_eq!(req.passthrough["extra_args"]["x"], serde_json::json!(1));
     }
 
     #[test]
@@ -254,6 +377,8 @@ mod tests {
             output_format: "mp4".into(),
             url: None,
             b64_json: Some("abc==".into()),
+            fps: None,
+            audio_sample_rate: None,
         };
         let json = serde_json::to_string(&d).unwrap();
         assert!(!json.contains("url"));
@@ -266,11 +391,28 @@ mod tests {
             output_format: "webm".into(),
             url: Some("http://x/v.webm".into()),
             b64_json: None,
+            fps: None,
+            audio_sample_rate: None,
         };
         let json = serde_json::to_string(&d).unwrap();
         let d2: VideoData = serde_json::from_str(&json).unwrap();
         assert_eq!(d2.output_format, "webm");
         assert_eq!(d2.url.as_deref(), Some("http://x/v.webm"));
         assert!(d2.b64_json.is_none());
+    }
+
+    #[test]
+    fn video_data_round_trip_with_media_metadata() {
+        let d = VideoData {
+            output_format: "mp4".into(),
+            url: Some("http://x/v.mp4".into()),
+            b64_json: None,
+            fps: Some(24),
+            audio_sample_rate: Some(32000),
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        let d2: VideoData = serde_json::from_str(&json).unwrap();
+        assert_eq!(d2.fps, Some(24));
+        assert_eq!(d2.audio_sample_rate, Some(32000));
     }
 }

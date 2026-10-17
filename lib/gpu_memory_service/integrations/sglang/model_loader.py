@@ -22,6 +22,7 @@ from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
     setup_meta_tensor_workaround,
     strip_gms_model_loader_config,
+    torch_device,
 )
 from gpu_memory_service.integrations.sglang.memory_saver import (
     get_gms_memory_saver_impl,
@@ -48,6 +49,10 @@ logger.info("[GMS] Applied patches")
 
 class GMSModelLoader:
     """SGLang model loader that loads/imports weights via GPU Memory Service."""
+
+    # SGLang adds this to its memory baseline. Keep it 0 because
+    # patch_model_runner already adds the read-mode preloaded bytes.
+    preloaded_weights_bytes = 0
 
     def __init__(self, load_config):
         self.load_config = load_config
@@ -101,7 +106,7 @@ class GMSModelLoader:
         """Import model weights from GMS metadata (READ mode)."""
         allocator = impl.allocators["weights"]
 
-        device_index = torch.cuda.current_device()
+        device_index = torch_device().current_device()
         model = self._create_meta_model(model_config, device_config)
 
         materialize_module_from_gms(allocator, model, device_index=device_index)
@@ -120,7 +125,7 @@ class GMSModelLoader:
 
         setup_meta_tensor_workaround()
 
-        original_device = torch.cuda.current_device()
+        original_device = torch_device().current_device()
         meta_device = torch.device("meta")
 
         with meta_device:
@@ -133,7 +138,7 @@ class GMSModelLoader:
                 device_config=device_config,
             )
 
-        torch.cuda.set_device(original_device)
+        torch_device().set_device(original_device)
 
         try:
             from sglang.srt.model_loader.utils import (
