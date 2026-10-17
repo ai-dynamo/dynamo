@@ -15,7 +15,7 @@ Use the [router configuration reference](../../developer-guide/knowledge-base/mo
 |---|---|---|
 | Mostly independent prompts | Round-robin, then load-aware routing | Mixed output lengths can still create queue imbalance. |
 | Many samples share a prompt or rubric | KV-aware routing | A cache-rich worker can become overloaded. |
-| Sibling samples arrive before KV events | KV-aware routing with a short predicted-placement window | A long prediction window can preserve stale placement. |
+| Sibling samples arrive before KV events | KV-aware routing with a predicted-placement window of about 1 second | With a window longer than the end-to-end request time, the router routes on predictions instead of KV events. |
 | Multi-turn trajectories | KV-aware routing; add session affinity only when strict stickiness is required | Affinity can pin work to an overloaded or replaced worker. |
 | Bursty mixed-length prompts | KV-aware or load-aware routing with queueing | Queueing can increase rollout tails or trigger framework timeouts. |
 
@@ -46,10 +46,22 @@ For parallel samples that arrive before the first worker publishes KV events, ad
 ```bash
 python -m dynamo.frontend \
   --router-mode kv \
-  --router-predicted-ttl-secs 5
+  --router-predicted-ttl-secs 1
 ```
 
-Treat `5` seconds as a starting value. Tune it against the observed gap between routing and usable KV events. Confirm that equivalent prompts use the same model, tokenizer, cache salt, LoRA identity, and token sequence; the router cannot recover reuse hidden by the request representation.
+> [!WARNING]
+> Set `--router-predicted-ttl-secs` lower than the end-to-end time of one request. Start at about 1 second. A larger value makes the router use its own predictions instead of real KV events.
+
+The predicted-placement window covers one gap only. This gap starts at the first routing decision for a prefix. It ends when the engine publishes a usable KV event for that prefix. Sibling requests that arrive at the frontend over HTTP in this gap use the prediction. The window is not a cache lifetime.
+
+Use these two limits to set the value:
+
+- Lower limit: the delay from a routing decision to the first usable KV event. If the TTL is shorter, later siblings lose the predicted placement.
+- Upper limit: the end-to-end time of one request.
+
+Each routing decision resets the timer for the prefix blocks that it records. A prediction stays alive while requests with the same prefix arrive more often than the TTL. A short TTL only limits how long a prediction lives after the last of these requests. If the TTL is longer than the time between batches or turns, the predictions never expire. The router then routes on its own predictions and does not see evictions. This behavior is approximate routing.
+
+Confirm that equivalent prompts use the same model, tokenizer, cache salt, LoRA identity, and token sequence. The router cannot recover reuse that the request representation hides.
 
 If one cache-rich worker receives too much work, compare overlap-credit decay or a lower overlap credit while holding the request schedule fixed. Use `--load-aware` as the control that accounts for active load without crediting prefix reuse:
 
@@ -121,6 +133,7 @@ The router does not filter workers by RL policy version. Gate synchronous update
 | Low cache reuse for repeated prompts | Tokenized prefix identity, block size, cache events, model/LoRA identity, and worker placement |
 | One worker is cache-rich but overloaded | Overlap credit, active prefill/decode load, decay, and affinity |
 | Sibling requests scatter | Request burst timing versus KV-event publication; predicted-placement TTL |
+| Requests go to a worker that evicted the shared prefix | A `--router-predicted-ttl-secs` value that is larger than the end-to-end request time |
 | Queue grows while workers appear idle | Eligible worker set, queue threshold, capacity input, and backend prefill limits |
 | Requests fail or stall after worker loss | Worker health and lease expiry, eligible worker set, migration settings, and the expected cache re-prefill |
 | Priority has no effect | Whether requests enter the router queue under controlled pressure |
