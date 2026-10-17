@@ -724,18 +724,38 @@ fn drain_deferred_reasoning(state: &mut ChoiceReasoningState) -> (Option<String>
     }
 }
 
+/// Finalize a choice's parser without the deferral, returning `(content,
+/// reasoning_content)` by the parser's own split: held marker-free text is
+/// content, a held partial marker inside reasoning stays reasoning. Shared by
+/// the terminal-chunk finalize and the end-of-stream fallback so the two
+/// cannot disagree. Finalizes at most once per choice; see `parser_finished`.
+fn finish_reasoning_parser(state: &mut ChoiceReasoningState) -> (Option<String>, Option<String>) {
+    if state.parser_finished {
+        return (None, None);
+    }
+    state.parser_finished = true;
+    let result = state.parser.finish_reasoning_stream();
+    (
+        (!result.normal_text.is_empty()).then_some(result.normal_text),
+        (!result.reasoning_text.is_empty()).then_some(result.reasoning_text),
+    )
+}
+
 struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
     parser_name: String,
     prompt_injected_reasoning: bool,
     bypass_bare_guided_json: bool,
     choices: HashMap<u32, ChoiceReasoningState>,
-    // Last emitted content-bearing response, reused as the envelope to carry any
+    // An emitted response with choices, reused as the envelope to carry any
     // text the parsers are still buffering when the upstream stream ends. Only
-    // retained when `defer_reasoning_for_nonempty_content` is set, to keep the
-    // per-token clone off the common reasoning hot path. Chunks with no choices
-    // (the trailing usage-only chunk) are never retained — that envelope has no
-    // delta slot to attach the flushed bytes to, so the flush would be dropped.
+    // retained when an end-of-stream flush may follow, to keep the per-token
+    // clone off the common reasoning hot path: under
+    // `defer_reasoning_for_nonempty_content` it is the latest such response;
+    // under `finalize_parser_at_finish` alone it is cloned once, while a parsed
+    // choice's parser is unfinished. Chunks with no choices (the trailing
+    // usage-only chunk) are never retained — that envelope has no delta slot
+    // to attach the flushed bytes to, so the flush would be dropped.
     last_response: Option<Annotated<NvCreateChatCompletionStreamResponse>>,
     // Nemotron force-reasoning parsers start inside the reasoning block, so
     // leading model output with no `<think>` is reported as reasoning even when
@@ -770,7 +790,9 @@ struct ReasoningState {
     defer_reasoning_for_nonempty_content: bool,
     // Finalize each choice's parser on its terminal chunk even without the
     // deferral above, for parsers that retain undecided text until EOF
-    // (MiniMax M3). Otherwise a turn whose output never shows a marker, such
+    // (MiniMax M3), and at end of stream for a choice whose parser is still
+    // unfinished: it sent no `finish_reason`, or its terminal chunk carried
+    // content parts. Otherwise a turn whose output never shows a marker, such
     // as grammar-constrained output under an adaptive prompt, is dropped
     // whole with the parser state. See `is_minimax_m3_reasoning_parser`.
     finalize_parser_at_finish: bool,
@@ -5366,7 +5388,6 @@ impl OpenAIPreprocessor {
         );
         let is_structured_response = Self::has_structured_response_format(request);
         let reasoning_parser = self.runtime_config.reasoning_parser.as_deref();
-        // MiniMax M3 treats top-level `guided_*` like a structured `response_format`.
         let is_minimax_m3_explicit_guided_output =
             Self::is_minimax_m3_family(reasoning_parser, self.tool_call_parser.as_deref())
                 && crate::preprocessor::tool_choice::has_explicit_guided_decoding(request);
@@ -5441,7 +5462,7 @@ impl OpenAIPreprocessor {
         // `content`. Leave the parser unseeded so its own rules decide: a worker
         // that delays the grammar still ends reasoning with `</mm:think>`, which
         // dangling-end recovery splits as reasoning, and marker-free output is
-        // decided as content when the parser is finalized at the terminal chunk.
+        // decided as content when the parser is finalized.
         let seed_reasoning_parser = prompt_injected_reasoning
             && !(Self::is_minimax_m3_reasoning_parser(reasoning_parser)
                 && crate::preprocessor::tool_choice::has_explicit_guided_decoding(request));
@@ -5450,9 +5471,9 @@ impl OpenAIPreprocessor {
         // flush of a truncated `<think>` prefix; gating on the request keeps the
         // per-token clone and the finish_reasoning_stream() flush off every
         // other request's path (a MiniMax M3 parser is still finalized on its
-        // terminal chunk; see `finalize_parser_at_finish`). Same predicate the
-        // aggregator uses, so the streaming and non-streaming paths cannot
-        // disagree.
+        // terminal chunk, or at end of stream without one; see
+        // `finalize_parser_at_finish`). Same predicate the aggregator uses, so
+        // the streaming and non-streaming paths cannot disagree.
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
             Box::pin(Self::parse_reasoning_content_from_stream_inner(
                 stream,
@@ -5468,12 +5489,16 @@ impl OpenAIPreprocessor {
         } else {
             Box::pin(stream)
         };
-        let stream: Pin<Box<dyn Stream<Item = _> + Send>> =
-            if defer_reasoning_for_nonempty_content || should_strip_disabled_reasoning_start {
-                Box::pin(Self::hold_usage_until_stream_end(stream))
-            } else {
-                stream
-            };
+        // A MiniMax M3 parser can also release held text in an end-of-stream
+        // chunk (see `finalize_parser_at_finish`), so its usage is held too.
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if defer_reasoning_for_nonempty_content
+            || should_strip_disabled_reasoning_start
+            || (should_parse_reasoning && Self::is_minimax_m3_reasoning_parser(reasoning_parser))
+        {
+            Box::pin(Self::hold_usage_until_stream_end(stream))
+        } else {
+            stream
+        };
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
             Box::pin(annotate_reasoning_usage(stream))
         } else {
@@ -7157,34 +7182,29 @@ impl OpenAIPreprocessor {
                             // Without the deferral, a parser that retains
                             // undecided text until EOF is finalized here, on
                             // the same terminal delta and under the same
-                            // conditions, and its own split stands: held
-                            // marker-free text is content, a held partial
-                            // marker inside reasoning stays reasoning.
-                            // Finalize at most once; see `parser_finished`.
+                            // conditions; see `finish_reasoning_parser`.
                             if !defer_reasoning
                                 && finalize_parser_at_finish
                                 && choice.finish_reason.is_some()
                                 && !terminal_carries_parts
                                 && bypass_decision == Some(false)
-                                && !choice_state.parser_finished
                             {
-                                choice_state.parser_finished = true;
-                                let held = choice_state.parser.finish_reasoning_stream();
-                                if !held.normal_text.is_empty() {
+                                let (content, reasoning) = finish_reasoning_parser(choice_state);
+                                if let Some(content) = content {
                                     let content = match choice.delta.content.take() {
                                         Some(ChatCompletionMessageContent::Text(existing)) => {
-                                            existing + &held.normal_text
+                                            existing + &content
                                         }
                                         // `None`; parts were excluded above.
-                                        _ => held.normal_text,
+                                        _ => content,
                                     };
                                     choice.delta.content =
                                         Some(ChatCompletionMessageContent::Text(content));
                                 }
-                                if !held.reasoning_text.is_empty() {
+                                if let Some(reasoning) = reasoning {
                                     choice.delta.reasoning_content = Some(
                                         choice.delta.reasoning_content.take().unwrap_or_default()
-                                            + &held.reasoning_text,
+                                            + &reasoning,
                                     );
                                 }
                             }
@@ -7194,11 +7214,24 @@ impl OpenAIPreprocessor {
                 };
 
                 // Retain a spare envelope only when an EOF flush may follow, so
-                // the common reasoning path avoids a full per-token clone. Skip
+                // the common reasoning path avoids a full per-token clone: the
+                // latest chunk under the deferral, or, without it, one chunk
+                // taken while a parsed choice still has a parser to finalize (a
+                // bypassed choice never fed its parser, and a finished one has
+                // nothing left). One is enough there: the flush rebuilds every
+                // choice field and scrubs the per-chunk metadata, and the rest
+                // of the envelope is the same for the whole response. Skip
                 // chunks with no choices (the trailing usage-only chunk): they
                 // carry no delta slot, so using one as the flush envelope would
                 // drop the very bytes the flush exists to preserve.
-                if state.defer_reasoning_for_nonempty_content
+                let retain_envelope = state.defer_reasoning_for_nonempty_content
+                    || (state.finalize_parser_at_finish
+                        && state.last_response.is_none()
+                        && state.choices.values().any(|choice_state| {
+                            choice_state.guided_json_bypass_decision == Some(false)
+                                && !choice_state.parser_finished
+                        }));
+                if retain_envelope
                     && processed_response
                         .data
                         .as_ref()
@@ -7207,29 +7240,31 @@ impl OpenAIPreprocessor {
                     state.last_response = Some(processed_response.clone());
                 }
                 Some((processed_response, state))
-            } else if !state.defer_reasoning_for_nonempty_content || state.saw_terminal_error {
+            } else if state.saw_terminal_error
+                || !(state.defer_reasoning_for_nonempty_content || state.finalize_parser_at_finish)
+            {
                 // After a backend error the buffered bytes are dropped rather
                 // than surfaced: the request failed, so there is no answer to
-                // complete. See `saw_terminal_error`. Without the deferral there
-                // is no envelope to flush into; a MiniMax M3 parser was already
-                // finalized on its terminal chunk, and only a stream that ends
-                // with no `finish_reason` leaves its held bytes here.
+                // complete. See `saw_terminal_error`.
                 None
             } else {
                 // Upstream ended with no answer for the choices still holding a
-                // pending buffer. Normally the terminal chunk already drained
-                // them, so this is the fallback for a stream that ends without
-                // any `finish_reason` — an aborted or truncated generation.
-                // The synthetic chunk it builds is the only case where recovered
-                // bytes arrive after the last upstream chunk, which is
-                // unavoidable when there was no terminal chunk to attach them
-                // to. Only the force_nonempty_content path reaches this branch;
-                // every other parser took the `None` branch above and keeps its
-                // original no-flush EOF behavior. Taking the envelope below
-                // rather than cloning it makes this branch one-shot: once it is
-                // gone the next poll ends the stream.
+                // pending buffer or an unfinished parser. Normally the terminal
+                // chunk already drained or finalized them, so this is the
+                // fallback for a stream that ends without any `finish_reason` —
+                // an aborted or truncated generation. The synthetic chunk it
+                // builds is the only case where recovered bytes arrive after the
+                // last upstream chunk, which is unavoidable when there was no
+                // terminal chunk to attach them to. Only the
+                // force_nonempty_content path and a parser finalized at finish
+                // (MiniMax M3) reach this branch; every other parser took the
+                // `None` branch above and keeps its original no-flush EOF
+                // behavior. Taking the envelope below rather than cloning it
+                // makes this branch one-shot: once it is gone the next poll ends
+                // the stream.
                 // Sorted so the emitted choice order is deterministic rather
                 // than following HashMap iteration order.
+                let defer_reasoning = state.defer_reasoning_for_nonempty_content;
                 let mut indices: Vec<u32> = state.choices.keys().copied().collect();
                 indices.sort_unstable();
                 #[allow(clippy::type_complexity)]
@@ -7240,7 +7275,11 @@ impl OpenAIPreprocessor {
                         if choice_state.guided_json_bypass_decision != Some(false) {
                             return None;
                         }
-                        let (content, reasoning) = drain_deferred_reasoning(choice_state);
+                        let (content, reasoning) = if defer_reasoning {
+                            drain_deferred_reasoning(choice_state)
+                        } else {
+                            finish_reasoning_parser(choice_state)
+                        };
                         (content.is_some() || reasoning.is_some())
                             .then_some((index, content, reasoning))
                     })
@@ -15043,7 +15082,6 @@ mod tests {
         }
     }
 
-    /// What one M3 request produced at the frontend.
     struct MiniMaxM3RoundTrip {
         /// The parsing stream's output chunks, before aggregation.
         chunks: Vec<NvCreateChatCompletionStreamResponse>,
@@ -15051,15 +15089,30 @@ mod tests {
         message: (String, String),
     }
 
+    /// How the backend ends an M3 stream after its content chunks.
+    #[derive(Clone, Copy)]
+    enum MiniMaxM3StreamEnd {
+        /// A terminal chunk with `finish_reason: "stop"`.
+        Stop,
+        /// Nothing more: every `finish_reason` stays null, as when the
+        /// generation is aborted or truncated.
+        NoFinishReason,
+        /// A usage-only chunk (no choices), and no `finish_reason`.
+        UsageOnlyNoFinishReason,
+        /// A backend error, and no `finish_reason`.
+        Error,
+    }
+
     /// Run an M3 request through the frontend steps `generate` applies around
     /// the backend: the HTTP boundary's reasoning-control normalization, the
-    /// thinking defaults, prompt-prefill detection, the response parsing
-    /// stream, then non-streaming aggregation. The backend sends one content
-    /// chunk per element of `backend_chunks`, then a terminal `stop` chunk.
-    async fn minimax_m3_round_trip(
+    /// thinking defaults, prompt-prefill detection, then the response parsing
+    /// stream. The backend sends one content chunk per element of
+    /// `backend_chunks`, then ends as `end` says.
+    async fn minimax_m3_parsing_stream_output(
         body: serde_json::Value,
         backend_chunks: &[&str],
-    ) -> MiniMaxM3RoundTrip {
+        end: MiniMaxM3StreamEnd,
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
         let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
@@ -15086,6 +15139,10 @@ mod tests {
             )),
         );
 
+        let chunk = |choices: serde_json::Value| {
+            serde_json::json!({"id": "test", "object": "chat.completion.chunk",
+                "created": 0, "model": "test", "choices": choices})
+        };
         let mut backend = backend_chunks
             .iter()
             .enumerate()
@@ -15095,26 +15152,47 @@ mod tests {
                 } else {
                     serde_json::json!({"content": text})
                 };
-                serde_json::json!({"id": "test", "object": "chat.completion.chunk",
-                    "created": 0, "model": "test",
-                    "choices": [{"index": 0, "delta": delta, "finish_reason": null}]})
+                chunk(serde_json::json!([{"index": 0, "delta": delta, "finish_reason": null}]))
             })
             .collect::<Vec<_>>();
-        backend.push(
-            serde_json::json!({"id": "test", "object": "chat.completion.chunk",
-            "created": 0, "model": "test",
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
-        );
-        let backend = backend.into_iter().map(|chunk| {
-            Annotated::from_data(
-                serde_json::from_value::<NvCreateChatCompletionStreamResponse>(chunk).unwrap(),
-            )
-        });
-        let output: Vec<_> = preprocessor
+        match end {
+            MiniMaxM3StreamEnd::Stop => backend.push(chunk(
+                serde_json::json!([{"index": 0, "delta": {}, "finish_reason": "stop"}]),
+            )),
+            MiniMaxM3StreamEnd::UsageOnlyNoFinishReason => {
+                let mut usage = chunk(serde_json::json!([]));
+                usage["usage"] = serde_json::json!(
+                    {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12}
+                );
+                backend.push(usage);
+            }
+            MiniMaxM3StreamEnd::NoFinishReason | MiniMaxM3StreamEnd::Error => {}
+        }
+        let mut backend = backend
+            .into_iter()
+            .map(|chunk| {
+                Annotated::from_data(
+                    serde_json::from_value::<NvCreateChatCompletionStreamResponse>(chunk).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if matches!(end, MiniMaxM3StreamEnd::Error) {
+            backend.push(Annotated::from_error("backend failed"));
+        }
+        preprocessor
             .postprocessor_parsing_stream(stream::iter(backend), &request, prefill, false)
             .unwrap()
             .collect()
-            .await;
+            .await
+    }
+
+    /// `minimax_m3_parsing_stream_output`, then non-streaming aggregation.
+    async fn minimax_m3_round_trip(
+        body: serde_json::Value,
+        backend_chunks: &[&str],
+        end: MiniMaxM3StreamEnd,
+    ) -> MiniMaxM3RoundTrip {
+        let output = minimax_m3_parsing_stream_output(body, backend_chunks, end).await;
         let chunks = output
             .iter()
             .filter_map(|annotated| annotated.data.clone())
@@ -15141,6 +15219,26 @@ mod tests {
         }
     }
 
+    /// `(content, reasoning_content, finish_reason set)` for the first choice
+    /// of each chunk that carries one.
+    fn minimax_m3_chunk_placement(
+        chunks: &[NvCreateChatCompletionStreamResponse],
+    ) -> Vec<(String, String, bool)> {
+        chunks
+            .iter()
+            .filter(|chunk| !chunk.inner.choices.is_empty())
+            .map(|chunk| {
+                let choice = &chunk.inner.choices[0];
+                let content = match choice.delta.content.as_ref() {
+                    Some(ChatCompletionMessageContent::Text(text)) => text.clone(),
+                    _ => String::new(),
+                };
+                let reasoning = choice.delta.reasoning_content.clone().unwrap_or_default();
+                (content, reasoning, choice.finish_reason.is_some())
+            })
+            .collect()
+    }
+
     /// The model output as one backend chunk, and as 2-byte chunks so every
     /// marker and JSON boundary also arrives split.
     fn minimax_m3_backend_chunkings(model_output: &str) -> Vec<(&'static str, Vec<&str>)> {
@@ -15154,16 +15252,19 @@ mod tests {
     }
 
     /// Run every `(label, body, model_output, expected)` row under both
-    /// chunkings and return each row whose `(content, reasoning_content)`
-    /// differs from `expected`, with what it produced, so one run reports
-    /// every failing row.
+    /// chunkings, ending each stream as `end` says, and return each row whose
+    /// `(content, reasoning_content)` differs from `expected`, with what it
+    /// produced, so one run reports every failing row.
     async fn minimax_m3_mismatched_rows(
         rows: Vec<(String, serde_json::Value, &str, (&str, &str))>,
+        end: MiniMaxM3StreamEnd,
     ) -> Vec<(String, (String, String))> {
         let mut mismatched = Vec::new();
         for (label, body, model_output, (content, reasoning)) in rows {
             for (chunking, chunks) in minimax_m3_backend_chunkings(model_output) {
-                let actual = minimax_m3_round_trip(body.clone(), &chunks).await.message;
+                let actual = minimax_m3_round_trip(body.clone(), &chunks, end)
+                    .await
+                    .message;
                 if actual != (content.to_string(), reasoning.to_string()) {
                     mismatched.push((format!("{label} [{chunking}]"), actual));
                 }
@@ -15253,7 +15354,7 @@ mod tests {
             }
         }
         assert_eq!(
-            minimax_m3_mismatched_rows(rows).await,
+            minimax_m3_mismatched_rows(rows, MiniMaxM3StreamEnd::Stop).await,
             Vec::<(String, (String, String))>::new(),
             "rows whose (content, reasoning_content) was not (model output, \"\")"
         );
@@ -15311,7 +15412,7 @@ mod tests {
             ));
         }
         assert_eq!(
-            minimax_m3_mismatched_rows(rows).await,
+            minimax_m3_mismatched_rows(rows, MiniMaxM3StreamEnd::Stop).await,
             Vec::<(String, (String, String))>::new(),
             "rows whose reasoning/answer split changed"
         );
@@ -15360,7 +15461,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            minimax_m3_mismatched_rows(rows).await,
+            minimax_m3_mismatched_rows(rows, MiniMaxM3StreamEnd::Stop).await,
             Vec::<(String, (String, String))>::new(),
             "rows whose (content, reasoning_content) was wrong"
         );
@@ -15378,32 +15479,17 @@ mod tests {
         ) {
             return;
         }
-        /// `(content, reasoning_content, finish_reason set)` per chunk.
-        fn chunk_placement(
-            chunks: &[NvCreateChatCompletionStreamResponse],
-        ) -> Vec<(String, String, bool)> {
-            chunks
-                .iter()
-                .filter(|chunk| !chunk.inner.choices.is_empty())
-                .map(|chunk| {
-                    let choice = &chunk.inner.choices[0];
-                    let content = match choice.delta.content.as_ref() {
-                        Some(ChatCompletionMessageContent::Text(text)) => text.clone(),
-                        _ => String::new(),
-                    };
-                    let reasoning = choice.delta.reasoning_content.clone().unwrap_or_default();
-                    (content, reasoning, choice.finish_reason.is_some())
-                })
-                .collect()
-        }
-
         // Text the parser held to EOF rides the terminal chunk, never a chunk
         // after `finish_reason`.
         let regex = minimax_m3_merge_body(
             serde_json::json!({"guided_regex": "Paris|London"}),
             &serde_json::json!({"chat_template_kwargs": {"thinking_mode": "adaptive"}}),
         );
-        let placed = chunk_placement(&minimax_m3_round_trip(regex, &["Par", "is"]).await.chunks);
+        let placed = minimax_m3_chunk_placement(
+            &minimax_m3_round_trip(regex, &["Par", "is"], MiniMaxM3StreamEnd::Stop)
+                .await
+                .chunks,
+        );
         assert_eq!(
             placed,
             vec![
@@ -15420,10 +15506,14 @@ mod tests {
             serde_json::json!({"guided_json": {"type": "object"}}),
             &serde_json::json!({"chat_template_kwargs": {"thinking_mode": "enabled"}}),
         );
-        let placed = chunk_placement(
-            &minimax_m3_round_trip(json, &[r#"{"city":"#, r#""Paris"}"#])
-                .await
-                .chunks,
+        let placed = minimax_m3_chunk_placement(
+            &minimax_m3_round_trip(
+                json,
+                &[r#"{"city":"#, r#""Paris"}"#],
+                MiniMaxM3StreamEnd::Stop,
+            )
+            .await
+            .chunks,
         );
         assert_eq!(
             placed,
@@ -15444,10 +15534,14 @@ mod tests {
             serde_json::json!({"guided_regex": "Paris|London"}),
             &serde_json::json!({"chat_template_kwargs": {"thinking_mode": "enabled"}}),
         );
-        let placed = chunk_placement(
-            &minimax_m3_round_trip(delayed, &["Let me think.", "</mm:think>", "Paris"])
-                .await
-                .chunks,
+        let placed = minimax_m3_chunk_placement(
+            &minimax_m3_round_trip(
+                delayed,
+                &["Let me think.", "</mm:think>", "Paris"],
+                MiniMaxM3StreamEnd::Stop,
+            )
+            .await
+            .chunks,
         );
         assert_eq!(
             placed,
@@ -15458,6 +15552,329 @@ mod tests {
                 (String::new(), String::new(), true),
             ],
             "guided_regex + thinking_mode=enabled, reasoning first: placement per chunk"
+        );
+    }
+
+    /// Turns whose last bytes the M3 parser still holds when the backend stops
+    /// sending: each top-level `guided_*` form under an adaptive prompt, and
+    /// plain adaptive chat with no marker, with an answer ending in a
+    /// marker-prefix byte, and with reasoning truncated inside its close marker.
+    fn minimax_m3_held_text_rows() -> Vec<(
+        String,
+        serde_json::Value,
+        &'static str,
+        (&'static str, &'static str),
+    )> {
+        let adaptive = serde_json::json!({"chat_template_kwargs": {"thinking_mode": "adaptive"}});
+        let mut rows: Vec<_> = minimax_m3_explicit_guided_cases()
+            .into_iter()
+            .map(|(field, body, output)| {
+                (
+                    format!("{field} + thinking_mode=adaptive"),
+                    minimax_m3_merge_body(body, &adaptive),
+                    output,
+                    (output, ""),
+                )
+            })
+            .collect();
+        let plain = serde_json::json!({});
+        rows.extend([
+            (
+                "plain, no marker".to_string(),
+                plain.clone(),
+                "Hello there",
+                ("Hello there", ""),
+            ),
+            (
+                "plain, answer ends in a marker-prefix byte".to_string(),
+                plain.clone(),
+                "<mm:think>hmm</mm:think>1 <",
+                ("1 <", "hmm"),
+            ),
+            (
+                "plain, truncated inside reasoning".to_string(),
+                plain,
+                "<mm:think>hmm</mm:th",
+                ("", "hmm</mm:th"),
+            ),
+        ]);
+        rows
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_stream_without_finish_reason_delivers_held_text() {
+        // The parser version is process-global; run with the default (no DYN_PARSER_VERSION).
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_minimax_m3_stream_without_finish_reason_delivers_held_text"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        // An aborted or truncated generation ends with every `finish_reason`
+        // null. What the parser still holds is decided at end of stream, as it
+        // is on a terminal chunk, instead of being dropped with the parser.
+        assert_eq!(
+            minimax_m3_mismatched_rows(
+                minimax_m3_held_text_rows(),
+                MiniMaxM3StreamEnd::NoFinishReason
+            )
+            .await,
+            Vec::<(String, (String, String))>::new(),
+            "rows whose (content, reasoning_content) was wrong without a finish_reason"
+        );
+
+        // The held text arrives once, in one chunk after the last backend
+        // chunk, with no `finish_reason` because the backend sent none.
+        let regex = minimax_m3_merge_body(
+            serde_json::json!({"guided_regex": "Paris|London"}),
+            &serde_json::json!({"chat_template_kwargs": {"thinking_mode": "adaptive"}}),
+        );
+        let placed = minimax_m3_chunk_placement(
+            &minimax_m3_round_trip(regex, &["Par", "is"], MiniMaxM3StreamEnd::NoFinishReason)
+                .await
+                .chunks,
+        );
+        assert_eq!(
+            placed,
+            vec![
+                (String::new(), String::new(), false),
+                (String::new(), String::new(), false),
+                ("Paris".to_string(), String::new(), false),
+            ],
+            "guided_regex + adaptive without a finish_reason: placement per chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_terminal_finalize_is_not_repeated_at_end_of_stream() {
+        // The parser version is process-global; run with the default (no DYN_PARSER_VERSION).
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_minimax_m3_terminal_finalize_is_not_repeated_at_end_of_stream"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        // A parser finalized on its terminal chunk is finished: the end of
+        // stream that follows must not emit its text a second time.
+        for (label, body, model_output, (content, reasoning)) in minimax_m3_held_text_rows() {
+            for (chunking, backend_chunks) in minimax_m3_backend_chunkings(model_output) {
+                let desc = format!("{label} [{chunking}]");
+                let round_trip =
+                    minimax_m3_round_trip(body.clone(), &backend_chunks, MiniMaxM3StreamEnd::Stop)
+                        .await;
+                let placed = minimax_m3_chunk_placement(&round_trip.chunks);
+                assert!(
+                    placed.last().is_some_and(|(_, _, finished)| *finished)
+                        && placed.iter().filter(|(_, _, finished)| *finished).count() == 1,
+                    "{desc}: no chunk may follow the terminal chunk: {placed:?}"
+                );
+                let streamed = placed.iter().fold(
+                    (String::new(), String::new()),
+                    |(all_content, all_reasoning), (delta_content, delta_reasoning, _)| {
+                        (all_content + delta_content, all_reasoning + delta_reasoning)
+                    },
+                );
+                assert_eq!(
+                    streamed,
+                    (content.to_string(), reasoning.to_string()),
+                    "{desc}: streamed text"
+                );
+                assert_eq!(round_trip.message, streamed, "{desc}: aggregated text");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_backend_error_drops_held_text() {
+        // The parser version is process-global; run with the default (no DYN_PARSER_VERSION).
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_minimax_m3_backend_error_drops_held_text"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        // An error is terminal, so text the parser still holds is dropped
+        // rather than emitted after the error as if it were the answer. These
+        // rows hold their whole output until the parser is finalized.
+        let rows = minimax_m3_held_text_rows()
+            .into_iter()
+            .filter(|(_, _, model_output, _)| !model_output.contains("<mm:think>"));
+        for (label, body, model_output, _) in rows {
+            for (chunking, backend_chunks) in minimax_m3_backend_chunkings(model_output) {
+                let desc = format!("{label} [{chunking}]");
+                let output = minimax_m3_parsing_stream_output(
+                    body.clone(),
+                    &backend_chunks,
+                    MiniMaxM3StreamEnd::Error,
+                )
+                .await;
+                assert!(
+                    output.last().is_some_and(|item| item.is_error()),
+                    "{desc}: the error must reach the client last"
+                );
+                let placed = minimax_m3_chunk_placement(
+                    &output
+                        .iter()
+                        .filter_map(|item| item.data.clone())
+                        .collect::<Vec<_>>(),
+                );
+                assert!(
+                    placed
+                        .iter()
+                        .all(|(content, reasoning, _)| content.is_empty() && reasoning.is_empty()),
+                    "{desc}: held text must be dropped: {placed:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_usage_only_chunk_is_not_the_flush_envelope() {
+        // The parser version is process-global; run with the default (no DYN_PARSER_VERSION).
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_minimax_m3_usage_only_chunk_is_not_the_flush_envelope"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        // A usage-only chunk has no choice to carry the held text, so the
+        // end-of-stream flush rides a copy of an earlier chunk that had one,
+        // and the usage chunk, held until the stream ends, still comes last.
+        assert_eq!(
+            minimax_m3_mismatched_rows(
+                minimax_m3_held_text_rows(),
+                MiniMaxM3StreamEnd::UsageOnlyNoFinishReason
+            )
+            .await,
+            Vec::<(String, (String, String))>::new(),
+            "rows whose (content, reasoning_content) was wrong after a usage-only chunk"
+        );
+
+        let regex = minimax_m3_merge_body(
+            serde_json::json!({"guided_regex": "Paris|London"}),
+            &serde_json::json!({"chat_template_kwargs": {"thinking_mode": "adaptive"}}),
+        );
+        let chunks = minimax_m3_round_trip(
+            regex,
+            &["Par", "is"],
+            MiniMaxM3StreamEnd::UsageOnlyNoFinishReason,
+        )
+        .await
+        .chunks;
+        let (usage, before_usage) = chunks.split_last().expect("the usage chunk");
+        assert!(
+            usage.inner.choices.is_empty() && usage.inner.usage.is_some(),
+            "the usage chunk must come last: {chunks:?}"
+        );
+        let flushed = before_usage.last().expect("the flushed chunk");
+        assert_eq!(flushed.inner.choices.len(), 1);
+        assert!(
+            matches!(
+                &flushed.inner.choices[0].delta.content,
+                Some(ChatCompletionMessageContent::Text(text)) if text == "Paris"
+            ),
+            "the held text must be flushed: {flushed:?}"
+        );
+        assert!(
+            flushed.inner.choices[0].delta.role.is_none()
+                && flushed.inner.choices[0].finish_reason.is_none(),
+            "the flushed chunk must not copy the envelope's role or finish_reason: {flushed:?}"
+        );
+        assert!(
+            flushed.inner.usage.is_none(),
+            "the flushed chunk must not repeat usage"
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|chunk| chunk.inner.usage.is_some())
+                .count(),
+            1,
+            "usage must be reported once"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_end_of_stream_flush_skips_finished_choices() {
+        fn chunk(choices: serde_json::Value) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            Annotated::from_data(
+                serde_json::from_value(serde_json::json!({"id": "test",
+                    "object": "chat.completion.chunk", "created": 0, "model": "test",
+                    "choices": choices}))
+                .unwrap(),
+            )
+        }
+        /// `(index, content, finish_reason set)` per choice, chunk by chunk.
+        async fn placement(
+            backend: Vec<Annotated<NvCreateChatCompletionStreamResponse>>,
+        ) -> Vec<Vec<(u32, String, bool)>> {
+            OpenAIPreprocessor::parse_reasoning_content_from_stream(
+                stream::iter(backend),
+                "minimax_m3".to_string(),
+                false,
+            )
+            .filter_map(|item| async move { item.data })
+            .map(|data| {
+                data.inner
+                    .choices
+                    .iter()
+                    .map(|choice| {
+                        let content = match choice.delta.content.as_ref() {
+                            Some(ChatCompletionMessageContent::Text(text)) => text.clone(),
+                            _ => String::new(),
+                        };
+                        (choice.index, content, choice.finish_reason.is_some())
+                    })
+                    .collect()
+            })
+            .collect()
+            .await
+        }
+        let world = chunk(serde_json::json!(
+            [{"index": 1, "delta": {"content": "World"}, "finish_reason": null}]
+        ));
+        let hello = chunk(serde_json::json!(
+            [{"index": 0, "delta": {"content": "Hello"}, "finish_reason": null}]
+        ));
+        let stop = chunk(serde_json::json!(
+            [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+        ));
+
+        // Choice 0 finished on its terminal chunk, so the end-of-stream flush
+        // carries only choice 1.
+        assert_eq!(
+            placement(vec![world.clone(), hello.clone(), stop]).await,
+            vec![
+                vec![(1, String::new(), false)],
+                vec![(0, String::new(), false)],
+                vec![(0, "Hello".to_string(), true)],
+                vec![(1, "World".to_string(), false)],
+            ]
+        );
+
+        // With neither finished, one flush chunk carries both, in index order.
+        assert_eq!(
+            placement(vec![world, hello]).await,
+            vec![
+                vec![(1, String::new(), false)],
+                vec![(0, String::new(), false)],
+                vec![
+                    (0, "Hello".to_string(), false),
+                    (1, "World".to_string(), false)
+                ],
+            ]
         );
     }
 
