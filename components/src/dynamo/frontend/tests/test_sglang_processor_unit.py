@@ -41,6 +41,11 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 import dynamo.frontend.sglang_prepost as sglang_prepost_module
 import dynamo.frontend.sglang_processor as sglang_processor_module
+from dynamo.common.backend.logprobs import (
+    build_sglang_logprob_kwargs,
+    extract_from_sglang_meta,
+    extract_prompt_logprobs_from_sglang_meta,
+)
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
@@ -126,6 +131,42 @@ def byte_fallback_tokenizer():
 
 class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc construction
     """Test sampling parameter projection from request to Dynamo format."""
+
+    @pytest.mark.parametrize(
+        "request_data,expected",
+        [
+            ({}, None),
+            ({"prompt_logprobs": None}, None),
+            ({"stream": True}, None),
+            ({"stream": True, "prompt_logprobs": None}, None),
+            ({"prompt_logprobs": 0}, 0),
+            ({"stream": False, "prompt_logprobs": 3}, 3),
+            ({"stream": True, "prompt_logprobs": 0}, None),
+            ({"stream": True, "prompt_logprobs": 3}, None),
+            (
+                {
+                    "stream": True,
+                    "prompt_logprobs": 0,
+                    "nvext": {"extra_fields": ["prompt_logprobs"]},
+                },
+                0,
+            ),
+            (
+                {
+                    "stream": True,
+                    "prompt_logprobs": 3,
+                    "nvext": {"extra_fields": ["prompt_logprobs"]},
+                },
+                3,
+            ),
+        ],
+    )
+    def test_prompt_logprobs_projection(self, request_data, expected):
+        request = {"model": "test", "messages": [], **request_data}
+        result = _build_dynamo_preproc(request, [1, 2], "test", None)
+        assert result["output_options"]["prompt_logprobs"] == expected
+        if expected is None:
+            assert build_sglang_logprob_kwargs(result["output_options"]) == {}
 
     def test_defaults(self):
         """Default sampling options when request has minimal fields."""
@@ -697,15 +738,20 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
         assert result["output_options"]["logprobs"] == 3
 
-    def test_logprobs_disabled(self):
-        """No logprobs yields None."""
+    @pytest.mark.parametrize(
+        "request_options",
+        [{}, {"logprobs": None}, {"logprobs": False, "top_logprobs": 0}],
+    )
+    def test_logprobs_disabled(self, request_options):
+        """Disabled logprobs must not enable backend computation."""
         result = _build_dynamo_preproc(
-            {"model": "test"},
+            {"model": "test", **request_options},
             [1],
             "test",
             None,
         )
         assert result["output_options"]["logprobs"] is None
+        assert build_sglang_logprob_kwargs(result["output_options"]) == {}
 
     def test_metadata_upload_nvext_is_forwarded_to_backend(self):
         result = _build_dynamo_preproc(
@@ -1930,11 +1976,8 @@ def test_forced_structural_tag_returns_tool_call(
 @pytest.mark.timeout(60)
 @pytest.mark.parametrize("tool_choice", ["auto", "required", "named"])
 @pytest.mark.parametrize("thinking", [False, True], ids=["chat", "thinking"])
-@pytest.mark.parametrize(
-    "separate_reasoning", [False, True], ids=["combined", "separate"]
-)
 def test_tool_structural_tag_enforced_after_one_reasoning_boundary(
-    tokenizer, tool_grammar_compiler, tool_choice, thinking, separate_reasoning
+    tokenizer, tool_grammar_compiler, tool_choice, thinking
 ):
     """The backend consumes reasoning; the inner grammar must enforce tools next."""
     request = {
@@ -1943,7 +1986,6 @@ def test_tool_structural_tag_enforced_after_one_reasoning_boundary(
         "tools": [parity_tool()],
         "tool_choice": tool_choice_value(tool_choice),
         "chat_template_kwargs": {"enable_thinking": thinking},
-        "separate_reasoning": separate_reasoning,
     }
     pre = preprocess_chat_request(
         request,
@@ -2170,6 +2212,59 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         )
 
         assert seen["tool_call_parser"] == "minimax-m3"
+        assert guided == {"structural_tag": {"type": "object"}}
+
+    @pytest.mark.parametrize(
+        "tool_choice_field",
+        [{}, {"tool_choice": None}, {"tool_choice": "auto"}],
+        ids=["omitted", "null", "auto"],
+    )
+    @pytest.mark.parametrize("scope", ["always", "auto"])
+    def test_null_tool_choice_uses_auto_structural_tag_policy(
+        self, monkeypatch, tool_choice_field, scope
+    ):
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ]
+        seen = {}
+
+        class FakeFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                pass
+
+            def get_structure_constraint(self, tool_choice, **kwargs):
+                seen["tool_choice"] = tool_choice
+                return "structural_tag", {"type": "object"}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            FakeFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {
+                **tool_choice_field,
+                "tools": raw_tools,
+                "parallel_tool_calls": False,
+            },
+            tool_call_parser_name="qwen3_coder",
+            sglang_tools=convert_tools(raw_tools),
+            structural_tag_mode="on",
+            structural_tag_scope=scope,
+        )
+
+        assert seen["tool_choice"] == "auto"
         assert guided == {"structural_tag": {"type": "object"}}
 
     def test_required_tool_choice_builds_json_schema_guidance(self):
@@ -4509,7 +4604,62 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             }
         ]
 
-    def _run_logprob_stream(self, items):
+    @pytest.mark.parametrize("count", [None, 0])
+    @pytest.mark.parametrize("include_nvext", [False, True])
+    def test_prompt_logprobs_survive_batched_output(self, count, include_nvext):
+        payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
+        processor = SglangProcessor(
+            tokenizer=self.ByteTokenizer(),
+            routed_engine=FakeRoutedEngine(
+                items=[
+                    {"token_ids": [ord("A")]},
+                    {
+                        "token_ids": [ord("B")],
+                        "engine_data": {"prompt_logprobs": payload},
+                    },
+                    {"token_ids": [], "finish_reason": "stop", "stop_reason": "END"},
+                ]
+            ),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+            stream_interval=20,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+        )
+        request = {"model": MODEL, "nvext": {"extra_fields": ["stop_reason"]}}
+        if count is not None:
+            request["prompt_logprobs"] = count
+        if include_nvext:
+            request["nvext"]["extra_fields"].append("prompt_logprobs")
+
+        async def collect():
+            return [
+                item["data"]
+                async for item in processor._generate_and_stream(
+                    "prompt-logprobs", request, {}, [], post
+                )
+                if "data" in item
+            ]
+
+        chunks = asyncio.run(collect())
+        assert len(chunks) == 2
+        assert "prompt_logprobs" not in chunks[0]
+        assert chunks[1].get("prompt_logprobs") == (
+            payload if count is not None else None
+        )
+        assert chunks[1]["nvext"].get("prompt_logprobs") == (
+            payload if include_nvext else None
+        )
+        assert chunks[1]["nvext"]["stop_reason"] == "END"
+        assert "prompt_logprobs" not in chunks[1]["choices"][0]
+
+    def _run_logprob_stream(self, items, request=None):
+        if request is None:
+            request = {"model": "test-model", "logprobs": True}
         processor = SglangProcessor(
             tokenizer=self.ByteTokenizer(),
             routed_engine=FakeRoutedEngine(items=items),
@@ -4528,12 +4678,91 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             return [
                 item["data"]
                 async for item in processor._generate_and_stream(
-                    "req-logprobs", {"model": "test-model"}, {}, [], post
+                    "req-logprobs", request, {}, [], post
                 )
                 if "data" in item
             ]
 
         return asyncio.run(collect())
+
+    @pytest.mark.parametrize(
+        "prompt_count,logprobs,top_logprobs,expected_top_count",
+        [
+            (0, None, None, None),
+            (0, False, None, None),
+            (0, True, 0, 0),
+            (3, True, None, 0),
+            (3, True, 1, 1),
+            (0, True, 3, 3),
+            (1, True, 3, 3),
+        ],
+    )
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_prompt_and_completion_logprob_counts_are_independent(
+        self, prompt_count, logprobs, top_logprobs, expected_top_count, stream
+    ):
+        request = {
+            "model": MODEL,
+            "prompt_logprobs": prompt_count,
+            "logprobs": logprobs,
+            "top_logprobs": top_logprobs,
+            "stream": stream,
+            "nvext": {"extra_fields": ["prompt_logprobs"]},
+        }
+        preproc = _build_dynamo_preproc(request, [1, 17], MODEL, None)
+        options = preproc["output_options"]
+        kwargs = build_sglang_logprob_kwargs(options)
+        assert kwargs["top_logprobs_num"] == max(prompt_count, expected_top_count or 0)
+        alternatives = [
+            (-0.1, ord("A"), "A"),
+            (-0.2, ord("B"), "B"),
+            (-0.3, ord("C"), "C"),
+        ][: kwargs["top_logprobs_num"]]
+        meta = {
+            "input_token_logprobs": [(None, 1, None), (-0.5, 17, "p")],
+            "input_top_logprobs": [None, alternatives],
+            "output_token_logprobs": [(-0.1, ord("A"), "A")],
+            "output_top_logprobs": [alternatives],
+        }
+        payload = extract_prompt_logprobs_from_sglang_meta(
+            meta, prompt_logprobs_count=options["prompt_logprobs"]
+        )
+        log_probs, output_top_logprobs = extract_from_sglang_meta(meta)
+        chunks = self._run_logprob_stream(
+            [
+                {
+                    "token_ids": [ord("A")],
+                    "log_probs": log_probs,
+                    "top_logprobs": output_top_logprobs,
+                    "finish_reason": "stop",
+                    "engine_data": {"prompt_logprobs": payload},
+                }
+            ],
+            request=request,
+        )
+        expected_prompt = [
+            None,
+            {
+                "17": {"logprob": -0.5, "decoded_token": "p"},
+                **{
+                    str(token_id): {"logprob": lp, "decoded_token": token}
+                    for lp, token_id, token in alternatives[:prompt_count]
+                },
+            },
+        ]
+        assert len(chunks) == 1
+        assert chunks[0]["nvext"]["prompt_logprobs"] == expected_prompt
+        if stream:
+            assert "prompt_logprobs" not in chunks[0]
+        else:
+            assert chunks[0]["prompt_logprobs"] == expected_prompt
+        completion_logprobs = chunks[0]["choices"][0]["logprobs"]
+        if expected_top_count is None:
+            assert completion_logprobs is None
+        else:
+            content = completion_logprobs["content"]
+            assert content[0]["token"] == "A"
+            assert len(content[0]["top_logprobs"]) == expected_top_count
 
     def test_missing_chunk_logprobs_do_not_drop_adjacent_logprobs(self):
         """A missing-logprob chunk is isolated from adjacent valid chunks."""
@@ -4694,9 +4923,37 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunks[0]["choices"][0]["finish_reason"] == "stop"
 
     @pytest.mark.parametrize("with_tool_parser", [False, True])
+    @pytest.mark.parametrize(
+        "backend_end",
+        [
+            "unrequested",
+            "metadata",
+            "empty",
+            "eof",
+            "error",
+            "error-finish",
+            "cancelled",
+        ],
+    )
     def test_processor_finishes_locally_without_stopping_parent_context(
-        self, with_tool_parser
+        self, with_tool_parser, backend_end
     ):
+        payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
+        terminal = {"token_ids": list(b"not-displayed"), "finish_reason": "stop"}
+        if backend_end == "metadata":
+            terminal["engine_data"] = {"prompt_logprobs": payload}
+        elif backend_end == "error":
+            terminal = FakeRoutedItem(
+                None, is_error=True, comments=["backend disconnected"]
+            )
+        elif backend_end == "error-finish":
+            terminal = {
+                "token_ids": [],
+                "finish_reason": "error: backend disconnected",
+                "engine_data": {"prompt_logprobs": payload},
+            }
+        elif backend_end == "cancelled":
+            terminal["finish_reason"] = "cancelled"
         routed_engine = FakeRoutedEngine(
             items=[
                 {
@@ -4709,8 +4966,8 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     "finish_reason": None,
                     "log_probs": [-0.4] * len(b"Dignored"),
                 },
-                {"token_ids": list(b"not-consumed"), "finish_reason": None},
             ]
+            + ([] if backend_end == "eof" else [terminal])
         )
         processor = SglangProcessor(
             tokenizer=self.ByteTokenizer(),
@@ -4743,11 +5000,13 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         async def collect():
             return [
-                item["data"]
+                item.get("data", item)
                 async for item in processor._generate_and_stream(
                     "req-stop",
                     {
                         "model": "test-model",
+                        "logprobs": True,
+                        "prompt_logprobs": None if backend_end == "unrequested" else 0,
                         "stream_options": {"include_usage": True},
                     },
                     {},
@@ -4755,7 +5014,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     post,
                     context,
                 )
-                if "data" in item
+                if "data" in item or item.get("event") == "error"
             ]
 
         chunks = asyncio.run(collect())
@@ -4766,6 +5025,16 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             entry["token"] for entry in chunks[0]["choices"][0]["logprobs"]["content"]
         ] == ["A"]
         assert "usage" not in chunks[0]
+        assert not context.stopped
+        assert routed_engine.yielded == (
+            2 if backend_end in {"unrequested", "eof"} else 3
+        )
+        assert routed_engine.stream_released
+        assert len(chunks) == 2
+        if backend_end in {"error", "error-finish"}:
+            assert chunks[1]["event"] == "error"
+            assert "backend disconnected" in chunks[1]["comment"][0]
+            return
         assert chunks[1]["choices"][0]["delta"] == {}
         assert chunks[1]["choices"][0]["finish_reason"] == "stop"
         assert chunks[1]["choices"][0]["logprobs"] is None
@@ -4774,12 +5043,15 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             "completion_tokens": 11,
             "total_tokens": 13,
         }
-        assert not context.stopped
-        assert routed_engine.yielded == 2
-        assert routed_engine.stream_released
-        assert len(chunks) == 2
+        assert chunks[1].get("prompt_logprobs") == (
+            payload if backend_end == "metadata" else None
+        )
 
-    def test_logprob_shape_flush_finishes_without_stopping_parent_context(self):
+    @pytest.mark.parametrize("include_prompt_logprobs", [False, True])
+    def test_logprob_shape_flush_finishes_without_stopping_parent_context(
+        self, include_prompt_logprobs
+    ):
+        payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
         routed_engine = FakeRoutedEngine(
             items=[
                 {"token_ids": list(b"A"), "finish_reason": None},
@@ -4789,7 +5061,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     "finish_reason": None,
                     "log_probs": [-0.1],
                 },
-                {"token_ids": list(b"not-consumed"), "finish_reason": None},
+                {
+                    "token_ids": list(b"not-displayed"),
+                    "finish_reason": "stop",
+                    "engine_data": {"prompt_logprobs": payload},
+                },
             ]
         )
         processor = SglangProcessor(
@@ -4822,6 +5098,13 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     "req-stop",
                     {
                         "model": "test-model",
+                        "logprobs": True,
+                        "stream": True,
+                        "nvext": {
+                            "extra_fields": ["prompt_logprobs"]
+                            if include_prompt_logprobs
+                            else []
+                        },
                         "stream_options": {"include_usage": True},
                     },
                     {},
@@ -4843,9 +5126,12 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             "total_tokens": 6,
         }
         assert not context.stopped
-        assert routed_engine.yielded == 3
+        assert routed_engine.yielded == (4 if include_prompt_logprobs else 3)
         assert routed_engine.stream_released
         assert len(chunks) == 2
+        assert chunks[1].get("nvext", {}).get("prompt_logprobs") == (
+            payload if include_prompt_logprobs else None
+        )
 
     def test_split_stop_string_suffix_is_not_emitted(self, tokenizer):
         post = SglangStreamingPostProcessor(
@@ -5353,7 +5639,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             return [
                 item["data"]
                 async for item in processor._generate_and_stream(
-                    "req-length", {"model": "test-model"}, {}, [], post
+                    "req-length",
+                    {"model": "test-model", "logprobs": True},
+                    {},
+                    [],
+                    post,
                 )
                 if "data" in item
             ]

@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_HTTP_PORT           Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT         Dynamo sidecar system port (default: 8081)"
             echo "  VLLM_RS_HTTP_PORT       vLLM HTTP port (default: 8100)"
-            echo "  VLLM_GRPC_PORT          vLLM gRPC port (default: 50051)"
+            echo "  VLLM_GRPC_PORT          vLLM gRPC port (default: 30001)"
             echo "  VLLM_DATA_PARALLEL_SIZE Number of local data-parallel ranks (default: 1)"
             echo "  MAX_MODEL_LEN           Maximum model length (default: 4096)"
             echo "  MAX_CONCURRENT_SEQS     Maximum concurrent sequences (default: 2)"
@@ -56,8 +56,8 @@ trap dynamo_exit_trap EXIT
 
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
-VLLM_RS_HTTP_PORT="${VLLM_RS_HTTP_PORT:-8100}"
-VLLM_GRPC_PORT="${VLLM_GRPC_PORT:-50051}"
+VLLM_RS_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${VLLM_RS_HTTP_PORT:-8100}")
+VLLM_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${VLLM_GRPC_PORT:-30001}")
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 # Default KV cache cap from profiling (2x safety over min=560 MiB); ~3.8 GiB peak VRAM.

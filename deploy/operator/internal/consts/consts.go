@@ -70,6 +70,7 @@ const (
 	KubeAnnotationGPUPowerLimit                   = "dynamo.nvidia.com/gpu-power-limit"
 
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
+	KubeLabelDynamoGraphDeploymentUID  = "nvidia.com/dynamo-graph-deployment-uid"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
 	KubeLabelDynamoNamespace           = "nvidia.com/dynamo-namespace"
 	// KubeLabelDynamoComponentType is the workload selector contract stamped on

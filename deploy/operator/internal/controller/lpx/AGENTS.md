@@ -92,7 +92,7 @@ SPDX-License-Identifier: Apache-2.0
 - Retain matching LPRs and their status across input edits. Collect missing
   requests in the same ordered pass that constructs desired requests. An
   immutable mismatch waits for its Grove engine to roll and LPX to release the
-  old requests; incompatible layouts and OnDelete builds require PCS replacement.
+  old requests; incompatible layouts require PCS replacement.
 - Publish missing requests independently in workload/PCSG ordinal/model order.
   Partial publication and idempotent retries are supported; exactly-once
   batches are not required. Creation order does not guarantee scheduler order or prevent
@@ -124,8 +124,11 @@ SPDX-License-Identifier: Apache-2.0
   This also defers PCS updates and replacement until all groups are observed.
 - Render a complete valid replacement before deleting an existing workload.
   A replacement error preserves the existing workload, even if its digest differs.
-- For incompatible layouts or OnDelete build changes, foreground-delete the PCS
-  and recreate it after garbage collection. Grove rolls compatible layouts.
+- For incompatible layouts, foreground-delete the PCS and recreate it after
+  garbage collection. Grove rolls compatible layouts, including build changes.
+- Admission rejects OnDelete for LPX DGDs: Grove would leave running Pods on
+  stale templates, which the LPX scheduler treats as dependency loss. Do not
+  add OnDelete-specific rollout handling.
 - Grove makes PCS clique composition and scaling-group `CliqueNames` immutable.
   Model removal therefore requires PCS replacement. Do not trim group membership
   while retaining templates; those templates can become standalone cliques.
@@ -137,9 +140,15 @@ SPDX-License-Identifier: Apache-2.0
   For build changes, all retiring requests in an engine must release before any
   are deleted. Keep UID/resource-version delete preconditions. Deadline cancellation
   remains separate.
-- Never directly delete Pods or PodCliques from graph reconciliation or LPR
-  lifecycle helpers. Grove scaling and owner garbage collection own workload
-  cleanup; scheduler Pod references and release journals do not authorize it.
+- Ordinary retirement leaves Pod and PodClique cleanup to Grove and owner GC.
+  The Dynamo operator's LPX controller may directly delete Pods only for a matching,
+  still-desired, non-deleting NodeLocal LPR in `Releasing` for `requestChanged`,
+  `dependencyChanged`, or `bindingFailed`: remove its journaled current and target
+  Agent Pod UIDs, including plan-replacement predecessors, after verifying their
+  PodClique -> PCSG -> PCS owner chain, including terminating PodCliques. Keep namespace
+  checks and UID/resource-version delete preconditions. Retry missing observations
+  without blocking cleanup of the remaining journaled Pods. Preserve Grove capacity
+  and LPUPipelineRequest status, finalizers, and annotations.
 - A terminating LPR is pending cleanup, not a reason to delete its PCS or Pods.
   Wait for scheduler finalization through watches, including when external
   capacity is unchanged.

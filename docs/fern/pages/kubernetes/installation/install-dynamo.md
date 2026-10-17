@@ -151,6 +151,23 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 > [!TIP]
 > All `helm install` commands can be customized with your own values file: `helm install ... -f your-values.yaml`
 
+> [!WARNING]
+> **Experimental. Development clusters only.** The unfinished DGDR v1beta2 schemas are disabled by
+> default. To install them for API development, add
+> `--set "dynamo-operator.dgdrV1Beta2.enabled=true"` to the Helm command.
+> The flag adds the v1beta2 `DynamoGraphDeploymentRequest` schema and installs the
+> `DynamoGraphDeploymentRun` and `DynamoGraphDeploymentCandidate` Custom Resource Definitions
+> (CRDs). It does not enable v1beta2 reconciliation, so the operator does not process resources
+> created with these schemas.
+>
+> Kubernetes persists Run and Candidate objects in etcd. Because the schemas are not finalized,
+> later schema changes can make stored objects unreadable or prevent a CRD upgrade. Do not enable
+> this API on production or shared clusters.
+>
+> Disabling the flag on a later Helm upgrade stops updating the experimental schemas but does not
+> delete CRDs that were previously installed. Remove those CRDs manually only after confirming
+> that they contain no resources.
+
 > [!TIP]
 > **Shared/Multi-Tenant Clusters**: If a cluster-wide Dynamo operator is already running, do **not** install another one. Check with:
 > ```bash
@@ -207,7 +224,7 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 > | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.10 |
 > | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
-> | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14 |
+> | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
 >
 > Upgrade Grove in lockstep with Dynamo while the Grove APIs remain unstable. Dynamo 1.3.x expects
 > Grove's earlier `ClusterTopology` API and is incompatible with the newer
