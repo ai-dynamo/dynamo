@@ -595,6 +595,50 @@ async fn typed_handoff_routes_output_and_lifecycle_for_supported_engines() {
 }
 
 #[tokio::test]
+async fn vllm_decode_reports_only_resident_prefix_hits() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        for enable_prefix_caching in [false, true] {
+            let mut args = handoff_args(EngineType::Vllm, WorkerType::Decode);
+            args.enable_prefix_caching = enable_prefix_caching;
+            let engine = LiveEngine::start(args, 0).unwrap();
+            for (token, expected_hits) in [
+                (1, 0),
+                (1, if enable_prefix_caching { 4 } else { 0 }),
+                (2, 0),
+            ] {
+                let handoff_id = HandoffId::new();
+                let (control, mut events) = engine.register_handoff(handoff_id).unwrap();
+                let (registration, mut request) = engine
+                    .prepare_request(DirectRequest {
+                        tokens: vec![token; 5],
+                        max_output_tokens: 2,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                control.reserve_destination(registration).await.unwrap();
+                assert_eq!(
+                    events.recv().await,
+                    Some(LiveHandoffEvent::DestinationReserved {
+                        transferable_prompt_tokens: 8 - expected_hits,
+                    })
+                );
+                control.activate_destination().await.unwrap();
+                let first = request.recv().await.unwrap();
+                assert_eq!(first.cached_tokens, Some(expected_hits));
+                let second = request.recv().await.unwrap();
+                assert!(second.completed);
+                assert_eq!(second.cached_tokens, None);
+                assert!(request.recv().await.is_none());
+                wait_for_idle(&engine).await;
+            }
+            engine.shutdown().await.unwrap();
+        }
+    })
+    .await
+    .expect("decode cache observations timed out");
+}
+
+#[tokio::test]
 async fn decode_admission_reserves_kv_without_recomputing_the_prompt() {
     #[derive(Default)]
     struct Passes(Mutex<Vec<crate::common::protocols::ForwardPassSnapshot>>);

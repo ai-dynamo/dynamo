@@ -1055,6 +1055,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let async_context = ctx.context();
         let reasoning = self.engine_args.runtime.reasoning.clone();
+        let enable_prefix_caching = self.engine_args.enable_prefix_caching;
         let handoff_session_timeout =
             Duration::from_millis(self.engine_args.runtime.handoff_session_timeout_ms);
         let mut native_timing = native_timing;
@@ -1154,6 +1155,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         }
 
                         if let Some(cached) = signal.cached_tokens {
+                            // Only account cache lookups when prefix caching is
+                            // enabled; otherwise the scheduler reports a zero
+                            // cached_tokens and every prompt length would be
+                            // counted as a query despite no cache lookup.
+                            if enable_prefix_caching {
+                                native_timing
+                                    .record_prefix_cache_result(prompt_tokens_count, cached);
+                            }
                             cached_prefix_tokens = Some(cached);
                         }
 
@@ -1455,6 +1464,67 @@ mod tests {
             .annotations(vec![])
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn prefix_cache_counters_follow_enabled_lookups() {
+        for enable_prefix_caching in [false, true] {
+            let args = MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "enable_prefix_caching": enable_prefix_caching,
+                    "block_size": 4,
+                    "num_gpu_blocks": 64,
+                    "max_num_batched_tokens": 64,
+                    "speedup_ratio": 1000.0
+                }
+            }))
+            .unwrap();
+            let live = LiveEngine::start(args.clone(), 0).unwrap();
+            let engine = MockerExecutionContext::new(args);
+            assert!(engine.engines.set(vec![live.clone()]).is_ok());
+            let registry = dynamo_runtime::MetricsRegistry::new();
+            engine.native_metrics.register(&registry).unwrap();
+
+            let mut observed_hits = 0;
+            for attempt in 0..2 {
+                let mut stream = engine
+                    .generate(SingleIn::new(decode_request(5, 1)))
+                    .await
+                    .unwrap();
+                let first = stream.next().await.unwrap().data.unwrap();
+                let cached = first
+                    .completion_usage
+                    .unwrap()
+                    .prompt_tokens_details
+                    .unwrap()
+                    .cached_tokens
+                    .unwrap();
+                assert_eq!(cached, u32::from(enable_prefix_caching && attempt == 1) * 4);
+                observed_hits += cached;
+                while stream.next().await.is_some() {}
+            }
+
+            let families = registry.get_prometheus_registry().gather();
+            for (name, expected) in [
+                (
+                    "vllm:prefix_cache_queries_total",
+                    if enable_prefix_caching { 10 } else { 0 },
+                ),
+                ("vllm:prefix_cache_hits_total", observed_hits),
+            ] {
+                let family = families
+                    .iter()
+                    .find(|family| family.name() == name)
+                    .unwrap();
+                let value: f64 = family
+                    .get_metric()
+                    .iter()
+                    .map(|metric| metric.counter.as_ref().unwrap().value())
+                    .sum();
+                assert_eq!(value, f64::from(expected), "{name}");
+            }
+            live.shutdown().await.unwrap();
+        }
     }
 
     #[tokio::test(start_paused = true)]
