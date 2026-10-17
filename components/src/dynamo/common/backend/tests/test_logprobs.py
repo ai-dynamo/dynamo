@@ -308,21 +308,37 @@ def test_prompt_logprobs_sglang_preserves_engine_bos_none():
     ]
 
 
-def test_prompt_logprobs_sglang_merges_input_top_logprobs():
+@pytest.mark.parametrize(
+    "count,actual_token,expected_tokens",
+    [
+        (None, 7, {"7", "70", "71"}),
+        (0, 70, {"70"}),
+        (1, 7, {"7"}),
+        (1, 70, {"7", "70"}),
+        (3, 99, {"7", "70", "71", "99"}),
+    ],
+)
+def test_prompt_logprobs_sglang_merges_input_top_logprobs(
+    count, actual_token, expected_tokens
+):
     meta = {
         "input_token_logprobs": [
             (None, 6, None),
-            (-0.5, 7, "a"),
+            (-0.7, actual_token, "actual"),
         ],
         "input_top_logprobs": [
             None,
-            [(-0.5, 7, "a"), (-1.5, 70, "A")],
+            [(-0.5, 7, "a"), (-1.5, 70, "A"), (-2.5, 71, "b")],
         ],
     }
-    payload = extract_prompt_logprobs_from_sglang_meta(meta)
-    assert payload[1] == {
-        "7": {"logprob": -0.5, "decoded_token": "a"},
-        "70": {"logprob": -1.5, "decoded_token": "A"},
+    payload = extract_prompt_logprobs_from_sglang_meta(
+        meta, prompt_logprobs_count=count
+    )
+    assert payload[0] is None
+    assert set(payload[1]) == expected_tokens
+    assert payload[1][str(actual_token)] == {
+        "logprob": -0.7,
+        "decoded_token": "actual",
     }
 
 
@@ -427,6 +443,37 @@ def test_sglang_extract_with_top():
             {"rank": 1, "token_id": 101, "token": "a", "logprob": -0.1},
             {"rank": 2, "token_id": 102, "token": "b", "logprob": -0.2},
         ]
+    ]
+
+
+@pytest.mark.parametrize("count", [0, 1, 3, None])
+def test_sglang_extract_limits_completion_alternatives(count):
+    candidates = [(-0.1, 101, "a"), (-0.2, 102, "b"), (-0.3, 103, "c")]
+    meta = {
+        "output_token_logprobs": [(-0.4, 104, "d"), (-0.5, 105, "e")],
+        "output_top_logprobs": [None, candidates],
+    }
+
+    log_probs, top_logprobs = extract_from_sglang_meta(
+        meta, top_logprobs_num=count, return_tokens_as_token_ids=True
+    )
+
+    assert log_probs == [-0.4, -0.5]
+    assert top_logprobs == [
+        [],
+        [
+            {
+                "rank": rank,
+                "token_id": token_id,
+                "token": f"token_id:{token_id}",
+                "logprob": lp,
+            }
+            for rank, (lp, token_id, _) in enumerate(candidates[:count], start=1)
+        ],
+    ]
+    assert meta["output_top_logprobs"] == [
+        None,
+        [(-0.1, 101, "a"), (-0.2, 102, "b"), (-0.3, 103, "c")],
     ]
 
 

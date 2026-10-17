@@ -44,6 +44,7 @@ from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
 from .utils import (
     PreprocessError,
+    PromptLogprobsAccumulator,
     as_error_envelope,
     extract_mm_urls,
     handle_engine_error,
@@ -66,6 +67,18 @@ def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
         return None
     cached_tokens = prompt_details.get("cached_tokens")
     return cached_tokens if isinstance(cached_tokens, int) else None
+
+
+def _request_logprobs_count(request: dict[str, Any]) -> int | None:
+    logprobs = request.get("logprobs")
+    top_logprobs = request.get("top_logprobs")
+    if logprobs is True:
+        return top_logprobs if top_logprobs is not None else 1
+    if isinstance(logprobs, int) and not isinstance(logprobs, bool):
+        return logprobs
+    if top_logprobs not in (None, 0):
+        return top_logprobs
+    return None
 
 
 def _normalize_eos_token_ids(value: Any) -> list[int]:
@@ -429,17 +442,6 @@ def _build_dynamo_preproc(
     elif stop is None:
         stop = []
 
-    # Handle logprobs
-    logprobs_val = None
-    logprobs = request.get("logprobs")
-    top_logprobs = request.get("top_logprobs")
-    if logprobs is True:
-        logprobs_val = top_logprobs if top_logprobs is not None else 1
-    elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
-        logprobs_val = logprobs
-    elif top_logprobs not in (None, 0):
-        logprobs_val = top_logprobs
-
     nvext = request.get("nvext") or {}
     routing = request.get("routing")
     nvext_routing = (
@@ -493,8 +495,13 @@ def _build_dynamo_preproc(
             "guided_decoding": guided_decoding,
         },
         "output_options": {
-            "logprobs": logprobs_val,
-            "prompt_logprobs": None,
+            "logprobs": _request_logprobs_count(request),
+            "prompt_logprobs": (
+                request.get("prompt_logprobs")
+                if request.get("stream") is not True
+                or nvext_extra_field_requested(request, "prompt_logprobs")
+                else None
+            ),
             # Preserve special tokens when a parser is active so delimiters
             # remain visible. Mirrors the post-processor's decode behavior.
             "skip_special_tokens": resolve_skip_special_tokens(
@@ -783,6 +790,8 @@ class SglangProcessor:
         post_proc_total_ms = 0.0
         created_ts = int(time.time())
         stream_interval = self.stream_interval
+        prompt_logprobs = PromptLogprobsAccumulator(request)
+        logprobs_count = _request_logprobs_count(request)
 
         try:
             dynamo_stream = await self.routed_engine.generate(
@@ -797,6 +806,7 @@ class SglangProcessor:
             pending_log_probs: list[float] | None = None
             pending_top_logprobs: list[list[dict[str, Any]]] | None = None
             pending_usage: dict[str, Any] | None = None
+            pending_terminal: dict[str, Any] | None = None
             first_chunk = True
             input_tokens = len(tokens)
             cumulative_output_tokens = 0
@@ -882,6 +892,7 @@ class SglangProcessor:
                     if response_nvext:
                         dynamo_out["nvext"] = response_nvext
 
+                    prompt_logprobs.attach(dynamo_out)
                     envelope["data"] = dynamo_out
 
                 metrics: dict[str, Any] = {
@@ -940,9 +951,35 @@ class SglangProcessor:
                     )
                     break
 
+                raw_finish_reason = engine_response.get("finish_reason")
+                finish_reason = _map_finish_reason(raw_finish_reason)
+                backend_finished = raw_finish_reason is not None
+                if pending_terminal is not None and finish_reason == "error":
+                    yield as_error_envelope(
+                        make_internal_error(request_id, raw_finish_reason)
+                    )
+                    break
+                prompt_logprobs.update(engine_response)
+                if pending_terminal is not None:
+                    if prompt_logprobs.needs_payload and not backend_finished:
+                        continue
+                    prompt_logprobs.attach(pending_terminal["data"])
+                    yield pending_terminal
+                    break
+
                 new_ids = engine_response["token_ids"]
-                log_probs = engine_response.get("log_probs")
-                top_logprobs = engine_response.get("top_logprobs")
+                log_probs = (
+                    engine_response.get("log_probs")
+                    if logprobs_count is not None
+                    else None
+                )
+                top_logprobs = (
+                    engine_response.get("top_logprobs") if logprobs_count else None
+                )
+                if top_logprobs is not None:
+                    top_logprobs = [
+                        entries[:logprobs_count] for entries in top_logprobs
+                    ]
 
                 if new_ids and pending_token_ids:
                     pending_logprob_shape = (
@@ -960,14 +997,19 @@ class SglangProcessor:
                             stop_terminated=False,
                             engine_data=None,
                         )
+                        if (
+                            post.locally_finished
+                            and prompt_logprobs.needs_payload
+                            and not backend_finished
+                        ):
+                            pending_terminal = envelope
+                            continue
                         yield envelope
                         if post.locally_finished:
                             break
 
                 chunk_tokens = len(new_ids)
                 cumulative_output_tokens += chunk_tokens
-                raw_finish_reason = engine_response.get("finish_reason")
-                finish_reason = _map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
                 stop_terminated = raw_finish_reason in {"eos", "stop"}
 
@@ -997,9 +1039,20 @@ class SglangProcessor:
                         stop_terminated=stop_terminated,
                         engine_data=engine_data,
                     )
+                    if (
+                        post.locally_finished
+                        and prompt_logprobs.needs_payload
+                        and not backend_finished
+                    ):
+                        # Preserve terminal metadata without emitting post-stop text.
+                        pending_terminal = envelope
+                        continue
                     yield envelope
                     if post.locally_finished:
                         break
+            else:
+                if pending_terminal is not None:
+                    yield pending_terminal
         except (InvalidArgument, Unknown):
             raise
         except Exception as e:
