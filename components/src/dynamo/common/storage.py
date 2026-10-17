@@ -45,7 +45,8 @@ def get_fs(fs_url: str) -> DirFileSystem:
     Initialize fsspec filesystem for the given URL.
 
     Args:
-        fs_url: The URL of the filesystem to initialize. e.g. s3://bucket, gs://bucket, file:///local/path
+        fs_url: Filesystem URL (e.g. s3://bucket, gs://bucket,
+            file:///local/path) or a local path without a protocol.
 
     Returns:
         The initialized DirFileSystem wrapper for the filesystem.
@@ -60,7 +61,7 @@ def get_fs(fs_url: str) -> DirFileSystem:
     protocol = fs_url_parts[0] if "://" in fs_url else "file"
 
     # ... or bucket name
-    root_path = fs_url_parts[1] if len(fs_url_parts) > 1 else "/"
+    root_path = fs_url_parts[1] if len(fs_url_parts) > 1 else fs_url
 
     fs_opts = {}
     if protocol in "file":

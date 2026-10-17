@@ -44,6 +44,8 @@ class TestGetFs:
             protocol = protocol[0]
         assert protocol == "file"
 
+        assert fs.path == str(media_dir)
+
     def test_s3_url_protocol(self):
         """Test s3:// URL extracts correct protocol and bucket path."""
         with patch("dynamo.common.storage.fsspec.filesystem") as mock_fsspec, patch(
@@ -138,6 +140,24 @@ class TestGetMediaUrl:
 
 class TestUploadToFs:
     """Tests for upload_to_fs() async upload + URL construction."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("relative_path", [False, True])
+    async def test_upload_to_local_path_without_protocol(
+        self, tmp_path, monkeypatch, relative_path
+    ):
+        monkeypatch.chdir(tmp_path)
+        media_dir = tmp_path / "media"
+        fs = get_fs("media" if relative_path else str(media_dir))
+        # Check the root before writing, so a regression cannot write under /.
+        assert fs.path == str(media_dir)
+
+        data = b"generated media"
+        url = await upload_to_fs(fs, "images/request/output.png", data)
+
+        output = media_dir / "images/request/output.png"
+        assert output.read_bytes() == data
+        assert url == output.as_uri()
 
     def _make_fs(self, protocol="file", path="/tmp/media"):  # noqa: S108
         """Create a mock DirFileSystem."""
