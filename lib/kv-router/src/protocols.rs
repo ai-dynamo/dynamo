@@ -306,7 +306,8 @@ pub trait WorkerConfigLike {
     ///
     /// `None` means this worker/rank does not support TRANSFER. Backends that
     /// support TRANSFER but cannot serve as a source may return `Some` with
-    /// `source_control_endpoint: None`.
+    /// `source_control_endpoint: None`. Capability and `worker_type` are the
+    /// same for every rank of a worker; only the source endpoint may differ.
     fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         _dp_rank: DpRank,
@@ -666,7 +667,6 @@ pub struct RouterHintSourceMetadata {
 pub struct ResolvedRouterHintSource {
     pub metadata: RouterHintSourceMetadata,
     pub attached_worker: Option<WorkerWithDpRank>,
-    /// `metadata` hashed for source matching.
     pub kv_transfer_keys: CacheOwnerKvTransferKeys,
 }
 

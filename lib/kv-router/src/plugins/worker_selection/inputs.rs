@@ -247,7 +247,6 @@ pub struct WorkerLoadInput {
     pub(crate) active_requests: usize,
 }
 
-/// The KV prefix one worker could fetch before running a request.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WorkerTransferInput {
     pub(crate) local_prefix_blocks: u32,
