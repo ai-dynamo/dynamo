@@ -43,7 +43,7 @@ class BackendParitySpec:
 class RequestCase:
     name: str
     prompt: str
-    max_tokens: int
+    max_tokens: int | None
     stream: bool
 
 
@@ -54,6 +54,7 @@ class RequestOutcome:
     stream_finished: bool
     usage: TokenUsage | None
     stream_error: dict | None
+    finish_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -234,8 +235,12 @@ def _native_command(spec: BackendParitySpec, port: int, tmp_path: Path) -> list[
     raise AssertionError(f"Unsupported framework: {spec.framework}")
 
 
-def _dynamo_config(spec: BackendParitySpec, tmp_path: Path) -> EngineConfig:
-    backend_dir = os.path.join(WORKSPACE_DIR, "examples", "backends", spec.framework)
+def _dynamo_config(
+    spec: BackendParitySpec, tmp_path: Path, output_limit: int | None = None
+) -> EngineConfig:
+    backend_dir = os.path.join(
+        WORKSPACE_DIR, "examples", "backends", spec.framework, "launch"
+    )
     script_args: list[str] = []
     env: dict[str, str] = {}
     delayed_start = 0
@@ -262,6 +267,9 @@ def _dynamo_config(spec: BackendParitySpec, tmp_path: Path) -> EngineConfig:
         }
     else:
         raise AssertionError(f"Unsupported framework: {spec.framework}")
+
+    if output_limit is not None:
+        env["DYN_OUTPUT_TOKEN_LIMIT"] = str(output_limit)
 
     return EngineConfig(
         name=f"dynamo-{spec.name}",
@@ -297,10 +305,11 @@ def _send_case(port: int, case: RequestCase) -> RequestOutcome:
     payload = {
         "model": MODEL,
         "prompt": case.prompt,
-        "max_tokens": case.max_tokens,
         "temperature": 0.0,
         "stream": case.stream,
     }
+    if case.max_tokens is not None:
+        payload["max_tokens"] = case.max_tokens
     if case.stream:
         payload["stream_options"] = {"include_usage": True}
     if case.name == "output-overflow":
@@ -328,12 +337,14 @@ def _send_case(port: int, case: RequestCase) -> RequestOutcome:
                 False,
                 _parse_usage(body),
                 None,
+                (body.get("choices") or [{}])[0].get("finish_reason") if body else None,
             )
 
         stream_finished = False
         saw_data = False
         usage = None
         stream_error = None
+        finish_reason = None
         for line in response.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data:"):
                 continue
@@ -347,6 +358,8 @@ def _send_case(port: int, case: RequestCase) -> RequestOutcome:
                 stream_error = event["error"]
                 continue
             usage = _parse_usage(event) or usage
+            for choice in event.get("choices", []):
+                finish_reason = choice.get("finish_reason") or finish_reason
 
         assert saw_data, "Successful streaming response did not contain SSE data"
         return RequestOutcome(
@@ -355,6 +368,7 @@ def _send_case(port: int, case: RequestCase) -> RequestOutcome:
             stream_finished,
             usage,
             stream_error,
+            finish_reason,
         )
     finally:
         response.close()
@@ -514,3 +528,61 @@ def test_native_and_dynamo_token_budget_parity(
                 f"{case.name}: native={native_outcome.usage}, "
                 f"Dynamo={dynamo_outcome.usage}"
             )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_1
+@pytest.mark.e2e
+@pytest.mark.core
+@pytest.mark.token_budget_parity
+@pytest.mark.model(MODEL)
+@pytest.mark.timeout(900)
+@pytest.mark.parametrize("spec", PARITY_SPECS)
+@pytest.mark.parametrize("ceiling_source", ["worker", "generation-config"])
+def test_worker_output_ceiling(
+    spec,
+    ceiling_source,
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
+    tmp_path,
+):
+    """Prove termination at a small configured ceiling, with EOS disabled."""
+    if ceiling_source == "generation-config" and spec.framework != "vllm":
+        pytest.skip("Explicit generation-config ceiling is a vLLM server control")
+    config = _dynamo_config(
+        spec, tmp_path, output_limit=32 if ceiling_source == "worker" else None
+    )
+    if ceiling_source == "generation-config":
+        config.script_args.extend(
+            ["--override-generation-config", '{"max_new_tokens":32}']
+        )
+    with managed_serve_deployment(config, request, ports=dynamo_dynamic_ports):
+        for stream in (False, True):
+            for requested in (None, 8, 32, 64):
+                outcome = _send_case(
+                    dynamo_dynamic_ports.frontend_port,
+                    RequestCase("output-overflow", "Hello", requested, stream),
+                )
+                assert outcome.status_code == 200
+                assert outcome.stream_error is None
+                assert outcome.usage is not None
+                assert outcome.usage.completion_tokens == min(requested or 32, 32)
+                assert outcome.finish_reason == "length"
+                if stream:
+                    assert outcome.stream_finished
+        response = requests.post(
+            f"http://127.0.0.1:{dynamo_dynamic_ports.frontend_port}/v1/completions",
+            json={
+                "model": MODEL,
+                "prompt": "Hello",
+                "max_tokens": 64,
+                "min_tokens": 33,
+            },
+            timeout=180,
+        )
+        try:
+            assert response.status_code == 400
+        finally:
+            response.close()

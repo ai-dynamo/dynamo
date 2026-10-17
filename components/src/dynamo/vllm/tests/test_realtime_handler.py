@@ -1002,7 +1002,8 @@ def test_cancellation_under_backpressure_closes_chat_stream(stop_context):
 
 
 @pytest.mark.parametrize("close_early", [False, True])
-def test_text_serving_closes_nested_engine_stream(monkeypatch, close_early):
+@pytest.mark.parametrize("requested", [None, 8, 32, 64])
+def test_text_serving_closes_nested_engine_stream(monkeypatch, close_early, requested):
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 
     from dynamo.vllm.realtime.factories import build_realtime_text_factories
@@ -1028,6 +1029,9 @@ def test_text_serving_closes_nested_engine_stream(monkeypatch, close_early):
         engine_stream = engine_output()
 
         async def create(self, request):
+            assert request.max_completion_tokens == (
+                32 if requested is None else min(requested, 32)
+            )
             return self.chat_completion_stream_generator(request, engine_stream)
 
         async def frames(self, request, result_generator):
@@ -1043,8 +1047,9 @@ def test_text_serving_closes_nested_engine_stream(monkeypatch, close_early):
             model_name=TEXT_MODEL,
             model_path=TEXT_MODEL,
             chat_template_path=None,
+            output_token_limit=32,
         )
-        stream = await factory([{"role": "user", "content": "Hi"}], 32)
+        stream = await factory([{"role": "user", "content": "Hi"}], requested)
         await anext(stream)
         if close_early:
             await stream.aclose()
