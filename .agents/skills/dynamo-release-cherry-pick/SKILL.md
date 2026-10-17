@@ -32,14 +32,18 @@ comment, or open pull requests unless the user asks.
 | Decision | `cherry-pick:approved` or `cherry-pick:rejected` | Release approver |
 | Landed | `cherry-pick:rcN` | Release PiC, at merge |
 
+The release approver (the release TPM) and the release PiC (person in charge
+of merges) are named in the branch-cut announcement for each release.
+
 - The stage labels form one exclusive group, so an issue holds one at a time.
 - `cherry-pick:release-only` is a separate tag outside the group. The release
   approver adds it beside `cherry-pick:approved` for a release-only change,
   and it stays on through `cherry-pick:rcN`.
 - A pick merged while RCn is the current release candidate gets
   `cherry-pick:rc(n+1)`, the build it first ships in.
-- Set the issue's **Releases** field to the target release (for example
-  `Dynamo v1.6.0`). Without it the pick does not appear on that release's
+- Add the target release to the issue's **Releases** field (for example
+  `Dynamo v1.6.0`) without removing releases already there, and read the
+  issue back to confirm it stuck. Without it the pick does not appear on that release's
   cherry-pick board.
 - `cherry-pick:rcN` is single-select, so an issue records one landing RC. An
   issue may carry several release PRs only when they all land in the same RC.
@@ -52,8 +56,8 @@ comment, or open pull requests unless the user asks.
 For a QA bug (an issue with a `qa:*` label), both the main PR and the release
 PR reference the issue with a non-closing word in the PR body: `Refs DYN-123`
 or `Part of DYN-123`. Never `Fixes`, `Closes`, or `Resolves`. A closing link
-moves the issue to Done when the main PR merges, and the bug-tracker sync then
-closes the bug before the fix reaches the release and QA verifies it. Linear
+moves the issue to Done when the main PR merges, and the NVBugs sync then
+closes the NVBug before the fix reaches the release and QA verifies it. Linear
 also treats an issue key in a branch name or PR title as a closing link, so
 keep the key out of both for these PRs.
 
@@ -124,9 +128,9 @@ Linear issue automatically; labels sync by name, the Releases field does not.
 
 A **sponsor** owns everything after that. The sponsor is the maintainer who
 merged the main PR or, for a release-only fix, the maintainer the release
-approver assigns. The sponsor sets the Releases field on the DGH issue, opens
-the release PR and attaches it to that issue, and keeps its CI green,
-following the internal steps above.
+approver assigns. The sponsor adds the release to the DGH issue's Releases
+field, opens the release PR with `Refs DGH-NNN` in its body so Linear attaches
+it, and keeps its CI green, following the internal steps above.
 
 ## Edge Cases
 

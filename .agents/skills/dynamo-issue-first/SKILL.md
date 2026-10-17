@@ -1,6 +1,6 @@
 ---
 name: dynamo-issue-first
-description: Ensures every piece of work in ai-dynamo/dynamo starts from a tracked issue and every pull request references one. Use when starting new work, opening or editing a pull request, or when the "PR Issue Link" check fails and needs remediation.
+description: Ensures every piece of work in ai-dynamo/dynamo starts from a tracked issue and every pull request references one. Use when starting new work, creating or sorting its Linear issue (release, feature project, milestone), opening or editing a pull request, or when the "PR Issue Link" check fails and needs remediation.
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -22,7 +22,8 @@ SPDX-License-Identifier: CC-BY-4.0
 
 Every pull request in this repository references the issue it implements, so
 work is traceable to a tracked task and release tracking stays live without
-manual reconciliation. The `PR Issue Link` CI check enforces this: advisory
+manual reconciliation. The `PR Issue Link` CI check enforces this on non-draft
+PRs into `main`: advisory
 today, required from the date named in its failure message.
 
 ## When to Use
@@ -57,8 +58,10 @@ When you create or update the Linear issue for your work, set its release and
 feature project yourself. You have the context; nobody sorts it after you.
 
 - **Content.** The Linear issue holds what the public PR must not: customer
-  names, NVBug ids and repro steps, internal threads, and roadmap context. The
-  PR references the issue and describes only the technical change.
+  names, NVBug ids and repro steps, internal threads, and roadmap context. Keep
+  that detail in an issue in your own team or DYN, never in DGH, which mirrors
+  to public GitHub. The PR references the issue and describes only the
+  technical change.
 - **Release.** Look up the Linear "Dynamo" release pipeline every time (Linear
   MCP `list_releases`, archived off) and take the release in "In Development".
   Never hardcode it or derive it from the version on `main`, which lags after a
@@ -93,7 +96,7 @@ Put at least one of these in the PR title or description:
 |---|---|
 | This PR completes the issue | `Fixes #123` or `Closes DYN-1234` |
 | The issue outlives this PR (multi-PR feature, tracking issue) | `Part of #123` or `refs DYN-1234` |
-| The issue is a QA bug (a `qa:*` label), or the fix still needs a release cherry-pick | `refs DYN-1234` or `Part of DYN-1234`, never a closing keyword |
+| The issue is a QA bug (a `qa:*` label) | `refs DYN-1234` or `Part of DYN-1234` in the description only, never a closing keyword, and the key out of the title |
 | The work implements a DEP | `Part of #<dep>` **and** a work issue of its own |
 | The issue lives in a sibling org repository | `ai-dynamo/<repo>#12` or the full issue URL |
 
@@ -101,8 +104,7 @@ Closing keywords close the issue on merge; non-closing forms link without
 closing, which is what a multi-PR feature issue needs. A QA bug must stay open
 until QA verifies the fix on a release candidate: closing it on the `main`
 merge closes the synced NVBug too early. `dynamo-release-cherry-pick` covers the
-release side. The reference must
-point at a real issue: the check verifies existence and does not count
+release side. The reference must point at a real issue: the check verifies existence and does not count
 pull-request numbers.
 
 A DEP does not satisfy the check on its own. It is a proposal umbrella that
