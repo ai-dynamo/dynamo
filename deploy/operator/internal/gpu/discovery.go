@@ -557,6 +557,10 @@ func ScrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, erro
 			TLSHandshakeTimeout: tlsHandshakeTimeout, // TLS handshake timeout
 		},
 	}
+
+	// Release this single-use transport's idle connections after the body closes.
+	defer client.CloseIdleConnections()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request for %s: %w", endpoint, err)
