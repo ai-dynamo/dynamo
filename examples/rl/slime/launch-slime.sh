@@ -28,10 +28,24 @@ export PYTHONPATH="${EXAMPLE_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
 read -r -a ENGINE_ADDRS <<<"${DYNAMO_ENGINE_ADDRS}"
 
+# Slime keeps only the last --custom-megatron-init-path, so a second value
+# would silently drop the SGLang weight-update session hook.
+for arg in "$@"; do
+    case "${arg}" in
+    --custom-megatron-init-path | --custom-megatron-init-path=*)
+        echo "launch-slime.sh sets --custom-megatron-init-path to" \
+            "sglang_weight_session.install. Call your hook from that module" \
+            "instead of passing the option." >&2
+        exit 2
+        ;;
+    esac
+done
+
 exec python3 "${SLIME_HOME}/train.py" \
     --rollout-external-engine-addrs "${ENGINE_ADDRS[@]}" \
     --rollout-function-path slime.rollout.sglang_rollout.generate_rollout \
     --custom-generate-function-path \
     dynamo_generate.generate_streaming \
     --sglang-incremental-streaming-output \
+    --custom-megatron-init-path sglang_weight_session.install \
     "$@"
