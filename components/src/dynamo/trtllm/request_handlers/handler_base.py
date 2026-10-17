@@ -61,6 +61,7 @@ from dynamo.trtllm.conversation_affinity import (
     engine_conversation_affinity_enabled,
 )
 from dynamo.trtllm.engine import TensorRTLLMEngine
+from dynamo.trtllm.health_check import HEALTH_CHECK_CACHE_SALT
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -1309,6 +1310,10 @@ class HandlerBase(BaseGenerativeHandler):
         # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
         cache_salt = request_cache_salt(request)
+        if cache_salt is None and request.get(HEALTH_CHECK_KEY):
+            # Keep the canary out of the unsalted namespace that TRT-LLM's
+            # attention-DP dummy requests match against.
+            cache_salt = HEALTH_CHECK_CACHE_SALT
 
         try:
             # NEW: Updated engine call to include multimodal data
