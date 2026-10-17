@@ -224,7 +224,11 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
 }
 
 /// Convert user-role content blocks into chat completion messages.
-/// Tool results become separate Tool messages; text/image blocks become user messages.
+///
+/// Each tool_result becomes a Tool message, emitted in block order. All text and
+/// image blocks are merged into one user message placed after them, so the tool
+/// results stay adjacent to the assistant tool_calls they answer even when a
+/// client puts text before a tool_result.
 fn convert_user_blocks(
     blocks: &[AnthropicContentBlock],
     messages: &mut Vec<ChatCompletionRequestMessage>,
@@ -256,10 +260,6 @@ fn convert_user_blocks(
                 content,
                 ..
             } => {
-                // Flush any accumulated content parts before the tool result message.
-                flush_user_content_parts(&mut content_parts, has_image, messages);
-                has_image = false;
-
                 let content = content
                     .as_ref()
                     .map(convert_tool_result_content)
@@ -283,7 +283,6 @@ fn convert_user_blocks(
         }
     }
 
-    // Flush remaining content parts.
     flush_user_content_parts(&mut content_parts, has_image, messages);
 
     Ok(())
@@ -2674,8 +2673,7 @@ mod tests {
     }
 
     #[test]
-    fn test_image_with_tool_result_flush() {
-        // Image + text should flush as Array before tool_result becomes a Tool message.
+    fn test_content_before_tool_result_follows_tool_message() {
         let req = AnthropicCreateMessageRequest {
             model: "test-model".into(),
             max_tokens: 100,
@@ -2701,6 +2699,11 @@ mod tests {
                     role: AnthropicRole::User,
                     content: AnthropicMessageContent::Blocks {
                         content: vec![
+                            AnthropicContentBlock::Text {
+                                text: "Here it is.".into(),
+                                citations: None,
+                                cache_control: None,
+                            },
                             AnthropicContentBlock::Image {
                                 source: AnthropicImageSource {
                                     source_type: "base64".into(),
@@ -2712,6 +2715,11 @@ mod tests {
                                 tool_use_id: "tool_1".into(),
                                 content: Some(ToolResultContent::Text("screenshot taken".into())),
                                 is_error: None,
+                                cache_control: None,
+                            },
+                            AnthropicContentBlock::Text {
+                                text: " What do you see?".into(),
+                                citations: None,
                                 cache_control: None,
                             },
                         ],
@@ -2736,17 +2744,30 @@ mod tests {
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        // user("What's the weather?"), assistant(tool_use), user(image), tool("screenshot taken")
+        // user("What's the weather?"), assistant(tool_use), tool("screenshot taken"),
+        // user(text, image, text)
         assert_eq!(chat_req.inner.messages.len(), 4);
 
-        // Third message: user with image (Array format, flushed before tool_result)
         match &chat_req.inner.messages[2] {
+            ChatCompletionRequestMessage::Tool(t) => assert_eq!(t.tool_call_id, "tool_1"),
+            other => panic!("expected tool message, got {other:?}"),
+        }
+
+        match &chat_req.inner.messages[3] {
             ChatCompletionRequestMessage::User(u) => match &u.content {
                 ChatCompletionRequestUserMessageContent::Array(parts) => {
-                    assert_eq!(parts.len(), 1);
+                    assert_eq!(parts.len(), 3);
                     assert!(matches!(
                         &parts[0],
+                        ChatCompletionRequestUserMessageContentPart::Text(t) if t.text == "Here it is."
+                    ));
+                    assert!(matches!(
+                        &parts[1],
                         ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+                    ));
+                    assert!(matches!(
+                        &parts[2],
+                        ChatCompletionRequestUserMessageContentPart::Text(t) if t.text == " What do you see?"
                     ));
                 }
                 other => panic!("expected Array content for image, got {other:?}"),
@@ -2754,11 +2775,8 @@ mod tests {
             other => panic!("expected user message, got {other:?}"),
         }
 
-        // Fourth message: tool result
-        assert!(matches!(
-            &chat_req.inner.messages[3],
-            ChatCompletionRequestMessage::Tool(_)
-        ));
+        crate::engines::ValidateRequest::validate(&chat_req)
+            .expect("tool result must pair with the preceding tool_use");
     }
 }
 
