@@ -93,7 +93,7 @@ spec:
                 sizeLimit: 200Gi
           containers:
             - name: main
-              image: vllm/vllm-openai:glm53-flash
+              image: vllm/vllm-openai:glm53-flash@sha256:2c6da6c6f16ed15c91e412d896dba13701f25fe1861eaec9ddaa4db34d1d21c4
               imagePullPolicy: IfNotPresent
               volumeMounts:
                 - name: model-cache
@@ -253,7 +253,7 @@ spec:
                 sizeLimit: 200Gi
           containers:
             - name: main
-              image: vllm/vllm-openai:glm53-flash
+              image: vllm/vllm-openai:glm53-flash@sha256:2c6da6c6f16ed15c91e412d896dba13701f25fe1861eaec9ddaa4db34d1d21c4
               imagePullPolicy: IfNotPresent
               volumeMounts:
                 - name: model-cache
