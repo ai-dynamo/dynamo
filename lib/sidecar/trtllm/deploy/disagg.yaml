@@ -109,7 +109,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
+              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:30001')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
             periodSeconds: 5
             timeoutSeconds: 10     # must exceed the RPC timeout + interpreter spawn
             failureThreshold: 60   # ~5 min for model load; raise for big models
@@ -118,7 +118,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
+              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:30001')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
@@ -176,7 +176,7 @@ spec:
           - --host
           - 127.0.0.1
           - --port
-          - "50051"
+          - "30001"
           # Workaround, not a requirement: `GetModelInfo` reads the unresolved
           # `llm.args.max_seq_len`, which stays `None` on the PyTorch path even
           # though the executor has already resolved the real window from the
@@ -202,7 +202,7 @@ spec:
           - --disaggregation-mode
           - prefill
           - --grpc-endpoint
-          - 127.0.0.1:50051
+          - 127.0.0.1:30001
           - --model-path
           - Qwen/Qwen3-0.6B
           # Matches the engine's --max_seq_len above.
@@ -234,7 +234,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
+              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:30001')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
             periodSeconds: 5
             timeoutSeconds: 10
             failureThreshold: 60
@@ -243,7 +243,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
+              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:30001')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
@@ -289,7 +289,7 @@ spec:
           - --host
           - 127.0.0.1
           - --port
-          - "50051"
+          - "30001"
           - --max_seq_len
           - "4096"
           - --extra_llm_api_options
@@ -303,7 +303,7 @@ spec:
           - --disaggregation-mode
           - decode
           - --grpc-endpoint
-          - 127.0.0.1:50051
+          - 127.0.0.1:30001
           - --model-path
           - Qwen/Qwen3-0.6B
           - --context-length
