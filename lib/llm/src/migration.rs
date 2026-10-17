@@ -105,6 +105,15 @@ fn is_migration_eligible(reason: &ErrorReason) -> bool {
     )
 }
 
+fn has_generation_artifact(request: &PreprocessedRequest) -> bool {
+    request
+        .extra_args
+        .as_ref()
+        .and_then(|extra| extra.pointer("/nvext/metadata_upload/kind"))
+        .and_then(serde_json::Value::as_str)
+        == Some("generation_artifact")
+}
+
 fn migratable_error_in_chain<'a>(err: &'a (dyn StdError + 'static)) -> Option<&'a DynamoError> {
     let mut migratable = None;
     let mut current = Some(err);
@@ -388,6 +397,14 @@ where
             if retries_left > 0 {
                 tracing::warn!(
                     "n>1 request: migration disabled - per-choice generation state is not transferable"
+                );
+            }
+            retries_left = 0;
+        }
+        if has_generation_artifact(&preprocessed_request) {
+            if retries_left > 0 {
+                tracing::warn!(
+                    "Generation-artifact request: migration disabled because capture state cannot be replayed"
                 );
             }
             retries_left = 0;
@@ -914,6 +931,46 @@ mod tests {
         assert_eq!(source.reason().as_str(), "capacity.worker_overloaded");
     }
 
+    #[test]
+    fn pre_stream_validation_refusal_is_not_a_transport_failure() {
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        for error_type in [
+            ErrorType::InvalidArgument,
+            ErrorType::Backend(BackendError::InvalidArgument),
+            ErrorType::InvalidRequest,
+        ] {
+            let worker_error = DynamoError::builder()
+                .error_type(error_type)
+                .message("missing kwargs_data")
+                .build();
+            let err = pre_stream_failure_error(StreamPrologueError::new(
+                format!("Generate Error: {worker_error}"),
+                worker_error,
+            ));
+            assert_eq!(err.class(), ErrorType::InvalidRequest, "{error_type:?}");
+            assert!(
+                !error::match_error_chain(&err, &[ErrorType::CannotConnect], &[]),
+                "{error_type:?} must not carry a CannotConnect ancestor"
+            );
+            assert!(!is_migratable(&err), "{error_type:?} must not migrate");
+        }
+
+        let shutdown = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+            .message("engine is shutting down")
+            .build();
+        for prologue in [
+            StreamPrologueError::new("Generate Error: engine is shutting down", shutdown),
+            StreamPrologueError::from_message("Generate Error: legacy worker"),
+        ] {
+            let err = pre_stream_failure_error(prologue);
+            assert_eq!(err.error_type(), ErrorType::CannotConnect, "{err}");
+            assert!(is_migratable(&err), "{err}");
+        }
+    }
+
     // dynamo-runtime cannot import this module, so the addressed router keeps a copy.
     #[test]
     fn migration_sensitive_reasons_match_the_blocking_set() {
@@ -1076,6 +1133,38 @@ mod tests {
             .annotations(vec![])
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn generation_artifact_disables_request_migration() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mut request = create_mock_request(1);
+        request.extra_args = Some(serde_json::json!({
+            "nvext": {"metadata_upload": {"kind": "generation_artifact", "mode": "inline_base64", "contents": []}}
+        }));
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> = Arc::new(
+            MockEngine::new(MockBehavior::Success, 1, 100, context_id.clone()),
+        );
+        let manager = RetryManager::build(
+            Arc::new(Controller::new(context_id)),
+            BTreeMap::new(),
+            request,
+            engine,
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(manager.retries_left, 0);
+        assert!(manager.request.migration_state.is_none());
+
+        let mut legacy = create_mock_request(1);
+        legacy.extra_args =
+            Some(serde_json::json!({"nvext": {"metadata_upload": {"url": "s3://bucket/key"}}}));
+        assert!(!has_generation_artifact(&legacy));
     }
 
     // Helper to create mock LLM engine output
