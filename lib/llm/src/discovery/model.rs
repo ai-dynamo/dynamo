@@ -691,22 +691,40 @@ impl Model {
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
+    /// Select a chat engine, restricted to WorkerSets advertising every
+    /// capability in `required_capabilities`.
     pub fn get_chat_engine_with_parsing(
         &self,
+        required_capabilities: &[&str],
     ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
-        self.select_worker_set_with(|ws| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
-            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
+        self.select_worker_set_with(|ws| {
+            supports_capabilities(ws, required_capabilities)
+                .then(|| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
+                .flatten()
+        })
+        .ok_or_else(|| {
+            self.capability_engine_error(required_capabilities, WorkerSet::has_chat_engine)
+        })
     }
 
+    /// Select a completions engine, restricted to WorkerSets advertising every
+    /// capability in `required_capabilities`.
     pub fn get_completions_engine_with_parsing(
         &self,
+        required_capabilities: &[&str],
     ) -> Result<(OpenAICompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
         self.select_worker_set_with(|ws| {
-            ws.completions_engine
-                .clone()
-                .map(|e| (e, ws.parsing_options()))
+            supports_capabilities(ws, required_capabilities)
+                .then(|| {
+                    ws.completions_engine
+                        .clone()
+                        .map(|e| (e, ws.parsing_options()))
+                })
+                .flatten()
         })
-        .ok_or_else(|| self.engine_error(self.has_completions_engine()))
+        .ok_or_else(|| {
+            self.capability_engine_error(required_capabilities, WorkerSet::has_completions_engine)
+        })
     }
 
     pub fn get_generate_engine_with_parsing(
@@ -762,6 +780,33 @@ impl Model {
         } else {
             ModelManagerError::ModelNotFound(self.name.clone())
         }
+    }
+
+    /// Like [`Self::engine_error`], but distinguishes a model whose serving
+    /// WorkerSets exist yet none advertises all of `required_capabilities`.
+    fn capability_engine_error(
+        &self,
+        required_capabilities: &[&str],
+        has_engine: fn(&WorkerSet) -> bool,
+    ) -> ModelManagerError {
+        let mut engine_exists = false;
+        let mut capable_engine_exists = false;
+        for ws in self.worker_sets.load().values() {
+            if has_engine(ws) {
+                engine_exists = true;
+                capable_engine_exists |= supports_capabilities(ws, required_capabilities);
+            }
+        }
+        if engine_exists && !capable_engine_exists {
+            return ModelManagerError::CapabilityUnsupported {
+                model: self.name.clone(),
+                capabilities: required_capabilities
+                    .iter()
+                    .map(|capability| capability.to_string())
+                    .collect(),
+            };
+        }
+        self.engine_error(engine_exists)
     }
 
     // -- Internal selection --
@@ -847,11 +892,19 @@ impl Model {
     }
 }
 
+/// Whether `ws` advertises every capability a request needs.
+fn supports_capabilities(ws: &WorkerSet, required_capabilities: &[&str]) -> bool {
+    required_capabilities
+        .iter()
+        .all(|capability| ws.supports_runtime_capability(capability))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::local_model::runtime_config::{
         VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        VLLM_XARGS_CAPABILITY,
     };
     use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::protocols::common::preprocessor::PreprocessedRequest;
@@ -1925,6 +1978,94 @@ mod tests {
         model.add_worker_set("ns1".to_string(), Arc::new(ws));
 
         assert!(model.is_ready_to_serve());
+    }
+
+    /// In-process chat WorkerSet whose card names it via `tool_call_parser`, so
+    /// the selected set is observable through its parsing options.
+    fn chat_worker_set(namespace: &str, name: &str, capabilities: &[&str]) -> Arc<WorkerSet> {
+        let mut card = ModelDeploymentCard::default();
+        card.runtime_config.tool_call_parser = Some(name.to_string());
+        for capability in capabilities {
+            card.runtime_config
+                .set_engine_specific(capability, true)
+                .unwrap();
+        }
+        let mut ws = WorkerSet::new(namespace.to_string(), format!("{name}-mdc"), card);
+        ws.chat_engine = Some(make_test_chat_engine());
+        Arc::new(ws)
+    }
+
+    #[test]
+    fn capability_requirement_rejects_model_without_capable_workers() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), chat_worker_set("ns1", "other", &[]));
+
+        assert!(model.get_chat_engine_with_parsing(&[]).is_ok());
+        match model.get_chat_engine_with_parsing(&[VLLM_XARGS_CAPABILITY]) {
+            Err(ModelManagerError::CapabilityUnsupported {
+                model,
+                capabilities,
+            }) => {
+                assert_eq!(model, "llama");
+                assert_eq!(capabilities, [VLLM_XARGS_CAPABILITY]);
+            }
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("worker without the capability must not be selected"),
+        }
+        assert!(matches!(
+            model.get_completions_engine_with_parsing(&[VLLM_XARGS_CAPABILITY]),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn capability_requirement_selects_only_capable_worker_sets() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), chat_worker_set("ns1", "other", &[]));
+        model.add_worker_set(
+            "ns2".to_string(),
+            chat_worker_set("ns2", "vllm", &[VLLM_XARGS_CAPABILITY]),
+        );
+
+        for _ in 0..64 {
+            let (_, parsing) = model
+                .get_chat_engine_with_parsing(&[VLLM_XARGS_CAPABILITY])
+                .unwrap();
+            assert_eq!(parsing.tool_call_parser.as_deref(), Some("vllm"));
+        }
+    }
+
+    #[test]
+    fn capability_requirement_needs_one_worker_set_supporting_all() {
+        const OTHER: &str = "other_capability";
+        let model = Model::new("llama".to_string());
+        model.add_worker_set(
+            "ns1".to_string(),
+            chat_worker_set("ns1", "xargs-only", &[VLLM_XARGS_CAPABILITY]),
+        );
+        model.add_worker_set(
+            "ns2".to_string(),
+            chat_worker_set("ns2", "other-only", &[OTHER]),
+        );
+        let required = [VLLM_XARGS_CAPABILITY, OTHER];
+
+        // Each capability is served somewhere, but no single WorkerSet has both.
+        match model.get_chat_engine_with_parsing(&required) {
+            Err(ModelManagerError::CapabilityUnsupported { capabilities, .. }) => {
+                assert_eq!(capabilities, required);
+            }
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("a WorkerSet lacking one capability must not be selected"),
+        }
+
+        model.add_worker_set(
+            "ns3".to_string(),
+            chat_worker_set("ns3", "both", &[VLLM_XARGS_CAPABILITY, OTHER]),
+        );
+        for _ in 0..64 {
+            let (_, parsing) = model.get_chat_engine_with_parsing(&required).unwrap();
+            assert_eq!(parsing.tool_call_parser.as_deref(), Some("both"));
+        }
     }
 
     /// Build a chat completions engine backed by the in-tree echo engine.
