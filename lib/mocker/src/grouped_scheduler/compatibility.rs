@@ -47,6 +47,10 @@ impl CompatibilityState {
             .insert(request_id, request.tokens.len());
         Request {
             request_id,
+            session_id: request
+                .replay_context
+                .as_ref()
+                .and_then(|context| context.session_id().map(str::to_owned)),
             tokens: request.tokens,
             max_output_tokens: request.max_output_tokens,
             output_token_ids: request.output_token_ids,
@@ -131,6 +135,7 @@ impl CompatibilityState {
                     },
                     full_prompt_tokens: transfer_timing.full_prompt_tokens,
                     kv_bytes_per_token: transfer_timing.kv_bytes_per_token,
+                    state_bytes: transfer_timing.state_bytes,
                     bandwidth_gb_s: transfer_timing.bandwidth_gb_s,
                 },
             },
@@ -302,5 +307,26 @@ mod tests {
 
         assert!(handoffs.dynamo(target_native).is_err());
         assert_eq!(handoffs.dynamo(unrelated_native).unwrap(), unrelated);
+    }
+
+    #[test]
+    fn native_request_preserves_normalized_session_identity() {
+        let state =
+            CompatibilityState::new(MockerConfig::from_value(serde_json::json!({})).unwrap());
+        for (authored, expected) in [("session-a", Some("session-a")), ("  ", None)] {
+            let request: DirectRequest = serde_json::from_value(serde_json::json!({
+                "tokens": [1, 2],
+                "max_output_tokens": 1,
+                "uuid": null,
+                "dp_rank": 0,
+                "arrival_timestamp_ms": null,
+                "replay_context": {"session_id": authored}
+            }))
+            .unwrap();
+            assert_eq!(
+                state.native_request(request).session_id.as_deref(),
+                expected
+            );
+        }
     }
 }

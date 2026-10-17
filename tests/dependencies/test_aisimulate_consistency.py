@@ -169,6 +169,7 @@ def test_planner_ci_image_collects_unified_cli_e2e_tests() -> None:
         pytest.skip("planner Dockerfile is not staged in this component image")
     planner_template = planner_dockerfile.read_text(encoding="utf-8")
 
+    assert "components/src/dynamo/replay/tests/test_speculation.py" in planner_template
     assert "components/src/dynamo/replay/tests/e2e" in planner_template
     assert "components/src/dynamo/replay/tests/test_main.py" not in planner_template
 

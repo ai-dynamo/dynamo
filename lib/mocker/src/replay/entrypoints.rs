@@ -2645,8 +2645,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.per_request.len(), 1);
-        assert_eq!(report.per_request[0].session_id, None);
-        assert_eq!(report.per_request[0].turn_index, None);
+        assert_eq!(
+            report.per_request[0].session_id.as_deref(),
+            Some("request_1")
+        );
+        assert_eq!(report.per_request[0].turn_index, Some(0));
     }
 
     #[test]

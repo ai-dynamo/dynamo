@@ -58,6 +58,9 @@ pub struct HandoffTransferTiming {
     pub mode: KvTransferTimingMode,
     pub full_prompt_tokens: usize,
     pub kv_bytes_per_token: Option<usize>,
+    /// Request-level state transferred once, independently of the KV token count.
+    #[serde(default)]
+    pub state_bytes: usize,
     pub bandwidth_gb_s: Option<f64>,
 }
 
@@ -258,6 +261,7 @@ fn replay_timing(timing: HandoffTransferTiming) -> aisimulate_core::replay::Hand
         },
         full_prompt_tokens: timing.full_prompt_tokens,
         kv_bytes_per_token: timing.kv_bytes_per_token,
+        state_bytes: timing.state_bytes,
         bandwidth_gb_s: timing.bandwidth_gb_s,
     }
 }

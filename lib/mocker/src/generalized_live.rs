@@ -800,6 +800,7 @@ mod tests {
     fn request(id: u128, prompt_len: usize, output_len: usize) -> Request {
         Request {
             request_id: Uuid::from_u128(id),
+            session_id: None,
             tokens: (0..prompt_len as u32).collect(),
             max_output_tokens: output_len,
             output_token_ids: Some((0..output_len as u32).map(|token| token + 10_000).collect()),
@@ -1939,6 +1940,7 @@ mod tests {
         );
         let prompt = |id: u128, first_token: u32| Request {
             request_id: Uuid::from_u128(id),
+            session_id: None,
             tokens: (first_token..first_token + 4).collect(),
             max_output_tokens: 3,
             output_token_ids: Some(vec![10_000, 10_001, 10_002]),
