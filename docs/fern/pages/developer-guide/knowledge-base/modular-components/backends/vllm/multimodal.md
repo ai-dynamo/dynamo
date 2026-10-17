@@ -503,7 +503,15 @@ python launch/realtime_audio_client.py --session-type transcription \
   --url ws://localhost:8000/v1/realtime --model Qwen/Qwen3-ASR-1.7B
 ```
 
-The session accepts 24 kHz PCM16 input, which the worker resamples to 16 kHz without PyAV. The model transcribes each 5-second segment as it arrives. Each segment's text starts on a new line with its own `language <Language><asr_text>` prefix, and a very short final segment can repeat the previous segment's text.
+The session accepts 24 kHz PCM16 input, which the worker resamples to 16 kHz with `scipy`. The Dynamo vLLM runtime images do not include `scipy`, and without it the session returns an empty transcript while the worker log shows `ModuleNotFoundError: No module named 'scipy'`. Install it where the worker runs:
+
+```bash
+pip install 'scipy>=1.14,<2'
+```
+
+The model transcribes each 5-second segment as it arrives. Each segment's text starts on a new line with its own `language <Language><asr_text>` prefix, and a very short final segment can repeat the previous segment's text.
+
+[`agg_asr_realtime.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_asr_realtime.yaml) deploys streaming transcription as a DynamoGraphDeployment. A `--realtime` worker cannot be combined with `--enable-multimodal`, so it serves only `/v1/realtime`. Deploy `agg_asr.yaml` for `/v1/chat/completions`. Run the worker from an image with `scipy` installed.
 
 ## Embedding Cache
 
