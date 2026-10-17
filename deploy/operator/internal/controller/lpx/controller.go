@@ -39,6 +39,7 @@ type graphReconciler struct {
 	modelRegistry         lpx.ModelRegistry
 	config                *configv1alpha1.OperatorConfiguration
 	dockerSecretRetriever dynamo.SecretsRetriever
+	apiReader             client.Reader
 
 	client.Client
 }
@@ -54,6 +55,7 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 		runtimeConfig:         runtimeConfig,
 		config:                config,
 		dockerSecretRetriever: secrets,
+		apiReader:             mgr.GetAPIReader(),
 		Client:                mgr.GetClient(),
 	}
 
@@ -84,6 +86,7 @@ func (r *graphReconciler) GetRecorder() events.EventRecorder {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets/finalizers,verbs=update
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale;podcliquescalinggroups/scale,verbs=update
 // +kubebuilder:rbac:groups=scheduling.lpu.nvidia.com,resources=lpupipelinerequests,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;delete
 
 // Reconcile observes dependencies once, then persists the final child status.
 // Workload observations use the cache; Grove validates writes against its installed API.
@@ -193,6 +196,8 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 // A nil pcs means initial creation, with no pcsgs, pclqs or requests. Otherwise
 // pcsgs contains every configured group; pclqs contains owned, non-deleting cliques.
 // On error, Reconcile persists status before applying deadline retries.
+//
+//nolint:gocyclo // Keep lifecycle ordering explicit in one reconciliation path.
 func (r *graphReconciler) reconcileWorkloads(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
@@ -209,12 +214,12 @@ func (r *graphReconciler) reconcileWorkloads(
 	}
 
 	// Share the rendered identities with capacity management and request publication.
-	desiredPCS, resources, err := r.renderPodCliqueSet(ctx, deployment, dgd, workloads, plans, pcs)
+	desiredPCS, resources, err := r.renderDesiredPodCliqueSet(ctx, deployment, dgd, workloads, plans, pcs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Grove rolls compatible layouts; immutable structure or OnDelete builds replace the PCS.
+	// Grove rolls compatible layouts; immutable structure changes replace the PCS.
 	if pcs != nil && !podCliqueSetLayoutMatches(pcs, desiredPCS) {
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the previous PodCliqueSet and its requests to be deleted")
 		return ctrl.Result{}, deletePodCliqueSet(ctx, r, pcs)
@@ -298,6 +303,11 @@ func (r *graphReconciler) reconcileWorkloads(
 		setScalingDeferredCondition(deployment, scalingRequired)
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the PodCliqueSet cache observation")
 		return ctrl.Result{}, nil
+	}
+
+	// The LPX scheduler waits for old Agent Pods to disappear before releasing the placement.
+	if err := r.removeReleasedAgentPods(ctx, pcsgs, desiredRequests); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Scale owned groups only when the rollout permits replica writes.
@@ -634,9 +644,7 @@ func (r *graphReconciler) deleteUnusedConfigMaps(ctx context.Context, deployment
 }
 
 // podCliqueSetLayoutMatches compares the variable immutable fields emitted by LPX.
-// OnDelete also fixes the workload digests; the desired strategy governs transitions.
 func podCliqueSetLayoutMatches(observed, desired *grovev1alpha1.PodCliqueSet) bool {
-	onDelete := desired.Spec.UpdateStrategy != nil && desired.Spec.UpdateStrategy.Type == grovev1alpha1.OnDeleteStrategy
 	layout := func(pcs *grovev1alpha1.PodCliqueSet) grovev1alpha1.PodCliqueSetTemplateSpec {
 		result := grovev1alpha1.PodCliqueSetTemplateSpec{TopologyConstraint: pcs.Spec.Template.TopologyConstraint}
 		for _, clique := range pcs.Spec.Template.Cliques {
@@ -646,11 +654,8 @@ func podCliqueSetLayoutMatches(observed, desired *grovev1alpha1.PodCliqueSet) bo
 			})
 		}
 		for _, group := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
-			// Grove defaults this mutable rollout policy; it does not change the layout.
-			group.RollingUpdate = nil
-			if !onDelete {
-				group.Annotations = nil
-			}
+			// Grove defaults the rollout policy and rolls workload digests; neither changes the layout.
+			group.RollingUpdate, group.Annotations = nil, nil
 			result.PodCliqueScalingGroupConfigs = append(result.PodCliqueScalingGroupConfigs, group)
 		}
 		return result

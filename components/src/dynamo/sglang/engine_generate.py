@@ -125,4 +125,8 @@ async def native_generate_stream(
 ) -> AsyncIterator[dict[str, Any]]:
     """Dispatch exactly as SGLang native ``/generate`` handler does."""
     async for response in engine.tokenizer_manager.generate_request(request, None):
-        yield {"token_ids": [], "engine_data": {"sglang_response": response}}
+        # The router counts output from token_ids; clients get the opaque response.
+        yield {
+            "token_ids": response.get("output_ids") or [],
+            "engine_data": {"sglang_response": response},
+        }
