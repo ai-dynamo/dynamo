@@ -21,6 +21,7 @@ from dynamo.sglang.engine_generate import (
     native_generate_stream,
     new_sglang_request_id,
 )
+from dynamo.sglang.kv_hints import kv_hint_kwargs
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import (
@@ -261,6 +262,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 lora_path=lora_path,
                 **priority_kwargs,
                 **agent_session_kwargs(self.engine, inner_request),
+                **kv_hint_kwargs(self.engine, inner_request),
             )
         if inner_request.get(HEALTH_CHECK_KEY):
             # Canary: stream engine output so the Rust canary sees scheduler output.
