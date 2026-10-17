@@ -18,6 +18,7 @@ from typing import Optional
 
 import uvloop
 
+from dynamo.common.utils.fd_limit import raise_fd_limit
 from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.llm import AisPerfConfig, KvRouter, KvRouterConfig
 from dynamo.router.args import (
@@ -238,6 +239,7 @@ async def worker(runtime: DistributedRuntime):
 
 def main():
     """Entry point for the standalone router service."""
+    raise_fd_limit()
     uvloop.run(worker())
 
 
