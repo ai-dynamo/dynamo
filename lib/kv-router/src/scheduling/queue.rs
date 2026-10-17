@@ -21,7 +21,7 @@ use super::overlap::SelectedWorkerTierSnapshot;
 use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
 };
-use super::policy_config::{PolicyClassConfig, PolicyProfile};
+use super::policy_config::{BusyThresholds, PolicyClassConfig, PolicyProfile};
 use super::policy_queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
@@ -32,6 +32,7 @@ use super::types::{
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
     SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
 };
+use crate::plugins::worker_selection::{WorkerCapacity, WorkerLoadInput};
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, SelectionTrace, SelectionTraceSpec, WorkerConfigLike,
     WorkerId, WorkerSelectionResult, WorkerWithDpRank,
@@ -1248,12 +1249,12 @@ impl<
                 .and_then(|provider| provider(&request));
             let should_queue = class.queueing_enabled()
                 && (self.pending.has_backlog(class_index) || {
-                    let active_tokens = self.slots.active_tokens(decay_now);
+                    let worker_loads = self.slots.project_worker_loads(None, decay_now);
                     let configs = self.workers_with_configs.borrow();
-                    Self::all_workers_prefill_busy_with(
-                        &active_tokens,
+                    Self::all_eligible_workers_full(
+                        &worker_loads,
                         &configs,
-                        class,
+                        class.busy_thresholds(),
                         request
                             .eligibility()
                             .with_available_workers(available.as_deref()),
@@ -1417,22 +1418,22 @@ impl<
 
     fn has_dispatchable_ready_head(&self) -> bool {
         let decay_now = Instant::now();
-        let mut active_tokens = None;
+        let mut worker_loads = None;
         self.pending.any_ready_head(|_, class, queued| {
             if !class.queueing_enabled() {
                 return true;
             }
-            let active_tokens =
-                active_tokens.get_or_insert_with(|| self.slots.active_tokens(decay_now));
+            let worker_loads = worker_loads
+                .get_or_insert_with(|| self.slots.project_worker_loads(None, decay_now));
             let available = self
                 .available_worker_provider
                 .as_ref()
                 .and_then(|provider| provider(&queued.request));
             let configs = self.workers_with_configs.borrow();
-            !Self::all_workers_prefill_busy_with(
-                active_tokens,
+            !Self::all_eligible_workers_full(
+                worker_loads,
                 &configs,
-                class,
+                class.busy_thresholds(),
                 queued
                     .request
                     .eligibility()
@@ -1514,7 +1515,7 @@ impl<
             let decay_now = Instant::now();
             // Share a capacity snapshot within this pass only. The next admission
             // must observe the capacity reserved by the previous one.
-            let mut active_tokens = None;
+            let mut worker_loads = None;
             let popped = {
                 let slots = &self.slots;
                 let provider = self.available_worker_provider.as_ref();
@@ -1523,17 +1524,17 @@ impl<
                     if !class.queueing_enabled() {
                         return true;
                     }
-                    let active_tokens =
-                        active_tokens.get_or_insert_with(|| slots.active_tokens(decay_now));
+                    let worker_loads = worker_loads
+                        .get_or_insert_with(|| slots.project_worker_loads(None, decay_now));
                     let available = provider.and_then(|provider| provider(&queued.request));
                     let configs = workers.borrow();
                     // TODO: This preserves head-of-line blocking within each policy
                     // class. A blocked constrained head can stall later entries in
                     // that class until a bounded non-HOL policy is introduced.
-                    !Self::all_workers_prefill_busy_with(
-                        active_tokens,
+                    !Self::all_eligible_workers_full(
+                        worker_loads,
                         &configs,
-                        class,
+                        class.busy_thresholds(),
                         queued
                             .request
                             .eligibility()
@@ -1946,32 +1947,34 @@ impl<
         })
     }
 
-    fn all_workers_prefill_busy_with(
-        active_tokens: &HashMap<crate::protocols::WorkerWithDpRank, usize>,
+    /// Whether every eligible rank is past `limits`, judged on the same `LOAD` row worker
+    /// selection reads.
+    fn all_eligible_workers_full(
+        worker_loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
         configs: &HashMap<WorkerId, C>,
-        class: &PolicyClassConfig,
+        limits: BusyThresholds,
         eligibility: RoutingEligibility<'_>,
     ) -> bool {
+        let has_room = |worker: WorkerWithDpRank, config: &C| {
+            let load = worker_loads
+                .get(&worker)
+                .copied()
+                .map(WorkerLoadInput::from_projection)
+                .unwrap_or_default();
+            limits.has_room(&load, WorkerCapacity::of(config))
+        };
+
         if let Some(worker) = eligibility.pinned_worker() {
             let Ok(config) = eligibility.validate_worker_rank(configs, worker) else {
                 return false;
             };
-
-            let max_batched = config
-                .max_num_batched_tokens()
-                .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
-            let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
-            return class.worker_is_busy(tokens, max_batched);
+            return !has_room(worker, config);
         }
 
         let mut checked_any = false;
         let has_available = eligibility.any_eligible_worker_rank(configs, |worker, config| {
             checked_any = true;
-            let max_batched = config
-                .max_num_batched_tokens()
-                .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
-            let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
-            !class.worker_is_busy(tokens, max_batched)
+            has_room(worker, config)
         });
 
         checked_any && !has_available

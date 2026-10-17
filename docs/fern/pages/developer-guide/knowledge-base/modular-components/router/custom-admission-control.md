@@ -277,6 +277,8 @@ Dynamo builds these rows with the same code that worker selection uses, so `CACH
 - Worker selection takes its own snapshot when it picks a worker, so it can pick a different worker than the classifier expected. Use `set_worker_selection_target` to state a preference.
 - Do not keep the view after the callback returns.
 
+To ask whether a rank has room, declare `WorkerInputs::LOAD | WorkerInputs::CAPACITY` and call `BusyThresholds::has_room` with the row's `load()` and `capacity()`. The policy-class queue runs the same function on the same row to decide when queued requests wait.
+
 ### Admission Decisions
 
 | Setter | Effect |
