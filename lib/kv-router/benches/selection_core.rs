@@ -90,7 +90,16 @@ fn core_with_config(
     core
 }
 
-/// Store the first `blocks` blocks of the prompt on `worker_id`.
+/// A runtime for one core. Dropping it drops the core's per-worker ZMQ
+/// listener tasks, which otherwise outlive the core and exhaust file
+/// descriptors at thousands of workers.
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+}
+
 async fn seed_prefix(core: &SelectionCore, worker_id: u64, blocks: usize) {
     let key = RoutingPartitionId::new("default", "default");
     let local_hashes =
@@ -160,15 +169,12 @@ fn reserve_request(selection_id: String) -> SelectAndReserveRequest {
 }
 
 fn bench_select_and_reserve(c: &mut Criterion) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
     let mut group = c.benchmark_group("selection_core/select_and_reserve_then_free");
     group.measurement_time(Duration::from_secs(5));
     group.throughput(Throughput::Elements(1));
     for &workers in &[8u64, 64, 512] {
         for hints in [false, true] {
+            let runtime = runtime();
             let core = core_with_workers(&runtime, workers, hints);
             let mut sequence = 0u64;
             group.bench_with_input(
@@ -200,10 +206,6 @@ fn bench_select_and_reserve(c: &mut Criterion) {
 /// worker is a fetch source and every unpinned booking chooses one.
 /// `credit` scores fetchable blocks (`shared_cache_multiplier: 0.5`).
 fn bench_fetch_sources(c: &mut Criterion) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
     let mut group = c.benchmark_group("selection_core/fetch_sources");
     group.measurement_time(Duration::from_secs(5));
     group.throughput(Throughput::Elements(1));
@@ -216,6 +218,7 @@ fn bench_fetch_sources(c: &mut Criterion) {
                 shared_cache_multiplier: Some(multiplier),
                 ..Default::default()
             };
+            let runtime = runtime();
             let core = core_with_config(&runtime, workers, true, config);
             runtime.block_on(async {
                 for worker_id in 1..=workers {
