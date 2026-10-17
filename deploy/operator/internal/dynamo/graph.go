@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
+	"path"
 	"regexp"
 	"slices"
 	"sort"
@@ -3314,11 +3315,16 @@ func GetDGDPreservedAlphaPVCs(dgd *v1beta1.DynamoGraphDeployment) []v1alpha1.PVC
 
 // DetectBackendFrameworkFromArgs detects the backend framework from command/args.
 func DetectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
+	// Kubernetes command is argv, not shell source. Wrapped native launches
+	// require an explicit backendFramework rather than shell interpretation.
+	if len(command) > 0 && !strings.Contains(command[0], "$(") && path.Base(command[0]) == "vllm-rs" {
+		return BackendFrameworkVLLM, nil
+	}
+
 	// Combine command and args to search through all parts
-	allParts := append(command, args...)
+	allParts := slices.Concat(command, args)
 	fullCommand := strings.Join(allParts, " ")
 
-	// Pattern to match python -m dynamo.{backend}.something
 	patterns := map[BackendFramework]*regexp.Regexp{
 		BackendFrameworkVLLM:   regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.vllm[^|&;]*`),
 		BackendFrameworkSGLang: regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.sglang[^|&;]*`),
@@ -3516,7 +3522,7 @@ func GenerateBasePodSpecForController(
 
 	numberOfNodes := componentSpec.GetNumberOfNodes()
 
-	// Determine backend framework using hybrid approach
+	// Backend configuration belongs to the engine in main, independently of the runtime launch.
 	var command, args []string
 	if main := GetMainContainer(componentSpec); main != nil {
 		command = main.Command
