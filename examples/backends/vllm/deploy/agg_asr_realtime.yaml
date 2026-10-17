@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Aggregated streaming speech recognition (ASR) with Qwen3-ASR over /v1/realtime.
+#
+# - The worker serves vLLM's native Qwen3-ASR realtime architecture, selected
+#   with --hf-overrides. --realtime cannot be combined with
+#   --enable-multimodal, so this worker does not serve /v1/chat/completions;
+#   use agg_asr.yaml for that.
+# - Realtime models register as text passthrough, so the frontend needs no
+#   chat processor or audio handoff settings.
+# - Clients stream 24 kHz PCM16 audio over a WebSocket. See
+#   launch/realtime_audio_client.py.
+# - The worker resamples the stream to 16 kHz with scipy, which the vLLM
+#   runtime image does not include. Run the worker from an image with
+#   scipy installed; without it, each session ends with an empty transcript.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-asr-realtime
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: worker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-ASR-1.7B
+          - --realtime
+          - --enforce-eager
+          - --hf-overrides
+          - '{"architectures":["Qwen3ASRRealtimeGeneration"]}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 10Gi
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: worker
