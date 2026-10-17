@@ -10,11 +10,23 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 
 <ExampleSelector
   variants={[
+    {"id": "kubernetes-sglang-agg-embed-yaml", "target": "kubernetes:sglang", "label": "agg_embed.yaml", "description": "Text Embeddings"},
     {"id": "local-sglang-agg-embed-sh", "target": "local:sglang", "label": "agg_embed.sh", "description": "Text Embeddings"},
     {"id": "local-vllm-agg-embed-sh", "target": "local:vllm", "label": "agg_embed.sh", "description": "Text Embeddings"},
     {"id": "local-vllm-agg-embed-multiworker-sh", "target": "local:vllm", "label": "agg_embed_multiworker.sh", "description": "Embedding Load Balancing and Model Dispatch"}
   ]}
 >
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-agg-embed-yaml">
+
+This template serves `Qwen/Qwen3-Embedding-0.6B` on one GPU; the local script defaults to
+`Qwen/Qwen3-Embedding-4B`.
+
+[Source: `agg_embed.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_embed.yaml)
+
+<Code src="../../../../../examples/backends/sglang/deploy/agg_embed.yaml" title="agg_embed.yaml" language="yaml" maxLines={0} />
+
+</div>
 
 <div className="dynamo-example-variant" data-example-variant="local-sglang-agg-embed-sh">
 

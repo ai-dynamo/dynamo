@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 title: Workload Examples
 sidebar-title: Overview
-subtitle: Explore LoRA, embeddings, classification, and realtime audio serving examples
+subtitle: Explore LoRA, embeddings, classification, reranking, and audio serving examples
 hide-toc: true
 ---
 
@@ -14,7 +14,7 @@ Choose a workload example, then filter its available deployment platforms and in
 
 <ExamplesCatalog topicFilter={false}>
 
-<div className="dynamo-example-card" data-example="lora" data-topic="workloads" data-topic-label="Workloads" data-targets="kubernetes:vllm local:sglang local:vllm" data-keywords="agg_lora.sh agg_lora.yaml agg_lora_hf.sh agg_lora_hf.yaml agg_lora_router.sh agg_lora_router_xpu.sh agg_lora_xpu.sh agg_qwen_lora.yaml lora_agg.sh omni_lora_agg.sh">
+<div className="dynamo-example-card" data-example="lora" data-topic="workloads" data-topic-label="Workloads" data-targets="kubernetes:vllm local:sglang local:vllm" data-keywords="agg_lora.sh agg_lora.yaml agg_lora_hf.sh agg_lora_hf.yaml agg_lora_router.sh agg_lora_router_xpu.sh agg_lora_xpu.sh agg_lora_xpu_dra.yaml agg_qwen_lora.yaml agg_qwen_lora_xpu_dra.yaml lora_agg.sh omni_lora_agg.sh">
 
 <span className="dynamo-example-icon"><Icon icon="plug" /></span>
 
@@ -28,7 +28,7 @@ LoRA adapters for text, multimodal, and vLLM-Omni serving.
 
 </div>
 
-<div className="dynamo-example-card" data-example="embeddings" data-topic="workloads" data-topic-label="Workloads" data-targets="local:sglang local:vllm" data-keywords="agg_embed.sh agg_embed_multiworker.sh">
+<div className="dynamo-example-card" data-example="embeddings" data-topic="workloads" data-topic-label="Workloads" data-targets="kubernetes:sglang local:sglang local:vllm" data-keywords="agg_embed.sh agg_embed.yaml agg_embed_multiworker.sh">
 
 <span className="dynamo-example-icon"><Icon icon="circle-nodes" /></span>
 
@@ -36,7 +36,7 @@ LoRA adapters for text, multimodal, and vLLM-Omni serving.
 
 Embedding workers, load balancing, and model-name dispatch.
 
-<ExampleTargets targets="local:sglang local:vllm" />
+<ExampleTargets targets="kubernetes:sglang local:sglang local:vllm" />
 
 <a className="dynamo-example-card-link" href="embeddings.mdx">Open Text Embeddings example</a>
 
@@ -56,15 +56,29 @@ vLLM sequence classification and pooling.
 
 </div>
 
-<div className="dynamo-example-card" data-example="audio" data-topic="workloads" data-topic-label="Workloads" data-targets="local:vllm" data-keywords="agg_omni_realtime.sh agg_realtime_transcription.sh">
+<div className="dynamo-example-card" data-example="rerank" data-topic="workloads" data-topic-label="Workloads" data-targets="local:sglang" data-keywords="agg_rerank.sh">
+
+<span className="dynamo-example-icon"><Icon icon="ranking-star" /></span>
+
+### Reranking
+
+Cross-encoder reranking through the /v1/rerank endpoint.
+
+<ExampleTargets targets="local:sglang" />
+
+<a className="dynamo-example-card-link" href="rerank.mdx">Open Reranking example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="audio" data-topic="workloads" data-topic-label="Workloads" data-targets="kubernetes:vllm local:vllm" data-keywords="agg.yaml agg_omni_realtime.sh agg_realtime_transcription.sh">
 
 <span className="dynamo-example-icon"><Icon icon="microphone" /></span>
 
 ### Audio and Realtime Serving
 
-Transcription and realtime speech-to-speech serving.
+Transcription, realtime speech-to-speech, and cascaded voice pipelines.
 
-<ExampleTargets targets="local:vllm" />
+<ExampleTargets targets="kubernetes:vllm local:vllm" />
 
 <a className="dynamo-example-card-link" href="audio.mdx">Open Audio and Realtime Serving example</a>
 

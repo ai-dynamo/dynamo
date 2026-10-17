@@ -321,6 +321,7 @@ def test_sparse_target_combinations_are_not_invented() -> None:
         not in catalog["disaggregated-kv-routing"]["data-targets"].split()
     )
     assert set(catalog["embeddings"]["data-targets"].split()) == {
+        "kubernetes:sglang",
         "local:sglang",
         "local:vllm",
     }
@@ -349,6 +350,12 @@ LAUNCH_HELPERS = {
     "_test_agg.sh",
     "validate_lora_agg.sh",
     "validate_omni_lora_agg.sh",
+    "validate_omni_minimax_h3.sh",
+}
+# Inference launchers that live outside a launch/ directory.
+LAUNCH_SCRIPTS = {
+    ROOT / "examples/diffusers/local/run_local.sh",
+    ROOT / "examples/backends/tokenspeed/launch_disagg.sh",
 }
 DEFERRED_PAGES = {"cancellation", "chat-templates", "custom-routing", "power-budget"}
 
@@ -376,7 +383,7 @@ def is_deployment_source(source: Path) -> bool:
         return (
             "launch" in source.relative_to(ROOT).parts
             and source.name not in LAUNCH_HELPERS
-        ) or source == ROOT / "examples/diffusers/local/run_local.sh"
+        ) or source in LAUNCH_SCRIPTS
     return any(
         doc.get("kind") in {"DynamoGraphDeployment", "DynamoGraphDeploymentRequest"}
         for doc in manifest_documents(source)
@@ -404,9 +411,7 @@ def test_backend_deployments_and_launch_inventory_is_preserved() -> None:
 def test_batch_gateway_exposes_only_the_dgd() -> None:
     page = EXAMPLES / "batch-gateway.mdx"
     assert len(variants(page)) == 1
-    assert embeds(page) == {
-        ROOT / "examples/deployments/llm-d-batch-gateway/dynamo.yaml"
-    }
+    assert embeds(page) == {ROOT / "examples/deployments/batch-gateway/dynamo.yaml"}
     card = cards()["batch-gateway"]
     assert card["data-targets"] == "kubernetes:vllm"
     assert card["data-keywords"] == "dynamo.yaml"
@@ -629,8 +634,8 @@ def test_supporting_only_pages_are_deferred_without_deleting_sources() -> None:
         "examples/custom_backend/cancellation/server.py",
         "examples/chat_templates/gemma4_tool.jinja",
         "examples/router/policy-class-queues.yaml",
-        "examples/deployments/llm-d-batch-gateway/run_example.py",
-        "examples/deployments/llm-d-batch-gateway/batch-gateway-values.yaml",
+        "examples/deployments/batch-gateway/run_example.py",
+        "examples/deployments/batch-gateway/profile-external-storage.yaml",
     ]:
         assert (ROOT / path).is_file()
 
@@ -972,6 +977,7 @@ def test_diffusion_overview_keeps_local_only_cases_discoverable() -> None:
         "agg_video_diffusion.sh",
         "disagg_omni_glm_image.sh",
         "disagg_omni_glm_image_nixl.sh",
+        "agg_omni_minimax_h3.sh",
     ]:
         assert name in text
         assert any(name == source.name for source in all_embeds())
