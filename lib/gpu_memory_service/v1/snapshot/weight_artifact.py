@@ -9,12 +9,14 @@ device mappings, data transfer, cleanup, and publication to readers.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
 import stat
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import monotonic
 from types import TracebackType
@@ -23,7 +25,7 @@ from uuid import uuid4
 import msgspec
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.vmm import VMMDevice, get_vmm
-from gpu_memory_service.snapshot.disk import write_device_shards
+from gpu_memory_service.snapshot.disk import write_device_shards_with_sha256
 from gpu_memory_service.snapshot.transfer import (
     FileTransferSource,
     GMSSnapshotConfig,
@@ -45,7 +47,7 @@ from gpu_memory_service.v1.protocol import (
 
 logger = logging.getLogger(__name__)
 
-_MANIFEST_VERSION = 1
+_MANIFEST_VERSION = 2
 _MANIFEST_NAME = "manifest.json"
 _SHARDS_DIR = "shards"
 
@@ -94,7 +96,25 @@ class WeightArtifactAllocation(msgspec.Struct, frozen=True, forbid_unknown_field
     offset: int
 
 
+class WeightArtifactShard(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    path: str
+    byte_count: int
+    sha256: str
+
+
 class WeightArtifactManifest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    version: int
+    allocations: tuple[WeightArtifactAllocation, ...]
+    shards: tuple[WeightArtifactShard, ...]
+
+
+class _ManifestHeader(msgspec.Struct):
+    version: int
+
+
+class _LegacyWeightArtifactManifest(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     version: int
     allocations: tuple[WeightArtifactAllocation, ...]
 
@@ -162,7 +182,7 @@ def save_weights(
                 resources.callback(_release_mapping, vmm, mapping)
 
             shard_roots = tuple(external_attempts) or (staging_path,)
-            placements = write_device_shards(
+            placements, shard_digests = write_device_shards_with_sha256(
                 [
                     (mapping.base, record.aligned_size)
                     for record, (mapping, _handle) in zip(
@@ -190,9 +210,20 @@ def save_weights(
                     strict=True,
                 )
             ]
+            shard_sizes: dict[str, int] = defaultdict(int)
+            for allocation in allocations:
+                shard_sizes[allocation.shard] += allocation.aligned_size
+            shards = tuple(
+                WeightArtifactShard(path, shard_sizes[path], digest)
+                for path, digest in sorted(shard_digests.items())
+            )
             vmm.synchronize()
 
-        manifest = WeightArtifactManifest(_MANIFEST_VERSION, tuple(allocations))
+        manifest = WeightArtifactManifest(
+            _MANIFEST_VERSION,
+            tuple(allocations),
+            shards,
+        )
         _write_manifest(staging_path, manifest)
         staging_path.rename(artifact_path)
     except BaseException:
@@ -232,7 +263,12 @@ def load_weights(
     vmm.ensure_initialized()
     vmm.runtime_set_device(device)
     granularity = int(vmm.get_allocation_granularity(device))
-    manifest, sources = _load_manifest(artifact_dir, granularity, roots)
+    manifest, sources = _load_manifest(
+        artifact_dir,
+        granularity,
+        roots,
+        max_workers=max_workers,
+    )
     backend = create_transfer_backend(
         transfer_backend,
         GMSSnapshotConfig(
@@ -338,22 +374,50 @@ def _load_manifest(
     artifact_dir: str,
     granularity: int,
     sharded_ssd_roots: Sequence[str] | None = None,
-) -> tuple[WeightArtifactManifest, list[FileTransferSource]]:
+    *,
+    max_workers: int = 16,
+) -> tuple[
+    WeightArtifactManifest | _LegacyWeightArtifactManifest, list[FileTransferSource]
+]:
     if granularity <= 0:
         raise ValueError("allocation granularity must be positive")
+    if max_workers <= 0:
+        raise ValueError("max_workers must be positive")
     root = Path(artifact_dir).expanduser().resolve(strict=True)
     allowed_roots = tuple(Path(path) for path in _normalize_roots(sharded_ssd_roots))
+    manifest_bytes = (root / _MANIFEST_NAME).read_bytes()
+    header = msgspec.json.decode(manifest_bytes, type=_ManifestHeader, strict=True)
+    if header.version not in (1, _MANIFEST_VERSION):
+        raise RuntimeError(
+            f"unsupported GMS V1 weight artifact version {header.version}; "
+            f"expected 1 or {_MANIFEST_VERSION}"
+        )
     manifest = msgspec.json.decode(
-        (root / _MANIFEST_NAME).read_bytes(),
-        type=WeightArtifactManifest,
+        manifest_bytes,
+        type=_LegacyWeightArtifactManifest
+        if header.version == 1
+        else WeightArtifactManifest,
         strict=True,
     )
-    if manifest.version != _MANIFEST_VERSION:
-        raise RuntimeError(
-            f"unsupported GMS V1 weight artifact version {manifest.version}"
-        )
     if not manifest.allocations:
         raise RuntimeError("GMS V1 weight artifact has no allocations")
+    shards = manifest.shards if isinstance(manifest, WeightArtifactManifest) else ()
+    if header.version == _MANIFEST_VERSION and not shards:
+        raise RuntimeError("GMS V1 weight artifact has no shard integrity records")
+
+    shard_records: dict[str, WeightArtifactShard] = {}
+    for shard in shards:
+        if not shard.path.strip():
+            raise RuntimeError("GMS V1 weight artifact has an empty shard path")
+        if shard.path in shard_records:
+            raise RuntimeError(f"duplicate GMS V1 shard record {shard.path!r}")
+        if shard.byte_count <= 0:
+            raise RuntimeError(f"GMS V1 shard {shard.path!r} has invalid size")
+        if not _is_sha256(shard.sha256):
+            raise RuntimeError(
+                f"GMS V1 shard {shard.path!r} has an invalid SHA-256 digest"
+            )
+        shard_records[shard.path] = shard
 
     allocation_ids: set[str] = set()
     extents: dict[Path, list[WeightArtifactAllocation]] = defaultdict(list)
@@ -385,9 +449,93 @@ def _load_manifest(
             )
         )
     _validate_file_extents(extents)
+    if header.version == 1:
+        logger.warning(
+            "Loading legacy GMS weight artifact %s (schema version 1): "
+            "SHA-256 integrity verification is unavailable; same-length weight "
+            "file corruption cannot be detected. Recapture with the current "
+            "saver to enable integrity verification.",
+            root,
+        )
+        return manifest, sources
+    if set(shard_records) != {allocation.shard for allocation in manifest.allocations}:
+        raise RuntimeError(
+            "GMS V1 shard integrity records do not match allocation shards"
+        )
+    resolved_shards: list[tuple[Path, WeightArtifactShard]] = []
+    resolved_paths: set[Path] = set()
+    for raw_path, shard in shard_records.items():
+        resolved = _resolve_shard_path(root, raw_path, allowed_roots)
+        if resolved in resolved_paths:
+            raise RuntimeError(f"duplicate GMS V1 shard record resolves to {resolved}")
+        resolved_paths.add(resolved)
+        if resolved.stat().st_size != shard.byte_count:
+            raise RuntimeError(f"GMS V1 shard length does not match record: {resolved}")
+        resolved_shards.append((resolved, shard))
+    verification_started_at = monotonic()
+    verification_bytes = sum(shard.byte_count for _path, shard in resolved_shards)
+    verification_workers = min(max_workers, len(resolved_shards))
+    try:
+        _verify_shard_digests(resolved_shards, max_workers=max_workers)
+    except BaseException:
+        verification_elapsed = monotonic() - verification_started_at
+        logger.warning(
+            "GMS V1 shard verification failed shards=%d expected_bytes=%d "
+            "workers=%d elapsed=%.3fs",
+            len(resolved_shards),
+            verification_bytes,
+            verification_workers,
+            verification_elapsed,
+        )
+        raise
+    verification_elapsed = monotonic() - verification_started_at
+    logger.info(
+        "GMS V1 shard verification succeeded shards=%d bytes=%d workers=%d "
+        "elapsed=%.3fs throughput=%.3fGiB/s",
+        len(resolved_shards),
+        verification_bytes,
+        verification_workers,
+        verification_elapsed,
+        _gib_per_second(verification_bytes, verification_elapsed),
+    )
     if {source.allocation_id for source in sources} != allocation_ids:
         raise RuntimeError("GMS V1 artifact source IDs do not match allocations")
     return manifest, sources
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
+
+
+def _gib_per_second(byte_count: int, elapsed: float) -> float:
+    return byte_count / 1024**3 / max(elapsed, 1e-9)
+
+
+def _verify_shard_digests(
+    shards: Sequence[tuple[Path, WeightArtifactShard]],
+    *,
+    max_workers: int,
+) -> None:
+    def verify(item: tuple[Path, WeightArtifactShard]) -> None:
+        path, shard = item
+        digest = hashlib.sha256()
+        with path.open("rb") as shard_file:
+            while chunk := shard_file.read(8 * 1024**2):
+                digest.update(chunk)
+        if digest.hexdigest() != shard.sha256:
+            raise RuntimeError(f"GMS V1 shard SHA-256 mismatch: {path}")
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(shards))) as executor:
+        futures = [executor.submit(verify, shard) for shard in shards]
+        try:
+            for future in as_completed(futures):
+                future.result()
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            raise
 
 
 def _resolve_shard_path(

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from collections import defaultdict
@@ -59,6 +60,7 @@ class DeviceToFileWriter:
         device: Optional[int] = None,
         buffers: int = _SAVE_COPY_BUFFERS,
         chunk_size: int = PINNED_COPY_CHUNK_SIZE,
+        hash_name: Optional[str] = None,
     ) -> None:
         self._file_path = file_path
         buffers = int(buffers)
@@ -67,6 +69,7 @@ class DeviceToFileWriter:
             raise ValueError("buffers must be positive")
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
+        self._hasher = hashlib.new(hash_name) if hash_name is not None else None
         self._vmm = get_vmm()
         if device is not None:
             self._vmm.runtime_set_device(device)
@@ -100,6 +103,8 @@ class DeviceToFileWriter:
             slot.wait()
             chunk_view = slot.view[:chunk_size]
             try:
+                if self._hasher is not None:
+                    self._hasher.update(chunk_view)
                 _write_all_from_view(self._fd, chunk_view, self._file_path)
             finally:
                 chunk_view.release()
@@ -130,6 +135,14 @@ class DeviceToFileWriter:
         if error is not None:
             raise error
 
+    def hexdigest(self) -> str:
+        """Return the requested streaming digest after all writes complete."""
+        if self._hasher is None:
+            raise RuntimeError("device writer was created without a hash algorithm")
+        if not self._closed:
+            raise RuntimeError("device writer digest is unavailable before close")
+        return self._hasher.hexdigest()
+
     def __enter__(self) -> "DeviceToFileWriter":
         return self
 
@@ -157,6 +170,49 @@ def write_device_shards(
     relative_to: Optional[str] = None,
 ) -> list[Tuple[str, int]]:
     """Write ``(device_va, size)`` extents and return their file placements."""
+    placements, _digests = _write_device_shards(
+        extents,
+        shard_dirs,
+        device=device,
+        shard_size_bytes=shard_size_bytes,
+        max_workers=max_workers,
+        relative_to=relative_to,
+        hash_name=None,
+    )
+    return placements
+
+
+def write_device_shards_with_sha256(
+    extents: Sequence[Tuple[int, int]],
+    shard_dirs: Sequence[str],
+    *,
+    device: int,
+    shard_size_bytes: int,
+    max_workers: int,
+    relative_to: Optional[str] = None,
+) -> tuple[list[Tuple[str, int]], dict[str, str]]:
+    """Write device shards and return placements plus streaming SHA-256 digests."""
+    return _write_device_shards(
+        extents,
+        shard_dirs,
+        device=device,
+        shard_size_bytes=shard_size_bytes,
+        max_workers=max_workers,
+        relative_to=relative_to,
+        hash_name="sha256",
+    )
+
+
+def _write_device_shards(
+    extents: Sequence[Tuple[int, int]],
+    shard_dirs: Sequence[str],
+    *,
+    device: int,
+    shard_size_bytes: int,
+    max_workers: int,
+    relative_to: Optional[str],
+    hash_name: Optional[str],
+) -> tuple[list[Tuple[str, int]], dict[str, str]]:
     if not shard_dirs:
         raise ValueError("at least one shard directory is required")
     if max_workers <= 0:
@@ -173,6 +229,7 @@ def write_device_shards(
         os.makedirs(shard_dir, exist_ok=True)
 
     placements: list[Optional[Tuple[str, int]]] = [None] * len(extents)
+    shard_digests: list[Optional[Tuple[str, str]]] = [None] * len(groups)
 
     def write_shard(shard_index: int, indices: list[int]) -> None:
         path = os.path.join(
@@ -180,11 +237,17 @@ def write_device_shards(
             f"shard_{shard_index:04d}.bin",
         )
         manifest_path = os.path.relpath(path, relative_to) if relative_to else path
-        with DeviceToFileWriter(path, device=device) as writer:
+        if hash_name is None:
+            writer = DeviceToFileWriter(path, device=device)
+        else:
+            writer = DeviceToFileWriter(path, device=device, hash_name=hash_name)
+        with writer:
             for index in indices:
                 va, size = extents[index]
                 writer.write_device(va, size)
                 placements[index] = (manifest_path, layout[index][1])
+        if hash_name is not None:
+            shard_digests[shard_index] = (manifest_path, writer.hexdigest())
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
@@ -196,7 +259,12 @@ def write_device_shards(
 
     if any(placement is None for placement in placements):
         raise RuntimeError("shard writer did not produce every extent")
-    return [placement for placement in placements if placement is not None]
+    if hash_name is not None and any(digest is None for digest in shard_digests):
+        raise RuntimeError("shard writer did not produce every digest")
+    return (
+        [placement for placement in placements if placement is not None],
+        dict(digest for digest in shard_digests if digest is not None),
+    )
 
 
 def _plan_shard_layout(
