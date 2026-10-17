@@ -95,6 +95,8 @@ examples:
   - 'tests/test_generate_kustomize_openapi.py'
   - 'tests/test_kustomize_matrix.py'
   - 'docs/tests/**'
+  # Recipe and benchmark catalogs: docs/tests runs validate.py over them.
+  - 'docs/fern/pages/recipes/**/_catalog/**'
   - 'deploy/operator/config/crd/bases/**'
 
 ignore:
