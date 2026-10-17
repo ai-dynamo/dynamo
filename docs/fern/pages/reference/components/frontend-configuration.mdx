@@ -894,6 +894,29 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   Inference, metrics, models, health, and liveness routes are unaffected.
 </ParamField>
 
+### Media refusal for text-only models
+
+A frontend that serves only text-only models can refuse media before routing. A refused request
+never reaches a worker, and a streaming client receives the HTTP status instead of a `200`
+followed by an error event.
+
+<ParamField path="--reject-media" type="boolean" default="false">
+  Refuse `/v1/chat/completions`, `/v1/responses`, and `/v1/messages` requests that carry an
+  image, video, or audio part in any message, including earlier turns. Refusals are counted with
+  `error_type="unsupported_modality"` on `dynamo_frontend_requests_total`, apart from validation
+  and overload errors.
+
+  Environment variable: `DYN_REJECT_MEDIA`
+</ParamField>
+
+<ParamField path="--reject-media-status-code" type="integer" default="415">
+  HTTP status for a request refused by `--reject-media`. Only 4xx and 5xx values are accepted.
+  Set it to a status an upstream gateway fails over on, for example `429`, to have that gateway
+  send media requests to a multimodal model.
+
+  Environment variable: `DYN_REJECT_MEDIA_STATUS_CODE`
+</ParamField>
+
 ### Endpoint path customization
 
 All endpoint paths can be overridden via environment variables:

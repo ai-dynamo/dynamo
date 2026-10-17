@@ -511,34 +511,6 @@ async fn anthropic_messages(
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
 
-    // Look up engine and parsing options early so we know whether a reasoning
-    // parser is configured before converting the request.
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| match e {
-            // Registered but not ready to serve yet → retryable 503 (mapped to
-            // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
-            // canonical, customer-facing message so both APIs report the same
-            // text. Anything else is a genuine missing model → 404.
-            crate::discovery::ModelManagerError::ModelUnavailable(_) => AnthropicHandlerError::new(
-                ErrorClass::Unavailable,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "overloaded_error",
-                super::openai::model_not_ready_message(&model),
-                ErrorType::Unavailable,
-            )
-            .into_marked_response(&mut inflight_guard),
-            _ => AnthropicHandlerError::new(
-                ErrorClass::NotFound,
-                StatusCode::NOT_FOUND,
-                "not_found_error",
-                format!("Model '{}' not found", model),
-                ErrorType::NotFound,
-            )
-            .into_marked_response(&mut inflight_guard),
-        })?;
-
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
 
@@ -590,6 +562,43 @@ async fn anthropic_messages(
         return Err(AnthropicHandlerError::validation(error.message())
             .into_marked_response(&mut inflight_guard));
     }
+    if let Some(refusal) = super::openai::media_refusal(&state, &chat_request) {
+        return Err(AnthropicHandlerError::new(
+            ErrorClass::UnsupportedMedia,
+            refusal.status,
+            "invalid_request_error",
+            refusal.message,
+            ErrorType::UnsupportedModality,
+        )
+        .into_marked_response(&mut inflight_guard));
+    }
+    // Looked up after the media refusal so a refused request gets the
+    // configured status, not this lookup's 404/503.
+    let (engine, parsing_options) = state
+        .manager()
+        .get_chat_completions_engine_with_parsing(&model)
+        .map_err(|e| match e {
+            // Registered but not ready to serve yet → retryable 503 (mapped to
+            // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
+            // canonical, customer-facing message so both APIs report the same
+            // text. Anything else is a genuine missing model → 404.
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => AnthropicHandlerError::new(
+                ErrorClass::Unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "overloaded_error",
+                super::openai::model_not_ready_message(&model),
+                ErrorType::Unavailable,
+            )
+            .into_marked_response(&mut inflight_guard),
+            _ => AnthropicHandlerError::new(
+                ErrorClass::NotFound,
+                StatusCode::NOT_FOUND,
+                "not_found_error",
+                format!("Model '{}' not found", model),
+                ErrorType::NotFound,
+            )
+            .into_marked_response(&mut inflight_guard),
+        })?;
     // When a reasoning parser is configured and the client hasn't explicitly
     // disabled thinking, assume the model's chat template will inject `<think>`.
     //
