@@ -93,6 +93,7 @@
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===
 /lib/sidecar/vllm/                                                                                      @ai-dynamo/dynamo-backend-vllm-codeowners
 /examples/backends/vllm/                                                                                @ai-dynamo/dynamo-backend-vllm-codeowners
+/lib/sidecar/realtime-ws/                                                                               @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/                                                                            @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/tests/                                                                      @ai-dynamo/dynamo-backend-vllm-codeowners
 
@@ -168,6 +169,7 @@
 # === multimodal  (@ai-dynamo/dynamo-multimodal-codeowners) ===
 /benchmarks/omni/                                                                                       @ai-dynamo/dynamo-multimodal-codeowners
 /benchmarks/multimodal/                                                                                 @ai-dynamo/dynamo-multimodal-codeowners
+/benchmarks/realtime_ws/                                                                                @ai-dynamo/dynamo-multimodal-codeowners
 /examples/custom_encoder/                                                                               @ai-dynamo/dynamo-multimodal-codeowners
 /examples/nemotron_speech_cascaded_pipeline/                                                            @ai-dynamo/dynamo-multimodal-codeowners
 

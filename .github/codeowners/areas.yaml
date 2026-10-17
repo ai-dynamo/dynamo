@@ -88,6 +88,7 @@ areas:
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
   - lib/sidecar/vllm/
+  - lib/sidecar/realtime-ws/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
@@ -201,6 +202,7 @@ areas:
   path_globs:
   - benchmarks/multimodal/
   - benchmarks/omni/
+  - benchmarks/realtime_ws/
   - components/src/dynamo/common/multimodal/
   - examples/custom_encoder/
   - examples/nemotron_speech_cascaded_pipeline/
