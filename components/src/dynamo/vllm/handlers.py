@@ -4150,10 +4150,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 raise InvalidArgument("artifact capture requires an exact token prompt")
             artifact_runtime = None
             if artifact_settings.get("mode") != "inline_base64":
+                # Object-store delivery needs opendal from the optional
+                # artifact-delivery extra, so load it only for these requests.
                 from dynamo.artifacts.runtime import (
                     ArtifactAuthorityClosed,
                     configured_artifact_runtime,
                 )
+                from dynamo.artifacts.storage import ArtifactStorageError
 
                 artifact_runtime = configured_artifact_runtime()
                 if artifact_runtime is None:
@@ -4192,6 +4195,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ):
                     raise WorkerOverloaded(str(exc)) from None
                 raise InvalidArgument(str(exc)) from None
+            except RuntimeError as exc:
+                # Storage policy rejects the requested destination before
+                # inference with a credential-safe message. A provider without
+                # conditional creation is a server fault and stays one.
+                if (
+                    artifact_runtime is not None
+                    and isinstance(exc, ArtifactStorageError)
+                    and exc.code in ("invalid_target", "destination_denied", "expired")
+                ):
+                    raise InvalidArgument(str(exc)) from None
+                raise
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
