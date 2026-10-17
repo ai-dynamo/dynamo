@@ -26,6 +26,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::Semaphore;
 
+use dynamo_kv_router::scheduling::KvSchedulerError;
 use dynamo_kv_router::services::selection::{SelectionError, WorkerSelectionPolicyRegistry};
 use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
@@ -97,6 +98,7 @@ struct TokenizeResult {
     token_ids: Vec<u32>,
     priority_jump: Option<f64>,
     strict_priority: Option<u32>,
+    do_not_queue: bool,
     cache_namespace: Option<String>,
     expected_output_tokens: Option<u32>,
 }
@@ -190,6 +192,11 @@ impl EppRouter {
             token_ids,
             priority_jump: resolved.priority_jump,
             strict_priority: resolved.strict_priority,
+            do_not_queue: hints
+                .nvext
+                .as_ref()
+                .and_then(|n| n.do_not_queue)
+                .unwrap_or(false),
             expected_output_tokens,
             cache_namespace,
         })
@@ -248,6 +255,8 @@ struct RoutingHints {
 struct RoutingNvExt {
     #[serde(default)]
     agent_hints: Option<AgentHints>,
+    #[serde(default)]
+    do_not_queue: Option<bool>,
     /// Dynamo-style `nvext.cache_salt`.
     #[serde(default, rename = "cache_salt")]
     cache_namespace: Option<String>,
@@ -344,6 +353,7 @@ impl EndpointPicker for EppRouter {
             token_ids: tokens,
             priority_jump,
             strict_priority,
+            do_not_queue,
             cache_namespace,
             expected_output_tokens,
         } = self
@@ -376,6 +386,7 @@ impl EndpointPicker for EppRouter {
             // Effective header-over-body values; `None` only when unset everywhere.
             priority_jump,
             strict_priority,
+            do_not_queue,
             expected_output_tokens,
             policy_class,
             cache_namespace: cache_namespace.clone(),
@@ -387,6 +398,9 @@ impl EndpointPicker for EppRouter {
             Ok(resp) => resp,
             Err(SelectionError::BadRequest(message)) => {
                 return Err(PickError::InvalidRequest(message));
+            }
+            Err(e) if selection_error_is_do_not_queue(&e) => {
+                return Err(PickError::Backpressure(e.to_string()));
             }
             Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
         };
@@ -539,9 +553,53 @@ impl TokenizeError {
     }
 }
 
+fn selection_error_is_do_not_queue(error: &SelectionError) -> bool {
+    matches!(
+        error,
+        SelectionError::Scheduler(KvSchedulerError::DoNotQueue { .. })
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_hints_lift_do_not_queue() {
+        let enabled: RoutingHints =
+            serde_json::from_str(r#"{"nvext":{"do_not_queue":true}}"#).unwrap();
+        assert_eq!(
+            enabled.nvext.and_then(|nvext| nvext.do_not_queue),
+            Some(true)
+        );
+
+        let omitted: RoutingHints = serde_json::from_str(r#"{"nvext":{}}"#).unwrap();
+        assert_eq!(omitted.nvext.and_then(|nvext| nvext.do_not_queue), None);
+
+        let explicit_null: RoutingHints =
+            serde_json::from_str(r#"{"nvext":{"do_not_queue":null}}"#).unwrap();
+        assert_eq!(
+            explicit_null.nvext.and_then(|nvext| nvext.do_not_queue),
+            None
+        );
+    }
+
+    #[test]
+    fn only_do_not_queue_selection_errors_map_to_backpressure() {
+        let do_not_queue = SelectionError::Scheduler(KvSchedulerError::DoNotQueue {
+            policy_class: "default".to_string(),
+            pending_count: 1,
+            pending_isl_tokens: 16,
+            pending_cached_tokens: 0,
+        });
+        assert!(selection_error_is_do_not_queue(&do_not_queue));
+
+        let overloaded = SelectionError::Scheduler(KvSchedulerError::AllEligibleWorkersOverloaded);
+        assert!(!selection_error_is_do_not_queue(&overloaded));
+
+        let unavailable = SelectionError::Scheduler(KvSchedulerError::NoEndpoints);
+        assert!(!selection_error_is_do_not_queue(&unavailable));
+    }
 
     #[test]
     fn requested_policy_class_uses_frontend_metadata_extraction() {

@@ -71,7 +71,10 @@ fn exact_queue(
     queue
 }
 
-fn shared_queue(requests: usize) -> PolicyQueue<BenchRequest> {
+fn shared_queue_with_dispatchability(
+    requests: usize,
+    reject_tail: bool,
+) -> PolicyQueue<BenchRequest> {
     let mut queue = PolicyQueue::new(profile());
     for request_index in 0..requests {
         queue
@@ -83,11 +86,21 @@ fn shared_queue(requests: usize) -> PolicyQueue<BenchRequest> {
                 0.0,
                 0,
                 WorkerPlacement::Any,
-                BenchRequest { dispatchable: true },
+                BenchRequest {
+                    dispatchable: !reject_tail || request_index + 1 != requests,
+                },
             )
             .unwrap();
     }
     queue
+}
+
+fn shared_queue(requests: usize) -> PolicyQueue<BenchRequest> {
+    shared_queue_with_dispatchability(requests, false)
+}
+
+fn shared_queue_with_rejected_tail(requests: usize) -> PolicyQueue<BenchRequest> {
+    shared_queue_with_dispatchability(requests, true)
 }
 
 fn drain(mut queue: PolicyQueue<BenchRequest>) -> usize {
@@ -218,6 +231,27 @@ fn bench_drain_shared(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_retract_rejected_tail(c: &mut Criterion) {
+    let mut group = c.benchmark_group("policy_queue/retract_rejected_tail");
+    for requests in [128, 1024, 4096] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(requests),
+            &requests,
+            |b, &requests| {
+                b.iter_batched_ref(
+                    || shared_queue_with_rejected_tail(requests),
+                    |queue| {
+                        queue.retain(|request| request.dispatchable);
+                        assert_eq!(black_box(queue.pending_count()), requests - 1);
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
@@ -225,6 +259,6 @@ criterion_group! {
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(3))
         .noise_threshold(0.03);
-    targets = bench_pop_once, bench_drain_fixed_requests, bench_drain_one_per_lane, bench_build_exact_lanes, bench_blocked_fraction, bench_drain_shared
+    targets = bench_pop_once, bench_drain_fixed_requests, bench_drain_one_per_lane, bench_build_exact_lanes, bench_blocked_fraction, bench_drain_shared, bench_retract_rejected_tail
 }
 criterion_main!(benches);
