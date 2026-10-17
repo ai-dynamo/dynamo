@@ -109,8 +109,9 @@ unredacted allowlisted values.
 ## Active Worker Health Checks
 
 HTTP `/live` and `/health` endpoints are passive: they report current process and runtime state when
-an external system queries them. Canary checks are active: Dynamo sends a real request through an
-idle worker endpoint to verify that the inference path still completes.
+an external system queries them. Canary checks are active: Dynamo sends a backend-defined request
+through an idle worker endpoint. LLM canaries verify inference completion. Aggregated vLLM-Omni
+canaries check native orchestrator and stage health by default; a custom payload opts into inference.
 
 1. **Observe successful activity.** A successful response chunk marks the endpoint ready and resets
    its idle timer.
