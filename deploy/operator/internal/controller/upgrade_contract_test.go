@@ -12,6 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
+const upgradePodCliqueSetKind = "PodCliqueSet"
+
 // Output-only metadata can be reviewed in goldens; generation selection and the
 // effective Grove pod templates are checked independently against historical state.
 func upgradeSafetyError(generationChanged bool, before, after []unstructured.Unstructured) error {
@@ -24,12 +26,12 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 	}
 	oldWorkloads, newWorkloads := 0, 0
 	for _, object := range before {
-		if object.GetKind() == "PodCliqueSet" {
+		if object.GetKind() == upgradePodCliqueSetKind {
 			oldWorkloads++
 		}
 	}
 	for _, object := range after {
-		if object.GetKind() == "PodCliqueSet" {
+		if object.GetKind() == upgradePodCliqueSetKind {
 			newWorkloads++
 		}
 	}
@@ -37,7 +39,7 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 		return fmt.Errorf("active workload inventory changed")
 	}
 	for _, old := range before {
-		if old.GetKind() != "PodCliqueSet" && old.GetKind() != "DynamoGraphDeployment" {
+		if old.GetKind() != upgradePodCliqueSetKind && old.GetKind() != "DynamoGraphDeployment" {
 			continue
 		}
 		current, ok := index[old.GetKind()+"/"+old.GetName()]
@@ -52,7 +54,7 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 			if oldOrigin != newOrigin || oldExists != newExists {
 				return fmt.Errorf("historical origin changed")
 			}
-		case "PodCliqueSet":
+		case upgradePodCliqueSetKind:
 			a, err := upgradeWorkerTemplates(old)
 			if err != nil {
 				return err
@@ -104,7 +106,7 @@ func upgradeWorkerTemplates(object unstructured.Unstructured) (map[string]any, e
 func TestUpgradeSafetyIndependentOfGolden(t *testing.T) {
 	t.Log("A reviewed resource-metadata default is allowed without weakening the rollout contract")
 	old := unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "grove.io/v1alpha1", "kind": "PodCliqueSet",
+		"apiVersion": "grove.io/v1alpha1", "kind": upgradePodCliqueSetKind,
 		"metadata": map[string]any{"name": "workers", "uid": "preserved"},
 		"spec": map[string]any{"template": map[string]any{"cliques": []any{map[string]any{
 			"name": "decode", "spec": map[string]any{"podSpec": map[string]any{"hostname": "worker"}},

@@ -28,6 +28,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
+	"sigs.k8s.io/yaml"
 )
 
 const upgradeRoot = "testdata/upgrade"
@@ -207,7 +208,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				require.Error(t, upgradeSafetyError(false, after, changed))
 				// Verify the workload actually carries the edit, not just the annotation.
 				for _, object := range changed {
-					if object.GetKind() == "PodCliqueSet" {
+					if object.GetKind() == upgradePodCliqueSetKind {
 						templates, err := upgradeWorkerTemplates(object)
 						require.NoError(t, err)
 						found := false
@@ -228,4 +229,20 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Upgrade capture and replay use the same version source as production admission.
+func clusterTestOperatorVersion() (string, error) {
+	data, err := os.ReadFile("../../../helm/charts/platform/components/operator/Chart.yaml")
+	if err != nil {
+		return "", err
+	}
+	var chart struct{ AppVersion string }
+	if err := yaml.Unmarshal(data, &chart); err != nil {
+		return "", err
+	}
+	if chart.AppVersion == "" {
+		return "", fmt.Errorf("operator chart has no appVersion")
+	}
+	return chart.AppVersion, nil
 }

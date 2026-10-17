@@ -8,9 +8,6 @@
 package controller
 
 import (
-	"fmt"
-	"os"
-
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -33,7 +30,6 @@ import (
 	"k8s.io/utils/ptr"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
-	"sigs.k8s.io/yaml"
 	vcbatchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
@@ -70,19 +66,4 @@ func clusterTestRestrictedConfig(namespace string) *configv1alpha1.OperatorConfi
 	config.Namespace.Restricted = namespace
 	config.GPU.DiscoveryEnabled = ptr.To(false)
 	return config
-}
-
-func clusterTestOperatorVersion() (string, error) {
-	data, err := os.ReadFile("../../../helm/charts/platform/components/operator/Chart.yaml")
-	if err != nil {
-		return "", err
-	}
-	var chart struct{ AppVersion string }
-	if err := yaml.Unmarshal(data, &chart); err != nil {
-		return "", err
-	}
-	if chart.AppVersion == "" {
-		return "", fmt.Errorf("operator chart has no appVersion")
-	}
-	return chart.AppVersion, nil
 }

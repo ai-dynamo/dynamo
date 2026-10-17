@@ -127,28 +127,35 @@ func PrepareHistory(ctx context.Context, c client.Client, snapshots map[string][
 		if err := golden.ApplySnapshot(ctx, c, namespace, objects); err != nil {
 			return cleanup, err
 		}
-		// Read back while schemas are still permissive. After restoring production
-		// schemas, Kubernetes is allowed to prune unknown fields on reads as well
-		// as writes; checking only after takeover cannot prove they reached storage.
-		for _, captured := range objects {
-			gvk := captured.GroupVersionKind()
-			custom := false
-			for _, crd := range crds.Items {
-				custom = custom || (crd.Spec.Group == gvk.Group && crd.Spec.Names.Kind == gvk.Kind)
-			}
-			if !custom {
-				continue
-			}
-			stored := captured.DeepCopy()
-			if err := c.Get(ctx, client.ObjectKeyFromObject(stored), stored); err != nil {
-				return cleanup, err
-			}
-			for _, field := range []string{"spec", "status"} {
-				if !reflect.DeepEqual(captured.Object[field], stored.Object[field]) {
-					return cleanup, fmt.Errorf("historical %s %s was normalized before takeover: %s", captured.GetKind(), captured.GetName(), field)
-				}
-			}
+		if err := verifyHistoricalObjects(ctx, c, crds.Items, objects); err != nil {
+			return cleanup, err
 		}
 	}
 	return cleanup, restoreCRDs(ctx)
+}
+
+func verifyHistoricalObjects(ctx context.Context, c client.Reader, crds []extensions.CustomResourceDefinition, objects []unstructured.Unstructured) error {
+	// Read back while schemas are still permissive. After restoring production
+	// schemas, Kubernetes is allowed to prune unknown fields on reads as well
+	// as writes; checking only after takeover cannot prove they reached storage.
+	for _, captured := range objects {
+		gvk := captured.GroupVersionKind()
+		custom := false
+		for _, crd := range crds {
+			custom = custom || (crd.Spec.Group == gvk.Group && crd.Spec.Names.Kind == gvk.Kind)
+		}
+		if !custom {
+			continue
+		}
+		stored := captured.DeepCopy()
+		if err := c.Get(ctx, client.ObjectKeyFromObject(stored), stored); err != nil {
+			return err
+		}
+		for _, field := range []string{"spec", "status"} {
+			if !reflect.DeepEqual(captured.Object[field], stored.Object[field]) {
+				return fmt.Errorf("historical %s %s was normalized before takeover: %s", captured.GetKind(), captured.GetName(), field)
+			}
+		}
+	}
+	return nil
 }
