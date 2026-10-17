@@ -192,6 +192,8 @@ def extract_prompt_logprobs_from_completion_output(
 
 def extract_prompt_logprobs_from_sglang_meta(
     meta: dict[str, Any],
+    *,
+    prompt_logprobs_count: int | None = None,
 ) -> Optional[list[Optional[dict[str, dict[str, Any]]]]]:
     """Extract prompt logprobs from an SGLang ``meta_info`` dict.
 
@@ -199,7 +201,8 @@ def extract_prompt_logprobs_from_sglang_meta(
     or None)``) and merges any ``input_top_logprobs`` alternatives. The pinned
     SGLang release and its N-1 predecessor both include the leading
     ``None``-logprob prompt position, which is preserved as Dynamo's BOS=None
-    ``PromptLogprobs`` entry.
+    ``PromptLogprobs`` entry. Limit alternatives to ``prompt_logprobs_count``
+    when provided, always retaining the actual input token.
     """
     input_logprobs = meta.get("input_token_logprobs")
     if not input_logprobs:
@@ -222,6 +225,9 @@ def extract_prompt_logprobs_from_sglang_meta(
         if idx < len(input_top_logprobs):
             top_at_pos = input_top_logprobs[idx]
             if top_at_pos:
+                # SGLang shares top-k with completion logprobs.
+                if prompt_logprobs_count is not None:
+                    top_at_pos = top_at_pos[:prompt_logprobs_count]
                 for top_lp, top_tok_id, top_decoded in top_at_pos:
                     key = str(top_tok_id)
                     if key in position_map:
@@ -315,12 +321,15 @@ def extract_from_sglang_meta(
     meta_info: dict[str, Any],
     *,
     return_tokens_as_token_ids: bool = False,
+    top_logprobs_num: Optional[int] = None,
 ) -> tuple[Optional[list[float]], Optional[list[list[dict[str, Any]]]]]:
     """Extract logprobs from SGLang's ``meta_info`` dict.
 
     Dynamo enables SGLang's incremental streaming output, so
     ``output_token_logprobs`` and ``output_top_logprobs`` already align with
-    the current disjoint ``output_ids`` chunk and can be forwarded directly.
+    the current disjoint ``output_ids`` chunk. ``top_logprobs_num`` limits
+    completion alternatives independently of the engine's shared prompt/output
+    top-k; ``None`` preserves all alternatives.
     """
     output_token_logprobs = meta_info.get("output_token_logprobs")
     if not output_token_logprobs:
@@ -336,6 +345,8 @@ def extract_from_sglang_meta(
             if position_entries is None:
                 top_logprobs.append([])
                 continue
+            if top_logprobs_num is not None:
+                position_entries = position_entries[:top_logprobs_num]
             position_list: list[dict[str, Any]] = []
             for rank_idx, entry in enumerate(position_entries):
                 tok_id = entry[1]
