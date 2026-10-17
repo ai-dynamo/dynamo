@@ -1103,11 +1103,20 @@ fn build_engine_config(
     })?;
     let max_num_seqs =
         client::json_u64(&discovery.server_info, "max_running_requests").map(|value| {
-            if attn_dp_size > 1 {
-                value / u64::from(attn_dp_size)
-            } else {
-                value
-            }
+            // Releases without attn_dp_size report attention DP as dp_size
+            // with enable_dp_attention, and max_running_requests covers all
+            // of those ranks.
+            let legacy_attention_dp = discovery
+                .server_info
+                .get("enable_dp_attention")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let ranks = match client::json_u32(&discovery.server_info, "attn_dp_size") {
+                Some(size) => size.max(1),
+                None if legacy_attention_dp => model_dp_size,
+                None => 1,
+            };
+            value / u64::from(ranks)
         });
     let max_num_batched_tokens =
         client::json_u64(&discovery.server_info, "max_prefill_tokens").or(max_total_tokens);
@@ -1854,6 +1863,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.llm.unwrap().max_num_seqs, Some(64));
+    }
+
+    #[test]
+    fn legacy_attention_dp_normalizes_max_num_seqs_per_rank() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "dp_size": 4,
+                "enable_dp_attention": true,
+                "max_running_requests": 256,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let registration = config.llm.unwrap();
+        assert_eq!(registration.data_parallel_size, Some(4));
+        assert_eq!(registration.max_num_seqs, Some(64));
     }
 
     #[test]
