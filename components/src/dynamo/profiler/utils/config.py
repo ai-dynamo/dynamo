@@ -369,9 +369,14 @@ def _get_per_instance_gpus(worker_component: Component) -> int | None:
                 return arg.split("=", 1)[1]
         return None
 
-    TP_FLAGS = ("--tensor-parallel-size", "--tp")
-    PP_FLAGS = ("--pipeline-parallel-size", "--pp")
-    DP_FLAGS = ("--data-parallel-size", "--data-parallel-size-local", "--dp")
+    TP_FLAGS = ("--tensor-parallel-size", "--tp-size", "--tp")
+    PP_FLAGS = ("--pipeline-parallel-size", "--pp-size", "--pp")
+    DP_FLAGS = (
+        "--data-parallel-size",
+        "--data-parallel-size-local",
+        "--dp-size",
+        "--dp",
+    )
 
     tp = 1
     pp = 1

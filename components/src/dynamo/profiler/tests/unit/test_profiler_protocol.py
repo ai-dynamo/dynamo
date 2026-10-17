@@ -816,6 +816,38 @@ def test_build_dgd_config_multinode_when_tp_exceeds_node() -> None:
     assert decode_component["multinode"] == {"nodeCount": 2}
 
 
+@pytest.mark.parametrize("method", ["set_config_tep_size", "set_config_dep_size"])
+@pytest.mark.parametrize(
+    ("args", "size", "node_count"),
+    [
+        (["--tp-size", "1"], 16, 2),
+        (["--tp-size=1"], 16, 2),
+        (["--tp", "2", "--tp-size=1"], 16, 2),
+        (["--tp-size=32"], 4, None),
+    ],
+)
+def test_sglang_parallel_modifier_sizes_resources_from_updated_args(
+    method: str, args: list[str], size: int, node_count: int | None
+) -> None:
+    """Changing parallelism replaces stale TP aliases before sizing placement."""
+    worker = _make_component("decode", "decode", args=args)
+    worker["multinode"] = {"nodeCount": 4}
+    config = {"metadata": {"name": "test"}, "spec": {"components": [worker]}}
+
+    updated = getattr(CONFIG_MODIFIERS["sglang"], method)(config, size, 8)
+
+    component = _component_by_type(updated, "decode")
+    container = _main_container(component)
+    final_args = container["args"]
+    assert final_args[final_args.index("--tp") + 1] == str(size)
+    assert not any(arg.startswith("--tp-size") for arg in final_args)
+    assert container["resources"]["limits"]["nvidia.com/gpu"] == str(min(size, 8))
+    if node_count is None:
+        assert component.get("multinode") is None
+    else:
+        assert component["multinode"] == {"nodeCount": node_count}
+
+
 def test_build_dgd_config_multinode_parses_shell_joined_parallelism_args() -> None:
     """Multinode detection should handle shell-joined CLI args from templates."""
     modifier = CONFIG_MODIFIERS["sglang"]
