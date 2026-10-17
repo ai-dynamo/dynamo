@@ -11,6 +11,12 @@ from typing import Any, Optional
 import transformers
 from vllm.config import VllmConfig
 
+# The resize-mode constants are re-exported for existing callers and tests.
+from dynamo.common.multimodal.qwen_video_contract import (  # noqa: F401
+    QWEN_VIDEO_RESIZE_LEGACY_CEIL,
+    QWEN_VIDEO_RESIZE_ROUND_TIES_EVEN,
+    resolve_qwen_video_resize_mode,
+)
 from dynamo.llm import ModelRuntimeConfig
 
 qwen3_smart_resize: Optional[Callable[..., Any]]
@@ -28,8 +34,6 @@ logger = logging.getLogger(__name__)
 VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY = "vllm_qwen_video_processor_contract"
 QWEN_VIDEO_TARGET_BARE = "bare_video_token"
 QWEN_VIDEO_TARGET_WRAPPED = "vision_wrapped_video_token"
-QWEN_VIDEO_RESIZE_LEGACY_CEIL = "legacy_ceil"
-QWEN_VIDEO_RESIZE_ROUND_TIES_EVEN = "round_ties_even"
 QWEN_VIDEO_MODEL_TYPES = {"qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"}
 QWEN_VIDEO_ARCHITECTURES = {
     "Qwen3VLForConditionalGeneration",
@@ -41,39 +45,10 @@ QWEN_VIDEO_ARCHITECTURES = {
 
 def _resolve_qwen_video_resize_mode() -> Optional[str]:
     """Identify the installed Qwen video processor's temporal resize rule."""
-    if qwen3_smart_resize is None:
-        logger.warning(
-            "Exact video-aware KV routing disabled because the installed "
-            "Transformers package has no Qwen3 video processor"
-        )
-        return None
-    try:
-        result = qwen3_smart_resize(
-            num_frames=5,
-            height=1120,
-            width=3760,
-            temporal_factor=2,
-            factor=32,
-            min_pixels=4096,
-            max_pixels=25165824,
-        )
-    except (TypeError, ValueError) as error:
-        logger.warning(
-            "Exact video-aware KV routing disabled because the installed Qwen "
-            "smart_resize API is unsupported: %s",
-            error,
-        )
-        return None
-    if result == (1216, 4096):
-        return QWEN_VIDEO_RESIZE_LEGACY_CEIL
-    if result == (1120, 3776):
-        return QWEN_VIDEO_RESIZE_ROUND_TIES_EVEN
-    logger.warning(
-        "Exact video-aware KV routing disabled because the installed Qwen "
-        "smart_resize behavior is unsupported: %s",
-        result,
+    # Read the module global at call time so tests can monkeypatch it.
+    return resolve_qwen_video_resize_mode(
+        qwen3_smart_resize, logger=logger, feature="video-aware KV routing"
     )
-    return None
 
 
 def _resolve_qwen_video_processor_contract(
