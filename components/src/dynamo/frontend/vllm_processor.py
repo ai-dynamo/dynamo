@@ -50,6 +50,7 @@ from .structural_tag_policy import (
     runtime_structural_tag_options,
 )
 from .thinking import runtime_default_thinking_mode
+from .usage import response_usage, update_usage_metadata
 from .utils import (
     as_error_envelope,
     backend_invalid_argument_to_http_error,
@@ -1252,6 +1253,7 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
+        usage_metadata: dict[str, Any] = {}
         # Per-request reasoning-token usage (NVBug 6678449b); see
         # _ReasoningUsageAnnotator. Must be per-request, never module-level.
         # The counts live on the post-processors, which are per-request too.
@@ -1325,6 +1327,10 @@ class VllmProcessor:
                 # consume tokens without emitting a visible delta.
                 chunk_tokens = len(engine_response.get("token_ids") or [])
                 cumulative_output_tokens += chunk_tokens
+                # Workers send prompt/cache metadata only when it changes. Capture
+                # it even if a tool/reasoning parser suppresses this chunk's text.
+                if backend_usage := engine_response.get("completion_usage"):
+                    update_usage_metadata(usage_metadata, backend_usage)
 
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
@@ -1424,7 +1430,13 @@ class VllmProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    if usage := engine_response.get("completion_usage"):
+                    if usage := response_usage(
+                        request,
+                        usage_metadata,
+                        prompt_tokens=input_tokens,
+                        completion_tokens=cumulative_output_tokens,
+                        finished=bool(raw_finish_reason),
+                    ):
                         dynamo_out["usage"] = reasoning_usage.annotate(usage)
                     envelope["data"] = dynamo_out
 
