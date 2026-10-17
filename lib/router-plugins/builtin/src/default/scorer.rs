@@ -10,7 +10,8 @@ use dynamo_kv_router::plugins::worker_selection::{
 };
 
 /// Resolve optional terms once so disabled weights add neither branches nor conversions to
-/// each worker score. The shared-cache specialization also omits range traversal code.
+/// each worker score. The remote-hit specialization (shared-cache ranges and fetchable KV
+/// prefixes) also omits range traversal code.
 pub(super) fn build(
     config: &PolicyParameters,
     worker_label: &'static str,
@@ -66,6 +67,8 @@ struct PreparedRequest {
     overlap_credit: f64,
     needs_decay: bool,
     needs_decode_subtraction: bool,
+    // The host supplies fetch inputs for every candidate or for none.
+    has_kv_transfer: bool,
 }
 
 /// Division by a power-of-two integer has an exact reciprocal. Both inputs to this helper
@@ -148,6 +151,10 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             needs_decode_subtraction: self.is_decode
                 && !context.tracks_prefill_tokens()
                 && overlap_credit > 0.0,
+            has_kv_transfer: SHARED_CREDIT
+                && candidates
+                    .get(0)
+                    .is_some_and(|candidate| candidate.kv_transfer().is_some()),
         };
         if self.prepared.needs_decay {
             let mut minimum = usize::MAX;
@@ -181,7 +188,21 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 let shared = cache
                     .shared_hits()
                     .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
-                self.shared_cache_multiplier * shared as f64
+                // Blocks a KV fetch would add beyond everything this worker holds.
+                let fetchable = if self.prepared.has_kv_transfer {
+                    candidate
+                        .kv_transfer()
+                        .and_then(|transfer| {
+                            let local = transfer
+                                .local_prefix_blocks()
+                                .saturating_add(cache.disk_overlap_blocks() as u32);
+                            Some(transfer.source_prefix_blocks()?.saturating_sub(local))
+                        })
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                self.shared_cache_multiplier * (shared + fetchable) as f64
             } else {
                 // Preserve signed zero when the configured weight is -0.0.
                 self.shared_cache_multiplier
@@ -235,10 +256,13 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
         // The builtin's load-only modes must book the full prompt without cache credit.
         // Hosts still start indexing solely from the policy's declared inputs.
         let inputs = WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT;
-        if !self.is_plain_decode && self.overlap_score_credit != 0.0 {
-            inputs | WorkerInputs::CACHE
-        } else {
+        if self.is_plain_decode || self.overlap_score_credit == 0.0 {
             inputs
+        } else if SHARED_CREDIT {
+            // The host builds fetch sources per selection only for policies that ask.
+            inputs | WorkerInputs::CACHE | WorkerInputs::KV_TRANSFER
+        } else {
+            inputs | WorkerInputs::CACHE
         }
     }
 

@@ -13,6 +13,7 @@ use super::{
     CandidateData, MaterializedSelectionInput, WorkerInputs, WorkerSelectionContext,
     WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
+use crate::kv_hints::KvTransferScope;
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
@@ -265,21 +266,27 @@ impl DefaultScoringContext {
     }
 }
 
-fn default_row(
+fn default_row<C: WorkerConfigLike>(
     input: &MaterializedSelectionInput<'_>,
     context: DefaultScoringContext,
     worker: WorkerWithDpRank,
+    config: &C,
     preferred_taint_multiplier: Option<f64>,
 ) -> CandidateData {
     input.track_kept_candidate(worker);
-    input.row_with_device_overlap(
+    let mut row = input.row_with_device_overlap(
         worker,
         preferred_taint_multiplier,
         WorkerInputs::ALL,
         |effective_overlap_blocks, device_overlap_blocks| {
             context.device_overlap(effective_overlap_blocks, device_overlap_blocks)
         },
-    )
+    );
+    // Like the builtin scorer, read fetchable prefixes only when they earn credit.
+    if context.weights.shared_cache_multiplier != 0.0 {
+        row.transfer = input.kv_transfer_input(worker, config);
+    }
+    row
 }
 
 impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
@@ -304,8 +311,18 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             .map_or(0, |hits| {
                 hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
             });
-        let shared_overlap_blocks =
-            weights.shared_cache_multiplier * shared_beyond_device_blocks as f64;
+        // Blocks a fetch would add beyond everything this worker already holds.
+        let fetchable_blocks = row
+            .transfer
+            .and_then(|transfer| {
+                let local_blocks = transfer
+                    .local_prefix_blocks
+                    .saturating_add(cache.disk_overlap_blocks as u32);
+                Some(transfer.source_prefix_blocks?.saturating_sub(local_blocks))
+            })
+            .unwrap_or(0);
+        let remote_blocks = shared_beyond_device_blocks + fetchable_blocks;
+        let shared_overlap_blocks = weights.shared_cache_multiplier * remote_blocks as f64;
         // Normalize backlog above the least-loaded eligible worker by this request's
         // size. The rational decay softly trades cache locality for prefill balance,
         // while leaving workers at the load floor with their full device credit.
@@ -386,19 +403,19 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         // `request_id` is the same value `[ROUTING] Best` logs, and `worker_type` separates the
         // prefill-pool and decode-pool decisions that interleave into one log. Both are evaluated
         // inside the macro so they cost nothing when DEBUG is disabled.
-        if shared_beyond_device_blocks > 0 {
+        if remote_blocks > 0 {
             tracing::debug!(
                 request_id = context.request.mode.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
-                 {} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
+                 {} shared or fetchable blocks beyond the local prefix (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
                  = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} + {active_request_cost_blocks:.3} \
                  (raw_prefill_blocks: {:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
-                shared_beyond_device_blocks,
+                remote_blocks,
                 raw_prefill_blocks,
                 shared_cache_multiplier = weights.shared_cache_multiplier,
                 prefill_load_scale = weights.prefill_load_scale
@@ -463,8 +480,18 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         eligibility,
         selection_weights(scorer.kv_router_config, request),
     );
+    // Rows are scored as they are built, so build every fetch source first.
+    if default_context.weights.shared_cache_multiplier != 0.0 {
+        input.kv_transfer_sources(workers, KvTransferScope::all);
+    }
     if let Some(worker) = eligibility.pinned_worker() {
-        let row = default_row(input, default_context, worker, None);
+        let row = default_row(
+            input,
+            default_context,
+            worker,
+            &workers[&worker.worker_id],
+            None,
+        );
         return Some((
             worker,
             scorer.worker_logit(&input.context, default_context, &row, "Pinned formula"),
@@ -482,7 +509,13 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         scorer.worker_cost(
             &input.context,
             default_context,
-            &default_row(input, default_context, worker, preferred_taint_multiplier),
+            &default_row(
+                input,
+                default_context,
+                worker,
+                config,
+                preferred_taint_multiplier,
+            ),
         )
     };
 
@@ -634,7 +667,13 @@ mod tests {
             .worker_logit(
                 &input.context,
                 default_context,
-                &default_row(&input, default_context, worker, None),
+                &default_row(
+                    &input,
+                    default_context,
+                    worker,
+                    &workers[&worker.worker_id],
+                    None,
+                ),
                 "test",
             )
     }
@@ -1968,8 +2007,9 @@ mod tests {
         let input = MaterializedSelectionInput::new(&request, 16);
         let default_context =
             DefaultScoringContext::new(&workers, &request, request.eligibility(), weights);
+        let config = &workers[&worker.worker_id];
         let custom_row = input.row(worker, None, WorkerInputs::CACHE);
-        let default_row = default_row(&input, default_context, worker, None);
+        let default_row = default_row(&input, default_context, worker, config, None);
 
         assert_eq!(custom_row.cache.device_overlap_blocks, 0.0);
         assert_eq!(

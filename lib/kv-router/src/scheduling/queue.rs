@@ -122,24 +122,6 @@ fn non_max_overlap_selection<C: WorkerConfigLike>(
     })
 }
 
-fn target_cached_prefix_blocks(request: &SchedulingRequest, target: WorkerWithDpRank) -> u32 {
-    let device = request
-        .overlap
-        .tier_overlap_blocks
-        .device
-        .get(&target)
-        .copied()
-        .unwrap_or(0);
-    let lower_tier = request
-        .overlap
-        .tier_overlap_blocks
-        .host_pinned
-        .get(&target)
-        .copied()
-        .unwrap_or(0);
-    u32::try_from(device.saturating_add(lower_tier)).unwrap_or(u32::MAX)
-}
-
 #[allow(clippy::large_enum_variant)]
 enum AdmissionCommand {
     Enqueue {
@@ -1728,8 +1710,6 @@ impl<
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
         self.with_projected_loads(request, decay_now, |actor, request| {
             let selected = actor.select_worker_for_request(request, false)?;
-            let target_cached_prefix_blocks =
-                target_cached_prefix_blocks(request, selected.selection.worker);
 
             Ok(AdvisorySchedulingResponse {
                 selected_worker_load: selected.selected_worker_load,
@@ -1740,7 +1720,7 @@ impl<
                     max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
                     selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
                     selected_worker_tiers: selected.selected_worker_tiers,
-                    target_cached_prefix_blocks,
+                    kv_transfer_source: selected.selection.kv_transfer_source,
                     kv_transfer_candidates: request.kv_transfer_candidates.take(),
                     potential_decode_blocks: selected.selection.potential_decode_blocks,
                     selection_trace: selected.selection_trace,
@@ -1778,8 +1758,6 @@ impl<
             }
         };
 
-        let target_cached_prefix_blocks =
-            target_cached_prefix_blocks(request, selected.selection.worker);
         let response = SchedulingResponse {
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
@@ -1787,7 +1765,7 @@ impl<
             max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
             selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
             selected_worker_tiers: selected.selected_worker_tiers,
-            target_cached_prefix_blocks,
+            kv_transfer_source: selected.selection.kv_transfer_source,
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
             selection_trace: selected.selection_trace,
@@ -2238,6 +2216,7 @@ mod tests {
                 selected_raw_cached_tokens: None,
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
+                kv_transfer_source: None,
             })
         }
     }
