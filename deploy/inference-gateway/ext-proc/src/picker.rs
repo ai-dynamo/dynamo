@@ -38,10 +38,7 @@ impl Endpoint {
 }
 
 /// Metadata about the incoming HTTP request.
-///
-/// `Clone` only (not `Debug`): `tracing::Span` is `Clone` but not `Debug`, so a
-/// struct holding a span cannot derive `Debug`.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RequestInfo {
     /// Unique request ID (from `x-request-id` header or generated UUID).
     /// Used for router bookkeeping (add_request / free_request).

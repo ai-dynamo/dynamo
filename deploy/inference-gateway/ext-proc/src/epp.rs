@@ -31,7 +31,7 @@ use dynamo_runtime::discovery::{
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
@@ -1451,20 +1451,9 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::InvalidRequest(format!("Invalid UTF-8: {e}")))?;
 
-        // Each routing phase is wrapped in its own span, created inside
-        // `root.in_scope(...)` (issue #16590). Creating the span while the root
-        // is the *current* span is what makes both the exported OTLP trace (the
-        // OTel layer builds the child from the current context) and the JSON
-        // trace context (`DistributedTraceIdLayer` inherits the root's W3C ids)
-        // nest the phase under the root — the same mechanism the frontend's
-        // nested spans use. The `in_scope` closure is synchronous (no `.await`
-        // inside), so the `Entered` guard it holds never crosses an await point
-        // in this spawned (Send) `pick` future. The span is then started
-        // synchronously via `span.context()` (stamping its start time) and its
-        // async work runs with no guard held; the handle drops at block end,
-        // ending the span, so its duration covers the tokenize/pick work.
-
-        // Phase 1: tokenize.
+        // Create phase spans while the root is current so the logging layer
+        // inherits its distributed trace context. Instrument each future to
+        // enter the phase only while it is polled.
         let TokenizeResult {
             tokens,
             cache_namespace,
@@ -1489,11 +1478,9 @@ impl EndpointPicker for Router {
                     cache_namespace = tracing::field::Empty,
                 ),
             };
-            // Start the OTel span now (synchronously) so its duration covers the
-            // tokenize work below, without entering it across the await.
-            let _ = span.context();
             let result = self
                 .tokenize(body_str, &req.headers)
+                .instrument(span.clone())
                 .await
                 .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
             span.record("input_tokens", result.tokens.len() as u64);
@@ -1529,7 +1516,6 @@ impl EndpointPicker for Router {
                     reserved = tracing::field::Empty,
                 ),
             };
-            let _ = span.context();
             let booking = self
                 .route_prefill(
                     &format!("epp-prefill/{reservation_id}"),
@@ -1541,6 +1527,7 @@ impl EndpointPicker for Router {
                     allowed_worker_ids.clone(),
                     routing_constraints.clone(),
                 )
+                .instrument(span.clone())
                 .await;
             span.record(
                 "prefill_worker_id",
@@ -1548,7 +1535,7 @@ impl EndpointPicker for Router {
             );
             span.record(
                 "prefill_dp_rank",
-                booking.as_ref().and_then(|b| b.dp_rank()).unwrap_or(0),
+                booking.as_ref().ok().and_then(|b| b.dp_rank()).unwrap_or(0),
             );
             span.record("reserved", booking.is_ok());
             booking
@@ -1584,7 +1571,6 @@ impl EndpointPicker for Router {
                     overlap_blocks = tracing::field::Empty,
                 ),
             };
-            let _ = span.context();
             let (worker, overlap_blocks) = self
                 .route_decode(
                     &tokens,
@@ -1596,6 +1582,7 @@ impl EndpointPicker for Router {
                     allowed_worker_ids,
                     routing_constraints,
                 )
+                .instrument(span.clone())
                 .await
                 .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
             span.record("decode_worker_id", worker.worker_id);

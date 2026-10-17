@@ -95,13 +95,7 @@ struct RequestContext {
     /// Incomplete trailing SSE bytes awaiting the next chunk / EOS.
     sse_usage_buf: Vec<u8>,
 
-    /// The per-stream root span, minted in [`Self::mint_request_span`]. It is
-    /// the `epp-request` span that carries the inbound `traceparent` as its
-    /// parent, so the EPP's routing spans and the worker-side Frontend's spans
-    /// all hang off one trace (issue #16590). Held (not entered) across the
-    /// stream; routing code re-enters it via [`Span::in_scope`]. `None` only
-    /// for streams that never reached a header phase (e.g. a protocol
-    /// rejection before any request headers were seen).
+    /// Kept alive until stream completion; phase spans and the worker inherit it.
     request_span: Option<Span>,
 }
 
@@ -136,36 +130,22 @@ impl RequestContext {
         }
     }
 
-    /// Mint the per-stream root `epp-request` span once we have the request
-    /// headers (and thus the inbound `traceparent`) and a resolved request id.
-    ///
-    /// The ext_proc message is not an HTTP request, so the span fields that a
-    /// real frontend would populate from the request (method/uri/version) use
-    /// stable placeholders; the routing decision is recorded on child spans and
-    /// on `decode_worker_id` / `prefill_worker_id` here as the pick completes.
     fn mint_request_span(&mut self) {
         if self.request_span.is_some() {
             return;
         }
         let span = make_request_span_from_headers(
             &self.request_headers,
-            "POST",
-            "/ext-proc/stream",
+            envoy_helpers::find_header(&self.request_headers, ":method").unwrap_or(""),
+            envoy_helpers::find_header(&self.request_headers, ":path").unwrap_or(""),
             "HTTP/2",
             &self.request_id,
         );
-        // Synchronously enter-and-exit the root span so the
-        // `DistributedTraceIdLayer` finalizes its W3C context (in particular its
-        // own `span_id`) and the OTel layer builds the span. The closure has no
-        // `.await`, so the `Entered` guard never crosses an await point in this
-        // spawned stream task (issue #16590). The root's span_id is what the
-        // phase children parent under, and what we later inject downstream as
-        // the worker's `traceparent`.
+        // Finalize the distributed context before creating children or injecting headers.
         span.in_scope(|| {});
         self.request_span = Some(span);
     }
 
-    /// The per-stream root span, if minted.
     fn request_span(&self) -> Option<Span> {
         self.request_span.clone()
     }
@@ -322,7 +302,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         ctx: &RequestContext,
         mut headers: Vec<(String, String)>,
     ) -> Vec<(String, String)> {
-        let Some(span) = ctx.request_span() else {
+        let Some(span) = ctx.request_span.as_ref() else {
             return headers;
         };
         let mut trace_headers = HashMap::new();
@@ -403,11 +383,6 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         ctx.target_endpoint = result.endpoint.clone();
         ctx.incoming_model_name = model;
         ctx.target_model_name = ctx.incoming_model_name.clone();
-        // The routing decision itself (chosen workers, dp ranks) is recorded on
-        // the `epp-*` phase spans the picker created, not on the root span:
-        // the root's `decode_worker_id`/`prefill_worker_id`/`model` fields are
-        // the frontend's, typed u64/String, and `Span::record` panics on a
-        // type change (issue #16590).
         tracing::info!(
             request_id = %ctx.request_id,
             endpoint = %result.endpoint,
@@ -1142,24 +1117,159 @@ mod tests {
 
     /// `with_trace_headers` is a no-op when the stream never minted a root span
     /// (e.g. the protocol was rejected before request headers were seen), so the
-    /// picker's routing headers are returned untouched and no client-supplied
-    /// `traceparent` survives.
+    /// picker's routing headers are returned untouched.
     #[test]
     fn with_trace_headers_is_a_noop_without_a_root_span() {
         let ctx = RequestContext::new();
         let headers = vec![
             ("x-dynamo-worker-instance-id".to_string(), "1".to_string()),
-            ("traceparent".to_string(), "00-client-client-client-client-client-01".to_string()),
+            (
+                "traceparent".to_string(),
+                "00-client-client-client-client-client-01".to_string(),
+            ),
         ];
         let out = ExtProcServer::<Tracker>::with_trace_headers(&ctx, headers);
         assert_eq!(
             out,
             vec![
                 ("x-dynamo-worker-instance-id".to_string(), "1".to_string()),
-                ("traceparent".to_string(), "00-client-client-client-client-client-01".to_string()),
+                (
+                    "traceparent".to_string(),
+                    "00-client-client-client-client-client-01".to_string()
+                ),
             ],
             "no root span → no trace headers added, nothing stripped"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn routing_paths_propagate_epp_span_to_worker() {
+        use dynamo_runtime::logging::{DistributedTraceIdLayer, make_inference_request_span};
+        use opentelemetry::trace::{TraceContextExt, TracerProvider};
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        use tracing_subscriber::prelude::*;
+
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_sampler(opentelemetry_sdk::trace::Sampler::ParentBased(Box::new(
+                opentelemetry_sdk::trace::Sampler::AlwaysOn,
+            )))
+            .build();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry()
+                .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")))
+                .with(DistributedTraceIdLayer),
+        );
+        let picker = Tracker::agg();
+        for header_only in [true, false] {
+            for flags in [Some("01"), Some("00"), None] {
+                let mut headers = vec![
+                    (
+                        ":method",
+                        if header_only { "GET" } else { "POST" }.to_string(),
+                    ),
+                    (":path", "/v1/models".to_string()),
+                ];
+                if let Some(flags) = flags {
+                    headers.push((
+                        "traceparent",
+                        format!("00-11111111111111111111111111111111-2222222222222222-{flags}"),
+                    ));
+                    headers.push(("tracestate", "vendor=value".to_string()));
+                }
+                let hdr = HttpHeaders {
+                    headers: Some(HeaderMap {
+                        headers: headers
+                            .into_iter()
+                            .map(|(key, value)| HeaderValue {
+                                key: key.to_string(),
+                                raw_value: value.into_bytes(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                    }),
+                    end_of_stream: header_only,
+                };
+                let mut ctx = RequestContext::new();
+                ExtProcServer::<Tracker>::handle_request_headers(&mut ctx, &hdr);
+                if header_only {
+                    ExtProcServer::handle_header_only_request(&picker, &mut ctx, &[])
+                        .await
+                        .unwrap_or_else(|e| panic!("{}", e.message));
+                } else {
+                    ExtProcServer::handle_request_body(
+                        &picker,
+                        &mut ctx,
+                        Bytes::from_static(br#"{"model":"m"}"#),
+                        &[],
+                    )
+                    .await
+                    .unwrap_or_else(|e| panic!("{}", e.message));
+                }
+
+                let root = ctx.request_span.as_ref().unwrap();
+                assert_eq!(root.metadata().unwrap().name(), "epp-request");
+                let root_context = root.context();
+                let root_span = root_context.span();
+                let root_sc = root_span.span_context();
+                assert!(root_sc.is_valid());
+                if let Some(flags) = flags {
+                    assert_eq!(
+                        root_sc.trace_id().to_string(),
+                        "11111111111111111111111111111111"
+                    );
+                    assert_ne!(root_sc.span_id().to_string(), "2222222222222222");
+                    assert_eq!(root_sc.is_sampled(), flags == "01");
+                }
+
+                let response = ctx.req_header_resp.as_ref().unwrap();
+                let Some(ext_proc::processing_response::Response::RequestHeaders(response)) =
+                    &response.response
+                else {
+                    panic!("expected header mutation")
+                };
+                let mutations = response
+                    .response
+                    .as_ref()
+                    .unwrap()
+                    .header_mutation
+                    .as_ref()
+                    .unwrap();
+                let mut worker_request = axum::http::Request::builder().uri("/v1/models");
+                let mut forwarded = HashMap::new();
+                for mutation in &mutations.set_headers {
+                    let header = mutation.header.as_ref().unwrap();
+                    let value = envoy_helpers::get_header_value(header);
+                    forwarded.insert(header.key.clone(), value.clone());
+                    worker_request = worker_request.header(header.key.as_str(), value.as_str());
+                }
+                assert!(forwarded.contains_key("x-dynamo-routing-mode"));
+                assert_eq!(
+                    forwarded["traceparent"],
+                    format!(
+                        "00-{}-{}-{:02x}",
+                        root_sc.trace_id(),
+                        root_sc.span_id(),
+                        root_sc.trace_flags().to_u8(),
+                    )
+                );
+                if flags.is_some() {
+                    assert_eq!(forwarded["tracestate"], "vendor=value");
+                }
+                let worker = make_inference_request_span(&worker_request.body(()).unwrap());
+                let worker_context = worker.context();
+                assert_eq!(
+                    worker_context.span().span_context().trace_id(),
+                    root_sc.trace_id()
+                );
+                let worker_dctx = worker
+                    .in_scope(dynamo_runtime::logging::get_distributed_tracing_context)
+                    .unwrap();
+                assert_eq!(
+                    worker_dctx.parent_id.as_deref(),
+                    Some(root_sc.span_id().to_string().as_str())
+                );
+            }
+        }
     }
 
     #[test]

@@ -130,28 +130,24 @@ fn create_tls_acceptor() -> Result<TlsAcceptor> {
 /// Run EPP until it exits.
 pub async fn run(policy_registry: Option<WorkerSelectionPolicyRegistry>) -> Result<()> {
     init_tracing();
-    let mode = EppMode::from_env()?;
-    if !matches!(mode, EppMode::Standalone)
-        && policy_registry
-            .as_ref()
-            .is_some_and(|registry| !registry.is_empty())
-    {
-        anyhow::bail!("linked worker-selection policies require DYN_EPP_MODE=standalone")
+    let result = async {
+        let mode = EppMode::from_env()?;
+        if !matches!(mode, EppMode::Standalone)
+            && policy_registry
+                .as_ref()
+                .is_some_and(|registry| !registry.is_empty())
+        {
+            anyhow::bail!("linked worker-selection policies require DYN_EPP_MODE=standalone")
+        }
+        run_inner(mode, policy_registry.unwrap_or_default()).await
     }
-    run_inner(mode, policy_registry.unwrap_or_default()).await
+    .await;
+    // Drain the last OTLP batch on both normal shutdown and startup failure.
+    tokio::task::spawn_blocking(dynamo_runtime::logging::flush).await?;
+    result
 }
 
-/// Initialize tracing through the shared Dynamo runtime logging module.
-///
-/// This is the same initializer the Frontend uses: it honors `DYN_LOG` /
-/// `DYN_LOGGING_CONFIG_PATH` for console filtering and, when
-/// `OTEL_EXPORT_ENABLED` is set, wires the `tracing` spans to OpenTelemetry
-/// with an OTLP exporter driven by the standard `OTEL_*` environment
-/// variables (endpoint, protocol, headers, sampler). The per-request spans
-/// the ext_proc server creates (see `server.rs`) and the routing spans the
-/// pickers create (see `epp.rs`) are exported under the same settings as the
-/// Frontend, and each honors an incoming W3C `traceparent` header so a
-/// gateway-originated request joins a single trace end to end.
+/// Use the same logging filters and OTLP configuration as the Frontend.
 fn init_tracing() {
     dynamo_runtime::logging::init();
 }

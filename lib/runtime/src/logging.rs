@@ -114,6 +114,8 @@ const DEFAULT_OTEL_SERVICE_NAME: &str = "dynamo";
 
 /// Once instance to ensure the logger is only initialized once
 static INIT: Once = Once::new();
+static LOGGING_PROVIDERS: OnceLock<(SdkTracerProvider, Option<SdkLoggerProvider>)> =
+    OnceLock::new();
 
 #[derive(Serialize, Deserialize, Debug)]
 struct LoggingConfig {
@@ -549,9 +551,9 @@ impl GenericHeaders for [(String, String)] {
     }
 }
 
-struct GenericHeaderExtractor<'a, H>(&'a H);
+struct GenericHeaderExtractor<'a, H: ?Sized>(&'a H);
 
-impl<H: GenericHeaders> Extractor for GenericHeaderExtractor<'_, H> {
+impl<H: GenericHeaders + ?Sized> Extractor for GenericHeaderExtractor<'_, H> {
     fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key)
     }
@@ -564,7 +566,7 @@ impl<H: GenericHeaders> Extractor for GenericHeaderExtractor<'_, H> {
     }
 }
 
-fn extract_trace_parent<H: GenericHeaders>(
+fn extract_trace_parent<H: GenericHeaders + ?Sized>(
     headers: &H,
 ) -> (TraceParent, Option<opentelemetry::Context>) {
     let valid_widths = headers.get("traceparent").is_some_and(|header| {
@@ -620,7 +622,7 @@ fn extract_trace_parent<H: GenericHeaders>(
 }
 
 impl TraceParent {
-    pub fn from_headers<H: GenericHeaders>(headers: &H) -> TraceParent {
+    pub fn from_headers<H: GenericHeaders + ?Sized>(headers: &H) -> TraceParent {
         extract_trace_parent(headers).0
     }
 }
@@ -721,18 +723,7 @@ pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
     span
 }
 
-/// Create a request span from a generic header list and a caller-supplied request
-/// ID.
-///
-/// `make_inference_request_span` and `make_system_request_span` build the span
-/// from a full `axum::http::Request`, but a gRPC ext_proc handler sees only the
-/// per-message header map — there is no HTTP `Request` object. This variant
-/// accepts ordered `(key, value)` header pairs so the EPP can mint the exact
-/// same `target: "request_span"` root span (W3C `traceparent` extraction,
-/// `set_parent`, and the `request_id` field the `DistributedTraceIdLayer` reads
-///) as the frontend's HTTP path. `method`/`uri`/`version` are carried as span
-/// fields only; the EPP passes stable placeholders since the ext_proc message
-/// has no real method/uri.
+/// Create the EPP request span from ext_proc header pairs and a resolved request ID.
 pub fn make_request_span_from_headers(
     headers: &[(String, String)],
     method: &str,
@@ -744,26 +735,16 @@ pub fn make_request_span_from_headers(
 
     let span = tracing::info_span!(
         target: "request_span",
-        "http-request",
+        "epp-request",
         method = method,
         uri = uri,
         version = version,
         trace_id = trace_parent.trace_id,
         parent_id = trace_parent.parent_id,
         trace_flags = trace_parent.trace_flags,
+        tracestate = trace_parent.tracestate,
         x_request_id = trace_parent.x_request_id,
         request_id = request_id,
-        model = tracing::field::Empty,
-        "request.outcome" = tracing::field::Empty,
-        input_tokens = tracing::field::Empty,
-        output_tokens = tracing::field::Empty,
-        image_count = tracing::field::Empty,
-        video_count = tracing::field::Empty,
-        audio_count = tracing::field::Empty,
-        ttft_ms = tracing::field::Empty,
-        avg_itl_ms = tracing::field::Empty,
-        prefill_worker_id = tracing::field::Empty,
-        decode_worker_id = tracing::field::Empty,
     );
 
     if let Some(context) = otel_context {
@@ -1283,6 +1264,21 @@ pub fn init() {
     });
 }
 
+/// Flush pending OTLP spans and logs before process exit. Call on a blocking thread.
+pub fn flush() {
+    let Some((traces, logs)) = LOGGING_PROVIDERS.get() else {
+        return;
+    };
+    if let Err(error) = traces.force_flush() {
+        eprintln!("Failed to flush OpenTelemetry traces: {error}");
+    }
+    if let Some(logs) = logs
+        && let Err(error) = logs.force_flush()
+    {
+        eprintln!("Failed to flush OpenTelemetry logs: {error}");
+    }
+}
+
 #[cfg(feature = "tokio-console")]
 fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let tokio_console_layer = console_subscriber::ConsoleLayer::builder()
@@ -1437,6 +1433,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             .with(l)
             .init();
 
+        let _ = LOGGING_PROVIDERS.set((tracer_provider, logger_provider_opt));
         log_otel_init_status(&service_name, endpoint_opt, console_format);
     } else {
         let l = console_layer(console_format, span_events, fmt_filter_layer);
@@ -2587,25 +2584,15 @@ pub mod tests {
         );
     }
 
-    /// The EPP mints its per-stream root span from a header list (there is no
-    /// HTTP `Request` in a gRPC ext_proc stream) and then mints its routing
-    /// phase spans *inside* `root.in_scope(...)` so they inherit the root's W3C
-    /// trace context. This proves both: the root carries the inbound
-    /// `traceparent`'s ids, and a child created in the root's scope inherits
-    /// `trace_id` + `parent_id` (the mechanism the EPP relies on, issue #16590).
-    ///
-    /// `get_distributed_tracing_context()` reads the *current* span, so each
-    /// context is read inside its own `in_scope`.
-    #[test]
-    fn request_span_from_headers_and_in_scope_child_inherit_w3c_context() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_span_from_headers_and_async_child_inherit_w3c_context() {
+        use tracing::Instrument;
+
         let provider = SdkTracerProvider::builder()
             .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
             .build();
         let tracer = provider.tracer("test");
-        // Core `set_default` (not `SubscriberInitExt::set_default`) to avoid
-        // installing the global `log` LogTracer, which would poison a later
-        // `logging::init()` with SetLoggerError. Includes the OTel layer the
-        // way `setup_logging` does, so spans finalize their OtelData on enter.
+        // Avoid installing the global LogTracer used by logging::init().
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry()
                 .with(tracing_opentelemetry::layer().with_tracer(tracer))
@@ -2614,49 +2601,49 @@ pub mod tests {
 
         let trace_id = "11111111111111111111111111111111";
         let inbound_parent_span_id = "2222222222222222";
-        let headers = vec![(
-            "traceparent".to_string(),
-            format!("00-{trace_id}-{inbound_parent_span_id}-01"),
-        )];
+        let headers = vec![
+            (
+                "TraceParent".to_string(),
+                format!("00-{trace_id}-{inbound_parent_span_id}-01"),
+            ),
+            ("TraceState".to_string(), "vendor=value".to_string()),
+        ];
         let request_id = "123e4567-e89b-12d3-a456-426614174000";
         let root = make_request_span_from_headers(
             &headers,
             "POST",
-            "/ext-proc",
+            "/v1/chat/completions",
             "HTTP/2",
             request_id,
         );
-
-        // While the root is current, read its finalized W3C context.
+        assert_eq!(root.metadata().unwrap().name(), "epp-request");
         let root_ctx = root
-            .in_scope(|| get_distributed_tracing_context())
+            .in_scope(get_distributed_tracing_context)
             .expect("root span finalizes a W3C context");
         assert_eq!(root_ctx.trace_id, trace_id);
         assert_eq!(root_ctx.parent_id.as_deref(), Some(inbound_parent_span_id));
         assert_eq!(root_ctx.request_id.as_deref(), Some(request_id));
-        assert_ne!(
-            root_ctx.span_id, inbound_parent_span_id,
-            "the root span gets its own span_id, not the inbound parent's"
-        );
-        let root_span_id = root_ctx.span_id.clone();
+        assert_ne!(root_ctx.span_id, inbound_parent_span_id);
 
-        // A child created in the root's scope (exactly how the EPP pickers mint their
-        // phase spans) must inherit the root's W3C context: same trace_id,
-        // parent_id = the root's own span_id, and the root's request_id.
-        let child_ctx = root.in_scope(|| {
-            let child =
-                tracing::info_span!("epp-tokenize", input_tokens = tracing::field::Empty);
-            child
-                .in_scope(get_distributed_tracing_context)
-                .expect("child span finalizes a W3C context")
-        });
+        let child = root.in_scope(|| tracing::info_span!("epp-tokenize"));
+        let child_ctx = async {
+            tokio::task::yield_now().await;
+            get_distributed_tracing_context().expect("phase is active after an await")
+        }
+        .instrument(child)
+        .await;
         assert_eq!(child_ctx.trace_id, trace_id);
-        assert_eq!(child_ctx.parent_id.as_deref(), Some(root_span_id.as_str()));
         assert_eq!(
-            child_ctx.request_id.as_deref(),
-            Some(request_id),
-            "request_id propagates to children"
+            child_ctx.parent_id.as_deref(),
+            Some(root_ctx.span_id.as_str())
         );
+        assert_eq!(child_ctx.request_id.as_deref(), Some(request_id));
+        assert_eq!(child_ctx.tracestate.as_deref(), Some("vendor=value"));
+
+        let mut forwarded = HashMap::new();
+        root.in_scope(|| inject_trace_headers_into_map(&mut forwarded));
+        assert_eq!(forwarded["traceparent"], root_ctx.create_traceparent());
+        assert_eq!(forwarded["tracestate"], "vendor=value");
     }
 
     #[test]
@@ -3005,13 +2992,9 @@ pub mod tests {
             });
 
             // (c) Re-run as a fresh subprocess, running ONLY the child test.
-            let output = Command::new("cargo")
+            let output = Command::new(std::env::current_exe().expect("locate test binary"))
                 .args([
-                    "test",
-                    "-p",
-                    "dynamo-runtime",
                     "logging::tests::otlp_sync_init_connects_subprocess",
-                    "--",
                     "--exact",
                     "--nocapture",
                 ])
@@ -3024,7 +3007,9 @@ pub mod tests {
                 .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
                 .env_remove("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
                 .env_remove("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL")
-                .env("OTEL_BSP_SCHEDULE_DELAY", "100") // flush fast (ms) so it connects promptly
+                .env("OTEL_BSP_SCHEDULE_DELAY", "60000")
+                .env("OTEL_BLRP_SCHEDULE_DELAY", "60000")
+                .env("OTEL_EXPORTER_OTLP_TIMEOUT", "1000")
                 .output()
                 .expect("failed to run subprocess");
 
@@ -3061,16 +3046,14 @@ pub mod tests {
 
         init(); // real global init → setup_logging → otel_runtime_handle
 
-        // Emit real span + log data. Close the span (drop the guard) BEFORE the
-        // wait below: a span is only exported when it ends, so an open span would
-        // leave the batch trace exporter with nothing to flush in the window.
+        // Close the span before explicitly flushing; the scheduled export is delayed
+        // beyond the test's timeout so only flush() can trigger the connection.
         {
             let _span = tracing::info_span!("otlp_sync_smoke").entered();
             tracing::info!("otlp sync-init smoke log");
         }
 
-        // Give the batch exporter's scheduled flush time to fire and connect.
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        flush();
     }
 
     // Test functions at different log levels for filtering tests

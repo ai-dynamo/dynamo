@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::Semaphore;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing::Instrument;
 
 use dynamo_kv_router::services::selection::{SelectionError, WorkerSelectionPolicyRegistry};
 use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
@@ -341,12 +341,8 @@ impl EndpointPicker for EppRouter {
             });
         }
 
-        // Phase spans are created inside `in_scope(root)` so they nest under the
-        // stream's root `epp-request` span (issue #16590) — see the
-        // Dynamo-discovery picker for the full rationale: the synchronous
-        // `in_scope` closure never holds an `Entered` guard across an `.await`
-        // in this spawned (Send) `pick` future, and the span is started via
-        // `context()` before the async work runs.
+        // The logging layer inherits distributed trace context from the current
+        // root; instrumenting the future enters the phase only while polled.
         let TokenizeResult {
             token_ids: tokens,
             priority_jump,
@@ -370,9 +366,9 @@ impl EndpointPicker for EppRouter {
                     cache_namespace = tracing::field::Empty,
                 ),
             };
-            let _ = span.context();
             let result = self
                 .tokenize(req.body.clone(), &req.headers)
+                .instrument(span.clone())
                 .await
                 .map_err(|e| e.into_pick_error(&req.request_id))?;
             span.record("input_tokens", result.token_ids.len() as u64);
@@ -432,8 +428,12 @@ impl EndpointPicker for EppRouter {
                     endpoint = tracing::field::Empty,
                 ),
             };
-            let _ = span.context();
-            let resp = match self.selector.select_and_reserve(select_req).await {
+            let resp = match self
+                .selector
+                .select_and_reserve(select_req)
+                .instrument(span.clone())
+                .await
+            {
                 Ok(resp) => resp,
                 Err(SelectionError::BadRequest(message)) => {
                     return Err(PickError::InvalidRequest(message));
