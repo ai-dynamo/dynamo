@@ -1,0 +1,41 @@
+{
+  "captureSources": {
+    "hack/bootstrap_upgrade_fixtures.py": "fdd838e17de4cf0c94933f7d9523113f3f70ee0703a1fc6d52de4c9b6f6a7c9d",
+    "hack/upgrade_capture_test.go.tmpl": "6d2e0b9bcb266ad0b72d719434f06b3686d230423486491493fb52c78e242206",
+    "internal/controller/testdata/upgrade/scenario.yaml": "530e0f0ccd0158616e62971632efe3c37a2ca8d5b859dd9b50a1ab0d6244a69f",
+    "internal/testing/golden/capture.go": "73425c5e21c3f3da45cb79549f0e1d23ef43eee21a85981c0b4f3703b5d845cd"
+  },
+  "inputs": {
+    "history/1.4.0/sglang-1.4/input.yaml": "3fb5be80f446cbf68225deef70a30bc20964dfdb217bbff06c14f6b11d0e3768",
+    "history/1.4.0/sglang-1.5-custom/input.yaml": "69b3f11202a659ee2f5dd2fc22f623d7c23865cc46f8c84a0dd0da0baaf5b8c7",
+    "history/1.5.0/sglang-1.5/input.yaml": "dbc861b3428e8eb828318d8e9966819b9faf6ac37f4032d2346235d3b6f816a6"
+  },
+  "observations": {
+    "sglang-1.4": {
+      "oldHash": "1e058f0f",
+      "originVersion": "1.4.0",
+      "post15Hash": "1e058f0f",
+      "reconciledVersion": "1.5.0",
+      "unchangedDGDSpec": true
+    },
+    "sglang-1.5": {
+      "oldHash": "75ea6c4b",
+      "originVersion": "1.5.0",
+      "post15Hash": "75ea6c4b",
+      "reconciledVersion": "1.5.0",
+      "unchangedDGDSpec": true
+    },
+    "sglang-1.5-custom": {
+      "oldHash": "3b24e7dc",
+      "originVersion": "1.4.0",
+      "post15Hash": "86105660",
+      "reconciledVersion": "1.5.0",
+      "unchangedDGDSpec": true
+    }
+  },
+  "reconciledVersion": "1.5.0",
+  "releases": {
+    "1.4.0": "03014943323e78feb5bd672ef08b72caea0918ac",
+    "1.5.0": "b83b1d9304ebfc624709ac46db32b1b6f1ff1615"
+  }
+}

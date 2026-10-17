@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# The generator substitutes only the catalog's image before the old operator runs.
+# The one-time bootstrap supplies a fixed runtime image and namespace per scenario.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:

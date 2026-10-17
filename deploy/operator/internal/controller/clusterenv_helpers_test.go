@@ -9,10 +9,8 @@ package controller
 
 import (
 	"fmt"
-	"os/exec"
-	"strings"
+	"os"
 
-	semver "github.com/Masterminds/semver/v3"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -35,6 +33,7 @@ import (
 	"k8s.io/utils/ptr"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
+	"sigs.k8s.io/yaml"
 	vcbatchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
@@ -74,15 +73,16 @@ func clusterTestRestrictedConfig(namespace string) *configv1alpha1.OperatorConfi
 }
 
 func clusterTestOperatorVersion() (string, error) {
-	output, err := exec.Command(
-		"git", "describe", "--tags", "--match", "v[0-9]*", "--abbrev=12", "--long", "HEAD",
-	).Output()
+	data, err := os.ReadFile("../../../helm/charts/platform/components/operator/Chart.yaml")
 	if err != nil {
-		return "", fmt.Errorf("describe current commit: %w", err)
+		return "", err
 	}
-	version := strings.TrimPrefix(strings.TrimSpace(string(output)), "v")
-	if _, err := semver.NewVersion(version); err != nil {
-		return "", fmt.Errorf("git describe returned invalid semantic version %q: %w", version, err)
+	var chart struct{ AppVersion string }
+	if err := yaml.Unmarshal(data, &chart); err != nil {
+		return "", err
 	}
-	return version, nil
+	if chart.AppVersion == "" {
+		return "", fmt.Errorf("operator chart has no appVersion")
+	}
+	return chart.AppVersion, nil
 }
