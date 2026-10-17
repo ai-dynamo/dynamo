@@ -14,7 +14,7 @@ Usage (always via pytest):
     pytest --max-vram-gib=6 -n 4 -sv -m "gpu_1 and vllm" tests/serve/
 
 Flags:
-    --max-vram-gib=N   Only run tests with profiled_vram_gib <= N
+    --max-vram-gib=N   Only run gpu_1 tests with profiled_vram_gib <= N
     -n N / -n auto     Run N tests concurrently (auto = GPU budget / smallest test)
     -s                 Stream subprocess output live with [wN] prefixes
     -v / -vv           Passed through to subprocesses for verbose test names
