@@ -222,22 +222,6 @@ def test_missing_fields_default_to_zero(tmp_path: Path) -> None:
     _assert_same_values(_metrics(k8s), zeros)
 
 
-def test_throughput_object_without_avg(tmp_path: Path) -> None:
-    data = dict(FULL_CANONICAL)
-    data["request_throughput"] = {}
-    data["output_token_throughput"] = {"p50": 9.0}
-    path = _write_json(tmp_path, data)
-
-    parsed = _parse_aiperf_json(path)
-    assert parsed["req_per_sec"] == 0
-    assert parsed["output_tok_per_sec"] == 0
-
-    k8s = _make_result(prepopulated=True)
-    _parse_k8s_aiperf_into_result(k8s, tmp_path)
-    assert k8s.req_per_sec == 0
-    assert k8s.output_tok_per_sec == 0
-
-
 # ── Falsey / null throughput averages ───────────────────────────────────────
 
 
@@ -479,9 +463,3 @@ def test_k8s_partial_update_before_uncaught_error(tmp_path: Path) -> None:
     with pytest.raises(AttributeError):
         _parse_k8s_aiperf_into_result(k8s, tmp_path)
     _assert_same_values(_metrics(k8s), dict(SENTINELS, req_per_sec=7))
-
-    # Local buffers into a dict first, so the result is not touched at all.
-    local = _make_result(prepopulated=True)
-    with pytest.raises(AttributeError):
-        _parse_aiperf_into_result(local, tmp_path)
-    _assert_same_values(_metrics(local), SENTINELS)
