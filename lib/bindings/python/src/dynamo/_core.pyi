@@ -483,11 +483,30 @@ class FirstTokenSource:
     def bind(self, context: Context, dp_rank: Optional[int] = None) -> None: ...
 
 
+class TtftStageGuard:
+    """Process-local TTFT interval. Closing is idempotent; exceptions propagate."""
+
+    def close(self) -> None: ...
+    def __enter__(self) -> TtftStageGuard: ...
+    def __exit__(
+        self, _exc_type: Any = None, _exc_value: Any = None, _traceback: Any = None
+    ) -> bool: ...
+
 class Context:
     """
     Context wrapper around AsyncEngineContext for Python bindings.
     Provides tracing and cancellation capabilities for request handling.
     """
+
+    def start_ttft_stage(self, stage: str) -> TtftStageGuard:
+        """Start a frontend stage; no-op if no HTTP TTFT timeline is attached."""
+        ...
+
+    def record_ttft_stage_ago(
+        self, stage: str, start_ago_seconds: float, end_ago_seconds: float
+    ) -> None:
+        """Import worker-pool intervals using nonnegative monotonic ages."""
+        ...
 
     def __init__(
         self,

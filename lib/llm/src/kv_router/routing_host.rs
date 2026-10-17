@@ -38,6 +38,7 @@ use crate::{
         llm_backend::LLMEngineOutput,
         preprocessor::owned_abort_error,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
+        ttft::{TtftSpan, TtftStage},
     },
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
@@ -851,6 +852,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let phase = request.phase();
         let phase_label = phase.to_string();
+        let ttft_route = start_ttft_route(&request, phase);
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let (mut selection, mut operation) = self
             .select_with_affinity(&request, phase, is_query_only, &budget)
@@ -907,7 +909,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         drop(route_guard);
         let selected_target = route_target(selection.worker);
         let stream = match self
-            .dispatch_selection(request, selection, guard, &budget)
+            .dispatch_selection(request, selection, guard, &budget, ttft_route)
             .await
         {
             Ok(stream) => stream,
@@ -923,6 +925,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         };
         self.bind_affinity(operation, selected_target, stream)
     }
+}
+
+fn start_ttft_route(request: &PreprocessedRequest, phase: RequestPhase) -> Option<TtftSpan> {
+    let timings = request.tracker.as_ref()?.ttft()?;
+    let stage = match phase {
+        RequestPhase::Prefill => TtftStage::RoutePrefill,
+        RequestPhase::Decode => TtftStage::RouteDecode,
+        RequestPhase::Aggregated => TtftStage::RouteAggregated,
+    };
+    Some(timings.start_span(stage))
 }
 
 enum ResponseItemOutcome {

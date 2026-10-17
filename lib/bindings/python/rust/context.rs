@@ -11,8 +11,10 @@
 // `set_status` operations mirror the OTel `Span` API.
 
 use dynamo_backend_common::FirstTokenNotifier;
+use dynamo_llm::protocols::common::ttft::{TTFT_CONTEXT_KEY, TtftSpan, TtftStage, TtftTimings};
 use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
+use dynamo_runtime::pipeline::Context as PipelineContext;
 use dynamo_runtime::pipeline::context::Controller;
 use opentelemetry::global::BoxedSpan;
 use opentelemetry::trace::{Span as OtelSpan, Status, TraceContextExt, Tracer};
@@ -63,6 +65,7 @@ pub struct Context {
     trace_context: Option<DistributedTraceContext>,
     first_token: Option<FirstTokenNotifier>,
     metadata: Arc<Mutex<BTreeMap<String, String>>>,
+    ttft: Option<Arc<TtftTimings>>,
     /// Captured `engine.generate` span. `None` for Python-instantiated test
     /// contexts (where no parent span was plumbed in) — `current_span` /
     /// `start_span` return a no-op `SpanProxy` in that case.
@@ -73,6 +76,40 @@ pub struct Context {
 #[pyclass]
 pub struct ContextMetadata {
     inner: Arc<Mutex<BTreeMap<String, String>>>,
+}
+
+fn python_ttft_stage(name: &str) -> PyResult<TtftStage> {
+    TtftStage::from_python(name).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("unknown frontend TTFT stage: {name}"))
+    })
+}
+
+/// A small RAII context manager; never creates an OpenTelemetry span or log.
+#[pyclass]
+pub struct TtftStageGuard {
+    inner: Option<TtftSpan>,
+}
+
+#[pymethods]
+impl TtftStageGuard {
+    fn close(&mut self) {
+        self.inner.take();
+    }
+
+    fn __enter__(slf: PyRefMut<Self>) -> PyRefMut<Self> {
+        slf
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<Bound<'_, PyAny>>,
+        _exc_value: Option<Bound<'_, PyAny>>,
+        _traceback: Option<Bound<'_, PyAny>>,
+    ) -> bool {
+        self.close();
+        false
+    }
 }
 
 impl ContextMetadata {
@@ -182,8 +219,23 @@ impl Context {
             trace_context,
             first_token,
             metadata: Arc::new(Mutex::new(metadata)),
+            ttft: None,
             span: None,
         }
+    }
+
+    pub fn with_ttft_from<T: Send + Sync + 'static>(
+        mut self,
+        context: &PipelineContext<T>,
+    ) -> Result<Self, String> {
+        self.ttft = context
+            .get_optional::<Arc<TtftTimings>>(TTFT_CONTEXT_KEY)?
+            .map(|timings| Arc::clone(timings.as_ref()));
+        Ok(self)
+    }
+
+    pub fn ttft(&self) -> Option<&Arc<TtftTimings>> {
+        self.ttft.as_ref()
     }
 
     /// Attach the `engine.generate` span. Called by `PyLLMEngine::generate`
@@ -272,6 +324,7 @@ impl Context {
             trace_context: None,
             first_token: None,
             metadata: Arc::new(Mutex::new(metadata.unwrap_or_default())),
+            ttft: None,
             span: None,
         }
     }
@@ -289,12 +342,44 @@ impl Context {
             trace_context: self.trace_context.clone(),
             first_token: None,
             metadata: Arc::new(Mutex::new(self.metadata_snapshot())),
+            ttft: self.ttft.clone(),
             span: self.span.clone(),
         }
     }
 
     fn is_stopped(&self) -> bool {
         self.inner.is_stopped()
+    }
+
+    /// Start a process-local frontend stage; no-op outside an HTTP timeline.
+    fn start_ttft_stage(&self, stage: &str) -> PyResult<TtftStageGuard> {
+        let stage = python_ttft_stage(stage)?;
+        Ok(TtftStageGuard {
+            inner: self.ttft.as_ref().map(|timings| timings.start_span(stage)),
+        })
+    }
+
+    /// Import pool-worker timings without serializing a native request context.
+    fn record_ttft_stage_ago(
+        &self,
+        stage: &str,
+        start_ago_seconds: f64,
+        end_ago_seconds: f64,
+    ) -> PyResult<()> {
+        let stage = python_ttft_stage(stage)?;
+        let start = std::time::Duration::try_from_secs_f64(start_ago_seconds)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid start age"))?;
+        let end = std::time::Duration::try_from_secs_f64(end_ago_seconds)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid end age"))?;
+        if start < end {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "start age precedes end age",
+            ));
+        }
+        if let Some(timings) = &self.ttft {
+            timings.record_ago(stage, start, end);
+        }
+        Ok(())
     }
 
     fn is_killed(&self) -> bool {

@@ -38,6 +38,7 @@ from .structural_tag_policy import (
     should_attempt_structural_tag,
 )
 from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .ttft import ttft_stage
 from .utils import legacy_guided_decoding
 
 get_model_structural_tag: Any
@@ -747,6 +748,7 @@ async def preprocess_chat_request(
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
     structural_tag_excludes_reasoning: bool = False,
+    context: Any | None = None,
 ) -> PreprocessResult:
     validated_request = _validate_chat_completion_request(request)
     assistant_guided_decoding = _build_assistant_guided_decoding(validated_request)
@@ -803,17 +805,18 @@ async def preprocess_chat_request(
     # Render first: whether generation starts inside a reasoning block depends
     # on the rendered prompt (e.g. a template that ends the generation prompt
     # with an open think tag), and the tool-call grammar must match it.
-    _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
+    with ttft_stage(context, "template_tokenize"):
+        _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
 
-    if "prompt_token_ids" in engine_prompt:
-        tokens = list(engine_prompt["prompt_token_ids"])
-    else:
-        async_tokenizer = _get_async_tokenizer(tokenizer)
-        encoded = await async_tokenizer(
-            engine_prompt["prompt"],
-            add_special_tokens=request_for_sampling.add_special_tokens,
-        )
-        tokens = list(encoded.input_ids)
+        if "prompt_token_ids" in engine_prompt:
+            tokens = list(engine_prompt["prompt_token_ids"])
+        else:
+            async_tokenizer = _get_async_tokenizer(tokenizer)
+            encoded = await async_tokenizer(
+                engine_prompt["prompt"],
+                add_special_tokens=request_for_sampling.add_special_tokens,
+            )
+            tokens = list(encoded.input_ids)
 
     tool_guided_decoding = build_tool_call_guided_decoding(
         request_for_sampling,

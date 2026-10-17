@@ -63,6 +63,43 @@ For example, keep the default at `info` and enable trace output for the system-s
 export DYN_LOG='info,dynamo_runtime::system_status_server=trace'
 ```
 
+## Per-Request First-Token Log
+
+When enabled, the frontend emits one DEBUG event for each HTTP chat or text completion request when
+it first observes a nonzero output token count. The target is `dynamo_frontend::ttft` and the message is
+`frontend first token`. Requests that end, fail, or are canceled before that observation do not
+emit the event. Later tokens do not emit additional TTFT events.
+
+The event contains the canonical HTTP context `request_id`, `model`, `ttft_ms`, and 17 numeric stage
+durations in milliseconds. Field names use `<stage>_ms` for an empty phase and
+`<stage>_<phase>_ms` otherwise, such as `template_tokenize_ms`, `multimodal_prepare_ms`,
+`kv_route_prefill_ms`, `backend_first_response_decode_ms`, and
+`backend_overlap_prefill_decode_ms`. All stage/phase combinations are present, including zeros for
+unused stages. These frozen values match the
+[TTFT stage histogram](metrics-catalog.mdx#ttft-stage-durations), and their sum equals `ttft_ms`,
+subject to floating-point rounding.
+
+These events are disabled at the default INFO level. TTFT timing and Prometheus stage histograms
+remain enabled regardless of the log filter. To enable TTFT events while keeping other logs at INFO,
+set this environment variable before starting the frontend:
+
+```bash
+export DYN_LOG='info,dynamo_frontend::ttft=debug'
+```
+
+A global DEBUG or TRACE level also enables these events. To disable them while retaining other
+DEBUG logs, set:
+
+```bash
+export DYN_LOG='debug,dynamo_frontend::ttft=off'
+```
+
+Set `DYN_LOGGING_CONSOLE_FORMAT=jsonl` for machine-readable records; duration fields remain JSON
+numbers. Readable and JSONL formats use the same filters. TOML `log_filters` entries are applied
+after `DYN_LOG`, so an entry for the same target overrides the environment directive. The file
+selected by `DYN_LOGGING_CONFIG_PATH` overrides matching entries in `/opt/dynamo/etc/logging.toml`.
+More specific target filters take precedence over broader prefixes.
+
 ## OTLP Export
 
 `OTEL_EXPORT_ENABLED=true` is the master switch for runtime trace and log export. Configure a
