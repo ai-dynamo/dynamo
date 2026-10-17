@@ -3,13 +3,11 @@
 
 """Materialize a client media reference to a trusted local path.
 
-`validate_media_reference` blocks the *initial* URL, but a validated URL must
-still not be handed to a downstream generator that fetches it and follows
-redirects on its own — an allowed origin can `302` to an internal address
-(redirect SSRF). This fetches URL references through the SSRF-safe client (which
-revalidates every redirect hop against the policy) into a temp file and yields
-that local path; local references pass through unchanged. Callers hand the
-generator only a trusted local path, never a URL.
+URL references are fetched through the SSRF-safe client, which validates the
+initial destination and every redirect within the fetch deadline. The result
+is written to a temporary file; local references pass through unchanged.
+Callers hand the generator only a trusted local path, never a URL it could
+fetch again without the policy.
 """
 
 from __future__ import annotations
@@ -127,7 +125,11 @@ async def local_media_reference(
     if max_bytes == _FROM_ENV:
         max_bytes = max_media_bytes()
 
-    resolved = await validate_media_reference(reference, policy)
+    resolved = (
+        reference
+        if urlparse(reference).scheme.lower() in ("http", "https")
+        else await validate_media_reference(reference, policy)
+    )
     scheme = urlparse(resolved).scheme
     if scheme in ("http", "https"):
         # Imported here, not at module scope, so tests can monkeypatch

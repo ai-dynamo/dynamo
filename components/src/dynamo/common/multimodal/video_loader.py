@@ -28,7 +28,7 @@ from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
     describe_media_source,
-    validate_media_url,
+    prepare_media_url,
 )
 from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
@@ -166,7 +166,7 @@ class VideoLoader:
     async def _load_video_with_vllm(
         self, video_url: str, media_io_kwargs: Dict[str, Any] | None = None
     ) -> tuple[np.ndarray, Dict[str, Any]]:
-        normalized_url = await validate_media_url(video_url, self._url_policy)
+        normalized_url = await prepare_media_url(video_url, self._url_policy)
         media_io = self._create_vllm_video_io(media_io_kwargs)
 
         # HTTP(S) goes through our SSRF-safe fetcher so each redirect hop is
