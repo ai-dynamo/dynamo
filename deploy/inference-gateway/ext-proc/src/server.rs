@@ -998,6 +998,28 @@ impl ExtProcError {
                 status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
             },
+            // Must match `scheduler_error_status`; see
+            // `epp_statuses_match_the_selection_service`.
+            PickError::RouterOverloaded => Self {
+                status_code: StatusCode::TooManyRequests,
+                message: e.to_string(),
+            },
+            PickError::RouterQueueRejected => Self {
+                status_code: StatusCode::TooManyRequests,
+                message: e.to_string(),
+            },
+            PickError::RouterDeadlineExceeded => Self {
+                status_code: StatusCode::TooManyRequests,
+                message: e.to_string(),
+            },
+            PickError::RouterConflict => Self {
+                status_code: StatusCode::Conflict,
+                message: e.to_string(),
+            },
+            PickError::RouterInternal => Self {
+                status_code: StatusCode::InternalServerError,
+                message: e.to_string(),
+            },
         }
     }
 
@@ -1720,5 +1742,54 @@ mod tests {
     fn inject_body_extensions_rejects_non_object_nvext() {
         let body = br#"{"nvext": "bad"}"#;
         assert!(inject_body_extensions(body, Some(&[1]), None).is_err());
+    }
+
+    /// The EPP and the selection service give every scheduler error the same status.
+    #[test]
+    fn epp_statuses_match_the_selection_service() {
+        use crate::admission::RouterRejectionExt;
+        use dynamo_kv_router::protocols::WorkerId;
+        use dynamo_kv_router::scheduling::{KvSchedulerError, QueueLimitKind, QueueRejection};
+        use dynamo_kv_router::services::selection::SelectionError;
+
+        let cases = [
+            KvSchedulerError::NoEndpoints,
+            KvSchedulerError::AllEligibleWorkersOverloaded,
+            KvSchedulerError::AllEligibleWorkersFiltered,
+            KvSchedulerError::SubscriberShutdown,
+            KvSchedulerError::InitFailed("boom".to_string()),
+            KvSchedulerError::BookingFailed("duplicate".to_string()),
+            KvSchedulerError::PinnedWorkerOverloaded {
+                worker_id: WorkerId::default(),
+            },
+            KvSchedulerError::PinnedWorkerNotAllowed {
+                worker_id: WorkerId::default(),
+            },
+            KvSchedulerError::QueueRejected(QueueRejection {
+                policy_class: "batch".to_string(),
+                limit_kind: QueueLimitKind::Requests,
+                current: 8,
+                limit: 8,
+            }),
+            KvSchedulerError::DeadlineExceeded,
+            KvSchedulerError::RequestClassifierPanicked("boom".to_string()),
+            KvSchedulerError::RequestClassifierFailed(std::sync::Arc::new(std::io::Error::other(
+                "boom",
+            ))),
+            KvSchedulerError::DuplicateClassificationRequestId("req".to_string()),
+            KvSchedulerError::InvalidClassificationMetadata("bad".to_string()),
+            KvSchedulerError::ClassificationLifecycleEnded("req".to_string()),
+        ];
+
+        for error in cases {
+            let label = error.to_string();
+            let epp = ExtProcError::from_pick_error(error.rejection().into_pick_error());
+            let selection = SelectionError::Scheduler(error).status_code();
+
+            assert_eq!(
+                epp.status_code as u16, selection,
+                "EPP and selection service disagree on {label:?}"
+            );
+        }
     }
 }

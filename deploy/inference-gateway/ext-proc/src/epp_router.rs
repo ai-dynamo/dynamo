@@ -34,6 +34,7 @@ use dynamo_llm::protocols::common::extensions::{
 };
 use serde::Deserialize;
 
+use crate::admission::{RouterRejectionExt, record_rejection};
 use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
@@ -387,6 +388,11 @@ impl EndpointPicker for EppRouter {
             Ok(resp) => resp,
             Err(SelectionError::BadRequest(message)) => {
                 return Err(PickError::InvalidRequest(message));
+            }
+            Err(SelectionError::Scheduler(error)) => {
+                let rejection = error.rejection();
+                record_rejection(rejection, &error);
+                return Err(rejection.into_pick_error());
             }
             Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
         };

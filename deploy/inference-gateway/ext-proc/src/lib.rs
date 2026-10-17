@@ -11,6 +11,7 @@
 //! Envoy ──ext-proc──▶ ExtProcServer<epp::Router> ──EndpointPicker──▶ Dynamo KV Router
 //! ```
 
+pub mod admission;
 pub mod envoy_helpers;
 pub mod epp;
 pub mod epp_router;
