@@ -184,13 +184,19 @@ fn kv_hint_to_proto(
         .actions
         .iter()
         .map(|action| {
-            let payload = Value::Object(action.payload.clone().into_iter().collect());
+            let mut payload: Map<String, Value> = action.payload.clone().into_iter().collect();
+            if hint.protocol_version == "0.1"
+                && action.action_type == "kv.fetch"
+                && action.action_version == "1.0"
+            {
+                encode_fetch_hashes(&mut payload)?;
+            }
             Ok(pb::KvHintAction {
                 action_id: action.action_id.clone(),
                 action_type: action.action_type.clone(),
                 action_version: action.action_version.clone(),
                 payload: Some(dynamo_sidecar_common::json_to_struct(
-                    payload,
+                    Value::Object(payload),
                     "kv hint action payload",
                 )?),
             })
@@ -201,6 +207,34 @@ fn kv_hint_to_proto(
         message_id: hint.message_id.clone(),
         actions,
     })
+}
+
+/// `Struct` numbers are binary64; full-width KV hashes must use SGLang's
+/// fixed-width hex-string representation. Do not rewrite unknown actions or
+/// versions, or relax the shared JSON codec's exact-integer safety check.
+fn encode_fetch_hashes(payload: &mut Map<String, Value>) -> Result<(), DynamoError> {
+    let Some(hashes) = payload.get_mut("block_hashes") else {
+        return Ok(());
+    };
+    let hashes = hashes
+        .as_array_mut()
+        .ok_or_else(|| client::invalid_request("kv.fetch block_hashes must be an array"))?;
+    for hash in hashes {
+        if hash.is_string() {
+            // Existing strings belong to the engine's action parser.
+            continue;
+        }
+        let value = hash
+            .as_u64()
+            .or_else(|| hash.as_i64().map(|value| value as u64))
+            .ok_or_else(|| {
+                client::invalid_request(
+                    "kv.fetch block_hashes must contain 64-bit integers or hex strings",
+                )
+            })?;
+        *hash = Value::String(format!("{value:016x}"));
+    }
+    Ok(())
 }
 
 pub(crate) fn routed_dp_rank(

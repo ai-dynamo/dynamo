@@ -5,8 +5,10 @@ use super::*;
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
     BackendError, BootstrapInfo, ErrorType, GuidedDecodingOptions, KvHint, KvHintAction,
-    OutputOptions, PrefillResult, SamplingOptions, StopConditions,
+    KvSourceLocationsPayload, OutputOptions, PrefillResult, SamplingOptions, StopConditions,
 };
+use dynamo_kv_router::protocols::ExternalSequenceBlockHash;
+use prost::Message;
 use serde_json::json;
 
 fn request() -> PreprocessedRequest {
@@ -651,6 +653,254 @@ fn sglang_0521_request_controls_are_forwarded() {
         .unwrap(),
         json!({"source": "worker-7"})
     );
+}
+
+fn fetch_hint_request(hashes: Value) -> PreprocessedRequest {
+    let mut request = request();
+    request.kv_hint = Some(KvHint::new(
+        "fetch-message",
+        vec![KvHintAction::new(
+            "fetch-action",
+            "kv.fetch",
+            "1.0",
+            std::collections::BTreeMap::from([
+                ("block_hashes".to_string(), hashes),
+                (
+                    "source_control_endpoint".to_string(),
+                    json!("tcp://peer:12000"),
+                ),
+                ("extension".to_string(), json!({"mode": "copy", "count": 2})),
+            ]),
+        )],
+    ));
+    request
+}
+
+#[test]
+fn fetch_hashes_survive_generate_request_protobuf_round_trip() {
+    let hashes = [
+        0,
+        1,
+        (1 << 53) - 1,
+        1 << 53,
+        (1 << 53) + 1,
+        i64::MAX as u64,
+        u64::MAX,
+    ];
+    let mut request = request();
+    let mut action = KvHintAction::fetch(
+        "fetch-action",
+        KvSourceLocationsPayload {
+            source_control_endpoint: "tcp://peer:12000".to_string(),
+            block_hashes: hashes.into_iter().map(ExternalSequenceBlockHash).collect(),
+        },
+    );
+    action
+        .payload
+        .insert("extension".into(), json!({"mode": "copy", "count": 2}));
+    request.kv_hint = Some(KvHint::new("fetch-message", vec![action]));
+    let original_hint = request.kv_hint.clone();
+    let mapped = build_generate_request(
+        &request,
+        "fetch",
+        DisaggregationMode::Aggregated,
+        None,
+        None,
+    )
+    .unwrap();
+    // Exercise the actual protobuf wire, not just the JSON conversion helper.
+    let decoded = pb::GenerateRequest::decode(mapped.encode_to_vec().as_slice()).unwrap();
+    let hints = decoded.kv_hints.unwrap();
+    assert_eq!(hints.protocol_version, "0.1");
+    assert_eq!(hints.message_id, "fetch-message");
+    let action = &hints.actions[0];
+    assert_eq!(action.action_id, "fetch-action");
+    assert_eq!(action.action_type, "kv.fetch");
+    assert_eq!(action.action_version, "1.0");
+    let payload = dynamo_sidecar_common::struct_to_json(
+        action.payload.clone().unwrap(),
+        "SGLang",
+        "kv hint action payload",
+    )
+    .unwrap();
+    assert_eq!(payload["source_control_endpoint"], "tcp://peer:12000");
+    assert_eq!(payload["extension"], json!({"mode": "copy", "count": 2}));
+    for (wire_hash, expected) in payload["block_hashes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(hashes)
+    {
+        let wire_hash = wire_hash.as_str().unwrap();
+        assert_eq!(wire_hash.len(), 16);
+        assert_eq!(u64::from_str_radix(wire_hash, 16).unwrap(), expected);
+    }
+    assert_eq!(
+        request.kv_hint, original_hint,
+        "lowering must not mutate the router request"
+    );
+}
+
+#[test]
+fn fetch_hashes_preserve_signed_bit_patterns_and_existing_strings() {
+    let request = fetch_hint_request(json!([
+        -1,
+        i64::MIN,
+        "0000000000001234",
+        "ABCDEF0123456789"
+    ]));
+    let mapped = build_generate_request(
+        &request,
+        "fetch",
+        DisaggregationMode::Aggregated,
+        None,
+        None,
+    )
+    .unwrap();
+    let decoded = pb::GenerateRequest::decode(mapped.encode_to_vec().as_slice()).unwrap();
+    let payload = dynamo_sidecar_common::struct_to_json(
+        decoded.kv_hints.unwrap().actions.remove(0).payload.unwrap(),
+        "SGLang",
+        "kv hint action payload",
+    )
+    .unwrap();
+    assert_eq!(
+        payload["block_hashes"],
+        json!([
+            "ffffffffffffffff",
+            "8000000000000000",
+            "0000000000001234",
+            "ABCDEF0123456789",
+        ])
+    );
+}
+
+#[test]
+fn malformed_fetch_hashes_are_rejected_without_float_coercion() {
+    for hashes in [
+        json!(42),
+        json!([1.5]),
+        json!([1.0]),
+        json!([true]),
+        json!([null]),
+        json!([{}]),
+    ] {
+        let request = fetch_hint_request(hashes);
+        assert_invalid(
+            build_generate_request(
+                &request,
+                "fetch",
+                DisaggregationMode::Aggregated,
+                None,
+                None,
+            )
+            .unwrap_err(),
+            "kv.fetch block_hashes",
+        );
+    }
+}
+
+#[test]
+fn unknown_hint_actions_and_versions_are_not_rewritten() {
+    let mut request = fetch_hint_request(json!([23]));
+    request.kv_hint.as_mut().unwrap().actions.extend([
+        KvHintAction::new(
+            "unknown-action",
+            "future.action",
+            "1.0",
+            std::collections::BTreeMap::from([("block_hashes".to_string(), json!([23]))]),
+        ),
+        KvHintAction::new(
+            "future-fetch",
+            "kv.fetch",
+            "2.0",
+            std::collections::BTreeMap::from([("block_hashes".to_string(), json!([23]))]),
+        ),
+    ]);
+    let mapped = build_generate_request(
+        &request,
+        "fetch",
+        DisaggregationMode::Aggregated,
+        None,
+        None,
+    )
+    .unwrap();
+    let hints = pb::GenerateRequest::decode(mapped.encode_to_vec().as_slice())
+        .unwrap()
+        .kv_hints
+        .unwrap();
+    assert_eq!(hints.actions.len(), 3);
+    for action in &hints.actions[1..] {
+        let payload = dynamo_sidecar_common::struct_to_json(
+            action.payload.clone().unwrap(),
+            "SGLang",
+            "kv hint action payload",
+        )
+        .unwrap();
+        assert_eq!(payload, json!({"block_hashes": [23]}));
+    }
+}
+
+#[test]
+fn unknown_hint_protocol_is_forwarded_without_known_action_lowering() {
+    let mut request = fetch_hint_request(json!([23]));
+    request.kv_hint.as_mut().unwrap().protocol_version = "0.2".into();
+    let mapped = build_generate_request(
+        &request,
+        "fetch",
+        DisaggregationMode::Aggregated,
+        None,
+        None,
+    )
+    .unwrap();
+    let hints = pb::GenerateRequest::decode(mapped.encode_to_vec().as_slice())
+        .unwrap()
+        .kv_hints
+        .unwrap();
+    assert_eq!(hints.protocol_version, "0.2");
+    let payload = dynamo_sidecar_common::struct_to_json(
+        hints.actions[0].payload.clone().unwrap(),
+        "SGLang",
+        "kv hint action payload",
+    )
+    .unwrap();
+    assert_eq!(payload["block_hashes"], json!([23]));
+}
+
+#[test]
+fn unrelated_payload_integers_still_require_exact_struct_representation() {
+    let mut request = fetch_hint_request(json!([u64::MAX]));
+    request.kv_hint.as_mut().unwrap().actions[0]
+        .payload
+        .insert("extension".into(), json!(u64::MAX));
+    assert_invalid(
+        build_generate_request(
+            &request,
+            "fetch",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap_err(),
+        "cannot be represented exactly",
+    );
+    for (action_type, action_version) in [("future.action", "1.0"), ("kv.fetch", "2.0")] {
+        let mut request = fetch_hint_request(json!([u64::MAX]));
+        let action = &mut request.kv_hint.as_mut().unwrap().actions[0];
+        action.action_type = action_type.into();
+        action.action_version = action_version.into();
+        assert_invalid(
+            build_generate_request(
+                &request,
+                "fetch",
+                DisaggregationMode::Aggregated,
+                None,
+                None,
+            )
+            .unwrap_err(),
+            "cannot be represented exactly",
+        );
+    }
 }
 
 #[test]
