@@ -93,6 +93,8 @@ struct WorkItem {
 /// Shared TCP server that handles multiple endpoints on a single port
 pub struct SharedTcpServer {
     handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
+    /// Serializes handler ownership changes with their readiness transitions.
+    registration_lock: Mutex<()>,
     /// The address to bind to (may have port 0 for OS-assigned port)
     bind_addr: SocketAddr,
     /// The actual bound address (populated after bind_and_start, contains actual port)
@@ -172,6 +174,7 @@ impl SharedTcpServer {
         };
 
         Ok(Arc::new(Self {
+            registration_lock: Mutex::new(()),
             handlers: Arc::new(DashMap::new()),
             bind_addr,
             actual_addr: RwLock::new(None),
@@ -465,10 +468,21 @@ impl SharedTcpServer {
             notify: Arc::new(Notify::new()),
         });
 
-        // Insert handler FIRST to ensure it's ready to receive requests
-        self.handlers.insert(endpoint_path, handler);
+        let _registration = self.registration_lock.lock();
+        match self.handlers.entry(endpoint_path.clone()) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(handler);
+            }
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                anyhow::bail!(
+                    "Endpoint '{fqn_endpoint}' is already registered at '{endpoint_path}'"
+                );
+            }
+        }
 
-        system_health.lock().set_endpoint_registered(&endpoint_name);
+        system_health
+            .lock()
+            .register_endpoint_transport(&endpoint_name);
 
         tracing::info!(
             "Registered endpoint '{fqn_endpoint}' with shared TCP server on {}",
@@ -479,11 +493,17 @@ impl SharedTcpServer {
     }
 
     pub async fn remove_handler(&self, endpoint_path: &str, endpoint_name: &str) {
-        if let Some((_, handler)) = self.handlers.remove(endpoint_path) {
-            handler
-                .system_health
-                .lock()
-                .set_endpoint_health_status(endpoint_name, crate::HealthStatus::NotReady);
+        let removed = {
+            let _registration = self.registration_lock.lock();
+            self.handlers.remove(endpoint_path).map(|(_, handler)| {
+                handler
+                    .system_health
+                    .lock()
+                    .unregister_endpoint_transport(endpoint_name);
+                handler
+            })
+        };
+        if let Some(handler) = removed {
             tracing::info!(
                 endpoint_name = %endpoint_name,
                 endpoint_path = %endpoint_path,
@@ -738,18 +758,18 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         component_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
-        let endpoint_id = EndpointId {
-            namespace: namespace.clone(),
-            component: component_name.clone(),
-            name: endpoint_name.clone(),
+        let endpoint = EndpointId {
+            namespace,
+            component: component_name,
+            name: endpoint_name,
         };
         self.register_endpoint(
-            instance_path(&endpoint_id, instance_id),
+            instance_path(&endpoint, instance_id),
             service_handler,
             instance_id,
-            namespace,
-            component_name,
-            endpoint_name,
+            endpoint.namespace,
+            endpoint.component,
+            endpoint.name,
             system_health,
         )
         .await
@@ -880,6 +900,134 @@ mod tests {
             "/health".to_string(),
             "/live".to_string(),
         )))
+    }
+
+    #[tokio::test]
+    async fn request_plane_cleanup_is_scoped_to_one_instance() {
+        let server =
+            SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), CancellationToken::new()).unwrap();
+        let system_health = Arc::new(Mutex::new(SystemHealth::new(
+            crate::HealthStatus::Ready,
+            vec![],
+            false,
+            "/health".to_string(),
+            "/live".to_string(),
+        )));
+
+        for instance_id in [1, 2] {
+            crate::pipeline::network::ingress::unified_server::RequestPlaneServer::register_endpoint(
+                server.as_ref(),
+                "shared".to_string(),
+                Arc::new(SlowMockHandler::new(Duration::ZERO)),
+                instance_id,
+                "test".to_string(),
+                "component".to_string(),
+                Arc::clone(&system_health),
+            )
+            .await
+            .unwrap();
+        }
+
+        let duplicate = crate::pipeline::network::ingress::unified_server::RequestPlaneServer::register_endpoint(
+            server.as_ref(),
+            "shared".to_string(),
+            Arc::new(SlowMockHandler::new(Duration::ZERO)),
+            2,
+            "test".to_string(),
+            "component".to_string(),
+            Arc::clone(&system_health),
+        )
+        .await;
+        assert!(duplicate.is_err());
+        assert_eq!(server.handlers.len(), 2);
+
+        crate::pipeline::network::ingress::unified_server::RequestPlaneServer::unregister_endpoint_instance(
+            server.as_ref(),
+            &EndpointId::from("test/component/shared"),
+            1,
+        )
+        .await
+        .unwrap();
+
+        assert!(!server.handlers.contains_key("1/test/component/shared"));
+        assert!(server.handlers.contains_key("2/test/component/shared"));
+        assert_eq!(
+            system_health.lock().get_endpoint_health_status("shared"),
+            Some(crate::HealthStatus::Ready)
+        );
+
+        crate::pipeline::network::ingress::unified_server::RequestPlaneServer::unregister_endpoint_instance(
+            server.as_ref(),
+            &EndpointId::from("test/component/shared"),
+            2,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            system_health.lock().get_endpoint_health_status("shared"),
+            Some(crate::HealthStatus::NotReady)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_replacement_keeps_endpoint_ready() {
+        let server =
+            SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), CancellationToken::new()).unwrap();
+        let health = ready_system_health();
+        for _ in 0..128 {
+            server
+                .register_endpoint(
+                    "old".to_string(),
+                    Arc::new(SlowMockHandler::new(Duration::ZERO)),
+                    1,
+                    "test".to_string(),
+                    "component".to_string(),
+                    "shared".to_string(),
+                    health.clone(),
+                )
+                .await
+                .unwrap();
+            let barrier = Arc::new(tokio::sync::Barrier::new(2));
+            let removing = tokio::spawn({
+                let server = server.clone();
+                let barrier = barrier.clone();
+                async move {
+                    barrier.wait().await;
+                    server.remove_handler("old", "shared").await;
+                }
+            });
+            let registering = tokio::spawn({
+                let server = server.clone();
+                let health = health.clone();
+                async move {
+                    barrier.wait().await;
+                    server
+                        .register_endpoint(
+                            "new".to_string(),
+                            Arc::new(SlowMockHandler::new(Duration::ZERO)),
+                            2,
+                            "test".to_string(),
+                            "component".to_string(),
+                            "shared".to_string(),
+                            health,
+                        )
+                        .await
+                        .unwrap();
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                removing.await.unwrap();
+                registering.await.unwrap();
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                health.lock().get_endpoint_health_status("shared"),
+                Some(crate::HealthStatus::Ready)
+            );
+            server.remove_handler("new", "shared").await;
+        }
     }
 
     #[tokio::test]
