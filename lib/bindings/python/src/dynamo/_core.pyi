@@ -2728,7 +2728,9 @@ class KvDcRelay:
         ...
 
 class KvStateAgentHost:
-    def __init__(self, endpoint: Endpoint, max_slots: int = 8) -> None:
+    def __init__(
+        self, endpoint: Endpoint, max_slots: int = 8, slots_per_socket: int = 1
+    ) -> None:
         ...
 
     async def start(self) -> None:
