@@ -10,6 +10,7 @@ import pytest
 
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY, TokenBudget
 from dynamo.sglang.capacity import (
+    effective_max_running_requests,
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
     kv_event_block_size,
@@ -506,3 +507,255 @@ def test_unreadable_at_file_extra_config_is_ignored(register, tmp_path, filename
         path.write_text("extra_backend_tag = t\n")
 
     assert register._parse_hicache_storage_extra_config(f"@{path}") == {}
+
+
+@pytest.mark.parametrize(
+    "internal_states, expected",
+    [
+        ([{"effective_max_running_requests_per_dp": 101}], 101),
+        ({"effective_max_running_requests_per_dp": 64}, 64),
+        # Ranks can resolve differently; the smallest binds first.
+        (
+            [
+                {"effective_max_running_requests_per_dp": 128},
+                {"effective_max_running_requests_per_dp": 96},
+            ],
+            96,
+        ),
+        ([{}], None),
+        ([{"effective_max_running_requests_per_dp": 0}], None),
+        ([{"effective_max_running_requests_per_dp": True}], None),
+        ([{"effective_max_running_requests_per_dp": "101"}], None),
+        (["not-a-dict"], None),
+        ([], None),
+        (None, None),
+    ],
+)
+def test_effective_max_running_requests_parses_internal_state(
+    internal_states, expected
+):
+    """Parse the smallest positive per-rank cap; reject malformed values."""
+    assert effective_max_running_requests(internal_states) == expected
+
+
+def _effective_cap_server_args(max_running_requests):
+    """Minimal SGLang server args for the resolved-cap tests."""
+    return SimpleNamespace(
+        allow_auto_truncate=False,
+        context_length=4096,
+        disaggregation_mode=None,
+        max_prefill_tokens=None,
+        max_running_requests=max_running_requests,
+        page_size=16,
+        speculative_algorithm="NONE",
+        speculative_num_steps=None,
+    )
+
+
+def _effective_cap_engine(get_internal_state):
+    """Fake engine whose tokenizer manager serves ``get_internal_state``."""
+    tokenizer_manager = SimpleNamespace(
+        context_len=4096,
+        validate_total_tokens=True,
+        num_reserved_tokens=0,
+    )
+    if get_internal_state is not None:
+        tokenizer_manager.get_internal_state = get_internal_state
+    return SimpleNamespace(
+        _scheduler_init_result=SimpleNamespace(
+            scheduler_infos=[{"max_total_num_tokens": 1024}]
+        ),
+        tokenizer_manager=tokenizer_manager,
+    )
+
+
+def _patch_runtime_config_dependencies(register, monkeypatch, cli_max_num_seqs):
+    """Stub the registration helpers unrelated to the resolved cap."""
+    capacity = SimpleNamespace(
+        max_num_seqs=cli_max_num_seqs,
+        max_num_batched_tokens=1024,
+        total_kv_blocks=64,
+    )
+    monkeypatch.setattr(register, "model_card_dp_rank_bounds", lambda _: (0, 1))
+    monkeypatch.setattr(register, "get_sglang_worker_group_id", lambda _: None)
+    monkeypatch.setattr(register, "apply_topology_config", lambda _: None)
+    monkeypatch.setattr(
+        register, "_get_bootstrap_info_for_config", lambda _: (None, None)
+    )
+    monkeypatch.setattr(register, "get_spec_decode_runtime_data", lambda _: None)
+    monkeypatch.setattr(register, "_get_mooncake_runtime_data", lambda _: None)
+    monkeypatch.setattr(register, "runtime_capacity", lambda *_: capacity)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cli_value, resolved_value, expected",
+    [
+        # Hybrid Mamba model: a requested 256 resolves to 101 state slots.
+        (256, 101, 101),
+        # Unset flag: SGLang's own default is published instead of nothing.
+        (None, 2048, 2048),
+        # Older SGLang without the field keeps the configured value.
+        (256, None, 256),
+        (None, None, None),
+    ],
+)
+async def test_runtime_config_publishes_resolved_max_running_requests(
+    register, monkeypatch, cli_value, resolved_value, expected
+):
+    """Publish SGLang's resolved cap, falling back to the CLI value."""
+    _patch_runtime_config_dependencies(register, monkeypatch, cli_value)
+
+    async def get_internal_state():
+        if resolved_value is None:
+            return [{}]
+        return [{"effective_max_running_requests_per_dp": resolved_value}]
+
+    dynamo_args = register.DynamoConfig()
+    dynamo_args.enable_local_indexer = False
+    runtime_config = await register.get_runtime_config(
+        _effective_cap_engine(get_internal_state),
+        _effective_cap_server_args(cli_value),
+        dynamo_args,
+    )
+
+    assert runtime_config.max_num_seqs == expected
+    assert runtime_config.total_kv_blocks == 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["times_out", "missing"])
+async def test_resolved_max_running_requests_read_failure_keeps_cli_value(
+    register, monkeypatch, caplog, failure
+):
+    """A timeout or missing method keeps the CLI value."""
+    _patch_runtime_config_dependencies(register, monkeypatch, 256)
+    monkeypatch.setattr(register, "_EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S", 0.01)
+
+    release = asyncio.Event()
+
+    async def times_out():
+        await release.wait()
+        return [{}]
+
+    get_internal_state = {"times_out": times_out}.get(failure)
+    dynamo_args = register.DynamoConfig()
+    dynamo_args.enable_local_indexer = False
+    runtime_config = await register.get_runtime_config(
+        _effective_cap_engine(get_internal_state),
+        _effective_cap_server_args(256),
+        dynamo_args,
+    )
+
+    assert runtime_config.max_num_seqs == 256
+    assert runtime_config.total_kv_blocks == 64
+    if failure == "times_out":
+        assert "Timed out after" in caplog.text
+    # Finish the abandoned read so no task outlives the test.
+    release.set()
+    for _ in range(10):
+        if not register._pending_internal_state_reads:
+            break
+        await asyncio.sleep(0)
+    assert not register._pending_internal_state_reads
+
+
+@pytest.mark.asyncio
+async def test_resolved_max_running_requests_read_error_propagates(
+    register, monkeypatch
+):
+    """An error from SGLang fails registration instead of being hidden."""
+    _patch_runtime_config_dependencies(register, monkeypatch, 256)
+
+    async def raises():
+        raise RuntimeError("scheduler unavailable")
+
+    dynamo_args = register.DynamoConfig()
+    dynamo_args.enable_local_indexer = False
+    with pytest.raises(RuntimeError, match="scheduler unavailable"):
+        await register.get_runtime_config(
+            _effective_cap_engine(raises),
+            _effective_cap_server_args(256),
+            dynamo_args,
+        )
+    assert not register._pending_internal_state_reads
+
+
+class _QueueingControlChannel:
+    """Models SGLang's one-in-flight control communicator.
+
+    Requests are serialized by a lock and replies carry no request id, so a
+    caller cancelled mid-exchange would leave its reply for the next caller.
+    """
+
+    def __init__(self):
+        """Start with no pending replies."""
+        self._lock = asyncio.Lock()
+        self.replies: asyncio.Queue = asyncio.Queue()
+        self.sent = 0
+        self.cancelled = 0
+
+    async def get_internal_state(self):
+        """Send one request and wait for the next reply."""
+        async with self._lock:
+            self.sent += 1
+            try:
+                return await self.replies.get()
+            except asyncio.CancelledError:
+                self.cancelled += 1
+                raise
+
+
+@pytest.mark.asyncio
+async def test_timed_out_read_is_not_cancelled_and_does_not_leak_into_next_caller(
+    register, monkeypatch
+):
+    """A timed-out read finishes later and its reply reaches no other caller."""
+    monkeypatch.setattr(register, "_EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S", 0.01)
+    channel = _QueueingControlChannel()
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(get_internal_state=channel.get_internal_state)
+    )
+
+    assert await register._get_effective_max_running_requests(engine) is None
+    assert channel.cancelled == 0
+    assert len(register._pending_internal_state_reads) == 1
+
+    # The late reply completes the abandoned read instead of being left behind.
+    await channel.replies.put([{"effective_max_running_requests_per_dp": 101}])
+    for _ in range(10):
+        if not register._pending_internal_state_reads:
+            break
+        await asyncio.sleep(0)
+    assert not register._pending_internal_state_reads
+
+    # A later caller gets its own reply, not the stale one.
+    next_read = asyncio.ensure_future(channel.get_internal_state())
+    await channel.replies.put([{"effective_max_running_requests_per_dp": 202}])
+    assert await next_read == [{"effective_max_running_requests_per_dp": 202}]
+    assert channel.sent == 2
+    assert channel.cancelled == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_registration_does_not_cancel_sglang_read(register):
+    """Cancelling registration does not cancel SGLang's in-flight read."""
+    channel = _QueueingControlChannel()
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(get_internal_state=channel.get_internal_state)
+    )
+
+    caller = asyncio.ensure_future(register._get_effective_max_running_requests(engine))
+    await asyncio.sleep(0)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    assert channel.cancelled == 0
+    assert len(register._pending_internal_state_reads) == 1
+    await channel.replies.put([{}])
+    for _ in range(10):
+        if not register._pending_internal_state_reads:
+            break
+        await asyncio.sleep(0)
+    assert not register._pending_internal_state_reads
