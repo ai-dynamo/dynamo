@@ -1294,6 +1294,10 @@ class HandlerBase(BaseGenerativeHandler):
             # attention-DP dummy requests match against.
             cache_salt = HEALTH_CHECK_CACHE_SALT
 
+        # Raised before the try below so it reaches the client as a 4xx and
+        # does not take the fatal-error (worker shutdown) path.
+        self._check_prompt_within_max_num_tokens(processed_input, disaggregated_params)
+
         try:
             # NEW: Updated engine call to include multimodal data
             # Only pass conversation_params in affinity mode — older TRT-LLM builds'
@@ -1616,6 +1620,59 @@ class HandlerBase(BaseGenerativeHandler):
 
             # Initiate graceful shutdown
             await self._initiate_shutdown(e)
+
+    def _check_prompt_within_max_num_tokens(
+        self, processed_input: Any, disaggregated_params: Any
+    ) -> None:
+        """Reject a prompt the engine would refuse for exceeding max_num_tokens.
+
+        Mirrors the PyTorch-backend check in TRT-LLM's `LLM._check_arguments`,
+        which raises a plain `RequestError` that the frontend can only report
+        as a 500. Raising InvalidArgument here makes the frontend answer 400.
+        The conditions (backend, chunked prefill, generation-only, cp_size,
+        strict `>`) follow the engine. Encoder-decoder prompts are checked by
+        the engine after it constructs the decoder input.
+        """
+        args = self.engine.llm.args
+        if args.backend != "pytorch":
+            return
+        if args.enable_chunked_prefill:
+            return
+        max_num_tokens = args.max_num_tokens
+        if not max_num_tokens:
+            return
+        if (
+            disaggregated_params is not None
+            and getattr(disaggregated_params, "request_type", None) == "generation_only"
+        ):
+            return
+
+        # Text encoder-decoder inputs contain encoder tokens here. TRT-LLM
+        # constructs the decoder start token and forced prefix internally;
+        # only the engine can check that resulting prompt's length correctly.
+        if self.engine.llm._is_encoder_decoder_model():
+            return
+
+        if isinstance(processed_input, dict):
+            # Image placeholders expand inside the engine, so the token count
+            # here would undercount; leave those requests to the engine.
+            if self._request_has_images(processed_input):
+                return
+            prompt_token_ids = processed_input.get("prompt_token_ids")
+        else:
+            prompt_token_ids = processed_input
+        if prompt_token_ids is None:
+            return
+
+        cp_size = args.parallel_config.cp_size
+        limit = max_num_tokens * cp_size
+        prompt_len = len(prompt_token_ids)
+        if prompt_len > limit:
+            raise InvalidArgument(
+                f"This model's maximum prompt length is {limit} tokens. "
+                f"However, your prompt resulted in {prompt_len} tokens. "
+                "Please reduce the length of the messages."
+            )
 
     @staticmethod
     def _request_has_images(processed_input) -> bool:
