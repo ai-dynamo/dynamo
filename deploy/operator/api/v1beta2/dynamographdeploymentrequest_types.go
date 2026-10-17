@@ -109,11 +109,10 @@ type StaticWorkloadSpec struct {
 
 // WorkloadSpec defines the synthetic traffic model used for every candidate evaluation.
 type WorkloadSpec struct {
-	// Static defines one of AISimulate's synthetic workload shapes. When omitted,
-	// it searches the full KV-load ratio range at ISL 4000 and OSL 1000.
-	// An explicit empty object opts out of this underlay.
+	// Static defines one of AISimulate's synthetic workload shapes. Its fields are not
+	// defaulted individually: the default belongs to spec.workload as a whole, so an
+	// explicit workload object keeps exactly the fields it names.
 	// +optional
-	// +kubebuilder:default={isl: 4000, osl: 1000, kvLoadRatio: {0.0, 1.0}}
 	Static *StaticWorkloadSpec `json:"static,omitempty"`
 }
 
@@ -175,7 +174,10 @@ type ObjectiveSpec struct {
 	// +listType=set
 	Metrics []ObjectiveMetric `json:"metrics,omitempty"`
 
-	// SLA defines per-request latency bounds used to calculate goodput.
+	// SLA defines per-request latency bounds used to calculate goodput. When omitted,
+	// the schema sets a TTFT bound of 2000 ms and an ITL bound of 30 ms. An explicit
+	// empty object disables all bounds. spec.aisimulate.parameters.goal.sla overrides
+	// the bounds it names.
 	// +optional
 	// +kubebuilder:default={ttftMs: 2000, itlMs: 30}
 	SLA *ObjectiveSLASpec `json:"sla,omitempty"`
@@ -184,15 +186,17 @@ type ObjectiveSpec struct {
 // AISimulateSpec selects the AISimulate execution artifact and supplies native input.
 type AISimulateSpec struct {
 	// Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
-	// and execution defaults are resolved outside this API.
+	// persists the operator's configured image.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image,omitempty"`
 
-	// VersionOverride declares the AISimulate compatibility version when it
-	// cannot be inferred from the effective image.
+	// VersionOverride declares the AISimulate compatibility version as three numeric parts
+    // (for example 0.13.0), not a semver version: no v prefix, pre-release or build suffix. It is required
+	// when the image tag is not a version and wins over a version in the tag.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	VersionOverride string `json:"versionOverride,omitempty"`
 
 	// Parameters contains native AISimulate input. Field names and nesting use
@@ -232,12 +236,16 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Hardware *HardwareSpec `json:"hardware,omitempty"`
 
 	// Workload defines the synthetic traffic model used for every candidate evaluation.
+	// When omitted, the schema searches the full KV-load ratio range at ISL 4000 and
+	// OSL 1000. An explicit empty object opts out of that default, leaving the workload
+	// to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload
+	// overrides the fields it names.
 	// +optional
-	// +kubebuilder:default={}
+	// +kubebuilder:default={static: {isl: 4000, osl: 1000, kvLoadRatio: {0.0, 1.0}}}
 	Workload *WorkloadSpec `json:"workload,omitempty"`
 
 	// Objective defines scalar optimization or a multi-objective Pareto search.
-	// When omitted, the schema supplies the default Optimize mode and SLA;
+	// When omitted, the schema supplies the default Optimize mode and SLA bounds;
 	// admission supplies the conditional scalar metric.
 	// +optional
 	// +kubebuilder:default={}
@@ -276,7 +284,6 @@ type DynamoGraphDeploymentRequestStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:unservedversion
 // +kubebuilder:resource:shortName=dgdr
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model.name`
 // +kubebuilder:printcolumn:name="Active Run",type=string,JSONPath=`.status.activeRunRef.name`

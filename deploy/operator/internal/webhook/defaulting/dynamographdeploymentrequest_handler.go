@@ -62,6 +62,9 @@ type DGDRDefaulter struct {
 	// dynamo-planner:<operatorVersion> tag does not exist (pre-release charts:
 	// rc, nightly); empty keeps the derived default.
 	DefaultImage string
+	// v1beta2 configures the defaults of Requests submitted as v1beta2, which reach this
+	// handler as a v1beta1 object carrying the spec.v1beta2 envelope.
+	v1beta2 DGDRV1beta2Options
 }
 
 // NewDGDRDefaulter creates a new DGDRDefaulter with the given operator version
@@ -70,11 +73,18 @@ func NewDGDRDefaulter(operatorVersion, defaultImage string) *DGDRDefaulter {
 	return &DGDRDefaulter{OperatorVersion: operatorVersion, DefaultImage: defaultImage}
 }
 
+// WithV1beta2 sets the defaults of v1beta2 Requests and returns the defaulter.
+func (d *DGDRDefaulter) WithV1beta2(options DGDRV1beta2Options) *DGDRDefaulter {
+	d.v1beta2 = options
+	return d
+}
+
 // Default implements admission.CustomDefaulter.
 // If spec.image is not set, derives a default image from the backend and operator version.
 // UPDATE requests are admitted unchanged so an omitted image is not rewritten after
 // creation.
 func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
+
 	logger := log.FromContext(ctx).WithName(dgdrDefaultingWebhookName)
 
 	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK); err != nil {
@@ -90,6 +100,12 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	if err != nil {
 		logger.Error(err, "failed to get admission request from context, skipping defaulting")
 		return nil
+	}
+
+	// A v1beta2 Request is defaulted from its envelope on CREATE and UPDATE; only CREATE
+	// reads the cluster.
+	if dgdr.Spec.V1Beta2 != nil {
+		return defaultDynamoGraphDeploymentRequestV1beta2(ctx, dgdr, req.Operation, d.v1beta2)
 	}
 
 	if req.Operation == admissionv1.Create && dgdr.Spec.Image == "" {

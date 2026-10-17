@@ -62,18 +62,21 @@ import (
 	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
+	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -116,6 +119,7 @@ func initCRDSchemes() {
 	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(crdScheme))
 
 	utilruntime.Must(nvidiacomv1beta1.AddToScheme(crdScheme))
+	utilruntime.Must(nvidiacomv1beta2.AddToScheme(crdScheme))
 
 	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
 
@@ -157,6 +161,7 @@ func main() {
 	var operatorImage string
 	var operatorImagePullPolicy string
 	var dgdrDefaultImage string
+	var dgdrAISimulateDefaultImage string
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
@@ -170,6 +175,8 @@ func main() {
 		"Image pull policy for operator helper init containers")
 	flag.StringVar(&dgdrDefaultImage, "dgdr-default-image", "",
 		"Default DGDR profiler image, put into DGDR spec.image when unset; empty derives dynamo-planner:<operator-version>")
+	flag.StringVar(&dgdrAISimulateDefaultImage, "dgdr-aisimulate-default-image", "",
+		"AISimulate runner image, put into v1beta2 DGDR spec.aisimulate.image when unset; empty leaves the image unset and the Request is rejected")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -502,7 +509,7 @@ func main() {
 	}
 
 	if err := registerWebhookHandlers(
-		mgr, operatorCfg, runtimeConfig, operatorVersion, dgdrDefaultImage, gates,
+		mgr, operatorCfg, runtimeConfig, operatorVersion, dgdrDefaultImage, dgdrAISimulateDefaultImage, gates,
 	); err != nil {
 		setupLog.Error(err, "failed to register webhooks")
 		os.Exit(1)
@@ -642,6 +649,7 @@ func registerWebhookHandlers(
 	runtimeConfig *commonController.RuntimeConfig,
 	operatorVersion string,
 	dgdrDefaultImage string,
+	dgdrAISimulateDefaultImage string,
 	gate features.Gate,
 ) error {
 	var operatorPrincipal string
@@ -653,10 +661,23 @@ func registerWebhookHandlers(
 	}
 
 	if err := webhooksetup.Setup(mgr, webhooksetup.Options{
-		Config:            operatorCfg,
-		RuntimeConfig:     runtimeConfig,
-		OperatorVersion:   operatorVersion,
-		DGDRDefaultImage:  dgdrDefaultImage,
+		Config:          operatorCfg,
+		RuntimeConfig:   runtimeConfig,
+		OperatorVersion: operatorVersion,
+		DGDRV1beta1: webhookdefaulting.DGDRV1beta1Options{
+			DefaultImage: dgdrDefaultImage,
+		},
+		DGDRV1beta2: webhookdefaulting.DGDRV1beta2Options{
+			AISimulateImage: dgdrAISimulateDefaultImage,
+			// The same discovery order as the DGDR reconciler: DCGM first, then node labels when
+			// the GPUDiscovery gate is on. The webhook keeps its own short-lived cache.
+			Hardware: webhookdefaulting.NewGPUHardwareDiscoverer(&gpu.Discoverer{
+				Reader:     mgr.GetAPIReader(),
+				DCGM:       gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
+				Cache:      gpu.NewGPUDiscoveryCache(),
+				NodeLabels: func() bool { return gate.Enabled(features.GPUDiscovery) },
+			}),
+		},
 		OperatorPrincipal: operatorPrincipal,
 		Gate:              gate,
 	}); err != nil {
