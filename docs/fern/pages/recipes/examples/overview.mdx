@@ -1,0 +1,114 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Examples
+subtitle: Choose a runnable Dynamo example by backend, deployment surface, and feature.
+---
+
+The Dynamo repository ships runnable examples for every supported backend and many
+Dynamo features. Use this page to find the one that matches your environment and
+goal, then follow its canonical guide. The source under [`examples/`](https://github.com/ai-dynamo/dynamo/tree/main/examples)
+tracks `main`; if you run a stable release, check out the matching release branch
+before using a script. Model recipes live under [Model Recipes](../model-recipes/overview.mdx);
+this page covers the broader example tree.
+
+## Getting started
+
+| Example | Use it when | Source |
+| --- | --- | --- |
+| Hello World custom backend | You want the smallest Dynamo runtime service (endpoint, worker, streaming) and no GPU. | [`examples/custom_backend/hello_world`](https://github.com/ai-dynamo/dynamo/tree/main/examples/custom_backend/hello_world) |
+| Request cancellation demo | You need to cancel in-flight requests across a client, a proxy, and a backend. | [`examples/custom_backend/cancellation`](https://github.com/ai-dynamo/dynamo/tree/main/examples/custom_backend/cancellation) |
+| Chat templates | A model's Hugging Face chat template lacks the parser markers Dynamo needs; use a vendored template instead. | [`examples/chat_templates`](https://github.com/ai-dynamo/dynamo/tree/main/examples/chat_templates) |
+
+## Local backend examples
+
+Run these on a local or bare-metal host with `python3 -m dynamo.*`. The
+[Local Templates](../cli-templates/vllm.mdx) pages document every launch script in full.
+
+| Example | Use it when | Canonical page | Source |
+| --- | --- | --- | --- |
+| vLLM local launch scripts | You want the baseline single-GPU, embedding, multimodal, routing, KV-cache, and speculative-decoding vLLM paths. | [vLLM local templates](../cli-templates/vllm.mdx) | [`examples/backends/vllm/launch`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch) |
+| vLLM LoRA adapters | You serve dynamic LoRA adapters with vLLM. | [LoRA adapters](../../cli/operations/lora-adapters.md) | [`examples/backends/vllm/launch/lora`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/lora) |
+| vLLM multimodal LoRA | You combine vision-language input with dynamically loaded adapters. | [LoRA adapters](../../cli/operations/lora-adapters.md) | [`examples/backends/vllm/launch/lora/multimodal`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/lora/multimodal) |
+| vLLM-Omni image LoRA | You generate images from an aggregated vLLM-Omni worker with adapters. | [Text to image](../../use-cases/diffusion/workflows/text-to-image.md) | [`examples/backends/vllm/launch/lora/omni`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/lora/omni) |
+| vLLM on Intel XPU | You run local vLLM on Intel XPU devices, including heterogeneous decode and routing. | | [`examples/backends/vllm/launch/xpu`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/xpu) |
+| vLLM XPU LoRA | You serve LoRA adapters on Intel XPU. | | [`examples/backends/vllm/launch/lora/xpu`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/lora/xpu) |
+| SGLang local launch scripts | You want aggregated, disaggregated, embedding, rerank, vision, or speculative-decoding SGLang paths. | [SGLang local templates](../cli-templates/sglang.mdx) | [`examples/backends/sglang/launch`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch) |
+| SGLang LoRA | You serve LoRA adapters with SGLang. | [LoRA adapters](../../cli/operations/lora-adapters.md) | [`examples/backends/sglang/launch/lora`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch/lora) |
+| TensorRT-LLM local launch scripts | You want TensorRT-LLM aggregated, disaggregated, multimodal EPD, or speculative-decoding paths. | [TensorRT-LLM local templates](../cli-templates/tensorrt-llm.mdx) | [`examples/backends/trtllm/launch`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/launch) |
+| TokenSpeed disaggregated serving | You want an experimental multi-host prefill/decode deployment with KV-aware routing. | | [`examples/backends/tokenspeed`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/tokenspeed) |
+| Shared GPU and LoRA utilities | You need the shared GPU-memory helpers or the S3-compatible LoRA setup used by several backends. | | [`examples/common/gpu_utils.md`](https://github.com/ai-dynamo/dynamo/blob/main/examples/common/gpu_utils.md), [`examples/common/lora.md`](https://github.com/ai-dynamo/dynamo/blob/main/examples/common/lora.md) |
+
+## Kubernetes templates
+
+Deploy these with Dynamo's Kubernetes operator. The [DGD](../kubernetes-templates/dgd/vllm.mdx)
+and [DGDR](../kubernetes-templates/dgdr.mdx) pages carry the full manifests.
+
+| Example | Use it when | Canonical page | Source |
+| --- | --- | --- | --- |
+| vLLM DGD templates | You deploy vLLM on Kubernetes, aggregated or disaggregated with KV routing and planning. | [vLLM DGD](../kubernetes-templates/dgd/vllm.mdx) | [`examples/backends/vllm/deploy`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy) |
+| vLLM KVCR | You add a secondary KV tier over RDMA to a two-node aggregated vLLM deployment. | | [`examples/backends/vllm/deploy/kvcr`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/kvcr) |
+| vLLM LoRA on Kubernetes | You load vLLM LoRA adapters from the Hugging Face Hub or MinIO. | [LoRA adapters](../../kubernetes/operations/lora-adapters.md) | [`examples/backends/vllm/deploy/lora`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/lora) |
+| vLLM multimodal LoRA on Kubernetes | You serve a vision-language model with LoRA adapters backed by MinIO. | [LoRA adapters](../../kubernetes/operations/lora-adapters.md) | [`examples/backends/vllm/deploy/lora/multimodal`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/lora/multimodal) |
+| Intel XPU DRA | You deploy vLLM on Intel XPU nodes with dynamic resource allocation. | | [`examples/backends/vllm/deploy/xpu`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/xpu) |
+| SGLang DGD templates | You deploy SGLang on Kubernetes, aggregated or disaggregated. | [SGLang DGD](../kubernetes-templates/dgd/sglang.mdx) | [`examples/backends/sglang/deploy`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy) |
+| TensorRT-LLM DGD templates | You deploy TensorRT-LLM on Kubernetes, including snapshot restore and request migration. | [TensorRT-LLM DGD](../kubernetes-templates/dgd/tensorrt-llm.mdx) | [`examples/backends/trtllm/deploy`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy) |
+| TensorRT-LLM engine configs | You need `--extra-engine-args` YAML for MTP, WideEP, or multimodal TensorRT-LLM workers. | | [`examples/backends/trtllm/engine_configs`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/engine_configs) |
+| DGDR examples | You let the profiler and planner generate a deployment from a request spec. | [DGDR](../kubernetes-templates/dgdr.mdx) | [`examples/deployments/dgdr`](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/dgdr) |
+
+## Cloud deployments
+
+Provider-specific manifests that back the managed-Kubernetes and ECS guides.
+
+| Example | Use it when | Source |
+| --- | --- | --- |
+| Amazon EKS | You deploy on EKS, including Auto Mode and EFA topologies. | [`examples/deployments/EKS`](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/EKS) |
+| Google GKE | You deploy disaggregated vLLM or SGLang on GKE. | [`examples/deployments/GKE`](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/GKE) |
+| Azure AKS | You deploy on AKS and need the Spot VM tolerations. | [`examples/deployments/AKS`](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/AKS) |
+| Amazon ECS | You run Dynamo on ECS with task-definition JSON rather than Kubernetes manifests. | [`examples/deployments/ECS`](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/ECS) |
+
+## Feature and component examples
+
+| Example | Use it when | Canonical page | Source |
+| --- | --- | --- | --- |
+| Custom worker selection policies | You write a Rust worker filter, scorer, or picker for the KV router. | [Custom worker selection](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx) | [`examples/router/custom-policy-example`](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example) |
+| Overload-aware soft pinning | You want soft session affinity that repins a worker when it overloads. | | [`examples/router/custom-policy-example/soft-pin-repin`](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example/soft-pin-repin) |
+| Router policy-class queues | You need a queue policy that separates cached, uncached, and latency classes. | | [`examples/router/policy-class-queues.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/policy-class-queues.yaml) |
+| Global Planner | You scale several DynamoGraphDeployments under one GPU budget. | [Global planner](../../developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md) | [`examples/global_planner`](https://github.com/ai-dynamo/dynamo/tree/main/examples/global_planner) |
+| Power-aware budget | You cap per-GPU power and let the planner scale within a power budget. | | [`examples/power-aware-budget`](https://github.com/ai-dynamo/dynamo/tree/main/examples/power-aware-budget) |
+| Offline batch with llm-d Batch Gateway | You serve the OpenAI Batch API from a dedicated Dynamo worker pool. | | [`examples/deployments/llm-d-batch-gateway`](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/llm-d-batch-gateway) |
+| External rollouts with Slime | You drive SGLang workers from a Slime reinforcement-learning loop and update weights. | [Slime](../../use-cases/reinforcement-learning/slime.md) | [`examples/rl/slime`](https://github.com/ai-dynamo/dynamo/tree/main/examples/rl/slime) |
+| Nemotron Speech cascaded pipeline | You build an OpenAI-compatible ASR, LLM, and TTS voice agent. | | [`examples/nemotron_speech_cascaded_pipeline`](https://github.com/ai-dynamo/dynamo/tree/main/examples/nemotron_speech_cascaded_pipeline) |
+| Diffusion with FastVideo | You serve text-to-video diffusion locally or on Kubernetes. | [Diffusion](../../use-cases/diffusion/overview.md) | [`examples/diffusers`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers), [`examples/diffusers/local`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/local), [`examples/diffusers/deploy`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/deploy) |
+| Custom vision encoders | You plug an in-process encoder into a multimodal vLLM worker. | [Custom vision encoders](../../use-cases/multimodal-serving/custom-vision-encoders.md) | [`examples/custom_encoder`](https://github.com/ai-dynamo/dynamo/tree/main/examples/custom_encoder) |
+
+## Internal and test-only examples
+
+These directories are not user-facing. They are listed so the example tree stays
+fully accounted for and so a rename is visible here.
+
+| Path | Disposition |
+| --- | --- |
+| [`examples/backends/sample`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sample) | Test-only CPU smoke backends used by CI. |
+| [`examples/backends/mocker`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/mocker) | GPU-free mocker workers used by CI and benchmarks. |
+| [`examples/backends/tokenspeed/tests`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/tokenspeed/tests) | Test-only. |
+| [`examples/backends/trtllm/templates`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/templates) | Supporting chat-template asset. |
+| [`examples/backends/vllm/deploy/gaie`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/gaie) | Supporting Gateway API Inference Extension manifest. |
+| [`examples/backends/vllm/deploy/v1beta1`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/v1beta1) | Obsolete legacy manifest path. |
+| [`examples/backends/vllm/launch/stage_configs`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/stage_configs) | Supporting stage configuration. |
+| [`examples/backends/vllm/omni`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/omni) | Internal dev/qualification overlay. |
+| [`examples/deployments/EKS/manifests`](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/EKS/manifests) | Supporting EKS manifests. |
+| [`examples/deployments/EKS/templates`](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/EKS/templates) | Supporting eksctl template. |
+| [`examples/deployments/GKE/vllm`](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/GKE/vllm) | Supporting GKE manifests. |
+| [`examples/deployments/GKE/sglang`](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/GKE/sglang) | Supporting GKE manifests. |
+| [`examples/nemotron_speech_cascaded_pipeline/container`](https://github.com/ai-dynamo/dynamo/tree/main/examples/nemotron_speech_cascaded_pipeline/container) | Supporting adapter image build. |
+| [`examples/nemotron_speech_cascaded_pipeline/nemotron_speech`](https://github.com/ai-dynamo/dynamo/tree/main/examples/nemotron_speech_cascaded_pipeline/nemotron_speech) | Internal adapter code. |
+| [`examples/nemotron_speech_cascaded_pipeline/tests`](https://github.com/ai-dynamo/dynamo/tree/main/examples/nemotron_speech_cascaded_pipeline/tests) | Test-only. |
+| [`examples/router/custom-policy-example/catalog`](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example/catalog) | Supporting Rust policy crate. |
+| [`examples/router/custom-policy-example/epp`](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example/epp) | Supporting endpoint-picker binary crate. |
+| [`examples/router/custom-policy-example/simple-filter-score-pick`](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example/simple-filter-score-pick) | Supporting sample crate. |
+| [`examples/router/custom-policy-example/simple-stacked-score-pick`](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example/simple-stacked-score-pick) | Supporting sample crate. |
+| [`examples/router/custom-policy-example/disagg-filter-score-pick`](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example/disagg-filter-score-pick) | Supporting sample crate. |
+
+The [Examples reference](../../reference/general/examples.md) keeps a short
+start-here list for readers arriving from the Reference tab.
