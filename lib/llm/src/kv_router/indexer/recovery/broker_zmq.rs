@@ -29,6 +29,7 @@ use super::{
         MismatchMetricScope, clear_mismatch_metric_on_cancellation, update_mismatch_metric,
         update_subscription_failure_metric,
     },
+    wait_for_retry,
     worker_query::WorkerQueryClient,
 };
 use crate::{
@@ -577,18 +578,6 @@ fn active_publishers(view: &KvSourceMembershipView) -> HashSet<u64> {
         .filter_map(|status| status.active_source())
         .map(|source| source.publisher_id)
         .collect()
-}
-
-async fn wait_for_retry(
-    delay: Duration,
-    membership_watch: &mut KvSourceMembershipWatch,
-    cancellation_token: &CancellationToken,
-) -> bool {
-    tokio::select! {
-        _ = cancellation_token.cancelled() => false,
-        changed = membership_watch.changed() => changed.is_ok(),
-        _ = tokio::time::sleep(delay) => true,
-    }
 }
 
 #[cfg(test)]
