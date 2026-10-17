@@ -13,7 +13,8 @@ use crate::{
     ConcurrentRadixTreeCompressed, SessionPrefixIndexer,
     indexer::{KvIndexer, KvRouterError, ThreadPoolIndexer},
     protocols::{
-        ExternalSequenceBlockHash, KvCacheEventData, RouterEvent, WorkerId, WorkerWithDpRank,
+        ExternalSequenceBlockHash, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
+        WorkerId, WorkerWithDpRank,
     },
 };
 use dashmap::{DashMap, mapref::entry::Entry};
@@ -84,12 +85,21 @@ pub(super) enum SessionMutation {
     },
     Stored {
         worker: WorkerWithDpRank,
+        tier: StorageTier,
         session_id: String,
         parent_hash: Option<ExternalSequenceBlockHash>,
         block_hashes: Vec<ExternalSequenceBlockHash>,
     },
+    /// A tier stored blocks without naming a session, such as a device offload to host
+    /// memory or a host load-back to the device.
+    Inherited {
+        worker: WorkerWithDpRank,
+        tier: StorageTier,
+        block_hashes: Vec<ExternalSequenceBlockHash>,
+    },
     Removed {
         worker: WorkerWithDpRank,
+        tier: StorageTier,
         block_hashes: Vec<ExternalSequenceBlockHash>,
     },
     Cleared {
@@ -101,17 +111,35 @@ pub(super) enum SessionMutation {
 }
 
 impl SessionMutation {
-    pub(super) fn from_event(event: &RouterEvent) -> Option<Self> {
+    /// Session frontiers follow device events and worker-owned lower tiers. Shared
+    /// cache-owner residency is not attributed to a worker rank.
+    pub(super) fn from_event(event: &RouterEvent, targets_primary: bool) -> Option<Self> {
+        if !targets_primary && event.resolved_residency_domain() != Ok(ResidencyDomain::Worker) {
+            return None;
+        }
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+        let tier = event.storage_tier;
         match &event.event.data {
-            KvCacheEventData::Stored(stored) => Some(Self::Stored {
-                worker,
-                session_id: event.session_id.clone()?,
-                parent_hash: stored.parent_hash,
-                block_hashes: stored.blocks.iter().map(|block| block.block_hash).collect(),
-            }),
+            KvCacheEventData::Stored(stored) => {
+                let block_hashes = stored.blocks.iter().map(|block| block.block_hash).collect();
+                match event.session_id.clone() {
+                    Some(session_id) => Some(Self::Stored {
+                        worker,
+                        tier,
+                        session_id,
+                        parent_hash: stored.parent_hash,
+                        block_hashes,
+                    }),
+                    None => Some(Self::Inherited {
+                        worker,
+                        tier,
+                        block_hashes,
+                    }),
+                }
+            }
             KvCacheEventData::Removed(removed) => Some(Self::Removed {
                 worker,
+                tier,
                 block_hashes: removed.block_hashes.clone(),
             }),
             KvCacheEventData::Cleared => Some(Self::Cleared { worker }),
@@ -122,6 +150,7 @@ impl SessionMutation {
         match self {
             Self::Matched { worker, .. }
             | Self::Stored { worker, .. }
+            | Self::Inherited { worker, .. }
             | Self::Removed { worker, .. }
             | Self::Cleared { worker } => Some(*worker),
             Self::WorkerRemoved { .. } => None,
@@ -163,25 +192,38 @@ impl SessionMutation {
             }
             Self::Stored {
                 worker,
+                tier,
                 session_id,
                 parent_hash,
                 block_hashes,
             } => {
-                if let Err(error) = index.update_session_from_stored_blocks(
+                if let Err(error) = index.update_session_from_stored_blocks_in_tier(
                     &session_id,
                     worker,
+                    tier,
                     parent_hash,
                     &block_hashes,
                 ) {
-                    tracing::warn!(%error, %session_id, ?worker, "failed to record stored session blocks");
+                    tracing::warn!(%error, %session_id, ?worker, ?tier, "failed to record stored session blocks");
                 }
+            }
+            Self::Inherited {
+                worker,
+                tier,
+                block_hashes,
+            } => {
+                index.inherit_stored_blocks(worker, tier, &block_hashes);
             }
             Self::Removed {
                 worker,
+                tier,
                 block_hashes,
             } => {
-                residency_versions.advance(worker);
-                index.update_session_from_removed_blocks(worker, &block_hashes);
+                // Versions guard route-time device matches only.
+                if tier.is_gpu() {
+                    residency_versions.advance(worker);
+                }
+                index.update_session_from_removed_blocks_in_tier(worker, tier, &block_hashes);
             }
             Self::Cleared { worker } => {
                 residency_versions.advance(worker);

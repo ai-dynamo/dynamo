@@ -444,20 +444,17 @@ impl Indexer {
                 return Ok(());
             }
         };
-        let session_update = if targets_primary {
-            match self {
-                Self::Single {
-                    session_updates, ..
-                }
-                | Self::Concurrent {
-                    session_updates, ..
-                } => session_updates.as_ref().and_then(|sender| {
-                    SessionMutation::from_event(&event).map(|mutation| (sender.clone(), mutation))
-                }),
-                Self::Remote { .. } | Self::None => None,
+        let session_update = match self {
+            Self::Single {
+                session_updates, ..
             }
-        } else {
-            None
+            | Self::Concurrent {
+                session_updates, ..
+            } => session_updates.as_ref().and_then(|sender| {
+                SessionMutation::from_event(&event, targets_primary)
+                    .map(|mutation| (sender.clone(), mutation))
+            }),
+            Self::Remote { .. } | Self::None => None,
         };
         let is_clear = matches!(&event.event.data, KvCacheEventData::Cleared);
         match self {
@@ -1815,6 +1812,132 @@ mod session_tests {
             3,
             "physical removal preserves logical topology"
         );
+    }
+
+    #[tokio::test]
+    async fn lower_tier_events_track_session_residency_per_tier() {
+        for (indexer, session_prefix_index) in [
+            make_session_test_indexer(),
+            make_concurrent_session_test_indexer(),
+        ] {
+            let worker = WorkerWithDpRank::new(7, 0);
+            let device_store = store_event(7, 0, 1, &[], &[41, 42, 43], StorageTier::Device)
+                .with_session_id("session-1");
+            let block_hashes = match &device_store.event.data {
+                KvCacheEventData::Stored(stored) => stored
+                    .blocks
+                    .iter()
+                    .map(|block| block.block_hash)
+                    .collect::<Vec<_>>(),
+                _ => unreachable!(),
+            };
+            let lineage = |tier| {
+                session_prefix_index
+                    .get_session_block_lineage_in_tier("session-1", worker, tier, None)
+                    .unwrap()
+            };
+
+            // The engine offloads two blocks without naming the session, then evicts the
+            // device copies of the last two.
+            indexer.try_apply_event(device_store).await.unwrap();
+            indexer
+                .try_apply_event(store_event(
+                    7,
+                    0,
+                    2,
+                    &[],
+                    &[41, 42],
+                    StorageTier::HostPinned,
+                ))
+                .await
+                .unwrap();
+            indexer
+                .try_apply_event(remove_event(7, 0, 3, block_hashes[1..].to_vec()))
+                .await
+                .unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert_eq!(lineage(StorageTier::Device), vec![vec![block_hashes[0]]]);
+            assert_eq!(
+                lineage(StorageTier::HostPinned),
+                vec![block_hashes[..2].to_vec()]
+            );
+
+            let host_remove = RouterEvent::with_storage_tier(
+                7,
+                KvCacheEvent {
+                    event_id: 4,
+                    data: KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: vec![block_hashes[1]],
+                    }),
+                    dp_rank: 0,
+                },
+                StorageTier::HostPinned,
+            );
+            indexer.try_apply_event(host_remove).await.unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert_eq!(
+                lineage(StorageTier::HostPinned),
+                vec![vec![block_hashes[0]]]
+            );
+            assert_eq!(lineage(StorageTier::Device), vec![vec![block_hashes[0]]]);
+        }
+    }
+
+    #[tokio::test]
+    async fn device_load_back_restores_session_device_residency() {
+        for (indexer, session_prefix_index) in [
+            make_session_test_indexer(),
+            make_concurrent_session_test_indexer(),
+        ] {
+            let worker = WorkerWithDpRank::new(7, 0);
+            let device_store = store_event(7, 0, 1, &[], &[41, 42, 43], StorageTier::Device)
+                .with_session_id("session-1");
+            let block_hashes = match &device_store.event.data {
+                KvCacheEventData::Stored(stored) => stored
+                    .blocks
+                    .iter()
+                    .map(|block| block.block_hash)
+                    .collect::<Vec<_>>(),
+                _ => unreachable!(),
+            };
+            let lineage = |tier| {
+                session_prefix_index
+                    .get_session_block_lineage_in_tier("session-1", worker, tier, None)
+                    .unwrap()
+            };
+
+            // Write-through to host, full device eviction, then the engine loads two
+            // blocks back without naming the session.
+            indexer.try_apply_event(device_store).await.unwrap();
+            indexer
+                .try_apply_event(store_event(
+                    7,
+                    0,
+                    2,
+                    &[],
+                    &[41, 42, 43],
+                    StorageTier::HostPinned,
+                ))
+                .await
+                .unwrap();
+            indexer
+                .try_apply_event(remove_event(7, 0, 3, block_hashes.clone()))
+                .await
+                .unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert!(lineage(StorageTier::Device).is_empty());
+
+            indexer
+                .try_apply_event(store_event(7, 0, 4, &[], &[41, 42], StorageTier::Device))
+                .await
+                .unwrap();
+            indexer.flush_session_updates().await.unwrap();
+            assert_eq!(
+                lineage(StorageTier::Device),
+                vec![block_hashes[..2].to_vec()]
+            );
+            assert_eq!(lineage(StorageTier::HostPinned), vec![block_hashes.clone()]);
+        }
     }
 
     #[tokio::test]
