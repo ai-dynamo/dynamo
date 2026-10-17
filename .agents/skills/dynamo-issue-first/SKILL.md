@@ -56,6 +56,9 @@ the change exists; an agent pointed at the issue first inherits all of it.
 When you create or update the Linear issue for your work, set its release and
 feature project yourself. You have the context; nobody sorts it after you.
 
+- **Content.** The Linear issue holds what the public PR must not: customer
+  names, NVBug ids and repro steps, internal threads, and roadmap context. The
+  PR references the issue and describes only the technical change.
 - **Release.** Look up the Linear "Dynamo" release pipeline every time (Linear
   MCP `list_releases`, archived off) and take the release in "In Development".
   Never hardcode it or derive it from the version on `main`, which lags after a
