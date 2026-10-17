@@ -65,6 +65,20 @@ Two-node aggregated deployments with a process-local KVCR tier or a resilient
 KVCR memory-service sidecar. See [`kvcr/README.md`](./kvcr/README.md) for image,
 RDMA, and lifecycle requirements.
 
+### 9. **Aggregated Speech Recognition** (`agg_asr.yaml`)
+Serves Qwen3-ASR through `/v1/chat/completions` with `audio_url` content parts. See the [vLLM multimodal guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#speech-recognition-asr) for request format, output format, and audio requirements.
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server with the vLLM chat processor (`--dyn-chat-processor vllm`), because the original Qwen3-ASR checkpoints ship no `tokenizer.json`. `DYNAMO_DISABLE_NIXL_MM=1` makes the worker load the audio, because shared-memory handoff does not cross pods.
+- `worker`: Single worker with `--enable-multimodal`
+
+### 10. **Aggregated Streaming Speech Recognition** (`agg_asr_realtime.yaml`)
+Streams Qwen3-ASR transcription over the `/v1/realtime` WebSocket. See the [vLLM multimodal guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#streaming-transcription) for the client and session format.
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server. Realtime models do not tokenize in the frontend, so it needs no chat processor.
+- `worker`: Single worker with `--realtime` and the `Qwen3ASRRealtimeGeneration` architecture selected through `--hf-overrides`. A realtime worker cannot also serve `/v1/chat/completions`; deploy `agg_asr.yaml` for that. The worker resamples audio with `scipy`, which the vLLM runtime image does not include, so run it from an image with `scipy` installed.
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:

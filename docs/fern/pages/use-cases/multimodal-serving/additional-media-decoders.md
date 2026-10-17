@@ -19,6 +19,7 @@ backends need the corresponding package from the table below. Installing an
 additional decoder package also covers:
 
 - **AAC and other compressed audio**, which NVDEC does not decode at all.
+- **Audio at a sample rate other than the model's** on vLLM, which resamples it through PyAV by default. Whisper-style audio encoders expect 16 kHz.
 - **H.264 and H.265 on hosts where NVDEC is unavailable** — no video decode engine on the GPU, or a container without the `video` capability.
 
 Each backend decodes such input through a specific Python package whose wheel bundles its own FFmpeg, so the support is added with a plain `pip install` — no image rebuild. **Nothing installs automatically.** There is no environment switch and no startup hook: an operator runs the install as a deliberate, visible step, so a deployment that broadens the image's codec surface says so in its Dockerfile, pod spec, or runbook.
@@ -56,7 +57,7 @@ pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5'
 
 ## Install with the bundled installer
 
-Every runtime image ships an installer for the packages above as part of the `ai-dynamo` package. Run it in the worker container (not the frontend) for the backend you deploy:
+Every runtime image ships an installer for the packages above as part of the `ai-dynamo` package. Run it in the worker container for the backend you deploy. A frontend running the vLLM chat processor (`--dyn-chat-processor vllm`) also loads and resamples media, so run it in that frontend container too:
 
 ```bash
 python -m dynamo.common.utils.install_media_decoders vllm
