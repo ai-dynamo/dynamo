@@ -66,14 +66,14 @@ for other models.
 Start the default model:
 
 ```bash
-./launch/agg_realtime_transcription.sh --max-model-len 4096 --max-num-seqs 2
+./launch/agg_asr_realtime.sh --max-model-len 4096 --max-num-seqs 2
 ```
 
 For another realtime-capable model, replace `MODEL_ID` and `REALTIME_ARCHITECTURE`
 with its model identifier and realtime architecture:
 
 ```bash
-./launch/agg_realtime_transcription.sh --model MODEL_ID \
+./launch/agg_asr_realtime.sh --model MODEL_ID \
     --hf-overrides '{"architectures":["REALTIME_ARCHITECTURE"]}'
 ```
 
@@ -92,7 +92,7 @@ python launch/realtime_audio_client.py \
 The client sends audio while receiving transcription events. A successful check prints
 `delta before commit: True`. vLLM processes five-second segments and flushes remaining audio on commit.
 
-[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_realtime_transcription.sh)
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_asr_realtime.sh)
 </Accordion>
 <Accordion title="Text Embeddings">
 
