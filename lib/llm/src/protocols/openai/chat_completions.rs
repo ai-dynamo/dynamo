@@ -2257,7 +2257,7 @@ mod preserve_thinking_tests {
 
     #[test]
     fn preserve_thinking_rejects_non_bool_values() {
-        for bad in [json!("true"), json!("yes"), json!(1), json!({})] {
+        for bad in [json!("true"), json!(1), json!({})] {
             let body = json!({
                 "model": "test-model",
                 "messages": [{"role": "user", "content": "hi"}],

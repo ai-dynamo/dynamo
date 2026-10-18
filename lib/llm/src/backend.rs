@@ -2059,9 +2059,6 @@ mod tests {
         }
     }
 
-    /// `retain_model_stop_token_text` keeps the model's own EOS text (what a parser like
-    /// Beam's needs as its turn terminator) and nothing else: a user stop token id and a
-    /// user stop string are trimmed exactly as without the flag.
     #[test]
     fn test_retain_model_stop_token_text_keeps_only_the_models_eos_text() {
         let (stop_id, marker) = (104, "<|return|>");

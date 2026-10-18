@@ -1373,7 +1373,6 @@ mod tests {
         assert_eq!(tools[0].function.strict, None);
         assert_eq!(tools[1].function.strict, Some(true));
         assert!(ValidateRequest::validate(&beam).is_ok());
-        // Idempotent.
         assert_eq!(
             relax_noncompliant_strict_tools_for_beam(&mut beam, Some("beam"), None),
             0

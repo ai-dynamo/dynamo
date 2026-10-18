@@ -91,11 +91,14 @@ impl DeltaAggregator {
                     merge_response_nvext(&mut aggregator.nvext, delta.nvext);
                     if let Some(echo) = delta.echo {
                         let index = echo.choice_index;
-                        aggregator
+                        let state_choice = aggregator
                             .choices
                             .entry(index)
-                            .or_insert_with(|| DeltaChoice::empty(index))
-                            .echo = Some(echo);
+                            .or_insert_with(|| DeltaChoice::empty(index));
+                        match state_choice.echo.as_mut() {
+                            Some(existing) => existing.merge(echo),
+                            None => state_choice.echo = Some(echo),
+                        }
                     }
 
                     // handle the choices
@@ -506,11 +509,17 @@ mod tests {
 
     #[tokio::test]
     async fn echo_is_prepended_to_the_aggregated_choice() {
-        let first = create_test_delta(0, "Hi", None, Some(-0.3));
+        // The text rides the first chunk, the prompt logprobs the final one.
+        let mut first = create_test_delta(0, "Hi", None, Some(-0.3));
+        first.data.as_mut().expect("delta data").echo = Some(CompletionEcho {
+            choice_index: 0,
+            text: "Prompt".to_string(),
+            logprobs: None,
+        });
         let mut last = create_test_delta(0, "!", Some("stop".to_string()), Some(-0.7));
         last.data.as_mut().expect("delta data").echo = Some(CompletionEcho {
             choice_index: 0,
-            text: "Prompt".to_string(),
+            text: String::new(),
             logprobs: Some(dynamo_protocols::types::Logprobs {
                 tokens: vec!["Prompt".to_string()],
                 token_logprobs: vec![None],

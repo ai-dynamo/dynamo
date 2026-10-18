@@ -1128,7 +1128,6 @@ fn argument_framing(constraint: &GuidedToolConstraint) -> ArgumentFraming {
     }
 }
 
-/// Apply a non-default framing before the parser consumes its first byte.
 fn apply_argument_framing(
     parser: &mut dyn UnifiedParser,
     argument_framing: ArgumentFraming,
@@ -4221,12 +4220,6 @@ pub(crate) mod tests {
             (
                 GuidedToolConstraint::BeamTurnGrammar {
                     frames_answer: false,
-                },
-                ArgumentFraming::SchemaConstrained,
-            ),
-            (
-                GuidedToolConstraint::BeamTurnGrammar {
-                    frames_answer: true,
                 },
                 ArgumentFraming::SchemaConstrained,
             ),

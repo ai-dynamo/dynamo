@@ -82,6 +82,10 @@ pub struct NvCreateCompletionResponse {
 /// The prompt side of a completions choice for `echo: true`: the prompt text and, when
 /// the request asked for `logprobs`, one entry per prompt token in the same layout as
 /// the completion's `logprobs` (position 0 has no logprob, as in the OpenAI API).
+///
+/// The two parts can travel on different chunks: the text goes out on the choice's
+/// first chunk, the prompt logprobs on the chunk that carries the engine's payload
+/// (the final one on vLLM and SGLang). A part that already went out is empty here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletionEcho {
     pub choice_index: u32,
@@ -90,6 +94,16 @@ pub struct CompletionEcho {
 }
 
 impl CompletionEcho {
+    /// Combine the parts of one choice's echo that arrived on different chunks.
+    pub fn merge(&mut self, other: CompletionEcho) {
+        if self.text.is_empty() {
+            self.text = other.text;
+        }
+        if self.logprobs.is_none() {
+            self.logprobs = other.logprobs;
+        }
+    }
+
     /// Put the echoed prompt ahead of the completion: text first, then the prompt
     /// positions before the generated ones. Generated `text_offset`s move past the
     /// echoed text.

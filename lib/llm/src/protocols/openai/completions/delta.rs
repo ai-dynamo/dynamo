@@ -56,8 +56,10 @@ struct EchoState {
     prompt_text: Option<String>,
     tokenizer: Arc<dyn Tokenizer>,
     skip_special_tokens: bool,
-    /// Choices already echoed: the prompt goes out once per choice.
-    emitted: HashSet<u32>,
+    /// Choices whose prompt text already went out (once per choice).
+    text_emitted: HashSet<u32>,
+    /// Choices whose prompt logprobs already went out, or were given up on.
+    logprobs_emitted: HashSet<u32>,
 }
 
 impl EchoState {
@@ -158,10 +160,11 @@ impl DeltaGenerator {
 
     /// Echo the prompt back on every choice (`echo: true`). `prompt_text` is the
     /// client's prompt when it was text; token prompts are decoded with `tokenizer`.
-    /// The echo rides the first chunk of each choice, so a streaming client sees the
-    /// prompt before any generated text: with the engine's prompt logprobs when that
-    /// chunk carries them (engines report them with the first token), text only
-    /// otherwise.
+    /// The prompt text rides the first chunk of each choice, so a streaming client
+    /// sees it before any generated text. The prompt logprobs (when `logprobs` was
+    /// requested) ride the chunk that carries the engine's prompt-logprobs payload,
+    /// which vLLM and SGLang attach to the final chunk; the unary aggregator merges
+    /// the two parts, SSE consumers get them in the chunks they arrive on.
     pub fn enable_echo(
         &mut self,
         prompt_token_ids: Arc<Vec<TokenIdType>>,
@@ -174,7 +177,8 @@ impl DeltaGenerator {
             prompt_text,
             tokenizer,
             skip_special_tokens,
-            emitted: HashSet::new(),
+            text_emitted: HashSet::new(),
+            logprobs_emitted: HashSet::new(),
         });
     }
 
@@ -392,36 +396,50 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         // The engine's prompt logprobs have two readers: the nvext field when the
         // client selected it, and `echo`, which rebuilds the prompt side of the choice
         // from them.
-        let wants_echo = self
-            .echo
-            .as_ref()
-            .is_some_and(|echo| !echo.emitted.contains(&index));
-        let prompt_logprobs = if self.state.options().response_fields.prompt_logprobs || wants_echo
-        {
-            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?
-        } else {
-            None
+        let enable_logprobs = self.state.options().enable_logprobs;
+        let (wants_echo_text, wants_echo_logprobs) = match &self.echo {
+            Some(echo) => (
+                !echo.text_emitted.contains(&index),
+                enable_logprobs && !echo.logprobs_emitted.contains(&index),
+            ),
+            None => (false, false),
         };
-        if wants_echo {
-            let enable_logprobs = self.state.options().enable_logprobs;
+        let prompt_logprobs =
+            if self.state.options().response_fields.prompt_logprobs || wants_echo_logprobs {
+                common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?
+            } else {
+                None
+            };
+        if wants_echo_text || wants_echo_logprobs {
             let return_as_ids = self.state.options().return_tokens_as_token_ids;
-            let echo = self.echo.as_mut().expect("checked by wants_echo");
+            let echo = self.echo.as_mut().expect("checked above");
+            let text = if wants_echo_text {
+                echo.text_emitted.insert(index);
+                echo.prompt_text()
+            } else {
+                String::new()
+            };
             let logprobs = match &prompt_logprobs {
-                Some(payload) if enable_logprobs => Some(echo.logprobs(payload, return_as_ids)),
-                None if enable_logprobs => {
+                Some(payload) if wants_echo_logprobs => {
+                    echo.logprobs_emitted.insert(index);
+                    Some(echo.logprobs(payload, return_as_ids))
+                }
+                None if wants_echo_logprobs && finish_reason.is_some() => {
                     tracing::warn!(
-                        "completions echo: the choice's first chunk carries no prompt logprobs; echoing the prompt text only"
+                        "completions echo: the engine reported no prompt logprobs; the prompt was echoed as text only"
                     );
+                    echo.logprobs_emitted.insert(index);
                     None
                 }
                 _ => None,
             };
-            response.echo = Some(CompletionEcho {
-                choice_index: index,
-                text: echo.prompt_text(),
-                logprobs,
-            });
-            echo.emitted.insert(index);
+            if !text.is_empty() || logprobs.is_some() {
+                response.echo = Some(CompletionEcho {
+                    choice_index: index,
+                    text,
+                    logprobs,
+                });
+            }
         }
 
         // Build the nvext response payload via the shared gating helper on
@@ -1216,14 +1234,55 @@ mod tests {
             .echo
             .expect("the choice's first chunk echoes the prompt, ahead of any generated text");
         assert_eq!(echo.text, "Hello world", "a text prompt is echoed verbatim");
-        assert!(echo.logprobs.is_none());
+        assert!(echo.logprobs.is_none(), "no prompt logprobs yet");
 
         let mut last = final_backend_output();
         last.engine_data = None;
         let response = generator
             .choice_from_postprocessor(last)
             .expect("choice generation");
-        assert!(response.echo.is_none(), "a choice echoes its prompt once");
+        assert!(
+            response.echo.is_none(),
+            "the engine never reported prompt logprobs: nothing more to echo"
+        );
+    }
+
+    #[test]
+    fn echo_logprobs_ride_the_final_chunk_after_the_text() {
+        let request = echo_request(Some(2));
+        let mut generator = request.response_generator("req-echo-split".to_string());
+        generator.enable_echo(Arc::new(vec![1, 5, 7]), None, Arc::new(MapTokenizer), false);
+
+        // First chunk: no prompt logprobs yet (vLLM and SGLang attach them to the
+        // final chunk), so only the text goes out.
+        let mut partial = final_backend_output();
+        partial.finish_reason = None;
+        partial.engine_data = None;
+        let response = generator
+            .choice_from_postprocessor(partial)
+            .expect("choice generation");
+        let echo = response
+            .echo
+            .expect("the first chunk echoes the prompt text");
+        assert_eq!(echo.text, "<s>Hello world");
+        assert!(echo.logprobs.is_none());
+
+        // Final chunk: the prompt logprobs, with no text (it already went out).
+        let mut response = generator
+            .choice_from_postprocessor(prompt_logprobs_output(true))
+            .expect("choice generation");
+        let echo = response
+            .echo
+            .clone()
+            .expect("the chunk carrying the prompt logprobs echoes them");
+        assert_eq!(echo.text, "");
+        let logprobs = echo.logprobs.expect("logprobs were requested");
+        assert_eq!(logprobs.tokens, vec!["<s>", "Hello", " world"]);
+        response.fold_echo();
+        let choice = &response.inner.choices[0];
+        assert_eq!(choice.text, "hello", "the text is not echoed twice");
+        let folded = choice.logprobs.as_ref().expect("prompt positions first");
+        assert_eq!(folded.tokens, vec!["<s>", "Hello", " world", "hello"]);
     }
 
     #[test]

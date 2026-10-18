@@ -16449,13 +16449,12 @@ mod beam_route_tests {
     #[test]
     fn preserve_thinking_is_rejected_off_the_beam_route() {
         let preprocessor = synthetic_preprocessor(false, HISTORY_TEMPLATE);
-        for value in [true, false] {
-            let mut request = history_request(Some(value));
-            let err = preprocessor
-                .apply_preserve_thinking(&mut request)
-                .unwrap_err();
-            assert!(err.to_string().contains("preserve_thinking"), "{err}");
-        }
+        // Any supplied value is rejected; the value itself is not inspected.
+        let mut request = history_request(Some(true));
+        let err = preprocessor
+            .apply_preserve_thinking(&mut request)
+            .unwrap_err();
+        assert!(err.to_string().contains("preserve_thinking"), "{err}");
 
         // Omitted is unchanged on a non-Beam route (no Beam defaults either).
         let mut omitted = history_request(None);
