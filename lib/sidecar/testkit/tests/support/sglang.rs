@@ -6,7 +6,10 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
-use dynamo_llm::local_model::runtime_config::StructuralTagScope;
+use dynamo_llm::local_model::runtime_config::{
+    StructuralTagScope, TOKEN_BUDGET_RUNTIME_KEY,
+    TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
+};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::common::preprocessor::RoutingHints;
 use dynamo_mocker::common::protocols::EngineType;
@@ -580,6 +583,22 @@ impl ProcessFixture for Fixture {
             Some(StructuralTagScope::Always)
         );
         assert_eq!(card.effective_context_length(), 32_768);
+        assert_eq!(
+            card.runtime_config
+                .get_engine_specific::<TokenBudget>(TOKEN_BUDGET_RUNTIME_KEY)
+                .unwrap(),
+            Some(TokenBudget {
+                combined_limit: 32_768,
+                reject_prompt_overflow: true,
+                reject_total_overflow: true,
+            })
+        );
+        assert!(
+            !card
+                .runtime_config
+                .runtime_data
+                .contains_key(TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY)
+        );
     }
 }
 
