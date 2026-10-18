@@ -159,9 +159,22 @@ impl MockerConfig {
     pub fn needs_kv_publisher(&self) -> bool {
         self.enable_prefix_caching && !self.is_decode()
     }
-    pub fn ais_gpus_per_worker(&self) -> usize {
+    /// Resolve physical prefill context ranks from the canonical timing identity.
+    /// Polynomial, fixed, and profile timing have no PCP topology to propagate.
+    pub(crate) fn replay_prefill_context_parallel_size(&self) -> Result<u32> {
+        Ok(self
+            .engine
+            .performance_config()?
+            .and_then(|config| config.cp_size)
+            .unwrap_or(1))
+    }
+
+    pub fn ais_gpus_per_worker(&self) -> Result<usize> {
+        let pcp = usize::try_from(self.replay_prefill_context_parallel_size()?)?;
         self.tensor_parallel_size
-            .saturating_mul(self.dp_size as usize)
+            .checked_mul(usize::try_from(self.dp_size)?)
+            .and_then(|gpus| gpus.checked_mul(pcp))
+            .ok_or_else(|| anyhow::anyhow!("Mocker GPU count overflows usize"))
     }
     pub fn effective_handoff_capacity(&self) -> usize {
         if self.max_num_seqs == usize::MAX {
@@ -216,6 +229,57 @@ mod tests {
             .unwrap()
             .rank;
         assert_eq!(rank, args.engine.engine);
+    }
+
+    #[test]
+    fn gpu_accounting_preserves_canonical_pcp_through_round_trip() {
+        assert_eq!(MockerConfig::default().ais_gpus_per_worker().unwrap(), 1);
+        for provider in ["ais", "aic"] {
+            for (cp_size, expected_gpus) in [(None, 6), (Some(4), 24)] {
+                let args = MockerConfig::from_value(json!({
+                    "engine": {"timing_model": {
+                        "type": "external", "provider": provider,
+                        "config": {
+                            "model": "test-model", "system": "h200_sxm",
+                            "backend": "vllm", "worker_type": "aggregated",
+                            "tp": 2, "attention_dp": 3, "cp_size": cp_size, "dcp": 2
+                        }
+                    }}
+                }))
+                .unwrap();
+                let roundtrip =
+                    MockerConfig::from_value(serde_json::to_value(&args).unwrap()).unwrap();
+                assert_eq!(roundtrip.ais_gpus_per_worker().unwrap(), expected_gpus);
+            }
+        }
+    }
+
+    #[test]
+    fn pcp_zero_is_rejected_at_the_config_boundary() {
+        let error = MockerConfig::from_value(json!({
+            "engine": {"timing_model": {
+                "type": "external", "provider": "ais",
+                "config": {
+                    "model": "test-model", "system": "h200_sxm",
+                    "backend": "vllm", "worker_type": "aggregated", "cp_size": 0
+                }
+            }}
+        }))
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("cp_size must be positive"));
+    }
+
+    #[test]
+    fn gpu_accounting_rejects_overflow() {
+        let mut args = MockerConfig::default();
+        args.tensor_parallel_size = usize::MAX;
+        args.dp_size = 2;
+        assert!(
+            args.ais_gpus_per_worker()
+                .unwrap_err()
+                .to_string()
+                .contains("overflows")
+        );
     }
 
     #[test]
