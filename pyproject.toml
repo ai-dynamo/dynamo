@@ -66,7 +66,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu13]==1.4.1",
-    "vllm[flashinfer,runai,otel]==0.31.0",
+    "vllm[flashinfer,runai,otel]==0.32.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.

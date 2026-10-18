@@ -18,12 +18,14 @@ import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from typing import Any, Callable
 
 import vllm
@@ -32,39 +34,22 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.executor import Executor
 
-# Resolved on first use, not at import: vLLM renamed get_engine_zmq_addresses in
-# vllm-project/vllm#54113, and this module is imported by every dynamo.vllm worker
-# while only --embedding-worker-processes > 1 calls into it. Module attributes so
-# tests can substitute them.
-get_engine_zmq_addresses: Callable[..., Any] | None = None
+create_engine_zmq_transport: Callable[..., Any] | None = None
 launch_core_engines: Callable[..., Any] | None = None
 
 
 def _resolve_engine_utils() -> tuple[Callable[..., Any], Callable[..., Any]]:
-    """Bind the vLLM engine-launch helpers this pool needs, failing with a clear message.
-
-    Returns ``(get_engine_zmq_addresses, launch_core_engines)`` so callers hold
-    non-optional references; the module attributes are kept in sync for tests.
-    """
-    global get_engine_zmq_addresses, launch_core_engines
+    global create_engine_zmq_transport, launch_core_engines
     engine_utils = importlib.import_module("vllm.v1.engine.utils")
 
     if launch_core_engines is None:
         launch_core_engines = engine_utils.launch_core_engines
-    if get_engine_zmq_addresses is None:
-        resolved = getattr(engine_utils, "get_engine_zmq_addresses", None)
-        if resolved is None:
-            # vllm#54113: the supervisor now binds the frontend listeners up front and
-            # children adopt them; this pool still lets children bind the addresses
-            # themselves, so refuse rather than hand out addresses that are already bound.
-            raise RuntimeError(
-                "--embedding-worker-processes > 1 is not yet supported on this vLLM: "
-                f"vLLM {vllm.__version__} has no get_engine_zmq_addresses (it binds "
-                "frontend listeners in the supervisor since vllm-project/vllm#54113). "
-                "Run with --embedding-worker-processes 1 until the pool adopts inherited listeners."
-            )
-        get_engine_zmq_addresses = resolved
-    return get_engine_zmq_addresses, launch_core_engines
+    if create_engine_zmq_transport is None:
+        create_engine_zmq_transport = (
+            getattr(engine_utils, "get_engine_zmq_addresses", None)
+            or engine_utils.bind_engine_zmq_listeners
+        )
+    return create_engine_zmq_transport, launch_core_engines
 
 
 logger = logging.getLogger(__name__)
@@ -73,6 +58,7 @@ _ROLE_ENV = "DYN_VLLM_EMBEDDING_PROCESS_ROLE"
 _INDEX_ENV = "DYN_VLLM_EMBEDDING_PROCESS_INDEX"
 _PARENT_PID_ENV = "DYN_VLLM_EMBEDDING_PARENT_PID"
 _ENGINE_ADDRESSES_ENV = "DYN_VLLM_EMBEDDING_ENGINE_ADDRESSES"
+_LISTENER_FDS_ENV = "DYN_VLLM_EMBEDDING_LISTENER_FDS"
 _CHILD_ROLE = "child"
 _RPC_BASE_PATH_ENV = "VLLM_RPC_BASE_PATH"
 # The two shapes _unpack_core_engine_launch accepts were read from these vLLM
@@ -147,25 +133,32 @@ def _attach_client(
     stat_loggers: list[Any],
     enable_log_requests: bool,
     disable_log_stats: bool,
+    listeners: tuple[socket.socket, socket.socket] | None = None,
 ) -> tuple[AsyncLLM, VllmConfig]:
     client_vllm_config = _client_config(
         vllm_config,
         process_count=process_count,
         process_index=process_index,
     )
-    client = AsyncLLM.from_vllm_config(
-        vllm_config=client_vllm_config,
-        usage_context=usage_context,
-        stat_loggers=stat_loggers,
-        enable_log_requests=enable_log_requests,
-        disable_log_stats=disable_log_stats,
-        client_addresses={
-            "input_address": input_address,
-            "output_address": output_address,
-        },
-        client_count=process_count,
-        client_index=process_index,
-    )
+    client_addresses: dict[str, Any] = {
+        "input_address": input_address,
+        "output_address": output_address,
+    }
+    with ExitStack() as stack:
+        if listeners is not None:
+            for key, listener in zip(("input_listener", "output_listener"), listeners):
+                stack.callback(listener.close)
+                client_addresses[key] = listener
+        client = AsyncLLM.from_vllm_config(
+            vllm_config=client_vllm_config,
+            usage_context=usage_context,
+            stat_loggers=stat_loggers,
+            enable_log_requests=enable_log_requests,
+            disable_log_stats=disable_log_stats,
+            client_addresses=client_addresses,
+            client_count=process_count,
+            client_index=process_index,
+        )
     return client, client_vllm_config
 
 
@@ -223,12 +216,17 @@ def _child_environment(
     process_index: int,
     addresses_json: str,
     parent_pid: int,
+    listener_fds: tuple[int, ...] = (),
 ) -> dict[str, str]:
     env = os.environ.copy()
     env[_ROLE_ENV] = _CHILD_ROLE
     env[_INDEX_ENV] = str(process_index)
     env[_PARENT_PID_ENV] = str(parent_pid)
     env[_ENGINE_ADDRESSES_ENV] = addresses_json
+    if listener_fds:
+        env[_LISTENER_FDS_ENV] = json.dumps(listener_fds)
+    else:
+        env.pop(_LISTENER_FDS_ENV, None)
     env["PYTHONUNBUFFERED"] = "1"
 
     # Each Dynamo runtime process needs its own system-status listener, but the
@@ -304,12 +302,14 @@ class EmbeddingWorkerProcessGroup:
         engine_manager: Any,
         rpc_directory: tempfile.TemporaryDirectory,
         previous_rpc_base_path: str | None,
+        zmq_listeners: Any = None,
         parent_failure_callback: Callable[[int, int], None] | None = None,
     ) -> None:
         self.children = children
         self.engine_manager = engine_manager
         self.rpc_directory = rpc_directory
         self.previous_rpc_base_path = previous_rpc_base_path
+        self.zmq_listeners = zmq_listeners
         self._parent_failure_callback = (
             parent_failure_callback or self._terminate_parent
         )
@@ -358,6 +358,9 @@ class EmbeddingWorkerProcessGroup:
                     self.engine_manager.shutdown(timeout=timeout)
                 except Exception:
                     logger.exception("Failed to shut down shared embedding EngineCore")
+
+            if self.zmq_listeners is not None:
+                self.zmq_listeners.cleanup()
 
             try:
                 self.rpc_directory.cleanup()
@@ -465,6 +468,14 @@ def create_shared_embedding_engine_client(
 
     if is_embedding_process_child():
         process_index, inputs, outputs = _decode_child_addresses(process_count)
+        listener_fds = json.loads(os.environ.get(_LISTENER_FDS_ENV, "null"))
+        listeners = None
+        if listener_fds is not None:
+            input_fd, output_fd = listener_fds
+            listeners = (
+                socket.socket(fileno=input_fd),
+                socket.socket(fileno=output_fd),
+            )
         client, client_config = _attach_client(
             vllm_config,
             process_count=process_count,
@@ -475,6 +486,7 @@ def create_shared_embedding_engine_client(
             stat_loggers=stat_loggers,
             enable_log_requests=enable_log_requests,
             disable_log_stats=disable_log_stats,
+            listeners=listeners,
         )
         logger.info(
             "Attached Dynamo embedding child %d/%d to shared EngineCore",
@@ -493,13 +505,19 @@ def create_shared_embedding_engine_client(
 
     engine_manager = None
     process_group = None
+    zmq_listeners = None
     children: list[tuple[int, subprocess.Popen]] = []
     try:
         vllm_config.parallel_config._api_process_count = process_count
         vllm_config.parallel_config._api_process_rank = -1
         executor_class = Executor.get_class(vllm_config)
-        engine_zmq_addresses, core_engines_launcher = _resolve_engine_utils()
-        addresses = engine_zmq_addresses(vllm_config, process_count)
+        create_transport, core_engines_launcher = _resolve_engine_utils()
+        transport = create_transport(vllm_config, process_count)
+        if hasattr(transport, "addresses"):
+            zmq_listeners = transport
+            addresses = zmq_listeners.addresses
+        else:
+            addresses = transport
 
         parent_logger_config = _client_config(
             vllm_config,
@@ -539,6 +557,15 @@ def create_shared_embedding_engine_client(
                 )
                 command = [sys.executable, "-m", "dynamo.vllm", *sys.argv[1:]]
                 for process_index in range(1, process_count):
+                    child_listeners = (
+                        (
+                            zmq_listeners.inputs[process_index].socket,
+                            zmq_listeners.outputs[process_index].socket,
+                        )
+                        if zmq_listeners is not None
+                        else ()
+                    )
+                    listener_fds = tuple(s.fileno() for s in child_listeners)
                     child = subprocess.Popen(
                         command,
                         env=_child_environment(
@@ -546,15 +573,20 @@ def create_shared_embedding_engine_client(
                             process_index=process_index,
                             addresses_json=addresses_json,
                             parent_pid=os.getpid(),
+                            listener_fds=listener_fds,
                         ),
+                        pass_fds=listener_fds,
                     )
                     children.append((process_index, child))
+                    for listener in child_listeners:
+                        listener.close()
 
                 process_group = EmbeddingWorkerProcessGroup(
                     children=children,
                     engine_manager=engine_manager,
                     rpc_directory=rpc_directory,
                     previous_rpc_base_path=previous_rpc_base_path,
+                    zmq_listeners=zmq_listeners,
                 )
                 process_group.start_monitor()
                 parent_client_future = client_pool.submit(
@@ -568,6 +600,14 @@ def create_shared_embedding_engine_client(
                     stat_loggers=parent_stat_loggers,
                     enable_log_requests=enable_log_requests,
                     disable_log_stats=disable_log_stats,
+                    listeners=(
+                        (
+                            zmq_listeners.inputs[0].socket,
+                            zmq_listeners.outputs[0].socket,
+                        )
+                        if zmq_listeners is not None
+                        else None
+                    ),
                 )
 
             parent_client, parent_config = parent_client_future.result()
@@ -589,6 +629,8 @@ def create_shared_embedding_engine_client(
                     logger.exception(
                         "Failed to shut down EngineCore after embedding pool startup error"
                     )
+            if zmq_listeners is not None:
+                zmq_listeners.cleanup()
             rpc_directory.cleanup()
             if previous_rpc_base_path is None:
                 os.environ.pop(_RPC_BASE_PATH_ENV, None)

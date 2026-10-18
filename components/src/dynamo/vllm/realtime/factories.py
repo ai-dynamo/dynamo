@@ -89,13 +89,14 @@ def build_realtime_text_factories(
     consumed without starting speculative generation.
     """
     from vllm.engine.protocol import StreamingInput
-    from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
     from vllm.entrypoints.serve.engine.protocol import ErrorResponse
     from vllm.inputs import tokens_input
     from vllm.renderers.online_renderer import OnlineRenderer
     from vllm.sampling_params import RequestOutputKind, SamplingParams
+
+    from dynamo.frontend.vllm_protocol import load_chat_template
 
     class RealtimeServingChat(OpenAIServingChat):
         async def chat_completion_stream_generator(
