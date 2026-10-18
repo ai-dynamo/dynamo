@@ -1552,7 +1552,6 @@ mod tests {
             .expect("routing response");
         assert_eq!(tracker.free.load(Ordering::SeqCst), 0);
 
-        // Close the transport while the request producer and response reader stay alive.
         connection.abort();
         assert!(connection.await.unwrap_err().is_cancelled());
         tokio::time::timeout(Duration::from_secs(5), async {

@@ -1859,7 +1859,6 @@ mod tests {
         assert!(loads.iter().all(|load| load.active_requests == 0));
     }
 
-    /// A selected worker missing from the pod index must leave no booked load.
     #[tokio::test]
     async fn decode_pick_without_endpoint_releases_booking() {
         let router = decode_test_router().await;
