@@ -14,7 +14,7 @@ import psutil
 import pytest
 import requests
 
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, QWEN, DynamoPortRange
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import SGLangSpecDecodeMetricsPayload, check_models_api
@@ -808,10 +808,6 @@ def test_request_migration_sglang_decode(
 @pytest.mark.profiled_vram_gib(7.5)  # measured NVML peak with two EAGLE3 workers
 @pytest.mark.requested_sglang_kv_tokens(1024)
 @pytest.mark.model(EAGLE3_DRAFT_MODEL_NAME)
-@pytest.mark.skipif(
-    FAULT_TOLERANCE_MODEL_NAME != QWEN,
-    reason=f"The EAGLE3 draft model only pairs with {QWEN}",
-)
 @SPEC_DECODING_MIGRATION_PARAMETERS
 def test_request_migration_sglang_spec_decoding(
     request,
