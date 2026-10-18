@@ -104,6 +104,10 @@ def _component_from_sbom_entry(
         # Strip the canonical purl down for use as a source URL pointer; the
         # full purl is the actual fetch URL via go module proxy.
         source_url = purl.split("?", 1)[0]
+    for reference in entry.get("externalReferences", []):
+        if reference.get("type") == "distribution" and reference.get("url"):
+            source_url = reference["url"]
+            break
 
     # Prefer the module's real LICENSE files harvested from the go module
     # cache in the go-builder (keyed by the escaped module path "@version");

@@ -13,7 +13,12 @@ from compliance import license_materials
 from compliance.audit_image_sbom import main as audit
 from compliance.binary_dependencies import collect as collect_binary
 from compliance.binary_dependencies import debian_git_lfs_main, etcd_binary_version
-from compliance.generators.common import Component, dedupe_by_name_version
+from compliance.generators.common import (
+    Component,
+    dedupe_by_name_version,
+    write_cyclonedx,
+)
+from compliance.generators.go import collect_components as collect_go
 from compliance.generators.native import (
     collect_bundled_python_binaries,
     collect_python_interpreters,
@@ -91,6 +96,32 @@ def test_debian_git_lfs_main_requires_exact_installed_owner(tmp_path, location):
     assert component.spdx == "MIT"
     assert component.source_url == "pkg:deb/ubuntu/git-lfs@3.4.1-1"
     assert component.license_text == copyright.read_text()
+    # The collector output is consumed by the Go notices generator. Debian
+    # provenance must survive without turning the Go module into a deb entry.
+    output = tmp_path / "go.cdx.json"
+    write_cyclonedx([component], output)
+    assert json.loads(output.read_text())["components"][0]["purl"].startswith(
+        "pkg:golang/"
+    )
+    licenses = tmp_path / "licenses"
+    harvested = licenses / "github.com/git-lfs/git-lfs@UNKNOWN"
+    harvested.mkdir(parents=True)
+    (harvested / "LICENSE-NOTICES.txt").write_text(component.license_text)
+    (generated,) = collect_go([output], licenses)
+    assert (
+        generated.ecosystem,
+        generated.name,
+        generated.version,
+        generated.spdx,
+        generated.source_url,
+    ) == (
+        component.ecosystem,
+        component.name,
+        component.version,
+        component.spdx,
+        component.source_url,
+    )
+    assert component.license_text.strip() in generated.license_text
     copied = tmp_path / "other-git-lfs"
     copied.write_bytes(binary.read_bytes())
     artifact["locations"] = [{"path": "/other-git-lfs"}]

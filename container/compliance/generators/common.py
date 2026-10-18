@@ -208,9 +208,11 @@ _PURL_TYPE = {
 def _component_purl(c: "Component") -> str | None:
     """Best-effort Package-URL for a component (its own source_url if already a
     purl, else synthesized from ecosystem/name/version)."""
-    if c.source_url and c.source_url.startswith("pkg:"):
-        return c.source_url
     ptype = _PURL_TYPE.get(c.ecosystem)
+    # An installed Go module may derive its license from a Debian owner.
+    # Keep the module's identity separate from that attribution source.
+    if c.source_url and ptype and c.source_url.startswith(f"pkg:{ptype}/"):
+        return c.source_url
     if not ptype or not c.name or not c.version:
         return None
     return f"pkg:{ptype}/{c.name}@{c.version}"
@@ -279,7 +281,7 @@ def write_cyclonedx(components: list[Component], output_path: Path) -> Path:
         purl = _component_purl(c)
         if purl:
             entry["purl"] = purl
-        if c.source_url and not c.source_url.startswith("pkg:"):
+        if c.source_url and c.source_url != purl:
             entry["externalReferences"] = [
                 {"type": "distribution", "url": c.source_url}
             ]
