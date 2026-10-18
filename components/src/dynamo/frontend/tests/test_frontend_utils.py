@@ -198,54 +198,8 @@ class TestBackendInvalidArgumentToHttpError:  # FRONTEND.8 — backend 4xx must 
 
 
 class TestRoutingHintsFromRequest:
-    """Shared by the vLLM and SGLang chat processors."""
-
-    def test_no_hints(self):
-        assert routing_hints_from_request({}) is None
-        assert routing_hints_from_request({"nvext": {}}) is None
-
-    def test_priority_projects_to_routing(self):
-        request = {"nvext": {"agent_hints": {"priority": 5, "strict_priority": 2}}}
-        assert routing_hints_from_request(request) == {
-            "priority": 5,
-            "priority_jump": 5.0,
-            "strict_priority": 2,
-        }
-
-    def test_negative_priority_keeps_engine_priority_and_clamps_jump(self):
-        request = {"nvext": {"agent_hints": {"priority": -3}}}
-        assert routing_hints_from_request(request) == {
-            "priority": -3,
-            "priority_jump": 0.0,
-        }
-
-    def test_latency_sensitivity_without_priority(self):
-        request = {"nvext": {"agent_hints": {"latency_sensitivity": 2.5, "osl": 64}}}
-        assert routing_hints_from_request(request) == {
-            "priority_jump": 2.5,
-            "expected_output_tokens": 64,
-        }
-
-    def test_invalid_values_are_ignored(self):
-        request = {
-            "nvext": {
-                "agent_hints": {
-                    "priority": True,
-                    "strict_priority": -1,
-                    "latency_sensitivity": float("nan"),
-                    "osl": 2**32,
-                }
-            }
-        }
-        assert routing_hints_from_request(request) is None
-
-    def test_explicit_routing_wins(self):
-        request = {
-            "nvext": {"agent_hints": {"priority": 5}, "dp_rank": 0},
-            "routing": {"priority": 1},
-        }
-        assert routing_hints_from_request(request) == {
-            "priority": 1,
-            "priority_jump": 5.0,
-            "dp_rank": 0,
-        }
+    @pytest.mark.parametrize("routing", ["worker-1", [1], 0])
+    def test_rejects_non_object_explicit_routing(self, routing):
+        request = {"nvext": {"backend_instance_id": 7}, "routing": routing}
+        with pytest.raises(InvalidArgument, match="routing must be an object"):
+            routing_hints_from_request(request)

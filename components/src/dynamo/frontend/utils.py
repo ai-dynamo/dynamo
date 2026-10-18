@@ -88,6 +88,10 @@ def routing_hints_from_request(request: dict[str, Any]) -> dict[str, Any] | None
     """
     nvext = request.get("nvext") or {}
     routing = request.get("routing")
+    if routing is not None and not isinstance(routing, dict):
+        raise InvalidArgument(
+            f"routing must be an object; received {type(routing).__name__}"
+        )
     nvext_routing = (
         _routing_from_agent_hints(nvext) if isinstance(nvext, dict) else None
     )
