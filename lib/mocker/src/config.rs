@@ -271,9 +271,14 @@ mod tests {
 
     #[test]
     fn gpu_accounting_rejects_overflow() {
-        let mut args = MockerConfig::default();
-        args.tensor_parallel_size = usize::MAX;
-        args.dp_size = 2;
+        let args = MockerConfig {
+            engine: EngineLaunchConfig {
+                tensor_parallel_size: usize::MAX,
+                dp_size: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         assert!(
             args.ais_gpus_per_worker()
                 .unwrap_err()
