@@ -22,18 +22,28 @@ B  aiperf ──HTTP──▶ Gateway ──ext_proc──▶ EPP (tokenize + KV
                       └──HTTP──▶ sidecar Frontend (tokenize, direct) ──TCP──▶ mocker
 ```
 
-## Why mockers, and why a cluster anyway
+## Why mockers, and where it runs
 
 The mocker (`python3 -m dynamo.mocker`) registers with Dynamo discovery, publishes KV events, and
 simulates prefill and decode timing on the CPU. A real GPU backend saturates long before the routing
 tier does, so it would hide the cost being measured. The mocker keeps the backend cheap and
 deterministic, which makes routing overhead and routing quality visible.
 
-Side B still needs Kubernetes. A Dynamo-mode EPP will not start without a Kubernetes API server: it
-watches worker pods to map each worker ID, a hash of the pod name, to the pod's IP. The Gateway
-itself is a Gateway API object, too. Mockers remove the GPUs, not the cluster. Every component here
-runs on CPU, so a local [minikube](https://minikube.sigs.k8s.io/) or [kind](https://kind.sigs.k8s.io/)
-cluster is enough to run the whole comparison.
+There are two backends. They share the workload, the measurement loop, the statistics, and the
+report:
+
+| | `--backend kubernetes` (default) | `--backend local` |
+|---|---|---|
+| Needs | A cluster (minikube or kind is enough), `kubectl`, `helm` | Docker only |
+| Side A | DGD: Frontend + mocker workers | Containers: Frontend + mocker workers |
+| Side B | DGD with an EPP, agentgateway, HTTPRoute, InferencePool, a direct-mode sidecar per worker pod | Envoy, the EPP, one direct-mode Frontend, mocker workers |
+| Worker id → address | The EPP's Kubernetes pod reflector | `DYN_EPP_STATIC_ENDPOINT` |
+| Setup per topology | Minutes | Seconds |
+| Use it for | Numbers you publish; anything that touches the operator, the Gateway, or pod discovery | Fast iteration on EPP and Frontend code, and frequent regression runs |
+
+Kubernetes is needed for B only because a Dynamo-mode EPP maps each picked worker ID, a hash of the
+pod name, to the pod's address through a pod reflector. The local backend replaces that one step.
+See [Running without Kubernetes](#running-without-kubernetes).
 
 ## Prerequisites
 
@@ -112,6 +122,48 @@ python3 -m benchmarks.gateway_ab --context gateway-ab \
 When the EPP misses the prefill workers, the disaggregated topology fails its smoke test with that
 diagnosis before any measurement runs. `all` still measures and reports the other topologies, then
 exits `1`.
+
+## Running without Kubernetes
+
+`--backend local` runs both sides in Docker on one host, with no cluster and no host ports. Each
+topology gets its own Docker network and its own file-discovery volume:
+
+```text
+A  aiperf ─▶ Frontend (KV router) ─▶ mocker workers
+B  aiperf ─▶ Envoy ─ext_proc─▶ EPP (Dynamo runtime mode, KV router)
+               └─▶ direct-mode Frontend ─▶ the mocker worker the EPP picked
+```
+
+- **Envoy** is configured the way Gateway API Inference Extension gateways program it:
+  full-duplex streamed `ext_proc` in both directions, and an original-destination cluster that
+  forwards to the address the EPP returns in `x-gateway-destination-endpoint`.
+- **The EPP** runs its production code: tokenization, KV-aware selection from the workers' KV
+  events, prefill routing, load bookkeeping from the response stream, and the `ext_proc` protocol.
+- **The one substitution:** the EPP runs with `DYN_EPP_STATIC_ENDPOINT` set to the direct-mode
+  Frontend, in place of its Kubernetes pod reflector. That Frontend forwards each request to the
+  worker and prefill worker named in the EPP's routing headers.
+
+That knob is new, so it needs an EPP built from this branch. Build it on a host whose glibc is no
+newer than the image's (Ubuntu 24.04 for 1.5.x), and pass the binary:
+
+```bash
+cargo build --release -p dynamo-ext-proc
+python3 -m benchmarks.gateway_ab --backend local \
+  --epp-binary target/release/dynamo-ext-proc all
+```
+
+The binary is mounted into the `dynamo-frontend` image, so everything else stays on the released
+images. The run pulls `dynamo-frontend`, `dynamo-planner`, and `envoyproxy/envoy` on first use, and
+caches the tokenizer in the `gwab-hf` Docker volume.
+
+Compared with the Kubernetes backend:
+
+- **Not exercised:** the pod reflector, the operator, InferencePool, HTTPRoute, and agentgateway.
+- **One Frontend instead of a sidecar per pod:** a single direct-mode Frontend serves every B worker.
+- **Shared CPU:** the load generator and every container share the host's CPUs. Trust the deltas,
+  and measure on a cluster for published absolute numbers.
+- **Isolation:** each container gets a 1M open-file limit, matching Kubernetes defaults rather than
+  Docker's 1024, which the EPP exceeds in disaggregated mode.
 
 ## Step by step
 
@@ -278,6 +330,9 @@ To compare two builds, run each and compare their reports. Run them back to back
 
 | Flag | Default | Notes |
 |---|---|---|
+| `--backend` | `kubernetes` | `local` runs everything in Docker on this host. |
+| `--epp-binary` | — | Local backend: an EPP binary to mount in place of the image's `/epp`. |
+| `--envoy-image` | `envoyproxy/envoy:v1.35.3` | Local backend: the gateway. |
 | `--topologies` | `agg,disagg` | |
 | `--request-rate` | `6,14` | Open-loop Poisson load points in requests/s, comma-separated. One measurement per value per round. |
 | `--concurrency` | — | Closed-loop load points instead, for example `8,32`. Mutually exclusive with `--request-rate`. |
@@ -319,6 +374,8 @@ To compare two builds, run each and compare their reports. Run them back to back
 | Smoke to `gateway` fails with 404 | The HTTPRoute is not attached. Check `kubectl get httproute -n <ns> -o yaml` for `Accepted`, and confirm the Gateway's listener allows routes from your namespace. |
 | Smoke to `gateway` fails with 500 or 503 | The EPP is not ready or found no workers. Check `kubectl logs -l nvidia.com/dynamo-component-type=epp`. |
 | DGD never becomes Ready | Usually an image pull or Hugging Face download failure. Check `kubectl describe pod` and the worker logs, and pass `--hf-secret` when rate-limited. |
+| Local: an EPP container exits with `Too many open files` | File discovery ran out of inotify instances, which are capped per user across the host. Raise them with `sudo sysctl fs.inotify.max_user_instances=1024`. Preflight warns when the limit is below 512. |
+| Local: the EPP exits mentioning `POD_NAMESPACE` or Kubernetes | The EPP lacks `DYN_EPP_STATIC_ENDPOINT`. Pass `--epp-binary` with a build from this branch. |
 | Excluded runs with errors | Look in the loadgen pod: `kubectl exec <prefix>-loadgen -- cat /results/<topology>/<side>/<load>/r<R>.log` (`<load>` is `c8`, `rps14`, and so on). |
 
 ## Files
@@ -327,6 +384,8 @@ To compare two builds, run each and compare their reports. Run them back to back
 |---|---|
 | `setup_cluster.sh` | Installs the Dynamo platform and the Gateway API Inference Extension stack. |
 | `cli.py` | Commands and orchestration. |
+| `k8s_backend.py` | Kubernetes backend: DGDs, HTTPRoute, loadgen pod, rollout checks. |
+| `local_backend.py` | Docker backend: containers, Envoy config, EPP with a static endpoint. |
 | `manifests.py` | DynamoGraphDeployment, HTTPRoute, and loadgen manifests for both sides. |
 | `loadgen.py` | aiperf command and in-pod result extraction. |
 | `stats.py` | Percentiles, hierarchical bootstrap, verdicts. Standard library only. |

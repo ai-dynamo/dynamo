@@ -39,7 +39,7 @@ LOADGEN_SPEC_HASH = "gateway-ab/spec-hash"
 # PID 1 of the loadgen pod. Every aiperf run is detached and ends up
 # reparented to PID 1, so it must reap; `sleep infinity` does not, and each
 # run would leave zombies behind.
-_REAPER = (
+REAPER = (
     "import os, signal, time\n"
     "signal.signal(signal.SIGTERM, lambda *_: os._exit(0))\n"
     "while True:\n"
@@ -132,15 +132,8 @@ def request_headers(cfg: BenchConfig, topology: str) -> dict[str, str]:
 def build_dgd(cfg: BenchConfig, topology: str, side: str) -> dict[str, Any]:
     _check(topology, side)
     components: list[dict[str, Any]] = [_router_component(cfg, side)]
-    if topology == "agg":
-        components.append(_worker_component(cfg, side, "decode", cfg.agg_workers, None))
-    else:
-        components.append(
-            _worker_component(cfg, side, "prefill", cfg.prefill_workers, "prefill")
-        )
-        components.append(
-            _worker_component(cfg, side, "decode", cfg.decode_workers, "decode")
-        )
+    for ctype, replicas, disagg_mode in worker_roles(cfg, topology):
+        components.append(_worker_component(cfg, side, ctype, replicas, disagg_mode))
     return {
         "apiVersion": "nvidia.com/v1beta1",
         "kind": "DynamoGraphDeployment",
@@ -210,7 +203,7 @@ def build_loadgen_pod(cfg: BenchConfig) -> dict[str, Any]:
     container: dict[str, Any] = {
         "name": "loadgen",
         "image": cfg.frontend_image,
-        "command": ["python3", "-c", _REAPER],
+        "command": ["python3", "-c", REAPER],
         "env": [
             {"name": "HF_HOME", "value": "/results/.hf"},
             # aiperf prints a rich UI otherwise; keep the logs plain.
@@ -286,13 +279,8 @@ def _router_component(cfg: BenchConfig, side: str) -> dict[str, Any]:
     }
 
 
-def _worker_component(
-    cfg: BenchConfig,
-    side: str,
-    ctype: str,
-    replicas: int,
-    disagg_mode: str | None,
-) -> dict[str, Any]:
+def mocker_args(cfg: BenchConfig, disagg_mode: str | None) -> list[str]:
+    """Arguments for one mocker worker; shared by every backend and side."""
     args = [
         "--model-path",
         cfg.model,
@@ -306,12 +294,32 @@ def _worker_component(
     ]
     if disagg_mode:
         args += ["--disaggregation-mode", disagg_mode]
-    args += list(cfg.mocker_extra_args)
+    return args + list(cfg.mocker_extra_args)
+
+
+def worker_roles(cfg: BenchConfig, topology: str) -> list[tuple[str, int, str | None]]:
+    """(component type, replicas, disaggregation mode) for each worker group."""
+    _check(topology, "frontend")
+    if topology == "agg":
+        return [("decode", cfg.agg_workers, None)]
+    return [
+        ("prefill", cfg.prefill_workers, "prefill"),
+        ("decode", cfg.decode_workers, "decode"),
+    ]
+
+
+def _worker_component(
+    cfg: BenchConfig,
+    side: str,
+    ctype: str,
+    replicas: int,
+    disagg_mode: str | None,
+) -> dict[str, Any]:
     worker: dict[str, Any] = {
         "name": "main",
         "image": cfg.worker_image,
         "command": ["python3", "-m", "dynamo.mocker"],
-        "args": args,
+        "args": mocker_args(cfg, disagg_mode),
         "resources": {"requests": {"cpu": cfg.worker_cpu, "memory": "2Gi"}},
     }
     _add_hf_secret(cfg, worker)

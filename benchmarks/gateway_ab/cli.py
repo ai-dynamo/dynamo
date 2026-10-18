@@ -23,17 +23,13 @@ import sys
 from typing import Any
 
 from . import manifests, report
-from .kube import Kube, KubeError, retry
-from .loadgen import RESULTS_ROOT, LoadGen, LoadPoint, Workload, aiperf_command
+from .k8s_backend import K8sBackend
+from .kube import KubeError, retry
+from .loadgen import RESULTS_ROOT, LoadPoint, Workload, aiperf_command
+from .local_backend import LocalBackend
 
 log = logging.getLogger("gateway_ab")
 
-PART_OF = "app.kubernetes.io/part-of=gateway-ab"
-REQUIRED_CRDS = (
-    "dynamographdeployments.nvidia.com",
-    "inferencepools.inference.networking.k8s.io",
-    "httproutes.gateway.networking.k8s.io",
-)
 EXIT_PREFLIGHT = 2
 EXIT_REGRESSION = 3
 # Relative to the working directory. Run from the repository root, it lands
@@ -44,7 +40,6 @@ DEFAULT_OUTPUT = "benchmarks/results/gateway_ab"
 class Bench:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.kube = Kube(args.context, args.namespace)
         self.cfg = manifests.BenchConfig(
             model=args.model,
             dynamo_version=args.dynamo_version,
@@ -86,91 +81,35 @@ class Bench:
             run_timeout_s=args.run_timeout,
         )
         self.topologies = tuple(args.topologies)
-        self.loadgen = LoadGen(self.kube, manifests.loadgen_pod_name(self.cfg))
+        if args.backend == "local":
+            self.backend = LocalBackend(args, self.cfg)
+        else:
+            self.backend = K8sBackend(args, self.cfg)
+        self.loadgen = self.backend.loadgen
 
-    # -- preflight ---------------------------------------------------------
+    # -- backend delegation -------------------------------------------------
 
     def preflight(self) -> list[str]:
-        problems = []
-        try:
-            self.kube.kubectl(
-                ["get", "namespace", self.kube.namespace], namespaced=False
-            )
-        except (KubeError, subprocess.TimeoutExpired) as e:
-            return [f"cannot reach namespace {self.kube.namespace!r}: {e}"]
-        for crd in REQUIRED_CRDS:
-            if not self.kube.exists(["crd", crd], namespaced=False):
-                problems.append(f"CRD {crd} is not installed")
-        gw = self.kube.get_json(
-            ["-n", self.cfg.gateway_namespace, "gateway", self.cfg.gateway_name],
-            namespaced=False,
-        )
-        if gw is None:
-            problems.append(
-                f"Gateway {self.cfg.gateway_namespace}/{self.cfg.gateway_name} not found"
-            )
-        elif not _condition_true(gw, "Programmed"):
-            problems.append(f"Gateway {self.cfg.gateway_name} is not Programmed")
-        for secret in (self.cfg.hf_secret, self.cfg.image_pull_secret):
-            if secret and not self.kube.exists(["secret", secret]):
-                problems.append(f"secret {secret!r} not found in {self.kube.namespace}")
-        return problems
-
-    # -- deploy ------------------------------------------------------------
+        return self.backend.preflight()
 
     def deploy_loadgen(self) -> None:
-        pod = manifests.loadgen_pod_name(self.cfg)
-        want = manifests.build_loadgen_pod(self.cfg)
-        current = self.kube.get_json(["pod", pod])
-        if current is not None:
-            # restartPolicy is Never, so a terminated loadgen never comes back;
-            # and a pod built from another image or secret must not be reused.
-            terminated = current.get("status", {}).get("phase") in (
-                "Failed",
-                "Succeeded",
-            )
-            stale = (
-                current["metadata"]
-                .get("annotations", {})
-                .get(manifests.LOADGEN_SPEC_HASH)
-                != want["metadata"]["annotations"][manifests.LOADGEN_SPEC_HASH]
-            )
-            if terminated or stale:
-                log.info("Recreating loadgen pod %s", pod)
-                self.kube.kubectl(["delete", "pod", pod, "--wait=true"])
-                current = None
-        if current is None:
-            self.kube.apply([want])
-        self.kube.wait(f"pod/{pod}", "Ready", 600)
+        self.backend.deploy_loadgen()
 
     def deploy_topology(self, topology: str) -> None:
-        names = [manifests.dgd_name(self.cfg, topology, s) for s in manifests.SIDES]
-        if any(self.kube.exists(["dynamographdeployment", n]) for n in names):
-            # Always start from fresh deployments. An in-place update that
-            # rolls the EPP and the workers together can bind the new EPP to
-            # the outgoing worker generation's namespace, where it stays and
-            # answers 503 once those workers drain. Recreating also gives
-            # every run cold caches and router state.
-            log.info("Recreating %s for a clean start", topology)
-            self.teardown_topology(topology)
-            self._wait_pods_gone(names)
-        log.info("Deploying %s (frontend and gateway sides)", topology)
-        self.kube.apply(
-            [
-                manifests.build_dgd(self.cfg, topology, "frontend"),
-                manifests.build_dgd(self.cfg, topology, "gateway"),
-                manifests.build_httproute(self.cfg, topology),
-            ]
-        )
-        for side in manifests.SIDES:
-            name = manifests.dgd_name(self.cfg, topology, side)
-            log.info("Waiting for DynamoGraphDeployment %s to settle", name)
-            retry(
-                lambda: self._check_settled(name),
-                attempts=max(1, self.args.ready_timeout // 5),
-                delay_s=5,
-                what=f"DynamoGraphDeployment {name} to settle",
-            )
+        self.backend.deploy_topology(topology)
+        self._smoke(topology)
+
+    def teardown_topology(self, topology: str) -> None:
+        self.backend.teardown_topology(topology)
+
+    def teardown_all(self) -> None:
+        self.backend.teardown_all()
+
+    def url(self, topology: str, side: str) -> str:
+        return self.backend.url(topology, side)
+
+    def _smoke(self, topology: str) -> None:
+        """One request per side through the full path, retried while it comes up."""
         for side in manifests.SIDES:
             url = self.url(topology, side)
             headers = manifests.request_headers(self.cfg, topology)
@@ -182,145 +121,10 @@ class Bench:
                     what=f"smoke request to {topology}/{side} at {url}",
                 )
             except KubeError as e:
-                raise KubeError(f"{e}\n{self._diagnose(topology, side)}") from e
+                raise KubeError(f"{e}\n{self.backend.diagnose(topology, side)}") from e
             log.info("Smoke %s/%s OK (%.0f ms)", topology, side, latency * 1000)
 
-    def _wait_pods_gone(self, names: list[str]) -> None:
-        def check() -> None:
-            for name in names:
-                pods = self.kube.get_json(
-                    ["pods", "-l", f"nvidia.com/dynamo-graph-deployment-name={name}"]
-                ) or {"items": []}
-                if pods["items"]:
-                    raise KubeError(f"{len(pods['items'])} pods of {name} remain")
-
-        retry(check, attempts=60, delay_s=5, what="old pods to terminate")
-
-    def _check_settled(self, name: str) -> None:
-        """Raise unless the DGD's current spec is fully rolled out and Ready.
-
-        ``kubectl wait --for=condition=Ready`` right after an apply can match
-        the previous generation's condition before the operator has seen the
-        change, and measurement would then start mid-rollout with old and new
-        pods both serving.
-        """
-        dgd = self.kube.get_json(["dynamographdeployment", name])
-        if dgd is None:
-            raise KubeError(f"{name} not found")
-        generation = dgd["metadata"].get("generation")
-        status = dgd.get("status", {})
-        if status.get("observedGeneration") != generation:
-            raise KubeError(f"{name}: generation {generation} not observed yet")
-        ready = next(
-            (c for c in status.get("conditions", []) if c.get("type") == "Ready"),
-            None,
-        )
-        if not ready or ready.get("status") != "True":
-            raise KubeError(f"{name}: not Ready")
-        if ready.get("observedGeneration", generation) != generation:
-            raise KubeError(f"{name}: Ready condition is from an older generation")
-        phase = (status.get("rollingUpdate") or {}).get("phase", "")
-        if phase not in ("", "Completed"):
-            raise KubeError(f"{name}: rolling update {phase}")
-        for comp, s in status.get("components", {}).items():
-            want = s.get("replicas")
-            if want is not None and not (
-                s.get("readyReplicas") == s.get("updatedReplicas", want) == want
-            ):
-                raise KubeError(f"{name}: component {comp} not fully updated and ready")
-        pods = self.kube.get_json(
-            ["pods", "-l", f"nvidia.com/dynamo-graph-deployment-name={name}"]
-        ) or {"items": []}
-        if any(p["metadata"].get("deletionTimestamp") for p in pods["items"]):
-            raise KubeError(f"{name}: old pods still terminating")
-
-    def _diagnose(self, topology: str, side: str) -> str:
-        """Best-effort hint for the failure modes seen in practice."""
-        if side != "gateway":
-            return "Check the Frontend and worker logs."
-        dgd = manifests.dgd_name(self.cfg, topology, side)
-        logs = self.kube.kubectl(
-            [
-                "logs",
-                "-l",
-                f"nvidia.com/dynamo-graph-deployment-name={dgd},"
-                "nvidia.com/dynamo-component-type=epp",
-                "--tail=-1",
-            ],
-            check=False,
-            timeout=60,
-        ).stdout
-        if topology == "disagg" and "Prefill worker discovered" not in logs:
-            return (
-                "The EPP never activated prefill routing, so decode sidecars reject "
-                "requests without a prefill worker id. EPP images up to 1.5.1 detect "
-                "prefill workers only by the legacy ModelType::Prefill bit, which the "
-                "mocker does not emit; use an EPP image with the worker_type-based "
-                "detection (see README, 'Disaggregated serving needs')."
-            )
-        return (
-            "Check the HTTPRoute status and the EPP logs: "
-            f"kubectl logs -l nvidia.com/dynamo-graph-deployment-name={dgd},"
-            "nvidia.com/dynamo-component-type=epp"
-        )
-
-    def teardown_topology(self, topology: str) -> None:
-        log.info("Tearing down %s", topology)
-        names = [manifests.dgd_name(self.cfg, topology, s) for s in manifests.SIDES]
-        self.kube.kubectl(
-            [
-                "delete",
-                "dynamographdeployment",
-                *names,
-                "--ignore-not-found",
-                "--wait=true",
-            ],
-            timeout=600,
-        )
-        self.kube.kubectl(
-            [
-                "delete",
-                "httproute",
-                manifests.route_name(self.cfg, topology),
-                "--ignore-not-found",
-            ]
-        )
-
-    def teardown_all(self) -> None:
-        self.kube.delete_by_label(
-            "dynamographdeployments.nvidia.com,httproutes.gateway.networking.k8s.io,pods",
-            PART_OF,
-        )
-
     # -- measure -----------------------------------------------------------
-
-    def url(self, topology: str, side: str) -> str:
-        if side == "frontend":
-            return f"http://{manifests.frontend_service(self.cfg, topology)}:8000"
-        if self.args.gateway_url:
-            return self.args.gateway_url.rstrip("/")
-        svcs = self.kube.get_json(
-            [
-                "-n",
-                self.cfg.gateway_namespace,
-                "svc",
-                "-l",
-                f"gateway.networking.k8s.io/gateway-name={self.cfg.gateway_name}",
-            ],
-            namespaced=False,
-        )
-        items = (svcs or {}).get("items", [])
-        if not items:
-            raise KubeError(
-                f"no Service for Gateway {self.cfg.gateway_name} in "
-                f"{self.cfg.gateway_namespace}; pass --gateway-url"
-            )
-        svc = items[0]
-        port = svc["spec"]["ports"][0]["port"]
-        return (
-            f"http://{svc['metadata']['name']}.{self.cfg.gateway_namespace}"
-            f".svc.cluster.local:{port}"
-        )
 
     def measure_topology(self, topology: str, results: pathlib.Path) -> int:
         """Run every (round, load point, side); return the failure count."""
@@ -487,19 +291,20 @@ class Bench:
             # Resuming. Mixing rounds measured under different settings
             # into one comparison would be silently wrong, so refuse.
             old = json.loads(path.read_text())
-            if old.get("workload") != self._workload_meta() or old.get(
-                "config"
-            ) != json.loads(json.dumps(dataclasses.asdict(self.cfg))):
+            if (
+                old.get("workload") != self._workload_meta()
+                or old.get("config")
+                != json.loads(json.dumps(dataclasses.asdict(self.cfg)))
+                or old.get("backend", "kubernetes") != self.backend.name
+            ):
                 raise KubeError(
-                    f"{results} was measured with a different workload or "
-                    "deployment config; use a new --results directory"
+                    f"{results} was measured with a different workload, deployment "
+                    "config, or backend; use a new --results directory"
                 )
             return
-        nodes = self.kube.get_json(["nodes"], namespaced=False) or {"items": []}
         meta: dict[str, Any] = {
             "started": _now(),
-            "context": self.kube.context,
-            "namespace": self.kube.namespace,
+            **self.backend.environment(),
             "git_sha": _git_sha(),
             "frontend_image": self.cfg.frontend_image,
             "worker_image": self.cfg.worker_image,
@@ -514,14 +319,6 @@ class Bench:
             },
             "workload": self._workload_meta(),
             "rounds": self.workload.rounds,
-            "nodes": [
-                {
-                    "name": n["metadata"]["name"],
-                    "cpu": n["status"]["allocatable"].get("cpu"),
-                    "kubelet": n["status"]["nodeInfo"].get("kubeletVersion"),
-                }
-                for n in nodes["items"]
-            ],
             "config": json.loads(json.dumps(dataclasses.asdict(self.cfg))),
         }
         path.write_text(json.dumps(meta, indent=2))
@@ -538,9 +335,7 @@ def cmd_preflight(bench: Bench) -> int:
         log.error("Install prerequisites with benchmarks/gateway_ab/setup_cluster.sh")
         return EXIT_PREFLIGHT
     log.info(
-        "preflight OK (context %s, namespace %s)",
-        bench.kube.context,
-        bench.kube.namespace,
+        "preflight OK (%s backend, %s)", bench.backend.name, bench.backend.describe()
     )
     return 0
 
@@ -663,7 +458,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("command", choices=sorted(COMMANDS))
     p.add_argument("-v", "--verbose", action="store_true")
 
-    k = p.add_argument_group("cluster")
+    b = p.add_argument_group("backend")
+    b.add_argument(
+        "--backend",
+        choices=("kubernetes", "local"),
+        default="kubernetes",
+        help="kubernetes: DGDs behind a real Gateway; local: Docker on this host, "
+        "no Kubernetes (see README)",
+    )
+    b.add_argument(
+        "--epp-binary",
+        help="local: EPP binary to run instead of the frontend image's /epp; it must "
+        "support DYN_EPP_STATIC_ENDPOINT",
+    )
+    b.add_argument(
+        "--envoy-image",
+        default="envoyproxy/envoy:v1.35.3",
+        help="local: Envoy image for the gateway",
+    )
+
+    k = p.add_argument_group("cluster (kubernetes backend)")
     k.add_argument("--context", help="kubectl context (default: current context)")
     k.add_argument("--namespace", default="gateway-ab")
     k.add_argument("--gateway-name", default="inference-gateway")
@@ -857,13 +671,6 @@ def _write_atomic(path: pathlib.Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text)
     tmp.replace(path)
-
-
-def _condition_true(obj: dict[str, Any], kind: str) -> bool:
-    for c in obj.get("status", {}).get("conditions", []):
-        if c.get("type") == kind:
-            return c.get("status") == "True"
-    return False
 
 
 def _git_sha() -> str:

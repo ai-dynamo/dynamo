@@ -285,9 +285,14 @@ class LoadGen:
         log_file = f"{artifact_dir}.log"
         d, rc_q, lg = (shlex.quote(p) for p in (artifact_dir, rc_file, log_file))
         inner = f"{shlex.join(cmd)} > {lg} 2>&1; echo $? > {rc_q}"
+        # Only the nohup'd run goes to the background. A trailing `&` binds
+        # to the whole `&&` list, which would background the setup too: the
+        # exec would return at once and, if the session closed before the
+        # list reached nohup, aiperf would never start while the poll below
+        # waited out the full timeout.
         launch = (
             f"rm -rf {d} {rc_q} {lg} && mkdir -p {d} && "
-            f"nohup sh -c {shlex.quote(inner)} > /dev/null 2>&1 &"
+            f"{{ nohup sh -c {shlex.quote(inner)} > /dev/null 2>&1 & }}"
         )
         # The harness runs one aiperf at a time. A previous attempt whose
         # exec stream dropped may still be running; left alone it would add

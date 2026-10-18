@@ -1,0 +1,284 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Kubernetes backend: DynamoGraphDeployments, an HTTPRoute, and a loadgen pod.
+
+Side B runs exactly as in production: the Gateway, the EPP in Dynamo runtime
+mode with its Kubernetes pod reflector, and a direct-mode Frontend sidecar in
+every worker pod.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import subprocess
+from typing import Any
+
+from . import manifests
+from .kube import Kube, KubeError, retry
+from .loadgen import LoadGen
+
+log = logging.getLogger("gateway_ab")
+
+PART_OF = "app.kubernetes.io/part-of=gateway-ab"
+REQUIRED_CRDS = (
+    "dynamographdeployments.nvidia.com",
+    "inferencepools.inference.networking.k8s.io",
+    "httproutes.gateway.networking.k8s.io",
+)
+
+
+class K8sBackend:
+    name = "kubernetes"
+
+    def __init__(self, args: argparse.Namespace, cfg: manifests.BenchConfig) -> None:
+        self.args = args
+        self.cfg = cfg
+        self.kube = Kube(args.context, args.namespace)
+        self.loadgen = LoadGen(self.kube, manifests.loadgen_pod_name(cfg))
+
+    def describe(self) -> str:
+        return f"context {self.kube.context}, namespace {self.kube.namespace}"
+
+    def environment(self) -> dict[str, Any]:
+        nodes = self.kube.get_json(["nodes"], namespaced=False) or {"items": []}
+        return {
+            "backend": self.name,
+            "context": self.kube.context,
+            "namespace": self.kube.namespace,
+            "nodes": [
+                {
+                    "name": n["metadata"]["name"],
+                    "cpu": n["status"]["allocatable"].get("cpu"),
+                    "kubelet": n["status"]["nodeInfo"].get("kubeletVersion"),
+                }
+                for n in nodes["items"]
+            ],
+        }
+
+    # -- preflight ---------------------------------------------------------
+
+    def preflight(self) -> list[str]:
+        problems = []
+        try:
+            self.kube.kubectl(
+                ["get", "namespace", self.kube.namespace], namespaced=False
+            )
+        except (KubeError, subprocess.TimeoutExpired) as e:
+            return [f"cannot reach namespace {self.kube.namespace!r}: {e}"]
+        for crd in REQUIRED_CRDS:
+            if not self.kube.exists(["crd", crd], namespaced=False):
+                problems.append(f"CRD {crd} is not installed")
+        gw = self.kube.get_json(
+            ["-n", self.cfg.gateway_namespace, "gateway", self.cfg.gateway_name],
+            namespaced=False,
+        )
+        if gw is None:
+            problems.append(
+                f"Gateway {self.cfg.gateway_namespace}/{self.cfg.gateway_name} not found"
+            )
+        elif not _condition_true(gw, "Programmed"):
+            problems.append(f"Gateway {self.cfg.gateway_name} is not Programmed")
+        for secret in (self.cfg.hf_secret, self.cfg.image_pull_secret):
+            if secret and not self.kube.exists(["secret", secret]):
+                problems.append(f"secret {secret!r} not found in {self.kube.namespace}")
+        return problems
+
+    # -- deploy ------------------------------------------------------------
+
+    def deploy_loadgen(self) -> None:
+        pod = manifests.loadgen_pod_name(self.cfg)
+        want = manifests.build_loadgen_pod(self.cfg)
+        current = self.kube.get_json(["pod", pod])
+        if current is not None:
+            # restartPolicy is Never, so a terminated loadgen never comes back;
+            # and a pod built from another image or secret must not be reused.
+            terminated = current.get("status", {}).get("phase") in (
+                "Failed",
+                "Succeeded",
+            )
+            stale = (
+                current["metadata"]
+                .get("annotations", {})
+                .get(manifests.LOADGEN_SPEC_HASH)
+                != want["metadata"]["annotations"][manifests.LOADGEN_SPEC_HASH]
+            )
+            if terminated or stale:
+                log.info("Recreating loadgen pod %s", pod)
+                self.kube.kubectl(["delete", "pod", pod, "--wait=true"])
+                current = None
+        if current is None:
+            self.kube.apply([want])
+        self.kube.wait(f"pod/{pod}", "Ready", 600)
+
+    def deploy_topology(self, topology: str) -> None:
+        names = [manifests.dgd_name(self.cfg, topology, s) for s in manifests.SIDES]
+        if any(self.kube.exists(["dynamographdeployment", n]) for n in names):
+            # Always start from fresh deployments. An in-place update that
+            # rolls the EPP and the workers together can bind the new EPP to
+            # the outgoing worker generation's namespace, where it stays and
+            # answers 503 once those workers drain. Recreating also gives
+            # every run cold caches and router state.
+            log.info("Recreating %s for a clean start", topology)
+            self.teardown_topology(topology)
+            self._wait_pods_gone(names)
+        log.info("Deploying %s (frontend and gateway sides)", topology)
+        self.kube.apply(
+            [
+                manifests.build_dgd(self.cfg, topology, "frontend"),
+                manifests.build_dgd(self.cfg, topology, "gateway"),
+                manifests.build_httproute(self.cfg, topology),
+            ]
+        )
+        for side in manifests.SIDES:
+            name = manifests.dgd_name(self.cfg, topology, side)
+            log.info("Waiting for DynamoGraphDeployment %s to settle", name)
+            retry(
+                lambda: self._check_settled(name),
+                attempts=max(1, self.args.ready_timeout // 5),
+                delay_s=5,
+                what=f"DynamoGraphDeployment {name} to settle",
+            )
+
+    def _wait_pods_gone(self, names: list[str]) -> None:
+        def check() -> None:
+            for name in names:
+                pods = self.kube.get_json(
+                    ["pods", "-l", f"nvidia.com/dynamo-graph-deployment-name={name}"]
+                ) or {"items": []}
+                if pods["items"]:
+                    raise KubeError(f"{len(pods['items'])} pods of {name} remain")
+
+        retry(check, attempts=60, delay_s=5, what="old pods to terminate")
+
+    def _check_settled(self, name: str) -> None:
+        """Raise unless the DGD's current spec is fully rolled out and Ready.
+
+        ``kubectl wait --for=condition=Ready`` right after an apply can match
+        the previous generation's condition before the operator has seen the
+        change, and measurement would then start mid-rollout with old and new
+        pods both serving.
+        """
+        dgd = self.kube.get_json(["dynamographdeployment", name])
+        if dgd is None:
+            raise KubeError(f"{name} not found")
+        generation = dgd["metadata"].get("generation")
+        status = dgd.get("status", {})
+        if status.get("observedGeneration") != generation:
+            raise KubeError(f"{name}: generation {generation} not observed yet")
+        ready = next(
+            (c for c in status.get("conditions", []) if c.get("type") == "Ready"),
+            None,
+        )
+        if not ready or ready.get("status") != "True":
+            raise KubeError(f"{name}: not Ready")
+        if ready.get("observedGeneration", generation) != generation:
+            raise KubeError(f"{name}: Ready condition is from an older generation")
+        phase = (status.get("rollingUpdate") or {}).get("phase", "")
+        if phase not in ("", "Completed"):
+            raise KubeError(f"{name}: rolling update {phase}")
+        for comp, s in status.get("components", {}).items():
+            want = s.get("replicas")
+            if want is not None and not (
+                s.get("readyReplicas") == s.get("updatedReplicas", want) == want
+            ):
+                raise KubeError(f"{name}: component {comp} not fully updated and ready")
+        pods = self.kube.get_json(
+            ["pods", "-l", f"nvidia.com/dynamo-graph-deployment-name={name}"]
+        ) or {"items": []}
+        if any(p["metadata"].get("deletionTimestamp") for p in pods["items"]):
+            raise KubeError(f"{name}: old pods still terminating")
+
+    def diagnose(self, topology: str, side: str) -> str:
+        """Best-effort hint for the failure modes seen in practice."""
+        if side != "gateway":
+            return "Check the Frontend and worker logs."
+        dgd = manifests.dgd_name(self.cfg, topology, side)
+        logs = self.kube.kubectl(
+            [
+                "logs",
+                "-l",
+                f"nvidia.com/dynamo-graph-deployment-name={dgd},"
+                "nvidia.com/dynamo-component-type=epp",
+                "--tail=-1",
+            ],
+            check=False,
+            timeout=60,
+        ).stdout
+        if topology == "disagg" and "Prefill worker discovered" not in logs:
+            return (
+                "The EPP never activated prefill routing, so decode sidecars reject "
+                "requests without a prefill worker id. EPP images up to 1.5.1 detect "
+                "prefill workers only by the legacy ModelType::Prefill bit, which the "
+                "mocker does not emit; use an EPP image with the worker_type-based "
+                "detection (see README, 'Disaggregated serving needs')."
+            )
+        return (
+            "Check the HTTPRoute status and the EPP logs: "
+            f"kubectl logs -l nvidia.com/dynamo-graph-deployment-name={dgd},"
+            "nvidia.com/dynamo-component-type=epp"
+        )
+
+    def teardown_topology(self, topology: str) -> None:
+        log.info("Tearing down %s", topology)
+        names = [manifests.dgd_name(self.cfg, topology, s) for s in manifests.SIDES]
+        self.kube.kubectl(
+            [
+                "delete",
+                "dynamographdeployment",
+                *names,
+                "--ignore-not-found",
+                "--wait=true",
+            ],
+            timeout=600,
+        )
+        self.kube.kubectl(
+            [
+                "delete",
+                "httproute",
+                manifests.route_name(self.cfg, topology),
+                "--ignore-not-found",
+            ]
+        )
+
+    def teardown_all(self) -> None:
+        self.kube.delete_by_label(
+            "dynamographdeployments.nvidia.com,httproutes.gateway.networking.k8s.io,pods",
+            PART_OF,
+        )
+
+    def url(self, topology: str, side: str) -> str:
+        if side == "frontend":
+            return f"http://{manifests.frontend_service(self.cfg, topology)}:8000"
+        if self.args.gateway_url:
+            return self.args.gateway_url.rstrip("/")
+        svcs = self.kube.get_json(
+            [
+                "-n",
+                self.cfg.gateway_namespace,
+                "svc",
+                "-l",
+                f"gateway.networking.k8s.io/gateway-name={self.cfg.gateway_name}",
+            ],
+            namespaced=False,
+        )
+        items = (svcs or {}).get("items", [])
+        if not items:
+            raise KubeError(
+                f"no Service for Gateway {self.cfg.gateway_name} in "
+                f"{self.cfg.gateway_namespace}; pass --gateway-url"
+            )
+        svc = items[0]
+        port = svc["spec"]["ports"][0]["port"]
+        return (
+            f"http://{svc['metadata']['name']}.{self.cfg.gateway_namespace}"
+            f".svc.cluster.local:{port}"
+        )
+
+
+def _condition_true(obj: dict[str, Any], kind: str) -> bool:
+    for c in obj.get("status", {}).get("conditions", []):
+        if c.get("type") == kind:
+            return c.get("status") == "True"
+    return False

@@ -120,12 +120,18 @@ class Kube:
         )
 
 
+class FatalError(KubeError):
+    """A failure that waiting will not fix; ``retry`` re-raises it at once."""
+
+
 def retry(fn, *, attempts: int, delay_s: float, what: str):
     """Call ``fn`` until it returns without raising, up to ``attempts`` times."""
     last: Exception | None = None
     for i in range(attempts):
         try:
             return fn()
+        except FatalError:
+            raise
         except Exception as e:  # noqa: BLE001 - surfaced after the last attempt
             last = e
             log.debug("%s: attempt %d/%d failed: %s", what, i + 1, attempts, e)

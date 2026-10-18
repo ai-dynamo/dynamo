@@ -210,10 +210,20 @@ def regressions(summary: dict[str, Any], max_pct: float) -> list[str]:
 def render_markdown(summary: dict[str, Any]) -> str:
     meta = summary.get("meta", {})
     lines = ["# Frontend vs Gateway+EPP A/B", ""]
+    if meta.get("backend") == "local":
+        side_b = (
+            "B = Envoy + EPP (KV router, Dynamo runtime mode, static endpoint) + "
+            "one direct-mode Frontend, in Docker without Kubernetes. "
+        )
+    else:
+        side_b = (
+            "B = Gateway + EPP (KV router, Dynamo runtime mode) + "
+            "direct-mode Frontend sidecars. "
+        )
     lines += [
         "A = Dynamo Frontend (KV router), no EPP. "
-        "B = Gateway + EPP (KV router, Dynamo runtime mode) + direct-mode Frontend sidecars. "
-        "Workers are mocker in both, built from the same spec.",
+        + side_b
+        + "Workers are mocker in both, built from the same spec.",
         "",
         "Δ is B relative to A; negative latency Δ means B is faster. "
         "Intervals are 95% hierarchical-bootstrap (rounds, then requests). "

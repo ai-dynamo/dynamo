@@ -296,3 +296,14 @@ def test_noise_line_uses_per_round_ttft_means(tmp_path):
     (point,) = report.build_summary(tmp_path, bootstrap_iterations=50)["points"]
     assert point["ttft_round_cv_pct"]["a"] == pytest.approx(12.856, abs=0.01)
     assert point["ttft_round_cv_pct"]["b"] == 0.0
+
+
+def test_report_header_names_the_backend(tmp_path):
+    _write_run(tmp_path, "agg", "frontend", 8, 0, [50.0] * 10)
+    _write_run(tmp_path, "agg", "gateway", 8, 0, [50.0] * 10)
+    (tmp_path / "meta.json").write_text(json.dumps({"backend": "local"}))
+    md = report.render_markdown(report.build_summary(tmp_path, bootstrap_iterations=20))
+    assert "without Kubernetes" in md and "sidecars" not in md
+    (tmp_path / "meta.json").write_text(json.dumps({"backend": "kubernetes"}))
+    md = report.render_markdown(report.build_summary(tmp_path, bootstrap_iterations=20))
+    assert "sidecars" in md

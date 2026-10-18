@@ -264,12 +264,12 @@ def test_check_settled(tmp_path, monkeypatch, dgd, terminating, settled):
     def get_json(args, namespaced=True):
         return dgd if args[0] == "dynamographdeployment" else {"items": [pod]}
 
-    monkeypatch.setattr(bench.kube, "get_json", get_json)
+    monkeypatch.setattr(bench.backend.kube, "get_json", get_json)
     if settled:
-        bench._check_settled("x")
+        bench.backend._check_settled("x")
     else:
         with pytest.raises(cli.KubeError):
-            bench._check_settled("x")
+            bench.backend._check_settled("x")
 
 
 def test_invalid_run_is_retried_and_remeasured_on_resume(tmp_path, monkeypatch):
@@ -300,7 +300,9 @@ def test_invalid_run_is_retried_and_remeasured_on_resume(tmp_path, monkeypatch):
 
 def test_resume_refuses_a_changed_workload(tmp_path, monkeypatch):
     def fake_meta_sources(bench):
-        monkeypatch.setattr(bench.kube, "get_json", lambda *a, **k: {"items": []})
+        monkeypatch.setattr(
+            bench.backend.kube, "get_json", lambda *a, **k: {"items": []}
+        )
         monkeypatch.setattr(bench.loadgen, "aiperf_version", lambda: "0.0")
 
     first = _bench(tmp_path, "--isl", "1024")
@@ -405,16 +407,32 @@ def test_loadgen_pod_recreated_when_spec_changes(tmp_path, monkeypatch):
     old = manifests.build_loadgen_pod(manifests.BenchConfig())  # no secret
     old["status"] = {"phase": "Running"}
     calls = []
-    monkeypatch.setattr(bench.kube, "get_json", lambda args, **k: old)
-    monkeypatch.setattr(bench.kube, "kubectl", lambda args, **k: calls.append(args))
-    monkeypatch.setattr(bench.kube, "apply", lambda objs: calls.append(["apply"]))
-    monkeypatch.setattr(bench.kube, "wait", lambda *a: None)
-    bench.deploy_loadgen()
+    monkeypatch.setattr(bench.backend.kube, "get_json", lambda args, **k: old)
+    monkeypatch.setattr(
+        bench.backend.kube, "kubectl", lambda args, **k: calls.append(args)
+    )
+    monkeypatch.setattr(
+        bench.backend.kube, "apply", lambda objs: calls.append(["apply"])
+    )
+    monkeypatch.setattr(bench.backend.kube, "wait", lambda *a: None)
+    bench.backend.deploy_loadgen()
     assert calls[0][:2] == ["delete", "pod"] and calls[1] == ["apply"]
 
     calls.clear()
     same = manifests.build_loadgen_pod(bench.cfg)
     same["status"] = {"phase": "Running"}
-    monkeypatch.setattr(bench.kube, "get_json", lambda args, **k: same)
-    bench.deploy_loadgen()
+    monkeypatch.setattr(bench.backend.kube, "get_json", lambda args, **k: same)
+    bench.backend.deploy_loadgen()
     assert calls == []
+
+
+def test_launch_backgrounds_only_the_run(monkeypatch):
+    monkeypatch.setattr(loadgen.time, "sleep", lambda s: None)
+    kube = _FakeKube([(0, "0\n", "")])
+    loadgen.LoadGen(kube, "pod").run(["aiperf", "profile"], "/results/a", 60)
+    launch = next(c[2] for c in kube.commands if c[:2] == ["sh", "-c"])
+    setup, _, rest = launch.partition("{ nohup")
+    # The setup runs in the foreground; the trailing & sits inside the braces.
+    # No lone `&` (background) in the setup, only `&&` chaining.
+    assert setup.replace("&&", "").count("&") == 0
+    assert rest.rstrip().endswith("& }")
