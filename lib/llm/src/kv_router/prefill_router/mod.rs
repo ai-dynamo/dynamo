@@ -45,6 +45,7 @@ mod admission;
 mod conditional_bypass;
 mod handoff;
 mod query;
+use activation::ActivationSnapshot;
 use handoff::PrefillTask;
 pub use query::PrefillReservation;
 
@@ -383,32 +384,42 @@ impl
         // do not turn an advisory worker lookup into conditional local execution.
         let query_only = req.get_annotation_value("query_instance_id").is_some();
 
+        // Hot path: an active router with a published binding never takes the
+        // target lock. Anything else is resolved from one locked snapshot.
         if self.lifecycle_state() != PrefillLifecycleState::Active {
-            // Model admission gates on the registered worker topology, which counts a
-            // prefill worker as live the moment it registers. This router only learns
-            // the matching target then, and its binding is built asynchronously. Until
-            // that build completes the namespace is already selectable, so forwarding
-            // the request would hand a decode-only worker an aggregated request it
-            // cannot run (`bootstrap_info is required for disaggregated decode`).
-            // Fail closed with a migratable error instead: the retry layer re-dispatches
-            // and the client sees a retryable 503 rather than a backend failure.
-            if !query_only && self.awaiting_activation() {
-                tracing::debug!(
-                    request_id = %request_id,
-                    model_name = %self.model_name,
-                    namespace = %self.namespace,
-                    "Prefill router target is still activating; rejecting request instead of \
-                     forwarding it to decode without a prefill hop"
-                );
-                return Err(prefill_activation_pending_error(
-                    &self.model_name,
-                    &self.namespace,
-                ));
+            match self.activation_snapshot() {
+                // Activation completed between the lock-free read and the snapshot:
+                // continue through the prefill path below.
+                ActivationSnapshot::Active(_) => {}
+                // Model admission gates on the registered worker topology, which counts
+                // a prefill worker as live the moment it registers. This router only
+                // learns the matching target then, and its binding is built
+                // asynchronously. Until that build completes the namespace is already
+                // selectable, so forwarding the request would hand a decode-only worker
+                // an aggregated request it cannot run (`bootstrap_info is required for
+                // disaggregated decode`). Fail closed with a migratable error instead:
+                // the retry layer re-dispatches and the client sees a retryable 503
+                // rather than a backend failure.
+                ActivationSnapshot::Pending if !query_only => {
+                    tracing::debug!(
+                        request_id = %request_id,
+                        model_name = %self.model_name,
+                        namespace = %self.namespace,
+                        "Prefill router target is still activating; rejecting request instead of \
+                         forwarding it to decode without a prefill hop"
+                    );
+                    return Err(prefill_activation_pending_error(
+                        &self.model_name,
+                        &self.namespace,
+                    ));
+                }
+                // Query-only previews never reach the engine. Otherwise no prefill
+                // target was ever set (aggregated-capable deployment) or every prefill
+                // worker left (target cleared): route directly to the backend.
+                ActivationSnapshot::Pending | ActivationSnapshot::Untargeted => {
+                    return next.generate(context.map(|_| req)).await;
+                }
             }
-
-            // No prefill target was ever set (aggregated-capable deployment) or every
-            // prefill worker left (target cleared): route directly to the backend.
-            return next.generate(context.map(|_| req)).await;
         }
 
         if query_only {
@@ -513,18 +524,25 @@ impl
                 session_affinity.as_ref().clone(),
             );
         }
-        let Some(binding) = self.binding.load_full() else {
-            // The target was replaced after the lifecycle gate above (a WorkerSet
-            // succession while this request awaited the phase barrier): `set_target`
-            // cleared the binding and the successor is still building. Fail closed
-            // the same way instead of forwarding to decode without a prefill hop.
-            if self.awaiting_activation() {
-                return Err(prefill_activation_pending_error(
-                    &self.model_name,
-                    &self.namespace,
-                ));
-            }
-            return next.generate(context.map(|_| req)).await;
+        let binding = match self.binding.load_full() {
+            Some(binding) => binding,
+            // The target was replaced after the gate above (a WorkerSet succession
+            // while this request awaited the phase barrier): `set_target` cleared the
+            // binding. Resolve from one locked snapshot: the successor may already
+            // have activated, in which case serve through it; if it is still
+            // building, fail closed rather than forward to decode without a prefill hop.
+            None => match self.activation_snapshot() {
+                ActivationSnapshot::Active(binding) => binding,
+                ActivationSnapshot::Pending => {
+                    return Err(prefill_activation_pending_error(
+                        &self.model_name,
+                        &self.namespace,
+                    ));
+                }
+                ActivationSnapshot::Untargeted => {
+                    return next.generate(context.map(|_| req)).await;
+                }
+            },
         };
 
         // Keyed on the prefill mode, not the decode set's, and checked after
@@ -911,7 +929,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Downstream stand-in for the decode leg: counts dispatches, accepts any request.
     #[derive(Default)]
     struct CountingDecodeHost {
         requests: AtomicUsize,
@@ -989,7 +1006,10 @@ mod tests {
     async fn pending_target_fails_closed_instead_of_forwarding_to_decode() {
         let router = fresh_decode_router();
         mark_target_pending(&router);
-        assert!(router.awaiting_activation());
+        assert!(matches!(
+            router.activation_snapshot(),
+            ActivationSnapshot::Pending
+        ));
 
         let host = Arc::new(CountingDecodeHost::default());
         let error = router
@@ -1016,7 +1036,10 @@ mod tests {
     async fn untargeted_router_still_passes_through() {
         // Aggregated-capable deployment: no prefill target was ever set.
         let router = fresh_decode_router();
-        assert!(!router.awaiting_activation());
+        assert!(matches!(
+            router.activation_snapshot(),
+            ActivationSnapshot::Untargeted
+        ));
 
         let host = Arc::new(CountingDecodeHost::default());
         router
@@ -1034,7 +1057,10 @@ mod tests {
         mark_target_pending(&router);
         router.set_target(None);
         assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
-        assert!(!router.awaiting_activation());
+        assert!(matches!(
+            router.activation_snapshot(),
+            ActivationSnapshot::Untargeted
+        ));
 
         let host = Arc::new(CountingDecodeHost::default());
         router
@@ -1059,7 +1085,7 @@ mod tests {
         assert_eq!(host.requests.load(Ordering::Relaxed), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn target_replaced_mid_flight_fails_closed_at_binding_load() {
         // The lifecycle gate runs once at the top of `generate`; the binding is
         // loaded only after the prefill phase barrier. A WorkerSet succession in
@@ -1083,7 +1109,8 @@ mod tests {
             let host = host.clone();
             async move { router.generate(SingleIn::new(request), host).await }
         });
-        // Let the request pass the lifecycle gate and block on the barrier.
+        // With paused time this sleep completes only once every other task is
+        // idle, i.e. once the request has passed the gate and parked on the barrier.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         mark_target_pending(&router);
@@ -1101,14 +1128,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activated_router_is_not_awaiting_activation() {
+    async fn snapshot_resolves_pending_and_untargeted_states() {
         let router = fresh_decode_router();
+        assert!(matches!(
+            router.activation_snapshot(),
+            ActivationSnapshot::Untargeted
+        ));
         mark_target_pending(&router);
-        router.lifecycle.store(
-            PrefillLifecycleState::Active as u8,
-            std::sync::atomic::Ordering::Release,
-        );
-        assert!(!router.awaiting_activation());
+        assert!(matches!(
+            router.activation_snapshot(),
+            ActivationSnapshot::Pending
+        ));
+        router.set_target(None);
+        assert!(matches!(
+            router.activation_snapshot(),
+            ActivationSnapshot::Untargeted
+        ));
     }
 
     #[test]

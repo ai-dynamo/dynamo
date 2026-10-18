@@ -20,6 +20,16 @@ use dynamo_runtime::{
 };
 
 use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter};
+
+/// Routing state of a prefill hop, resolved atomically by [`PrefillRouter::activation_snapshot`].
+pub(super) enum ActivationSnapshot {
+    /// Binding published and lifecycle `Active`: route through prefill.
+    Active(Arc<PrefillBinding>),
+    /// A target is set but its binding is not published yet: fail closed.
+    Pending,
+    /// No prefill target (never set, or cleared): passthrough to decode is safe.
+    Untargeted,
+}
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
     kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource},
@@ -632,14 +642,26 @@ impl PrefillRouter {
         PrefillLifecycleState::from_atomic(self.lifecycle.load(Ordering::Acquire))
     }
 
-    /// A prefill target is set but its binding has not been published yet:
-    /// either `drive_target` is still building it, or `set_target` discarded
-    /// the previous binding for a different target. Both `set_target` and the
-    /// build loop publish lifecycle under the target lock, so reading the two
-    /// together here cannot observe a target without its matching lifecycle.
-    pub(super) fn awaiting_activation(&self) -> bool {
+    /// One consistent view of target, lifecycle and binding, read under the
+    /// target lock. Both publishers (`set_target` and the build loop) store the
+    /// binding and lifecycle while holding that lock, so a routing decision made
+    /// from this snapshot cannot interleave with a Pending->Active transition the
+    /// way two separate lock-free reads can.
+    pub(super) fn activation_snapshot(&self) -> ActivationSnapshot {
         let target = self.target.lock();
-        target.is_some() && self.lifecycle_state() == PrefillLifecycleState::Pending
+        match self.lifecycle_state() {
+            PrefillLifecycleState::Active => match self.binding.load_full() {
+                Some(binding) => ActivationSnapshot::Active(binding),
+                // The binding is stored before `Active` under this lock, so this
+                // arm is not expected; resolve by target rather than panicking.
+                None if target.is_some() => ActivationSnapshot::Pending,
+                None => ActivationSnapshot::Untargeted,
+            },
+            PrefillLifecycleState::Pending if target.is_some() => ActivationSnapshot::Pending,
+            PrefillLifecycleState::Pending | PrefillLifecycleState::Unavailable => {
+                ActivationSnapshot::Untargeted
+            }
+        }
     }
 
     #[cfg(test)]
