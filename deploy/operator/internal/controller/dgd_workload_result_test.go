@@ -47,3 +47,29 @@ func TestApplyAndClearComponentGPUShapes(t *testing.T) {
 	assert.Nil(t, statuses["unobserved"].GPUsPerEngine)
 	assert.Nil(t, statuses["unobserved"].GPUsPerReplica)
 }
+
+func TestApplyAndClearComponentRuntimeStatuses(t *testing.T) {
+	t.Log("Apply provider-resolved serving-role facts to observed component statuses")
+	statuses := map[string]nvidiacomv1beta1.ComponentReplicaStatus{
+		"decode": {},
+	}
+	applyComponentRuntimeStatuses(statuses, map[string]dynamo.ComponentRuntimeStatus{
+		"decode": {
+			ServedModelName:      "Qwen/Qwen3-8B",
+			RuntimeComponentName: "custom-decode",
+			GPUPowerLimitWatts:   ptr.To(int64(300)),
+		},
+		"unobserved": {ServedModelName: "ignored"},
+	})
+	assert.Equal(t, "Qwen/Qwen3-8B", statuses["decode"].ServedModelName)
+	assert.Equal(t, "custom-decode", statuses["decode"].RuntimeComponentName)
+	require.NotNil(t, statuses["decode"].GPUPowerLimitWatts)
+	assert.Equal(t, int64(300), *statuses["decode"].GPUPowerLimitWatts)
+	assert.NotContains(t, statuses, "unobserved")
+
+	t.Log("Clear all runtime facts before a later provider render can fail")
+	clearComponentRuntimeStatuses(statuses)
+	assert.Empty(t, statuses["decode"].ServedModelName)
+	assert.Empty(t, statuses["decode"].RuntimeComponentName)
+	assert.Nil(t, statuses["decode"].GPUPowerLimitWatts)
+}

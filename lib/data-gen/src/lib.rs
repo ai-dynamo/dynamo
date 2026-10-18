@@ -18,6 +18,7 @@ pub use mooncake::{
     AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticDependency,
     AgenticDependencyRelation, AgenticDependencyTrigger, AgenticHashIdScope, AgenticMooncakeHeader,
     AgenticMooncakeRow, AgenticSourceProvenance, MooncakeJsonlWriter, MooncakeRow,
-    RollingHashIdMapper, WriterStats, hash_token_blocks, ids_for_sequence_hashes, require_positive,
-    sequence_hashes_for_tokens, try_hash_token_blocks, write_empty_files,
+    RollingHashIdMapper, WriterStats, extend_sequence_hashes, hash_token_blocks,
+    ids_for_sequence_hashes, require_positive, sequence_hashes_for_tokens, try_hash_token_blocks,
+    write_empty_files,
 };

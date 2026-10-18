@@ -18,6 +18,13 @@ class RealtimeTurn:
     def __init__(self) -> None:
         self.events: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=256)
         self.task: asyncio.Task[None] | None = None
+        self._cancel_requested = False
+
+    def cancel(self) -> None:
+        """Cancel once so concurrent stop signals cannot interrupt cleanup."""
+        if self.task is not None and not self._cancel_requested:
+            self._cancel_requested = True
+            self.task.cancel()
 
 
 TurnT = TypeVar("TurnT", bound=RealtimeTurn)
@@ -91,12 +98,22 @@ class RealtimeConnection(Generic[TurnT]):
         """Detach, cancel, and close the active uncommitted turn."""
         turn = self.finish_active_turn()
         if turn is not None and turn.task is not None:
-            turn.task.cancel()
+            turn.cancel()
             # A task cancelled before its coroutine starts cannot run its finally
-            # block, so close the output explicitly. Drop partial uncommitted output.
+            # block, so close the output explicitly.
             drain_queue(turn.events)
             turn.events.put_nowait(None)
         return turn
+
+    async def cancel_turn_preserving_output(self, turn: TurnT) -> None:
+        """Cancel a turn after retaining all output it has already produced."""
+        if turn.task is not None:
+            turn.cancel()
+            # Cancelling the input pump must not interrupt the engine's abort.
+            await asyncio.shield(asyncio.gather(turn.task, return_exceptions=True))
+            # _drive_turn normally closes the queue. Add a marker as well for a
+            # task cancelled before its coroutine had a chance to start.
+            await turn.events.put(None)
 
     async def _drive_turn(self, turn: TurnT) -> None:
         try:
@@ -154,9 +171,8 @@ class RealtimeConnection(Generic[TurnT]):
         finally:
             pump_task.cancel()
             pending = [turn.task for turn in self._turns if turn.task is not None]
-            for task in pending:
-                task.cancel()
             for turn in self._turns:
+                turn.cancel()
                 drain_queue(turn.events)
             await asyncio.gather(pump_task, *pending, return_exceptions=True)
 

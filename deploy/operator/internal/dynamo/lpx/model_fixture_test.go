@@ -18,7 +18,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-const registryTestTopology = "URSA_V2_1__Q8__8C__G_106__KP_FEC__GHZ_1_0__NO_FPGA"
+const registryTestTopology = "test-topology"
 
 const gbuildManifestJSONFile = "manifest.json"
 
@@ -168,13 +168,10 @@ func newManifestV2ContractFixture(t *testing.T) manifestcapnpv2.Manifest {
 	deployment, err := manifest.NewDeployment()
 	require.NoError(t, err)
 	deployment.SetCompilationMode(manifestcapnpv2.CompilationMode_lpx)
-	deployment.SetNumLpuNodes(1)
-	program, err := deployment.NewProgram()
+	_, err = deployment.NewProgram()
 	require.NoError(t, err)
-	program.SetBatchSize(8)
 	runtimeIO, err := deployment.NewRuntimeIo()
 	require.NoError(t, err)
-	runtimeIO.SetProtocol(runtimeIOProtocolMultiEndpoint)
 	runtimeIO.SetReserved1(2)
 	runtimeIO.SetIoFpgaCount(4)
 	runtimeIO.SetFanoutFactor(2)
@@ -200,4 +197,5 @@ func setManifestV2LPUArtifact(t *testing.T, partition manifestcapnpv2.PartitionI
 	require.NoError(t, detail.SetTopology(registryTestTopology))
 	detail.SetNumChips(8)
 	detail.SetDevicesPerNode(8)
+	setManifestChipArchitectures(t, detail, []string{"polaris"})
 }
