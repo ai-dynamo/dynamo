@@ -154,9 +154,7 @@ def test_vllm_pynv_backend_enabled_when_requested(monkeypatch):
         "_require_vllm_video_media",
         lambda: (None, FakeVideoMediaIO, lambda **kwargs: None),
     )
-    media_io = VideoLoader()._create_vllm_video_io(
-        {"video_backend": "pynvvideocodec"}
-    )
+    media_io = VideoLoader()._create_vllm_video_io({"video_backend": "pynvvideocodec"})
     assert media_io.kwargs["video_backend"] == "pynvvideocodec"
 
 
