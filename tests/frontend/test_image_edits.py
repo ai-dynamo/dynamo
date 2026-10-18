@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import socket
 import time
 
 import pytest
@@ -26,13 +27,16 @@ pytestmark = [
 
 
 class ImageWorkerProcess(ManagedProcess):
-    def __init__(self, request, port, *, limit=None, legacy=False):
+    def __init__(self, request, port, *, limit=None, legacy=False, cancel_file=None):
         """Launch one isolated worker with explicit capability and reader versions."""
         env = os.environ.copy()
         env.pop("IMAGE_EDIT_CAPABILITY", None)
         if limit is not None:
             env["IMAGE_EDIT_CAPABILITY"] = str(limit)
         env["IMAGE_EDIT_LEGACY_READER"] = "1" if legacy else "0"
+        env.pop("IMAGE_EDIT_CANCEL_FILE", None)
+        if cancel_file is not None:
+            env["IMAGE_EDIT_CANCEL_FILE"] = str(cancel_file)
         super().__init__(
             command=["python3", "-m", "tests.frontend.image_edit_worker"],
             health_check_urls=[
@@ -124,6 +128,44 @@ def test_image_edits_order_json_parity_and_legacy_wire(frontend, request):
             json.loads(response.json()["data"][0]["revised_prompt"])["wire_type"]
             == "str"
         )
+
+
+def test_image_edits_disconnect_cancels_worker(frontend, request, tmp_path):
+    """An HTTP disconnect must cancel the in-flight worker request over TCP."""
+    cancelled = tmp_path / "cancelled"
+    started = tmp_path / "cancelled.started"
+
+    def wait_for_marker(path, expected):
+        """Wait for the worker's explicit state signal, not a log or fixed sleep."""
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if path.exists() and path.read_text() == expected:
+                return
+            time.sleep(0.05)
+        pytest.fail(f"worker did not report {expected}")
+
+    with ImageWorkerProcess(request, frontend, limit=4, cancel_file=cancelled):
+        prepared = requests.Request(
+            "POST",
+            f"http://localhost:{frontend}/v1/images/edits",
+            data={"model": MODEL_NAME, "prompt": "wait-for-cancel"},
+            files=[("image", ("input.png", references()[0], "image/png"))],
+        ).prepare()
+        headers = (
+            f"POST {prepared.path_url} HTTP/1.1\r\n"
+            f"Host: localhost:{frontend}\r\n"
+            + "".join(f"{key}: {value}\r\n" for key, value in prepared.headers.items())
+            + "\r\n"
+        ).encode("ascii")
+        with socket.create_connection(("localhost", frontend), timeout=20) as client:
+            client.sendall(headers + prepared.body)
+            wait_for_marker(started, "started")
+            assert not cancelled.exists(), "request was cancelled before disconnect"
+
+        # Assert before worker teardown, which can also cancel pending requests.
+        wait_for_marker(cancelled, "cancelled")
+        response = upload(frontend, references()[:1])
+        assert response.status_code == 200, response.text
 
 
 @pytest.mark.parametrize("limit,legacy", [(None, True), (0, False), (4, True)])

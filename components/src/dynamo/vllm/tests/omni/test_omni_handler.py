@@ -1657,6 +1657,29 @@ class TestImageReferenceInputs:
         handler.engine_client.generate.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("modality", ["image", "IMAGE"])
+    async def test_invalid_reference_schema_is_redacted_case_insensitively(
+        self, image_request_handler, modality
+    ):
+        """Accepted modality casing must not expose raw Pydantic input values."""
+        handler = image_request_handler
+        handler.config.output_modalities = [modality]
+        request = {
+            "prompt": "a teapot",
+            "input_reference": {
+                "url": "https://example.com/input.png?signature=private"
+            },
+        }
+
+        with pytest.raises(InvalidArgument) as exc_info:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        assert str(exc_info.value) == "Failed to load input_reference"
+        handler._image_edit_loader.load_image.assert_not_awaited()
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_oversized_reference_rejected_before_generation(
         self, image_request_handler
     ):
