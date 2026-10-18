@@ -718,7 +718,7 @@ fn transfer_source_lookup_deadline_does_not_wait_for_busy_blocking_pool() {
         .unwrap();
     runtime.block_on(async {
         let core = local_core(test_config(true));
-        let mut source = worker(1);
+        let mut source = worker_with_kv_events(1);
         hint_capable(&mut source);
         source.router_hint_transfer_domain = Some("certified-layout-v1".to_string());
         core.upsert_worker(source).await.unwrap();
