@@ -338,6 +338,14 @@ mod integration_tests {
         role: WorkerType,
         enabled: bool,
     ) -> (RoutingHost, u64, Arc<HintDispatch>) {
+        // Discovery instance IDs belong to a DRT, not to an endpoint. Model
+        // distinct serving processes so the donor is not rejected as the target.
+        let distributed = DistributedRuntime::new(
+            distributed.runtime().clone(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
         let endpoint = distributed
             .namespace("d-to-p-transfer-tests".to_string())
             .unwrap()
@@ -528,6 +536,7 @@ mod integration_tests {
             Box::pin(host(&distributed, "prefill", WorkerType::Prefill, true)).await;
         let (source, source_id, _) =
             Box::pin(host(&distributed, "decode", WorkerType::Decode, true)).await;
+        assert_ne!(source_id, target_id, "the donor must be a different worker");
         assert!(
             !source
                 .kv_router()
