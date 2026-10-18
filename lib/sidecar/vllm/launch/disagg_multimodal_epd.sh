@@ -41,6 +41,7 @@ while [[ $# -gt 0 ]]; do
             echo "  VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT  Prefill NIXL port (default: 5601)"
             echo "  VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT   Decode NIXL port (default: 5602)"
             echo "  VLLM_PREFILL_KV_EVENT_PORT   Prefill KV event port (default: 20081)"
+            echo "  VLLM_PREFILL_KV_REPLAY_PORT  Prefill KV event replay port (default: 20181)"
             exit 0
             ;;
         *)
@@ -83,6 +84,7 @@ VLLM_DECODE_GPU="${VLLM_DECODE_GPU:-2}"
 VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT="${VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT:-5601}"
 VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT="${VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT:-5602}"
 VLLM_PREFILL_KV_EVENT_PORT="${VLLM_PREFILL_KV_EVENT_PORT:-20081}"
+VLLM_PREFILL_KV_REPLAY_PORT="${VLLM_PREFILL_KV_REPLAY_PORT:-20181}"
 ENCODER_GPU_MEMORY_UTILIZATION="${ENCODER_GPU_MEMORY_UTILIZATION:-0.1}"
 
 DEFAULT_KV_CACHE_BYTES="${DEFAULT_KV_CACHE_BYTES:-1119388000}"
@@ -136,7 +138,7 @@ vllm-rs serve "$MODEL" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --ec-transfer-config "$CONSUMER_EC_CONFIG" \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
-    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}" \
+    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL_KV_EVENT_PORT}\",\"replay_endpoint\":\"tcp://*:${VLLM_PREFILL_KV_REPLAY_PORT}\",\"enable_kv_cache_events\":true}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 

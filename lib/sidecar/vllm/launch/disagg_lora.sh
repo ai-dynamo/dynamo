@@ -51,6 +51,7 @@ while [[ $# -gt 0 ]]; do
             echo "  VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT  Decode NIXL port (default: 5600)"
             echo "  VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT Prefill NIXL port (default: 20097)"
             echo "  VLLM_PREFILL_KV_EVENT_ENDPOINT  KV event endpoint (default: private local IPC socket)"
+            echo "  VLLM_PREFILL_KV_REPLAY_ENDPOINT KV event replay endpoint (default: private local IPC socket)"
             echo "  VLLM_DECODE_GPU                 Decode GPU index (default: 0)"
             echo "  VLLM_PREFILL_GPU                Prefill GPU index (default: 1)"
             echo "  MAX_MODEL_LEN                   Maximum model length (default: 4096)"
@@ -71,6 +72,11 @@ KV_EVENT_DIR=""
 if [[ -z "${VLLM_PREFILL_KV_EVENT_ENDPOINT:-}" ]]; then
     KV_EVENT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dynamo-vllm-kv.XXXXXX")"
     VLLM_PREFILL_KV_EVENT_ENDPOINT="ipc://${KV_EVENT_DIR}/events"
+    VLLM_PREFILL_KV_REPLAY_ENDPOINT="${VLLM_PREFILL_KV_REPLAY_ENDPOINT:-ipc://${KV_EVENT_DIR}/replay}"
+fi
+KV_REPLAY_CONFIG=""
+if [[ -n "${VLLM_PREFILL_KV_REPLAY_ENDPOINT:-}" ]]; then
+    KV_REPLAY_CONFIG=",\"replay_endpoint\":\"${VLLM_PREFILL_KV_REPLAY_ENDPOINT}\""
 fi
 
 lora_exit_trap() {
@@ -169,7 +175,7 @@ vllm-rs serve "$MODEL" \
     --max-loras "$MAX_LORAS" \
     --max-lora-rank "$MAX_LORA_RANK" \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
-    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"${VLLM_PREFILL_KV_EVENT_ENDPOINT}\",\"enable_kv_cache_events\":true}" \
+    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"${VLLM_PREFILL_KV_EVENT_ENDPOINT}\"${KV_REPLAY_CONFIG},\"enable_kv_cache_events\":true}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 

@@ -462,7 +462,7 @@ def test_sidecar_kv_routing(
         engine_env = {"CUDA_VISIBLE_DEVICES": ",".join(devices)}
         # KV publishers offset by rank; SGLang also derives communication ports.
         dep_ports = allocate_contiguous_ports(
-            1, 12 if backend == "sglang" else 2, DynamoPortRange.SERVE.value
+            1, 12 if backend == "sglang" else 4, DynamoPortRange.SERVE.value
         )
         request.addfinalizer(lambda: deallocate_ports(dep_ports))
         config.script_args += [
@@ -472,7 +472,14 @@ def test_sidecar_kv_routing(
                     "publisher": "zmq",
                     "topic": "kv-events",
                     "endpoint": f"tcp://*:{dep_ports[0]}",
-                    **({"enable_kv_cache_events": True} if backend == "vllm" else {}),
+                    **(
+                        {
+                            "enable_kv_cache_events": True,
+                            "replay_endpoint": f"tcp://*:{dep_ports[2]}",
+                        }
+                        if backend == "vllm"
+                        else {}
+                    ),
                 }
             ),
         ]

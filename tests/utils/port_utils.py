@@ -50,6 +50,7 @@ class ServicePorts:
     # launches). Empty unless the test carries @pytest.mark.engine_ports.
     engine_http_ports: list[int] = field(default_factory=list)
     engine_grpc_ports: list[int] = field(default_factory=list)
+    engine_kv_replay_ports: list[int] = field(default_factory=list)
 
 
 def _load_port_registry() -> dict:
