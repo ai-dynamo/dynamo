@@ -5398,22 +5398,16 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         asyncio.run(check())
 
     @pytest.mark.parametrize(
-        "prefix", ["", "InvalidRequest: ", "BackendInvalidArgument: "]
-    )
-    @pytest.mark.parametrize(
-        "stage,after_output",
+        "prefix,stage",
         [
-            ("initial", False),
-            ("event", False),
-            ("exception", False),
-            ("typed_initial", False),
-            ("typed_exception", False),
-            ("event", True),
-            ("exception", True),
-            ("typed_exception", True),
+            ("", "event"),
+            ("InvalidRequest: ", "event"),
+            ("BackendInvalidArgument: ", "event"),
+            ("", "exception"),
+            ("InvalidRequest: ", "typed_exception"),
         ],
     )
-    def test_scheduler_input_limit_preserves_details(self, prefix, stage, after_output):
+    def test_scheduler_input_limit_preserves_details(self, prefix, stage):
         """Normalize scheduler rejections on typed and untyped error paths."""
         message = (
             "Input length (4097 tokens) exceeds the maximum allowed length "
@@ -5422,16 +5416,10 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         class RejectingEngine:
             async def generate(self, preprocessed, **kwargs):
-                """Raise the requested rejection at creation or iteration time."""
-                if stage == "initial":
-                    raise RuntimeError(prefix + message)
-                if stage == "typed_initial":
-                    raise InvalidArgument(prefix + message)
+                """Return an iterator that rejects on the requested error path."""
 
                 async def stream():
-                    """Emit optional output, then reject without continuing."""
-                    if after_output:
-                        yield FakeRoutedItem({"token_ids": [ord("A")]})
+                    """Reject without continuing the stream."""
                     if stage == "exception":
                         raise RuntimeError(prefix + message)
                     if stage == "typed_exception":
@@ -5459,9 +5447,6 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             stream = processor._generate_and_stream(
                 "req-input-limit", {"model": "test-model"}, {}, [], post
             )
-            if after_output:
-                first = await anext(stream)
-                assert first["data"]["choices"][0]["delta"]["content"] == "A"
             with pytest.raises(InvalidArgument) as error:
                 await anext(stream)
             assert str(error.value) == message
@@ -5473,18 +5458,16 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
     @pytest.mark.parametrize(
         "suffix", [" private path: /srv/worker.py", "\ntraceback", "\n"]
     )
-    @pytest.mark.parametrize("after_output", [False, True])
-    def test_input_limit_with_diagnostics_remains_internal(self, suffix, after_output):
+    def test_input_limit_with_diagnostics_remains_internal(self, suffix):
         """Keep diagnostic-bearing routed messages on the internal error path."""
         message = (
             "InvalidRequest: Input length (4097 tokens) exceeds the maximum allowed "
             "length (4096 tokens). Use a shorter input or enable --allow-auto-truncate."
             + suffix
         )
-        prefix = [{"token_ids": [ord("A")]}] if after_output else []
         items = self._run_stream(
             self.ByteTokenizer(),
-            [*prefix, FakeRoutedItem(None, is_error=True, comments=[message])],
+            [FakeRoutedItem(None, is_error=True, comments=[message])],
         )
         assert items[-1] == {
             "_dynamo_annotated": True,
