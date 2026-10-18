@@ -67,14 +67,15 @@ mod test_event_processing {
 
     #[test]
     fn test_publish_batch_ignores_empty_and_preserves_order() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
-            kv_block_size: 1,
+            kv_block_size: 16,
+            next_event_id: Arc::new(AtomicU64::new(0)),
             source: None,
+            processor_handle: tokio::sync::Mutex::new(None),
             cancellation_token: CancellationToken::new(),
             worker_id: 7,
             tx,
-            next_event_id: Arc::new(AtomicU64::new(0)),
         };
 
         publisher.publish_batch(Vec::new()).unwrap();
@@ -97,7 +98,7 @@ mod test_event_processing {
                 },
             ])
             .unwrap();
-        let batch = rx.try_recv().unwrap();
+        let batch = rx.try_recv().unwrap().into_events();
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0].event.event_id, 8);
         assert_eq!(batch[0].event.dp_rank, 1);
@@ -107,14 +108,15 @@ mod test_event_processing {
 
     #[test]
     fn test_publish_batch_closed_channel_returns_original_events_in_order() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
-            kv_block_size: 1,
+            kv_block_size: 16,
+            next_event_id: Arc::new(AtomicU64::new(0)),
             source: None,
+            processor_handle: tokio::sync::Mutex::new(None),
             cancellation_token: CancellationToken::new(),
             worker_id: 7,
             tx,
-            next_event_id: Arc::new(AtomicU64::new(0)),
         };
         drop(rx);
 
@@ -142,14 +144,15 @@ mod test_event_processing {
 
     #[test]
     fn test_publish_wraps_events_in_batches() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
-            kv_block_size: 1,
+            kv_block_size: 16,
+            next_event_id: Arc::new(AtomicU64::new(0)),
             source: None,
+            processor_handle: tokio::sync::Mutex::new(None),
             cancellation_token: CancellationToken::new(),
             worker_id: 7,
             tx,
-            next_event_id: Arc::new(AtomicU64::new(0)),
         };
 
         publisher
@@ -159,7 +162,7 @@ mod test_event_processing {
                 dp_rank: 2,
             })
             .unwrap();
-        let batch = rx.try_recv().unwrap();
+        let batch = rx.try_recv().unwrap().into_events();
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].event.event_id, 10);
         assert_eq!(batch[0].event.dp_rank, 2);
@@ -185,7 +188,7 @@ mod test_event_processing {
             ])
             .unwrap();
 
-        let batch = rx.try_recv().unwrap();
+        let batch = rx.try_recv().unwrap().into_events();
         assert_eq!(
             batch
                 .iter()
@@ -902,7 +905,7 @@ mod tests_startup_helpers {
 
         let cancellation_token = CancellationToken::new();
         let processor_token = cancellation_token.clone();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
         let cleanup_discovery = discovery.clone();
         let processor = tokio::spawn(async move {
             let (publisher, _) = MockComponent::new();
@@ -1319,7 +1322,7 @@ mod tests_startup_helpers {
         }
 
         // Prepare channel that listener should fill
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
 
         // Keep the unique IPC directory alive until the sockets shut down.
         let (_ipc_dir, endpoint) = unique_ipc_endpoint();
@@ -1344,6 +1347,7 @@ mod tests_startup_helpers {
                 token,
                 4,
                 next_event_id,
+                None,
                 None,
                 None,
             )
@@ -1394,7 +1398,7 @@ mod tests_startup_helpers {
             loop {
                 tokio::select! {
                     event_batch = rx.recv() => {
-                        return event_batch.expect("listener channel closed");
+                        return event_batch.expect("listener channel closed").into_events();
                     }
                     _ = publish_interval.tick() => {
                         send_multipart(&pub_socket, frames.clone())
@@ -1461,7 +1465,7 @@ mod tests_startup_helpers {
             },
         }
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
         let token = dynamo_runtime::CancellationToken::new();
@@ -1475,6 +1479,7 @@ mod tests_startup_helpers {
                 token,
                 4,
                 Arc::new(AtomicU64::new(0)),
+                None,
                 None,
                 None,
             )
@@ -1505,7 +1510,7 @@ mod tests_startup_helpers {
             loop {
                 tokio::select! {
                     event_batch = rx.recv() => {
-                        return event_batch.expect("listener channel closed");
+                        return event_batch.expect("listener channel closed").into_events();
                     }
                     _ = publish_interval.tick() => {
                         send_multipart(&pub_socket, frames.clone())
@@ -1560,7 +1565,7 @@ mod tests_startup_helpers {
             },
         }
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
         let token = dynamo_runtime::CancellationToken::new();
@@ -1574,6 +1579,7 @@ mod tests_startup_helpers {
                 token,
                 4,
                 Arc::new(AtomicU64::new(0)),
+                None,
                 None,
                 None,
             )
@@ -1597,7 +1603,7 @@ mod tests_startup_helpers {
             loop {
                 tokio::select! {
                     event_batch = rx.recv() => {
-                        return event_batch.expect("listener channel closed");
+                        return event_batch.expect("listener channel closed").into_events();
                     }
                     _ = publish_interval.tick() => {
                         send_multipart(&pub_socket, sentinel_frames.clone())
@@ -1648,7 +1654,7 @@ mod tests_startup_helpers {
 
     #[tokio::test]
     async fn test_start_zmq_listener_connects_before_publisher_bind() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         // Keep the unique IPC directory alive until the sockets shut down.
         let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let topic = String::new();
@@ -1658,7 +1664,18 @@ mod tests_startup_helpers {
         let listener_handle = tokio::spawn({
             let token = token.clone();
             let endpoint = endpoint.clone();
-            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None, None)
+            start_zmq_listener(
+                endpoint,
+                topic,
+                1,
+                tx,
+                token,
+                4,
+                next_event_id,
+                None,
+                None,
+                None,
+            )
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
@@ -1692,7 +1709,7 @@ mod tests_startup_helpers {
             loop {
                 tokio::select! {
                     event_batch = rx.recv() => {
-                        return event_batch.expect("listener channel closed");
+                        return event_batch.expect("listener channel closed").into_events();
                     }
                     _ = publish_interval.tick() => {
                         send_multipart(
@@ -2413,6 +2430,57 @@ mod event_processor_tests {
                 block_hashes: vec![ExternalSequenceBlockHash(block_hash)],
             }),
             dp_rank,
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_ack_waits_for_local_application_and_propagates_failure() {
+        use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer};
+        for fail in [false, true] {
+            let indexer = Arc::new(LocalKvIndexer::new(
+                CancellationToken::new(),
+                4,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+                16,
+            ));
+            let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
+            let cancel = CancellationToken::new();
+            let publisher = MockPublisher::new();
+            let task = tokio::spawn(run_event_processor_loop(
+                publisher.clone(),
+                1,
+                cancel.clone(),
+                rx,
+                Some(indexer.clone()),
+                Some(60_000),
+                DEFAULT_MAX_BATCH_BLOCKS,
+            ));
+            let (done, ack) = tokio::sync::oneshot::channel();
+            // A missing parent reaches the physical index but cannot be applied.
+            let parent = fail.then_some(999);
+            tx.send(PublisherInput::Recovery(
+                local_gpu_batch(vec![stored_event(0, parent, 10, 0)]),
+                done,
+            ))
+            .unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(5), ack)
+                .await
+                .unwrap()
+                .unwrap();
+            if fail {
+                assert!(result.is_err());
+            } else {
+                result.unwrap();
+                // No flush/sleep: acknowledgement means physical mutation finished,
+                // even with an otherwise long publisher batching timeout.
+                let matches = indexer
+                    .find_matches(vec![LocalBlockHash(10)])
+                    .await
+                    .unwrap();
+                assert!(!matches.scores.is_empty());
+            }
+            drop(tx);
+            task.await.unwrap();
         }
     }
 
