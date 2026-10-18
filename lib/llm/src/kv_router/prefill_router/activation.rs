@@ -632,6 +632,16 @@ impl PrefillRouter {
         PrefillLifecycleState::from_atomic(self.lifecycle.load(Ordering::Acquire))
     }
 
+    /// A prefill target is set but its binding has not been published yet:
+    /// either `drive_target` is still building it, or `set_target` discarded
+    /// the previous binding for a different target. Both `set_target` and the
+    /// build loop publish lifecycle under the target lock, so reading the two
+    /// together here cannot observe a target without its matching lifecycle.
+    pub(super) fn awaiting_activation(&self) -> bool {
+        let target = self.target.lock();
+        target.is_some() && self.lifecycle_state() == PrefillLifecycleState::Pending
+    }
+
     #[cfg(test)]
     pub(crate) fn target_endpoint_id(&self) -> Option<dynamo_runtime::protocols::EndpointId> {
         self.target_tx
@@ -654,6 +664,7 @@ mod tests {
         DistributedRuntime, Runtime,
         discovery::{DiscoverySpec, EventTransportKind},
         distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
+        error::{ErrorType, match_error_chain},
         pipeline::{
             AsyncEngine, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, SingleIn,
             network::Ingress,
@@ -760,6 +771,40 @@ mod tests {
         let worker = response.next().await.unwrap().data.unwrap().token_ids[0];
         while response.next().await.is_some() {}
         worker
+    }
+
+    /// Poll the hop until its committed target activates. While the target is
+    /// still activating, requests must fail closed with a migratable error;
+    /// they must never reach the downstream engine as an aggregated request
+    /// (worker 99). Once active, the request routes through prefill.
+    async fn await_activation(router: &PrefillRouter, expected_prefill_worker: u32) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match router
+                    .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99)))
+                    .await
+                {
+                    Err(error) => {
+                        assert!(
+                            match_error_chain(error.as_ref(), &[ErrorType::WorkerUnavailable], &[]),
+                            "activation window must surface WorkerUnavailable, got: {error}"
+                        );
+                        tokio::task::yield_now().await;
+                    }
+                    Ok(mut response) => {
+                        let worker = response.next().await.unwrap().data.unwrap().token_ids[0];
+                        while response.next().await.is_some() {}
+                        assert_eq!(
+                            worker, expected_prefill_worker,
+                            "activated router must route through prefill"
+                        );
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("committed prefill target must activate");
     }
 
     #[tokio::test]
@@ -903,18 +948,7 @@ mod tests {
         );
         let (admissions, admitted_ids) = watch::channel(vec![ids[0]]);
         router.set_target(Some(target(1, 64, admitted_ids)));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let worker = prefilled_worker(&router).await;
-                if worker != 99 {
-                    assert_eq!(worker, 0);
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("committed prefill target must activate");
+        await_activation(&router, 0).await;
         assert_eq!(
             router.available_worker_ids_for(&group_id, &endpoint.id()),
             Some(HashSet::from([ids[0]]))
@@ -1021,18 +1055,7 @@ mod tests {
                 .available_worker_ids_for("other-group", &endpoint.id())
                 .is_none()
         );
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let worker = prefilled_worker(&router).await;
-                if worker != 99 {
-                    assert_eq!(worker, 2);
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("same-endpoint successor must activate");
+        await_activation(&router, 2).await;
         assert_eq!(
             router.available_worker_ids_for(&group_id, &endpoint.id()),
             Some(HashSet::from([ids[2]]))

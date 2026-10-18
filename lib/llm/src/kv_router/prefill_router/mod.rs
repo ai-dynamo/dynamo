@@ -16,7 +16,7 @@ use dynamo_kv_router::{
     config::RouterConfigOverride, protocols::RoutingConstraints,
 };
 use dynamo_runtime::{
-    error::{ErrorType, match_error_chain},
+    error::{DynamoError, ErrorClass, ErrorType, match_error_chain},
     pipeline::{
         AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream, RouterMode,
         ServerStreamingEngine, SingleIn, async_trait, propagate_first_response_guard,
@@ -149,6 +149,20 @@ fn into_decode_request(
     }
     req.staged_kv_cleanup = true;
     req
+}
+
+/// The request reached a decode WorkerSet whose prefill target is known but
+/// whose prefill binding is still being built. `WorkerUnavailable` is the
+/// migratable sibling of `Unavailable`: it maps to HTTP 503 and lets the retry
+/// layer re-dispatch rather than treating the whole model as down.
+fn prefill_activation_pending_error(model_name: &str, namespace: &str) -> anyhow::Error {
+    DynamoError::builder()
+        .class(ErrorClass::WorkerUnavailable)
+        .message(format!(
+            "prefill routing for model {model_name} in namespace {namespace} is still activating"
+        ))
+        .build()
+        .into()
 }
 
 fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
@@ -365,16 +379,39 @@ impl
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
-        // If the prefill router is not activated (no prefill workers discovered) or has been
-        // deactivated (all prefill workers died), route directly to the backend. Model admission
-        // remains gated by the registered worker topology before the request reaches this stage.
+        // Query-only requests are owned by the decode RoutingHost. In particular,
+        // do not turn an advisory worker lookup into conditional local execution.
+        let query_only = req.get_annotation_value("query_instance_id").is_some();
+
         if self.lifecycle_state() != PrefillLifecycleState::Active {
+            // Model admission gates on the registered worker topology, which counts a
+            // prefill worker as live the moment it registers. This router only learns
+            // the matching target then, and its binding is built asynchronously. Until
+            // that build completes the namespace is already selectable, so forwarding
+            // the request would hand a decode-only worker an aggregated request it
+            // cannot run (`bootstrap_info is required for disaggregated decode`).
+            // Fail closed with a migratable error instead: the retry layer re-dispatches
+            // and the client sees a retryable 503 rather than a backend failure.
+            if !query_only && self.awaiting_activation() {
+                tracing::debug!(
+                    request_id = %request_id,
+                    model_name = %self.model_name,
+                    namespace = %self.namespace,
+                    "Prefill router target is still activating; rejecting request instead of \
+                     forwarding it to decode without a prefill hop"
+                );
+                return Err(prefill_activation_pending_error(
+                    &self.model_name,
+                    &self.namespace,
+                ));
+            }
+
+            // No prefill target was ever set (aggregated-capable deployment) or every
+            // prefill worker left (target cleared): route directly to the backend.
             return next.generate(context.map(|_| req)).await;
         }
 
-        // Query-only requests are owned by the decode RoutingHost. In particular,
-        // do not turn an advisory worker lookup into conditional local execution.
-        if req.get_annotation_value("query_instance_id").is_some() {
+        if query_only {
             return next.generate(context.map(|_| req)).await;
         }
 
@@ -862,6 +899,165 @@ mod tests {
             .annotations(vec!["query_instance_id:".to_string()])
             .build()
             .unwrap()
+    }
+
+    /// Downstream stand-in for the decode leg: counts dispatches, accepts any request.
+    #[derive(Default)]
+    struct CountingDecodeHost {
+        requests: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for CountingDecodeHost
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            Ok(ResponseStream::new(
+                Box::pin(stream::empty()),
+                request.context(),
+            ))
+        }
+    }
+
+    fn inference_request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap()
+    }
+
+    /// A decode WorkerSet's router as the watcher creates it: enabled, no
+    /// target yet, lifecycle `Pending`, no conditional disaggregation.
+    fn fresh_decode_router() -> Arc<PrefillRouter> {
+        let (_activation_tx, activation_rx) = oneshot::channel();
+        PrefillRouter::new(
+            activation_rx,
+            Arc::new(ModelManager::new()),
+            RouterMode::RoundRobin,
+            16,
+            None,
+            None,
+            None,
+            SessionAffinityMode::Hard,
+            "model".to_string(),
+            "namespace".to_string(),
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            CancellationToken::new(),
+        )
+    }
+
+    /// Mirror the state `set_target(Some(..))` leaves behind before
+    /// `drive_target` publishes a binding: target known, lifecycle `Pending`,
+    /// no binding. Set directly so the test does not need a live endpoint.
+    fn mark_target_pending(router: &PrefillRouter) {
+        *router.target.lock() = Some(WorkerSetTargetId::Committed {
+            group: "namespace/prefill/generate".to_string(),
+            generation: 1,
+        });
+        router.binding.store(None);
+        router.lifecycle.store(
+            PrefillLifecycleState::Pending as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+
+    // -- Activation-window behavior (worker rollout race) --
+    //
+    // Admission counts a prefill worker as live once it registers, but this
+    // router's binding is built asynchronously after `set_target`. A decode-only
+    // worker cannot run the aggregated request a passthrough would send it.
+
+    #[tokio::test]
+    async fn pending_target_fails_closed_instead_of_forwarding_to_decode() {
+        let router = fresh_decode_router();
+        mark_target_pending(&router);
+        assert!(router.awaiting_activation());
+
+        let host = Arc::new(CountingDecodeHost::default());
+        let error = router
+            .generate(SingleIn::new(inference_request()), host.clone())
+            .await
+            .expect_err("a pending prefill target must not pass through to decode");
+
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::WorkerUnavailable], &[]),
+            "expected WorkerUnavailable so the error maps to a retryable 503, got: {error}"
+        );
+        assert!(
+            crate::migration::is_migratable(error.as_ref()),
+            "the retry layer must be able to re-dispatch this request"
+        );
+        assert_eq!(
+            host.requests.load(Ordering::Relaxed),
+            0,
+            "decode must not see a request without its prefill hop"
+        );
+    }
+
+    #[tokio::test]
+    async fn untargeted_router_still_passes_through() {
+        // Aggregated-capable deployment: no prefill target was ever set.
+        let router = fresh_decode_router();
+        assert!(!router.awaiting_activation());
+
+        let host = Arc::new(CountingDecodeHost::default());
+        router
+            .generate(SingleIn::new(inference_request()), host.clone())
+            .await
+            .expect("no target means plain passthrough");
+        assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn cleared_target_still_passes_through() {
+        // Every prefill worker left: `set_target(None)` moves the router to
+        // `Unavailable`, which keeps the pre-existing passthrough behavior.
+        let router = fresh_decode_router();
+        mark_target_pending(&router);
+        router.set_target(None);
+        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
+        assert!(!router.awaiting_activation());
+
+        let host = Arc::new(CountingDecodeHost::default());
+        router
+            .generate(SingleIn::new(inference_request()), host.clone())
+            .await
+            .expect("a deactivated router passes through");
+        assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_target_still_serves_query_only_requests() {
+        // Routing previews never reach the engine, so they are not at risk and
+        // must keep working while the prefill binding is being built.
+        let router = fresh_decode_router();
+        mark_target_pending(&router);
+
+        let host = Arc::new(QueryOnlyDecodeHost::default());
+        router
+            .generate(SingleIn::new(query_only_request()), host.clone())
+            .await
+            .expect("query-only requests bypass the activation gate");
+        assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn activated_router_is_not_awaiting_activation() {
+        let router = fresh_decode_router();
+        mark_target_pending(&router);
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        assert!(!router.awaiting_activation());
     }
 
     #[test]

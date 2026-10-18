@@ -21,6 +21,7 @@ Key characteristics of the prefill router:
 - **Always disables active block tracking** (`track_active_blocks=false`) since prefill workers do not perform decode.
 - **Runs between preprocessing and decode routing** and returns handoff metadata for the selected decode worker.
 - **Uses decode-only routing when no prefill router is active.** Once a request has been dispatched to prefill, a prefill or handoff failure is returned to the request; it does not retry through an aggregated decode-only path.
+- **Fails closed while a prefill target is activating.** During a worker rollout the decode set can become routable before the frontend finishes building its prefill routing state. Requests that arrive in that window are rejected with a retryable HTTP 503 (`WorkerUnavailable`, eligible for request migration) rather than forwarded to decode without a prefill hop, which a disaggregated-only decode worker cannot serve.
 
 Key characteristics of the decode routing stage in disaggregated mode:
 - **Disables overlap scoring** (`overlap_score_credit=0`) because decode routing should not chase prefix reuse.
