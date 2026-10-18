@@ -254,6 +254,10 @@ impl DiscoveredModel {
         Ok(Some(block_size))
     }
 
+    pub(crate) fn instance_id(&self) -> &str {
+        &self.server.instance_id
+    }
+
     pub(crate) fn data_parallel_range(&self) -> &Range<u32> {
         &self.data_parallel_range
     }

@@ -32,12 +32,15 @@ use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, reso
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
 
+#[path = "recovery.rs"]
+mod recovery;
+
 pub struct VllmSidecarEngine {
     endpoint: GrpcEndpoint,
     model: DiscoveredModel,
     mode: DisaggregationMode,
     transport: GrpcTransportConfig,
-    client: OnceCell<VllmClient>,
+    state: recovery::Lifecycle,
     runtime_endpoint: OnceCell<Endpoint>,
     lora_downloader: OnceCell<LoRADownloader>,
     is_lora_enabled: bool,
@@ -69,7 +72,7 @@ impl VllmSidecarEngine {
             model,
             mode,
             transport,
-            client: OnceCell::new(),
+            state: recovery::Lifecycle::default(),
             runtime_endpoint: OnceCell::new(),
             lora_downloader: OnceCell::new(),
             lifecycle: lora::LoraLifecycle::default(),
@@ -275,10 +278,24 @@ impl VllmSidecarEngine {
         Ok((engine, config))
     }
 
-    fn started_client(&self) -> Result<&VllmClient, DynamoError> {
-        self.client
-            .get()
-            .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))
+    fn engine_config(
+        &self,
+        model: &DiscoveredModel,
+    ) -> Result<dynamo_backend_common::EngineConfig, DynamoError> {
+        let mut engine_config = model.engine_config(!self.mode.is_encode())?;
+        if self.engine_gates_reasoning {
+            // vLLM applies the tool grammar after reasoning ends, so the
+            // frontend must not include a second reasoning phase in it.
+            engine_config.runtime_data.insert(
+                dynamo_llm::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY.to_string(),
+                Value::Bool(true),
+            );
+        }
+        Ok(engine_config)
+    }
+
+    fn started_client(&self) -> Result<Arc<VllmClient>, DynamoError> {
+        Ok(self.started_state()?.client.clone())
     }
 
     fn ready_endpoint(&self) -> Result<&Endpoint, DynamoError> {
@@ -528,7 +545,7 @@ impl VllmSidecarEngine {
             if let Err(cleanup_error) = self.unpublish_pending_loras(endpoint, &mut state).await {
                 tracing::warn!(%cleanup_error, lora_name = %adapter.lora_name, "failed to remove LoRA discovery record during rollback");
             }
-            self.rollback_loaded_adapter(client, &adapter).await;
+            self.rollback_loaded_adapter(&client, &adapter).await;
             self.lifecycle.forget(&adapter.lora_name).await;
             return Err(error);
         }
@@ -781,55 +798,36 @@ impl LLMEngine for VllmSidecarEngine {
         &self,
         _worker_id: u64,
     ) -> Result<dynamo_backend_common::EngineConfig, DynamoError> {
-        if self.client.initialized() {
-            return Err(client::engine_shutdown("vLLM sidecar has already started"));
-        }
-        tracing::info!(
-            endpoint = %self.endpoint,
-            connections = self.transport.connections,
-            mode = %self.mode,
-            "connecting to vLLM gRPC"
-        );
-        let startup_deadline = client::startup_deadline(self.transport.startup_deadline)?;
-        let client =
-            VllmClient::connect(&self.endpoint, self.transport, startup_deadline, false).await?;
-        client
-            .wait_for_services(
-                &[CONTROL_SERVICE, INFERENCE_SERVICE],
-                startup_deadline,
-                self.transport.retry_interval,
-            )
-            .await?;
-        let (model, server) = client.discover(startup_deadline).await?;
-        let observed = DiscoveredModel::from_proto(model, server)?;
-        self.model.ensure_startup_compatible(&observed)?;
-        let mut engine_config = observed.engine_config(!self.mode.is_encode())?;
-        if self.engine_gates_reasoning {
-            // vLLM applies the tool grammar after reasoning ends, so the
-            // frontend must not include a second reasoning phase in it.
-            engine_config.runtime_data.insert(
-                dynamo_llm::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY.to_string(),
-                Value::Bool(true),
-            );
-        }
-        let routing_image_token_id =
-            resolve_routing_image_token_id(&observed, startup_deadline).await;
-        self.routing_image_token_id
-            .set(routing_image_token_id)
-            .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
-        let connection_count = client.connection_count();
-        self.client
-            .set(client)
-            .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
-        tracing::info!(
-            endpoint = %self.endpoint,
-            connections = connection_count,
-            model = %observed.source,
-            served_model_name = %observed.served_name,
-            mode = %self.mode,
-            "vLLM gRPC services are ready"
-        );
-        Ok(engine_config)
+        self.initialize().await
+    }
+
+    async fn wait_for_startup(&self) -> Result<(), DynamoError> {
+        self.wait_for_recovery().await
+    }
+
+    async fn recover_startup(
+        &self,
+    ) -> Result<Option<dynamo_backend_common::EngineConfig>, DynamoError> {
+        self.reconnect(true).await.map(|recovery| match recovery {
+            dynamo_backend_common::engine::EngineRecovery::Replacement(config) => Some(*config),
+            dynamo_backend_common::engine::EngineRecovery::SameInstance => {
+                unreachable!("startup recreates publishers")
+            }
+        })
+    }
+
+    async fn wait_for_unavailable(&self) -> Result<(), DynamoError> {
+        self.monitor_availability().await
+    }
+
+    async fn recover_serving(
+        &self,
+    ) -> Result<dynamo_backend_common::engine::EngineRecovery, DynamoError> {
+        self.reconnect(false).await
+    }
+
+    async fn on_recovery_complete(&self) -> Result<(), DynamoError> {
+        self.finish_recovery().await
     }
 
     async fn generate(
@@ -843,10 +841,17 @@ impl LLMEngine for VllmSidecarEngine {
                 self.model.served_name
             )));
         }
-        let client = self
-            .client
-            .get()
-            .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
+        let connection = self.started_state()?;
+        if !self.cancel.is_cancelled()
+            && (connection.cancel.is_cancelled()
+                || self
+                    .state
+                    .is_recovering
+                    .load(std::sync::atomic::Ordering::Acquire))
+        {
+            return Err(client::engine_shutdown("vLLM sidecar is recovering"));
+        }
+        let client = &connection.client;
         let request_id = ctx.id().to_string();
         let mut request = normalize_response_options(request)?;
         if !self.model.reports_proto_0_6()
@@ -1012,9 +1017,10 @@ impl LLMEngine for VllmSidecarEngine {
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
-        let Some(client) = self.client.get() else {
+        let Ok(connection) = self.started_state() else {
             return;
         };
+        let client = &connection.client;
         if let Err(error) = client.abort(ctx.id().to_string()).await {
             // Escaped: the message embeds the engine's gRPC status text, so raw
             // newlines from the peer could forge separate log records.
@@ -1221,10 +1227,7 @@ impl LLMEngine for VllmSidecarEngine {
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
-        let client = self
-            .client
-            .get()
-            .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
+        let client = self.started_client()?;
         let expected_dp_range = self.model.data_parallel_range();
         let expected_dp_size = expected_dp_range.end - expected_dp_range.start;
         let mut ranks = HashSet::new();
@@ -1732,7 +1735,7 @@ mod tests {
                 supported,
                 "capabilities: {flags:?}"
             );
-            assert!(engine.client.get().is_none());
+            assert!(engine.started_state().is_err());
             if !supported {
                 assert_eq!(
                     engine
@@ -1745,7 +1748,7 @@ mod tests {
                     }),
                     "capabilities: {flags:?}"
                 );
-                assert!(engine.client.get().is_none());
+                assert!(engine.started_state().is_err());
             }
         }
     }

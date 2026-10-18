@@ -178,6 +178,19 @@ impl VllmClient {
             .map_err(|status| status_to_dynamo("GenerateStream", status))
     }
 
+    pub(crate) async fn watch_service(
+        &self,
+        service: &str,
+    ) -> Result<tonic::Streaming<tonic_health::pb::HealthCheckResponse>, DynamoError> {
+        HealthClient::new(self.pool.next_channel())
+            .watch(HealthCheckRequest {
+                service: service.to_string(),
+            })
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|status| status_to_dynamo("Health.Watch", status))
+    }
+
     pub(crate) async fn kv_event_sources(&self) -> Result<Vec<pb::KvEventSource>, DynamoError> {
         let mut client = pb::control_client::ControlClient::new(self.pool.next_channel())
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
