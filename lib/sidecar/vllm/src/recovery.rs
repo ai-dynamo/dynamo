@@ -581,6 +581,7 @@ impl VllmSidecarEngine {
                 .any(|rank| matches!(*rank.status.borrow(), KvStreamStatus::MissingHistory { .. }))
         };
         let mut is_history_missing = false;
+        let mut is_shutdown_requested = false;
         self.unpublish_all_loras().await;
         loop {
             let connection = self.connect_generation(deadline).await?;
@@ -588,6 +589,9 @@ impl VllmSidecarEngine {
             // A listener may confirm the loss after a failed recovery attempt.
             is_history_missing |= has_missing_history(&ranks);
             if is_history_missing && is_same {
+                if !is_shutdown_requested {
+                    is_shutdown_requested = self.request_shutdown(old.model.instance_id()).await?;
+                }
                 connection.cancel.cancel();
                 tokio::time::sleep(self.transport.retry_interval).await;
                 continue;
@@ -625,6 +629,37 @@ impl VllmSidecarEngine {
             }
             tracing::warn!(%error, "vLLM recovery remains incomplete");
             tokio::time::sleep(self.transport.retry_interval).await;
+        }
+    }
+
+    /// Returns whether the engine whose identity was verified accepted Shutdown.
+    async fn request_shutdown(&self, instance_id: &str) -> Result<bool, DynamoError> {
+        tracing::warn!(
+            instance_id,
+            "Required KV history is unavailable; requesting configured vLLM shutdown"
+        );
+        let result = tokio::time::timeout(
+            self.transport.connect_attempt_timeout,
+            client::shutdown_instance(&self.endpoint, instance_id),
+        )
+        .await;
+        match result {
+            Ok(Ok(is_accepted)) => Ok(is_accepted),
+            Ok(Err(status))
+                if matches!(
+                    status.code(),
+                    tonic::Code::FailedPrecondition
+                        | tonic::Code::Unimplemented
+                        | tonic::Code::PermissionDenied
+                        | tonic::Code::Unauthenticated
+                ) =>
+            {
+                Err(client::status_to_dynamo("Shutdown", status))
+            }
+            result => {
+                tracing::warn!(?result, "Shutdown delivery uncertain; awaiting replacement");
+                Ok(false)
+            }
         }
     }
 }

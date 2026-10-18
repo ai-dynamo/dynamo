@@ -2698,6 +2698,7 @@ dependencies = [
  "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
+ "hyper-util",
  "parking_lot",
  "prost-types 0.14.4",
  "serde",
@@ -2706,6 +2707,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.14.6",
  "tonic-health 0.14.6",
+ "tower",
  "tracing",
  "vllm-proto",
 ]
