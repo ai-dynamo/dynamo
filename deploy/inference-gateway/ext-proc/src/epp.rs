@@ -42,6 +42,7 @@ use crate::picker::{
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+const DYN_EPP_STATIC_ENDPOINT: &str = "DYN_EPP_STATIC_ENDPOINT";
 
 /// `tokens_safe_to_inject` is `false` when `token_ids` were computed from
 /// only one prompt of a multi-prompt text batch (routing-only, matching
@@ -69,6 +70,36 @@ fn validate_kube_discovery_mode() -> Result<bool> {
             anyhow::bail!("{DYN_KUBE_DISCOVERY_MODE} must be valid Unicode")
         }
     }
+}
+
+/// Read `DYN_EPP_STATIC_ENDPOINT`, a fixed `ip:port` that every worker
+/// resolves to in place of the Kubernetes pod reflector.
+///
+/// For running the Dynamo-mode EPP without a Kubernetes API server, such as
+/// local testing with mocker workers behind a single direct-mode Frontend.
+/// Routing is unchanged: the EPP still picks the worker (and prefill worker)
+/// and sends their ids in the routing headers, and the direct-mode Frontend
+/// at this address forwards to exactly that worker. Only the step that turns
+/// a worker id into a pod address is replaced. Unset in Kubernetes.
+fn static_endpoint_from_env() -> Result<Option<String>> {
+    match std::env::var(DYN_EPP_STATIC_ENDPOINT) {
+        Ok(value) if value.is_empty() => Ok(None),
+        Ok(value) => parse_static_endpoint(&value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{DYN_EPP_STATIC_ENDPOINT} must be valid Unicode")
+        }
+    }
+}
+
+/// Parse a static endpoint as a `SocketAddr` and render it the way the worker
+/// index stores pod addresses (IPv6 bracketed). A hostname is rejected: the
+/// gateway forwards to the address verbatim.
+fn parse_static_endpoint(value: &str) -> Result<String> {
+    let address: SocketAddr = value.parse().map_err(|e| {
+        anyhow::anyhow!("{DYN_EPP_STATIC_ENDPOINT}={value:?} is not an ip:port: {e}")
+    })?;
+    Ok(address.to_string())
 }
 
 /// `Ok(true)` for container discovery, `Ok(false)` for pod discovery (the
@@ -120,6 +151,8 @@ pub struct Router {
     runtime: Runtime,
     worker_index: Arc<RwLock<WorkerEndpointIndex>>,
     pod_store_ready: Arc<AtomicBool>,
+    /// Set from `DYN_EPP_STATIC_ENDPOINT`; replaces the pod reflector.
+    static_endpoint: Option<String>,
     served_model: String,
 }
 
@@ -151,6 +184,7 @@ impl Router {
         component: &str,
     ) -> Result<Self> {
         let container_discovery = validate_kube_discovery_mode()?;
+        let static_endpoint = static_endpoint_from_env()?;
 
         let runtime = Runtime::from_settings()?;
         let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
@@ -236,8 +270,21 @@ impl Router {
         // `nvidia.com/dynamo-namespace` is always set to the base
         // ("atchernych-qwen") by the operator. Using the suffixed name here
         // would silently match zero pods during/after a DGD rolling update.
-        let (worker_index, pod_store_ready) =
-            spawn_pod_reflector(&namespace_filter, container_discovery).await?;
+        let (worker_index, pod_store_ready) = match &static_endpoint {
+            Some(endpoint) => {
+                tracing::warn!(
+                    endpoint = %endpoint,
+                    "{DYN_EPP_STATIC_ENDPOINT} is set: skipping the Kubernetes pod \
+                     reflector and resolving every worker to this endpoint. \
+                     For local testing only."
+                );
+                (
+                    Arc::new(RwLock::new(WorkerEndpointIndex::new(container_discovery))),
+                    Arc::new(AtomicBool::new(true)),
+                )
+            }
+            None => spawn_pod_reflector(&namespace_filter, container_discovery).await?,
+        };
 
         // `model_manager` and `drt` are intentionally not stored on the
         // Router. The KV chooser, prefill router, prefill discovery watcher,
@@ -252,6 +299,7 @@ impl Router {
             runtime,
             worker_index,
             pod_store_ready,
+            static_endpoint,
             served_model: model_name,
         })
     }
@@ -415,6 +463,9 @@ impl Router {
     /// worker index — O(1), no K8s API calls, no pod scan, no worker-ID
     /// rehashing (see [`WorkerEndpointIndex`]).
     pub fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
+        if let Some(endpoint) = &self.static_endpoint {
+            return Some(endpoint.clone());
+        }
         read_index(&self.worker_index)
             .endpoints
             .get(&worker_id)
@@ -424,6 +475,9 @@ impl Router {
     /// Resolve any available worker to its endpoint address (ip:port).
     /// Used for body-less requests (GET /v1/models) where we just need any backend.
     pub fn resolve_any_worker_endpoint(&self) -> Option<String> {
+        if let Some(endpoint) = &self.static_endpoint {
+            return Some(endpoint.clone());
+        }
         read_index(&self.worker_index)
             .endpoints
             .values()
@@ -1262,6 +1316,17 @@ fn is_prefill_card(card: &ModelDeploymentCard) -> bool {
     card.effective_worker_type() == WorkerType::Prefill
 }
 
+/// Whether a `candidate_subset` hint (`ip:port` or bare `ip` entries) names
+/// the static endpoint, matched the same way as reflected pod addresses.
+fn static_endpoint_in_subset(endpoint: &str, candidate_subset: &[String]) -> bool {
+    let candidates: HashSet<&str> = candidate_subset.iter().map(|s| s.as_str()).collect();
+    let candidate_ips: HashSet<IpAddr> = candidate_subset
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    endpoint_in_subset(endpoint, &candidates, &candidate_ips)
+}
+
 fn spawn_prefill_discovery_watcher(
     drt: DistributedRuntime,
     target_namespace: String,
@@ -1371,6 +1436,18 @@ impl EndpointPicker for Router {
         // subset.
         let (allowed_worker_ids, worker_map) = if endpoints.is_empty() {
             if req.candidate_subset.is_empty() {
+                (None, Vec::new())
+            } else if let Some(endpoint) = &self.static_endpoint {
+                // One endpoint fronts every worker, so a subset hint either
+                // names it (no narrowing) or excludes everything.
+                if !static_endpoint_in_subset(endpoint, &req.candidate_subset) {
+                    tracing::warn!(
+                        subset = ?req.candidate_subset,
+                        endpoint = %endpoint,
+                        "Subset hint excludes the static endpoint; refusing to route outside the subset"
+                    );
+                    return Err(PickError::NoEndpoints);
+                }
                 (None, Vec::new())
             } else {
                 let ids = self.subset_to_worker_ids(&req.candidate_subset);
@@ -1692,6 +1769,43 @@ mod tests {
         card.worker_type = worker_type;
         card.model_type = model_type;
         card
+    }
+
+    #[test]
+    fn static_endpoint_parses_ip_port_and_rejects_the_rest() {
+        assert_eq!(
+            parse_static_endpoint("127.0.0.1:8100").unwrap(),
+            "127.0.0.1:8100"
+        );
+        // Bracketed IPv6, rendered the way the worker index stores addresses.
+        assert_eq!(parse_static_endpoint("[::1]:8100").unwrap(), "[::1]:8100");
+        for bad in ["localhost:8100", "127.0.0.1", "::1:8100", "127.0.0.1:99999"] {
+            assert!(
+                parse_static_endpoint(bad).is_err(),
+                "{bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn static_endpoint_subset_match_uses_address_semantics() {
+        let subset = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(static_endpoint_in_subset(
+            "127.0.0.1:8100",
+            &subset(&["127.0.0.1:8100"])
+        ));
+        assert!(static_endpoint_in_subset(
+            "127.0.0.1:8100",
+            &subset(&["127.0.0.1"])
+        ));
+        assert!(static_endpoint_in_subset(
+            "[fd00::2]:8100",
+            &subset(&["fd00::2"])
+        ));
+        assert!(!static_endpoint_in_subset(
+            "127.0.0.1:8100",
+            &subset(&["10.0.0.1:8100"])
+        ));
     }
 
     #[test]
