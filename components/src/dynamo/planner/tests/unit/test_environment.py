@@ -175,19 +175,6 @@ async def test_initialize_proceeds_once_only_pending_capacity_remains(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_initialize_waits_for_readiness_without_a_serving_worker():
-    controller = _controller()
-    controller.get_worker_inventory = AsyncMock(
-        return_value=WorkerCounts(ready_num_decode=0, pending_num_decode=2)
-    )
-    environment = _agg_environment(controller)
-
-    await environment.initialize()
-
-    controller.wait_for_deployment_ready.assert_awaited_once_with(include_planner=False)
-
-
-@pytest.mark.asyncio
 async def test_initialize_does_not_treat_rollout_as_pending_capacity():
     controller = _controller()
     controller.get_worker_inventory = AsyncMock(
@@ -226,6 +213,54 @@ async def test_initialize_falls_back_to_readiness_wait_without_pod_inventory():
     await environment.initialize()
 
     controller.wait_for_deployment_ready.assert_awaited_once_with(include_planner=False)
+
+
+@pytest.mark.asyncio
+async def test_initialize_surfaces_readiness_error_raised_during_inventory_check():
+    controller = _controller()
+    controller.wait_for_deployment_ready = AsyncMock(
+        side_effect=RuntimeError("deployment lookup failed")
+    )
+
+    async def inventory_after_readiness_fails(**kwargs):
+        for _ in range(3):
+            await asyncio.sleep(0)
+        return WorkerCounts(ready_num_decode=2, pending_num_decode=1)
+
+    controller.get_worker_inventory = AsyncMock(
+        side_effect=inventory_after_readiness_fails
+    )
+    environment = _agg_environment(controller)
+
+    with pytest.raises(RuntimeError, match="deployment lookup failed"):
+        await environment.initialize()
+
+
+@pytest.mark.asyncio
+async def test_power_aware_startup_keeps_the_settled_wait():
+    controller = _controller()
+    controller.get_worker_inventory = AsyncMock(
+        return_value=WorkerCounts(ready_num_decode=2, pending_num_decode=1)
+    )
+    controller.wait_for_settled_graph_deployment = AsyncMock(
+        side_effect=RuntimeError("settled wait reached")
+    )
+    controller.get_graph_deployment = MagicMock(return_value={})
+    controller.get_component_power_configs = MagicMock(return_value=(None, None))
+    controller.get_power_aware_worker_counts = AsyncMock(return_value=(0, 2, True))
+    environment = PlannerEnvironmentImpl(
+        config=_config(mode="agg", enable_power_awareness=True),
+        controller=controller,
+        require_prefill=False,
+        require_decode=True,
+        fpm_provider=_fpm_provider(),
+    )
+
+    with pytest.raises(RuntimeError, match="settled wait reached"):
+        await environment.initialize()
+
+    controller.wait_for_settled_graph_deployment.assert_awaited_once()
+    controller.wait_for_deployment_ready.assert_not_awaited()
 
 
 @pytest.mark.asyncio

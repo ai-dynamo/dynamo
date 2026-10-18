@@ -256,7 +256,10 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         )
         try:
             while not ready.done():
-                if await self._startup_blocked_only_by_pending():
+                pending_only = await self._startup_blocked_only_by_pending()
+                if ready.done():
+                    break
+                if pending_only:
                     logger.info(
                         "Starting with serving workers while additional replicas "
                         "are pending startup capacity"
@@ -275,23 +278,20 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 ready.cancel()
 
     async def _startup_blocked_only_by_pending(self) -> bool:
+        """True when every required role serves and only pending startup capacity remains."""
         if not is_startup_aware_connector(self.controller):
             return False
         defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
         if defaults is None:
             return False
-        try:
-            inventory = await self.controller.get_worker_inventory(
-                prefill_component_name=(
-                    defaults.prefill_worker_k8s_name if self.require_prefill else None
-                ),
-                decode_component_name=(
-                    defaults.decode_worker_k8s_name if self.require_decode else None
-                ),
-            )
-        except Exception as exc:
-            logger.warning("Failed to read worker inventory during startup: %s", exc)
-            return False
+        inventory = await self.controller.get_worker_inventory(
+            prefill_component_name=(
+                defaults.prefill_worker_k8s_name if self.require_prefill else None
+            ),
+            decode_component_name=(
+                defaults.decode_worker_k8s_name if self.require_decode else None
+            ),
+        )
         if inventory is None or not inventory.startup_in_progress:
             return False
         return all(
