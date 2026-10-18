@@ -15,21 +15,6 @@ LLAMA = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # on an l4 gpu, must limit -
 GPT_OSS = "openai/gpt-oss-20b"
 QWEN_EMBEDDING = "Qwen/Qwen3-Embedding-4B"
 
-# EAGLE3 draft model for QWEN and the SGLang worker flags that enable it.
-QWEN_SGLANG_EAGLE3_DRAFT = "GavinLucky/SGLang-EAGLE3-Qwen3-0.6B-SpecForge"
-QWEN_SGLANG_EAGLE3_ARGS = (
-    "--speculative-algorithm",
-    "EAGLE3",
-    "--speculative-draft-model-path",
-    QWEN_SGLANG_EAGLE3_DRAFT,
-    "--speculative-num-steps",
-    "3",
-    "--speculative-eagle-topk",
-    "1",
-    "--speculative-num-draft-tokens",
-    "4",
-)
-
 TEST_MODELS = [
     QWEN,
     LLAMA,

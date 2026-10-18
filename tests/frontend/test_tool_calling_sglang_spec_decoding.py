@@ -27,13 +27,11 @@ from tests.frontend.test_tool_calling_sglang import (  # noqa: F401
     model,
     runtime_services,
 )
-from tests.utils.constants import (
-    QWEN_SGLANG_EAGLE3_ARGS,
-    QWEN_SGLANG_EAGLE3_DRAFT,
-    DynamoPortRange,
-)
+from tests.utils.constants import DynamoPortRange
 from tests.utils.payloads import SGLangSpecDecodeMetricsPayload
 from tests.utils.port_utils import allocate_port, deallocate_ports
+
+DRAFT_MODEL_NAME = "GavinLucky/SGLang-EAGLE3-Qwen3-0.6B-SpecForge"
 
 pytestmark = [
     pytest.mark.sglang,
@@ -42,14 +40,23 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.integration,
     pytest.mark.model(MODEL_NAME),
-    pytest.mark.model(QWEN_SGLANG_EAGLE3_DRAFT),
+    pytest.mark.model(DRAFT_MODEL_NAME),
     pytest.mark.timeout(300),
 ]
 
 EAGLE3_ARGS = (
     "--page-size",
     "16",
-    *QWEN_SGLANG_EAGLE3_ARGS,
+    "--speculative-algorithm",
+    "EAGLE3",
+    "--speculative-draft-model-path",
+    DRAFT_MODEL_NAME,
+    "--speculative-num-steps",
+    "3",
+    "--speculative-eagle-topk",
+    "1",
+    "--speculative-num-draft-tokens",
+    "4",
     # Exposes the sglang:spec_* counters on the worker system port.
     "--enable-metrics",
 )

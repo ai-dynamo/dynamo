@@ -14,13 +14,7 @@ import psutil
 import pytest
 import requests
 
-from tests.utils.constants import (
-    FAULT_TOLERANCE_MODEL_NAME,
-    QWEN,
-    QWEN_SGLANG_EAGLE3_ARGS,
-    QWEN_SGLANG_EAGLE3_DRAFT,
-    DynamoPortRange,
-)
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, QWEN, DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import SGLangSpecDecodeMetricsPayload, check_models_api
@@ -48,6 +42,20 @@ KV_TRANSFER_PROMPT_REPETITIONS = 128
 # Speculation emits several tokens per step, so leave decode room on both sides
 # of the fault.
 SPEC_DECODING_MAX_TOKENS = 256
+
+EAGLE3_DRAFT_MODEL_NAME = "GavinLucky/SGLang-EAGLE3-Qwen3-0.6B-SpecForge"
+EAGLE3_ARGS = (
+    "--speculative-algorithm",
+    "EAGLE3",
+    "--speculative-draft-model-path",
+    EAGLE3_DRAFT_MODEL_NAME,
+    "--speculative-num-steps",
+    "3",
+    "--speculative-eagle-topk",
+    "1",
+    "--speculative-num-draft-tokens",
+    "4",
+)
 
 SGLANG_MIGRATION_FRONTEND_STARTUP_TIMEOUT_S = 60
 # Last-resort ceiling; individual operations have their own bounded waits.
@@ -799,7 +807,7 @@ def test_request_migration_sglang_decode(
 @pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(7.5)  # measured NVML peak with two EAGLE3 workers
 @pytest.mark.requested_sglang_kv_tokens(1024)
-@pytest.mark.model(QWEN_SGLANG_EAGLE3_DRAFT)
+@pytest.mark.model(EAGLE3_DRAFT_MODEL_NAME)
 @pytest.mark.skipif(
     FAULT_TOLERANCE_MODEL_NAME != QWEN,
     reason=f"The EAGLE3 draft model only pairs with {QWEN}",
@@ -839,7 +847,7 @@ def test_request_migration_sglang_spec_decoding(
             tmp_path,
             max_model_len=AGGREGATED_MAX_MODEL_LEN,
             enable_metrics=True,
-            extra_args=QWEN_SGLANG_EAGLE3_ARGS,
+            extra_args=EAGLE3_ARGS,
             cuda_graph=True,
         )
         worker2 = DynamoWorkerProcess(
@@ -849,7 +857,7 @@ def test_request_migration_sglang_spec_decoding(
             tmp_path,
             max_model_len=AGGREGATED_MAX_MODEL_LEN,
             enable_metrics=True,
-            extra_args=QWEN_SGLANG_EAGLE3_ARGS,
+            extra_args=EAGLE3_ARGS,
             cuda_graph=True,
         )
         with managed_processes_concurrently(worker1, worker2):
