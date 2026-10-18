@@ -2827,3 +2827,23 @@ type = "native"
 name = "CRIU"
 allow = ["GPL-2.0-only"]
 reason = "Mere aggregation: standalone checkpoint/restore binary the snapshot-agent execs as a subprocess, not linked into Dynamo's Apache-2.0 code. COPYING ships at /legal/CRIU/COPYING; source available via the OSRB archive."
+
+[[exceptions]]
+type = "python"
+name = "chardet"
+version = "6.0.0.post1"
+allow = ["LGPL-2.1-or-later"]
+reason = "Reviewed LGPL redistribution of the pure-Python encoding detector. Preserve its upstream license text and installed Python source."
+
+[[exceptions]]
+type = "python"
+name = "nvidia-matmul-heuristics"
+version = "0.1.0.27"
+allow = ["LicenseRef-NVIDIA-nvMatmulHeuristics-License"]
+reason = "Exact NVIDIA product identifier for the bundled NVIDIA Math Libraries SDK agreement, confirmed against the official nvMatmulHeuristics license page. Fits the existing NVIDIA product licensing category; preserve the precise upstream LicenseRef and complete license text."
+
+[[exceptions]]
+type = "native"
+name = "cbc"
+allow = ["EPL-1.0"]
+reason = "Mere aggregation: PuLP bundles CBC as a standalone solver executable, not code linked into Dynamo's Apache-2.0 libraries. The solver's own coin-license.txt is reproduced in NOTICES-Native.txt, and bundled-native-provenance.json records the owning wheel and file locations. CBC source is published at https://github.com/coin-or/Cbc; redistribution retains EPL source-availability and notice obligations. This exception does not allow EPL generally or apply to the Rust cbc crate."

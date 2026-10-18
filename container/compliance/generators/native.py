@@ -34,17 +34,108 @@ a baseline_sbom by (name, version).
 
 from __future__ import annotations
 
+import csv
+import email.parser
+import json
 import logging
+import re
 from pathlib import Path
 
 import yaml
 
 from . import common
 from .common import UNKNOWN, Component, spdx_license_text
+from .python import _resolve_site_packages
 
 logger = logging.getLogger(__name__)
 
 ECOSYSTEM = "native"
+
+
+def collect_bundled_python_binaries(
+    search_paths: list[Path], output_dir: Path
+) -> list[Component]:
+    """Keep PuLP's standalone CBC solver under its own verified license."""
+    components = []
+    records = []
+    for site in _resolve_site_packages(search_paths):
+        for info in site.glob("*.dist-info"):
+            metadata = info / "METADATA"
+            if not metadata.is_file():
+                continue
+            package = email.parser.Parser().parsestr(metadata.read_text())
+            if package.get("Name", "").lower() != "pulp":
+                continue
+            binaries = sorted((site / "pulp/solverdir/cbc").rglob("cbc"))
+            if not binaries:
+                continue
+            if package["Version"] != "3.3.2":
+                raise ValueError("Review bundled CBC attribution for this PuLP version")
+            with (info / "RECORD").open(newline="") as stream:
+                owned = {row[0] for row in csv.reader(stream) if row}
+            for binary in binaries:
+                notice = binary.parent / "coin-license.txt"
+                for path in (binary, notice):
+                    if str(path.relative_to(site)) not in owned or not path.is_file():
+                        raise ValueError(
+                            f"CBC file lacks PuLP RECORD ownership: {path}"
+                        )
+                text = notice.read_text()
+                if not text.startswith("Eclipse Public License - v 1.0"):
+                    raise ValueError(f"Review bundled CBC license: {notice}")
+                components.append(
+                    Component(
+                        "native",
+                        "cbc",
+                        "UNKNOWN",
+                        "EPL-1.0",
+                        "https://github.com/coin-or/Cbc",
+                        text,
+                    )
+                )
+                records.append(
+                    {
+                        "component": "cbc",
+                        "license": "EPL-1.0",
+                        "owner": "PuLP",
+                        "owner_version": package["Version"],
+                        "metadata": str(metadata),
+                        "binary": str(binary),
+                        "license_file": str(notice),
+                    }
+                )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "bundled-native-provenance.json").write_text(
+        json.dumps(records, indent=2) + "\n"
+    )
+    return common.dedupe_by_name_version(components)
+
+
+def collect_python_interpreters(root: Path) -> list[Component]:
+    """Attribute copied UV-managed CPython separately from Python wheels."""
+    components = []
+    for prefix in sorted((root / "opt/python").glob("cpython-*-linux-*")):
+        match = re.match(r"cpython-(\d+\.\d+\.\d+)-linux-", prefix.name)
+        if not match or not (prefix / "bin/python3").exists():
+            continue
+        licenses = list(prefix.glob("lib/python*/LICENSE.txt"))
+        if len(licenses) != 1:
+            raise ValueError(f"Missing copied CPython license: {prefix}")
+        text = licenses[0].read_text(encoding="utf-8")
+        spdx = "Python-2.0"
+        if "ZERO-CLAUSE BSD" in text.upper() or "0BSD" in text:
+            spdx += " AND 0BSD"
+        components.append(
+            Component(
+                "native",
+                "python",
+                match[1],
+                spdx,
+                "https://www.python.org/downloads/",
+                text,
+            )
+        )
+    return components
 
 
 def collect_components(

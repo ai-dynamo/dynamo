@@ -27,6 +27,7 @@ from __future__ import annotations
 import email
 import email.parser
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -286,50 +287,72 @@ def _resolve_site_packages(search_paths: list[Path]) -> list[Path]:
         for site in p.glob("lib/python*/site-packages"):
             if site.is_dir():
                 out.add(site.resolve())
-        if p.is_dir() and any(p.glob("*.dist-info")):
+        if p.is_dir() and (
+            p.name in {"site-packages", "dist-packages"}
+            or any(p.glob("*.dist-info"))
+            or any(p.glob("*.egg-info"))
+        ):
             out.add(p.resolve())
+    # Vendored distributions carry independent license terms. Follow only
+    # explicit vendor roots, not arbitrary test-data / example dist-info trees.
+    pending = list(out)
+    while pending:
+        site = pending.pop()
+        for pattern in (
+            "*/_vendor",
+            "*/vendor",
+            "tensorrt_llm/include/trtllm_gen_kernels/fmha/cutlass/python",
+        ):
+            for vendor in site.glob(pattern):
+                if vendor.is_dir() and vendor.resolve() not in out:
+                    out.add(vendor.resolve())
+                    pending.append(vendor)
     return sorted(out)
 
 
-def _read_license_text(dist_info_dir: Path) -> str | None:
-    """Return every upstream license-related text shipped by a wheel.
+def installed_search_paths(root: Path = Path("/")) -> list[Path]:
+    """All installed system/venv package roots, including system-site-packages.
 
-    PEP 639 permits multiple files under ``<dist-info>/licenses``. They can
-    cover separately bundled native components, so selecting only a generic
-    ``LICENSE.txt`` can silently discard required third-party notices. Older
-    wheels use a single file at the top of the dist-info directory.
+    Do not import packages or execute a different interpreter. Enumerate only
+    known installation layouts, leaving caches and test fixtures out.
     """
-    licenses_dir = dist_info_dir / "licenses"
-    candidates = (
-        sorted(path for path in licenses_dir.rglob("*") if path.is_file())
-        if licenses_dir.is_dir()
-        else []
-    )
-    if not candidates:
-        candidates = [
-            dist_info_dir / "LICENSE",
-            dist_info_dir / "LICENSE.txt",
-            dist_info_dir / "LICENSE.md",
-            dist_info_dir / "LICENCE",
-            dist_info_dir / "COPYING",
-            dist_info_dir / "NOTICE",
-        ]
+    paths = set()
+    for prefix in (root / "usr", root / "opt"):
+        for directory, children, _ in os.walk(prefix, followlinks=False):
+            path = Path(directory)
+            if (
+                path.name in {"site-packages", "dist-packages"}
+                and re.fullmatch(r"python\d+(?:\.\d+)?", path.parent.name)
+                and path.parent.parent.name in {"lib", "lib64"}
+            ):
+                paths.add(path)
+                children[:] = []
+    return sorted(paths)
 
-    texts: list[tuple[str, str]] = []
-    for path in candidates:
-        if path.is_file():
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace").strip()
-            except OSError:
-                continue
-            if text:
-                texts.append((str(path.relative_to(dist_info_dir)), text))
 
-    if not texts:
-        return None
-    if len(texts) == 1:
-        return texts[0][1] + "\n"
-    return "\n\n".join(f"===== {name} =====\n{text}" for name, text in texts) + "\n"
+def _read_license_text(dist_info_dir: Path) -> str | None:
+    """Return the upstream LICENSE text for a wheel, if present.
+
+    Modern wheels put it under <dist-info>/licenses/LICENSE (PEP 639). Older
+    wheels use <dist-info>/LICENSE or LICENSE.txt at the top of the dir.
+    """
+    candidates = set()
+    for directory in (dist_info_dir, dist_info_dir / "licenses"):
+        if directory.is_dir():
+            candidates.update(
+                path
+                for path in directory.rglob("*")
+                if path.is_file()
+                and path.name.upper().startswith(
+                    ("LICENSE", "LICENCE", "COPYING", "NOTICE", "AUTHORS", "COPYRIGHT")
+                )
+            )
+    texts = []
+    for path in sorted(candidates):
+        body = path.read_text(encoding="utf-8", errors="replace").strip()
+        if body:
+            texts.append(f"--- {path.relative_to(dist_info_dir)} ---\n\n{body}")
+    return "\n\n".join(texts) or None
 
 
 def _extract_metadata_field(
@@ -421,9 +444,11 @@ def collect_components(search_paths: list[Path]) -> list[Component]:
 
     components: list[Component] = []
     for site in sites:
-        dist_infos = sorted(site.glob("*.dist-info"))
+        dist_infos = sorted([*site.glob("*.dist-info"), *site.glob("*.egg-info")])
         for dist_info in dist_infos:
-            metadata_path = dist_info / "METADATA"
+            metadata_path = dist_info / (
+                "PKG-INFO" if dist_info.suffix == ".egg-info" else "METADATA"
+            )
             if not metadata_path.is_file():
                 continue
             try:
@@ -450,6 +475,16 @@ def collect_components(search_paths: list[Path]) -> list[Component]:
             # when the wheel ships none, fall back to the canonical SPDX text
             # for the identifier (render_notices adds the no-license-file note).
             license_text = _read_license_text(dist_info)
+            if (
+                name == "cutlass_library"
+                and dist_info.name == "cutlass_library.egg-info"
+                and site.as_posix().endswith("/trtllm_gen_kernels/fmha/cutlass/python")
+            ):
+                license_path = site.parent / "LICENSE.txt"
+                if license_path.is_file():
+                    license_text = license_path.read_text(encoding="utf-8")
+                    if "SPDX-License-Identifier: BSD-3-Clause" in license_text:
+                        spdx = "BSD-3-Clause"
             is_canonical = False
             if license_text is None:
                 license_text = spdx_license_text(spdx)

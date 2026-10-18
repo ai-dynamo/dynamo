@@ -361,9 +361,10 @@ def subtract_baseline(
 
 
 def dedupe_by_name_version(components: list[Component]) -> list[Component]:
-    """Collapse `(name, version)` duplicates. Keep the entry with the most
-    license info: prefer non-UNKNOWN spdx, then license_text presence, then
-    source_url presence.
+    """Collapse duplicate identities without dropping bundled copyright text.
+
+    Prefer known SPDX and actual upstream notices over canonical fallback.
+    Distinct upstream notices for the same identity/license remain together.
     """
     by_key: dict[tuple[str, str], Component] = {}
     for c in components:
@@ -376,4 +377,22 @@ def dedupe_by_name_version(components: list[Component]) -> list[Component]:
             by_key[key] = c
         elif existing.spdx == c.spdx and not existing.license_text and c.license_text:
             by_key[key] = c
+        elif existing.spdx == c.spdx and c.license_text:
+            if existing.license_text_is_canonical and not c.license_text_is_canonical:
+                by_key[key] = c
+            elif (
+                not existing.license_text_is_canonical
+                and not c.license_text_is_canonical
+            ):
+                prior = (existing.license_text or "").strip()
+                incoming = c.license_text.strip()
+                if prior in incoming:
+                    by_key[key] = c
+                elif incoming not in prior:
+                    by_key[key] = dataclasses.replace(
+                        existing,
+                        license_text=prior
+                        + "\n\n--- Additional bundled attribution ---\n\n"
+                        + incoming,
+                    )
     return list(by_key.values())

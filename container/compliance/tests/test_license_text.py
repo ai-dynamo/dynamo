@@ -282,7 +282,8 @@ def test_write_merged_csv_notes_only_for_non_permissive(tmp_path):
     }
     out = tmp_path / "osrb-deps.csv"
     write_merged_csv(comps, exc, out)
-    rows = {(r["ecosystem"], r["name"]): r for r in _csv.DictReader(out.open())}
+    with out.open() as stream:
+        rows = {(r["ecosystem"], r["name"]): r for r in _csv.DictReader(stream)}
     # 6-column schema incl. notes
     assert list(next(iter(rows.values())).keys()) == [
         "ecosystem",
