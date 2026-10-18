@@ -323,6 +323,7 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
@@ -366,6 +367,7 @@ fn mock_multi_choice_content_chunk(
         .collect();
 
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices,
@@ -406,6 +408,7 @@ fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamRes
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
@@ -441,6 +444,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
@@ -463,6 +467,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
 fn mock_usage_only_chunk() -> NvCreateChatCompletionStreamResponse {
     use dynamo_protocols::types::{CompletionUsage, CreateChatCompletionStreamResponse};
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![],
@@ -509,6 +514,7 @@ fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStrea
         })
         .collect();
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices,
@@ -4581,6 +4587,103 @@ async fn postprocessor_parsing_stream_force_nonempty_whitespace_only_turn_surviv
 
 // ── Muse unified parser routing (default-on) ──────────────────────────────────
 
+#[tokio::test]
+async fn muse_spark_forced_choices_parse_native_calls_and_finish_cleanly() {
+    let preprocessor = build_preprocessor(Some("muse_spark"), Some("muse_spark"));
+    let thought = "<|start|>assistant to=self<|message|>Look it up.<|eom|>";
+    let paris = "<|start|>assistant to=get_weather<|message|><atem:function_calls><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke></atem:function_calls><|eom|>";
+    let london = "<|start|>assistant to=get_weather<|message|><atem:function_calls><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">London</atem:parameter></atem:invoke></atem:function_calls><|eot|>";
+    let named = ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
+        r#type: ChatCompletionToolType::Function,
+        function: FunctionName {
+            name: "get_weather".to_owned(),
+        },
+    });
+
+    for (choice, expected) in [(ChatCompletionToolChoiceOption::Required, 2), (named, 1)] {
+        for split_characters in [false, true] {
+            for streaming in [false, true] {
+                let mut request = streaming_tool_request(choice.clone());
+                request.inner.stream = Some(streaming);
+                let text = if expected == 2 {
+                    format!("{thought}{paris}{london}")
+                } else {
+                    format!("{thought}{london}")
+                };
+                let mut input = if split_characters {
+                    text.chars()
+                        .map(|c| mock_content_chunk(&c.to_string()))
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![mock_content_chunk(&text)]
+                };
+                input.push(mock_final_chunk());
+                let output = preprocessor
+                    .postprocessor_parsing_stream(
+                        stream::iter(input.into_iter().map(Annotated::from_data)),
+                        &request,
+                        false,
+                        false,
+                    )
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await;
+                let choices = output
+                    .iter()
+                    .filter_map(|chunk| chunk.data.as_ref())
+                    .flat_map(|chunk| chunk.inner.choices.iter())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    choices
+                        .iter()
+                        .filter_map(|choice| choice.finish_reason.as_ref())
+                        .next_back(),
+                    Some(&FinishReason::ToolCalls)
+                );
+                if !streaming {
+                    let response = NvCreateChatCompletionResponse::from_annotated_stream(
+                        stream::iter(output.clone()),
+                        ParsingOptions::default(),
+                    )
+                    .await
+                    .unwrap();
+                    let choice = &response.inner.choices[0];
+                    assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
+                    assert_eq!(choice.message.tool_calls.as_ref().unwrap().len(), expected);
+                    assert_eq!(
+                        choice.message.reasoning_content.as_deref(),
+                        Some("Look it up.")
+                    );
+                }
+                let result = demux_by_choice(&output).remove(&0).unwrap();
+                assert_eq!(result.reasoning, "Look it up.");
+                assert!(
+                    result.content.is_empty(),
+                    "native markup must not leak: {:?}",
+                    result.content
+                );
+                assert_eq!(result.tool_calls.len(), expected);
+                let calls = result.tool_calls.into_values().collect::<Vec<_>>();
+                for call in &calls {
+                    assert_eq!(call.name.as_deref(), Some("get_weather"));
+                    assert!(call.id.is_some());
+                }
+                assert_eq!(
+                    serde_json::from_str::<Value>(&calls[expected - 1].arguments).unwrap(),
+                    serde_json::json!({"location": "London"})
+                );
+                if expected == 2 {
+                    assert_ne!(calls[0].id, calls[1].id);
+                    assert_eq!(
+                        serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
+                        serde_json::json!({"location": "Paris"})
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// One muse turn: a `to=self` thought, one `get_weather` call, then the visible
 /// `to=user` answer. Raw model markup, one channel per streamed chunk.
 const MUSE_MARKUP_SHAPE: [&str; 3] = [
@@ -4688,36 +4791,49 @@ async fn muse_force_nonempty_keeps_reasoning_before_a_tool_call_on_the_wire() {
     }));
 }
 
-/// `tool_choice=Required` is excluded by the guard (auto/none only), so the turn
-/// falls through to the guided-decode + jail path. No reasoning parser is
-/// configured there, so `reasoning_content` can never be produced — proof the
-/// unified parser (which would yield "Look it up.") did NOT engage.
+/// `tool_choice=Required` carries its guided constraint into the unified parser.
+/// SGLang may emit native Muse reasoning before the constraint activates, then
+/// emits the required call as bare guided JSON. The unified path must preserve
+/// that reasoning, decode the guided payload, and strip the Muse markers.
 #[tokio::test]
-async fn postprocessor_parsing_stream_muse_required_does_not_route_to_unified() {
+async fn postprocessor_parsing_stream_muse_required_routes_to_unified() {
     let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
     let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let guided_call = r#"[{"name":"get_weather","arguments":{"location":"Paris"}}]"#;
 
-    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+    let out = solo_output(
+        &preprocessor,
+        &request,
+        &[MUSE_MARKUP_SHAPE[0], guided_call],
+    )
+    .await;
 
-    assert!(
-        out.reasoning.is_empty(),
-        "Required must NOT route to unified; reasoning_content must stay empty, got {:?}",
-        out.reasoning
+    assert_eq!(
+        out.reasoning, "Look it up.",
+        "reasoning_content must come from the unified parser"
     );
-    // Empty reasoning alone also passes if the unified parser ran and dropped it, so
-    // assert the POSITIVE signal of the jail path: it does not strip muse markers.
     assert!(
-        out.content.contains("<|start|>"),
-        "the jail path leaves muse markup in content; got {:?}",
+        out.content.is_empty(),
+        "guided tool JSON must not leak into content: {:?}",
         out.content
     );
-    assert!(
-        out.tool_calls
-            .iter()
-            .all(|(name, _)| name.as_deref() != Some("get_weather")),
-        "the unified parser must not produce a native-markup call here: {:?}",
+    assert_eq!(
+        out.tool_calls.len(),
+        1,
+        "expected one tool call: {:?}",
         out.tool_calls
     );
+    assert_eq!(out.tool_calls[0].0.as_deref(), Some("get_weather"));
+    let args: Value = serde_json::from_str(&out.tool_calls[0].1).unwrap();
+    assert_eq!(args, serde_json::json!({"location": "Paris"}));
+    for marker in ["<|start|>", "<|message|>", "<atem:invoke"] {
+        assert!(
+            !out.content.contains(marker) && !out.reasoning.contains(marker),
+            "marker {marker:?} leaked: content={:?} reasoning={:?}",
+            out.content,
+            out.reasoning
+        );
+    }
 }
 
 /// A structural-tag request must stay on the guided-decode + jail path, exactly as a

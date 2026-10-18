@@ -355,13 +355,15 @@ RUN cp /tmp/uv-binary ${VIRTUAL_ENV}/bin/uv && \
     chmod +x ${VIRTUAL_ENV}/bin/uv && \
     pip install maturin[patchelf]
 {% else %}
-# SGLang CUDA: Create venv with --system-site-packages to inherit runtime packages
+# SGLang CUDA: copy the active runtime's packages, whether they are installed
+# under system Python or an upstream venv such as /opt/sglang.
 COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /tmp/uv-binary
-RUN mkdir -p /opt/dynamo/venv && \
+RUN SOURCE_SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" && \
+    mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
-    cp -r /usr/local/lib/python${PYTHON_VERSION}/dist-packages/* \
-          /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/ && \
-    chmod -R g+w /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/ && \
+    TARGET_SITE_PACKAGES="$(/opt/dynamo/venv/bin/python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" && \
+    cp -a "${SOURCE_SITE_PACKAGES}/." "${TARGET_SITE_PACKAGES}/" && \
+    chmod -R g+w "${TARGET_SITE_PACKAGES}" && \
     cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
     chmod +x /opt/dynamo/venv/bin/uv && \
     pip install --ignore-installed maturin[patchelf]

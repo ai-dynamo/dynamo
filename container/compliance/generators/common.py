@@ -208,9 +208,11 @@ _PURL_TYPE = {
 def _component_purl(c: "Component") -> str | None:
     """Best-effort Package-URL for a component (its own source_url if already a
     purl, else synthesized from ecosystem/name/version)."""
-    if c.source_url and c.source_url.startswith("pkg:"):
-        return c.source_url
     ptype = _PURL_TYPE.get(c.ecosystem)
+    # An installed Go module may derive its license from a Debian owner.
+    # Keep the module's identity separate from that attribution source.
+    if c.source_url and ptype and c.source_url.startswith(f"pkg:{ptype}/"):
+        return c.source_url
     if not ptype or not c.name or not c.version:
         return None
     return f"pkg:{ptype}/{c.name}@{c.version}"
@@ -279,7 +281,7 @@ def write_cyclonedx(components: list[Component], output_path: Path) -> Path:
         purl = _component_purl(c)
         if purl:
             entry["purl"] = purl
-        if c.source_url and not c.source_url.startswith("pkg:"):
+        if c.source_url and c.source_url != purl:
             entry["externalReferences"] = [
                 {"type": "distribution", "url": c.source_url}
             ]
@@ -361,9 +363,10 @@ def subtract_baseline(
 
 
 def dedupe_by_name_version(components: list[Component]) -> list[Component]:
-    """Collapse `(name, version)` duplicates. Keep the entry with the most
-    license info: prefer non-UNKNOWN spdx, then license_text presence, then
-    source_url presence.
+    """Collapse duplicate identities without dropping bundled copyright text.
+
+    Prefer known SPDX and actual upstream notices over canonical fallback.
+    Distinct upstream notices for the same identity/license remain together.
     """
     by_key: dict[tuple[str, str], Component] = {}
     for c in components:
@@ -376,4 +379,22 @@ def dedupe_by_name_version(components: list[Component]) -> list[Component]:
             by_key[key] = c
         elif existing.spdx == c.spdx and not existing.license_text and c.license_text:
             by_key[key] = c
+        elif existing.spdx == c.spdx and c.license_text:
+            if existing.license_text_is_canonical and not c.license_text_is_canonical:
+                by_key[key] = c
+            elif (
+                not existing.license_text_is_canonical
+                and not c.license_text_is_canonical
+            ):
+                prior = (existing.license_text or "").strip()
+                incoming = c.license_text.strip()
+                if prior in incoming:
+                    by_key[key] = c
+                elif incoming not in prior:
+                    by_key[key] = dataclasses.replace(
+                        existing,
+                        license_text=prior
+                        + "\n\n--- Additional bundled attribution ---\n\n"
+                        + incoming,
+                    )
     return list(by_key.values())

@@ -83,6 +83,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--installed-root",
+        type=Path,
+        help="Also discover all installed system/venv Python roots beneath this filesystem root.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         required=True,
@@ -191,6 +196,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.venv is not None:
         search_paths.append(args.venv)
     search_paths.extend(args.site_packages)
+    if args.installed_root is not None:
+        from .python import installed_search_paths
+
+        search_paths.extend(installed_search_paths(args.installed_root))
 
     # Load the baseline subtraction set once, share across ecosystems.
     subtract: set[tuple[str, str]] | None = None
@@ -202,7 +211,9 @@ def main(argv: list[str] | None = None) -> int:
     # components, which we accumulate for the unified CSV + CycloneDX below.
     failures: list[str] = []
     all_components: list = []
-    for eco in args.ecosystem:
+    # Debian attribution must be available before classifying system Python
+    # metadata that belongs to an already attributed OS package.
+    for eco in sorted(args.ecosystem, key=lambda item: item != "dpkg"):
         comps = None
         try:
             if eco == "rust":
@@ -228,7 +239,15 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 from . import python as gen  # type: ignore[no-redef]
 
-                comps = gen.generate(search_paths, args.output_dir, subtract=subtract)
+                comps = gen.generate(
+                    search_paths,
+                    args.output_dir,
+                    subtract=subtract,
+                    dpkg_components=[
+                        c for c in all_components if c.ecosystem == "dpkg"
+                    ],
+                    dpkg_root=args.dpkg_root,
+                )
             elif eco == "dpkg":
                 from . import dpkg as gen  # type: ignore[no-redef]
 
@@ -261,6 +280,19 @@ def main(argv: list[str] | None = None) -> int:
                     image_filter=args.native_image,
                     subtract=subtract,
                 )
+                if args.installed_root is not None:
+                    extra = gen.collect_python_interpreters(args.installed_root)
+                    extra.extend(
+                        gen.collect_bundled_python_binaries(
+                            search_paths, args.output_dir
+                        )
+                    )
+                    comps.extend(
+                        c
+                        for c in extra
+                        if not subtract or (c.name, c.version) not in subtract
+                    )
+                    common.write_notices("native", comps, args.output_dir)
             else:  # pragma: no cover - guarded by argparse type
                 failures.append(f"unknown ecosystem {eco}")
                 continue

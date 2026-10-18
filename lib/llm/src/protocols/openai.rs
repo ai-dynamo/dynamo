@@ -552,8 +552,8 @@ mod parsing_options_tests {
     }
 
     #[test]
-    fn disabling_tool_calls_retains_muse_for_content_decoding() {
-        for parser in ["muse_glimmer", "muse"] {
+    fn disabling_tool_calls_retains_atem_unified_families_for_content_decoding() {
+        for parser in ["muse_glimmer", "muse", "muse_spark"] {
             let options = ParsingOptions::new(Some(parser.to_string()), None)
                 .with_tool_call_parsing_enabled(false);
 

@@ -91,6 +91,7 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
         common: CommonExt::default(),
         nvext: None,
         chat_template_args: None,
+        responses_tools: None,
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,

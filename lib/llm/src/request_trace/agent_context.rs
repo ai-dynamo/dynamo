@@ -647,6 +647,7 @@ mod tests {
 
         let responses = vec![
             Annotated::from_data(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "chatcmpl-1".to_string(),
                     choices: vec![ChatChoiceStream {
@@ -681,6 +682,7 @@ mod tests {
                 llm_metrics: None,
             }),
             Annotated::from_data(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "chatcmpl-1".to_string(),
                     choices: vec![ChatChoiceStream {

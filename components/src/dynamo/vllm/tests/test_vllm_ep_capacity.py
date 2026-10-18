@@ -42,6 +42,7 @@ def _install_ray_stub(
     raises=None,
     delay=0.0,
     thread_log=None,
+    blocked_until=None,
 ):
     """Register a fake ``ray`` package tree covering everything the handler imports.
 
@@ -49,12 +50,16 @@ def _install_ray_stub(
                     path never touches Ray, or assert how a failure is reported.
     ``delay``    -- seconds each query blocks for, to model a slow GCS.
     ``thread_log`` -- list that each query appends its thread ident to.
+    ``blocked_until`` -- event gating a query until the caller releases it.
     """
     idle = dict(idle_by_node_id or {})
 
     def _enter():
         if thread_log is not None:
             thread_log.append(threading.get_ident())
+        if blocked_until is not None:
+            # Bound a broken implementation's stall as well as the async wait.
+            blocked_until.wait(timeout=10)
         if delay:
             time.sleep(delay)
         if raises is not None:
@@ -219,28 +224,33 @@ def test_ray_queries_run_off_the_event_loop(monkeypatch):
 
 def test_slow_ray_times_out_and_still_reports_dp_tp(monkeypatch):
     monkeypatch.setattr(vllm_handlers, "_EP_CAPACITY_RAY_TIMEOUT_S", 0.05)
+    release_query = threading.Event()
     _install_ray_stub(
         monkeypatch,
         nodes=[_node("n1", "10.0.0.1", 4.0)],
         idle_by_node_id={"n1": {"GPU": 4.0}},
-        delay=0.2,
+        blocked_until=release_query,
     )
+    handler = _make_self(dp=3, tp=2, backend="ray")
 
-    async def _timed():
-        started = time.monotonic()
-        res = await BaseWorkerHandler.get_ep_capacity(
-            _make_self(dp=3, tp=2, backend="ray"), {}
+    async def _query():
+        result = await asyncio.wait_for(
+            BaseWorkerHandler.get_ep_capacity(handler, {}), timeout=5
         )
-        return res, time.monotonic() - started
+        # Prove the caller returns while the GCS query is still blocked. This
+        # avoids asserting a sub-second wall-clock budget on a busy CI host.
+        assert handler._ep_capacity_inflight is not None
+        assert not handler._ep_capacity_inflight.done()
+        return result
 
-    r, elapsed = asyncio.run(_timed())
+    try:
+        r = asyncio.run(_query())
+    finally:
+        release_query.set()
+        _shutdown(handler)
 
     assert r["status"] == "error"
     assert "timed out" in r["message"].lower()
-    # The caller is released at the timeout instead of waiting out the GCS stall.
-    # Timed around the await, not around asyncio.run: the timeout frees the caller,
-    # not the thread, so loop shutdown still joins the orphaned executor thread.
-    assert elapsed < 0.15, f"caller waited {elapsed:.2f}s, expected to bail at 0.05s"
     # dp/tp still reported even though the GPU query timed out.
     assert r["data_parallel_size"] == 3
     assert r["tensor_parallel_size"] == 2

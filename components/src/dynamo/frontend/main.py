@@ -291,9 +291,22 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
-            from vllm.entrypoints.openai.cli_args import FrontendArgs
+
+            try:
+                from vllm.entrypoints.launchers.cli_args import FrontendArgs
+            except ModuleNotFoundError as exc:
+                # Older vLLM releases keep these arguments under openai.
+                # Missing dependencies inside the new module must still fail.
+                if exc.name not in {
+                    "vllm.entrypoints.launchers",
+                    "vllm.entrypoints.launchers.cli_args",
+                }:
+                    raise
+                from vllm.entrypoints.openai.cli_args import FrontendArgs
         except ModuleNotFoundError:
-            logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
+            logger.exception(
+                "Unable to import vLLM CLI arguments for '--dyn-chat-processor vllm'."
+            )
             sys.exit(1)
 
         vllm_parser = FlexibleArgumentParser(add_help=False)

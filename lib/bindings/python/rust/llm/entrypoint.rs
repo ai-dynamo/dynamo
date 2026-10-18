@@ -847,7 +847,7 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
                     let engine: PythonAsyncEngine = py_result.extract(py).map_err(|e| {
                         anyhow::anyhow!("Failed to extract PythonAsyncEngine: {}", e)
                     })?;
-                    Ok::<_, anyhow::Error>(Arc::new(engine))
+                    Ok::<_, anyhow::Error>(Arc::new(engine.chat_engine()))
                 })?;
 
                 Ok(engine)

@@ -184,7 +184,7 @@ fn validate_legacy_jail_nvext_choice_count(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ToolProcessingRoute {
-    MuseUnified(String),
+    AtemUnified(String),
     QwenUnified(&'static str),
     ParserV2(String),
     LegacyJail(Option<String>),
@@ -195,6 +195,20 @@ impl ToolProcessingRoute {
     fn uses_legacy_jail(&self) -> bool {
         matches!(self, Self::LegacyJail(_))
     }
+}
+
+fn atem_unified_family_for_constraint(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    guided_tool_constraint: &crate::protocols::openai::GuidedToolConstraint,
+) -> Option<String> {
+    if guided_tool_constraint.uses_structural_tag() {
+        return None;
+    }
+    crate::protocols::openai::chat_completions::tool_parser_v2::unified_family(
+        tool_call_parser,
+        reasoning_parser,
+    )
 }
 
 fn tool_content_part_as_user(
@@ -1380,11 +1394,13 @@ fn attach_agent_context_from_context(
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
 /// `function.arguments` when the model opts in (GLM-5.2), and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
+/// Muse Spark named choices expose only the selected function to the template.
 /// All other trait methods delegate to the inner request.
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
     continue_final_message: bool,
+    named_tool: Option<&'a str>,
 }
 
 impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> {
@@ -1393,8 +1409,7 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn messages(&self) -> minijinja::value::Value {
-        let mut json = serde_json::to_value(self.inner.typed_messages().unwrap_or_default())
-            .unwrap_or_default();
+        let mut json = serde_json::to_value(self.inner.messages()).unwrap_or_default();
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
         {
@@ -1421,7 +1436,30 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn tools(&self) -> Option<minijinja::value::Value> {
-        self.inner.tools()
+        let Some(name) = self.named_tool else {
+            return self.inner.tools();
+        };
+        let tools = self.inner.tools()?;
+        let selected: Vec<_> = tools
+            .try_iter()
+            .ok()?
+            .filter(|tool| {
+                tool.get_attr("function")
+                    .and_then(|function| function.get_attr("name"))
+                    .is_ok_and(|tool_name| tool_name.as_str() == Some(name))
+            })
+            .collect();
+        Some(minijinja::value::Value::from_serialize(&selected))
+    }
+
+    fn template_tools(&self) -> Option<minijinja::value::Value> {
+        // A forced function is already selected: render its full schema with
+        // its resolved name, without advertising unrelated deferred members.
+        if self.named_tool.is_some() {
+            None
+        } else {
+            self.inner.template_tools()
+        }
     }
 
     fn tool_choice(&self) -> Option<minijinja::value::Value> {
@@ -1961,6 +1999,20 @@ impl OpenAIPreprocessor {
                 .and_then(|args| args.get("thinking_mode"))
                 .and_then(serde_json::Value::as_str)
                 .is_none_or(|mode| mode != "disabled"),
+
+            // Muse Glimmer defaults to a `to=self` reasoning channel and exposes
+            // its own opt-out knob rather than the common thinking aliases.
+            Some("muse_glimmer" | "muse") => {
+                chat_template_args
+                    .and_then(|args| args.get("disable_reasoning"))
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            }
+
+            // Muse Spark always advertises the `self` recipient. Its public
+            // template has no `disable_reasoning` switch; `reasoning_effort`
+            // controls strength without disabling the reasoning channel.
+            Some("muse_spark_open" | "muse_spark") => true,
 
             // These SGLang reasoners do not expose a per-request off mode.
             Some("deepseek_r1" | "step3" | "gpt_oss" | "kimi") => true,
@@ -3025,15 +3077,31 @@ impl OpenAIPreprocessor {
         request: &R,
     ) -> Result<Option<RenderedPrompt>> {
         let continue_final = request.get_continue_final_message() == Some(true);
-        let formatted_prompt = if self.normalize_tool_call_args || continue_final {
-            self.apply_template_inner(&NormalizedArgsRequest {
-                inner: request,
-                normalize_tool_call_args: self.normalize_tool_call_args,
-                continue_final_message: continue_final,
-            })?
+        let named_tool = if tool_choice::uses_muse_spark_parser(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) {
+            request.tool_choice().and_then(|choice| {
+                choice
+                    .get_attr("function")
+                    .and_then(|function| function.get_attr("name"))
+                    .ok()
+                    .and_then(|name| name.as_str().map(str::to_owned))
+            })
         } else {
-            self.apply_template_inner(request)?
+            None
         };
+        let formatted_prompt =
+            if self.normalize_tool_call_args || continue_final || named_tool.is_some() {
+                self.apply_template_inner(&NormalizedArgsRequest {
+                    inner: request,
+                    normalize_tool_call_args: self.normalize_tool_call_args,
+                    continue_final_message: continue_final,
+                    named_tool: named_tool.as_deref(),
+                })?
+            } else {
+                self.apply_template_inner(request)?
+            };
         let Some(prompt) = formatted_prompt else {
             return Ok(None);
         };
@@ -4503,17 +4571,12 @@ impl OpenAIPreprocessor {
         use crate::protocols::openai::chat_completions::{tool_parser_v2, unified_parser};
 
         let uses_tool_call_structural_tag = guided_tool_constraint.uses_structural_tag();
-        if let Some(family) = tool_parser_v2::unified_family(
+        if let Some(family) = atem_unified_family_for_constraint(
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
-        ) && !uses_tool_call_structural_tag
-            && matches!(
-                request.inner.tool_choice.as_ref(),
-                None | Some(ChatCompletionToolChoiceOption::Auto)
-                    | Some(ChatCompletionToolChoiceOption::None)
-            )
-        {
-            return Ok(ToolProcessingRoute::MuseUnified(family));
+            guided_tool_constraint,
+        ) {
+            return Ok(ToolProcessingRoute::AtemUnified(family));
         }
 
         if let Some(family) = unified_parser::selected_family(
@@ -4625,11 +4688,11 @@ impl OpenAIPreprocessor {
             env_is_falsey(env_llm::DYN_ENABLE_GUIDED_TOOL_STREAMING),
         );
 
-        // Two independent families each own ONE unified parser (ordered reasoning +
+        // Two parser groups each own ONE unified parser per grammar (ordered reasoning +
         // content + tool calls) that replaces the v1 reasoning stage AND the tool
-        // jail outright: muse (`tool_parser_v2`, default-on — its v1 reasoning
-        // parser is gone, so `get_reasoning_parser_from_name` falls back to
-        // `Basic`, which cannot read the `to=self<|message|>` grammar) and Qwen3
+        // jail outright: the ATEM families, Muse and Muse Spark (`tool_parser_v2`,
+        // default-on — no usable v1 reasoning parser can read their
+        // `to=self<|message|>` grammar), and Qwen3
         // (`unified_parser`, gated on `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2`). Both
         // run regardless of has_tools — they own reasoning and strip its markers
         // even with zero tools — and both route their output through the SAME
@@ -4637,14 +4700,13 @@ impl OpenAIPreprocessor {
         // a no-tools or `tool_choice: none` request, exactly as it does for every
         // other family's jail output.
         //
-        // A forced/structural-tag `tool_choice` still excludes muse: its
-        // `apply_unified_stream` only reads native markup, so a guided-JSON or
-        // structural-tag request would misparse the grammar it does not speak. The
-        // newer Qwen3 `apply_stream` handles every `tool_choice` itself (guided
-        // JSON for named/required, native markup for auto/none/structural-tag), so
-        // it does not need the same entry gate.
+        // A structural-tag request still excludes the ATEM families because that
+        // transport owns its output framing. Named/required guided JSON stays here:
+        // the parser is initialized with the installed constraint and can preserve
+        // native reasoning before decoding the bare JSON payload. Qwen3 handles the
+        // same split in its unified adapter below.
         //
-        if let ToolProcessingRoute::MuseUnified(family) = &tool_processing_route {
+        if let ToolProcessingRoute::AtemUnified(family) = &tool_processing_route {
             let tool_definitions = request.inner.tools.as_ref().map(|tools| {
                 tools
                     .iter()
@@ -4655,12 +4717,17 @@ impl OpenAIPreprocessor {
                     })
                     .collect()
             });
+            let prefill = unified_parser::stream_prefill(family, prompt_injected_reasoning);
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
-                Box::pin(tool_parser_v2::apply_unified_stream(
+                Box::pin(tool_parser_v2::apply_unified_stream_with_phases(
                     stream,
                     tool_definitions,
                     family.clone(),
+                    guided_tool_constraint,
+                    prefill,
+                    guided_tool_streaming,
                     true,
+                    request.responses_tools.is_some(),
                 ));
             return Ok(Self::apply_unified_response_policies(
                 unified,
@@ -4835,7 +4902,7 @@ impl OpenAIPreprocessor {
                     ))
                 }
                 ToolProcessingRoute::PassThrough => Box::pin(stream),
-                ToolProcessingRoute::MuseUnified(_) | ToolProcessingRoute::QwenUnified(_) => {
+                ToolProcessingRoute::AtemUnified(_) | ToolProcessingRoute::QwenUnified(_) => {
                     unreachable!("unified routes return before legacy response processing")
                 }
             };
@@ -5597,6 +5664,7 @@ impl OpenAIPreprocessor {
             });
             let mut nv_chunk = Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                    message_boundary: None,
                     inner,
                     nvext,
                     llm_metrics,
@@ -5798,6 +5866,7 @@ impl OpenAIPreprocessor {
                 } else {
                     p.response_template.take().map(|inner| Annotated {
                         data: Some(NvCreateChatCompletionStreamResponse {
+                            message_boundary: None,
                             inner,
                             nvext,
                             llm_metrics,
@@ -5845,7 +5914,7 @@ impl OpenAIPreprocessor {
         // - inkling: `<|message_model|>` / `<|content_thinking|>` /
         //   `<|content_text|>` / `<|content_invoke_tool_json|>` / `<|end_message|>`
         //   channel markers, consumed by both the tool-call and reasoning parsers.
-        // - muse_glimmer: `<|start|>` / `<|message|>` / `<|eom|>` / `<|eot|>`
+        // - muse_glimmer / muse_spark: `<|start|>` / `<|message|>` / `<|eom|>` / `<|eot|>`
         //   channel markers, consumed by the unified parser (reasoning + content +
         //   tool calls); matched on either parser name since the card may set only
         //   the reasoning name.
@@ -5864,6 +5933,8 @@ impl OpenAIPreprocessor {
                 | Some("inkling")
                 | Some("muse_glimmer")
                 | Some("muse")
+                | Some("muse_spark_open")
+                | Some("muse_spark")
         ) || matches!(
             reasoning_parser,
             Some("gemma4")
@@ -5878,6 +5949,8 @@ impl OpenAIPreprocessor {
                 | Some("inkling")
                 | Some("muse_glimmer")
                 | Some("muse")
+                | Some("muse_spark_open")
+                | Some("muse_spark")
         )
     }
 
@@ -5964,7 +6037,7 @@ impl OpenAIPreprocessor {
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> bool {
-        // Unified Qwen and Muse now use the same force-nonempty deferral as the v1
+        // Unified Qwen and the ATEM families use the same force-nonempty deferral as the v1
         // reasoning path, so their reasoning-only turns can withhold every meaningful
         // output delta until the terminal decision too.
         let has_reasoning_decoder = reasoning_parser.is_some()
@@ -6899,6 +6972,10 @@ impl
         // unpack the request
         let (mut request, context) = request.into_parts();
 
+        request
+            .normalize_responses_tools(self.formatter.supports_native_tools(&request))
+            .map_err(|error| invalid_argument_error(error.to_string()))?;
+
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
@@ -7386,6 +7463,32 @@ mod tests {
     }
 
     #[test]
+    fn atem_unified_route_accepts_guided_json_but_not_structural_tags() {
+        for constraint in [
+            crate::protocols::openai::GuidedToolConstraint::None,
+            crate::protocols::openai::GuidedToolConstraint::GuidedJsonRequired,
+            crate::protocols::openai::GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_weather".to_string(),
+            },
+        ] {
+            assert_eq!(
+                atem_unified_family_for_constraint(Some("muse_spark"), None, &constraint)
+                    .as_deref(),
+                Some("muse_spark"),
+                "constraint {constraint:?} must retain the Muse Spark unified route"
+            );
+        }
+        assert_eq!(
+            atem_unified_family_for_constraint(
+                Some("muse_spark"),
+                None,
+                &crate::protocols::openai::GuidedToolConstraint::StructuralTag,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn legacy_jail_rejects_multiple_choices_for_choice_specific_nvext() {
         let engine_data = vec!["engine_data".to_string()];
         let request_level = vec!["timing".to_string(), "worker_id".to_string()];
@@ -7395,7 +7498,7 @@ mod tests {
         assert!(validate_legacy_jail_nvext_choice_count(2, Some(&request_level), true).is_ok());
 
         for route in [
-            ToolProcessingRoute::MuseUnified("muse_glimmer".to_string()),
+            ToolProcessingRoute::AtemUnified("muse_glimmer".to_string()),
             ToolProcessingRoute::QwenUnified("qwen3"),
             ToolProcessingRoute::ParserV2("qwen3_coder".to_string()),
             ToolProcessingRoute::PassThrough,
@@ -7430,6 +7533,7 @@ mod tests {
             logprobs: None,
         };
         Annotated::from_data(NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![choice],
@@ -8493,6 +8597,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn muse_spark_open_preserves_channel_tokens_and_reasoning_mode() {
+        for (tool, reasoning) in [
+            (Some("muse_spark_open"), None),
+            (None, Some("muse_spark_open")),
+        ] {
+            assert!(OpenAIPreprocessor::parser_requires_special_tokens(
+                tool, reasoning
+            ));
+            assert!(OpenAIPreprocessor::special_tokens_will_be_stripped(
+                Some(true),
+                tool,
+                reasoning
+            ));
+        }
+        let args = std::collections::HashMap::from([
+            ("disable_reasoning".to_owned(), serde_json::json!(true)),
+            ("enable_thinking".to_owned(), serde_json::json!(false)),
+        ]);
+        assert!(OpenAIPreprocessor::sglang_effective_reasoning_enabled(
+            Some("muse_spark_open"),
+            Some(&args)
+        ));
+    }
+
     /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_parser_requires_special_tokens() {
@@ -8616,6 +8745,18 @@ mod tests {
                 None,
                 true,
                 "muse (SGLang's registered name, tool) → required",
+            ),
+            (
+                Some("muse_spark"),
+                None,
+                true,
+                "muse_spark tool-call only → required",
+            ),
+            (
+                None,
+                Some("muse_spark"),
+                true,
+                "muse_spark reasoning-name only → required",
             ),
             (None, None, false, "no parsers → not required"),
         ];
@@ -9194,6 +9335,24 @@ mod tests {
             Some("deepseek_v4")
         ));
 
+        let atem_default = request(serde_json::json!("required"), None);
+        for parser in ["muse_glimmer", "muse", "muse_spark"] {
+            assert!(
+                OpenAIPreprocessor::guided_output_requires_reasoning(&atem_default, Some(parser)),
+                "{parser} defaults to reasoning before guided tool JSON"
+            );
+        }
+        let mut muse_spark_with_legacy_disable = request(serde_json::json!("required"), None);
+        muse_spark_with_legacy_disable.chat_template_args =
+            Some(serde_json::from_value(serde_json::json!({"disable_reasoning": true})).unwrap());
+        assert!(
+            OpenAIPreprocessor::guided_output_requires_reasoning(
+                &muse_spark_with_legacy_disable,
+                Some("muse_spark")
+            ),
+            "Muse Spark's public template ignores the retired disable_reasoning knob"
+        );
+
         let structured_request = |enable_thinking: bool| {
             serde_json::from_value::<NvCreateChatCompletionRequest>(serde_json::json!({
                 "model": "test-model",
@@ -9325,6 +9484,24 @@ mod tests {
                 "minimax_m3",
                 serde_json::json!({"thinking_mode": "disabled"}),
                 false,
+            ),
+            ("muse_glimmer", serde_json::json!({}), true),
+            ("muse", serde_json::json!({}), true),
+            ("muse_spark", serde_json::json!({}), true),
+            (
+                "muse_spark",
+                serde_json::json!({"disable_reasoning": true}),
+                true,
+            ),
+            (
+                "muse_spark",
+                serde_json::json!({"disable_reasoning": false}),
+                true,
+            ),
+            (
+                "muse_spark",
+                serde_json::json!({"reasoning_effort": "xhigh"}),
+                true,
             ),
             ("gpt_oss", serde_json::json!({}), true),
             (
@@ -9900,6 +10077,7 @@ mod tests {
                     inner: request,
                     normalize_tool_call_args: false,
                     continue_final_message: true,
+                    named_tool: None,
                 })
                 .unwrap()
         } else {

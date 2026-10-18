@@ -23,9 +23,13 @@ from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
     filter_supported_async_generate_kwargs,
+    get_sglang_model_config,
+    mm_encode,
     override_server_args,
+    publish_server_args,
     require_reasoning_kwargs,
     resolved_server_args,
+    sglang_uses_mla_backend,
 )
 from dynamo.sglang.args import (
     _diffusion_generator_kwargs,
@@ -156,6 +160,71 @@ def test_override_server_args_supports_legacy_xpu_pin(monkeypatch):
     assert server_args.load_format == "legacy-loader"
 
 
+def test_publish_server_args_uses_private_runtime_registry(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_publish",
+        lambda server_args, *, role: calls.append((server_args, role)),
+    )
+    server_args = SimpleNamespace()
+
+    publish_server_args(server_args, role="encoder")
+
+    assert calls == [(server_args, "encoder")]
+
+
+def test_publish_server_args_supports_released_sglang(monkeypatch):
+    monkeypatch.setattr(sglang_compat, "sglang_publish", None)
+
+    publish_server_args(SimpleNamespace(), role="encoder")
+
+
+@pytest.mark.asyncio
+async def test_mm_encode_supports_legacy_encoder():
+    calls = []
+
+    class LegacyEncoder:
+        async def _encode(self, media_inputs, modality):
+            calls.append((media_inputs, modality))
+            return "grid", "embeddings", {"aux": True}
+
+    result = await mm_encode(LegacyEncoder(), ["media"], "image")
+
+    assert result == ("grid", "embeddings", {"aux": True})
+    assert calls == [(["media"], "image")]
+
+
+@pytest.mark.asyncio
+async def test_mm_encode_supports_split_encoder_api():
+    calls = []
+    context = SimpleNamespace(
+        preprocess_result=SimpleNamespace(grid_thw="grid"),
+        aux_data={"aux": True},
+    )
+
+    class SplitEncoder:
+        async def _prepare_encode_context(
+            self, requests, modality, *, use_global_cache
+        ):
+            calls.append((requests, modality, use_global_cache))
+            return context
+
+        async def _compute_embedding(self, encode_context, *, keep_on_gpu):
+            assert encode_context is context
+            assert keep_on_gpu is False
+            return "embeddings"
+
+    result = await mm_encode(SplitEncoder(), ["media"], "video")
+
+    assert result == ("grid", "embeddings", {"aux": True})
+    requests, modality, use_global_cache = calls[0]
+    assert modality == "video"
+    assert use_global_cache is False
+    assert requests[0]["req_id"].startswith("dynamo-direct-")
+    assert requests[0]["mm_items"] == ["media"]
+
+
 def test_resolved_server_args_uses_declarative_view(monkeypatch):
     raw_server_args = SimpleNamespace(page_size=None)
     resolved_server_args_view = SimpleNamespace(page_size=64)
@@ -168,6 +237,52 @@ def test_resolved_server_args_uses_declarative_view(monkeypatch):
 
     assert resolved_server_args(raw_server_args) is resolved_server_args_view
     assert raw_server_args.page_size is None
+
+
+def test_compat_uses_current_sglang_model_config_accessor(monkeypatch):
+    expected = SimpleNamespace(is_multimodal=True)
+    server_args = SimpleNamespace()
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_model_config_of",
+        lambda value: expected if value is server_args else None,
+    )
+
+    assert get_sglang_model_config(server_args) is expected
+
+
+def test_compat_uses_legacy_sglang_model_config_accessor(monkeypatch):
+    expected = SimpleNamespace(is_multimodal=False)
+    server_args = SimpleNamespace(get_model_config=lambda: expected)
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_model_config_of",
+        lambda _: pytest.fail("current accessor should not run for legacy ServerArgs"),
+    )
+
+    assert get_sglang_model_config(server_args) is expected
+
+
+def test_compat_uses_current_sglang_mla_accessor(monkeypatch):
+    server_args = SimpleNamespace()
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_use_mla_backend",
+        lambda value: value is server_args,
+    )
+
+    assert sglang_uses_mla_backend(server_args) is True
+
+
+def test_compat_uses_legacy_sglang_mla_accessor(monkeypatch):
+    server_args = SimpleNamespace(use_mla_backend=lambda: True)
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_use_mla_backend",
+        lambda _: pytest.fail("current accessor should not run for legacy ServerArgs"),
+    )
+
+    assert sglang_uses_mla_backend(server_args) is True
 
 
 def test_config_uses_resolved_server_args_after_runtime_init():

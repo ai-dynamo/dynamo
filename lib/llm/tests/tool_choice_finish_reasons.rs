@@ -32,6 +32,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        responses_tools: None,
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
@@ -96,6 +97,7 @@ async fn apply_jail_transformation(
     tokio::pin!(output_stream);
     let out = output_stream.next().await.unwrap();
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: out.data.unwrap(),
         nvext: None,
         llm_metrics: None,

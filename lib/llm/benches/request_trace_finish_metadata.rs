@@ -92,6 +92,7 @@ fn chat_request() -> NvCreateChatCompletionRequest {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        responses_tools: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),

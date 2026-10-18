@@ -3,16 +3,24 @@
 
 pub mod stream_converter;
 
+#[cfg(test)]
+mod native_tools_tests;
+
+#[cfg(test)]
+mod phase_search_tests;
+
 use std::collections::HashMap;
 
 use dynamo_protocols::types::responses::{
-    AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
-    InputContent, InputItem, InputOutputMessageContent, InputParam, InputRole, InputTokenDetails,
-    Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem, OutputMessage,
-    OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
-    PromptCacheRetention, Reasoning, ReasoningItem, Response, ResponseTextParam, ResponseUsage,
-    Role as ResponseRole, ServiceTier, Status, SummaryPart, SummaryTextContent,
-    TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    AssistantRole, CUSTOM_TOOL_INPUT_ARG, FunctionCallOutput, FunctionCallStatus, FunctionToolCall,
+    IncludeEnum, IncompleteDetails, InputContent, InputItem, InputOutputMessageContent, InputParam,
+    InputRole, InputTokenDetails, Instructions, Item, MessageItem, MessagePhase,
+    NamespaceToolParamTool, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
+    OutputTextContent, OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem,
+    RequestTool, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier,
+    Status, SummaryPart, SummaryTextContent, TextResponseFormatConfiguration, Tool,
+    ToolChoiceOptions, ToolChoiceParam, ToolSearchExecutionType, Truncation,
+    client_tool_search_function, custom_tool_parameters, native_tools_for_chat_template,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -67,6 +75,7 @@ pub struct NvCreateResponse {
 }
 
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
+#[serde(try_from = "serde_json::Value")]
 pub struct NvResponse {
     /// Flattened Response fields (includes upstream + extended spec fields).
     #[serde(flatten)]
@@ -87,6 +96,55 @@ pub struct NvResponse {
     pub frequency_penalty: f32,
     #[serde(default)]
     pub store: bool,
+    #[serde(default)]
+    #[schema(ignore)]
+    pub template_tools: Option<Vec<RequestTool>>,
+    #[serde(default)]
+    #[schema(ignore)]
+    pub template_tool_choice: Option<ToolChoiceParam>,
+}
+
+impl TryFrom<serde_json::Value> for NvResponse {
+    type Error = serde_json::Error;
+
+    fn try_from(mut value: serde_json::Value) -> Result<Self, Self::Error> {
+        // Keep request extensions while the pinned SDK parses its base response.
+        let template_tools =
+            serde_json::from_value(value.get("tools").cloned().unwrap_or_default())?;
+        let template_tool_choice: Option<ToolChoiceParam> =
+            serde_json::from_value(value.get("tool_choice").cloned().unwrap_or_default())?;
+        if let Some(choice) = &template_tool_choice {
+            value["tool_choice"] = serde_json::to_value(choice.sdk_response_choice())?;
+        }
+        let nvext = value.get("nvext").filter(|value| !value.is_null()).cloned();
+        let presence_penalty = serde_json::from_value(
+            value
+                .get("presence_penalty")
+                .cloned()
+                .unwrap_or(serde_json::json!(0.0)),
+        )?;
+        let frequency_penalty = serde_json::from_value(
+            value
+                .get("frequency_penalty")
+                .cloned()
+                .unwrap_or(serde_json::json!(0.0)),
+        )?;
+        let store = serde_json::from_value(
+            value
+                .get("store")
+                .cloned()
+                .unwrap_or(serde_json::json!(false)),
+        )?;
+        Ok(Self {
+            inner: serde_json::from_value(value)?,
+            nvext,
+            presence_penalty,
+            frequency_penalty,
+            store,
+            template_tools,
+            template_tool_choice,
+        })
+    }
 }
 
 /// Patch an already-serialized `Response` JSON object to match the
@@ -131,10 +189,16 @@ pub(crate) fn patch_response_for_spec(
 impl Serialize for NvResponse {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut value = serde_json::to_value(&self.inner).map_err(serde::ser::Error::custom)?;
+        if let Some(tools) = &self.template_tools {
+            value["tools"] = serde_json::to_value(tools).map_err(serde::ser::Error::custom)?;
+        }
+        if let Some(choice) = &self.template_tool_choice {
+            value["tool_choice"] =
+                serde_json::to_value(choice).map_err(serde::ser::Error::custom)?;
+        }
         let serde_json::Value::Object(obj) = &mut value else {
             return value.serialize(serializer);
         };
-
         patch_response_for_spec(
             obj,
             self.presence_penalty,
@@ -483,110 +547,166 @@ impl PendingAssistant {
 }
 
 /// Convert InputParam::Items to a Vec of ChatCompletionRequestMessages.
-fn convert_input_items_to_messages(
+fn convert_input_items_with_phases(
     items: &[InputItem],
-) -> Result<Vec<ChatCompletionRequestMessage>, anyhow::Error> {
+) -> anyhow::Result<(
+    Vec<ChatCompletionRequestMessage>,
+    HashMap<usize, MessagePhase>,
+)> {
+    let mut phases = HashMap::new();
     let mut messages = Vec::with_capacity(items.len());
     let mut pending = PendingAssistant::default();
 
     for item in items {
         match item {
-            InputItem::Item(inner_item) => match inner_item {
-                Item::Message(msg_item) => match msg_item {
-                    MessageItem::Input(msg) => {
-                        std::mem::take(&mut pending).flush_into(&mut messages);
-                        let chat_msg = match msg.role {
-                            InputRole::System | InputRole::Developer => {
-                                let text = convert_input_content_to_text(&msg.content);
-                                ChatCompletionRequestMessage::System(
-                                    ChatCompletionRequestSystemMessage {
-                                        content: ChatCompletionRequestSystemMessageContent::Text(
-                                            text,
-                                        ),
-                                        name: None,
-                                    },
-                                )
+            InputItem::Item(inner_item) => {
+                match inner_item {
+                    Item::Message(msg_item) => match msg_item {
+                        MessageItem::Input(msg) => {
+                            std::mem::take(&mut pending).flush_into(&mut messages);
+                            let chat_msg = match msg.role {
+                                InputRole::System | InputRole::Developer => {
+                                    let text = convert_input_content_to_text(&msg.content);
+                                    ChatCompletionRequestMessage::System(
+                                        ChatCompletionRequestSystemMessage {
+                                            content:
+                                                ChatCompletionRequestSystemMessageContent::Text(
+                                                    text,
+                                                ),
+                                            name: None,
+                                        },
+                                    )
+                                }
+                                InputRole::User => {
+                                    let content =
+                                        convert_input_content_to_user_content(&msg.content)?;
+                                    ChatCompletionRequestMessage::User(
+                                        ChatCompletionRequestUserMessage {
+                                            content,
+                                            name: None,
+                                        },
+                                    )
+                                }
+                            };
+                            messages.push(chat_msg);
+                        }
+                        MessageItem::Output(out_msg) => {
+                            // Fold Refusal parts into the assistant's text content
+                            // (same turn-position they appeared in). Upstream
+                            // `ChatCompletionRequestAssistantMessage` has a
+                            // dedicated `refusal` field, but most chat templates
+                            // render only `content`; putting refusal text inline
+                            // preserves it across turns without requiring template
+                            // awareness of a separate refusal field.
+                            let text = out_msg
+                                .content
+                                .iter()
+                                .map(|c| match c {
+                                    InputOutputMessageContent::OutputText(t) => t.text.as_str(),
+                                    InputOutputMessageContent::Refusal(r) => r.refusal.as_str(),
+                                })
+                                .collect::<Vec<_>>()
+                                .join("");
+                            if let Some(phase) = out_msg.phase {
+                                std::mem::take(&mut pending).flush_into(&mut messages);
+                                phases.insert(messages.len(), phase);
+                                pending.push_text(&text);
+                                std::mem::take(&mut pending).flush_into(&mut messages);
+                            } else {
+                                pending.push_text(&text);
                             }
-                            InputRole::User => {
-                                let content = convert_input_content_to_user_content(&msg.content)?;
-                                ChatCompletionRequestMessage::User(
-                                    ChatCompletionRequestUserMessage {
-                                        content,
-                                        name: None,
-                                    },
-                                )
+                        }
+                    },
+                    Item::FunctionCall(fc) => {
+                        pending.push_tool_call(ChatCompletionMessageToolCall {
+                            id: fc.call_id.clone(),
+                            r#type: FunctionType::Function,
+                            function: dynamo_protocols::types::FunctionCall {
+                                name: qualified_name(&fc.name, fc.namespace.as_deref()),
+                                arguments: fc.arguments.clone(),
+                            },
+                        });
+                    }
+                    Item::FunctionCallOutput(fco) => {
+                        std::mem::take(&mut pending).flush_into(&mut messages);
+                        let output_text = match &fco.output {
+                            FunctionCallOutput::Text(text) => text.clone(),
+                            FunctionCallOutput::Content(parts) => {
+                                convert_upstream_input_content_to_text(parts)
                             }
                         };
-                        messages.push(chat_msg);
+                        messages.push(ChatCompletionRequestMessage::Tool(
+                            ChatCompletionRequestToolMessage {
+                                content: ChatCompletionRequestToolMessageContent::Text(output_text),
+                                tool_call_id: fco.call_id.clone(),
+                            },
+                        ));
                     }
-                    MessageItem::Output(out_msg) => {
-                        // Fold Refusal parts into the assistant's text content
-                        // (same turn-position they appeared in). Upstream
-                        // `ChatCompletionRequestAssistantMessage` has a
-                        // dedicated `refusal` field, but most chat templates
-                        // render only `content`; putting refusal text inline
-                        // preserves it across turns without requiring template
-                        // awareness of a separate refusal field.
-                        let text = out_msg
-                            .content
+                    Item::CustomToolCall(call) => {
+                        pending.push_tool_call(ChatCompletionMessageToolCall {
+                            id: call.call_id.clone(),
+                            r#type: FunctionType::Function,
+                            function: dynamo_protocols::types::FunctionCall {
+                                name: qualified_name(&call.name, call.namespace.as_deref()),
+                                arguments: serde_json::json!({CUSTOM_TOOL_INPUT_ARG: call.input})
+                                    .to_string(),
+                            },
+                        });
+                    }
+                    Item::CustomToolCallOutput(output) => {
+                        std::mem::take(&mut pending).flush_into(&mut messages);
+                        let text = match &output.output {
+                        dynamo_protocols::types::responses::CustomToolCallOutputOutput::Text(text) => text.clone(),
+                        dynamo_protocols::types::responses::CustomToolCallOutputOutput::List(parts) => convert_upstream_input_content_to_text(parts),
+                    };
+                        messages.push(ChatCompletionRequestMessage::Tool(
+                            ChatCompletionRequestToolMessage {
+                                content: ChatCompletionRequestToolMessageContent::Text(text),
+                                tool_call_id: output.call_id.clone(),
+                            },
+                        ));
+                    }
+                    Item::ToolSearchCall(call) => {
+                        pending.push_tool_call(ChatCompletionMessageToolCall {
+                            id: search_call_id(call.call_id.as_deref())?.to_owned(),
+                            r#type: FunctionType::Function,
+                            function: dynamo_protocols::types::FunctionCall {
+                                name: "tool_search".into(),
+                                arguments: call.arguments.to_string(),
+                            },
+                        });
+                    }
+                    Item::ToolSearchOutput(result) => {
+                        std::mem::take(&mut pending).flush_into(&mut messages);
+                        messages.push(ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
+                            tool_call_id: search_call_id(result.call_id.as_deref())?.to_owned(),
+                            content: ChatCompletionRequestToolMessageContent::Text(serde_json::to_string(&serde_json::json!({"tools": native_tools_for_chat_template(&result.tools)}))?),
+                        }));
+                    }
+                    Item::Reasoning(r) => {
+                        let text = r
+                            .summary
                             .iter()
-                            .map(|c| match c {
-                                InputOutputMessageContent::OutputText(t) => t.text.as_str(),
-                                InputOutputMessageContent::Refusal(r) => r.refusal.as_str(),
-                            })
+                            .map(|SummaryPart::SummaryText(t)| t.text.as_str())
                             .collect::<Vec<_>>()
                             .join("");
-                        pending.push_text(&text);
+                        pending.push_reasoning(&text);
                     }
-                },
-                Item::FunctionCall(fc) => {
-                    pending.push_tool_call(ChatCompletionMessageToolCall {
-                        id: fc.call_id.clone(),
-                        r#type: FunctionType::Function,
-                        function: dynamo_protocols::types::FunctionCall {
-                            name: fc.name.clone(),
-                            arguments: fc.arguments.clone(),
-                        },
-                    });
+                    other => {
+                        // Unknown / unsupported variants (ComputerCall, WebSearchCall,
+                        // tool-output items other than FunctionCallOutput, etc.). We do
+                        // not have a faithful Chat Completions mapping, but silently
+                        // consuming them without flushing would let a following
+                        // FunctionCall coalesce with tool_calls from a different
+                        // semantic turn. Flush first, then skip.
+                        tracing::debug!(
+                            "Skipping unsupported input item type during conversion: {:?}",
+                            std::mem::discriminant(other)
+                        );
+                        std::mem::take(&mut pending).flush_into(&mut messages);
+                    }
                 }
-                Item::FunctionCallOutput(fco) => {
-                    std::mem::take(&mut pending).flush_into(&mut messages);
-                    let output_text = match &fco.output {
-                        FunctionCallOutput::Text(text) => text.clone(),
-                        FunctionCallOutput::Content(parts) => {
-                            convert_upstream_input_content_to_text(parts)
-                        }
-                    };
-                    messages.push(ChatCompletionRequestMessage::Tool(
-                        ChatCompletionRequestToolMessage {
-                            content: ChatCompletionRequestToolMessageContent::Text(output_text),
-                            tool_call_id: fco.call_id.clone(),
-                        },
-                    ));
-                }
-                Item::Reasoning(r) => {
-                    let text = r
-                        .summary
-                        .iter()
-                        .map(|SummaryPart::SummaryText(t)| t.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join("");
-                    pending.push_reasoning(&text);
-                }
-                other => {
-                    // Unknown / unsupported variants (ComputerCall, WebSearchCall,
-                    // tool-output items other than FunctionCallOutput, etc.). We do
-                    // not have a faithful Chat Completions mapping, but silently
-                    // consuming them without flushing would let a following
-                    // FunctionCall coalesce with tool_calls from a different
-                    // semantic turn. Flush first, then skip.
-                    tracing::debug!(
-                        "Skipping unsupported input item type during conversion: {:?}",
-                        std::mem::discriminant(other)
-                    );
-                    std::mem::take(&mut pending).flush_into(&mut messages);
-                }
-            },
+            }
             InputItem::EasyMessage(easy) => {
                 use dynamo_protocols::types::responses::EasyInputContent;
                 match easy.role {
@@ -643,7 +763,14 @@ fn convert_input_items_to_messages(
                                 convert_input_content_to_text(parts)
                             }
                         };
-                        pending.push_text(&text);
+                        if let Some(phase) = easy.phase {
+                            std::mem::take(&mut pending).flush_into(&mut messages);
+                            phases.insert(messages.len(), phase);
+                            pending.push_text(&text);
+                            std::mem::take(&mut pending).flush_into(&mut messages);
+                        } else {
+                            pending.push_text(&text);
+                        }
                     }
                 }
             }
@@ -655,74 +782,383 @@ fn convert_input_items_to_messages(
 
     pending.flush_into(&mut messages);
 
-    Ok(messages)
+    Ok((messages, phases))
 }
 
-/// Convert Responses API tools to the flat Chat Completions representation.
-///
-/// Bare function names are preserved for model compatibility. Reject collisions
-/// from different origins instead of guessing which namespace to restore on the
-/// response path.
-fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
+/// Both representations share one tool registry; older templates retain bare
+/// member names, while native namespace templates generate qualified names.
+#[derive(Clone, Debug, Default)]
+pub struct ResponsesToolContext {
+    pub tools: Vec<RequestTool>,
+    pub declared_tools: Vec<RequestTool>,
+    native: bool,
+    pub history_phases: HashMap<usize, MessagePhase>,
+    pub legacy_history_names: HashMap<String, String>,
+    history_tool_names: HashMap<String, String>,
+    tool_choice_name: Option<String>,
+}
+
+fn search_call_id(id: Option<&str>) -> anyhow::Result<&str> {
+    id.filter(|id| !id.is_empty()).ok_or_else(|| {
+        ResponsesConversionError::InvalidArgument(
+            "Client tool search requires a nonempty call_id".into(),
+        )
+        .into()
+    })
+}
+
+/// Resolve client results in order. Schema definitions are rendered in the tool result,
+/// while this registry supplies parser identities and guided constraints.
+pub(crate) fn effective_response_tools(
+    request: &NvCreateResponse,
+) -> anyhow::Result<Vec<RequestTool>> {
+    let mut tools = request.inner.tools.clone().unwrap_or_default();
+    let client_search = tools.iter().any(|tool| matches!(&tool.inner, Tool::ToolSearch(search) if search.execution == Some(ToolSearchExecutionType::Client)));
+    if tools.iter().any(|tool| matches!(&tool.inner, Tool::ToolSearch(search) if search.execution != Some(ToolSearchExecutionType::Client))) {
+        return Err(ResponsesConversionError::UnsupportedContent("Server-executed tool search is not supported".into()).into());
+    }
+    let search_count = tools
+        .iter()
+        .filter(|tool| matches!(&tool.inner, Tool::ToolSearch(_)))
+        .count();
+    if search_count > 1
+        || client_search
+            && tools.iter().any(|tool| {
+                matches!(&tool.inner, Tool::Function(f) if f.name == "tool_search")
+                    || matches!(&tool.inner, Tool::Custom(f) if f.name == "tool_search")
+            })
+    {
+        return Err(ResponsesConversionError::InvalidArgument(
+            "Client tool search has an ambiguous tool_search definition".into(),
+        )
+        .into());
+    }
+    if matches!(request.inner.tool_choice, Some(ToolChoiceParam::ToolSearch)) && !client_search {
+        return Err(ResponsesConversionError::InvalidArgument(
+            "tool_choice=tool_search requires a client tool_search definition".into(),
+        )
+        .into());
+    }
+    let mut calls = std::collections::HashSet::new();
+    let mut seen_calls = std::collections::HashSet::new();
+    if let InputParam::Items(items) = &request.inner.input {
+        for item in items {
+            match item {
+                InputItem::Item(Item::ToolSearchCall(call)) => {
+                    if !client_search || call.execution == Some(ToolSearchExecutionType::Server) {
+                        return Err(ResponsesConversionError::UnsupportedContent(
+                            "Only configured client-executed tool search can be replayed".into(),
+                        )
+                        .into());
+                    }
+                    let id = search_call_id(call.call_id.as_deref())?;
+                    if !call.arguments.is_object() || !seen_calls.insert(id.to_owned()) {
+                        return Err(ResponsesConversionError::InvalidArgument(
+                            "Tool search requires object arguments and unique call_id values"
+                                .into(),
+                        )
+                        .into());
+                    }
+                    calls.insert(id.to_owned());
+                }
+                InputItem::Item(Item::ToolSearchOutput(result)) => {
+                    let id = search_call_id(result.call_id.as_deref())?;
+                    if result.execution == Some(ToolSearchExecutionType::Server)
+                        || !calls.remove(id)
+                    {
+                        return Err(ResponsesConversionError::InvalidArgument(
+                            "Client tool search output must match a preceding client call".into(),
+                        )
+                        .into());
+                    }
+                    for loaded in &result.tools {
+                        match &loaded.inner {
+                            Tool::Function(f) if f.name != "tool_search" => {
+                                tools.retain(|tool| !matches!(&tool.inner, Tool::Function(old) if old.name == f.name) && !matches!(&tool.inner, Tool::Custom(old) if old.name == f.name));
+                                tools.push(loaded.clone());
+                            }
+                            Tool::Custom(f) if f.name != "tool_search" => {
+                                tools.retain(|tool| !matches!(&tool.inner, Tool::Function(old) if old.name == f.name) && !matches!(&tool.inner, Tool::Custom(old) if old.name == f.name));
+                                tools.push(loaded.clone());
+                            }
+                            Tool::Namespace(ns) => {
+                                if let Some(existing) = tools.iter_mut().find(|tool| matches!(&tool.inner, Tool::Namespace(old) if old.name == ns.name)) {
+                                    let Tool::Namespace(old) = &mut existing.inner else { unreachable!() };
+                                    for member in &ns.tools {
+                                        let name = namespace_member_name(member);
+                                        old.tools.retain(|old| namespace_member_name(old) != name);
+                                        old.tools.push(member.clone());
+                                    }
+                                } else { tools.push(loaded.clone()); }
+                            }
+                            _ => return Err(ResponsesConversionError::InvalidArgument("Client tool search results must contain function, custom, or namespace tools".into()).into()),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(tools)
+}
+
+fn namespace_member_name(member: &NamespaceToolParamTool) -> &str {
+    match member {
+        NamespaceToolParamTool::Function(f) => &f.name,
+        NamespaceToolParamTool::Custom(f) => &f.name,
+    }
+}
+
+fn qualified_name(name: &str, namespace: Option<&str>) -> String {
+    match namespace {
+        Some(ns) => format!("{ns}.{name}"),
+        None => name.to_owned(),
+    }
+}
+
+fn convert_tools(tools: &[RequestTool], native: bool) -> anyhow::Result<Vec<ChatCompletionTool>> {
     let mut converted = Vec::new();
     let mut origins = HashMap::<String, Option<String>>::new();
-    let mut push_function = |name: &str,
-                             description: &Option<String>,
-                             parameters: &Option<serde_json::Value>,
-                             strict: Option<bool>,
-                             namespace: Option<&str>|
+    let mut push = |name: &str,
+                    description: &Option<String>,
+                    parameters: Option<serde_json::Value>,
+                    strict: Option<bool>,
+                    namespace: Option<&str>|
      -> anyhow::Result<()> {
-        if let Some(previous_namespace) = origins.get(name) {
-            if previous_namespace.as_deref() != namespace {
+        let registered = qualified_name(name, namespace.filter(|_| native));
+        if let Some(previous) = origins.get(&registered) {
+            if previous.as_deref() != namespace {
                 return Err(ResponsesConversionError::InvalidArgument(
-                    "Responses function tool names are ambiguous after namespace flattening"
-                        .to_string(),
+                    "Responses function tool names are ambiguous after namespace flattening".into(),
                 )
                 .into());
             }
         } else {
-            origins.insert(name.to_owned(), namespace.map(str::to_owned));
+            origins.insert(registered.clone(), namespace.map(str::to_owned));
         }
         converted.push(ChatCompletionTool {
             r#type: ChatCompletionToolType::Function,
             function: FunctionObject {
-                name: name.to_owned(),
+                name: registered,
                 description: description.clone(),
-                parameters: parameters.clone(),
+                parameters,
                 strict,
             },
         });
         Ok(())
     };
-
     for tool in tools {
-        match tool {
-            Tool::Function(f) => {
-                push_function(&f.name, &f.description, &f.parameters, f.strict, None)?
-            }
-            Tool::Namespace(namespace) => {
-                for tool in &namespace.tools {
-                    if let NamespaceToolParamTool::Function(f) = tool {
-                        push_function(
+        match &tool.inner {
+            Tool::Function(f) => push(
+                &f.name,
+                &f.description,
+                f.parameters.clone(),
+                f.strict,
+                None,
+            )?,
+            Tool::Custom(f) => push(
+                &f.name,
+                &f.description,
+                Some(custom_tool_parameters()),
+                None,
+                None,
+            )?,
+            Tool::Namespace(ns) => {
+                for member in &ns.tools {
+                    match member {
+                        NamespaceToolParamTool::Function(f) => push(
                             &f.name,
                             &f.description,
-                            &f.parameters,
+                            f.parameters.clone(),
                             f.strict,
-                            Some(&namespace.name),
-                        )?;
+                            Some(&ns.name),
+                        )?,
+                        NamespaceToolParamTool::Custom(f) => push(
+                            &f.name,
+                            &f.description,
+                            Some(custom_tool_parameters()),
+                            None,
+                            Some(&ns.name),
+                        )?,
                     }
                 }
             }
-            // Only function tools are forwarded to Chat Completions.
+            Tool::ToolSearch(search) => {
+                if let Some(value) = client_tool_search_function(search) {
+                    let f = &value["function"];
+                    push(
+                        "tool_search",
+                        &f["description"].as_str().map(str::to_owned),
+                        Some(f["parameters"].clone()),
+                        None,
+                        None,
+                    )?;
+                }
+            }
             _ => {}
         }
     }
     Ok(converted)
 }
 
-/// Convert Responses API ToolChoiceParam to ChatCompletionToolChoiceOption.
+impl NvCreateChatCompletionRequest {
+    /// Qualified names are an internal Responses representation. Validate
+    /// caller-supplied namespace and leaf names independently so the ordinary
+    /// Chat Completions name rules remain unchanged.
+    pub(crate) fn validate_responses_tool_definitions(&self) -> anyhow::Result<()> {
+        use super::validate::validate_tools;
+        let Some(context) = &self.responses_tools else {
+            return validate_tools(&self.inner.tools.as_deref());
+        };
+        let mut definitions = Vec::new();
+        for tool in &context.tools {
+            if let Tool::Namespace(namespace) = &tool.inner {
+                let name = ChatCompletionTool {
+                    r#type: ChatCompletionToolType::Function,
+                    function: FunctionObject {
+                        name: namespace.name.clone(),
+                        ..Default::default()
+                    },
+                };
+                validate_tools(&Some(std::slice::from_ref(&name)))?;
+            }
+            definitions.extend(convert_tools(std::slice::from_ref(tool), false)?);
+        }
+        validate_tools(&Some(definitions.as_slice()))
+    }
+
+    pub(crate) fn normalize_responses_tools(&mut self, native: bool) -> anyhow::Result<()> {
+        if let Some(context) = &mut self.responses_tools {
+            context.native = native;
+        }
+        let Some(context) = &self.responses_tools else {
+            return Ok(());
+        };
+        self.inner.tools =
+            Some(convert_tools(&context.tools, native)?).filter(|tools| !tools.is_empty());
+        let resolve = |name: &str| -> String {
+            if !native {
+                return context
+                    .legacy_history_names
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.to_owned());
+            }
+            if self
+                .inner
+                .tools
+                .iter()
+                .flatten()
+                .any(|tool| tool.function.name == name)
+            {
+                return name.to_owned();
+            }
+            let mut matching = context
+                .legacy_history_names
+                .iter()
+                .filter(|(_, bare)| bare.as_str() == name);
+            match matching.next() {
+                Some((qualified, _)) if matching.next().is_none() => qualified.clone(),
+                _ => name.to_owned(),
+            }
+        };
+        for message in &mut self.inner.messages {
+            if let ChatCompletionRequestMessage::Assistant(message) = message {
+                for call in message.tool_calls.iter_mut().flatten() {
+                    let original = context
+                        .history_tool_names
+                        .get(&call.id)
+                        .unwrap_or(&call.function.name);
+                    call.function.name = resolve(original);
+                }
+            }
+        }
+        if let Some(ChatCompletionToolChoiceOption::Named(choice)) = &mut self.inner.tool_choice {
+            let original = context
+                .tool_choice_name
+                .as_deref()
+                .unwrap_or(&choice.function.name);
+            choice.function.name = resolve(original);
+        }
+        Ok(())
+    }
+
+    /// Serialize an in-process request for a Python chat processor.
+    /// Responses history metadata must stay off the worker wire.
+    pub fn python_chat_processor_request_json(
+        &self,
+    ) -> Result<serde_json::Value, serde_json::Error> {
+        let mut value = serde_json::to_value(self)?;
+        if let Some(context) = &self.responses_tools
+            && !context.history_phases.is_empty()
+        {
+            // Assistant ordinals survive vLLM's multimodal user-message splitting
+            // and system-message consolidation; absolute message indices do not.
+            let phases: Vec<Option<MessagePhase>> = self
+                .inner
+                .messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| {
+                    matches!(message, ChatCompletionRequestMessage::Assistant(_))
+                })
+                .map(|(index, _)| context.history_phases.get(&index).cloned())
+                .collect();
+            value["responses_history_phases"] = serde_json::to_value(phases)?;
+        }
+        Ok(value)
+    }
+
+    pub(crate) fn template_messages_json(&self) -> serde_json::Value {
+        let mut messages =
+            serde_json::to_value(&self.inner.messages).expect("typed messages serialize");
+        if let Some(context) = &self.responses_tools {
+            for (index, phase) in &context.history_phases {
+                if let Some(message) = messages.get_mut(*index) {
+                    message["recipient"] = serde_json::json!(match phase {
+                        MessagePhase::Commentary => "commentary",
+                        MessagePhase::FinalAnswer => "user",
+                    });
+                }
+            }
+        }
+        messages
+    }
+
+    pub(crate) fn declared_template_tools(&self) -> Option<serde_json::Value> {
+        let context = self.responses_tools.as_ref()?;
+        let tools = convert_tools(&context.declared_tools, context.native)
+            .expect("validated declared registry");
+        Some(serde_json::to_value(tools).expect("typed tools serialize"))
+    }
+
+    pub(crate) fn native_template_tools(&self) -> Option<minijinja::Value> {
+        let context = self.responses_tools.as_ref()?;
+        let wants_native = context.declared_tools.iter().any(|tool| match &tool.inner {
+            Tool::Namespace(_) => true,
+            Tool::Function(f) => f.defer_loading == Some(true),
+            Tool::Custom(f) => f.defer_loading == Some(true),
+            Tool::ToolSearch(_) => true,
+            _ => false,
+        });
+        wants_native.then(|| {
+            minijinja::Value::from_serialize(native_tools_for_chat_template(
+                &context.declared_tools,
+            ))
+        })
+    }
+}
+
 fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
     match tc {
+        ToolChoiceParam::ToolSearch => {
+            ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionName {
+                    name: "tool_search".into(),
+                },
+            })
+        }
         ToolChoiceParam::Mode(mode) => match mode {
             ToolChoiceOptions::None => ChatCompletionToolChoiceOption::None,
             ToolChoiceOptions::Auto => ChatCompletionToolChoiceOption::Auto,
@@ -736,14 +1172,15 @@ fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
                 },
             })
         }
-        ToolChoiceParam::Hosted(_) => {
-            // Hosted tools are not forwarded to chat completions
-            ChatCompletionToolChoiceOption::Auto
+        ToolChoiceParam::Custom(f) => {
+            ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionName {
+                    name: f.name.clone(),
+                },
+            })
         }
-        _ => {
-            // Other tool choice types (AllowedTools, Mcp, Custom, etc.) default to auto
-            ChatCompletionToolChoiceOption::Auto
-        }
+        _ => ChatCompletionToolChoiceOption::Auto,
     }
 }
 
@@ -774,6 +1211,8 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
     fn try_from(resp: NvCreateResponse) -> Result<Self, Self::Error> {
+        let effective_tools = effective_response_tools(&resp)?;
+        let mut history_phases = HashMap::new();
         let mut messages = Vec::new();
 
         // Prepend instructions as system message if present
@@ -797,7 +1236,12 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 ));
             }
             InputParam::Items(items) => {
-                let item_messages = convert_input_items_to_messages(items)?;
+                let (item_messages, phases) = convert_input_items_with_phases(items)?;
+                history_phases.extend(
+                    phases
+                        .into_iter()
+                        .map(|(index, phase)| (index + messages.len(), phase)),
+                );
                 messages.extend(item_messages);
             }
         }
@@ -815,6 +1259,10 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 .take_while(|m| matches!(m, ChatCompletionRequestMessage::System(_)))
                 .count();
             if leading_system_count > 1 {
+                history_phases = history_phases
+                    .into_iter()
+                    .map(|(index, phase)| (index.saturating_sub(leading_system_count - 1), phase))
+                    .collect();
                 let combined: String = messages[..leading_system_count]
                     .iter()
                     .map(|m| match m {
@@ -849,17 +1297,82 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
 
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
 
-        // Convert tools if present
-        let tools = resp
-            .inner
-            .tools
-            .as_ref()
-            .map(|t| convert_tools(t))
-            .transpose()?
-            .filter(|t: &Vec<_>| !t.is_empty());
+        let tools = Some(convert_tools(&effective_tools, true)?).filter(|tools| !tools.is_empty());
+
+        let mut legacy_history_names = HashMap::new();
+        for tool in &effective_tools {
+            if let Tool::Namespace(ns) = &tool.inner {
+                for member in &ns.tools {
+                    let name = match member {
+                        NamespaceToolParamTool::Function(f) => &f.name,
+                        NamespaceToolParamTool::Custom(f) => &f.name,
+                    };
+                    legacy_history_names.insert(qualified_name(name, Some(&ns.name)), name.clone());
+                }
+            }
+        }
+        if let InputParam::Items(items) = &resp.inner.input {
+            for item in items {
+                if let InputItem::Item(Item::CustomToolCall(call)) = item
+                    && call.namespace.is_some()
+                {
+                    legacy_history_names.insert(
+                        qualified_name(&call.name, call.namespace.as_deref()),
+                        call.name.clone(),
+                    );
+                }
+                if let InputItem::Item(Item::FunctionCall(fc)) = item
+                    && fc.namespace.is_some()
+                {
+                    legacy_history_names.insert(
+                        qualified_name(&fc.name, fc.namespace.as_deref()),
+                        fc.name.clone(),
+                    );
+                }
+            }
+        }
+        let history_tool_names = messages
+            .iter()
+            .filter_map(|message| match message {
+                ChatCompletionRequestMessage::Assistant(message) => message.tool_calls.as_ref(),
+                _ => None,
+            })
+            .flatten()
+            .map(|call| (call.id.clone(), call.function.name.clone()))
+            .collect();
 
         // Convert tool_choice if present
-        let tool_choice = resp.inner.tool_choice.as_ref().map(convert_tool_choice);
+        let mut tool_choice = resp.inner.tool_choice.as_ref().map(convert_tool_choice);
+        if let Some(ChatCompletionToolChoiceOption::Named(choice)) = &mut tool_choice
+            && let Some(tools) = &tools
+            && !tools
+                .iter()
+                .any(|tool| tool.function.name == choice.function.name)
+        {
+            let mut matching = tools.iter().filter(|tool| {
+                legacy_history_names.get(&tool.function.name) == Some(&choice.function.name)
+            });
+            if let Some(tool) = matching.next()
+                && matching.next().is_none()
+            {
+                choice.function.name = tool.function.name.clone();
+            }
+        }
+        let tool_choice_name = match &tool_choice {
+            Some(ChatCompletionToolChoiceOption::Named(choice)) => {
+                Some(choice.function.name.clone())
+            }
+            _ => None,
+        };
+        let responses_tools = Some(ResponsesToolContext {
+            tools: effective_tools,
+            declared_tools: resp.inner.tools.clone().unwrap_or_default(),
+            native: true,
+            history_phases,
+            legacy_history_names,
+            history_tool_names,
+            tool_choice_name,
+        });
 
         // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
@@ -905,6 +1418,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             common: Default::default(),
             nvext: resp.nvext,
             chat_template_args: resp.chat_template_args,
+            responses_tools,
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
@@ -1003,6 +1517,8 @@ pub struct ResponseParams {
     pub parallel_tool_calls: Option<bool>,
     pub store: Option<bool>,
     pub tools: Option<Vec<Tool>>,
+    pub template_tools: Option<Vec<RequestTool>>,
+    pub loaded_tools: Vec<Tool>,
     pub tool_choice: Option<ToolChoiceParam>,
     pub instructions: Option<String>,
     pub reasoning: Option<Reasoning>,
@@ -1029,6 +1545,10 @@ pub struct ResponseParams {
 }
 
 impl ResponseParams {
+    pub(super) fn is_client_search(&self, name: &str) -> bool {
+        name == "tool_search" && self.tools.iter().flatten().any(|tool| matches!(tool, Tool::ToolSearch(search) if search.execution == Some(ToolSearchExecutionType::Client)))
+    }
+
     fn reasoning_summary_requested(&self) -> bool {
         self.reasoning
             .as_ref()
@@ -1036,30 +1556,127 @@ impl ResponseParams {
             .is_some()
     }
 
-    fn namespace_for_function(&self, name: &str) -> Option<String> {
-        let tools = self.tools.as_deref()?;
-        if tools
-            .iter()
-            .any(|tool| matches!(tool, Tool::Function(function) if function.name == name))
-        {
-            return None;
+    pub(super) fn tool_identity(&self, emitted: &str) -> (String, Option<String>, bool) {
+        let tools = if self.loaded_tools.is_empty() {
+            self.tools.as_deref().unwrap_or_default()
+        } else {
+            self.loaded_tools.as_slice()
+        };
+        // Match qualified names before considering a legacy bare member name.
+        for tool in tools {
+            if let Tool::Namespace(ns) = tool {
+                for member in &ns.tools {
+                    let (name, custom) = match member {
+                        NamespaceToolParamTool::Function(f) => (&f.name, false),
+                        NamespaceToolParamTool::Custom(f) => (&f.name, true),
+                    };
+                    if qualified_name(name, Some(&ns.name)) == emitted {
+                        return (name.clone(), Some(ns.name.clone()), custom);
+                    }
+                }
+            }
         }
-
-        let mut namespaces = tools.iter().filter_map(|tool| {
-            let Tool::Namespace(namespace) = tool else {
-                return None;
-            };
-            namespace
-                .tools
-                .iter()
-                .any(|tool| matches!(tool, NamespaceToolParamTool::Function(function) if function.name == name))
-                .then_some(namespace.name.as_str())
-        });
-        let namespace = namespaces.next()?;
-        namespaces
-            .all(|other_namespace| other_namespace == namespace)
-            .then(|| namespace.to_owned())
+        for tool in tools {
+            match tool {
+                Tool::Function(f) if f.name == emitted => return (emitted.into(), None, false),
+                Tool::Custom(f) if f.name == emitted => return (emitted.into(), None, true),
+                _ => {}
+            }
+        }
+        let mut found = None;
+        for tool in tools {
+            if let Tool::Namespace(ns) = tool {
+                for member in &ns.tools {
+                    let (name, custom) = match member {
+                        NamespaceToolParamTool::Function(f) => (&f.name, false),
+                        NamespaceToolParamTool::Custom(f) => (&f.name, true),
+                    };
+                    if name == emitted {
+                        if found.is_some() {
+                            return (emitted.into(), None, false);
+                        }
+                        found = Some((name.clone(), Some(ns.name.clone()), custom));
+                    }
+                }
+            }
+        }
+        found.unwrap_or_else(|| (emitted.into(), None, false))
     }
+
+    pub(super) fn tool_output(
+        &self,
+        item_id: String,
+        call_id: String,
+        emitted: &str,
+        arguments: &str,
+        status: OutputStatus,
+    ) -> anyhow::Result<OutputItem> {
+        if self.is_client_search(emitted) {
+            let arguments = if arguments.is_empty() && status == OutputStatus::InProgress {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(arguments)?
+            };
+            anyhow::ensure!(
+                arguments.is_object(),
+                "Client tool search arguments must be an object"
+            );
+            return Ok(serde_json::from_value(
+                serde_json::json!({"type":"tool_search_call","id":item_id,"call_id":call_id,"execution":"client","arguments":arguments,"status":status}),
+            )?);
+        }
+        let (name, namespace, custom) = self.tool_identity(emitted);
+        if custom {
+            let input = if arguments.is_empty() && status == OutputStatus::InProgress {
+                String::new()
+            } else {
+                custom_input(arguments)?
+            };
+            // The upstream custom output type is non_exhaustive, so construct
+            // it through its wire representation rather than a struct literal.
+            Ok(serde_json::from_value(
+                serde_json::json!({"type":"custom_tool_call", "id":item_id,
+                "call_id":call_id,"name":name,"namespace":namespace,"input":input,"status":status}),
+            )?)
+        } else {
+            Ok(OutputItem::FunctionCall(FunctionToolCall {
+                id: Some(item_id),
+                call_id,
+                name,
+                namespace,
+                arguments: arguments.to_owned(),
+                status: Some(status),
+            }))
+        }
+    }
+
+    pub(super) fn echoed_tools(&self) -> Option<Vec<RequestTool>> {
+        let mut tools = self.template_tools.clone()?;
+        for tool in &mut tools {
+            if let Tool::Function(function) = &mut tool.inner {
+                function.strict.get_or_insert(true);
+            }
+            if let Tool::Namespace(ns) = &mut tool.inner {
+                for member in &mut ns.tools {
+                    if let NamespaceToolParamTool::Function(function) = member {
+                        function.strict.get_or_insert(true);
+                    }
+                }
+            }
+        }
+        Some(tools)
+    }
+}
+
+pub(super) fn custom_input(arguments: &str) -> anyhow::Result<String> {
+    let value: serde_json::Value = serde_json::from_str(arguments)?;
+    value
+        .get(CUSTOM_TOOL_INPUT_ARG)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Custom tool arguments must contain a string input parameter")
+        })
 }
 
 /// Normalize tools so that `FunctionTool.strict` is always set.
@@ -1108,18 +1725,6 @@ fn make_text_message(id: String, text: String) -> OutputItem {
     })
 }
 
-/// Build a function call output item with generated IDs.
-fn make_function_call(name: String, arguments: String, namespace: Option<String>) -> OutputItem {
-    OutputItem::FunctionCall(FunctionToolCall {
-        arguments,
-        call_id: format!("call_{}", Uuid::new_v4().simple()),
-        namespace,
-        name,
-        id: Some(format!("fc_{}", Uuid::new_v4().simple())),
-        status: Some(OutputStatus::Completed),
-    })
-}
-
 /// Convert a ChatCompletion response into a Responses API response object,
 /// echoing back the actual request parameters from `params`.
 pub fn chat_completion_to_response(
@@ -1128,6 +1733,8 @@ pub fn chat_completion_to_response(
     api_context: Option<&crate::protocols::unified::ResponsesContext>,
 ) -> Result<NvResponse, anyhow::Error> {
     let nvext = nv_resp.nvext.clone();
+    let response_events = nv_resp.response_events;
+    let has_phases = !response_events.is_empty();
     let chat_resp = nv_resp.inner;
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
@@ -1155,17 +1762,17 @@ pub fn chat_completion_to_response(
             }));
         }
 
+        let replay_calls = choice.message.tool_calls.clone().unwrap_or_default();
         // Handle structured tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
             for tc in &tool_calls {
-                output.push(OutputItem::FunctionCall(FunctionToolCall {
-                    arguments: tc.function.arguments.clone(),
-                    call_id: tc.id.clone(),
-                    namespace: params.namespace_for_function(&tc.function.name),
-                    name: tc.function.name.clone(),
-                    id: Some(format!("fc_{}", Uuid::new_v4().simple())),
-                    status: Some(OutputStatus::Completed),
-                }));
+                output.push(params.tool_output(
+                    format!("fc_{}", Uuid::new_v4().simple()),
+                    tc.id.clone(),
+                    &tc.function.name,
+                    &tc.function.arguments,
+                    OutputStatus::Completed,
+                )?);
             }
         }
 
@@ -1187,8 +1794,13 @@ pub fn chat_completion_to_response(
             let parsed_calls = parse_tool_call_text(&content_text);
             if !parsed_calls.is_empty() {
                 for (name, arguments) in parsed_calls {
-                    let namespace = params.namespace_for_function(&name);
-                    output.push(make_function_call(name, arguments, namespace));
+                    output.push(params.tool_output(
+                        format!("fc_{}", Uuid::new_v4().simple()),
+                        format!("call_{}", Uuid::new_v4().simple()),
+                        &name,
+                        &arguments,
+                        OutputStatus::Completed,
+                    )?);
                 }
                 let remaining = strip_tool_call_text(&content_text);
                 if !remaining.trim().is_empty() {
@@ -1200,6 +1812,89 @@ pub fn chat_completion_to_response(
             } else {
                 output.push(make_text_message(message_id.clone(), content_text));
             }
+        }
+
+        if !response_events.is_empty() {
+            // Keep the optional reasoning summary, then reconstruct the visible turn
+            // from parser-owned boundaries and call identities in generation order.
+            output.retain(|item| matches!(item, OutputItem::Reasoning(_)));
+            let mut phase = None;
+            let mut text = String::new();
+            let mut open = false;
+            let flush = |output: &mut Vec<OutputItem>,
+                         text: &mut String,
+                         phase: Option<MessagePhase>,
+                         status: OutputStatus,
+                         open: &mut bool| {
+                if *open || !text.is_empty() {
+                    let OutputItem::Message(mut message) = make_text_message(
+                        format!("msg_{}", Uuid::new_v4().simple()),
+                        std::mem::take(text),
+                    ) else {
+                        unreachable!()
+                    };
+                    message.phase = phase;
+                    message.status = status;
+                    output.push(OutputItem::Message(message));
+                    *open = false;
+                }
+            };
+            use super::chat_completions::{MessageBoundary, ResponseOutputEvent};
+            for event in response_events {
+                match event {
+                    ResponseOutputEvent::Boundary(MessageBoundary::Start(next)) => {
+                        flush(
+                            &mut output,
+                            &mut text,
+                            phase,
+                            OutputStatus::Completed,
+                            &mut open,
+                        );
+                        phase = Some(next);
+                        open = true;
+                    }
+                    ResponseOutputEvent::Boundary(MessageBoundary::End) => {
+                        flush(
+                            &mut output,
+                            &mut text,
+                            phase,
+                            OutputStatus::Completed,
+                            &mut open,
+                        );
+                        phase = None;
+                    }
+                    ResponseOutputEvent::Text(delta) => text.push_str(&delta),
+                    ResponseOutputEvent::ToolCall(id) => {
+                        flush(
+                            &mut output,
+                            &mut text,
+                            phase,
+                            OutputStatus::Completed,
+                            &mut open,
+                        );
+                        if let Some(call) = replay_calls.iter().find(|call| call.id == id) {
+                            output.push(params.tool_output(
+                                format!("fc_{}", Uuid::new_v4().simple()),
+                                call.id.clone(),
+                                &call.function.name,
+                                &call.function.arguments,
+                                OutputStatus::Completed,
+                            )?);
+                        }
+                    }
+                }
+            }
+            flush(
+                &mut output,
+                &mut text,
+                phase,
+                if output_limit_reached {
+                    OutputStatus::Incomplete
+                } else {
+                    OutputStatus::Completed
+                },
+                &mut open,
+            );
         }
 
         if output.is_empty() {
@@ -1235,21 +1930,28 @@ pub fn chat_completion_to_response(
         Status::Completed
     };
     if output_limit_reached {
-        // Unary responses do not expose explicit phase boundaries. A message
-        // or function call proves reasoning finished before the terminal item
-        // exhausted the output budget.
+        // Without explicit phase boundaries, the terminal visible item owns
+        // the interrupted status. Completed phase-labelled messages keep theirs.
         // The budget runs out once, inside the item the model was still writing.
         // Every earlier item finished, so only the terminal one is incomplete.
-        let terminal = output
-            .iter()
-            .rposition(|item| matches!(item, OutputItem::Message(_) | OutputItem::FunctionCall(_)));
+        let terminal = output.iter().rposition(|item| {
+            matches!(
+                item,
+                OutputItem::Message(_)
+                    | OutputItem::FunctionCall(_)
+                    | OutputItem::ToolSearchCall(_)
+            )
+        });
         for (index, item) in output.iter_mut().enumerate() {
             match item {
-                OutputItem::Message(message) if Some(index) == terminal => {
+                OutputItem::Message(message) if Some(index) == terminal && !has_phases => {
                     message.status = OutputStatus::Incomplete
                 }
                 OutputItem::FunctionCall(call) if Some(index) == terminal => {
                     call.status = Some(OutputStatus::Incomplete)
+                }
+                OutputItem::ToolSearchCall(call) if Some(index) == terminal => {
+                    call.status = FunctionCallStatus::Incomplete
                 }
                 OutputItem::Reasoning(reasoning) if terminal.is_none() => {
                     reasoning.status = Some(OutputStatus::Incomplete)
@@ -1282,7 +1984,8 @@ pub fn chat_completion_to_response(
         tool_choice: params
             .tool_choice
             .clone()
-            .or(Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto))),
+            .or(Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)))
+            .map(|choice| choice.sdk_response_choice()),
         tools: Some(
             params
                 .tools
@@ -1334,6 +2037,8 @@ pub fn chat_completion_to_response(
         presence_penalty: params.presence_penalty.unwrap_or(0.0),
         frequency_penalty: params.frequency_penalty.unwrap_or(0.0),
         store: params.store.unwrap_or(false),
+        template_tools: params.echoed_tools(),
+        template_tool_choice: params.tool_choice.clone(),
     })
 }
 
@@ -2619,7 +3324,8 @@ mod tests {
             .unwrap(),
         );
 
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let mut chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        chat_req.normalize_responses_tools(false).unwrap();
         let tools = chat_req.inner.tools.expect("tools should reach backend");
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].function.name, "get_weather");
@@ -2647,7 +3353,8 @@ mod tests {
             .unwrap(),
         );
 
-        let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+        let mut chat_req = NvCreateChatCompletionRequest::try_from(req).unwrap();
+        let error = chat_req.normalize_responses_tools(false).unwrap_err();
         assert_eq!(
             error.to_string(),
             "Responses function tool names are ambiguous after namespace flattening"
@@ -2674,7 +3381,8 @@ mod tests {
             .unwrap(),
         );
 
-        let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+        let mut chat_req = NvCreateChatCompletionRequest::try_from(req).unwrap();
+        let error = chat_req.normalize_responses_tools(false).unwrap_err();
         assert_eq!(
             error.to_string(),
             "Responses function tool names are ambiguous after namespace flattening"
@@ -2737,6 +3445,7 @@ mod tests {
     fn test_into_nvresponse_from_chat_response() {
         let now = 1_726_000_000;
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -2792,6 +3501,7 @@ mod tests {
     fn test_response_with_tool_calls() {
         let now = 1_726_000_000;
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -2841,6 +3551,7 @@ mod tests {
     #[test]
     fn test_response_with_namespaced_tool_call() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -3074,6 +3785,7 @@ thinking
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3110,6 +3822,7 @@ thinking
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3138,6 +3851,7 @@ thinking
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3163,6 +3877,7 @@ thinking
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3315,6 +4030,7 @@ thinking
             ChatChoice, ChatCompletionMessageContent, ChatCompletionResponseMessage, FinishReason,
         };
         NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![ChatChoice {
                     index: 0,

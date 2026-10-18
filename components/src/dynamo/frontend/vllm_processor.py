@@ -17,7 +17,6 @@ from typing import Any
 
 from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
-from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.exceptions import VLLMClientError
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -42,6 +41,7 @@ from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import HttpError
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
+from ._vllm_chat_utils import load_chat_template
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .thinking import runtime_default_thinking_mode
 from .utils import (

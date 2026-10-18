@@ -26,6 +26,7 @@ from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 from dynamo.trtllm.workers.llm_worker import (
     _populate_kv_cache_capacity,
+    _resolve_multimodal_model_type,
     _strip_postprocess_workers,
     init_llm_worker,
 )
@@ -52,6 +53,59 @@ pytestmark = [
 # Create TRTLLM-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_trtllm_cli = make_cli_args_fixture("dynamo.trtllm")
+
+
+def test_resolve_multimodal_model_type_uses_transformers_config():
+    model_config = mock.Mock(model_type="known_model")
+    with (
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.AutoConfig.from_pretrained",
+            return_value=model_config,
+        ) as auto_config,
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.PretrainedConfig.get_config_dict"
+        ) as raw_config,
+    ):
+        assert (
+            _resolve_multimodal_model_type("example/model", trust_remote_code=True)
+            == "known_model"
+        )
+
+    auto_config.assert_called_once_with("example/model", trust_remote_code=True)
+    raw_config.assert_not_called()
+
+
+def test_resolve_multimodal_model_type_falls_back_to_raw_config(caplog):
+    with (
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.AutoConfig.from_pretrained",
+            side_effect=ValueError("unknown model type"),
+        ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.PretrainedConfig.get_config_dict",
+            return_value=({"model_type": "muse_spark"}, {}),
+        ) as raw_config,
+        caplog.at_level("WARNING"),
+    ):
+        assert _resolve_multimodal_model_type("example/model") == "muse_spark"
+
+    raw_config.assert_called_once_with("example/model")
+    assert "using the raw checkpoint value" in caplog.text
+
+
+def test_resolve_multimodal_model_type_preserves_error_without_raw_type():
+    with (
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.AutoConfig.from_pretrained",
+            side_effect=ValueError("unknown model type"),
+        ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.PretrainedConfig.get_config_dict",
+            return_value=({}, {}),
+        ),
+        pytest.raises(ValueError, match="unknown model type"),
+    ):
+        _resolve_multimodal_model_type("example/model")
 
 
 def test_populate_kv_cache_capacity_publishes_engine_values():

@@ -32,6 +32,11 @@
 !.github/scripts
 .github/scripts/*
 !.github/scripts/apply_dev_version.py
+# Compliance contract tests read these workflow sources in runtime test images.
+!.github/workflows
+.github/workflows/*
+!.github/workflows/pr.yaml
+!.github/workflows/shared-compliance-audit.yml
 **/*backup*/
 .dockerignore
 **/target/*

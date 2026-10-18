@@ -6,13 +6,13 @@
 # container/compliance/overrides.py via license_overrides.lookup(), which every
 # NOTICES generator calls before falling back to UNKNOWN.
 #
-# Match is by (ecosystem, name) — version-agnostic. If a package legitimately
-# changes license across versions, add separate entries with the version baked
-# into the name (e.g. cuda-nvcc-12-9 vs cuda-nvcc-13-0).
+# Match is by (ecosystem, name), with an optional exact version. Version-specific
+# entries take precedence; existing version-agnostic entries remain supported.
 #
 # Schema:
 #   ecosystem: rust | go | python | dpkg | native
 #   name:      package name (must match exactly what the SBOM/metadata reports)
+#   version:   optional exact package version; omit for version-agnostic matches
 #   license:   SPDX expression OR LicenseRef-* identifier
 #   source:    REQUIRED audit trail — link to the upstream LICENSE/EULA URL
 #              that establishes this license, OR a justification for why we're
@@ -24,6 +24,14 @@
 # the policy gate will reject it.
 
 overrides:
+  # The exact release's source archive bundles Apache 2.0 LICENSE text and its
+  # Cargo.toml declares the same license; its Python metadata omits the field.
+  - ecosystem: python
+    name: oss-harmony
+    version: "0.0.11"
+    license: Apache-2.0
+    source: "Verified LICENSE and Cargo.toml in https://files.pythonhosted.org/packages/43/88/ca56e5b17df4763bbb552c7be3abe432b51db3c51f6327a3848b88ad7c08/oss_harmony-0.0.11.tar.gz (sha256: ccad467b71d61490df1f2204b7a064990833338615ac135536c5b3a8e2d03a15)"
+
   # --- NVIDIA CUDA Python wheels ---
   # Most ship via pypi.nvidia.com; the wheel METADATA's License field is empty
   # or contains marketing prose. The actual EULA is bundled in the wheel
@@ -303,6 +311,7 @@ overrides:
   - { ecosystem: dpkg, name: libnvjpeg-dev-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: libnvptxcompiler-13-0,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: libnvvm-13-0,                     license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: dpdk-community,                   license: "BSD-3-Clause", source: "Upstream DPDK core libraries and drivers — https://doc.dpdk.org/guides/contributing/patches.html#source-license" }
   - { ecosystem: dpkg, name: mlnx-dpdk,                        license: "BSD-3-Clause", source: "Mellanox build of upstream DPDK — https://www.dpdk.org/about/legal/" }
 
   # --- NVIDIA DOCA SDK (cuda-dl-base 25.11 ships these) ---
@@ -396,6 +405,7 @@ overrides:
   - { ecosystem: python, name: vsa,                       license: "Apache-2.0",  source: "vsa (visual self-attention, sglang component) — Apache-2.0" }
 
   # --- Sglang v0.5.18 — Python packages with missing license metadata ---
+  - { ecosystem: python, name: nvshmem4py-cu13,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA NVSHMEM Software License Agreement — https://docs.nvidia.com/nvshmem/api/eula.html" }
   - { ecosystem: python, name: omegaconf,                  license: "BSD-3-Clause", source: "OmegaConf upstream — https://github.com/omry/omegaconf/blob/main/LICENSE" }
   - { ecosystem: python, name: sgl-deep-ep,                license: "MIT",          source: "SGLang DeepEP — https://github.com/sgl-project/DeepEP/blob/main/LICENSE" }
   - { ecosystem: python, name: webencodings,               license: "BSD-3-Clause", source: "webencodings upstream — https://github.com/gsnedders/python-webencodings/blob/master/LICENSE" }
@@ -996,6 +1006,13 @@ overrides:
   - { ecosystem: dpkg, name: libwayland-client0, license: "MIT", source: "Ubuntu 24.04 libwayland-client0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
   - { ecosystem: dpkg, name: libwayland-cursor0, license: "MIT", source: "Ubuntu 24.04 libwayland-cursor0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
   - { ecosystem: dpkg, name: libwayland-egl1, license: "MIT", source: "Ubuntu 24.04 libwayland-egl1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  # This package's copyright omits the DEP-5 Format header. Both architectures
+  # ship identical X11/MIT Expat terms; keep Mesa's runtime dependency installed.
+  - ecosystem: dpkg
+    name: libwayland-server0
+    version: "1.22.0-2.1build1"
+    license: "MIT"
+    source: "Ubuntu package copyright: https://ports.ubuntu.com/ubuntu-ports/pool/main/w/wayland/libwayland-server0_1.22.0-2.1build1_arm64.deb"
   - { ecosystem: dpkg, name: libxcb-dri3-0, license: "MIT", source: "Ubuntu 24.04 libxcb-dri3-0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
   - { ecosystem: dpkg, name: libxcb-glx0, license: "MIT", source: "Ubuntu 24.04 libxcb-glx0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
   - { ecosystem: dpkg, name: libxcb-present0, license: "MIT", source: "Ubuntu 24.04 libxcb-present0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }

@@ -45,7 +45,7 @@ RUN apt-get update && \
         openssl && \
     rm -rf /var/lib/apt/lists/* && \
     ldconfig && \
-    ldconfig -p | grep -q 'libturbojpeg.so.0'
+    ldconfig -p | grep -F 'libturbojpeg.so.0' >/dev/null
 {% else %}
 # Install the TurboJPEG runtime used by frontend JPEG decoding.
 RUN apt-get update && \
@@ -53,7 +53,7 @@ RUN apt-get update && \
         libturbojpeg && \
     rm -rf /var/lib/apt/lists/* && \
     ldconfig && \
-    ldconfig -p | grep -q 'libturbojpeg.so.0'
+    ldconfig -p | grep -F 'libturbojpeg.so.0' >/dev/null
 {% endif %}
 
 # Create dynamo user with group 0 for OpenShift compatibility
@@ -201,8 +201,19 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 # it properly. The XPU image is not published, so there is nothing to remove from
 # it in the first place; the codec gate skips it for the same reason. Matches the
 # equivalent purge in vllm_runtime.Dockerfile.
+# The Muse Spark Open base also installs the Ubuntu FFmpeg/media dependency
+# stack outside the Python and /usr/local paths removed below. Purge only the
+# rejected media package families; do not autoremove, which could sweep unrelated
+# CUDA/JIT dependencies. Keep this list scoped to packages found in that media
+# stack so networking and the non-media runtime remain untouched.
 {% if device == "cuda" %}
 RUN set -eux; \
+    media_packages="$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
+        | grep -E '^(ffmpeg|libass[0-9]|libavc1394|libav(codec|device|filter|format|util|resample)|libbluray|libbs2b|libcaca|libcdio|libchromaprint|libcodec2|libdc1394|libflite|libgme|libgsm|libiec61883|libjack|libmp3lame|libpocketsphinx|libpostproc|libpulse|libraw1394|librubberband|libsdl2|libshine|libsndfile|libsoxr|libsphinxbase|libsrt[0-9]|libsvtav1|libsw(resample|scale)|libtwolame|libudfread|libvidstab|libx264|libx265|libxvidcore|libzvbi)' \
+        || true)"; \
+    if [ -n "${media_packages}" ]; then \
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y ${media_packages}; \
+    fi; \
     python3 -m pip uninstall --yes \
         av \
         decord \
@@ -238,7 +249,75 @@ RUN set -eux; \
         /usr/local/lib/pkgconfig/libsw*.pc \
         /usr/local/src/ffmpeg \
         /root/.cache/pip; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/*; \
     ldconfig
+
+# The soundfile wheel carries the libsndfile implementation used by MuseSpark.
+# Exercise an actual WAV encode/decode after the distro media stack is removed;
+# an import-only check would not catch a missing shared-library dependency.
+RUN python3 -c 'import io; import soundfile as sf; import torchaudio; b = io.BytesIO(); sf.write(b, [0.0], 16000, format="WAV"); b.seek(0); data, rate = sf.read(b); assert rate == 16000 and len(data) == 1'
+{% endif %}
+
+{% if device == "cuda" and target not in ("dev", "local-dev") %}
+# The SGLang development base includes GUI, packaging, debugging and kernel
+# module build tools that serving does not use. Remove these before generating
+# the runtime SBOM. Keep the compiler, CUDA/JIT headers and userspace RDMA/GDRCopy
+# libraries; the node supplies the kernel driver. Do not use autoremove.
+# Preserve the graphics libraries present in the qualified runtime. The public
+# base's Mesa version also needs libwayland-server0; its verified license is
+# recorded in license_overrides.yaml rather than removing that dependency.
+RUN set -eux; \
+    candidates='at-spi2-common autoconf automake autopoint autotools-dev \
+        bear bsdextrautils check cloc dbus-user-session dconf-gsettings-backend \
+        dconf-service debhelper debugedit dh-autoreconf dh-strip-nondeterminism \
+        dkms dwz fakeroot gdb gdrdrv-dkms gettext gettext-base \
+        gfortran-13 gfortran-13-aarch64-linux-gnu gfortran-13-x86-64-linux-gnu \
+        googletest groff-base gtk-update-icon-cache hicolor-icon-theme htop \
+        humanity-icon-theme intltool-debian kmod libatk-bridge2.0-0t64 \
+        libatk1.0-0t64 libatspi2.0-0t64 libavahi-client3 libavahi-common-data \
+        libavahi-common3 libbabeltrace1 libc-ares-dev libcolord2 libdconf1 \
+        libdebhelper-perl libdebuginfod-common libdebuginfod1t64 libdw-dev \
+        libear libegl1 libelf-dev libevdev2 libevent-2.1-7t64 libevent-dev \
+        libevent-extra-2.1-7t64 libevent-openssl-2.1-7t64 libfakeroot \
+        libfile-stripnondeterminism-perl libgd3 libgfortran-13-dev libgrpc++-dev \
+        libgrpc-dev libgtest-dev libgtk-3-0t64 libgtk-3-common libgudev-1.0-0 \
+        libheif-plugin-aomdec libheif1 libhwloc-dev libinput-bin libinput10 \
+        libjs-underscore libjsoncpp-dev libltdl-dev libltdl7 liblzma-dev \
+        libnl-genl-3-200 libnotify4 libopenmpi-dev libpipeline1 libpmix-dev \
+        libpython3-dev libqt5core5t64 libqt5dbus5t64 libqt5gui5t64 \
+        libqt5network5t64 libqt5printsupport5t64 libqt5widgets5t64 \
+        libsource-highlight-common libsource-highlight4t64 libsystemd-dev \
+        libtirpc-common libtirpc3t64 libtool libuchardet0 libunwind-dev \
+        libutempter0 libwxbase3.2-1t64 libwxgtk3.2-1t64 \
+        libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 \
+        libxcb-util1 libxcb-xinerama0 libxcb-xinput0 libxcb-xkb1 \
+        libxcomposite1 libxdamage1 libxinerama1 libxkbcommon-x11-0 libxpm4 \
+        libxtst6 lsof m4 man-db mpi-default-bin mpi-default-dev \
+        nsight-systems-cli nsight-systems-cli-2026.4.1 openmpi-bin openmpi-common \
+        pahole patchutils po-debconf protobuf-compiler-grpc python3-dev \
+        silversearcher-ag tree ubuntu-mono uuid-dev wdiff zsh zsh-common'; \
+    packages="$(dpkg-query -W -f='${Package} ${db:Status-Status}\n' ${candidates} 2>/dev/null \
+        | awk '$2 == "installed" { print $1 }' || true)"; \
+    if [ -n "${packages}" ]; then \
+        apt-get --simulate purge ${packages} > /tmp/sglang-purge-plan; \
+        cat /tmp/sglang-purge-plan; \
+        if awk '$1 == "Remv" || $1 == "Purg" { print $2 }' /tmp/sglang-purge-plan \
+            | grep -E '^(build-essential|cmake|make|ninja-build|pkg-config|python3|python3-minimal|python3\.[0-9]+(-dev|-minimal|-venv)?|libpython3\.[0-9]+.*|gcc(-.*)?|g\+\+(-.*)?|cuda-.*|libcublas.*|libcufft.*|libcufile.*|libcurand.*|libcusolver.*|libcusparse.*|libnpp.*|libnv.*|libnccl.*|libgdrapi.*|libibverbs.*|ibverbs-providers|librdmacm.*|libmlx.*|libnuma.*|libssl.*|libuv[0-9].*|libzmq.*|libczmq[0-9].*|libevent-(core|pthreads).*|libhwloc[0-9].*|libpmix[0-9].*|libopenmpi[0-9].*|libelf[0-9].*|libdw[0-9].*|libgbm1|libgl1|libgl1-mesa-dri|libglx-mesa0|libglx0|libwayland-server0|libc6(-dev)?|zlib1g(-dev)?|liblzma[0-9].*)$'; then \
+            echo 'ERROR: SGLang cleanup would remove serving or JIT dependencies' >&2; \
+            exit 1; \
+        fi; \
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y ${packages}; \
+        rm /tmp/sglang-purge-plan; \
+    fi; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/*; \
+    ldconfig; \
+    for tool in c++ cmake make nvcc; do command -v "${tool}"; done; \
+    test -f /usr/include/gdrapi.h; \
+    printf '%s\n' '#include <Python.h>' 'int main() { return 0; }' \
+        | c++ -fsyntax-only -x c++ -I"$(python3 -c 'import sysconfig; print(sysconfig.get_path("include"))')" -
+ENV GDRCOPY_HOME=/usr
 {% endif %}
 
 # Drop the Nsight efa_metrics plugin the CUDA floor carries: a Go NIC sampler

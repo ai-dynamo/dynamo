@@ -68,6 +68,7 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
             .unwrap(),
         nvext: None,
         chat_template_args: None,
+        responses_tools: None,
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
@@ -338,6 +339,7 @@ fn test_serialization_preserves_structure() {
             ..Default::default()
         }),
         chat_template_args: None,
+        responses_tools: None,
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
@@ -392,6 +394,7 @@ fn test_sampling_parameters_extraction() {
             .unwrap(),
         nvext: None,
         chat_template_args: None,
+        responses_tools: None,
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,

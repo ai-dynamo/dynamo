@@ -116,3 +116,34 @@ linux_<arch>/
 Detection is conservative: only unambiguous matches get an SPDX identifier. `UNKNOWN`
 fails the policy gate, surfacing the package for an explicit override in
 `license_overrides.yaml` or a signed-off `[[exceptions]]` entry in `policy/licenses.toml`.
+
+## Runtime completeness
+
+CUDA runtimes and the frontend scan installed Rust and Go binaries in the
+licenses stage with pinned Syft 1.44.0. `binary_dependencies.py` resolves exact
+crate/module versions, verifies crates.io archive checksums, and harvests full
+upstream LICENSE, COPYRIGHT and NOTICE files. UV workspace modules resolve from
+their matching UV tag. Cobra's generated-project license templates do not
+replace the license of Cobra itself. Scanner tools and caches stay out of the
+runtime; binary inventories and Go license evidence are included under `/legal`.
+
+Python discovery covers system packages, hidden/versioned environments such as
+`/opt/framework-runtime/.venv-3.12`, explicitly vendored distributions, and the
+nested CUTLASS generation scripts. Copied CPython interpreters have their own
+native attribution. PuLP's bundled CBC solver has a separate native
+EPL-1.0 entry, its own full license text, and RECORD-backed ownership evidence
+in `bundled-native-provenance.json`; PuLP's MIT license and the unrelated Rust
+`cbc` crate cannot cover it. Wheel notices retain all bundled license and notice files;
+dpkg notices retain the complete Debian copyright file, including custom NRL
+acknowledgments. Removed dpkg entries remain attributed while conffiles ship.
+
+The reviewed `soxr` 1.1.0 exception always ships its checksum-verified source
+archive and rebuild/relink instructions at `/legal/sources/soxr-1.1.0`, including
+PR builds with optional source archival disabled.
+
+The independent audit is a required backend check on both architectures. It
+uses the exact architecture's published baseline and fails on missing installed attribution or license-policy
+violations. Rust/Go binary dependency versions must match exactly. Cargo.lock
+declarations remain available in a separate report because declarations alone
+do not establish binary linkage. Launcher/template ownership exceptions require
+actual package file records; they never hide independent vendored packages.

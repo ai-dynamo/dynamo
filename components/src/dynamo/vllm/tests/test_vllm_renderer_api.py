@@ -22,7 +22,7 @@ _vllm = importlib.import_module("vllm")
 _chat_protocol = importlib.import_module(
     "vllm.entrypoints.openai.chat_completion.protocol"
 )
-_engine_protocol = importlib.import_module("vllm.entrypoints.openai.engine.protocol")
+_engine_protocol = importlib.import_module("vllm.entrypoints.generate.base.protocol")
 _inputs_data = importlib.import_module("vllm.inputs")
 _reasoning = importlib.import_module("vllm.reasoning")
 _sampling_params = importlib.import_module("vllm.sampling_params")
@@ -394,6 +394,12 @@ class TestVllmRendererApi:
         core_request_fields = core_request_fields + tuple(
             (*fields, "session_id") for fields in core_request_fields
         )
+        # The 22ba09 private vLLM base adds optional KV hints after session_id.
+        # Dynamo leaves them unset; retain the exact field-order contract and
+        # verify the default below rather than accepting arbitrary new fields.
+        core_request_fields = core_request_fields + tuple(
+            (*fields, "kv_hints") for fields in core_request_fields
+        )
         # vllm-omni monkey-patches EngineCoreRequest with an extra field, which
         # lands after every field vLLM declares.
         valid_request_fields = core_request_fields + tuple(
@@ -412,7 +418,10 @@ class TestVllmRendererApi:
             f"Actual:          {actual_request_fields}\n"
             "Update request construction in components/src/dynamo/frontend/vllm_processor.py"
         )
-        if "session_id" in actual_request_fields:
+        optional_request_fields = {"session_id", "kv_hints"}.intersection(
+            actual_request_fields
+        )
+        if optional_request_fields:
             request_defaults = dict(
                 zip(
                     actual_request_fields[
@@ -422,7 +431,8 @@ class TestVllmRendererApi:
                     strict=True,
                 )
             )
-            assert request_defaults["session_id"] is None
+            for field in optional_request_fields:
+                assert request_defaults[field] is None
 
         base_output_fields = (
             "request_id",
@@ -469,16 +479,22 @@ class TestVllmRendererApi:
             base_output_fields,
             cached_token_output_fields,
         )
-        # vLLM 0.28 appends optional multimodal cache-miss and sampling-mask
-        # payloads. Dynamo does not enable either feature, so both retain their
-        # None defaults, but their declaration order remains part of vLLM's
-        # array-like wire contract.
-        vllm_028_output_extra_fields = (
+        # The pinned downstream vLLM appends optional cache-miss, sampling-mask,
+        # and speculative-decoding payloads. Dynamo does not enable these
+        # features, so they retain their None defaults, but their declaration
+        # order remains part of vLLM's array-like wire contract.
+        vllm_output_extra_fields = (
             "mm_cache_miss_hashes",
             "new_sampling_mask",
+            "spec_decode_metrics",
         )
         core_output_fields = core_output_fields + tuple(
-            fields + vllm_028_output_extra_fields for fields in core_output_fields
+            fields + vllm_output_extra_fields for fields in core_output_fields
+        )
+        # 22ba09 also appends prompt-token scoring. The frontend constructs
+        # EngineCoreOutput by keyword and leaves this optional field unset.
+        core_output_fields = core_output_fields + tuple(
+            (*fields, "prompt_token_id_logprobs") for fields in core_output_fields
         )
         valid_output_fields = core_output_fields + tuple(
             fields + omni_output_extra_fields for fields in core_output_fields
@@ -490,6 +506,15 @@ class TestVllmRendererApi:
             f"Actual:          {actual_output_fields}\n"
             "Update output mapping in components/src/dynamo/frontend/vllm_processor.py"
         )
+        if "prompt_token_id_logprobs" in actual_output_fields:
+            output_defaults = dict(
+                zip(
+                    actual_output_fields[-len(EngineCoreOutput.__struct_defaults__) :],
+                    EngineCoreOutput.__struct_defaults__,
+                    strict=True,
+                )
+            )
+            assert output_defaults["prompt_token_id_logprobs"] is None
 
         req_config = getattr(EngineCoreRequest, "__struct_config__", None)
         out_config = getattr(EngineCoreOutput, "__struct_config__", None)
@@ -518,6 +543,8 @@ class TestVllmRendererApi:
             assert output.mm_cache_miss_hashes is None
         if "new_sampling_mask" in EngineCoreOutput.__struct_fields__:
             assert output.new_sampling_mask is None
+        if "spec_decode_metrics" in EngineCoreOutput.__struct_fields__:
+            assert output.spec_decode_metrics is None
         assert output.finish_reason is FinishReason.STOP
         assert output.stop_reason == "eos"
 

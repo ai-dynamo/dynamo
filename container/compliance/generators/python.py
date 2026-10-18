@@ -27,6 +27,7 @@ from __future__ import annotations
 import email
 import email.parser
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -286,9 +287,47 @@ def _resolve_site_packages(search_paths: list[Path]) -> list[Path]:
         for site in p.glob("lib/python*/site-packages"):
             if site.is_dir():
                 out.add(site.resolve())
-        if p.is_dir() and any(p.glob("*.dist-info")):
+        if p.is_dir() and (
+            p.name in {"site-packages", "dist-packages"}
+            or any(p.glob("*.dist-info"))
+            or any(p.glob("*.egg-info"))
+        ):
             out.add(p.resolve())
+    # Vendored distributions carry independent license terms. Follow only
+    # explicit vendor roots, not arbitrary test-data / example dist-info trees.
+    pending = list(out)
+    while pending:
+        site = pending.pop()
+        for pattern in (
+            "*/_vendor",
+            "*/vendor",
+            "tensorrt_llm/include/trtllm_gen_kernels/fmha/cutlass/python",
+        ):
+            for vendor in site.glob(pattern):
+                if vendor.is_dir() and vendor.resolve() not in out:
+                    out.add(vendor.resolve())
+                    pending.append(vendor)
     return sorted(out)
+
+
+def installed_search_paths(root: Path = Path("/")) -> list[Path]:
+    """All installed system/venv package roots, including system-site-packages.
+
+    Do not import packages or execute a different interpreter. Enumerate only
+    known installation layouts, leaving caches and test fixtures out.
+    """
+    paths = set()
+    for prefix in (root / "usr", root / "opt"):
+        for directory, children, _ in os.walk(prefix, followlinks=False):
+            path = Path(directory)
+            if (
+                path.name in {"site-packages", "dist-packages"}
+                and re.fullmatch(r"python\d+(?:\.\d+)?", path.parent.name)
+                and path.parent.parent.name in {"lib", "lib64"}
+            ):
+                paths.add(path)
+                children[:] = []
+    return sorted(paths)
 
 
 def _read_license_text(dist_info_dir: Path) -> str | None:
@@ -297,20 +336,23 @@ def _read_license_text(dist_info_dir: Path) -> str | None:
     Modern wheels put it under <dist-info>/licenses/LICENSE (PEP 639). Older
     wheels use <dist-info>/LICENSE or LICENSE.txt at the top of the dir.
     """
-    candidates = [
-        dist_info_dir / "licenses" / "LICENSE",
-        dist_info_dir / "licenses" / "LICENSE.txt",
-        dist_info_dir / "LICENSE",
-        dist_info_dir / "LICENSE.txt",
-        dist_info_dir / "LICENSE.md",
-    ]
-    for path in candidates:
-        if path.is_file():
-            try:
-                return path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-    return None
+    candidates = set()
+    for directory in (dist_info_dir, dist_info_dir / "licenses"):
+        if directory.is_dir():
+            candidates.update(
+                path
+                for path in directory.rglob("*")
+                if path.is_file()
+                and path.name.upper().startswith(
+                    ("LICENSE", "LICENCE", "COPYING", "NOTICE", "AUTHORS", "COPYRIGHT")
+                )
+            )
+    texts = []
+    for path in sorted(candidates):
+        body = path.read_text(encoding="utf-8", errors="replace").strip()
+        if body:
+            texts.append(f"--- {path.relative_to(dist_info_dir)} ---\n\n{body}")
+    return "\n\n".join(texts) or None
 
 
 def _extract_metadata_field(
@@ -393,19 +435,48 @@ def _resolve_spdx(
     return UNKNOWN
 
 
-def collect_components(search_paths: list[Path]) -> list[Component]:
+def collect_components(
+    search_paths: list[Path],
+    dpkg_components: list[Component] | None = None,
+    dpkg_root: Path = Path("/"),
+) -> list[Component]:
     """Walk each site-packages dir, parse *.dist-info/METADATA, return Components."""
     sites = _resolve_site_packages(search_paths)
     if not sites:
         logger.warning("No site-packages dirs resolved from %s", search_paths)
         return []
 
+    # System Python distributions are covered by the Debian package whose
+    # installed-file record owns their metadata. Keep unowned and vendored
+    # distributions independent; a directory prefix alone is never coverage.
+    owners: dict[Path, set[str]] = {}
+    attributed = {p.name for p in dpkg_components or [] if p.spdx != UNKNOWN}
+    info = dpkg_root / "var/lib/dpkg/info"
+    for package in dpkg_components or []:
+        lists = [info / f"{package.name}.list", *info.glob(f"{package.name}:*.list")]
+        for listing in lists:
+            if not listing.is_file():
+                continue
+            for filename in listing.read_text().splitlines():
+                if filename.startswith("/usr/lib/python3/dist-packages/"):
+                    path = dpkg_root / filename.lstrip("/")
+                    owners.setdefault(path, set()).add(package.name)
     components: list[Component] = []
     for site in sites:
-        dist_infos = sorted(site.glob("*.dist-info"))
+        dist_infos = sorted([*site.glob("*.dist-info"), *site.glob("*.egg-info")])
         for dist_info in dist_infos:
-            metadata_path = dist_info / "METADATA"
+            metadata_path = dist_info / (
+                "PKG-INFO" if dist_info.suffix == ".egg-info" else "METADATA"
+            )
             if not metadata_path.is_file():
+                continue
+            metadata_owners = owners.get(metadata_path, set())
+            if len(metadata_owners) == 1 and metadata_owners <= attributed:
+                logger.info(
+                    "Python metadata %s is attributed by Debian package %s",
+                    metadata_path,
+                    next(iter(owners[metadata_path])),
+                )
                 continue
             try:
                 metadata_text = metadata_path.read_text(
@@ -431,6 +502,16 @@ def collect_components(search_paths: list[Path]) -> list[Component]:
             # when the wheel ships none, fall back to the canonical SPDX text
             # for the identifier (render_notices adds the no-license-file note).
             license_text = _read_license_text(dist_info)
+            if (
+                name == "cutlass_library"
+                and dist_info.name == "cutlass_library.egg-info"
+                and site.as_posix().endswith("/trtllm_gen_kernels/fmha/cutlass/python")
+            ):
+                license_path = site.parent / "LICENSE.txt"
+                if license_path.is_file():
+                    license_text = license_path.read_text(encoding="utf-8")
+                    if "SPDX-License-Identifier: BSD-3-Clause" in license_text:
+                        spdx = "BSD-3-Clause"
             is_canonical = False
             if license_text is None:
                 license_text = spdx_license_text(spdx)
@@ -461,6 +542,8 @@ def generate(
     search_paths: list[Path],
     output_dir: Path,
     subtract: set[tuple[str, str]] | None = None,
+    dpkg_components: list[Component] | None = None,
+    dpkg_root: Path = Path("/"),
 ) -> list[Component]:
     """Read METADATA from each search path, write NOTICES-Python.txt + python-deps.csv.
 
@@ -469,7 +552,7 @@ def generate(
     """
     from . import common
 
-    components = collect_components(search_paths)
+    components = collect_components(search_paths, dpkg_components, dpkg_root)
     if subtract:
         components = common.subtract_baseline(components, subtract)
     common.write_notices(ECOSYSTEM, components, output_dir)

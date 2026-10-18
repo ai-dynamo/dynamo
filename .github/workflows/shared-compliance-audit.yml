@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Independent compliance completeness audit. Syft-scans the FINAL pushed image,
-# subtracts the baseline SBOM, and reports any shipped component missing from the
-# build's unified osrb-deps.csv — the authoritative "did the generators miss
-# anything" check that verify_sbom_diff never was (it only compared our own
-# outputs). Runs as a sibling job (needs:[<fw>-build]) IN PARALLEL with the test
-# jobs so the slow syft pull+scan never blocks testing. SOFT GATE: report-only
-# (no --fail-on-findings) until the name-normalization is proven low-noise; the
-# job is not a required check.
+# Independent final-image compliance audit. Syft-scans the FINAL pushed image,
+# subtracts the baseline SBOM, and produces two reports: shipped components
+# missing from the build's unified osrb-deps.csv, and license-policy violations
+# found directly in the final filesystem scan. Runs as a sibling job
+# (needs:[<fw>-build]) IN PARALLEL with the test jobs so the slow syft pull+scan
+# never blocks testing. Scanner failures, missing attribution and license
+# violations fail the audit and required backend-status-check.
 name: Shared Compliance Audit
 
 on:
@@ -31,15 +30,24 @@ on:
         description: 'Plain image tag prefix from the build job (also the compliance artifact prefix)'
         required: true
         type: string
+      baseline_sbom_file_arm64:
+        description: ARM64 baseline override for hybrid upstream images
+        required: false
+        type: string
+        default: ''
       baseline_sbom_file:
-        description: 'Baseline SBOM stem from the build job (needs.<fw>-build.outputs.baseline_sbom_file); we append -amd64.cdx.json. Empty = audit full image.'
+        description: 'Baseline SBOM stem from the build job (needs.<fw>-build.outputs.baseline_sbom_file); we append the native architecture. Empty = audit full image.'
         required: false
         type: string
         default: ''
 
 jobs:
   audit:
-    name: Compliance audit
+    name: Compliance audit (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [amd64, arm64]
     # syft catalogs the FULL multi-GB image. Runner history (every PR pool has a
     # distinct wall for 15-20GB CUDA images):
     #   small-v2       : disk too small (dies on all large images)
@@ -47,10 +55,10 @@ jobs:
     #   deploy-tester-v1: IRSA role lacks ECR -> NoCredentials (Azure ACR + vCluster)
     #   prod-builder-v3: 482GB disk but the runner pod OOMs syft on large images
     #                    (sized to orchestrate REMOTE BuildKit, not scan locally)
-    # prod-tester-amd-v2 RUNS these images for tests, so it has the memory the
-    # builder lacked. Non-GPU tester (syft needs no GPU); registry scan is
-    # daemon-independent.
-    runs-on: prod-tester-amd-v2
+    # The native non-GPU tester pools RUN these images in tests, so they have the
+    # memory the builder lacked. Running each image on its matching architecture
+    # also makes the container rootfs and baseline subtraction architecture-exact.
+    runs-on: ${{ matrix.platform == 'amd64' && 'prod-tester-amd-v2' || 'prod-tester-arm-v2' }}
     # Run inside the shipped image itself (same runner combo as shared-test.yml,
     # proven on this pool): satisfies the runner's job-container requirement and
     # provides python3 for the audit. syft then scans the container's OWN
@@ -74,20 +82,18 @@ jobs:
         with:
           persist-credentials: false
       - name: Install syft
-        # Best-effort: the audit is a soft gate, so never hard-fail the job on a
-        # syft install hiccup — the scan step below is also continue-on-error.
-        continue-on-error: true
         shell: bash
         run: |
+          set -euo pipefail
           # Install into a runner-writable dir and put it on PATH (no sudo).
           # curl||wget — the shipped image normally has curl, but fall back so a
           # missing one doesn't silently no-op the audit.
           mkdir -p "${RUNNER_TEMP}/bin"
-          INSTALL_URL=https://raw.githubusercontent.com/anchore/syft/main/install.sh
+          INSTALL_URL=https://raw.githubusercontent.com/anchore/syft/v1.44.0/install.sh
           if command -v curl >/dev/null 2>&1; then
-            curl -sSfL "${INSTALL_URL}" | sh -s -- -b "${RUNNER_TEMP}/bin"
+            curl -sSfL "${INSTALL_URL}" | sh -s -- -b "${RUNNER_TEMP}/bin" v1.44.0
           else
-            wget -qO- "${INSTALL_URL}" | sh -s -- -b "${RUNNER_TEMP}/bin"
+            wget -qO- "${INSTALL_URL}" | sh -s -- -b "${RUNNER_TEMP}/bin" v1.44.0
           fi
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
       - name: Resolve image ref, baseline + artifact name
@@ -111,12 +117,15 @@ jobs:
           echo "artifact=compliance-${{ github.sha }}-${{ inputs.target_tag_plain }}" >> "$GITHUB_OUTPUT"
           # Baseline SBOM stem comes from the build job's output (it rendered the
           # Dockerfile with the deps it has), so the audit runner needs no
-          # render.py / PyYAML / pip. Append -amd64 to match the amd64 scan.
+          # render.py / PyYAML / pip. Append the native architecture.
           STEM="${{ inputs.baseline_sbom_file }}"
-          if [ -n "${STEM}" ] && [ -f "container/compliance/base_sboms/${STEM}-amd64.cdx.json" ]; then
-            echo "baseline=container/compliance/base_sboms/${STEM}-amd64.cdx.json" >> "$GITHUB_OUTPUT"
+          if [ "${{ matrix.platform }}" = "arm64" ] && [ -n "${{ inputs.baseline_sbom_file_arm64 }}" ]; then
+            STEM="${{ inputs.baseline_sbom_file_arm64 }}"
+          fi
+          if [ -n "${STEM}" ] && [ -f "container/compliance/base_sboms/${STEM}-${{ matrix.platform }}.cdx.json" ]; then
+            echo "baseline=container/compliance/base_sboms/${STEM}-${{ matrix.platform }}.cdx.json" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice::no amd64 baseline SBOM for stem '${STEM}'; auditing full image"
+            echo "::notice::no ${{ matrix.platform }} baseline SBOM for stem '${STEM}'; auditing full image"
             echo "baseline=" >> "$GITHUB_OUTPUT"
           fi
       - name: Download build compliance artifact
@@ -124,8 +133,8 @@ jobs:
         with:
           name: ${{ steps.resolve.outputs.artifact }}
           path: /tmp/compliance
-      - name: Syft scan (container fs) + audit vs osrb-deps.csv
-        continue-on-error: true   # soft gate — never block tests/merge
+      - name: Syft scan final container filesystem
+        id: scan
         shell: bash
         run: |
           set -euo pipefail
@@ -137,34 +146,76 @@ jobs:
           # actually shipped, not deps merely *declared* in source manifests that
           # framework images bundle (lmsysorg/sglang ships its repo: .github
           # workflows, go.mod, requirements.txt, pre-commit configs). rust-cargo-lock
-          # is added back because our Rust deps are only visible via Cargo.lock
-          # (the wheels aren't cargo-auditable) and they're the audit's main signal
-          # (e.g. vllm's aws-sdk crates). go-module-binary stays (installed), so
-          # the etcd/nats binaries are still attributed; only source go.mod drops.
+          # is added back to retain source declarations for separate review.
+          # The installed-only gate never treats a lockfile declaration as
+          # proof of binary linkage. Embedded Rust/Go module metadata remains
+          # an installed-component signal and must have exact attribution.
           # Excludes still skip virtual fs + GHA mounts (cheap; guards /proc etc.).
           syft dir:/ \
             --select-catalogers 'installed,+rust-cargo-lock-cataloger' \
             --exclude './proc/**' --exclude './sys/**' --exclude './dev/**' \
             --exclude './__w/**' --exclude './__e/**' --exclude './github/**' \
             --exclude './tmp/**' --exclude './run/**' --exclude './home/runner/**' \
+            -o syft-json=/tmp/syft.json \
             -o cyclonedx-json=/tmp/syft.cdx.json
-          OUR_CSV=$(find /tmp/compliance -path '*linux_amd64*' -name 'osrb-*.csv' | head -1)
-          [ -z "${OUR_CSV}" ] && OUR_CSV=$(find /tmp/compliance -name 'osrb-*.csv' | head -1)
+      - name: Select current architecture inventory
+        id: inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          csvs=(/tmp/compliance/linux_${{ matrix.platform }}/osrb-*-"${GITHUB_SHA:0:8}".csv)
+          if [ "${#csvs[@]}" -ne 1 ]; then
+            echo "::error::Expected one current ${{ matrix.platform }} OSRB inventory; found ${#csvs[@]}"
+            exit 1
+          fi
+          OUR_CSV="${csvs[0]}"
+          echo "csv=${OUR_CSV}" >> "$GITHUB_OUTPUT"
+      - name: Report final-image license-policy violations
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' && steps.inventory.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUR_CSV="${{ steps.inventory.outputs.csv }}"
+          BASE_ARG=""
+          [ -n "${{ steps.resolve.outputs.baseline }}" ] && BASE_ARG="--base-sbom ${{ steps.resolve.outputs.baseline }}"
+          PYTHONPATH=container python3 -m compliance.policy.validate_sbom \
+            --syft-sbom /tmp/syft.cdx.json \
+            ${BASE_ARG} \
+            --our-csv "${OUR_CSV}" \
+            --policy container/compliance/policy/licenses.toml \
+            --image "${{ steps.resolve.outputs.image_tag }}" \
+            --report /tmp/policy-report.txt \
+            --fail-on-findings
+      - name: Audit final image vs osrb-deps.csv
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' && steps.inventory.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUR_CSV="${{ steps.inventory.outputs.csv }}"
           echo "auditing against ${OUR_CSV}"
           BASE_ARG=""
           [ -n "${{ steps.resolve.outputs.baseline }}" ] && BASE_ARG="--base-sbom ${{ steps.resolve.outputs.baseline }}"
           PYTHONPATH=container python3 -m compliance.audit_image_sbom \
             --syft-sbom /tmp/syft.cdx.json \
+            --syft-json /tmp/syft.json \
             ${BASE_ARG} \
             --our-csv "${OUR_CSV}" \
             --image "${{ steps.resolve.outputs.image_tag }}" \
-            --report /tmp/audit-report.txt -v
+            --report /tmp/audit-report.txt \
+            --installed-only --declarations-report /tmp/source-declarations.txt \
+            --fail-on-findings -v
       - name: Upload audit report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          # compliance-audit-<git-sha>-<container>[-cudaN] (image_tag already carries all three).
-          name: compliance-audit-${{ steps.resolve.outputs.image_tag }}
-          path: /tmp/audit-report.txt
+          # Architecture suffix keeps the two native scan reports distinct.
+          name: compliance-audit-${{ steps.resolve.outputs.image_tag }}-${{ matrix.platform }}
+          path: |
+            /tmp/audit-report.txt
+            /tmp/policy-report.txt
+            /tmp/source-declarations.txt
+            /tmp/syft.cdx.json
+            /tmp/syft.json
           retention-days: 7
           if-no-files-found: ignore
