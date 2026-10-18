@@ -42,12 +42,15 @@ flowchart LR
        Client["Client"] --> Frontend["Frontend"]
        Frontend --> Worker["Aggregated worker<br/>Prefill and decode"]
        Worker --> Frontend
-       Discovery["Discovery<br/>Kubernetes or etcd"] -. membership .-> Frontend
-       Worker -. register .-> Discovery
+       Discovery["Runtime discovery view"] -. membership .-> Frontend
+       Etcd["etcd<br/>Lease-backed registrations"] -. updates .-> Discovery
+       KubeDiscovery["Kubernetes<br/>Pod, EndpointSlice, and worker metadata"] -. updates .-> Discovery
+       Worker -. register .-> Etcd
+       Worker -. health and readiness .-> KubeDiscovery
        Kubernetes["Kubernetes and Dynamo Operator"] -. pod lifecycle .-> Worker
        Optional["Optional startup and recovery helpers<br/>GMS, Snapshot, ModelExpress"] -. integrate .-> Worker
        class Client,Frontend,Worker request
-       class Discovery discovery
+       class Discovery,Etcd,KubeDiscovery discovery
        class Kubernetes platform
        class Optional optional
 ```
@@ -68,17 +71,20 @@ flowchart LR
        classDef discovery fill:#FFFDE7,stroke:#F9A825,color:#6D4C00
        classDef platform fill:#E8F5E9,stroke:#2E7D32,color:#1B5E20
        Client["Client"] --> Frontend["Frontend and router"]
-       Frontend --> Prefill["Prefill worker"]
-       Prefill --> Transfer["NIXL KV transfer"]
-       Transfer --> Decode["Decode worker"]
+       Frontend --> Prefill["Selected prefill worker"]
+       Prefill --> Metadata["Transfer metadata"]
+       Metadata --> Frontend
+       Frontend --> Decode["Selected decode worker"]
+       Decode -. requests KV transfer .-> Prefill
+       Prefill -. NIXL KV data .-> Decode
        Decode --> Frontend
-       Discovery["Discovery"] -. membership .-> Frontend
-       Prefill -. register .-> Discovery
-       Decode -. register .-> Discovery
+       Discovery["Runtime discovery view"] -. membership .-> Frontend
+       Prefill -. publish membership .-> Discovery
+       Decode -. publish membership .-> Discovery
        Kubernetes["Kubernetes and Dynamo Operator"] -. pod lifecycle .-> Prefill
        Kubernetes -. pod lifecycle .-> Decode
        class Client,Frontend,Prefill,Decode request
-       class Transfer transfer
+       class Metadata transfer
        class Discovery discovery
        class Kubernetes platform
 ```
@@ -98,15 +104,24 @@ flowchart TB
        classDef platform fill:#E8F5E9,stroke:#2E7D32,color:#1B5E20
        subgraph Request["Request level"]
            RequestError["Observe request or stream error"]
-           Migrate["Retry an eligible request"]
+           Eligible{"Migration enabled?<br/>Error and request eligible?"}
+           Migrate["Retry through routing"]
+           Fail["Return the request error"]
            RequestOutcome["Report request outcome"]
-           RequestError --> Migrate --> RequestOutcome
+           RequestError --> Eligible
+           Eligible -->|Yes| Migrate
+           Migrate --> RequestOutcome
+           Eligible -->|No| Fail
+           Fail --> RequestOutcome
        end
        subgraph Runtime["Runtime level"]
-           Membership["Observe membership or health change"]
-           Inhibit["Inhibit or remove failed endpoint"]
-           Rejoin["Observe replacement membership<br/>Readiness boundary varies"]
-           Membership --> Inhibit --> Rejoin
+           Membership["Observe discovery membership change"]
+           Remove["Add or remove endpoint from routing"]
+           PathFailure["Observe qualifying request-path failure"]
+           Inhibit["Temporarily inhibit endpoint"]
+           EligibleEndpoint["Observe eligible replacement or recovered endpoint"]
+           Membership --> Remove --> EligibleEndpoint
+           PathFailure --> Inhibit --> EligibleEndpoint
        end
        subgraph Platform["Platform level"]
            WorkloadFailure["Observe process, Pod, device, or node failure"]
@@ -114,28 +129,31 @@ flowchart TB
            Ready["Publish workload readiness<br/>Not endpoint eligibility"]
            WorkloadFailure --> Replace --> Ready
        end
-       RequestError -. may identify worker .-> Membership
+       RequestError -. may identify worker .-> PathFailure
        WorkloadFailure -. changes membership .-> Membership
-       Ready -. may enable registration .-> Rejoin
-       Rejoin -. may restore routing eligibility .-> Migrate
-       class RequestError,Migrate,RequestOutcome request
-       class Membership,Inhibit,Rejoin runtime
+       Ready -. may enable registration .-> EligibleEndpoint
+       EligibleEndpoint -. available to future routing .-> Migrate
+       class RequestError,Eligible,Migrate,Fail,RequestOutcome request
+       class Membership,Remove,PathFailure,Inhibit,EligibleEndpoint runtime
        class WorkloadFailure,Replace,Ready platform
 ```
 
-The request layer can retry eligible work, the runtime controls endpoint
-eligibility, and the platform restores capacity. The exact conditions for
-returning an endpoint to traffic vary by backend. Dynamo does not define one
-cross-backend return-to-service contract.
+The request layer classifies retry eligibility, the router selects a destination
+for each attempt, the runtime maintains endpoint eligibility, and the platform
+restores capacity. Discovery removal and temporary local inhibition are
+independent paths. The exact conditions for returning an endpoint to traffic
+vary by backend. Dynamo does not define one cross-backend return-to-service
+contract.
 
 ## Component Responsibilities
 
 | Component | Role in the healthy path | Failure signal | Action owned today |
 | --- | --- | --- | --- |
-| Frontend | Accepts, preprocesses, routes, and streams requests | Request setup or stream error and Frontend health state | Retry eligible requests when migration is enabled. Reject or fail requests that cannot migrate |
-| Distributed runtime | Registers endpoints and maintains the client routing view | Discovery membership update or request-path failure | Remove endpoints from routing through discovery. Temporarily inhibit a failed worker locally |
-| Router | Selects aggregated, prefill, or decode workers | Discovery, load, and request errors | Select another available endpoint for a new attempt. It does not restore failed capacity |
-| Backend worker and inference engine | Executes prefill or decode and reports endpoint readiness | Process exit, engine error, health-check failure, or backend-specific error | Stop serving or exit. Backend-specific cleanup and recovery behavior varies |
+| Frontend | Accepts, preprocesses, routes, and streams requests | Request setup or stream error and Frontend health state | Classify request-path failures and invoke the migrator when migration is enabled and the error and request are eligible. Return an error otherwise |
+| Distributed runtime | Maintains the client routing view from discovery membership and local health state | Backend-specific membership event or qualifying request-path failure | Propagate discovery additions and removals. Temporarily inhibit a failed endpoint after a qualifying request-path failure |
+| Discovery source | etcd stores lease-backed registrations. Kubernetes publishes Pod, EndpointSlice, and worker metadata state | Lease expiry or Kubernetes resource and readiness change | Supply membership changes to each runtime discovery client. It does not restore failed capacity |
+| Router | Selects aggregated, prefill, or decode workers for an initial or retry attempt | Discovery membership, endpoint eligibility, and load state | Select an available destination. The Frontend migrator, not the router, decides whether to retry |
+| Backend worker and inference engine | Executes prefill or decode and exposes backend health | Process exit, engine error, health-check failure, or backend-specific error | Stop serving or exit. Runtime registration, backend health, and Kubernetes readiness remain separate signals |
 | Kubernetes | Schedules Pods and evaluates liveness and readiness probes | Container exit, failed probe, Pod eviction, or node loss | Restart or replace Pods according to workload policy |
 | Dynamo Operator | Reconciles the graph and reports deployment state | Kubernetes resource status and controller reconciliation errors | Reconcile desired replicas and publish graph, component, restart, rolling-update, and checkpoint status |
 | NIXL | Transfers KV cache data between disaggregated workers | Backend-visible transfer or connection error | Report transport failure to the caller. It does not choose a recovery strategy |
@@ -153,10 +171,10 @@ shared recovery policy.
 | Feature | Current behavior | Boundary |
 | --- | --- | --- |
 | GPU Memory Service (GMS) | Keeps supported GPU allocations outside the engine process and lets supported backends attach to them | GMS manages GPU memory lifetime. It does not configure active and standby engines or preserve requests |
-| Shadow Engine Failover | Runs an active and standby engine workflow on the same healthy node and GPU allocation by using GMS-owned weights | Experimental. It handles selected process failures only. It does not preserve in-flight requests or KV cache, and it does not cover GMS, GPU, or node loss |
+| Shadow Engine Failover | Uses GMS-owned weights for an active and standby engine workflow. Intra-Pod mode runs two engine containers in one Pod. Inter-Pod mode runs engine pods and a dedicated GMS weight-server Pod per rank | Experimental. The workflow does not buffer new requests or preserve in-flight requests and KV cache. Intra-Pod and inter-Pod replacement paths differ, and neither covers GMS, GPU, or node loss |
 | Dynamo Snapshot | Uses the standalone Snapshot operator to capture and restore `PodSnapshot` resources | Experimental. DGD checkpoint settings control capture and startup policy. Snapshot does not select a failed worker recovery strategy |
-| ModelExpress | Streams model weights GPU-to-GPU to reduce replacement startup time | It does not detect failure, create replacement capacity, or establish application readiness |
-| NATS | Carries request or event traffic when selected | Failure handling belongs to the NATS deployment and the calling component |
+| ModelExpress | Streams model weights to reduce replacement startup time. The shared `fetch_model` helper falls back to direct download when it cannot connect, request the model, or resolve the downloaded path | Backend plugin paths can use different fallback behavior. ModelExpress does not detect worker failure, create replacement capacity, or establish application readiness |
+| NATS | Provides optional request/reply and event pub/sub transports. TCP is the default request plane, and ZeroMQ (ZMQ) is the default event plane | `DYN_REQUEST_PLANE=nats` and `DYN_EVENT_PLANE=nats` select independent paths. Dynamo does not define one reconnection, retry, or replay guarantee across them |
 
 See the [Fault Tolerance Overview](../../../../kubernetes/fault-tolerance/introduction.md#worker-fault-tolerance)
 for Shadow Engine Failover, the [Snapshot workflow](../../../../kubernetes/model-deployment/model-loading/snapshot.mdx)
@@ -171,32 +189,37 @@ Current mechanisms can be combined without forming one shared recovery policy.
 | --- | --- | --- |
 | Request continuity during worker loss | Compatible spare workers, discovery, local inhibition, and request migration | Only eligible requests migrate, and compatible spare capacity must remain |
 | Planned rollout or scale-down | Graceful shutdown, sufficient Pod termination time, and request migration | Kubernetes can terminate the Pod when its deadline expires |
-| Disaggregated pool continuity | Spare prefill and decode capacity, discovery, request migration, and workload replacement | Transfer failure or loss of an entire pool can still fail a request |
-| Same-node process recovery | Shadow Engine Failover with GMS on a supported backend and topology | Does not preserve requests or KV cache and does not cover GPU or node loss |
+| Disaggregated pool continuity | Spare prefill and decode capacity, discovery, request migration, and workload replacement | A transfer error causes migration only when the backend surfaces a migration-eligible request error. Loss of an entire pool can still fail a request |
+| GMS-backed engine failover | Shadow Engine Failover on a supported backend and intra-Pod or inter-Pod topology | The failover workflow does not buffer requests or preserve KV cache. Replacement differs by mode and does not cover GMS, GPU, or node loss |
 | Initialized-worker startup | Snapshot with a compatible artifact and supported backend | Accelerates startup but does not select failed-worker recovery |
-| Model-loading acceleration | ModelExpress with replacement capacity and backend readiness checks | Faster loading does not establish application readiness |
+| Model-loading acceleration | ModelExpress with replacement capacity and backend readiness checks | The shared helper has a direct-download fallback, but backend plugin behavior varies. Faster loading does not establish application readiness |
 | Tensor-parallel or multinode capacity restoration | Backend-specific recovery with the configured workload provider | Rank and cohort recovery behavior varies by backend and provider |
 
 ## Detection and Action Ownership
 
-| Failure scope | First observable signal | Detection owner | Action owner | Traffic behavior |
-| --- | --- | --- | --- | --- |
-| Request cannot connect to a worker | Request-plane error | Frontend or calling runtime client | Frontend migrator, when enabled | Failed worker is locally inhibited. An eligible request retries elsewhere |
-| Worker fails during generation | Stream error or termination | Frontend and runtime. Kubernetes also observes the Pod | Frontend handles the request. Kubernetes restores capacity | Eligible requests migrate. New routing follows discovery |
-| Planned worker termination | `SIGTERM` or `SIGINT` | Worker process and Kubernetes | Worker drains and unregisters. Kubernetes completes the rollout or scale-down | New work stops before admitted work drains |
-| Worker endpoint becomes stale | Discovery lease expiry or Kubernetes membership update | Discovery backend | Distributed runtime | Endpoint leaves normal routing |
-| Active health canary fails | Inference request timeout or error | Runtime health-check client | Runtime client and request owner | Failed endpoint is inhibited locally while discovery remains authoritative |
-| Engine process exits | Process and Pod state | Backend wrapper and Kubernetes | Backend cleanup, then Kubernetes restart or replacement | Capacity is unavailable until a ready endpoint registers |
-| GPU or node fails | Device plugin, node, Pod, or infrastructure status | Kubernetes and cluster health integrations | Kubernetes and the configured workload provider | Affected endpoints disappear. Replacement behavior depends on deployment policy |
-| Tensor-parallel rank fails | Engine or collective failure | Inference engine and process group | Backend and configured workload provider | The cohort is unavailable. Replacement behavior depends on the backend and provider |
-| Shadow engine fails over | Active engine process exit and failover state | Operator failover workflow and backend integration | Standby engine workflow | New traffic waits for the standby engine. In-flight requests and KV cache are not preserved |
-| Snapshot capture or restore fails | `SnapshotJob`, `PodSnapshot`, and Pod status | Standalone Snapshot operator and Dynamo Operator | Snapshot operator handles artifacts. DGD startup policy controls serving replica startup | `WaitForCheckpoint` keeps serving replicas gated. `Immediate` starts them cold |
-| NIXL transfer fails | Backend transfer error | Backend and NIXL | Request owner and backend | The request fails or migrates when eligible. NIXL does not restore the worker |
-| ModelExpress model loading fails | Loader, stream, or backend startup signal | ModelExpress or backend integration, depending on the failure | Deployment or backend integration, depending on the configured fallback | ModelExpress does not establish backend readiness or endpoint eligibility |
-| NATS request or event transport fails | Client or transport signal | NATS client or calling component | NATS deployment or calling component | Recovery behavior depends on the affected request or event plane |
+| Failure scope | First observable signal | Signal source | Observer or propagator | Action owner | Traffic behavior |
+| --- | --- | --- | --- | --- | --- |
+| Request cannot connect to a worker | Request-plane error | Transport or backend client | Frontend or calling runtime client | Frontend migrator, when enabled | A qualifying failure temporarily inhibits the endpoint. The request retries only when migration is enabled and the error and request are eligible |
+| Worker fails during generation | Stream error or termination | Backend or connection | Frontend and runtime. Kubernetes observes Pod state separately | Frontend handles the request. Kubernetes restores capacity | Eligible requests migrate when migration is enabled. New routing follows the runtime discovery view |
+| Planned worker termination | `SIGTERM` or `SIGINT` | Kubernetes or process supervisor | Worker process and Kubernetes | Worker drains and unregisters. Kubernetes completes the rollout or scale-down | New work stops before admitted work drains |
+| etcd registration becomes stale | Registration lease revocation or expiry | etcd | Runtime etcd discovery client | Distributed runtime | The endpoint leaves routing after the lease change propagates to the client view |
+| Kubernetes endpoint becomes stale | Pod, EndpointSlice, worker metadata, or readiness change | Kubernetes API and controllers | Runtime Kubernetes discovery client | Distributed runtime | The endpoint leaves routing after the membership or readiness change propagates to the client view |
+| Active health canary fails | Inference request timeout or error | Worker health endpoint | Runtime health-check client | Runtime client and request owner | The endpoint is inhibited locally while discovery membership remains authoritative |
+| Engine process exits | Process and Pod state | Backend wrapper and Kubernetes | Backend integration and Kubernetes | Backend cleanup, then Kubernetes restart or replacement | Capacity remains unavailable until backend health and runtime endpoint eligibility succeed |
+| GPU or node fails | Device plugin, node, Pod, or infrastructure status | Kubernetes and configured cluster integrations | Kubernetes and the workload provider | Kubernetes and the configured workload provider | Endpoints leave routing as readiness and membership changes propagate. With etcd discovery, removal follows lease revocation or expiry and watch propagation |
+| Tensor-parallel rank fails | Engine or collective failure | Inference engine and process group | Backend integration and workload provider | Backend and configured workload provider | The cohort is unavailable. Replacement behavior depends on the backend and provider |
+| Intra-Pod shadow engine fails over | Active engine process exit and failover state | Engine process and failover lock | Backend failover integration | Standby engine workflow | The workflow does not buffer new requests. Serving resumes after the standby becomes healthy and eligible. Earlier requests may fail or migrate when eligible |
+| Inter-Pod shadow engine cohort fails | Terminal engine Pod or cohort state | Kubernetes Pod state and failover labels | Failover cascade controller and Grove | Failover cascade controller and Grove | The failed engine group is recreated. The workflow does not buffer requests or preserve in-flight requests and KV cache |
+| Snapshot capture or restore fails | `SnapshotJob`, `PodSnapshot`, and Pod status | Snapshot and Kubernetes resources | Standalone Snapshot operator and Dynamo Operator | Snapshot operator handles artifacts. DGD startup policy controls serving replica startup | `WaitForCheckpoint` keeps serving replicas gated. `Immediate` starts them cold |
+| NIXL transfer fails | Backend-visible transfer or connection error | Backend and NIXL | Backend request path | Request owner and backend | The request fails unless the backend surfaces a migration-eligible error and migration is enabled and permitted for the request. NIXL does not initiate migration or restore the worker |
+| ModelExpress model loading fails | Connection, download, path-resolution, plugin, or backend startup error | ModelExpress client, backend plugin, or engine startup path | Calling loader or backend integration | The shared `fetch_model` helper falls back to direct download. Plugin and later startup failures follow their backend-specific paths | Model loading does not establish backend readiness or endpoint eligibility |
+| Optional NATS request transport fails | Request/reply client or transport signal | NATS request client | Calling runtime component | Calling component and NATS deployment | The affected request path may fail or apply caller-specific retry. Transport failure does not by itself remove worker membership |
+| Optional NATS event transport fails | Publish, subscription, or connection signal | NATS event client | Event producer or consumer | Calling component and NATS deployment | Effects depend on the event consumer. Dynamo does not define one replay or recovery guarantee |
 
-Detection and recovery can have different owners. The Frontend may detect and
-retry a broken request, while Kubernetes restores the lost capacity.
+Signal authority, observation, and recovery can have different owners. The
+Frontend can classify and retry a broken request while Kubernetes restores lost
+capacity. The runtime can update routing only after its selected discovery
+source propagates a membership change.
 
 ## Endpoint Removal and Rejoin
 
@@ -206,11 +229,13 @@ replacement, and return-to-service ordering vary by backend and deployment.
 
 | Mechanism | Removal from traffic | Recovery or replacement | Return to service | Status |
 | --- | --- | --- | --- | --- |
-| Runtime discovery | Membership loss or local inhibition removes or suppresses an endpoint | A replacement is created outside discovery | Registration and membership propagation make the endpoint visible again | Registration order is backend-specific. Dynamo does not define one return-to-service sequence |
-| Kubernetes workload | Failed Pod or node removes capacity | Kubernetes or the configured workload provider restarts or replaces capacity | Pod readiness and Dynamo endpoint eligibility are separate checks | Current platform boundary. Application readiness is component-specific |
-| Shadow Engine Failover | Failed active engine stops serving | A standby engine takes over on the same healthy node and GPU allocation | Backend and endpoint health must succeed before traffic returns | Detection and readiness span Operator and backend-specific signals |
-| ModelExpress-assisted startup | ModelExpress does not control removal from normal routing | Retry and fallback behavior are backend-specific | Backend and runtime determine readiness and registration | Dynamo does not define one ModelExpress fallback or registration sequence |
-| NATS transport | The affected request or event path may become unavailable without removing worker membership | Deployment and client recovery are plane-specific | Calling components resume when the required transport path is usable | Dynamo does not define one recovery sequence across request and event planes |
+| etcd runtime discovery | Lease revocation or expiry removes a stale registration from membership | A replacement is created outside discovery and registers with a new lease | Registration and watch propagation make the endpoint visible again | Lease changes and watch propagation are asynchronous |
+| Kubernetes runtime discovery | Pod, EndpointSlice, worker metadata, and readiness changes update membership | Kubernetes or the configured workload provider restores capacity | Kubernetes discovery propagates an eligible endpoint into the runtime view | Kubernetes readiness, runtime health, and endpoint eligibility remain separate checks |
+| Temporary local inhibition | A qualifying request-path or canary failure suppresses an endpoint in one client | Recovery occurs outside the local inhibition mechanism | The inhibition window expires, or a direct request bypasses it | Local inhibition does not change authoritative discovery membership |
+| Intra-Pod Shadow Engine Failover | The failed active engine stops serving | The standby engine wakes against the same GMS-managed allocation | Backend health and endpoint eligibility must succeed before traffic returns | The workflow does not buffer requests while the standby wakes |
+| Inter-Pod Shadow Engine Failover | A terminal engine Pod marks its failover group for replacement | The cascade controller removes the failed group, and Grove recreates the cohort | Recreated engines must become healthy and eligible | Cohort recreation differs from intra-Pod standby promotion |
+| ModelExpress-assisted startup | ModelExpress does not control removal from normal routing | The shared `fetch_model` path falls back to direct download. Backend plugin fallback varies | Backend and runtime determine health, registration, and eligibility | Dynamo does not define one ModelExpress fallback or registration sequence across load paths |
+| Optional NATS transport | A request or event path can become unavailable without removing worker membership | Deployment and client recovery are path-specific | Calling components resume when their selected NATS path is usable | Request/reply and event pub/sub are independent opt-ins with no common replay or recovery contract |
 
 See [Distributed Runtime](../system-architecture/architecture.md#distributed-runtime)
 for discovery and lease behavior, [Request Migration](../../../../kubernetes/fault-tolerance/request-migration.md)
@@ -229,10 +254,11 @@ for endpoint health states.
 | Tensor parallelism with all ranks on one node | Rank, process, Pod, or complete cohort | Engine-specific failure handling | Backend and workload-provider behavior is implementation-specific | One node failure removes the cohort. Fixed-rank recovery support is backend-specific |
 | Tensor parallelism across nodes | Rank, process, Pod, node, or complete cohort | Engine-specific failure handling | Cohort-recreation behavior depends on the backend and workload provider | Dynamo does not define common fixed-rank or cohort-recovery behavior |
 | Worker with GMS | Engine process on the same GPU allocation | Backend-specific memory reuse | Process supervisor or Kubernetes | GMS alone does not configure failover |
-| Worker with Shadow Engine Failover | Active engine process on the same healthy node and GPU allocation | Standby engine takes over by using GMS-owned weights | Shadow Engine Failover workflow | No in-flight request or KV-cache preservation. No coverage for GMS, GPU, or node loss |
+| Worker with intra-Pod Shadow Engine Failover | Active engine container within one Pod | Standby engine container wakes by using GMS-owned weights | Intra-Pod standby workflow | No request buffering, in-flight request preservation, or KV-cache preservation. No coverage for GMS, GPU, Pod, or node loss |
+| Worker with inter-Pod Shadow Engine Failover | Engine Pod or failover cohort | A standby engine Pod can acquire the active role. A terminal cohort is removed and recreated | Inter-Pod failover workflow, cascade controller, and Grove | No request buffering, in-flight request preservation, or KV-cache preservation. No coverage for GMS, GPU, or node loss |
 | Worker with Snapshot | New Pod startup | Restore from a ready compatible checkpoint | Dynamo Operator, Snapshot, and Kubernetes | Artifact readiness is tracked separately from runtime failure recovery |
-| Worker with ModelExpress | New Pod startup | Faster weight delivery | Kubernetes plus ModelExpress | Startup acceleration does not verify application readiness |
-| Deployment using NATS | Request or event transport path | Calling-component retry or NATS deployment recovery, when configured | NATS deployment and calling component | Dynamo does not define common recovery behavior across request and event planes |
+| Worker using the shared ModelExpress fetch path | New Pod startup | Faster weight delivery with direct-download fallback for client, request, and path-resolution failures | Kubernetes, the calling loader, and ModelExpress | Backend plugin paths differ. Startup acceleration does not verify application readiness |
+| Deployment using optional NATS transport | Request/reply or event pub/sub path | Calling-component handling or NATS deployment recovery | NATS deployment and calling component | TCP requests and ZMQ events remain the defaults. Dynamo does not define common retry, replay, or recovery behavior across the optional NATS paths |
 
 ## Enablement and Status
 
@@ -243,11 +269,12 @@ for endpoint health states.
 | Graceful shutdown | On by default for Dynamo workers | Process logs, endpoint discovery, and Pod status |
 | Active worker canaries | Runtime default is off. Operator-managed workers targeting Dynamo runtime 1.5.0 or newer default to on unless explicitly overridden | Runtime logs, health payloads, and request errors |
 | Kubernetes restart and replacement | Defined by the generated workload and Kubernetes policy | Pod, workload, and DGD status |
-| Shadow Engine Failover | Experimental. Enable the failover and GMS fields for a supported backend and topology | Failover state, backend logs, and endpoint health |
+| Shadow Engine Failover | Experimental. Enable the failover and GMS fields and select a supported intra-Pod or inter-Pod topology | Failover state, engine-group and Pod state, backend logs, and endpoint health |
 | Snapshot startup | Experimental. Configure DGD checkpoint support and select `Immediate` or `WaitForCheckpoint` | `SnapshotJob`, `PodSnapshot`, Pod readiness, and DGD status |
 | GMS memory reuse | Configure the backend GMS load format and integration flags | GMS lock state, backend logs, and engine readiness |
-| ModelExpress loading | Configure the backend ModelExpress loader and server | Backend startup logs and Pod readiness |
-| NATS transport | Configure NATS for the selected request or event path | NATS deployment status, client logs, and affected component status |
+| ModelExpress loading | Configure the shared fetch path or a backend ModelExpress plugin and server | Client fallback and backend startup logs, Pod readiness, and runtime endpoint eligibility |
+| NATS request transport | TCP is the default. Set `DYN_REQUEST_PLANE=nats` to select the optional NATS request/reply path | NATS deployment status, request-client logs, and affected component status |
+| NATS event transport | ZMQ is the default. Set `DYN_EVENT_PLANE=nats` to select NATS event pub/sub | NATS deployment status, event-client logs, and affected producer or consumer status |
 
 Use the [Health Check Reference](../../../../reference/observability/health-checks.mdx)
 for endpoint payloads and canary settings. See [Request Migration](../../../../kubernetes/fault-tolerance/request-migration.md)
@@ -260,12 +287,14 @@ and [Health Check Reference](../../../../reference/observability/health-checks.m
 
 ## Current Coverage Limits
 
-| Area | Current documented limit |
+| Area | Current limit |
 | --- | --- |
-| Endpoint lifecycle | Removal and return-to-service signals vary by backend. Dynamo does not define one cross-backend sequence |
+| Endpoint lifecycle | etcd lease changes and Kubernetes resource changes propagate through different discovery clients. Dynamo does not define one cross-backend removal or return-to-service sequence |
 | Replacement readiness | Kubernetes Pod readiness and Dynamo endpoint eligibility are separate. Dynamo does not define one end-to-end replacement-readiness contract |
-| ModelExpress fallback | Retry, fallback, and registration behavior vary by backend integration |
-| NATS recovery | Failure and recovery behavior depend on the request or event plane, NATS deployment, and calling component |
+| Shadow Engine Failover | Intra-Pod standby activation and inter-Pod cohort recreation use different replacement paths. Neither buffers requests or covers GMS, GPU, or node loss |
+| NIXL transfer failure | NIXL reports transfer failure. Request migration occurs only when the backend surfaces a migration-eligible error and the request remains eligible |
+| ModelExpress fallback | The shared `fetch_model` helper falls back to direct download for client, request, and path-resolution failures. Backend plugin fallback and later startup behavior vary |
+| NATS recovery | TCP requests and ZMQ events are the defaults. Optional NATS request/reply and event pub/sub paths have separate callers, and Dynamo does not define one retry, replay, or recovery guarantee across them |
 | Tensor-parallel and multinode recovery | Rank recovery and cohort recreation depend on the backend and workload provider |
 
 ## Related Documentation
@@ -275,3 +304,6 @@ and [Health Check Reference](../../../../reference/observability/health-checks.m
 - [Graceful Shutdown Architecture](graceful-shutdown-architecture.md)
 - [Fault Tolerance Testing](fault-tolerance-testing.md)
 - [Distributed Runtime](../system-architecture/architecture.md#distributed-runtime)
+- [Disaggregated Serving](../system-architecture/disaggregated-serving.md)
+- [Runtime Configuration](../../../../reference/components/runtime-configuration.mdx)
+- [DynamoGraphDeployment API Reference](../../../../reference/kubernetes-api/dynamo-graph-deployment.mdx)
