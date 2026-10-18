@@ -981,9 +981,7 @@ mod tests {
         )
     }
 
-    /// Mirror the state `set_target(Some(..))` leaves behind before
-    /// `drive_target` publishes a binding: target known, lifecycle `Pending`,
-    /// no binding. Set directly so the test does not need a live endpoint.
+    /// Set the pending state directly so the test does not need a live endpoint.
     fn mark_target_pending(router: &PrefillRouter) {
         *router.target.lock() = Some(WorkerSetTargetId::Committed {
             group: "namespace/prefill/generate".to_string(),
@@ -1034,7 +1032,6 @@ mod tests {
 
     #[tokio::test]
     async fn untargeted_router_still_passes_through() {
-        // Aggregated-capable deployment: no prefill target was ever set.
         let router = fresh_decode_router();
         assert!(matches!(
             router.activation_snapshot(),
@@ -1051,8 +1048,6 @@ mod tests {
 
     #[tokio::test]
     async fn cleared_target_still_passes_through() {
-        // Every prefill worker left: `set_target(None)` moves the router to
-        // `Unavailable`, which keeps the pre-existing passthrough behavior.
         let router = fresh_decode_router();
         mark_target_pending(&router);
         router.set_target(None);

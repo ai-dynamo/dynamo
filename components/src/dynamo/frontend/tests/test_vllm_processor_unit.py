@@ -2065,8 +2065,6 @@ class TestRoutedEnginePath:
     async def test_worker_unavailable_is_raised_not_enveloped(
         self, vllm_processor_module
     ):
-        """A retryable routed-engine rejection must reach the binding as a 503,
-        not be flattened into a 500 error envelope."""
         rejection = WorkerUnavailable("prefill routing is still activating")
 
         class _RejectingRoutedEngine(_FakeRoutedEngine):
