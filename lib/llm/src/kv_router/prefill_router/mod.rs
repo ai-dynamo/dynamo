@@ -514,6 +514,16 @@ impl
             );
         }
         let Some(binding) = self.binding.load_full() else {
+            // The target was replaced after the lifecycle gate above (a WorkerSet
+            // succession while this request awaited the phase barrier): `set_target`
+            // cleared the binding and the successor is still building. Fail closed
+            // the same way instead of forwarding to decode without a prefill hop.
+            if self.awaiting_activation() {
+                return Err(prefill_activation_pending_error(
+                    &self.model_name,
+                    &self.namespace,
+                ));
+            }
             return next.generate(context.map(|_| req)).await;
         };
 
@@ -1047,6 +1057,47 @@ mod tests {
             .await
             .expect("query-only requests bypass the activation gate");
         assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn target_replaced_mid_flight_fails_closed_at_binding_load() {
+        // The lifecycle gate runs once at the top of `generate`; the binding is
+        // loaded only after the prefill phase barrier. A WorkerSet succession in
+        // between clears the binding and moves the router back to `Pending`.
+        // Hold the phase barrier so the request is parked in that gap, replace
+        // the target, then release it: the request must fail closed rather than
+        // reach the missing-binding passthrough.
+        let router = fresh_decode_router();
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        let tracker = Arc::new(RequestTracker::new());
+        let barrier = tracker.set_phase(RequestPhase::Prefill).await;
+        let mut request = inference_request();
+        request.tracker = Some(tracker.clone());
+
+        let host = Arc::new(CountingDecodeHost::default());
+        let in_flight = tokio::spawn({
+            let router = router.clone();
+            let host = host.clone();
+            async move { router.generate(SingleIn::new(request), host).await }
+        });
+        // Let the request pass the lifecycle gate and block on the barrier.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        mark_target_pending(&router);
+        drop(barrier);
+
+        let error = match in_flight.await.unwrap() {
+            Ok(_) => panic!("a replaced target must not pass through to decode"),
+            Err(error) => error,
+        };
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::WorkerUnavailable], &[]),
+            "expected WorkerUnavailable after a mid-flight target replacement, got: {error}"
+        );
+        assert_eq!(host.requests.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
