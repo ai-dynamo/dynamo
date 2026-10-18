@@ -5385,6 +5385,89 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         asyncio.run(check())
 
+    @pytest.mark.parametrize(
+        "prefix", ["", "InvalidRequest: ", "BackendInvalidArgument: "]
+    )
+    @pytest.mark.parametrize(
+        "stage,after_output",
+        [
+            ("initial", False),
+            ("event", False),
+            ("exception", False),
+            ("event", True),
+            ("exception", True),
+        ],
+    )
+    def test_scheduler_input_limit_preserves_details(self, prefix, stage, after_output):
+        message = (
+            "Input length (4097 tokens) exceeds the maximum allowed length "
+            "(4096 tokens). Use a shorter input or enable --allow-auto-truncate."
+        )
+
+        class RejectingEngine:
+            async def generate(self, preprocessed, **kwargs):
+                if stage == "initial":
+                    raise RuntimeError(prefix + message)
+
+                async def stream():
+                    if after_output:
+                        yield FakeRoutedItem({"token_ids": [ord("A")]})
+                    if stage == "exception":
+                        raise RuntimeError(prefix + message)
+                    yield FakeRoutedItem(
+                        None, is_error=True, comments=[prefix + message]
+                    )
+                    pytest.fail("Input-limit errors must terminate the stream")
+
+                return stream()
+
+        async def check():
+            tokenizer = self.ByteTokenizer()
+            processor = SglangProcessor(
+                tokenizer=tokenizer,
+                routed_engine=RejectingEngine(),
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+                eos_token_ids=None,
+            )
+            post = SglangStreamingPostProcessor(
+                tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+            )
+            stream = processor._generate_and_stream(
+                "req-input-limit", {"model": "test-model"}, {}, [], post
+            )
+            if after_output:
+                first = await anext(stream)
+                assert first["data"]["choices"][0]["delta"]["content"] == "A"
+            with pytest.raises(InvalidArgument) as error:
+                await anext(stream)
+            assert str(error.value) == message
+            with pytest.raises(StopAsyncIteration):
+                await anext(stream)
+
+        asyncio.run(check())
+
+    @pytest.mark.parametrize(
+        "suffix", [" private path: /srv/worker.py", "\ntraceback", "\n"]
+    )
+    @pytest.mark.parametrize("after_output", [False, True])
+    def test_input_limit_with_diagnostics_remains_internal(self, suffix, after_output):
+        message = (
+            "InvalidRequest: Input length (4097 tokens) exceeds the maximum allowed "
+            "length (4096 tokens). Use a shorter input or enable --allow-auto-truncate."
+            + suffix
+        )
+        prefix = [{"token_ids": [ord("A")]}] if after_output else []
+        items = self._run_stream(
+            self.ByteTokenizer(),
+            [*prefix, FakeRoutedItem(None, is_error=True, comments=[message])],
+        )
+        assert items[-1] == {
+            "_dynamo_annotated": True,
+            "event": "error",
+            "comment": [message],
+        }
+
     def test_routed_engine_none_data_is_skipped(self, tokenizer):
         """data() is None (e.g. comment-only event) is skipped, not yielded as error."""
         items = self._run_stream(
