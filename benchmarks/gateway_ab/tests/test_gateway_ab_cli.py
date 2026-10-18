@@ -436,3 +436,22 @@ def test_launch_backgrounds_only_the_run(monkeypatch):
     # No lone `&` (background) in the setup, only `&&` chaining.
     assert setup.replace("&&", "").count("&") == 0
     assert rest.rstrip().endswith("& }")
+
+
+def test_preflight_names_the_flag_not_the_secret(tmp_path, monkeypatch):
+    bench = _bench(tmp_path, "--hf-secret", "my-hf-token")
+    kube = bench.backend.kube
+    monkeypatch.setattr(kube, "kubectl", lambda *a, **k: "")
+    monkeypatch.setattr(kube, "exists", lambda args, **k: args[0] != "secret")
+    monkeypatch.setattr(
+        kube,
+        "get_json",
+        lambda *a, **k: {
+            "status": {"conditions": [{"type": "Programmed", "status": "True"}]}
+        },
+    )
+    problems = bench.preflight()
+    assert problems == [
+        f"the Secret named by --hf-secret was not found in {kube.namespace}"
+    ]
+    assert not any("my-hf-token" in p for p in problems)

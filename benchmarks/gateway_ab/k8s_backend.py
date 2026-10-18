@@ -80,9 +80,16 @@ class K8sBackend:
             )
         elif not _condition_true(gw, "Programmed"):
             problems.append(f"Gateway {self.cfg.gateway_name} is not Programmed")
-        for secret in (self.cfg.hf_secret, self.cfg.image_pull_secret):
+        # Name the flag, not its value: the value is only a Secret's name, but
+        # logging it trips code scanning's clear-text-secret check.
+        for flag, secret in (
+            ("--hf-secret", self.cfg.hf_secret),
+            ("--image-pull-secret", self.cfg.image_pull_secret),
+        ):
             if secret and not self.kube.exists(["secret", secret]):
-                problems.append(f"secret {secret!r} not found in {self.kube.namespace}")
+                problems.append(
+                    f"the Secret named by {flag} was not found in {self.kube.namespace}"
+                )
         return problems
 
     # -- deploy ------------------------------------------------------------
