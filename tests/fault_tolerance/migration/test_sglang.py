@@ -6,7 +6,7 @@ import os
 import signal
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -14,10 +14,16 @@ import psutil
 import pytest
 import requests
 
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
+from tests.utils.constants import (
+    FAULT_TOLERANCE_MODEL_NAME,
+    QWEN,
+    QWEN_SGLANG_EAGLE3_ARGS,
+    QWEN_SGLANG_EAGLE3_DRAFT,
+    DynamoPortRange,
+)
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess, check_health_ready
-from tests.utils.payloads import check_models_api
+from tests.utils.payloads import SGLangSpecDecodeMetricsPayload, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_ports
 from tests.utils.prometheus import sum_metric_samples
 
@@ -39,6 +45,9 @@ DECODE_MAX_TOKENS = 64
 KV_TRANSFER_MAX_MODEL_LEN = 1024
 KV_TRANSFER_MAX_TOKENS = 64
 KV_TRANSFER_PROMPT_REPETITIONS = 128
+# Speculation emits several tokens per step, so leave decode room on both sides
+# of the fault.
+SPEC_DECODING_MAX_TOKENS = 256
 
 SGLANG_MIGRATION_FRONTEND_STARTUP_TIMEOUT_S = 60
 # Last-resort ceiling; individual operations have their own bounded waits.
@@ -316,6 +325,23 @@ KV_TRANSFER_MIGRATION_PARAMETERS = pytest.mark.parametrize(
     indirect=["request_plane"],
 )
 
+# Speculative decoding does not change the migration policy outcomes covered
+# above, so only the successful migration path is exercised. The two rows
+# cover both shutdown lifecycles, APIs, and request-plane transports.
+SPEC_DECODING_MIGRATION_PARAMETERS = pytest.mark.parametrize(
+    ("immediate_kill", "request_api", "request_plane"),
+    [
+        pytest.param(True, "chat", "nats", id="worker_failure-chat-stream-nats"),
+        pytest.param(
+            False,
+            "completion",
+            "tcp",
+            id="graceful_shutdown-completion-stream-tcp",
+        ),
+    ],
+    indirect=["request_plane"],
+)
+
 pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.sglang,
@@ -337,6 +363,8 @@ class DynamoWorkerProcess(ManagedProcess):
         frontend_port: Port where the frontend is running
         disagg_mode: None for aggregated, "prefill" or "decode" for disaggregated
         enable_metrics: Expose SGLang engine metrics through the worker system port
+        extra_args: Additional SGLang worker arguments
+        cuda_graph: Keep CUDA graphs enabled; EAGLE3 workers stall without them
     """
 
     def __init__(
@@ -348,6 +376,8 @@ class DynamoWorkerProcess(ManagedProcess):
         disagg_mode: str | None = None,
         max_model_len: int = 8192,
         enable_metrics: bool = False,
+        extra_args: Sequence[str] = (),
+        cuda_graph: bool = False,
     ):
         self.worker_id = worker_id
         allocated_ports: list[int] = []
@@ -393,14 +423,14 @@ class DynamoWorkerProcess(ManagedProcess):
             "1",
             "--nccl-port",
             str(self.nccl_port),
-            "--disable-cuda-graph",
-            "--disable-piecewise-cuda-graph",
             "--max-running-requests",
             "1",
             *gpu_mem_args,
             "--context-length",
             str(max_model_len),
         ]
+        if not cuda_graph:
+            command.extend(["--disable-cuda-graph", "--disable-piecewise-cuda-graph"])
         if disagg_mode is None:
             # Aggregated
             command.append("--skip-tokenizer-init")
@@ -427,6 +457,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
         if enable_metrics:
             command.append("--enable-metrics")
+        command.extend(extra_args)
 
         # Set environment variables
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
@@ -762,3 +793,103 @@ def test_request_migration_sglang_decode(
                 verify_replacement_worker=True,
                 force_max_output_tokens=True,
             )
+
+
+@pytest.mark.timeout(SGLANG_MIGRATION_TEST_TIMEOUT_S)
+@pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(7.5)  # measured NVML peak with two EAGLE3 workers
+@pytest.mark.requested_sglang_kv_tokens(1024)
+@pytest.mark.model(QWEN_SGLANG_EAGLE3_DRAFT)
+@pytest.mark.skipif(
+    FAULT_TOLERANCE_MODEL_NAME != QWEN,
+    reason=f"The EAGLE3 draft model only pairs with {QWEN}",
+)
+@SPEC_DECODING_MIGRATION_PARAMETERS
+def test_request_migration_sglang_spec_decoding(
+    request,
+    runtime_services_dynamic_ports,
+    set_ucx_tls_no_mm,
+    predownload_models,
+    immediate_kill,
+    request_api,
+    tmp_path,
+):
+    """
+    End-to-end test for aggregated request migration between EAGLE3 workers.
+
+    Setup: 2 aggregated workers, both running EAGLE3 speculative decoding.
+    The serving worker is faulted after decode starts. The test requires the
+    surviving worker to finish the full output budget and its speculative
+    decoding counters to show accepted draft tokens.
+
+    Parameters:
+        immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
+        request_api: "chat" for chat completion API, "completion" for completion API
+    """
+    with DynamoFrontendProcess(
+        request,
+        migration_limit=3,
+        migration_max_seq_len=None,
+        startup_timeout_s=SGLANG_MIGRATION_FRONTEND_STARTUP_TIMEOUT_S,
+    ) as frontend:
+        worker1 = DynamoWorkerProcess(
+            request,
+            "worker1",
+            frontend.frontend_port,
+            tmp_path,
+            max_model_len=AGGREGATED_MAX_MODEL_LEN,
+            enable_metrics=True,
+            extra_args=QWEN_SGLANG_EAGLE3_ARGS,
+            cuda_graph=True,
+        )
+        worker2 = DynamoWorkerProcess(
+            request,
+            "worker2",
+            frontend.frontend_port,
+            tmp_path,
+            max_model_len=AGGREGATED_MAX_MODEL_LEN,
+            enable_metrics=True,
+            extra_args=QWEN_SGLANG_EAGLE3_ARGS,
+            cuda_graph=True,
+        )
+        with managed_processes_concurrently(worker1, worker2):
+            wait_for_endpoint_instances(
+                frontend.frontend_port,
+                {("backend", "generate"): 2},
+            )
+
+            replacement_worker, _ = run_migration_test(
+                frontend,
+                worker1,
+                worker2,
+                receiving_pattern="New Request ID: ",
+                migration_limit=3,
+                migration_max_seq_len=None,
+                immediate_kill=immediate_kill,
+                use_chat_completion=(request_api == "chat"),
+                stream=True,
+                max_tokens=SPEC_DECODING_MAX_TOKENS,
+                wait_for_new_response_before_stop=True,
+                expected_ongoing_request_count=1,
+                graceful_shutdown=lambda worker: _sglang_graceful_shutdown(
+                    frontend, worker
+                ),
+                verify_replacement_worker=True,
+                force_max_output_tokens=True,
+            )
+
+            # The replacement worker served only the migrated request, so its
+            # counters show whether speculation stayed active after migration.
+            assert isinstance(replacement_worker, DynamoWorkerProcess)
+            metrics = requests.get(
+                f"http://localhost:{replacement_worker.system_port}/metrics",
+                timeout=1,
+            )
+            metrics.raise_for_status()
+            SGLangSpecDecodeMetricsPayload(
+                body={},
+                expected_response=[],
+                expected_log=[],
+                port=replacement_worker.system_port,
+                min_num_requests=1,
+            ).validate(metrics, metrics.text)
