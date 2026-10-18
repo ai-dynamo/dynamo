@@ -82,6 +82,7 @@ fn setup_kv_publishers(
                     topic,
                     image_token_id,
                     video_token_id: None,
+                    recovery: None,
                 }),
                 None,
             ),

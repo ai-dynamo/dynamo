@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::zmq_wire::*;
 
+use super::{PublisherInput, ZmqRecoveryConfig};
 use crate::kv_router::metrics::kv_publisher_metrics;
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
@@ -49,12 +50,13 @@ pub(super) async fn start_zmq_listener(
     zmq_endpoint: String,
     zmq_topic: String,
     worker_id: WorkerId,
-    tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
+    tx: mpsc::UnboundedSender<PublisherInput>,
     cancellation_token: CancellationToken,
     kv_block_size: u32,
     next_event_id: Arc<AtomicU64>,
     image_token_id: Option<u32>,
     video_token_id: Option<u32>,
+    recovery: Option<ZmqRecoveryConfig>,
 ) {
     tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
@@ -65,6 +67,20 @@ pub(super) async fn start_zmq_listener(
     let mut normalizer = ZmqEventNormalizer::new(kv_block_size)
         .with_image_token_id(image_token_id)
         .with_video_token_id(video_token_id);
+    if let Some(recovery) = recovery {
+        super::zmq_recovery::recovering_listener(
+            &zmq_endpoint,
+            &zmq_topic,
+            &mut normalizer,
+            &tx,
+            &next_event_id,
+            worker_id,
+            recovery,
+            cancellation_token,
+        )
+        .await;
+        return;
+    }
     let socket = match connect_sub_socket(&zmq_endpoint, Some(&zmq_topic)).await {
         Ok(socket) => socket,
         Err(error) => {
@@ -73,7 +89,6 @@ pub(super) async fn start_zmq_listener(
         }
     };
     let mut socket = socket;
-    let metrics = kv_publisher_metrics();
 
     if cancellation_token.is_cancelled() {
         return;
@@ -119,44 +134,15 @@ pub(super) async fn start_zmq_listener(
                 );
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0).cast_unsigned();
-                let mut events = Vec::with_capacity(batch.events.len());
-                for raw_event in batch.events {
-                    let event_type = raw_event.event_type_label();
-                    if let Some(metrics) = &metrics {
-                        metrics.increment_zmq_event("received", event_type);
-                    }
-                    let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                    let raw_event = match normalizer.preprocess_with_reason(raw_event, worker) {
-                        Ok(raw_event) => raw_event,
-                        Err(reason) => {
-                            if let Some(metrics) = &metrics {
-                                metrics.increment_zmq_filtered_event(event_type, reason.as_label());
-                            }
-                            continue;
-                        }
-                    };
-                    if let Some(metrics) = &metrics {
-                        metrics.increment_zmq_event("accepted", event_type);
-                    }
-                    let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
-                    let Some(event) =
-                        normalizer.normalize_preprocessed(raw_event, event_id, worker)
-                    else {
-                        if let Some(metrics) = &metrics {
-                            metrics.increment_zmq_conversion_issue(event_type, "conversion_none");
-                        }
-                        continue;
-                    };
-                    if matches!(event.event.data, KvCacheEventData::Stored(ref data) if data.blocks.is_empty())
-                        && let Some(metrics) = &metrics
-                    {
-                        metrics.increment_zmq_suspicious_event(event_type, "empty_store_blocks");
-                    }
-                    events.push(event);
-                }
+                let events = normalize_batch(
+                    batch,
+                    &mut normalizer,
+                    WorkerWithDpRank::new(worker_id, dp_rank),
+                    &next_event_id,
+                );
                 if !events.is_empty() {
                     let event_count = events.len() as u64;
-                    if tx.send(events).is_err() {
+                    if tx.send(PublisherInput::Events(events)).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         break 'main String::from("channel receiver dropped");
                     }
@@ -171,4 +157,47 @@ pub(super) async fn start_zmq_listener(
         exit_reason,
         messages_processed
     );
+}
+
+/// Shared by live and recovery ingestion so both use one normalizer and event ID allocator.
+pub(super) fn normalize_batch(
+    batch: KvEventBatch,
+    normalizer: &mut ZmqEventNormalizer,
+    worker: WorkerWithDpRank,
+    next_event_id: &AtomicU64,
+) -> Vec<PlacementEvent> {
+    let metrics = kv_publisher_metrics();
+    let mut events = Vec::with_capacity(batch.events.len());
+    for raw_event in batch.events {
+        let event_type = raw_event.event_type_label();
+        if let Some(metrics) = &metrics {
+            metrics.increment_zmq_event("received", event_type);
+        }
+        let raw_event = match normalizer.preprocess_with_reason(raw_event, worker) {
+            Ok(raw_event) => raw_event,
+            Err(reason) => {
+                if let Some(metrics) = &metrics {
+                    metrics.increment_zmq_filtered_event(event_type, reason.as_label());
+                }
+                continue;
+            }
+        };
+        if let Some(metrics) = &metrics {
+            metrics.increment_zmq_event("accepted", event_type);
+        }
+        let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
+        let Some(event) = normalizer.normalize_preprocessed(raw_event, event_id, worker) else {
+            if let Some(metrics) = &metrics {
+                metrics.increment_zmq_conversion_issue(event_type, "conversion_none");
+            }
+            continue;
+        };
+        if matches!(event.event.data, KvCacheEventData::Stored(ref data) if data.blocks.is_empty())
+            && let Some(metrics) = &metrics
+        {
+            metrics.increment_zmq_suspicious_event(event_type, "empty_store_blocks");
+        }
+        events.push(event);
+    }
+    events
 }

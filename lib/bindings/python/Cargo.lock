@@ -2297,6 +2297,7 @@ dependencies = [
  "validator",
  "video-rs",
  "xxhash-rust",
+ "zmq",
 ]
 
 [[package]]
