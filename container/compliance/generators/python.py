@@ -435,13 +435,32 @@ def _resolve_spdx(
     return UNKNOWN
 
 
-def collect_components(search_paths: list[Path]) -> list[Component]:
+def collect_components(
+    search_paths: list[Path],
+    dpkg_components: list[Component] | None = None,
+    dpkg_root: Path = Path("/"),
+) -> list[Component]:
     """Walk each site-packages dir, parse *.dist-info/METADATA, return Components."""
     sites = _resolve_site_packages(search_paths)
     if not sites:
         logger.warning("No site-packages dirs resolved from %s", search_paths)
         return []
 
+    # System Python distributions are covered by the Debian package whose
+    # installed-file record owns their metadata. Keep unowned and vendored
+    # distributions independent; a directory prefix alone is never coverage.
+    owners: dict[Path, set[str]] = {}
+    attributed = {p.name for p in dpkg_components or [] if p.spdx != UNKNOWN}
+    info = dpkg_root / "var/lib/dpkg/info"
+    for package in dpkg_components or []:
+        lists = [info / f"{package.name}.list", *info.glob(f"{package.name}:*.list")]
+        for listing in lists:
+            if not listing.is_file():
+                continue
+            for filename in listing.read_text().splitlines():
+                if filename.startswith("/usr/lib/python3/dist-packages/"):
+                    path = dpkg_root / filename.lstrip("/")
+                    owners.setdefault(path, set()).add(package.name)
     components: list[Component] = []
     for site in sites:
         dist_infos = sorted([*site.glob("*.dist-info"), *site.glob("*.egg-info")])
@@ -450,6 +469,14 @@ def collect_components(search_paths: list[Path]) -> list[Component]:
                 "PKG-INFO" if dist_info.suffix == ".egg-info" else "METADATA"
             )
             if not metadata_path.is_file():
+                continue
+            metadata_owners = owners.get(metadata_path, set())
+            if len(metadata_owners) == 1 and metadata_owners <= attributed:
+                logger.info(
+                    "Python metadata %s is attributed by Debian package %s",
+                    metadata_path,
+                    next(iter(owners[metadata_path])),
+                )
                 continue
             try:
                 metadata_text = metadata_path.read_text(
@@ -515,6 +542,8 @@ def generate(
     search_paths: list[Path],
     output_dir: Path,
     subtract: set[tuple[str, str]] | None = None,
+    dpkg_components: list[Component] | None = None,
+    dpkg_root: Path = Path("/"),
 ) -> list[Component]:
     """Read METADATA from each search path, write NOTICES-Python.txt + python-deps.csv.
 
@@ -523,7 +552,7 @@ def generate(
     """
     from . import common
 
-    components = collect_components(search_paths)
+    components = collect_components(search_paths, dpkg_components, dpkg_root)
     if subtract:
         components = common.subtract_baseline(components, subtract)
     common.write_notices(ECOSYSTEM, components, output_dir)

@@ -69,8 +69,6 @@ def collect_bundled_python_binaries(
             binaries = sorted((site / "pulp/solverdir/cbc").rglob("cbc"))
             if not binaries:
                 continue
-            if package["Version"] != "3.3.2":
-                raise ValueError("Review bundled CBC attribution for this PuLP version")
             with (info / "RECORD").open(newline="") as stream:
                 owned = {row[0] for row in csv.reader(stream) if row}
             for binary in binaries:

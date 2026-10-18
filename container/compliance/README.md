@@ -130,7 +130,7 @@ runtime; binary inventories and Go license evidence are included under `/legal`.
 Python discovery covers system packages, hidden/versioned environments such as
 `/opt/framework-runtime/.venv-3.12`, explicitly vendored distributions, and the
 nested CUTLASS generation scripts. Copied CPython interpreters have their own
-native attribution. PuLP 3.3.2's bundled CBC solver has a separate native
+native attribution. PuLP's bundled CBC solver has a separate native
 EPL-1.0 entry, its own full license text, and RECORD-backed ownership evidence
 in `bundled-native-provenance.json`; PuLP's MIT license and the unrelated Rust
 `cbc` crate cannot cover it. Wheel notices retain all bundled license and notice files;

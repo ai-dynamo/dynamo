@@ -211,7 +211,9 @@ def main(argv: list[str] | None = None) -> int:
     # components, which we accumulate for the unified CSV + CycloneDX below.
     failures: list[str] = []
     all_components: list = []
-    for eco in args.ecosystem:
+    # Debian attribution must be available before classifying system Python
+    # metadata that belongs to an already attributed OS package.
+    for eco in sorted(args.ecosystem, key=lambda item: item != "dpkg"):
         comps = None
         try:
             if eco == "rust":
@@ -237,7 +239,15 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 from . import python as gen  # type: ignore[no-redef]
 
-                comps = gen.generate(search_paths, args.output_dir, subtract=subtract)
+                comps = gen.generate(
+                    search_paths,
+                    args.output_dir,
+                    subtract=subtract,
+                    dpkg_components=[
+                        c for c in all_components if c.ecosystem == "dpkg"
+                    ],
+                    dpkg_root=args.dpkg_root,
+                )
             elif eco == "dpkg":
                 from . import dpkg as gen  # type: ignore[no-redef]
 

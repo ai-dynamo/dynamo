@@ -25,11 +25,14 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
 @pytest.mark.parametrize("failure", [None, "unowned", "changed-license"])
-def test_bundled_cbc_keeps_its_own_license_and_record_evidence(tmp_path, failure):
+@pytest.mark.parametrize("version", ["3.2.2", "3.3.2"])
+def test_bundled_cbc_keeps_its_own_license_and_record_evidence(
+    tmp_path, failure, version
+):
     site = tmp_path / "site-packages"
-    info = site / "pulp-3.3.2.dist-info"
+    info = site / f"pulp-{version}.dist-info"
     info.mkdir(parents=True)
-    (info / "METADATA").write_text("Name: PuLP\nVersion: 3.3.2\nLicense: MIT\n")
+    (info / "METADATA").write_text(f"Name: PuLP\nVersion: {version}\nLicense: MIT\n")
     binary = site / "pulp/solverdir/cbc/linux/i64/cbc"
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b"standalone solver fixture")
@@ -50,19 +53,28 @@ def test_bundled_cbc_keeps_its_own_license_and_record_evidence(tmp_path, failure
     assert component.license_text == text
     provenance = json.loads((legal / "bundled-native-provenance.json").read_text())
     assert provenance[0]["binary"] == str(binary)
+    assert provenance[0]["owner_version"] == version
     policy = load_policy(Path(__file__).resolve().parents[1] / "policy/licenses.toml")
     assert validate_row(policy, "native", "cbc", "UNKNOWN", "EPL-1.0") is None
     assert validate_row(policy, "rust", "cbc", "0.1.2", "EPL-1.0") is not None
     assert validate_row(policy, "native", "cbc", "UNKNOWN", "EPL-2.0") is not None
 
 
-def test_debian_git_lfs_main_requires_exact_installed_owner(tmp_path):
+@pytest.mark.parametrize(
+    "location",
+    ["/usr/bin/git-lfs", "usr/bin/git-lfs", "./usr/bin/git-lfs", "/bin/git-lfs"],
+)
+def test_debian_git_lfs_main_requires_exact_installed_owner(tmp_path, location):
     info = tmp_path / "var/lib/dpkg/info"
     info.mkdir(parents=True)
     (info / "git-lfs.list").write_text("/usr/bin/git-lfs\n")
     (info.parent / "status").write_text(
         "Package: git-lfs\nStatus: install ok installed\nVersion: 3.4.1-1\n"
     )
+    binary = tmp_path / "usr/bin/git-lfs"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"installed Git LFS fixture")
+    (tmp_path / "bin").symlink_to("usr/bin", target_is_directory=True)
     copyright = tmp_path / "usr/share/doc/git-lfs/copyright"
     copyright.parent.mkdir(parents=True)
     copyright.write_text(
@@ -73,12 +85,18 @@ def test_debian_git_lfs_main_requires_exact_installed_owner(tmp_path):
         "name": "github.com/git-lfs/git-lfs",
         "version": "UNKNOWN",
         "metadata": {"mainModule": "github.com/git-lfs/git-lfs"},
-        "locations": [{"path": "/usr/bin/git-lfs"}],
+        "locations": [{"path": location}],
     }
     component = debian_git_lfs_main(artifact, tmp_path)
     assert component.spdx == "MIT"
     assert component.source_url == "pkg:deb/ubuntu/git-lfs@3.4.1-1"
     assert component.license_text == copyright.read_text()
+    copied = tmp_path / "other-git-lfs"
+    copied.write_bytes(binary.read_bytes())
+    artifact["locations"] = [{"path": "/other-git-lfs"}]
+    with pytest.raises(ValueError, match="executable locations"):
+        debian_git_lfs_main(artifact, tmp_path)
+    artifact["locations"] = [{"path": location}]
     (info / "git-lfs.list").write_text("/usr/share/doc/git-lfs/copyright\n")
     with pytest.raises(ValueError, match="file ownership"):
         debian_git_lfs_main(artifact, tmp_path)
@@ -161,6 +179,47 @@ def test_hidden_versioned_environment_and_nested_cutlass(tmp_path):
         ("cutlass_library", "4.4.2", "BSD-3-Clause")
     ]
     assert "Copyright upstream holder" in components[0].license_text
+
+
+@pytest.mark.parametrize(
+    "ownership",
+    ["exact", "unowned", "unknown-license", "ambiguous", "ambiguous-unknown"],
+)
+def test_system_python_requires_unambiguous_attributed_dpkg_owner(tmp_path, ownership):
+    site = tmp_path / "usr/lib/python3/dist-packages"
+    info = site / "os_package-1.0.egg-info"
+    info.mkdir(parents=True)
+    metadata = info / "PKG-INFO"
+    metadata.write_text("Name: os-package\nVersion: 1.0\n")
+    records = tmp_path / "var/lib/dpkg/info"
+    records.mkdir(parents=True)
+    filename = "/" + str(metadata.relative_to(tmp_path))
+    (records / "python3-os-package.list").write_text(
+        filename if ownership != "unowned" else "/some/other/file"
+    )
+    packages = [
+        Component(
+            "dpkg",
+            "python3-os-package",
+            "1.0-1",
+            "UNKNOWN" if ownership == "unknown-license" else "MIT",
+        )
+    ]
+    if ownership.startswith("ambiguous"):
+        packages.append(
+            Component(
+                "dpkg",
+                "another-package",
+                "1.0",
+                "UNKNOWN" if ownership == "ambiguous-unknown" else "MIT",
+            )
+        )
+        (records / "another-package.list").write_text(filename)
+    components = collect_components([site], packages, tmp_path)
+    if ownership == "exact":
+        assert components == []
+    else:
+        assert [(c.name, c.spdx) for c in components] == [("os-package", "UNKNOWN")]
 
 
 def test_copied_interpreter_has_individual_full_notice(tmp_path):

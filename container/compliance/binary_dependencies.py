@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import logging
+import posixpath
 import re
 import subprocess
 import tarfile
@@ -161,8 +162,16 @@ def debian_git_lfs_main(artifact: dict, root: Path) -> Component | None:
     ):
         return None
     locations = artifact.get("locations", [])
-    if not locations or any(loc["path"] != "/usr/bin/git-lfs" for loc in locations):
-        raise ValueError("unrecognized Git LFS main executable location")
+    binary = root / "usr/bin/git-lfs"
+    # A rootfs scan can report ./usr/bin/... or the /bin alias on usr-merged
+    # images. Require the same installed file, not one exact path spelling.
+    if not locations or any(
+        not (
+            root / posixpath.normpath("/" + loc["path"].lstrip("/")).lstrip("/")
+        ).samefile(binary)
+        for loc in locations
+    ):
+        raise ValueError(f"unrecognized Git LFS main executable locations: {locations}")
     files = root / "var/lib/dpkg/info/git-lfs.list"
     if not files.is_file() or "/usr/bin/git-lfs" not in files.read_text().splitlines():
         raise ValueError("Git LFS main executable lacks Debian file ownership")
@@ -188,6 +197,7 @@ def debian_git_lfs_main(artifact: dict, root: Path) -> Component | None:
 
 def etcd_binary_version(path: str, root: Path) -> str:
     """Read the release identity from one of Dynamo's copied etcd executables."""
+    path = posixpath.normpath("/" + path.lstrip("/"))
     if path not in {
         "/usr/local/bin/etcd/etcd",
         "/usr/local/bin/etcd/etcdctl",
