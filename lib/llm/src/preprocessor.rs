@@ -2303,14 +2303,12 @@ impl OpenAIPreprocessor {
         tool_call_parser: Option<&str>,
         thinking_control_from_client: bool,
     ) {
-        let constrained_generation = !thinking_control_from_client
-            && Self::is_minimax_m3_family(reasoning_parser, tool_call_parser)
-            && Self::has_minimax_m3_constrained_generation(request);
+        let constrained_generation = Self::is_minimax_m3_family(reasoning_parser, tool_call_parser)
+            && Self::minimax_m3_constraint_disables_thinking(request, thinking_control_from_client);
         Self::normalize_thinking_args_with_source(
             &mut request.chat_template_args,
             reasoning_parser,
             tool_call_parser,
-            thinking_control_from_client,
             constrained_generation,
         );
     }
@@ -2319,7 +2317,6 @@ impl OpenAIPreprocessor {
         chat_template_args: &mut Option<HashMap<String, serde_json::Value>>,
         reasoning_parser: Option<&str>,
         tool_call_parser: Option<&str>,
-        thinking_control_from_client: bool,
         constrained_generation: bool,
     ) {
         let normalized =
@@ -2329,7 +2326,6 @@ impl OpenAIPreprocessor {
             Self::normalize_minimax_m3_thinking_mode(
                 chat_template_args,
                 normalized,
-                thinking_control_from_client,
                 constrained_generation,
             );
             return;
@@ -2394,18 +2390,17 @@ impl OpenAIPreprocessor {
     fn normalize_minimax_m3_thinking_mode(
         chat_template_args: &mut Option<HashMap<String, serde_json::Value>>,
         normalized: Option<bool>,
-        thinking_control_from_client: bool,
         constrained_generation: bool,
     ) {
         // MiniMax M3 defaults `thinking_mode` to "adaptive", which breaks
-        // constrained JSON/schema and forced-tool generation. If the client
-        // did not set thinking controls, force "disabled" for those requests.
+        // constrained JSON/schema and forced-tool generation. A forced tool
+        // choice takes precedence over explicit thinking controls.
         let explicit_thinking_mode_is_adaptive = chat_template_args
             .as_ref()
             .and_then(|args| args.get("thinking_mode"))
             .and_then(|v| v.as_str())
             .is_some_and(|s| s.eq_ignore_ascii_case("adaptive"));
-        if !thinking_control_from_client && constrained_generation {
+        if constrained_generation {
             let args = chat_template_args.get_or_insert_default();
             args.insert(
                 "thinking_mode".to_string(),
@@ -2471,6 +2466,15 @@ impl OpenAIPreprocessor {
 
     fn has_minimax_m3_constrained_generation<R: OAIChatLikeRequest>(request: &R) -> bool {
         Self::has_structured_response_format(request) || Self::has_guided_tool_choice(request)
+    }
+
+    fn minimax_m3_constraint_disables_thinking<R: OAIChatLikeRequest>(
+        request: &R,
+        thinking_control_from_client: bool,
+    ) -> bool {
+        Self::has_guided_tool_choice(request)
+            || (!thinking_control_from_client
+                && Self::has_minimax_m3_constrained_generation(request))
     }
 
     /// True when `tool_choice` forces a tool call.
@@ -6786,9 +6790,8 @@ impl OpenAIPreprocessor {
     ) -> bool {
         let mut chat_template_args = request.chat_template_args.clone();
         let from_client = Self::request_has_client_thinking_control(request);
-        let constrained_generation = !from_client
-            && Self::is_minimax_m3_family(reasoning_parser, tool_parser)
-            && Self::has_minimax_m3_constrained_generation(request);
+        let constrained_generation = Self::is_minimax_m3_family(reasoning_parser, tool_parser)
+            && Self::minimax_m3_constraint_disables_thinking(request, from_client);
         Self::apply_default_thinking_mode_value(
             default_thinking_mode,
             &mut chat_template_args,
@@ -6798,7 +6801,6 @@ impl OpenAIPreprocessor {
             &mut chat_template_args,
             reasoning_parser,
             tool_parser,
-            from_client,
             constrained_generation,
         );
         // Unified owns both channels even when only a tool selector was configured.
@@ -14745,71 +14747,57 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_thinking_arg_m3_preserves_explicit_thinking_for_constrained() {
-        // Explicit client thinking intent is respected for constrained M3
-        // requests. The runtime attempts the combination even though the
-        // template's adaptive/enabled path is known to conflict with the
-        // constrained decoder — this is the client's opt-in, and returning
-        // possibly-degraded content is preferred to a hard reject at the
-        // API boundary (which would break provider-compatibility probes
-        // that expect the request to be attempted).
-        for (body, expected_mode, desc) in [
+    fn test_normalize_thinking_arg_m3_preserves_explicit_thinking_for_response_format() {
+        let mut request = minimax_m3_request(serde_json::json!({
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "s", "schema": {"type": "object"}}
+            },
+            "chat_template_kwargs": {"thinking_mode": "enabled"}
+        }));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
+        assert_eq!(
+            request.chat_template_args.unwrap().get("thinking_mode"),
+            Some(&serde_json::json!("enabled"))
+        );
+    }
+
+    #[test]
+    fn test_normalize_thinking_arg_m3_forced_tool_choice_overrides_explicit_thinking() {
+        for (tool_choice, thinking_args) in [
             (
-                serde_json::json!({
-                    "response_format": {
-                        "type": "json_schema",
-                        "json_schema": {"name": "s", "schema": {"type": "object"}}
-                    },
-                    "chat_template_kwargs": {"thinking_mode": "enabled"}
-                }),
-                "enabled",
-                "json_schema + explicit thinking_mode=enabled",
+                serde_json::json!("required"),
+                serde_json::json!({"thinking": true}),
             ),
             (
-                serde_json::json!({
-                    "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
-                    "tool_choice": "required",
-                    "chat_template_kwargs": {"thinking_mode": "adaptive"}
-                }),
-                "adaptive",
-                "required tool + explicit thinking_mode=adaptive",
+                serde_json::json!("required"),
+                serde_json::json!({"thinking_mode": "adaptive"}),
             ),
             (
-                serde_json::json!({
-                    "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
-                    "tool_choice": {"type": "function", "function": {"name": "f"}},
-                    "chat_template_kwargs": {"thinking": true}
-                }),
-                "enabled",
-                "named tool + explicit thinking=true",
+                serde_json::json!({"type": "function", "function": {"name": "f"}}),
+                serde_json::json!({"thinking": true}),
             ),
         ] {
-            let mut request = minimax_m3_request(body);
-            assert!(!OpenAIPreprocessor::request_disables_reasoning_with_family(
+            let mut request = minimax_m3_request(serde_json::json!({
+                "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+                "tool_choice": tool_choice,
+                "chat_template_kwargs": thinking_args
+            }));
+            assert!(OpenAIPreprocessor::request_disables_reasoning_with_family(
                 &request,
                 None,
                 Some("minimax_m3"),
-                Some("disabled"),
+                None,
                 Some("minimax_m3"),
             ));
-            let thinking_control_from_client =
-                OpenAIPreprocessor::request_has_client_thinking_control(&request);
-            assert!(
-                thinking_control_from_client,
-                "{desc} must be classified as client thinking intent"
-            );
-            OpenAIPreprocessor::normalize_thinking_arg_with_source(
-                &mut request,
-                Some("minimax_m3"),
-                None,
-                thinking_control_from_client,
-            );
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("minimax_m3"), None);
             let args = request.chat_template_args.as_ref().unwrap();
             assert_eq!(
                 args.get("thinking_mode"),
-                Some(&serde_json::json!(expected_mode)),
-                "{desc} must preserve explicit client thinking"
+                Some(&serde_json::json!("disabled"))
             );
+            assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+            assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
         }
     }
 
