@@ -46,11 +46,9 @@ async def generate(request, context):
         path = os.environ["IMAGE_EDIT_CANCEL_FILE"]
         with open(path + ".started", "w") as output:
             output.write("started")
-        try:
-            await context.async_killed_or_stopped()
-        finally:
-            with open(path, "w") as output:
-                output.write("cancelled")
+        await context.async_killed_or_stopped()
+        with open(path, "w") as output:
+            output.write("cancelled")
         return
     yield {
         "created": 1,

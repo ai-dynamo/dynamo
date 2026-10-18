@@ -338,7 +338,10 @@ class OmniHandler(BaseOmniHandler):
                 request, self.config.output_modalities
             )
         except ValidationError as error:
-            if "image" not in (self.config.output_modalities or []):
+            if not any(
+                modality.lower() == "image"
+                for modality in (self.config.output_modalities or [])
+            ):
                 raise
             # Pydantic's rendered exception includes the offending input value.
             # Only expose a field label, never an inline image or signed URL.
