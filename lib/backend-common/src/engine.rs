@@ -550,6 +550,8 @@ pub enum KvEventSource {
         dp_rank: u32,
         /// Model image-placeholder token used to normalize multimodal events.
         image_token_id: Option<u32>,
+        /// Opt-in replay recovery for engines that gate readiness on KV continuity.
+        recovery: Option<dynamo_llm::kv_router::publisher::ZmqRecoveryConfig>,
     },
     Push {
         on_ready: OnPublisherReady,

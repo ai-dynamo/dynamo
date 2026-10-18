@@ -435,11 +435,11 @@ impl pb::control_server::Control for FakeVllm {
                     transport: "zmq".to_string(),
                     endpoint: format!("tcp://*:{}", 20081 + rank),
                     topic: String::new(),
-                    replay_endpoint: String::new(),
+                    replay_endpoint: format!("tcp://*:{}", 21081 + rank),
                     data_parallel_rank: Some(rank),
                     encoding: "msgpack".to_string(),
                     schema_version: 1,
-                    buffer_steps: 0,
+                    buffer_steps: 100,
                     hwm: 0,
                     max_queue_size: 0,
                 })

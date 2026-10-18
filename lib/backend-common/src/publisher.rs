@@ -42,17 +42,15 @@ pub(crate) struct PublisherHandles {
 }
 
 impl PublisherHandles {
-    /// Stop every KV publisher, reporting the first failure after all have stopped.
     pub(crate) async fn stop_kv(&mut self) -> Result<(), DynamoError> {
-        let mut result = Ok(());
-        for publisher in self.kv_publishers.drain(..) {
-            if let Err(e) = publisher.stop_and_wait().await
-                && result.is_ok()
-            {
-                result = Err(publisher_err(format!("KV publisher shutdown: {e}")));
-            }
+        for publisher in &self.kv_publishers {
+            publisher
+                .stop_and_wait()
+                .await
+                .map_err(|e| publisher_err(format!("KV publisher shutdown: {e}")))?;
         }
-        result
+        self.kv_publishers.clear();
+        Ok(())
     }
 
     pub(crate) fn replace_kv(
@@ -113,6 +111,7 @@ fn setup_kv_publishers(
                 endpoint,
                 topic,
                 image_token_id,
+                recovery,
                 ..
             } => (
                 Some(KvEventSourceConfig::Zmq {
@@ -120,7 +119,7 @@ fn setup_kv_publishers(
                     topic,
                     image_token_id,
                     video_token_id: None,
-                    recovery: None,
+                    recovery,
                 }),
                 None,
             ),
