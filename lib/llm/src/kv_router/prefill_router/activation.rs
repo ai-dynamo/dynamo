@@ -23,7 +23,6 @@ use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillR
 
 /// Routing state of a prefill hop, resolved atomically by [`PrefillRouter::activation_snapshot`].
 pub(super) enum ActivationSnapshot {
-    /// Binding published and lifecycle `Active`: route through prefill.
     Active(Arc<PrefillBinding>),
     /// A target is set but its binding is not published yet: fail closed.
     Pending,

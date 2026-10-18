@@ -1163,8 +1163,6 @@ def _qwen_guided_request_without_separation(tool_choice):
 def test_routed_engine_rejection_keeps_worker_unavailable(
     tokenizer, routed_error, expected
 ):
-    """A retryable routed-engine rejection keeps its type so the client gets a 503."""
-
     class RejectingRoutedEngine(FakeRoutedEngine):
         async def generate(self, preprocessed, **kwargs):
             raise routed_error

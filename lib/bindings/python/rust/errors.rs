@@ -68,7 +68,6 @@ fn is_worker_unavailable(error: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
-/// Map a Python `WorkerUnavailable` back to its Dynamo error class.
 pub(crate) fn worker_unavailable_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<DynamoError> {
     if !err.is_instance_of::<WorkerUnavailable>(py) {
         return None;

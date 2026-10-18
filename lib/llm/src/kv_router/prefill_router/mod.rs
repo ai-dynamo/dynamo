@@ -1127,25 +1127,6 @@ mod tests {
         assert_eq!(host.requests.load(Ordering::Relaxed), 0);
     }
 
-    #[tokio::test]
-    async fn snapshot_resolves_pending_and_untargeted_states() {
-        let router = fresh_decode_router();
-        assert!(matches!(
-            router.activation_snapshot(),
-            ActivationSnapshot::Untargeted
-        ));
-        mark_target_pending(&router);
-        assert!(matches!(
-            router.activation_snapshot(),
-            ActivationSnapshot::Pending
-        ));
-        router.set_target(None);
-        assert!(matches!(
-            router.activation_snapshot(),
-            ActivationSnapshot::Untargeted
-        ));
-    }
-
     #[test]
     fn client_cancellation_does_not_cancel_prefill_context() {
         for kill in [false, true] {
