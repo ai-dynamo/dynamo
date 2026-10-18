@@ -102,10 +102,18 @@ pub(crate) fn build_generate_request(
             min_tokens: stop.min_tokens,
             conditions: stop_conditions(request),
             ignore_eos: stop.ignore_eos,
-            // `include_stop_in_output` retains matched stop *strings*; the
-            // request-level flag is rejected in `validate_request`, so leave it
-            // unset (the server strips them).
-            include_stop_in_output: None,
+            // Visible stop tokens (e.g. Harmony's `<|call|>` when tools are
+            // present) stop generation like hidden ones but must reach the
+            // frontend decoder. This maps to TensorRT-LLM's
+            // `include_stop_str_in_output`, which keeps matched stop words in
+            // the output IDs. It keeps hidden stop IDs and stop strings too;
+            // the frontend decoder strips those itself. Without visible tokens
+            // it stays unset, so the server trims as before.
+            //
+            // A visible token that is also the tokenizer EOS (`end_id`) ends
+            // the sequence as END_ID rather than as a stop word and may still
+            // be dropped. GPT-OSS's `<|call|>` is not its `end_id`.
+            include_stop_in_output: has_visible_stop_tokens(request).then_some(true),
         }),
         response: Some(pb::ResponseOptions {
             // A prefill worker streams no tokens to the client, but it must
@@ -261,12 +269,18 @@ fn stop_conditions(request: &PreprocessedRequest) -> Vec<pb::StopCondition> {
     conditions
 }
 
+/// Every stop ID becomes an engine stop condition; visible ones are kept in the
+/// output by `include_stop_in_output`. TensorRT-LLM 1.3.0rc29's `min_tokens`
+/// holds back only `end_id`, so any of these can end generation before the
+/// minimum, as the generation-config EOS IDs it adds itself already do. Newer
+/// releases also hold back single-token stop words (NVIDIA/TensorRT-LLM#20188).
 fn stop_token_ids(request: &PreprocessedRequest) -> Vec<u32> {
     let stop = &request.stop_conditions;
     let mut ids = BTreeSet::new();
     for values in [
         stop.stop_token_ids.as_ref(),
         stop.stop_token_ids_hidden.as_ref(),
+        stop.stop_token_ids_visible.as_ref(),
     ]
     .into_iter()
     .flatten()
@@ -274,6 +288,14 @@ fn stop_token_ids(request: &PreprocessedRequest) -> Vec<u32> {
         ids.extend(values.iter().copied());
     }
     ids.into_iter().collect()
+}
+
+fn has_visible_stop_tokens(request: &PreprocessedRequest) -> bool {
+    request
+        .stop_conditions
+        .stop_token_ids_visible
+        .as_ref()
+        .is_some_and(|ids| !ids.is_empty())
 }
 
 fn guided_decoding(
@@ -366,20 +388,6 @@ fn validate_request(
         ));
     }
     if request
-        .stop_conditions
-        .stop_token_ids_visible
-        .as_ref()
-        .is_some_and(|ids| !ids.is_empty())
-    {
-        // A visible stop token must halt generation *and* stay in the output.
-        // OpenEngine's stop conditions and single `include_stop_in_output` (stop
-        // *strings*) cannot honor that per token, so reject rather than silently
-        // drop or mis-retain them.
-        return Err(client::invalid_argument(
-            "visible stop token IDs are not supported by the TensorRT-LLM sidecar",
-        ));
-    }
-    if request
         .routing
         .as_ref()
         .and_then(|routing| routing.lora_name.as_deref())
@@ -438,10 +446,9 @@ fn validate_request(
     }
     let sampling = &request.sampling_options;
     if sampling.include_stop_str_in_output == Some(true) {
-        // Retaining stop *strings* maps to `include_stop_in_output`, but the
-        // sidecar rejects visible stop token IDs above; honoring string retention
-        // alone would be inconsistent, so reject until both are supported
-        // together.
+        // Retaining stop *strings* would also set `include_stop_in_output`, as
+        // visible stop tokens do, and leave the strings to the frontend
+        // decoder; reject until that path is tested end to end.
         return Err(client::invalid_argument(
             "include_stop_str_in_output is not supported by the TensorRT-LLM sidecar",
         ));

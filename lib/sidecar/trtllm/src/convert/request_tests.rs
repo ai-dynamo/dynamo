@@ -29,7 +29,8 @@ fn request_maps_sampling_stop_and_output_fields() {
     assert_eq!(stopping.max_tokens, Some(16));
     assert_eq!(stopping.min_tokens, Some(1));
     assert_eq!(stopping.ignore_eos, Some(true));
-    // Stop-string retention is never enabled from `include_stop_str_in_output`.
+    // Stop-word retention is only for visible stop tokens; without them the
+    // server trims matched stops as before.
     assert_eq!(stopping.include_stop_in_output, None);
     let conditions: Vec<_> = stopping
         .conditions
@@ -72,6 +73,36 @@ fn request_maps_sampling_stop_and_output_fields() {
         pb::guided_decoding::Guide::JsonSchema(guide) => assert!(guide.contains("object")),
         other => panic!("expected JSON schema guide, got {other:?}"),
     }
+}
+
+#[test]
+fn visible_stop_tokens_stop_in_engine_and_stay_in_output() {
+    // Harmony tool calls: the preprocessor moves `<|call|>` from the hidden set
+    // to the visible set, so the engine must stop on it without trimming it.
+    let mut req = request();
+    req.stop_conditions.stop_token_ids = Some(vec![7]);
+    req.stop_conditions.stop_token_ids_hidden = Some(vec![2, 200002]);
+    req.stop_conditions.stop_token_ids_visible = Some(vec![200012, 7]);
+    let proto = build_generate_request(&req, "req", "model", None, AGG).expect("build");
+    let stopping = proto.stopping.unwrap();
+    assert_eq!(stopping.include_stop_in_output, Some(true));
+    let stop_ids: Vec<_> = stopping
+        .conditions
+        .iter()
+        .filter_map(|condition| match condition.condition {
+            Some(pb::stop_condition::Condition::StopTokenId(id)) => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stop_ids, [2, 7, 200002, 200012]);
+}
+
+#[test]
+fn empty_visible_stop_tokens_leave_stop_trimming_on() {
+    let mut req = request();
+    req.stop_conditions.stop_token_ids_visible = Some(Vec::new());
+    let proto = build_generate_request(&req, "req", "model", None, AGG).expect("build");
+    assert_eq!(proto.stopping.unwrap().include_stop_in_output, None);
 }
 
 #[test]

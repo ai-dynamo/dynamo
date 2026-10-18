@@ -678,10 +678,7 @@ async fn unsupported_features_fail_before_rpc_submission() {
     let mut prompt_logprobs = request();
     prompt_logprobs.output_options.prompt_logprobs = Some(1);
 
-    let mut visible_stops = request();
-    visible_stops.stop_conditions.stop_token_ids_visible = Some(vec![7]);
-
-    for unsupported in [multiple, beam, embeds, prompt_logprobs, visible_stops] {
+    for unsupported in [multiple, beam, embeds, prompt_logprobs] {
         let context = dynamo_backend_common::testing::mock_context();
         let result = engine
             .generate(unsupported, GenerateContext::new(context, None))
@@ -689,6 +686,31 @@ async fn unsupported_features_fail_before_rpc_submission() {
         assert!(result.is_err());
     }
     assert!(server.service.requests.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn visible_stop_tokens_are_dispatched_with_stop_retention() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+
+    // Once rejected before dispatch; now the stop token (the fake always
+    // streams 42) passes through to the frontend decoder.
+    let mut req = request();
+    req.stop_conditions.stop_token_ids_visible = Some(vec![42]);
+    let outputs = collect(&engine, req).await;
+    assert_eq!(outputs[0].token_ids, [42]);
+    assert_eq!(
+        outputs.last().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
+
+    let requests = server.service.requests.lock().await;
+    let stopping = requests[0].stopping.as_ref().expect("stopping");
+    assert_eq!(stopping.include_stop_in_output, Some(true));
+    assert!(stopping.conditions.iter().any(
+        |condition| condition.condition == Some(pb::stop_condition::Condition::StopTokenId(42))
+    ));
 }
 
 #[tokio::test]
