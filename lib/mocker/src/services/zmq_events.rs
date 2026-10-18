@@ -11,6 +11,7 @@ use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
 use futures::{Sink, SinkExt, StreamExt};
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 use tmq::{
     AsZmqSocket, Context, Multipart, SocketBuilder,
@@ -30,9 +31,15 @@ const ZMQ_RECONNECT_IVL_MS: i32 = 100;
 const ZMQ_RECONNECT_IVL_MAX_MS: i32 = 5000;
 const ZMQ_TCP_KEEPALIVE: i32 = 1;
 const ZMQ_LINGER_MS: i32 = 0;
+/// Matches vLLM's `ZmqEventPublisher` (`hwm=100_000`); libzmq's default of
+/// 1000 drops events far earlier when a subscriber falls behind.
+const ZMQ_SNDHWM: i32 = 100_000;
 
 /// Maximum number of entries in the replay ring buffer.
 const REPLAY_BUFFER_CAPACITY: usize = 10_000;
+
+/// Raw-event ownership tag for KVCR-owned lower-tier residency.
+const KVCR_OWNERSHIP: &str = "kvcr";
 
 #[derive(Serialize)]
 #[serde(tag = "type")]
@@ -45,13 +52,94 @@ enum ZmqRawKvEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         medium: Option<&'static str>,
         group_idx: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ownership: Option<&'static str>,
     },
     BlockRemoved {
         block_hashes: Vec<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         medium: Option<&'static str>,
         group_idx: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ownership: Option<&'static str>,
     },
+}
+
+/// Released blocks whose token IDs stay recoverable, oldest dropped first.
+///
+/// A G1 slot can be reacquired while its block's D2H copy is still in flight
+/// (only the new owner's compute waits for it), so a block's G1 `Removed` can
+/// precede its G2 `Stored`. That fence stalls the rank's compute until the copy
+/// lands, so only about one scheduling pass of evictions can race it.
+const RELEASED_BLOCK_TOKENS: usize = 16_384;
+
+/// Token IDs of resident blocks, keyed by sequence hash, with a bitmask of the
+/// tiers (G1, lower) holding each block.
+///
+/// AISimulate's G2 residency events carry no token IDs, which the vLLM wire
+/// requires. Every G2 block is written through from a G1 block whose Stored
+/// event carried them, so the encoder recovers them here.
+#[derive(Default)]
+pub(crate) struct ResidentBlockTokens {
+    blocks: FxHashMap<u64, (Vec<u32>, u8)>,
+    /// Blocks no longer resident in any tier, kept for in-flight G2 stores.
+    released: VecDeque<u64>,
+}
+
+impl ResidentBlockTokens {
+    /// Track `event`'s residency and return a store's flattened token IDs.
+    /// `None` is a store whose token IDs are unknown; it changes no state.
+    fn observe(&mut self, event: &RawKvEvent) -> Option<Vec<u32>> {
+        let tier = if event.storage_tier.is_gpu() { 1 } else { 2 };
+        match &event.event.data {
+            KvCacheEventData::Stored(store) => {
+                let event_ids = event.block_token_ids.as_deref().unwrap_or_default();
+                let token_ids = store
+                    .blocks
+                    .iter()
+                    .enumerate()
+                    .map(|(index, block)| {
+                        event_ids
+                            .get(index)
+                            .or_else(|| self.blocks.get(&block.block_hash.0).map(|(ids, _)| ids))
+                            .map(Vec::as_slice)
+                    })
+                    .collect::<Option<Vec<_>>>()?
+                    .concat();
+                for (index, block) in store.blocks.iter().enumerate() {
+                    self.blocks
+                        .entry(block.block_hash.0)
+                        .or_insert_with(|| (event_ids[index].clone(), 0))
+                        .1 |= tier;
+                }
+                Some(token_ids)
+            }
+            KvCacheEventData::Removed(remove) => {
+                for hash in &remove.block_hashes {
+                    if let Some((_, tiers)) = self.blocks.get_mut(&hash.0) {
+                        *tiers &= !tier;
+                        if *tiers == 0 {
+                            self.released.push_back(hash.0);
+                        }
+                    }
+                }
+                while self.released.len() > RELEASED_BLOCK_TOKENS {
+                    let hash = self.released.pop_front().unwrap();
+                    if self.blocks.get(&hash).is_some_and(|(_, tiers)| *tiers == 0) {
+                        self.blocks.remove(&hash);
+                    }
+                }
+                Some(Vec::new())
+            }
+            KvCacheEventData::Cleared => {
+                self.blocks.retain(|_, (_, tiers)| {
+                    *tiers &= !tier;
+                    *tiers != 0
+                });
+                Some(Vec::new())
+            }
+        }
+    }
 }
 
 pub struct ZmqKvEventSink {
@@ -61,13 +149,26 @@ pub struct ZmqKvEventSink {
 }
 
 impl ZmqKvEventSink {
+    /// `kvcr_host_ownership` tags host-pinned events as KVCR-owned, so a KV
+    /// state agent indexes them under the attached CacheOwner. `topic` is the
+    /// topic frame of every published and replayed batch, as vLLM's
+    /// `kv_events_config.topic`.
     pub async fn new(
         port: u16,
         replay_port: Option<u16>,
         dp_rank: u32,
         block_size: u32,
+        kvcr_host_ownership: bool,
+        topic: String,
     ) -> Result<Self> {
-        Self::bind(Some(port), replay_port, dp_rank, block_size)
+        Self::bind_with_ownership(
+            Some(port),
+            replay_port,
+            dp_rank,
+            block_size,
+            kvcr_host_ownership,
+            topic,
+        )
     }
 
     /// Bind the publisher, using an OS-assigned port when `port` is absent.
@@ -77,6 +178,17 @@ impl ZmqKvEventSink {
         replay_port: Option<u16>,
         dp_rank: u32,
         block_size: u32,
+    ) -> Result<Self> {
+        Self::bind_with_ownership(port, replay_port, dp_rank, block_size, false, String::new())
+    }
+
+    fn bind_with_ownership(
+        port: Option<u16>,
+        replay_port: Option<u16>,
+        dp_rank: u32,
+        block_size: u32,
+        kvcr_host_ownership: bool,
+        topic: String,
     ) -> Result<Self> {
         let runtime = tokio::runtime::Handle::try_current()
             .context("ZmqKvEventSink::bind requires an active Tokio runtime")?;
@@ -115,6 +227,7 @@ impl ZmqKvEventSink {
         runtime.spawn(async move {
             let mut seq_num: u64 = 0;
             let mut ring_buffer: VecDeque<(u64, Bytes)> = VecDeque::new();
+            let mut block_tokens = ResidentBlockTokens::default();
 
             loop {
                 tokio::select! {
@@ -191,7 +304,7 @@ impl ZmqKvEventSink {
                             let frames = vec![
                                 identity.clone().to_vec(),
                                 Vec::new(),
-                                Vec::new(),
+                                topic.as_bytes().to_vec(),
                                 seq.to_be_bytes().to_vec(),
                                 payload.to_vec(),
                             ];
@@ -214,7 +327,13 @@ impl ZmqKvEventSink {
                     msg_opt = rx.recv() => {
                         let Some(raw_events) = msg_opt else { break };
 
-                        let payload = match encode_event_batch(&raw_events, block_size, dp_rank) {
+                        let payload = match encode_event_batch(
+                            &raw_events,
+                            &mut block_tokens,
+                            block_size,
+                            dp_rank,
+                            kvcr_host_ownership,
+                        ) {
                             Ok(Some(payload)) => payload,
                             Ok(None) => continue,
                             Err(e) => {
@@ -231,7 +350,7 @@ impl ZmqKvEventSink {
                         }
 
                         let frames = vec![
-                            Vec::new(),
+                            topic.as_bytes().to_vec(),
                             seq_num.to_be_bytes().to_vec(),
                             payload.to_vec(),
                         ];
@@ -283,17 +402,30 @@ impl RawKvEventSink for ZmqKvEventSink {
 
 pub(crate) fn encode_event_batch(
     raw_events: &[RawKvEvent],
+    block_tokens: &mut ResidentBlockTokens,
     block_size: u32,
     dp_rank: u32,
+    kvcr_host_ownership: bool,
 ) -> std::result::Result<Option<Bytes>, rmp_serde::encode::Error> {
     let events = raw_events
         .iter()
         .flat_map(|event| {
+            let Some(token_ids) = block_tokens.observe(event) else {
+                tracing::warn!(
+                    dp_rank,
+                    tier = ?event.storage_tier,
+                    "Dropping ZMQ KV store with unknown block token IDs"
+                );
+                return Vec::new();
+            };
+            let ownership = (kvcr_host_ownership && event.storage_tier == StorageTier::HostPinned)
+                .then_some(KVCR_OWNERSHIP);
             convert_to_zmq_events(
                 &event.event,
-                event.block_token_ids.as_deref(),
+                token_ids,
                 block_size,
                 event.storage_tier,
+                ownership,
             )
         })
         .collect::<Vec<_>>();
@@ -311,19 +443,16 @@ pub(crate) fn encode_event_batch(
 
 fn convert_to_zmq_events(
     event: &KvCacheEvent,
-    block_token_ids: Option<&[Vec<u32>]>,
+    token_ids: Vec<u32>,
     block_size: u32,
     storage_tier: StorageTier,
+    ownership: Option<&'static str>,
 ) -> Vec<ZmqRawKvEvent> {
     let medium = storage_tier.to_kv_medium();
     match &event.data {
         KvCacheEventData::Stored(store_data) => {
             let block_hashes: Vec<u64> = store_data.blocks.iter().map(|b| b.block_hash.0).collect();
             let parent_block_hash = store_data.parent_hash.map(|h| h.0);
-
-            let token_ids: Vec<u32> = block_token_ids
-                .map(|tids| tids.iter().flatten().copied().collect())
-                .unwrap_or_default();
 
             assert_eq!(
                 token_ids.len(),
@@ -340,6 +469,7 @@ fn convert_to_zmq_events(
                 block_size,
                 medium,
                 group_idx: 0,
+                ownership,
             }]
         }
         KvCacheEventData::Removed(remove_data) => {
@@ -348,6 +478,7 @@ fn convert_to_zmq_events(
                 block_hashes,
                 medium,
                 group_idx: 0,
+                ownership,
             }]
         }
         KvCacheEventData::Cleared => vec![],
@@ -376,7 +507,9 @@ fn configure_send_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
 where
     T: tmq::FromZmqSocket<T>,
 {
-    configure_common_builder(builder).set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
+    configure_common_builder(builder)
+        .set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
+        .set_sndhwm(ZMQ_SNDHWM)
 }
 
 fn configure_bidirectional_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
@@ -471,11 +604,16 @@ mod tests {
         assert_ne!(port, 0);
         assert_ne!(first.endpoint(), second.endpoint());
         assert_eq!(first.endpoint(), format!("tcp://0.0.0.0:{port}"));
-        assert!(ZmqKvEventSink::new(port, None, 0, 4).await.is_err());
+        assert!(
+            ZmqKvEventSink::new(port, None, 0, 4, false, String::new())
+                .await
+                .is_err()
+        );
         drop(first);
         let rebound = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Ok(sink) = ZmqKvEventSink::new(port, None, 0, 4).await {
+                if let Ok(sink) = ZmqKvEventSink::new(port, None, 0, 4, false, String::new()).await
+                {
                     break sink;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -489,20 +627,40 @@ mod tests {
     #[tokio::test]
     async fn automatic_replay_port_serves_events_and_rejects_a_second_bind() {
         use std::time::Duration;
-        use tmq::dealer::dealer;
+        use tmq::{dealer::dealer, subscribe::subscribe};
 
-        let sink = ZmqKvEventSink::bind(None, Some(0), 0, 4).unwrap();
+        const TOPIC: &str = "0123456789abcdef";
+        let sink =
+            ZmqKvEventSink::bind_with_ownership(None, Some(0), 0, 4, false, TOPIC.into()).unwrap();
         let replay_endpoint = sink.replay_endpoint().unwrap();
         let replay_port: u16 = replay_endpoint.rsplit_once(':').unwrap().1.parse().unwrap();
         assert_ne!(replay_port, 0);
         assert!(ZmqKvEventSink::bind(None, Some(replay_port), 0, 4).is_err());
-        sink.publish(RawKvEvent {
-            event: stored_event(),
-            block_token_ids: Some(vec![vec![1, 2, 3, 4]]),
-            storage_tier: StorageTier::Device,
-        })
-        .unwrap();
         let ctx = Context::new();
+        // Live batches carry the topic frame, as vLLM's publisher does.
+        let mut live = subscribe(&ctx)
+            .connect(&sink.endpoint().replace("0.0.0.0", "127.0.0.1"))
+            .unwrap()
+            .subscribe(TOPIC.as_bytes())
+            .unwrap();
+        let live_frames = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                sink.publish(RawKvEvent {
+                    event: stored_event(),
+                    block_token_ids: Some(vec![vec![1, 2, 3, 4]]),
+                    storage_tier: StorageTier::Device,
+                })
+                .unwrap();
+                if let Ok(Some(frames)) =
+                    tokio::time::timeout(Duration::from_millis(50), live.next()).await
+                {
+                    break multipart_message(frames.unwrap());
+                }
+            }
+        })
+        .await
+        .expect("a SUB on the topic must receive live batches");
+        assert_eq!(live_frames[0], TOPIC.as_bytes());
         let mut replay = dealer(&ctx)
             .set_linger(0)
             .connect(&replay_endpoint.replace("0.0.0.0", "127.0.0.1"))
@@ -526,6 +684,7 @@ mod tests {
         })
         .await
         .expect("replay must return the published event");
+        assert_eq!(frames[1], TOPIC.as_bytes());
         assert_eq!(frames[2], 0u64.to_be_bytes());
         let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&frames[3]).unwrap();
         assert_eq!(batch.data_parallel_rank, Some(0));
@@ -536,9 +695,10 @@ mod tests {
     fn host_pinned_zmq_stored_event_carries_medium() {
         let events = convert_to_zmq_events(
             &stored_event(),
-            Some(&[vec![1, 2, 3, 4]]),
+            vec![1, 2, 3, 4],
             4,
             StorageTier::HostPinned,
+            None,
         );
 
         let [ZmqRawKvEvent::BlockStored { medium, .. }] = events.as_slice() else {
@@ -551,9 +711,10 @@ mod tests {
     fn device_zmq_stored_event_omits_medium() {
         let events = convert_to_zmq_events(
             &stored_event(),
-            Some(&[vec![1, 2, 3, 4]]),
+            vec![1, 2, 3, 4],
             4,
             StorageTier::Device,
+            None,
         );
 
         let [ZmqRawKvEvent::BlockStored { medium, .. }] = events.as_slice() else {
@@ -595,9 +756,15 @@ mod tests {
             storage_tier: StorageTier::HostPinned,
         };
 
-        let payload = encode_event_batch(&[stored, removed, stored_pinned], 4, 3)
-            .expect("encoding must succeed")
-            .expect("non-empty batch must produce a payload");
+        let payload = encode_event_batch(
+            &[stored, removed, stored_pinned],
+            &mut ResidentBlockTokens::default(),
+            4,
+            3,
+            false,
+        )
+        .expect("encoding must succeed")
+        .expect("non-empty batch must produce a payload");
 
         let batch: KvEventBatch =
             rmp_serde::from_slice(&payload).expect("router zmq_wire must decode the payload");
@@ -650,5 +817,132 @@ mod tests {
         assert_eq!(*removed_group_idx, Some(0));
         assert_eq!(pinned_medium.as_deref(), Some("CPU_PINNED"));
         assert_eq!(*pinned_group_idx, Some(0));
+    }
+
+    #[test]
+    fn host_pinned_store_recovers_g1_token_ids_and_kvcr_ownership() {
+        use dynamo_kv_router::protocols::KvCacheRemoveData;
+        use dynamo_kv_router::zmq_wire::{KvEventBatch, KvEventOwnership, RawKvEvent as Wire};
+
+        // AISimulate G2 residency carries no token IDs.
+        let stored_pinned = RawKvEvent {
+            event: stored_event(),
+            block_token_ids: None,
+            storage_tier: StorageTier::HostPinned,
+        };
+        let events = [
+            RawKvEvent {
+                event: stored_event(),
+                block_token_ids: Some(vec![vec![1, 2, 3, 4]]),
+                storage_tier: StorageTier::Device,
+            },
+            stored_pinned.clone(),
+            RawKvEvent {
+                event: KvCacheEvent {
+                    event_id: 2,
+                    data: KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: vec![ExternalSequenceBlockHash(10)],
+                    }),
+                    dp_rank: 0,
+                },
+                block_token_ids: None,
+                storage_tier: StorageTier::HostPinned,
+            },
+        ];
+
+        let decode = |kvcr_host_ownership| {
+            let mut block_tokens = ResidentBlockTokens::default();
+            let payload = encode_event_batch(&events, &mut block_tokens, 4, 0, kvcr_host_ownership)
+                .unwrap()
+                .unwrap();
+            let batch: KvEventBatch = rmp_serde::from_slice(&payload).unwrap();
+            batch.events
+        };
+        let wire = decode(true);
+        assert_eq!(
+            wire.iter()
+                .map(|event| event.ownership().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                KvEventOwnership::Framework,
+                KvEventOwnership::Kvcr,
+                KvEventOwnership::Kvcr,
+            ]
+        );
+        let Wire::BlockStored {
+            token_ids, medium, ..
+        } = &wire[1]
+        else {
+            panic!("expected the host-pinned store, got {:?}", wire[1]);
+        };
+        assert_eq!(token_ids, &vec![1, 2, 3, 4]);
+        assert_eq!(medium.as_deref(), Some("CPU_PINNED"));
+        assert!(
+            decode(false)
+                .iter()
+                .all(|event| event.ownership() == Ok(KvEventOwnership::Framework))
+        );
+
+        // A G2 store whose block never reached G1 has no token IDs to send.
+        assert!(
+            encode_event_batch(
+                std::slice::from_ref(&stored_pinned),
+                &mut ResidentBlockTokens::default(),
+                4,
+                0,
+                true
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        // G1 can evict a block before its in-flight G2 store lands.
+        let removed_device = RawKvEvent {
+            storage_tier: StorageTier::Device,
+            ..events[2].clone()
+        };
+        let mut block_tokens = ResidentBlockTokens::default();
+        let payload = encode_event_batch(
+            &[events[0].clone(), removed_device, stored_pinned],
+            &mut block_tokens,
+            4,
+            0,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        let batch: KvEventBatch = rmp_serde::from_slice(&payload).unwrap();
+        let [_, _, Wire::BlockStored { token_ids, .. }] = batch.events.as_slice() else {
+            panic!(
+                "expected the late host-pinned store, got {:?}",
+                batch.events
+            );
+        };
+        assert_eq!(token_ids, &vec![1, 2, 3, 4]);
+
+        // A G2 store with one unknown block is dropped without touching the
+        // known block's residency.
+        let mut block_tokens = ResidentBlockTokens::default();
+        encode_event_batch(&events[..1], &mut block_tokens, 4, 0, true).unwrap();
+        let mut mixed = stored_event();
+        let KvCacheEventData::Stored(store) = &mut mixed.data else {
+            unreachable!();
+        };
+        store.blocks.push(KvCacheStoredBlockData {
+            block_hash: ExternalSequenceBlockHash(11),
+            tokens_hash: LocalBlockHash(101),
+            mm_extra_info: None,
+        });
+        let mixed = RawKvEvent {
+            event: mixed,
+            block_token_ids: None,
+            storage_tier: StorageTier::HostPinned,
+        };
+        assert!(
+            encode_event_batch(&[mixed], &mut block_tokens, 4, 0, true)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(block_tokens.blocks[&10].1, 1);
     }
 }

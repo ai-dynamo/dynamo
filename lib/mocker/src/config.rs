@@ -26,7 +26,13 @@ pub struct MockerRuntimeOptions {
     pub reasoning: Option<ReasoningConfig>,
     pub response_replay_trace_path: Option<PathBuf>,
     pub zmq_kv_events_port: Option<u16>,
+    /// Topic frame of every raw KV event batch, shared by all DP ranks like
+    /// vLLM's `kv_events_config.topic`. Unset publishes the empty topic.
+    pub zmq_kv_events_topic: Option<String>,
     pub zmq_replay_port: Option<u16>,
+    /// Publish raw ZMQ events for an external KV state agent only: no
+    /// in-process relay, and host-pinned events are tagged KVCR-owned.
+    pub kv_state_agent: bool,
     pub router_queue_policy: Option<RouterQueuePolicy>,
 }
 
@@ -39,7 +45,9 @@ impl Default for MockerRuntimeOptions {
             reasoning: None,
             response_replay_trace_path: None,
             zmq_kv_events_port: None,
+            zmq_kv_events_topic: None,
             zmq_replay_port: None,
+            kv_state_agent: false,
             router_queue_policy: None,
         }
     }
@@ -137,6 +145,10 @@ impl MockerConfig {
         ensure!(
             self.runtime.handoff_session_timeout_ms > 0,
             "handoff_session_timeout_ms must be positive"
+        );
+        ensure!(
+            !self.runtime.kv_state_agent || self.runtime.zmq_kv_events_port.is_some(),
+            "kv_state_agent requires zmq_kv_events_port"
         );
         if let Some(reasoning) = &self.runtime.reasoning {
             reasoning.validate()?;

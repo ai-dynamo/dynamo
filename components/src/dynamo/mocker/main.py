@@ -6,6 +6,7 @@
 import argparse
 import asyncio
 import functools
+import json
 import logging
 import os
 import signal
@@ -16,15 +17,31 @@ import uvloop
 os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.constants import (
+    KV_HINT_TRANSFER_CAPABILITY_KEY,
+    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
+)
+from dynamo.common.kv_state_agent import worker_raw_topic
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.llm import EngineType, EntrypointArgs, fetch_model, make_engine, run_input
+from dynamo.common.utils.topology import read_topology_config
+from dynamo.llm import (
+    EngineType,
+    EntrypointArgs,
+    KvStateAttachmentOwner,
+    fetch_model,
+    make_engine,
+    run_input,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import parse_args, resolve_planner_profile_data
 from .config import (
     apply_worker_engine_args_overrides,
+    build_kv_state_agent_descriptors,
     build_runtime_config,
+    kv_state_agent_cache_owner_ids,
     load_mocker_engine_args,
+    worker_topology_config,
 )
 from .utils.kv_cache import compute_kv_bytes_per_token
 
@@ -121,6 +138,49 @@ async def worker():
             del profile_data_result  # Triggers tmpdir cleanup via __del__
 
 
+async def start_kv_state_agent_owner(
+    args: argparse.Namespace,
+    runtime,
+    engine_args: dict,
+    runtime_config,
+    cache_owner_ids: list[str],
+) -> KvStateAttachmentOwner:
+    """Attach one worker's raw ZMQ streams to the namespace's KV state agent."""
+    runtime_config.kv_event_source_mode = "state_agent_v2"
+    runtime_config.kv_state_endpoint = args.kv_state_endpoint
+    hint_worker_type = None
+    if args.kv_state_agent_router_hints:
+        hint_worker_type = (
+            "prefill"
+            if args.is_prefill_worker
+            else "decode"
+            if args.is_decode_worker
+            else "aggregated"
+        )
+        # Source endpoints ride in the descriptors, as for vLLM state-agent workers.
+        runtime_config.set_engine_specific(
+            KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, json.dumps(hint_worker_type)
+        )
+        runtime_config.set_engine_specific(
+            KV_HINT_TRANSFER_CAPABILITY_KEY, json.dumps(True)
+        )
+    endpoint = runtime.endpoint(args.endpoint)
+    owner = KvStateAttachmentOwner(
+        endpoint,
+        endpoint.connection_id(),
+        build_kv_state_agent_descriptors(
+            engine_args,
+            cache_owner_ids=cache_owner_ids,
+            kv_state_endpoint=args.kv_state_endpoint or args.endpoint,
+            raw_advertise_host=args.kv_state_agent_raw_host,
+            zmq_kv_events_port=engine_args["dynamo"]["zmq_kv_events_port"],
+            router_hint_worker_type=hint_worker_type,
+        ),
+    )
+    await owner.start()
+    return owner
+
+
 def compute_stagger_delay(num_workers: int, stagger_delay: float) -> float:
     """Compute the stagger delay based on worker count to give the frontend time to process registrations.
     Returns the delay in seconds between worker launches.
@@ -154,6 +214,9 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
     """
     futures = []
     runtimes = []
+    # Discovery leases own the attachment intents; holding the owners keeps
+    # their handles alive until the runtimes shut down.
+    attachment_owners = []
     shutdown_requested = False
 
     def on_worker_done(worker_num: int, future: asyncio.Future) -> None:
@@ -200,6 +263,11 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
             args.router_advertisement.router_mode,
         )
 
+    # Read once: the environment is the same for every worker in this process.
+    topology_config = read_topology_config()
+    if args.kv_transfer_island_size and not topology_config.enabled:
+        raise ValueError("--kv-transfer-island-size requires DYN_TOPOLOGY_ENABLED")
+
     for worker_id in range(args.num_workers):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
 
@@ -213,6 +281,15 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         )
         runtimes.append(runtime)
 
+        cache_owner_ids = (
+            kv_state_agent_cache_owner_ids(
+                base_engine_args["dp_size"],
+                args.kv_state_agent_cache_slot
+                + worker_id * base_engine_args["dp_size"],
+            )
+            if args.kv_state_agent
+            else None
+        )
         if needs_per_worker_overrides:
             worker_engine_args = apply_worker_engine_args_overrides(
                 base_engine_args,
@@ -226,11 +303,16 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
                     if args.zmq_kv_events_ports_list
                     else None
                 ),
+                # Every DP rank publishes the worker's state-agent topic, as vLLM does.
+                zmq_kv_events_topic=(
+                    worker_raw_topic(cache_owner_ids) if cache_owner_ids else None
+                ),
                 zmq_replay_port=(
                     args.zmq_replay_ports_list[worker_id]
                     if args.zmq_replay_ports_list
                     else None
                 ),
+                kv_state_agent=args.kv_state_agent or None,
                 ais_mtp_seed=(
                     (base_engine_args["engine"]["aic_mtp_seed"] + worker_id) % (1 << 64)
                     if base_engine_args["engine"]["aic_nextn"] is not None
@@ -240,9 +322,20 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         else:
             worker_engine_args = base_engine_args
 
-        kv_cache_block_size, runtime_config = build_runtime_config(worker_engine_args)
+        kv_cache_block_size, runtime_config = build_runtime_config(
+            worker_engine_args,
+            worker_topology_config(
+                topology_config, worker_id, args.kv_transfer_island_size
+            ),
+        )
         if args.sglang_generate:
             runtime_config.set_engine_specific("sglang_generate", "true")
+        if worker_engine_args["dynamo"]["kv_state_agent"]:
+            attachment_owners.append(
+                await start_kv_state_agent_owner(
+                    args, runtime, worker_engine_args, runtime_config, cache_owner_ids
+                )
+            )
 
         # Create EntrypointArgs for this worker
         entrypoint_args = EntrypointArgs(

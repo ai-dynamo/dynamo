@@ -4,7 +4,6 @@
 """Opt-in vLLM attachment configuration for the external KV state agent."""
 
 import asyncio
-import ipaddress
 import logging
 import re
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+from dynamo.common.kv_state_agent import validate_advertise_host, worker_raw_topic
 from dynamo.llm import KvStateAttachmentOwner, WorkerType
 from dynamo.runtime import Endpoint
 
@@ -76,7 +76,13 @@ async def _close_attachment_owner(owner: KvStateAttachmentOwner) -> None:
 
 
 def state_agent_settings(config: Any) -> StateAgentSettings | None:
-    kv_transfer = getattr(config.engine_args, "kv_transfer_config", None)
+    return state_agent_settings_from_engine_args(config.engine_args)
+
+
+def state_agent_settings_from_engine_args(
+    engine_args: Any,
+) -> StateAgentSettings | None:
+    kv_transfer = getattr(engine_args, "kv_transfer_config", None)
     extra = getattr(kv_transfer, "kv_connector_extra_config", None) or {}
     if not isinstance(extra, dict):
         raise ValueError("kv_connector_extra_config must be an object")
@@ -89,7 +95,7 @@ def state_agent_settings(config: Any) -> StateAgentSettings | None:
     host = section.get("raw_advertise_host")
     if not isinstance(host, str) or not host:
         raise ValueError("dynamo_state_agent.raw_advertise_host is required")
-    _validate_advertise_host(host)
+    validate_advertise_host(host)
 
     raw_owners = section.get("cache_owner_ids")
     if not isinstance(raw_owners, dict) or not raw_owners:
@@ -163,6 +169,14 @@ async def start_attachment_owner(
         )
 
     events = config.engine_args.kv_events_config
+    # Every rank of this worker publishes one topic, set at startup from its
+    # CacheOwner IDs; advertise exactly what vLLM publishes.
+    raw_topic = worker_raw_topic(settings.cache_owner_ids.values())
+    if getattr(events, "topic", None) != raw_topic:
+        raise ValueError(
+            "kv_events_config.topic must be the state-agent worker topic "
+            f"{raw_topic!r}, got {getattr(events, 'topic', None)!r}"
+        )
     block_size = get_configured_kv_event_block_size(vllm_config)
     kv_transfer_hint_sources = resolve_kv_transfer_hint_sources(
         config.engine_args,
@@ -190,7 +204,7 @@ async def start_attachment_owner(
                 "raw_zmq_endpoint": _advertised_raw_endpoint(
                     events.endpoint, rank, settings.raw_advertise_host
                 ),
-                "raw_topic": "",
+                "raw_topic": raw_topic,
                 "image_token_id": image_token_id,
                 "video_token_id": video_token_id,
                 "router_hint_source": (
@@ -231,35 +245,3 @@ def _advertised_raw_endpoint(base: str, rank: int, host: str) -> str:
     if not port.isdigit():
         raise ValueError(f"vLLM KV event endpoint has no numeric port: {endpoint!r}")
     return f"tcp://{host}:{port}"
-
-
-def _validate_advertise_host(host: str) -> None:
-    if host in {"*", "localhost", "0.0.0.0", "::", "[::]"}:
-        raise ValueError("raw_advertise_host must be a non-loopback connectable host")
-    if "://" in host or "/" in host:
-        raise ValueError("raw_advertise_host must not include a scheme, port, or path")
-    if host.startswith("["):
-        if not host.endswith("]"):
-            raise ValueError("raw_advertise_host has mismatched IPv6 brackets")
-        literal = host[1:-1]
-        try:
-            address = ipaddress.ip_address(literal)
-        except ValueError as error:
-            raise ValueError(
-                "bracketed raw_advertise_host must be an IPv6 literal"
-            ) from error
-        if address.version != 6:
-            raise ValueError("only IPv6 literals may use brackets")
-    else:
-        if "[" in host or "]" in host or ":" in host or any(c.isspace() for c in host):
-            raise ValueError(
-                "raw_advertise_host must be a hostname or bracketed IPv6 literal without a port"
-            )
-        literal = host
-        try:
-            address = ipaddress.ip_address(literal)
-        except ValueError:
-            return
-
-    if address.is_loopback or address.is_unspecified:
-        raise ValueError("raw_advertise_host must be a non-loopback connectable host")
