@@ -34,6 +34,13 @@ These are the vLLM-Omni orchestration flags. The omni worker also accepts the sa
 <ParamField path="--task-type" type="string">
   Model-defined startup task or checkpoint partition.
 </ParamField>
+<ParamField path="--no-guardrails" type="flag" default="false">
+  Disable native model guardrails, such as Cosmos3 guardrails, for an aggregated
+  Omni worker. The environment equivalent is `DYN_OMNI_NO_GUARDRAILS=true`.
+  Omitting the option preserves the model's guardrail configuration and its
+  dependency requirements. Standalone stages, the stage router, and realtime
+  workers reject this option.
+</ParamField>
 <ParamField path="--lora-path" type="path ...">
   Diffusion checkpoint adapter path(s) fused into the model at startup. This is
   separate from request-time LoRA loading.
@@ -49,6 +56,24 @@ These are the vLLM-Omni orchestration flags. The omni worker also accepts the sa
 
 ## Memory & Performance
 
+<ParamField path="--image-png-compression-level" type="int" default="6">
+  Lossless PNG compression level for generated images, from `0` to `9`.
+  `0` disables compression for faster CPU encoding and larger responses;
+  `1` uses fast compression, and `9` uses the strongest compression. The default
+  `6` preserves Pillow's existing encoding behavior. All levels preserve pixels.
+
+  Set `DYN_OMNI_IMAGE_PNG_COMPRESSION_LEVEL` as an environment alternative;
+  an explicit CLI value takes precedence. Invalid values fail startup.
+  Set this on the aggregated worker, or on the `--omni-router` process in
+  disaggregated mode. It applies to PNG images returned as base64, stored for
+  URL responses, or embedded in chat responses. It does not change model
+  inference or video encoding.
+
+  Measure both encoding time and end-to-end latency when tuning this setting:
+  larger payloads can offset CPU savings on slower networks. Compare backends
+  at matched PNG compression levels, and report first-request and warm latency
+  separately from model-loading time.
+</ParamField>
 <ParamField path="--vae-use-slicing" type="flag">
   Enable VAE slicing for memory optimization.
 </ParamField>

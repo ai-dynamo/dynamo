@@ -19,6 +19,7 @@ That image is the build's `RUNTIME_IMAGE`, so the result is a single "Dynamo + T
 | Tensor (KServe gRPC) Serving                   |      Ready       | Multiple models per worker                                      |
 | Classification (`class_count` / top-K)         |      Ready       | Top-K `"<score>:<index>[:<label>]"` class strings               |
 | OpenAI `/v1/classify`                          |      Ready       | Text-in classifier (leaf or ensemble) via `--task classify`     |
+| OpenAI `/v1/embeddings`                        |      Ready       | Text-in embedding (leaf or ensemble) via `--task embeddings`         |
 | Service Discovery / Routing                    |      Ready       | Via the Dynamo Frontend                                         |
 | Triton backends (TensorRT, ONNX, PyTorch, ...) |      Ready       | Whatever the Triton release image ships                         |
 | TensorRT Plugins                               |      Ready       | Via `--backend-config='tensorrt,plugins=...'`                   |
@@ -112,9 +113,11 @@ Common flags:
 | `--backend-config <cfg>`        | Triton backend config, repeatable, e.g. `--backend-config='tensorrt,plugins=/path/lib.so'` |
 | `--log-verbose <int>`           | Triton verbose logging level; `0` disables, `>= 1` enables (default: `0`)                  |
 | `--discovery-backend <backend>` | Service discovery backend: `kubernetes`, `etcd`, `file`, `mem` (default: `etcd`)           |
-| `--task <task>`                 | Endpoint the worker registers: `tensor` (default) or `classify` (see below)                |
+| `--task <task>`                 | Endpoint the worker registers: `tensor` (default), `classify`, or `embeddings` (see below)      |
 | `--classify-input-name <name>`  | Override the BYTES input tensor name for `--task classify` (auto-detected by default)      |
 | `--classify-output-name <name>` | Override the FP32 output tensor name for `--task classify` (auto-detected by default)      |
+| `--embeddings-input-name <name>`     | Override the BYTES input tensor name for `--task embeddings` (auto-detected by default)         |
+| `--embeddings-output-name <name>`    | Override the FP32 output tensor name for `--task embeddings` (auto-detected by default)         |
 
 ### Environment variables
 
@@ -171,12 +174,12 @@ Common flags:
      --discovery-backend=file &
    ```
 
-## Serving `/v1/classify` (OpenAI classify)
+## Serving `/v1/classify` (OpenAI Classify)
 
 Start the worker with `--task classify` to expose a Triton classifier through the OpenAI-compatible `POST /v1/classify` endpoint on the Dynamo Frontend, instead of the KServe tensor path.
 The frontend translates the classify JSON into a Dynamo tensor request, this worker forwards it to Triton as a single BYTES text input, and reads a single FP32 probability output back — no HuggingFace tokenizer or `config.json` fetch is required.
 
-**Expected model shape.**
+### Expected Model Shape
 The worker auto-detects the input/output tensor names from `config.pbtxt`.
 Any Triton model — leaf plan or ensemble — that declares exactly one `TYPE_STRING` input and exactly one `TYPE_FP32` output serves classify unchanged.
 The STRING input must declare `dims: [ 1 ]` or `dims: [ -1 ]` (one string per request item); other layouts are rejected at startup.
@@ -194,7 +197,7 @@ ensemble_scheduling { ... }
 When the model has more than one BYTES input or FP32 output, disambiguate with `--classify-input-name` / `--classify-output-name`.
 Class labels come from Triton's own `label_filename` on the output when set; when absent, response `label` fields are `null`.
 
-**Launching the worker and issuing a request.**
+### Launching the Worker and Issuing a Request
 
 ```bash
 # Frontend (HTTP so /v1/classify is reachable)
@@ -225,12 +228,80 @@ The response shape mirrors vLLM's `/classify`:
 }
 ```
 
-**Notes and limits.**
+### Notes and Limits
 
 - Text input only (`"input": "..."` or `"input": ["..."]`); token-ID variants (`Tokens` / `TokenBatch`) return HTTP 400.
 - Pooling (`/v1/pooling`) is not yet served by this worker; requests with `encoding_format` set are rejected.
 - `use_activation`, `add_special_tokens`, `truncate_prompt_tokens`, and `truncation_side` are rejected with HTTP 400. The Triton model plan owns tokenization and the classify head's activation, so this worker can neither apply nor skip them; a silent no-op would let clients relying on those semantics get a different classification per backend.
 - To serve the same underlying Triton model on both `/v2/models/{name}/infer` (tensor) and `/v1/classify`, run two worker processes against the same `--model-repository` — one with the default `--task=tensor` and one with `--task=classify`.
+- Model aliases (multiple served names for one card) are not honored on this path.
+
+## Serving `/v1/embeddings` (OpenAI Embeddings)
+
+Start the worker with `--task embeddings` to expose a Triton embedding model through the OpenAI-compatible `POST /v1/embeddings` endpoint on the Dynamo Frontend, instead of the KServe tensor path.
+The frontend translates the embeddings JSON into a Dynamo tensor request, this worker forwards it to Triton as a single BYTES text input, and reads a single FP32 vector output back, so no HuggingFace tokenizer or `config.json` fetch is required.
+
+### Expected Model Shape
+The worker auto-detects the input/output tensor names from `config.pbtxt`.
+Any Triton model (leaf plan or ensemble) that declares exactly one `TYPE_STRING` input and exactly one `TYPE_FP32` output serves embeddings unchanged.
+The STRING input must declare `dims: [ 1 ]` or `dims: [ -1 ]` (one string per request item); other layouts are rejected at startup.
+An ensemble that runs tokenization inside Triton (Python-backend tokenizer plus a TensorRT plan wired through `ensemble_scheduling`) is the intended shape:
+
+```protobuf
+name: "text_embedder"
+platform: "ensemble"
+max_batch_size: 64
+input  [ { name: "TEXT"      data_type: TYPE_STRING dims: [ 1 ] } ]
+output [ { name: "embedding" data_type: TYPE_FP32   dims: [ 768 ] } ]
+ensemble_scheduling { ... }
+```
+
+When the model has more than one BYTES input or FP32 output, disambiguate with `--embeddings-input-name` / `--embeddings-output-name`.
+The output vector length is whatever the Triton model's FP32 output declares; the worker does not reshape or truncate it.
+
+### Model Repository Layout
+A single worker process serves one task.
+`--task embeddings` registers every user-facing model in `--model-repository` as an embedding, so every model in the repo must be shaped STRING-in / FP32-out. A classifier or raw-tensor model mixed into the same repo makes startup fail with the mismatched model's name in the error.
+Ensemble dependency models (tokenizer, encoder, anything referenced from another model's `ensemble_scheduling.step[].model_name`) are the exception: they stay loaded in Triton so their parent ensemble can call them, but they are not registered as `/v1/embeddings` endpoints, so an ensemble + its dependencies are the intended repo shape.
+To serve multiple tasks from the same underlying models, run one worker process per task against repositories dedicated to that task.
+
+### Launching the Worker and Issuing a Request
+
+```bash
+# Frontend (HTTP so /v1/embeddings is reachable)
+python3 -m dynamo.frontend --http-port=8000 --discovery-backend=file &
+
+# Worker: register as an embedding model
+python3 -m dynamo.triton --task=embeddings --discovery-backend=file &
+
+# Client request
+curl -sX POST http://localhost:8000/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "text_embedder", "input": ["hello world", "another example"]}'
+```
+
+The response shape mirrors OpenAI's `/v1/embeddings`:
+
+```json
+{
+  "object": "list",
+  "model": "text_embedder",
+  "data": [
+    {"index": 0, "object": "embedding", "embedding": [0.013, -0.027, ...]},
+    {"index": 1, "object": "embedding", "embedding": [0.041,  0.009, ...]}
+  ],
+  "usage": {"prompt_tokens": 0, "total_tokens": 0}
+}
+```
+
+The worker emits every vector as base64-encoded little-endian FP32 bytes on the Dynamo wire; the frontend decodes to a float array at the HTTP boundary when the client omits `encoding_format` or sets it to `"float"`, and forwards the base64 string unchanged when the client sets `encoding_format: "base64"`.
+
+### Notes and Limits
+
+- Text input only (`"input": "..."` or `"input": ["..."]`); token-ID variants (`Tokens` / `TokenBatch`) return HTTP 400.
+- `dimensions` (Matryoshka truncation), `add_special_tokens`, and `truncate_prompt_tokens` are rejected with HTTP 400. The Triton model plan owns tokenization and the output dimension is fixed by the model; a silent no-op would let clients relying on those semantics get a different embedding per backend.
+- `encoding_format` only accepts `"float"` (default) and `"base64"`; other values return HTTP 400.
+- To serve the same underlying Triton model on both `/v2/models/{name}/infer` (tensor) and `/v1/embeddings`, run two worker processes against the same `--model-repository`: one with the default `--task=tensor` and one with `--task=embeddings`.
 - Model aliases (multiple served names for one card) are not honored on this path.
 
 ## Configuring the Triton version
@@ -294,4 +365,5 @@ The worker ([`components/src/dynamo/triton/main.py`](https://github.com/ai-dynam
 4. Registers each model with the Dynamo runtime, keyed on `--task`:
    - `tensor` (default): `ModelInput.Tensor` / `ModelType.TensorBased` — Dynamo Frontend hosted KServe gRPC endpoint. Requests are translated to Triton inference requests and streamed back as Dynamo tensors.
    - `classify`: `ModelInput.Text` / `ModelType.Classify` — Dynamo Frontend hosted `POST /v1/classify`. Requests are translated to a single BYTES text input and the FP32 probability output is wrapped in the OpenAI classify response shape.
+   - `embed`: `ModelInput.Text` / `ModelType.Embedding`: Dynamo Frontend hosted `POST /v1/embeddings`. Requests are translated to a single BYTES text input and the FP32 vector output is base64-encoded on the wire, with the frontend decoding to a float array at the HTTP boundary when the client asks for float.
 5. Each model is served on its own endpoint (`triton.<model_name>`), so a single worker can serve multiple models routed by name.

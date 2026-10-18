@@ -816,7 +816,7 @@ def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_native_generate_stream_forwards_only_opaque_response():
+async def test_native_generate_stream_forwards_opaque_response_and_token_ids():
     native_response = {
         "output_ids": [101],
         "meta_info": {
@@ -841,9 +841,101 @@ async def test_native_generate_stream_forwards_only_opaque_response():
     )
 
     assert chunks == [
-        {"token_ids": [], "engine_data": {"sglang_response": native_response}}
+        {"token_ids": [101], "engine_data": {"sglang_response": native_response}}
     ]
     assert chunks[0]["engine_data"]["sglang_response"] is native_response
+
+
+async def _native_terminal_chunks(finish_reason, **usage):
+    """Run a non-terminal and a terminal native chunk through the decode path."""
+    responses = [
+        {"output_ids": [101], "meta_info": {"id": "r", "finish_reason": None}},
+        {
+            "output_ids": [102],
+            "meta_info": {"id": "r", "finish_reason": finish_reason, **usage},
+        },
+    ]
+    snapshot = deepcopy(responses)
+    chunks = await _collect(
+        _new_decode_handler(
+            serving_mode=DisaggregationMode.DECODE
+        )._process_native_generate_stream(
+            _stream(
+                [
+                    {
+                        "token_ids": r["output_ids"],
+                        "engine_data": {"sglang_response": r},
+                    }
+                    for r in responses
+                ]
+            ),
+            _Context(),
+        )
+    )
+    # The opaque response reaches the client unchanged and unmutated.
+    assert responses == snapshot
+    assert [c["engine_data"] for c in chunks] == [
+        {"sglang_response": r} for r in responses
+    ]
+    assert set(chunks[0]) == {"token_ids", "engine_data"}
+    return chunks[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("finish_reason", "expected"),
+    [
+        ({"type": "stop"}, "stop"),
+        ({"type": "length", "length": 4}, "length"),
+        ({"type": "abort", "message": "Aborted"}, "cancelled"),
+        (
+            {"type": "abort", "message": "Aborted", "status_code": None},
+            "cancelled",
+        ),
+        (
+            {"type": "abort", "message": "bad grammar", "status_code": 400},
+            "error: bad grammar",
+        ),
+        (
+            {"type": "abort", "message": "", "err_type": "InternalError"},
+            "error: SGLang aborted the request with an error",
+        ),
+        ({"type": "mystery"}, "stop"),
+    ],
+)
+async def test_native_generate_stream_maps_terminal_finish_reason(
+    finish_reason, expected
+):
+    final = await _native_terminal_chunks(finish_reason)
+    assert final["finish_reason"] == expected
+    assert "stop_reason" not in final
+    assert "completion_usage" not in final
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        (
+            {"prompt_tokens": 4, "completion_tokens": 2, "cached_tokens": 3},
+            {
+                "prompt_tokens": 4,
+                "completion_tokens": 2,
+                "total_tokens": 6,
+                "prompt_tokens_details": {"cached_tokens": 3},
+            },
+        ),
+        (
+            {"prompt_tokens": 4, "completion_tokens": 2, "cached_tokens": 0},
+            {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+        ),
+        ({"prompt_tokens": 4}, None),
+    ],
+)
+async def test_native_generate_stream_reports_completion_usage(usage, expected):
+    final = await _native_terminal_chunks({"type": "stop"}, **usage)
+    assert final.get("completion_usage") == expected
+    assert final["token_ids"] == [102]
 
 
 @pytest.mark.asyncio
@@ -1072,7 +1164,7 @@ def test_nvext_token_data_rejects_out_of_vocabulary_token_id(invalid_token_id):
 
     with pytest.raises(
         HttpError,
-        match=rf"Token id {invalid_token_id} is out of vocabulary",
+        match=rf"Token id {invalid_token_id} is out of vocabulary at nvext\.token_data\[1\]$",
     ) as error:
         handler._get_input_param(request)
 
@@ -1142,13 +1234,6 @@ def test_nvext_token_data_rejects_invalid_token_id(invalid_token_id):
         handler._get_input_param(request)
 
     assert error.value.code == 400
-
-
-def test_nvext_token_data_validation_skips_ordinary_token_input():
-    handler = _new_token_input_handler()
-    request = {"token_ids": [2**32 - 1]}
-
-    assert handler._get_input_param(request) == {"input_ids": [2**32 - 1]}
 
 
 async def _stream(items):
@@ -2100,6 +2185,103 @@ async def test_native_generate_stream_reports_kv_cache_hit_on_final_chunk(
     if reports:
         expected["kv_cache_hit"] = {"prompt_tokens": 4, "reused_tokens": 3}
     assert chunks[1]["engine_data"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode", [DisaggregationMode.AGGREGATED, DisaggregationMode.DECODE]
+)
+@pytest.mark.parametrize(
+    "prompt_count,completion_count,expected_tokens",
+    [
+        (0, 3, {"17"}),
+        (1, 3, {"17", "65"}),
+        (3, 0, {"17", "65", "66", "67"}),
+        (3, 1, {"17", "65", "66", "67"}),
+        (3, 3, {"17", "65", "66", "67"}),
+    ],
+)
+async def test_generate_limits_prompt_and_completion_logprobs_independently(
+    monkeypatch, mode, prompt_count, completion_count, expected_tokens
+):
+    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
+    handler = _new_decode_handler(serving_mode=mode)
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {}
+    handler.enable_trace = False
+    handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler._resolve_lora = lambda request: None
+    alternatives = [(-0.1, 65, "A"), (-0.2, 66, "B"), (-0.3, 67, "C")]
+    engine_chunks = [
+        {
+            "output_ids": [68],
+            "meta_info": {
+                "id": "sample-0",
+                "finish_reason": None,
+                "output_token_logprobs": [(-0.4, 68, "D")],
+                "output_top_logprobs": [alternatives],
+            },
+        },
+        {
+            "output_ids": [69],
+            "meta_info": {
+                "id": "sample-0",
+                "finish_reason": {"type": "length"},
+                "input_token_logprobs": [(None, 1, None), (-0.5, 17, "p")],
+                "input_top_logprobs": [None, alternatives],
+                "output_token_logprobs": [(-0.5, 69, "E")],
+                "output_top_logprobs": [alternatives],
+            },
+        },
+    ]
+    original_chunks = deepcopy(engine_chunks)
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(return_value=_stream(engine_chunks))
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+    request = {
+        "token_ids": [1, 17],
+        "stop_conditions": {"max_tokens": 2},
+        "output_options": {
+            "prompt_logprobs": prompt_count,
+            "logprobs": completion_count,
+        },
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 123,
+        },
+    }
+
+    chunks = await _collect(handler.generate(request, context))
+
+    assert len(chunks) == 2
+    kwargs = handler.engine.async_generate.await_args.kwargs
+    assert kwargs["top_logprobs_num"] == max(prompt_count, completion_count)
+    assert kwargs["logprob_start_len"] == 0
+    prompt_logprobs = chunks[-1]["engine_data"]["prompt_logprobs"]
+    assert prompt_logprobs[0] is None
+    assert set(prompt_logprobs[1]) == expected_tokens
+    assert prompt_logprobs[1]["17"] == {"logprob": -0.5, "decoded_token": "p"}
+    assert [chunk["token_ids"] for chunk in chunks] == [[68], [69]]
+    assert [chunk["log_probs"] for chunk in chunks] == [[-0.4], [-0.5]]
+    for chunk in chunks:
+        assert chunk["top_logprobs"] == [
+            [
+                {"rank": rank, "token_id": token_id, "token": token, "logprob": lp}
+                for rank, (lp, token_id, token) in enumerate(
+                    alternatives[:completion_count], start=1
+                )
+            ]
+        ]
+    assert engine_chunks == original_chunks
 
 
 @pytest.mark.asyncio

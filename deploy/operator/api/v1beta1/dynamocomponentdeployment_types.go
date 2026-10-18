@@ -18,12 +18,15 @@
 package v1beta1
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -86,7 +89,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// component. With apiVersion `grove.io/v1alpha1`, target is
 	// `PodCliqueTemplateSpec` for a single-node component or
 	// `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set
-	// only `topologyConstraint`. Standalone DCD OpenAPI omits this field.
+	// `topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD
+	// OpenAPI omits this field.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
 
@@ -456,17 +460,29 @@ func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
 	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.GetNamespace(), s.GetParentGraphDeploymentName())
 }
 
-// ComputeDynamoNamespace is the single source of truth for computing the Dynamo namespace.
-// When `globalDynamoNamespace` is true, returns the global namespace constant.
-// Otherwise returns `{k8sNamespace}-{dgdName}` with dots in `dgdName` replaced
-// by hyphens so that the namespace can safely form the first segment of
-// endpoint paths.
+// ComputeDynamoNamespace is the single source of truth for derived Dynamo namespaces.
+// It returns the global namespace when requested; otherwise it combines the
+// Kubernetes namespace and DGD name, replacing dots with hyphens
+// for endpoint path parsing. Values over the Kubernetes label limit are shortened
+// with a 16-character SHA-256 suffix derived from the original namespace/name pair.
+// Inputs must be valid Kubernetes namespace and DGD names.
 func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName string) string {
+	// Preserve the explicit global namespace independently of resource names.
 	if globalDynamoNamespace {
 		return commonconsts.GlobalDynamoNamespace
 	}
-	sanitized := strings.ReplaceAll(dgdName, ".", "-")
-	return fmt.Sprintf("%s-%s", k8sNamespace, sanitized)
+
+	// Preserve existing runtime identities that already fit in a Kubernetes label.
+	namespace := k8sNamespace + "-" + strings.ReplaceAll(dgdName, ".", "-")
+	if len(namespace) <= validation.LabelValueMaxLength {
+		return namespace
+	}
+
+	// Hash the original pair so truncation and dot normalization do not merge identities.
+	sum := sha256.Sum256([]byte(k8sNamespace + "/" + dgdName))
+	suffix := hex.EncodeToString(sum[:8])
+	prefix := strings.TrimRight(namespace[:validation.LabelValueMaxLength-len(suffix)-1], "-")
+	return prefix + "-" + suffix
 }
 
 // GetSpec returns the spec as an interface, used by generic resource helpers.
