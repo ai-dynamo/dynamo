@@ -3552,6 +3552,11 @@ async fn chat_completions(
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
     {
+        crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
+            &mut request,
+            model_parsing.tool_call_parser.as_deref(),
+            model_parsing.reasoning_parser.as_deref(),
+        );
         crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
             &mut request,
             model_parsing.tool_call_parser.as_deref(),

@@ -1256,8 +1256,6 @@ mod tests {
 
     #[test]
     fn beam_forced_choices_keep_the_harmony_wire_and_its_analysis_channel() {
-        // Either parser slot may carry the family name; both route forced choices
-        // away from the generic JSON grammar.
         let named = ToolChoice::Named("get_weather".to_string());
         assert!(requires_native_tool_call_format(
             Some("beam"),

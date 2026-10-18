@@ -7774,6 +7774,11 @@ impl
             thinking_control_from_client,
         );
         Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
+        crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
+            &mut request,
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
         crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
             &mut request,
             self.tool_call_parser.as_deref(),
@@ -16167,7 +16172,6 @@ mod beam_route_tests {
         let tools_before = serde_json::to_value(&request.inner.tools).unwrap();
         let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
         assert_eq!(rendered.as_str(), "SYS:bash:string;DEV:weather;");
-        // The request's real tools and kwargs are untouched.
         assert_eq!(
             serde_json::to_value(&request.inner.tools).unwrap(),
             tools_before

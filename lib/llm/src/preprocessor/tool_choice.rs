@@ -337,6 +337,60 @@ pub(crate) fn relax_noncompliant_strict_tools_for_beam(
     relaxed.len()
 }
 
+/// Beam route only: a `builtin_tools` entry given as a declaration object (the legacy
+/// form; the 1.0 template takes names) that the request does not also declare in
+/// `tools` is added to `tools`, so the prompt, the turn grammar and the parser all see
+/// one tool set. Entries that are names, or objects already declared, are left to the
+/// renderer, which validates them. Returns how many tools were added.
+pub(crate) fn declare_legacy_builtin_tools_for_beam(
+    request: &mut NvCreateChatCompletionRequest,
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> usize {
+    if !(is_beam_parser(tool_call_parser) || is_beam_parser(reasoning_parser)) {
+        return 0;
+    }
+    let Some(entries) = request
+        .chat_template_args
+        .as_ref()
+        .and_then(|args| args.get("builtin_tools"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return 0;
+    };
+    let mut added: Vec<ChatCompletionTool> = Vec::new();
+    for entry in entries.iter().filter(|entry| entry.is_object()) {
+        let declaration = if entry.get("function").is_some() {
+            entry.clone()
+        } else {
+            serde_json::json!({"type": "function", "function": entry})
+        };
+        // A malformed declaration is left for the renderer's error message.
+        let Ok(tool) = serde_json::from_value::<ChatCompletionTool>(declaration) else {
+            continue;
+        };
+        let declared = request
+            .inner
+            .tools
+            .iter()
+            .flatten()
+            .chain(added.iter())
+            .any(|existing| existing.function.name == tool.function.name);
+        if !declared {
+            added.push(tool);
+        }
+    }
+    let count = added.len();
+    if count > 0 {
+        request
+            .inner
+            .tools
+            .get_or_insert_with(Vec::new)
+            .extend(added);
+    }
+    count
+}
+
 fn install_structural_tag(
     common_request: &mut PreprocessedRequest,
     structural_tag: serde_json::Value,
@@ -1344,6 +1398,53 @@ mod tests {
                 "{parsers:?}"
             );
         }
+    }
+
+    #[test]
+    fn beam_route_declares_legacy_builtin_declarations_as_tools() {
+        let weather = json!({"type": "function", "function": {
+            "name": "weather", "parameters": {"type": "object", "properties": {}}}});
+        let mut beam = request(json!({"tools": [weather.clone()]}));
+        beam.chat_template_args = Some(std::collections::HashMap::from([(
+            "builtin_tools".to_string(),
+            json!([
+                "weather",
+                {"name": "bash", "parameters": {"type": "object", "properties": {
+                    "cmd": {"type": "string"}}}},
+                {"type": "function", "function": {"name": "weather"}},
+                {"type": "function", "function": {"name": "python",
+                    "parameters": {"type": "object", "properties": {}}}}
+            ]),
+        )]));
+
+        // Names and already-declared objects add nothing; undeclared objects join `tools`
+        // in OpenAI form, once each.
+        assert_eq!(
+            declare_legacy_builtin_tools_for_beam(&mut beam, Some("beam"), None),
+            2
+        );
+        let names: Vec<&str> = beam
+            .inner
+            .tools
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|tool| tool.function.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["weather", "bash", "python"]);
+        assert_eq!(
+            declare_legacy_builtin_tools_for_beam(&mut beam, Some("beam"), None),
+            0
+        );
+
+        // Other routes do not read `builtin_tools`.
+        let mut hermes = request(json!({"tools": [weather]}));
+        hermes.chat_template_args = beam.chat_template_args.clone();
+        assert_eq!(
+            declare_legacy_builtin_tools_for_beam(&mut hermes, Some("hermes"), None),
+            0
+        );
+        assert_eq!(hermes.inner.tools.as_ref().unwrap().len(), 1);
     }
 
     #[test]

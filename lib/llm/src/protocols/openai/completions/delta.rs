@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::{CompletionEcho, NvCreateCompletionRequest, NvCreateCompletionResponse};
@@ -60,6 +60,24 @@ struct EchoState {
     text_emitted: HashSet<u32>,
     /// Choices whose prompt logprobs already went out, or were given up on.
     logprobs_emitted: HashSet<u32>,
+    /// Generated text and logprobs held back per choice while its prompt logprobs are
+    /// still to come, so the prompt positions precede the generated ones on the wire.
+    held: HashMap<u32, (String, Option<dynamo_protocols::types::Logprobs>)>,
+}
+
+fn append_logprobs(
+    into: &mut Option<dynamo_protocols::types::Logprobs>,
+    more: dynamo_protocols::types::Logprobs,
+) {
+    match into {
+        None => *into = Some(more),
+        Some(existing) => {
+            existing.tokens.extend(more.tokens);
+            existing.token_logprobs.extend(more.token_logprobs);
+            existing.top_logprobs.extend(more.top_logprobs);
+            existing.text_offset.extend(more.text_offset);
+        }
+    }
 }
 
 impl EchoState {
@@ -161,10 +179,10 @@ impl DeltaGenerator {
     /// Echo the prompt back on every choice (`echo: true`). `prompt_text` is the
     /// client's prompt when it was text; token prompts are decoded with `tokenizer`.
     /// The prompt text rides the first chunk of each choice, so a streaming client
-    /// sees it before any generated text. The prompt logprobs (when `logprobs` was
-    /// requested) ride the chunk that carries the engine's prompt-logprobs payload,
-    /// which vLLM and SGLang attach to the final chunk; the unary aggregator merges
-    /// the two parts, SSE consumers get them in the chunks they arrive on.
+    /// sees it before any generated text. When `logprobs` was requested, the prompt
+    /// logprobs ride the chunk that carries the engine's payload (vLLM and SGLang
+    /// attach it to the final chunk), and the choice's generated text and logprobs
+    /// are held back until then, so the wire order stays prompt, then completion.
     pub fn enable_echo(
         &mut self,
         prompt_token_ids: Arc<Vec<TokenIdType>>,
@@ -179,6 +197,7 @@ impl DeltaGenerator {
             skip_special_tokens,
             text_emitted: HashSet::new(),
             logprobs_emitted: HashSet::new(),
+            held: HashMap::new(),
         });
     }
 
@@ -410,6 +429,31 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             } else {
                 None
             };
+        if wants_echo_logprobs
+            && let Some(echo) = self.echo.as_mut()
+            && let Some(choice) = response
+                .inner
+                .choices
+                .iter_mut()
+                .find(|choice| choice.index == index)
+        {
+            if prompt_logprobs.is_none() && finish_reason.is_none() {
+                // Hold this chunk's generated side until the prompt logprobs arrive.
+                let held = echo.held.entry(index).or_default();
+                held.0.push_str(&std::mem::take(&mut choice.text));
+                if let Some(logprobs) = choice.logprobs.take() {
+                    append_logprobs(&mut held.1, logprobs);
+                }
+            } else if let Some((text, logprobs)) = echo.held.remove(&index) {
+                // Release what was held ahead of this chunk's own generated side.
+                choice.text.insert_str(0, &text);
+                let mut released = logprobs;
+                if let Some(current) = choice.logprobs.take() {
+                    append_logprobs(&mut released, current);
+                }
+                choice.logprobs = released;
+            }
+        }
         if wants_echo_text || wants_echo_logprobs {
             let return_as_ids = self.state.options().return_tokens_as_token_ids;
             let echo = self.echo.as_mut().expect("checked above");
@@ -1266,8 +1310,12 @@ mod tests {
             .expect("the first chunk echoes the prompt text");
         assert_eq!(echo.text, "<s>Hello world");
         assert!(echo.logprobs.is_none());
+        assert_eq!(
+            response.inner.choices[0].text, "",
+            "the generated side is held until the prompt logprobs arrive"
+        );
 
-        // Final chunk: the prompt logprobs, with no text (it already went out).
+        // Final chunk: the prompt logprobs, the held text and this chunk's own, in order.
         let mut response = generator
             .choice_from_postprocessor(prompt_logprobs_output(true))
             .expect("choice generation");
@@ -1275,14 +1323,18 @@ mod tests {
             .echo
             .clone()
             .expect("the chunk carrying the prompt logprobs echoes them");
-        assert_eq!(echo.text, "");
+        assert_eq!(echo.text, "", "the prompt text already went out");
         let logprobs = echo.logprobs.expect("logprobs were requested");
         assert_eq!(logprobs.tokens, vec!["<s>", "Hello", " world"]);
         response.fold_echo();
         let choice = &response.inner.choices[0];
-        assert_eq!(choice.text, "hello", "the text is not echoed twice");
+        assert_eq!(
+            choice.text, "hellohello",
+            "held text first, then this chunk's"
+        );
         let folded = choice.logprobs.as_ref().expect("prompt positions first");
         assert_eq!(folded.tokens, vec!["<s>", "Hello", " world", "hello"]);
+        assert_eq!(folded.token_logprobs.last(), Some(&Some(-0.1)));
     }
 
     #[test]
