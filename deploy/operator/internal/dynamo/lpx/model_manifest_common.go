@@ -14,7 +14,8 @@ import (
 	"capnproto.org/go/capnp/v3"
 )
 
-const hxTopologyFamily = "16x8x2x3"
+// hxTopologyFamily is the GBuild topology type whose dimension order HX partition shapes use.
+const hxTopologyFamily = "HX16x8x2"
 
 func classifyManifestPartitions(filename string, partitions []BuildPartition, partSelect bool) (BuildFamily, error) {
 	family := BuildFamilyXT
