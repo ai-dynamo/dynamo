@@ -5343,15 +5343,26 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         }
 
     @pytest.mark.parametrize("after_output", [False, True])
-    def test_routed_validation_exception_preserves_type_and_message(self, after_output):
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Failed to compile json grammar: unsupported schema type",
+            "InvalidRequest: Input length (4097 tokens) exceeds the maximum allowed "
+            "length (4096 tokens). Use a shorter input or enable --allow-auto-truncate."
+            " private path: /srv/worker.py",
+        ],
+    )
+    def test_routed_validation_exception_preserves_type_and_message(
+        self, after_output, message
+    ):
         """A typed iterator failure survives before or after an emitted delta."""
-        message = "Failed to compile json grammar: unsupported schema type"
 
         class FailingEngine:
             async def generate(self, preprocessed, **kwargs):
                 """Model the routed iterator raising a native validation exception."""
 
                 async def stream():
+                    """Raise an unmatched typed error after optional output."""
                     if after_output:
                         yield FakeRoutedItem({"token_ids": [ord("A")]})
                     raise InvalidArgument(message)
@@ -5359,6 +5370,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                 return stream()
 
         async def check():
+            """Check the typed message and stream termination together."""
             tokenizer = self.ByteTokenizer()
             processor = SglangProcessor(
                 tokenizer=tokenizer,
@@ -5394,11 +5406,15 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             ("initial", False),
             ("event", False),
             ("exception", False),
+            ("typed_initial", False),
+            ("typed_exception", False),
             ("event", True),
             ("exception", True),
+            ("typed_exception", True),
         ],
     )
     def test_scheduler_input_limit_preserves_details(self, prefix, stage, after_output):
+        """Normalize scheduler rejections on typed and untyped error paths."""
         message = (
             "Input length (4097 tokens) exceeds the maximum allowed length "
             "(4096 tokens). Use a shorter input or enable --allow-auto-truncate."
@@ -5406,14 +5422,20 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         class RejectingEngine:
             async def generate(self, preprocessed, **kwargs):
+                """Raise the requested rejection at creation or iteration time."""
                 if stage == "initial":
                     raise RuntimeError(prefix + message)
+                if stage == "typed_initial":
+                    raise InvalidArgument(prefix + message)
 
                 async def stream():
+                    """Emit optional output, then reject without continuing."""
                     if after_output:
                         yield FakeRoutedItem({"token_ids": [ord("A")]})
                     if stage == "exception":
                         raise RuntimeError(prefix + message)
+                    if stage == "typed_exception":
+                        raise InvalidArgument(prefix + message)
                     yield FakeRoutedItem(
                         None, is_error=True, comments=[prefix + message]
                     )
@@ -5422,6 +5444,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                 return stream()
 
         async def check():
+            """Check the normalized sentence and terminal stream behavior."""
             tokenizer = self.ByteTokenizer()
             processor = SglangProcessor(
                 tokenizer=tokenizer,
@@ -5452,6 +5475,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
     )
     @pytest.mark.parametrize("after_output", [False, True])
     def test_input_limit_with_diagnostics_remains_internal(self, suffix, after_output):
+        """Keep diagnostic-bearing routed messages on the internal error path."""
         message = (
             "InvalidRequest: Input length (4097 tokens) exceeds the maximum allowed "
             "length (4096 tokens). Use a shorter input or enable --allow-auto-truncate."

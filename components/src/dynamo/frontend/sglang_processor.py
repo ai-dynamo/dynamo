@@ -68,6 +68,7 @@ _SGLANG_INPUT_LENGTH_RE = re.compile(
 
 
 def _scheduler_input_limit_error(message: str) -> InvalidArgument | None:
+    """Recover only the scheduler's complete, public input-limit sentence."""
     # The scheduler's KV capacity can be below the model context limit. Expose
     # only its complete validation message, without wrappers or diagnostics.
     if match := _SGLANG_INPUT_LENGTH_RE.fullmatch(message):
@@ -1071,7 +1072,11 @@ class SglangProcessor:
             else:
                 if pending_terminal is not None:
                     yield pending_terminal
-        except (InvalidArgument, Unknown):
+        except InvalidArgument as e:
+            if error := _scheduler_input_limit_error(str(e)):
+                raise error from e
+            raise
+        except Unknown:
             raise
         except Exception as e:
             if error := _scheduler_input_limit_error(str(e)):
