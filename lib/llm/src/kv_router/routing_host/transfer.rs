@@ -292,7 +292,6 @@ mod integration_tests {
         component::Instance,
         distributed::DistributedConfig,
         pipeline::{AddressedRequest, Context, ManyIn, StreamingDispatch},
-        traits::DistributedRuntimeProvider,
     };
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -551,19 +550,20 @@ mod integration_tests {
             .await
             .unwrap();
         while stream.next().await.is_some() {}
-        let calls = dispatch.0.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, target_id);
-        let hint = calls[0]
-            .1
-            .as_ref()
-            .expect("final backend request carries decode hint");
-        let payload: KvSourceLocationsPayload =
-            serde_json::from_value(serde_json::to_value(&hint.actions[0].payload).unwrap())
-                .unwrap();
-        assert_eq!(payload.block_hashes, expected);
-        assert_eq!(payload.source_control_endpoint, "tcp://decode:9000");
-        drop(calls);
+        {
+            let calls = dispatch.0.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, target_id);
+            let hint = calls[0]
+                .1
+                .as_ref()
+                .expect("final backend request carries decode hint");
+            let payload: KvSourceLocationsPayload =
+                serde_json::from_value(serde_json::to_value(&hint.actions[0].payload).unwrap())
+                    .unwrap();
+            assert_eq!(payload.block_hashes, expected);
+            assert_eq!(payload.source_control_endpoint, "tcp://decode:9000");
+        }
         assert_no_decode_bookings(&source).await;
         drop(target);
         drop(source);
