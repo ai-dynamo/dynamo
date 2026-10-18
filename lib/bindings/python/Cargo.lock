@@ -2698,6 +2698,7 @@ dependencies = [
  "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
+ "parking_lot",
  "prost-types 0.14.4",
  "serde",
  "serde_json",

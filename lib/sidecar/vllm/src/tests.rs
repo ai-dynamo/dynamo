@@ -601,6 +601,7 @@ struct FakeServer {
     endpoint: String,
     service: FakeVllm,
     shutdown: Option<oneshot::Sender<()>>,
+    health: tonic_health::server::HealthReporter,
 }
 
 impl FakeServer {
@@ -636,6 +637,7 @@ impl FakeServer {
             endpoint: format!("http://{address}"),
             service,
             shutdown: Some(shutdown),
+            health,
         }
     }
 }
@@ -2988,3 +2990,6 @@ async fn unsupported_features_fail_before_rpc_submission() {
     }
     assert!(server.service.requests.lock().await.is_empty());
 }
+
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
