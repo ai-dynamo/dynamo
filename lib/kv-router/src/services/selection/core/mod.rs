@@ -58,6 +58,7 @@ mod reservations;
 mod run;
 #[cfg(test)]
 mod tests;
+mod transfer_sources;
 mod workers;
 
 use reservations::ReservationIndex;
@@ -66,6 +67,7 @@ pub use operation::{
     LookupTimings, Selected, SelectionAdmission, SelectionOperation, SelectionOutcome,
     SelectionRun, SessionBinding,
 };
+pub use transfer_sources::{TransferSourceQuery, TransferSourceResult};
 
 use super::affinity::{
     AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
@@ -124,6 +126,8 @@ struct SelectionEntry {
     block_size: u32,
     is_eagle: bool,
     indexer: Indexer,
+    /// Optional donor lookups must not build an unbounded blocking-task queue.
+    transfer_source_slots: Arc<tokio::sync::Semaphore>,
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
     scheduler: SelectionScheduler,
     replica_inbox: Option<ReplicaInbox>,

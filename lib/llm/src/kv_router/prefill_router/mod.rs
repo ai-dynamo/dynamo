@@ -564,9 +564,11 @@ impl
         let mut prefill_completion = None;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
-                .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    self.prepare_prefill_dispatch(request, target, endpoint_id)
-                })
+                .select_and_dispatch_prefill(
+                    prefill_context,
+                    self.decode_routing_host.get().map(Arc::as_ref),
+                    |request, target| self.prepare_prefill_dispatch(request, target, endpoint_id),
+                )
                 .await?;
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {

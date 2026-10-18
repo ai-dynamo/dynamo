@@ -133,6 +133,33 @@ impl LowerTierIndexers {
         self.indexers.read().unwrap().get(&storage_tier).cloned()
     }
 
+    /// Root-aligned prefixes backed entirely by host inventory. Starting at
+    /// the root, rather than extending the device match, prevents GPU-only or
+    /// disk-only blocks from being advertised to the CPU KVCR adapter.
+    pub(crate) fn host_transfer_candidates(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Option<KvTransferCandidates> {
+        let indexer = self.get(StorageTier::HostPinned)?;
+        let snapshot = self.routing_snapshot.load_full();
+        let first_hash = *sequence.first()?;
+        let continuations: FxHashMap<_, _> = indexer
+            .backend()
+            .root_workers(first_hash, snapshot.projection())
+            .into_iter()
+            .map(|worker| (worker, crate::indexer::LowerTierContinuation::from_root(0)))
+            .collect();
+        let matches = indexer
+            .backend()
+            .query_match_details_with_options_and_snapshot(
+                sequence,
+                &continuations,
+                true,
+                &snapshot,
+            );
+        merge_kv_transfer_tier_candidates(None, &matches, snapshot)
+    }
+
     pub fn record_unsupported_residency_event(&self, event: &RouterEvent) {
         record_unsupported_residency_event(self.metrics.as_deref(), event);
     }

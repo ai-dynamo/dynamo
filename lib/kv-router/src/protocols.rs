@@ -312,6 +312,12 @@ pub trait WorkerConfigLike {
         None
     }
 
+    /// Operator-certified identity of model weights, tokenizer and KV layout.
+    /// Missing identity disables cross-role reuse. This is not a topology label.
+    fn router_hint_transfer_domain(&self) -> Option<&str> {
+        None
+    }
+
     /// Tokens retained by the backend's native KV offloading tier, if available.
     fn native_offloading_capacity_tokens(&self) -> Option<u64> {
         None

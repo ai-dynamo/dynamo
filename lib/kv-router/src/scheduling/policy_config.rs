@@ -248,6 +248,12 @@ impl RouterSettings {
             enable_session_prefix_index,
             shared_cache_type,
             router_predicted_ttl_secs,
+            enable_decode_to_prefill_reuse,
+            transfer_source_lookup_budget_ms,
+            minimum_transfer_prefix_blocks,
+            minimum_estimated_ttft_saving_ms,
+            transfer_source_estimated_block_us,
+            transfer_source_prefill_token_us,
         );
         Ok(())
     }

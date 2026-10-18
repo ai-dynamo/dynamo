@@ -55,6 +55,9 @@ pub struct SelectionWorkerConfig {
     /// means the worker can consume router hints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_hint_worker_type: Option<String>,
+    /// Explicit certification of identical model weights, tokenizer and KV layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_transfer_domain: Option<String>,
     /// Per-global-DP-rank KV control endpoints a hint target fetches from.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
@@ -105,6 +108,12 @@ impl WorkerConfigLike for SelectionWorkerConfig {
         self.kv_transfer_preferred_weight
     }
 
+    fn router_hint_transfer_domain(&self) -> Option<&str> {
+        self.router_hint_transfer_domain
+            .as_deref()
+            .filter(|domain| !domain.trim().is_empty())
+    }
+
     fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         dp_rank: DpRank,
@@ -151,6 +160,9 @@ pub struct WorkerCatalogRecord {
     pub kv_transfer_preferred_weight: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_hint_worker_type: Option<String>,
+    /// Explicit certification of identical model weights, tokenizer and KV layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_transfer_domain: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -183,6 +195,7 @@ impl WorkerCatalogRecord {
             kv_transfer_enforcement: req.kv_transfer_enforcement,
             kv_transfer_preferred_weight: req.kv_transfer_preferred_weight,
             router_hint_worker_type: req.router_hint_worker_type,
+            router_hint_transfer_domain: req.router_hint_transfer_domain,
             router_hint_source_control_endpoints: req.router_hint_source_control_endpoints,
             kv_event_source_mode: req.kv_event_source_mode,
             not_schedulable_reasons: Vec::new(),
@@ -222,6 +235,7 @@ impl WorkerCatalogRecord {
             kv_transfer_enforcement: self.kv_transfer_enforcement,
             kv_transfer_preferred_weight: self.kv_transfer_preferred_weight,
             router_hint_worker_type: self.router_hint_worker_type.clone(),
+            router_hint_transfer_domain: self.router_hint_transfer_domain.clone(),
             router_hint_source_control_endpoints: self.router_hint_source_control_endpoints.clone(),
             kv_event_source_mode: self.kv_event_source_mode.clone(),
         })
@@ -283,6 +297,7 @@ impl Default for WorkerRequest {
             kv_transfer_enforcement: None,
             kv_transfer_preferred_weight: None,
             router_hint_worker_type: None,
+            router_hint_transfer_domain: None,
             router_hint_source_control_endpoints: HashMap::new(),
             kv_event_source_mode: None,
         }
@@ -319,6 +334,9 @@ pub struct WorkerRequest {
     /// worker as able to consume router hints.
     #[serde(default)]
     pub router_hint_worker_type: Option<String>,
+    /// Explicit certification of identical model weights, tokenizer and KV layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_transfer_domain: Option<String>,
     /// Per-global-DP-rank KV control endpoints this worker can serve hints from.
     #[serde(default)]
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
@@ -346,6 +364,9 @@ pub struct WorkerPatchRequest {
     pub kv_transfer_preferred_weight: Option<f32>,
     #[serde(default)]
     pub router_hint_worker_type: Option<String>,
+    /// Explicit certification of identical model weights, tokenizer and KV layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_transfer_domain: Option<String>,
     #[serde(default)]
     pub router_hint_source_control_endpoints: Option<HashMap<u32, String>>,
     #[serde(default)]
@@ -404,6 +425,9 @@ impl WorkerCatalogRecord {
         }
         if patch.kv_transfer_preferred_weight.is_some() {
             self.kv_transfer_preferred_weight = patch.kv_transfer_preferred_weight;
+        }
+        if patch.router_hint_transfer_domain.is_some() {
+            self.router_hint_transfer_domain = patch.router_hint_transfer_domain;
         }
         if patch.router_hint_worker_type.is_some() {
             self.router_hint_worker_type = patch.router_hint_worker_type;

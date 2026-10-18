@@ -413,6 +413,16 @@ impl EmbeddedSelection {
         run
     }
 
+    pub(crate) async fn query_transfer_sources(
+        &self,
+        query: dynamo_kv_router::services::selection::TransferSourceQuery<'_>,
+    ) -> Result<
+        Option<dynamo_kv_router::services::selection::TransferSourceResult>,
+        dynamo_kv_router::services::selection::SelectionError,
+    > {
+        self.service.core().query_transfer_sources(query).await
+    }
+
     pub(crate) fn worker_type(&self) -> &'static str {
         self.worker_type
     }
@@ -503,6 +513,7 @@ pub(crate) fn worker_request_from_runtime_config(
         kv_transfer_enforcement: config.kv_transfer_enforcement,
         kv_transfer_preferred_weight: config.kv_transfer_preferred_weight,
         router_hint_worker_type,
+        router_hint_transfer_domain: config.router_hint_transfer_domain().map(str::to_owned),
         router_hint_source_control_endpoints,
         kv_event_source_mode: config.kv_event_source_mode.clone(),
         ..WorkerRequest::default()

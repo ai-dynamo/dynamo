@@ -344,6 +344,26 @@ fn kv_router_config_from_lookup(
     if let Some(value) = get_env(DYN_ROUTER_DECODE_POLICY) {
         config.router_decode_policy = Some(value);
     }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_DECODE_TO_PREFILL_REUSE") {
+        config.enable_decode_to_prefill_reuse = value;
+    }
+    if let Some(value) = get_env("DYN_ROUTER_TRANSFER_SOURCE_LOOKUP_BUDGET_MS") {
+        config.transfer_source_lookup_budget_ms = value.parse().map_err(|_| {
+            "DYN_ROUTER_TRANSFER_SOURCE_LOOKUP_BUDGET_MS must be an unsigned integer".to_string()
+        })?;
+    }
+    if let Some(value) = parse_usize(&get_env, "DYN_ROUTER_MINIMUM_TRANSFER_PREFIX_BLOCKS") {
+        config.minimum_transfer_prefix_blocks = value;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_MINIMUM_ESTIMATED_TTFT_SAVING_MS") {
+        config.minimum_estimated_ttft_saving_ms = value;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TRANSFER_SOURCE_ESTIMATED_BLOCK_US") {
+        config.transfer_source_estimated_block_us = Some(value);
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TRANSFER_SOURCE_PREFILL_TOKEN_US") {
+        config.transfer_source_prefill_token_us = Some(value);
+    }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_CONDITIONAL_DISAGG") {
         config.conditional_disagg_enabled = value;
     }
@@ -734,6 +754,12 @@ struct KvRouterConfigSerde {
     shared_cache_multiplier: Option<f64>,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
+    enable_decode_to_prefill_reuse: bool,
+    transfer_source_lookup_budget_ms: u64,
+    minimum_transfer_prefix_blocks: usize,
+    minimum_estimated_ttft_saving_ms: f64,
+    transfer_source_estimated_block_us: Option<f64>,
+    transfer_source_prefill_token_us: Option<f64>,
     conditional_disagg_enabled: bool,
     conditional_disagg_policy: ConditionalDisaggPolicyKind,
     conditional_disagg_eff_isl_threshold: usize,
@@ -779,6 +805,12 @@ impl Default for KvRouterConfigSerde {
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
+            enable_decode_to_prefill_reuse: config.enable_decode_to_prefill_reuse,
+            transfer_source_lookup_budget_ms: config.transfer_source_lookup_budget_ms,
+            minimum_transfer_prefix_blocks: config.minimum_transfer_prefix_blocks,
+            minimum_estimated_ttft_saving_ms: config.minimum_estimated_ttft_saving_ms,
+            transfer_source_estimated_block_us: config.transfer_source_estimated_block_us,
+            transfer_source_prefill_token_us: config.transfer_source_prefill_token_us,
             conditional_disagg_enabled: config.conditional_disagg_enabled,
             conditional_disagg_policy: config.conditional_disagg_policy,
             conditional_disagg_eff_isl_threshold: config.conditional_disagg_eff_isl_threshold,
@@ -796,6 +828,32 @@ impl Default for KvRouterConfigSerde {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "KvRouterConfigSerde")]
 pub struct KvRouterConfig {
+    /// Enable demand-driven decode-to-prefill KV source hints. Requires a
+    /// certified transfer domain and calibrated transfer/prefill cost estimates.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub enable_decode_to_prefill_reuse: bool,
+    /// Maximum advisory source lookup time, in milliseconds.
+    #[serde(
+        default = "default_transfer_source_lookup_budget_ms",
+        skip_serializing_if = "is_default_transfer_source_lookup_budget_ms"
+    )]
+    pub transfer_source_lookup_budget_ms: u64,
+    /// Minimum additional complete prefix blocks required to consider a donor.
+    #[serde(
+        default = "default_minimum_transfer_prefix_blocks",
+        skip_serializing_if = "is_default_minimum_transfer_prefix_blocks"
+    )]
+    pub minimum_transfer_prefix_blocks: usize,
+    /// Required predicted TTFT improvement over local and same-role reuse, in ms.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub minimum_estimated_ttft_saving_ms: f64,
+    /// Calibrated end-to-end transfer/onboarding cost per block, in microseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_source_estimated_block_us: Option<f64>,
+    /// Calibrated marginal prefill cost per token, in microseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_source_prefill_token_us: Option<f64>,
+
     /// Device-local prefix-overlap credit multiplier applied to the prefill
     /// load before sampling. Values must be finite and non-negative. Values above
     /// 1.0 give device overlap extra credit. Set to 0.0 to ignore prefix matching.
@@ -980,6 +1038,19 @@ pub struct KvRouterConfig {
     pub conditional_disagg_decode_busy_threshold: Option<f64>,
 }
 
+const fn default_transfer_source_lookup_budget_ms() -> u64 {
+    5
+}
+fn is_default_transfer_source_lookup_budget_ms(value: &u64) -> bool {
+    *value == default_transfer_source_lookup_budget_ms()
+}
+const fn default_minimum_transfer_prefix_blocks() -> usize {
+    1
+}
+fn is_default_minimum_transfer_prefix_blocks(value: &usize) -> bool {
+    *value == default_minimum_transfer_prefix_blocks()
+}
+
 fn default_conditional_disagg_eff_isl_threshold() -> usize {
     crate::conditional_disagg::DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD
 }
@@ -1033,6 +1104,12 @@ impl Default for KvRouterConfig {
             shared_cache_multiplier: None,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
+            enable_decode_to_prefill_reuse: false,
+            transfer_source_lookup_budget_ms: 5,
+            minimum_transfer_prefix_blocks: 1,
+            minimum_estimated_ttft_saving_ms: 0.0,
+            transfer_source_estimated_block_us: None,
+            transfer_source_prefill_token_us: None,
             conditional_disagg_enabled: false,
             conditional_disagg_policy: ConditionalDisaggPolicyKind::default(),
             conditional_disagg_eff_isl_threshold: default_conditional_disagg_eff_isl_threshold(),
@@ -1098,6 +1175,12 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
+            enable_decode_to_prefill_reuse: compat.enable_decode_to_prefill_reuse,
+            transfer_source_lookup_budget_ms: compat.transfer_source_lookup_budget_ms,
+            minimum_transfer_prefix_blocks: compat.minimum_transfer_prefix_blocks,
+            minimum_estimated_ttft_saving_ms: compat.minimum_estimated_ttft_saving_ms,
+            transfer_source_estimated_block_us: compat.transfer_source_estimated_block_us,
+            transfer_source_prefill_token_us: compat.transfer_source_prefill_token_us,
             conditional_disagg_enabled: compat.conditional_disagg_enabled,
             conditional_disagg_policy: compat.conditional_disagg_policy,
             conditional_disagg_eff_isl_threshold: compat.conditional_disagg_eff_isl_threshold,
@@ -1439,6 +1522,43 @@ impl KvRouterConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if self.transfer_source_lookup_budget_ms == 0
+            || self.transfer_source_lookup_budget_ms > 60_000
+        {
+            return Err("transfer_source_lookup_budget_ms must be between 1 and 60000".to_string());
+        }
+        if self.minimum_transfer_prefix_blocks == 0 {
+            return Err("minimum_transfer_prefix_blocks must be positive".to_string());
+        }
+        validate_finite_non_negative(
+            "minimum_estimated_ttft_saving_ms",
+            self.minimum_estimated_ttft_saving_ms,
+        )?;
+        for (name, value) in [
+            (
+                "transfer_source_estimated_block_us",
+                self.transfer_source_estimated_block_us,
+            ),
+            (
+                "transfer_source_prefill_token_us",
+                self.transfer_source_prefill_token_us,
+            ),
+        ] {
+            if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                return Err(format!("{name} must be finite and positive"));
+            }
+            if self.enable_decode_to_prefill_reuse && value.is_none() {
+                return Err(format!(
+                    "enable_decode_to_prefill_reuse requires calibrated {name}"
+                ));
+            }
+        }
+        if self.enable_decode_to_prefill_reuse && (!self.use_kv_events || self.use_remote_indexer) {
+            return Err(
+                "enable_decode_to_prefill_reuse requires local KV event inventory".to_string(),
+            );
+        }
+
         validate_overlap_score_credit(self.overlap_score_credit)?;
         validate_finite_non_negative(
             "overlap_score_credit_decay",
@@ -1637,6 +1757,65 @@ fn random_sequence_hashes(num_blocks: usize) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn decode_to_prefill_env_gate_matches_frontend_env() {
+        let config = config_from_values(&[
+            ("DYN_ROUTER_DECODE_TO_PREFILL_REUSE", "true"),
+            ("DYN_ROUTER_TRANSFER_SOURCE_ESTIMATED_BLOCK_US", "20"),
+            ("DYN_ROUTER_TRANSFER_SOURCE_PREFILL_TOKEN_US", "1"),
+        ]);
+        assert!(config.enable_decode_to_prefill_reuse);
+        assert_eq!(config.transfer_source_estimated_block_us, Some(20.0));
+        assert_eq!(config.transfer_source_prefill_token_us, Some(1.0));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn decode_to_prefill_reuse_defaults_are_wire_compatible_and_require_calibration() {
+        let defaults = KvRouterConfig::default();
+        assert!(!defaults.enable_decode_to_prefill_reuse);
+        assert_eq!(defaults.transfer_source_lookup_budget_ms, 5);
+        assert_eq!(defaults.minimum_transfer_prefix_blocks, 1);
+        let value = serde_json::to_value(&defaults).unwrap();
+        for name in [
+            "enable_decode_to_prefill_reuse",
+            "transfer_source_lookup_budget_ms",
+            "minimum_transfer_prefix_blocks",
+            "minimum_estimated_ttft_saving_ms",
+            "transfer_source_estimated_block_us",
+            "transfer_source_prefill_token_us",
+        ] {
+            assert!(
+                value.get(name).is_none(),
+                "default {name} must be absent for older frontends"
+            );
+        }
+        let mut config = KvRouterConfig {
+            enable_decode_to_prefill_reuse: true,
+            ..Default::default()
+        };
+        assert!(config.validate().unwrap_err().contains("calibrated"));
+        config.transfer_source_estimated_block_us = Some(20.0);
+        config.transfer_source_prefill_token_us = Some(1.0);
+        assert!(config.validate().is_ok());
+        let round_trip: KvRouterConfig =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert!(round_trip.enable_decode_to_prefill_reuse);
+        assert_eq!(round_trip.transfer_source_estimated_block_us, Some(20.0));
+        config.use_kv_events = false;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .contains("local KV event inventory")
+        );
+        config.use_kv_events = true;
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            config.transfer_source_estimated_block_us = Some(invalid);
+            assert!(config.validate().is_err());
+        }
+    }
+
+    #[test]
     fn router_settings_override_legacy_values_once_and_preserve_process_fields() {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         let yaml = include_str!("../../tests/data/router-settings.yaml");
@@ -1654,6 +1833,12 @@ mod tests {
         assert_eq!(config.router_ttl_secs, 42.0);
         assert_eq!(config.host_cache_hit_weight, 0.6);
         assert_eq!(config.router_predicted_ttl_secs, None);
+        assert!(!config.enable_decode_to_prefill_reuse);
+        assert_eq!(config.transfer_source_lookup_budget_ms, 8);
+        assert_eq!(config.minimum_transfer_prefix_blocks, 2);
+        assert_eq!(config.minimum_estimated_ttft_saving_ms, 0.5);
+        assert_eq!(config.transfer_source_estimated_block_us, Some(12.0));
+        assert_eq!(config.transfer_source_prefill_token_us, Some(3.0));
         assert!(!config.router_assume_kv_reuse);
         assert!(config.router_track_output_blocks);
         assert_eq!(config.router_prefill_policy.as_deref(), Some("default"));

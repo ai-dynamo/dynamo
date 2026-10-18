@@ -651,6 +651,7 @@ impl RoutingHost {
     pub(super) async fn select_and_dispatch_kv_prefill<M, F>(
         &self,
         mut request: SingleIn<PreprocessedRequest>,
+        transfer_source: Option<&RoutingHost>,
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
@@ -679,6 +680,10 @@ impl RoutingHost {
                 return Err(error);
             }
         };
+        if !is_query_only {
+            self.enrich_prefill_transfer_hint(&request, &mut selection, transfer_source)
+                .await;
+        }
         drop(route_guard);
         let stream = match self
             .dispatch_selection(request, selection, guard, &budget)

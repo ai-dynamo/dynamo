@@ -22,3 +22,9 @@ router:
   enable_session_prefix_index: true
   shared_cache_type: none
   router_predicted_ttl_secs: null
+  enable_decode_to_prefill_reuse: false
+  transfer_source_lookup_budget_ms: 8
+  minimum_transfer_prefix_blocks: 2
+  minimum_estimated_ttft_saving_ms: 0.5
+  transfer_source_estimated_block_us: 12.0
+  transfer_source_prefill_token_us: 3.0

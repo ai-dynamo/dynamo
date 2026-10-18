@@ -54,6 +54,12 @@ _ROUTER_SETTINGS = (
     "enable_session_prefix_index",
     "shared_cache_type",
     "router_predicted_ttl_secs",
+    "enable_decode_to_prefill_reuse",
+    "transfer_source_lookup_budget_ms",
+    "minimum_transfer_prefix_blocks",
+    "minimum_estimated_ttft_saving_ms",
+    "transfer_source_estimated_block_us",
+    "transfer_source_prefill_token_us",
 )
 
 # Authoritative field list — used by kv_router_kwargs() to extract values.
@@ -213,6 +219,12 @@ class KvRouterConfigBase(ConfigBase):
     conditional_disagg_prefill_busy_threshold: Optional[float] = None
     conditional_disagg_decode_busy_threshold: Optional[float] = None
     router_predicted_ttl_secs: Optional[float] = None
+    enable_decode_to_prefill_reuse: bool = False
+    transfer_source_lookup_budget_ms: int = 5
+    minimum_transfer_prefix_blocks: int = 1
+    minimum_estimated_ttft_saving_ms: float = 0.0
+    transfer_source_estimated_block_us: Optional[float] = None
+    transfer_source_prefill_token_us: Optional[float] = None
     load_aware: bool = False
 
     @cached_property
@@ -603,6 +615,34 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=str,
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-decode-to-prefill-reuse",
+            env_var="DYN_ROUTER_DECODE_TO_PREFILL_REUSE",
+            dest="enable_decode_to_prefill_reuse",
+            default=False,
+            help=(
+                "Experimental decode-to-prefill KV reuse. Requires a certified "
+                "router_hint_transfer_domain, local KV events, and calibrated "
+                "transfer-source cost bounds."
+            ),
+        )
+        for name, arg_type, default, help_text in (
+            ("transfer_source_lookup_budget_ms", int, 5, "Maximum donor lookup time in milliseconds."),
+            ("minimum_transfer_prefix_blocks", int, 1, "Minimum extra reusable blocks beyond the existing prefix."),
+            ("minimum_estimated_ttft_saving_ms", float, 0.0, "Minimum estimated TTFT saving in milliseconds."),
+            ("transfer_source_estimated_block_us", float, None, "Measured upper bound per missing block, including acquisition, copy, onboarding, donor contention, and incremental P-to-D cost."),
+            ("transfer_source_prefill_token_us", float, None, "Measured conservative prefill time saved per reused token in microseconds."),
+        ):
+            add_argument(
+                g,
+                flag_name="--router-" + name.replace("_", "-"),
+                env_var="DYN_ROUTER_" + name.upper(),
+                dest=name,
+                arg_type=arg_type,
+                default=default,
+                help=help_text,
+            )
         add_negatable_bool_argument(
             g,
             flag_name="--router-conditional-disagg",

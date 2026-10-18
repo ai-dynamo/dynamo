@@ -18,6 +18,7 @@ from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -360,3 +361,180 @@ def test_publish_kv_hint_capabilities_reads_tier_inside_multi_connector():
         KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
         json.dumps({"0": "tcp://127.0.0.1:17771"}),
     )
+
+
+def _kvcr_connector(**tier_overrides):
+    tier = {
+        "type": "kvcr",
+        "router_capabilities": [KV_HINT_TRANSFER_CAPABILITY_KEY],
+        "control_advertise_host": "decode-worker",
+        "control_ports": [24000, 24001],
+        **tier_overrides,
+    }
+    return {
+        "kv_connector": "OffloadingConnector",
+        "kv_connector_extra_config": {"secondary_tiers": [tier]},
+    }
+
+
+def _wrapped_engine_args(wrapper, children, **extra_config):
+    return SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector=wrapper,
+            kv_connector_extra_config={"connectors": children, **extra_config},
+        )
+    )
+
+
+@pytest.mark.parametrize("wrapper", ["MultiConnector", "PdConnector"])
+def test_nested_connector_publishes_exact_per_dp_source(wrapper):
+    engine_args = _wrapped_engine_args(
+        wrapper,
+        [
+            {
+                "kv_connector": "MultiConnector",
+                "kv_connector_extra_config": {"connectors": [_kvcr_connector()]},
+            },
+            {"kv_connector": "NixlConnector"},
+        ],
+    )
+    runtime_config = MagicMock()
+    publish_kv_hint_capabilities(
+        runtime_config, engine_args, WorkerType.Decode, dp_range=(4, 2)
+    )
+    calls = runtime_config.set_engine_specific.call_args_list
+    assert calls[0].args == (
+        KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        json.dumps(
+            {"4": "tcp://decode-worker:24000", "5": "tcp://decode-worker:24001"}
+        ),
+    )
+    assert calls[-1].args == (KV_HINT_TRANSFER_CAPABILITY_KEY, "true")
+
+
+def test_nested_connector_rejects_ambiguous_transfer_providers_before_publication():
+    engine_args = _wrapped_engine_args(
+        "MultiConnector",
+        [
+            _kvcr_connector(),
+            {
+                "kv_connector": "PdConnector",
+                "kv_connector_extra_config": {"connectors": [_kvcr_connector()]},
+            },
+        ],
+    )
+    runtime_config = MagicMock()
+    with pytest.raises(ValueError, match="exactly one capable"):
+        publish_kv_hint_capabilities(
+            runtime_config, engine_args, WorkerType.Decode, (0, 2)
+        )
+    runtime_config.set_engine_specific.assert_not_called()
+
+
+@pytest.mark.parametrize("children", ["OffloadingConnector", ["OffloadingConnector"]])
+def test_nested_connector_rejects_malformed_children(children):
+    runtime_config = MagicMock()
+    with pytest.raises(ValueError, match="list of connector configs"):
+        publish_kv_hint_capabilities(
+            runtime_config,
+            _wrapped_engine_args("PdConnector", children),
+            WorkerType.Decode,
+        )
+    runtime_config.set_engine_specific.assert_not_called()
+
+
+def test_unknown_wrapper_does_not_claim_child_transfer_capabilities():
+    runtime_config = MagicMock()
+    publish_kv_hint_capabilities(
+        runtime_config,
+        _wrapped_engine_args("UncertifiedWrapper", [_kvcr_connector()]),
+        WorkerType.Decode,
+        (0, 2),
+    )
+    runtime_config.set_engine_specific.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "tier_overrides",
+    [
+        {"control_advertise_host": "0.0.0.0"},
+        {"control_advertise_host": "::"},
+        {"control_advertise_host": "tcp://decode-worker"},
+        {"control_advertise_host": "decode-worker/path"},
+        {"control_advertise_host": "decode worker"},
+        {"control_advertise_host": "127.1"},
+        {"control_advertise_host": "worker.-invalid"},
+        {"control_advertise_host": "239.1.1.1"},
+        {"control_ports": [24000, 24000]},
+        {"control_ports": [24000, True]},
+    ],
+)
+def test_nested_connector_rejects_unusable_source_endpoints(tier_overrides):
+    runtime_config = MagicMock()
+    with pytest.raises(ValueError, match="P2P KV transfer hint support requires"):
+        publish_kv_hint_capabilities(
+            runtime_config,
+            _wrapped_engine_args("PdConnector", [_kvcr_connector(**tier_overrides)]),
+            WorkerType.Decode,
+            (0, 2),
+        )
+    runtime_config.set_engine_specific.assert_not_called()
+
+
+def test_transfer_domain_is_explicit_and_published_before_capability(monkeypatch):
+    from dynamo.common.constants import KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY
+
+    monkeypatch.delenv("DYN_KV_HINT_TRANSFER_DOMAIN", raising=False)
+    runtime_config = MagicMock()
+    publish_kv_hint_capabilities(
+        runtime_config,
+        _wrapped_engine_args(
+            "PdConnector",
+            [_kvcr_connector()],
+            router_hint_transfer_domain="certified-v1",
+        ),
+        WorkerType.Decode,
+        (0, 2),
+    )
+    calls = runtime_config.set_engine_specific.call_args_list
+    assert calls[-2].args == (KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY, '"certified-v1"')
+    assert calls[-1].args == (KV_HINT_TRANSFER_CAPABILITY_KEY, "true")
+
+
+def test_transfer_domain_environment_fallback_and_config_precedence(monkeypatch):
+    from dynamo.common.constants import KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY
+
+    monkeypatch.setenv("DYN_KV_HINT_TRANSFER_DOMAIN", "deployment-domain")
+    for configured_domain, expected in [
+        (None, "deployment-domain"),
+        ("configured-domain", "configured-domain"),
+    ]:
+        runtime_config = MagicMock()
+        publish_kv_hint_capabilities(
+            runtime_config,
+            _wrapped_engine_args(
+                "PdConnector",
+                [_kvcr_connector()],
+                router_hint_transfer_domain=configured_domain,
+            ),
+            WorkerType.Decode,
+            (0, 2),
+        )
+        runtime_config.set_engine_specific.assert_any_call(
+            KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY, json.dumps(expected)
+        )
+
+
+@pytest.mark.parametrize("domain", ["", " ", " padded ", 42])
+def test_invalid_transfer_domain_fails_before_any_publication(domain):
+    runtime_config = MagicMock()
+    with pytest.raises(ValueError, match="nonempty string"):
+        publish_kv_hint_capabilities(
+            runtime_config,
+            _wrapped_engine_args(
+                "PdConnector", [_kvcr_connector()], router_hint_transfer_domain=domain
+            ),
+            WorkerType.Decode,
+            (0, 2),
+        )
+    runtime_config.set_engine_specific.assert_not_called()

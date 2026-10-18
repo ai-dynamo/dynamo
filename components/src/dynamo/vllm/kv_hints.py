@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -16,6 +18,7 @@ if TYPE_CHECKING:
 
 from dynamo.common.constants import (
     KV_HINT_TRANSFER_CAPABILITY_KEY,
+    KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY,
     KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
@@ -54,28 +57,63 @@ def _apply_kv_hint(sampling_params: Any, kv_hint: Any) -> None:
 
 
 def _secondary_tiers(engine_args: AsyncEngineArgs) -> list[Mapping[str, Any]]:
-    """Return mapping-shaped secondary-tier configs from KVTransferConfig."""
+    """Find secondary tiers in supported connector wrappers, in child order.
+
+    Only known wrappers have a defined ``connectors`` contract. In particular,
+    wrapper-owned settings must not be mistaken for a child's KVCR settings.
+    Discovery does not certify a wrapper's load arbitration or event forwarding.
+    """
+
+    def visit(kv_config: Any) -> list[Mapping[str, Any]]:
+        if isinstance(kv_config, Mapping):
+            name = kv_config.get("kv_connector")
+            extra = kv_config.get("kv_connector_extra_config")
+        else:
+            name = getattr(kv_config, "kv_connector", None)
+            extra = getattr(kv_config, "kv_connector_extra_config", None)
+        if not isinstance(extra, Mapping):
+            return []
+        if name in MULTI_CONNECTOR_WRAPPERS:
+            children = extra.get("connectors", [])
+            if not isinstance(children, list) or any(
+                not isinstance(child, Mapping) for child in children
+            ):
+                raise ValueError(
+                    f"{name} requires connectors to be a list of connector configs"
+                )
+            return [tier for child in children for tier in visit(child)]
+        tiers = extra.get("secondary_tiers")
+        return (
+            [tier for tier in tiers if isinstance(tier, Mapping)]
+            if isinstance(tiers, list)
+            else []
+        )
+
+    return visit(getattr(engine_args, "kv_transfer_config", None))
+
+
+def _transfer_hint_domain(engine_args: AsyncEngineArgs) -> str | None:
+    """Read an operator-certified model, tokenizer, namespace and layout domain.
+
+    This is deliberately distinct from ``kv_transfer_domain``, which is a
+    topology label key. No domain is inferred from a model name or connector.
+    Keep it in the outer connector extra config, never inside a secondary tier:
+    vLLM forwards secondary-tier settings as constructor keyword arguments.
+    """
     kv_config = getattr(engine_args, "kv_transfer_config", None)
-    extra_config = getattr(kv_config, "kv_connector_extra_config", None)
-    if not isinstance(extra_config, Mapping):
-        return []
-
-    extra_configs = [extra_config]
-    if getattr(kv_config, "kv_connector", None) in MULTI_CONNECTOR_WRAPPERS:
-        extra_configs = [
-            child.get("kv_connector_extra_config") or {}
-            for child in extra_config.get("connectors") or []
-        ]
-
-    tiers: list[Mapping[str, Any]] = []
-    for config in extra_configs:
-        secondary_tiers = config.get("secondary_tiers")
-        if not isinstance(secondary_tiers, list):
-            continue
-        for tier in secondary_tiers:
-            if isinstance(tier, Mapping):
-                tiers.append(tier)
-    return tiers
+    extra = getattr(kv_config, "kv_connector_extra_config", None)
+    domain = (
+        extra.get(KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY)
+        if isinstance(extra, Mapping)
+        else None
+    )
+    if domain is None:
+        domain = os.environ.get("DYN_KV_HINT_TRANSFER_DOMAIN")
+    if domain is None:
+        return None
+    if not isinstance(domain, str) or not domain.strip() or domain != domain.strip():
+        raise ValueError("router_hint_transfer_domain must be a nonempty string")
+    return domain
 
 
 def _supports_transfer_hint(tier: Mapping[str, Any]) -> bool:
@@ -102,8 +140,26 @@ def _transfer_hint_source_host(host: str | None) -> str | None:
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
+        # Reject URI fragments, wildcard binds, malformed IP literals and
+        # whitespace without performing a blocking DNS lookup at registration.
+        if len(host) > 253 or not re.fullmatch(
+            r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.?", host
+        ):
+            return None
+        if all(character.isdigit() or character == "." for character in host):
+            return None
+        if any(
+            len(label) > 63
+            or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+            for label in host.rstrip(".").split(".")
+        ):
+            return None
         return host
-    if address.is_unspecified:
+    if (
+        address.is_unspecified
+        or address.is_multicast
+        or str(address) == "255.255.255.255"
+    ):
         return None
     if address.version == 6:
         return f"[{address.compressed}]"
@@ -158,6 +214,10 @@ def _transfer_hint_source_control_endpoints(
         if control_port is None:
             return None
         endpoints[str(global_dp_rank)] = f"tcp://{host}:{control_port}"
+    if len(set(endpoints.values())) != dp_size:
+        raise ValueError(
+            "P2P KV transfer hint support requires unique per-DP control ports"
+        )
     return endpoints
 
 
@@ -222,6 +282,7 @@ def _publish_kv_transfer_hint_capability(
     if sources is None:
         return
     transfer_hint_worker_type = next(iter(sources.values())).worker_type
+    domain = _transfer_hint_domain(engine_args)
 
     # set_engine_specific expects JSON text; the PyO3 binding parses each value
     # with serde_json::from_str, so Python strings must be json.dumps'ed first.
@@ -240,6 +301,10 @@ def _publish_kv_transfer_hint_capability(
         KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
         json.dumps(transfer_hint_worker_type),
     )
+    if domain is not None:
+        runtime_config.set_engine_specific(
+            KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY, json.dumps(domain)
+        )
     runtime_config.set_engine_specific(
         KV_HINT_TRANSFER_CAPABILITY_KEY, json.dumps(True)
     )

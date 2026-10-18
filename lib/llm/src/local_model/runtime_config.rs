@@ -573,6 +573,17 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
             .as_u64()
     }
 
+    fn router_hint_transfer_domain(&self) -> Option<&str> {
+        if !self.supports_runtime_capability(KV_HINT_TRANSFER_CAPABILITY_KEY) {
+            return None;
+        }
+        let domain = self
+            .runtime_data
+            .get("router_hint_transfer_domain")?
+            .as_str()?;
+        (!domain.trim().is_empty()).then_some(domain)
+    }
+
     fn taints(&self) -> &HashSet<String> {
         &self.taints
     }
