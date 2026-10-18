@@ -628,11 +628,36 @@ class KvRouterArgGroup(ArgGroup):
             ),
         )
         for name, arg_type, default, help_text in (
-            ("transfer_source_lookup_budget_ms", int, 5, "Maximum donor lookup time in milliseconds."),
-            ("minimum_transfer_prefix_blocks", int, 1, "Minimum extra reusable blocks beyond the existing prefix."),
-            ("minimum_estimated_ttft_saving_ms", float, 0.0, "Minimum estimated TTFT saving in milliseconds."),
-            ("transfer_source_estimated_block_us", float, None, "Measured upper bound per missing block, including acquisition, copy, onboarding, donor contention, and incremental P-to-D cost."),
-            ("transfer_source_prefill_token_us", float, None, "Measured conservative prefill time saved per reused token in microseconds."),
+            (
+                "transfer_source_lookup_budget_ms",
+                int,
+                5,
+                "Maximum donor lookup time in milliseconds.",
+            ),
+            (
+                "minimum_transfer_prefix_blocks",
+                int,
+                1,
+                "Minimum extra reusable blocks beyond the existing prefix.",
+            ),
+            (
+                "minimum_estimated_ttft_saving_ms",
+                float,
+                0.0,
+                "Minimum estimated TTFT saving in milliseconds.",
+            ),
+            (
+                "transfer_source_estimated_block_us",
+                float,
+                None,
+                "Measured upper bound per missing block, including acquisition, copy, onboarding, donor contention, and incremental P-to-D cost.",
+            ),
+            (
+                "transfer_source_prefill_token_us",
+                float,
+                None,
+                "Measured conservative prefill time saved per reused token in microseconds.",
+            ),
         ):
             add_argument(
                 g,
