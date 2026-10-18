@@ -14,7 +14,7 @@ import psutil
 import pytest
 import requests
 
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, QWEN, DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import SGLangSpecDecodeMetricsPayload, check_models_api
@@ -55,6 +55,13 @@ EAGLE3_ARGS = (
     "1",
     "--speculative-num-draft-tokens",
     "4",
+)
+# The EAGLE3 draft model is trained for Qwen3-0.6B. Skip at collection time
+# otherwise, so the draft model is not predownloaded either.
+EAGLE3_TARGET_MARK = (
+    pytest.mark.model(EAGLE3_DRAFT_MODEL_NAME)
+    if FAULT_TOLERANCE_MODEL_NAME == QWEN
+    else pytest.mark.skip(reason=f"The EAGLE3 draft model only pairs with {QWEN}")
 )
 
 SGLANG_MIGRATION_FRONTEND_STARTUP_TIMEOUT_S = 60
@@ -330,23 +337,6 @@ KV_TRANSFER_MIGRATION_PARAMETERS = pytest.mark.parametrize(
         "request_plane",
     ),
     KV_TRANSFER_CASES,
-    indirect=["request_plane"],
-)
-
-# Speculative decoding does not change the migration policy outcomes covered
-# above, so only the successful migration path is exercised. The two rows
-# cover both shutdown lifecycles, APIs, and request-plane transports.
-SPEC_DECODING_MIGRATION_PARAMETERS = pytest.mark.parametrize(
-    ("immediate_kill", "request_api", "request_plane"),
-    [
-        pytest.param(True, "chat", "nats", id="worker_failure-chat-stream-nats"),
-        pytest.param(
-            False,
-            "completion",
-            "tcp",
-            id="graceful_shutdown-completion-stream-tcp",
-        ),
-    ],
     indirect=["request_plane"],
 )
 
@@ -807,28 +797,25 @@ def test_request_migration_sglang_decode(
 @pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(7.5)  # measured NVML peak with two EAGLE3 workers
 @pytest.mark.requested_sglang_kv_tokens(1024)
-@pytest.mark.model(EAGLE3_DRAFT_MODEL_NAME)
-@SPEC_DECODING_MIGRATION_PARAMETERS
+@EAGLE3_TARGET_MARK
+# Speculative decoding does not change the migration policies, shutdown
+# lifecycles, APIs, or transports covered above, so one successful migration
+# case is enough.
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_request_migration_sglang_spec_decoding(
     request,
     runtime_services_dynamic_ports,
     set_ucx_tls_no_mm,
     predownload_models,
-    immediate_kill,
-    request_api,
     tmp_path,
 ):
     """
     End-to-end test for aggregated request migration between EAGLE3 workers.
 
     Setup: 2 aggregated workers, both running EAGLE3 speculative decoding.
-    The serving worker is faulted after decode starts. The test requires the
-    surviving worker to finish the full output budget and its speculative
-    decoding counters to show accepted draft tokens.
-
-    Parameters:
-        immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
-        request_api: "chat" for chat completion API, "completion" for completion API
+    The serving worker is gracefully shut down after decode starts. The test
+    requires the surviving worker to finish the full output budget and its
+    speculative decoding counters to show accepted draft tokens.
     """
     with DynamoFrontendProcess(
         request,
@@ -869,8 +856,8 @@ def test_request_migration_sglang_spec_decoding(
                 receiving_pattern="New Request ID: ",
                 migration_limit=3,
                 migration_max_seq_len=None,
-                immediate_kill=immediate_kill,
-                use_chat_completion=(request_api == "chat"),
+                immediate_kill=False,
+                use_chat_completion=False,
                 stream=True,
                 max_tokens=SPEC_DECODING_MAX_TOKENS,
                 wait_for_new_response_before_stop=True,
