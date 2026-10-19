@@ -546,7 +546,7 @@ jobs:
       # Drop this source overlay after the upstream TensorRT-LLM change ships.
       extra_build_args: |
         TRTLLM_SOURCE_REPOSITORY=https://github.com/krishung5/TensorRT-LLM
-        TRTLLM_SOURCE_COMMIT=5d2e3b2c758b4ccc0fa0a3eb0e01cdef934e8089
+        TRTLLM_SOURCE_COMMIT=9dc3ab125422271b67aed519ca4c6d8109be3b15
     # actions: read lets the build download a prior run's baseline compliance
     # artifact to diff against (a reusable workflow's token can't exceed the
     # caller's). Missing -> the diff soft-degrades, build stays green.
