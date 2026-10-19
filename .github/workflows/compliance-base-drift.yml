@@ -57,7 +57,7 @@ jobs:
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
-          ngc_ci_access_token: ${{ secrets.NGC_PUBLISH_TOKEN }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
 
       - name: Check base-image digest drift
         run: python3 container/compliance/base_sboms/check_drift.py
