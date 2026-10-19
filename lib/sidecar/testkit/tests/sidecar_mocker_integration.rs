@@ -762,7 +762,78 @@ async fn trtllm_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<support::trtllm::Fixture>(),
     )
     .await;
-    failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Unknown);
+    assert!(error.to_string().contains("Generate"));
+}
+
+#[tokio::test]
+async fn trtllm_native_rejection_recovers_on_same_engine() {
+    let error = bounded(
+        "native rejection and recovery",
+        native_rejection::<support::trtllm::Fixture>(1_000_001),
+    )
+    .await;
+    assert!(
+        error
+            .to_string()
+            .contains("exceeds the Mocker limit of 1000000"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn trtllm_malformed_terminal_fails_then_recovers() {
+    bounded("malformed terminal and recovery", async {
+        use dynamo_trtllm_sidecar::proto as pb;
+        let control = Controller::<support::trtllm::Adapter>::default();
+        let mut fixture =
+            support::trtllm::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        fixture.respond(
+            ctx.id(),
+            vec![
+                pb::GenerateResponse {
+                    event: Some(pb::generate_response::Event::Token(pb::TokenOutput {
+                        output_index: Some(0),
+                        tokens: vec![pb::TokenInfo {
+                            token_id: 101,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+                pb::GenerateResponse {
+                    event: Some(pb::generate_response::Event::Finished(
+                        pb::GenerationFinished {
+                            output_index: Some(0),
+                            reason: pb::FinishReason::Unspecified as i32,
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                },
+            ],
+        );
+        let error = failure(
+            collect(
+                &engine,
+                request("mocker-model", vec![1, 2, 3], 3),
+                GenerateContext::new(ctx, None),
+            )
+            .await,
+            &[101],
+            BackendError::Unknown,
+        );
+        assert!(error.to_string().contains("unspecified finish reason"));
+        bounded("malformed RPC released", handle.wait(Event::Dropped)).await;
+        healthy(&fixture, &engine, &control).await;
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
 }
 
 fn http_request() -> PreprocessedRequest {
