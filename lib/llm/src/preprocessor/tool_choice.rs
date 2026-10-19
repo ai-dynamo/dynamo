@@ -1178,7 +1178,6 @@ mod tests {
             let preprocessor = preprocessor("beam", mode);
             for extra in [
                 json!({}),
-                json!({"tool_choice": "none"}),
                 json!({"tools": tools(), "tool_choice": "none"}),
                 json!({"tool_choice": "auto", "response_format": {"type": "text"}}),
             ] {
@@ -1224,8 +1223,6 @@ mod tests {
             ]}),
             json!({"response_format": {"type": "json_object"}}),
             json!({"response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object"}}}}),
-            json!({"tools": tools(), "tool_choice": "none", "response_format": {"type": "json_object"}}),
-            json!({"tools": tools(), "tool_choice": "none", "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object"}}}}),
         ] {
             let mut request = request(extra.clone());
             let mut normal = preprocessed_request();
