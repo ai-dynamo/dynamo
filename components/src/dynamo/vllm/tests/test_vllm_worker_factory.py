@@ -1508,10 +1508,12 @@ async def _enter_restore_path(
     register: AsyncMock,
     endpoint: Mock,
     setup_vllm_engine: Mock | None = None,
+    factory: WorkerFactory | None = None,
+    gms_shadow_mode: bool = False,
 ) -> None:
     """Run one worker-creation path; it ends in ``register`` or the error under test."""
     method_name, mode = _RESTORE_PATHS[path]
-    factory = _make_factory(
+    factory = factory or _make_factory(
         register_vllm_model_fn=register,
         setup_vllm_engine_fn=setup_vllm_engine or Mock(),
     )
@@ -1531,6 +1533,7 @@ async def _enter_restore_path(
         use_vllm_tokenizer=False,
         engine_args=SimpleNamespace(enable_lora=False),
         endpoint_types="chat,completions",
+        gms_shadow_mode=gms_shadow_mode,
     )
     await getattr(factory, method_name)(
         runtime,
@@ -1574,7 +1577,6 @@ def restore_path_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         WorkerFactory, "_maybe_get_encode_worker_client", AsyncMock(return_value=None)
     )
-    monkeypatch.setattr(WorkerFactory, "_maybe_wait_for_failover_lock", AsyncMock())
     monkeypatch.setattr(WorkerFactory, "register_engine_routes", Mock())
 
 
@@ -1588,6 +1590,89 @@ def _restored_endpoint() -> Mock:
 def _assert_not_served(endpoint: Mock) -> None:
     endpoint.serve_endpoint.assert_not_called()
     endpoint.serve_bidirectional_endpoint.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["decode", "prefill"])
+@pytest.mark.parametrize("startup", ["shadow", "cold", "snapshot"])
+async def test_fpm_relay_starts_only_after_shadow_election(
+    path, startup, restore_path_stubs, monkeypatch
+):
+    snapshot, engine_client = _restore_snapshot_engine()
+    engine_setup, _stat_logger = snapshot
+    vllm_config = engine_setup[1]
+    vllm_config.additional_config["benchmark"] = {"enabled": True}
+    relay = Mock(return_value=[object()])
+    register = AsyncMock(side_effect=_ReachedRegistration)
+    factory = _make_factory(
+        setup_vllm_engine_fn=Mock(return_value=engine_setup),
+        setup_fpm_relay_fn=relay,
+        register_vllm_model_fn=register,
+    )
+    handler = Mock(
+        embedding_cache_manager=None,
+        _pause_controller=SimpleNamespace(pause=AsyncMock()),
+    )
+    handler_cls = "DecodeWorkerHandler" if path == "decode" else "PrefillWorkerHandler"
+    monkeypatch.setattr(
+        f"dynamo.vllm.worker_factory.{handler_cls}", Mock(return_value=handler)
+    )
+    waiting = asyncio.Event()
+    elected = asyncio.Event()
+
+    async def wait_for_election(*_args, **_kwargs):
+        waiting.set()
+        await elected.wait()
+        return SimpleNamespace(was_contended=True)
+
+    election = AsyncMock(side_effect=wait_for_election)
+    monkeypatch.setattr("dynamo.vllm.worker_factory.elect_and_wake", election)
+
+    async def benchmark(*_args):
+        relay.assert_called_once()
+        assert handler.fpm_relays is relay.return_value
+
+    benchmark_wait = AsyncMock(side_effect=benchmark)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._await_benchmark_then_restore_workers",
+        benchmark_wait,
+    )
+    task = asyncio.create_task(
+        _enter_restore_path(
+            path,
+            snapshot if startup == "snapshot" else None,
+            register,
+            _restored_endpoint(),
+            factory=factory,
+            gms_shadow_mode=startup == "shadow",
+        )
+    )
+    try:
+        if startup == "shadow":
+            await asyncio.wait_for(waiting.wait(), timeout=5)
+            # The primary can hold this election indefinitely. Its sleeping
+            # shadow must not publish an undiscovered worker's idle heartbeats.
+            assert not task.done()
+            relay.assert_not_called()
+            register.assert_not_awaited()
+            benchmark_wait.assert_not_awaited()
+            handler._pause_controller.pause.assert_awaited_once_with(1)
+            elected.set()
+        with pytest.raises(_ReachedRegistration):
+            await asyncio.wait_for(task, timeout=5)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    relay.assert_called_once()
+    benchmark_wait.assert_awaited_once()
+    register.assert_awaited_once()
+    if startup != "shadow":
+        election.assert_not_awaited()
+    if startup == "snapshot":
+        engine_client.engine_core.call_utility_async.assert_awaited_once_with(
+            FPM_SET_WORKER_ID_METHOD_NAME, _RESTORED_ENDPOINT_ID
+        )
 
 
 @pytest.mark.asyncio

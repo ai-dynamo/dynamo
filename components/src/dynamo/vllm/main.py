@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -39,7 +40,11 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.common.utils.topology import apply_topology_config
+from dynamo.common.utils.topology import (
+    TopologyConfig,
+    apply_topology_config,
+    read_topology_config,
+)
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -572,6 +577,16 @@ def setup_kv_event_publisher(
     return kv_publishers if kv_publishers else None
 
 
+@functools.cache
+def _worker_topology_config() -> TopologyConfig:
+    """Read this worker's topology once.
+
+    The KV state-agent attachment and every model registration then publish the
+    same island, and a later read cannot wait on or exit for a changed file.
+    """
+    return read_topology_config()
+
+
 async def setup_kv_state_attachment_owner(
     config: Config,
     generate_endpoint: Endpoint,
@@ -582,6 +597,7 @@ async def setup_kv_state_attachment_owner(
         generate_endpoint,
         vllm_config,
         _resolve_image_token_id(config, vllm_config),
+        topology_domains=_worker_topology_config().topology_domains,
     )
 
 
@@ -976,7 +992,7 @@ async def register_vllm_model(
         logging.info("Published vLLM spec decode runtime metadata: %s", spec_decode)
 
     # Set topology and KV transfer policy for topology-aware routing
-    apply_topology_config(runtime_config)
+    apply_topology_config(runtime_config, _worker_topology_config())
 
     # Configure frontend media decoding and transfer via NIXL RDMA.
     media_decoder, media_fetcher = create_frontend_media_config(

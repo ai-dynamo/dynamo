@@ -889,6 +889,12 @@ runs:
           --all-containers --tail=300 --prefix=true 2>&1 || true
         echo "::endgroup::"
 
+        echo "::group::Previous vCluster syncer logs (host namespace)"
+        kubectl logs -n "${NAMESPACE}" \
+          -l "app=vcluster,release=${VCLUSTER_NAME}" \
+          -c syncer --previous --tail=300 --prefix=true 2>&1 || true
+        echo "::endgroup::"
+
         if [ ! -f "${VKUBECONFIG}" ]; then
           echo "::warning::vCluster kubeconfig not found — vCluster never connected successfully"
           echo "- **vCluster kubeconfig missing** — connect-vcluster step failed before writing .kubeconfig-vcluster" >> $GITHUB_STEP_SUMMARY
