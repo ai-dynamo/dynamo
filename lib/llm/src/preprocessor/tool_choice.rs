@@ -410,9 +410,7 @@ fn install_structural_tag(
 /// explicit guided-decoding field constrains the answer itself; a `response_format` on
 /// an unforced choice is framed inside the final channel. (A forced choice with
 /// explicit guided decoding is rejected at request time.)
-/// Plain `ignore_eos` requests also opt out: a completed turn grammar would otherwise
-/// stop the engine before its token budget. Tools and output constraints keep their
-/// existing enforcement even when EOS is ignored.
+/// Plain `ignore_eos` requests skip the turn grammar to avoid grammar-driven early stops.
 fn beam_turn_grammar_constraint<R: OAIChatLikeRequest + CommonExtProvider>(
     request: &R,
 ) -> GuidedToolConstraint {
@@ -1199,8 +1197,7 @@ mod tests {
                         installed_structural_tag(&common_request).is_some(),
                         ignore_eos != Some(true)
                     );
-                    // A frontend reconstructing the response policy must agree with
-                    // the preprocessor, including when only one parser slot is set.
+                    // Reconstructed response policy must match preprocessing with either parser slot.
                     for parsers in [(Some("beam"), None), (None, Some("beam"))] {
                         assert_eq!(
                             guided_tool_constraint(&request, parsers.0, parsers.1, false).unwrap(),
