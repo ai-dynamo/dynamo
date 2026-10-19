@@ -3558,6 +3558,7 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
             RouterHintSourceMetadata {
                 source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
                 worker_type: "prefill".to_string(),
+                topology_domains: Default::default(),
             },
             None,
         )],
@@ -3566,6 +3567,184 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
         transfer_hint_for_selection(&configs, WorkerWithDpRank::new(7, 0), 0, Some(&candidates))
             .expect("hint");
     assert_eq!(hint.source_control_endpoint, "tcp://persistent-owner:23280");
+}
+
+const ISLAND_DOMAIN: &str = "rdma-island";
+
+fn island_config(endpoint: &str, island: &str) -> SelectionWorkerConfig {
+    let mut config = hint_config("prefill", &[(0, endpoint)]);
+    config.topology_domains = HashMap::from([(ISLAND_DOMAIN.to_string(), island.to_string())]);
+    config.kv_transfer_domain = Some(ISLAND_DOMAIN.to_string());
+    config.kv_transfer_enforcement = Some(crate::protocols::KvTransferEnforcement::Required);
+    config
+}
+
+fn hint_endpoint(
+    configs: &HashMap<WorkerId, SelectionWorkerConfig>,
+    candidates: &KvTransferCandidates,
+) -> Option<String> {
+    transfer_hint_for_selection(configs, WorkerWithDpRank::new(7, 0), 0, Some(candidates))
+        .map(|hint| hint.source_control_endpoint)
+}
+
+#[test]
+fn hint_source_must_share_the_target_island() {
+    let mut configs = HashMap::from([
+        (7, island_config("tcp://target:23280", "a")),
+        (8, island_config("tcp://same-island:23280", "a")),
+        (9, island_config("tcp://other-island:23280", "b")),
+        (10, hint_config("prefill", &[(0, "tcp://unlabeled:23280")])),
+    ]);
+    let cross_island: Vec<(KvTransferCandidateSource, usize)> = vec![
+        (WorkerWithDpRank::new(9, 0).into(), 3),
+        (WorkerWithDpRank::new(10, 0).into(), 3),
+    ];
+    let mut all = cross_island.clone();
+    all.push((WorkerWithDpRank::new(8, 0).into(), 2));
+    let all = hint_candidates(&[101, 102, 103], all);
+    let cross_island = hint_candidates(&[101, 102, 103], cross_island);
+
+    // Longer prefixes in another island, or in none, are skipped.
+    assert_eq!(
+        hint_endpoint(&configs, &all).as_deref(),
+        Some("tcp://same-island:23280")
+    );
+    // Without a same-island source there is no hint, and the target recomputes.
+    assert_eq!(hint_endpoint(&configs, &cross_island), None);
+    // A target without a transfer domain is not filtered.
+    configs.get_mut(&7).unwrap().kv_transfer_domain = None;
+    assert_eq!(
+        hint_endpoint(&configs, &cross_island).as_deref(),
+        Some("tcp://other-island:23280")
+    );
+}
+
+#[test]
+fn preferred_island_falls_back_to_a_cross_island_source() {
+    let mut target = island_config("tcp://target:23280", "a");
+    target.kv_transfer_enforcement = Some(crate::protocols::KvTransferEnforcement::Preferred);
+    let configs = HashMap::from([
+        (7, target),
+        (8, island_config("tcp://same-island:23280", "a")),
+        (9, island_config("tcp://other-island:23280", "b")),
+    ]);
+    let both = hint_candidates(
+        &[101, 102, 103],
+        vec![
+            (WorkerWithDpRank::new(8, 0).into(), 2),
+            (WorkerWithDpRank::new(9, 0).into(), 3),
+        ],
+    );
+    let cross_island = hint_candidates(
+        &[101, 102, 103],
+        vec![(WorkerWithDpRank::new(9, 0).into(), 3)],
+    );
+
+    assert_eq!(
+        hint_endpoint(&configs, &both).as_deref(),
+        Some("tcp://same-island:23280")
+    );
+    assert_eq!(
+        hint_endpoint(&configs, &cross_island).as_deref(),
+        Some("tcp://other-island:23280")
+    );
+}
+
+#[test]
+fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
+    use crate::identity::{
+        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
+    use crate::protocols::{
+        ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
+    let owner = |slot: u8| {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(3),
+            ),
+            StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
+        )
+    };
+    let source = |owner| {
+        KvTransferCandidateSource::CacheOwner(ResidencyOwner::cache_owner(owner).compact_key())
+    };
+    let metadata = |endpoint: &str, island: Option<&str>| RouterHintSourceMetadata {
+        source_control_endpoint: endpoint.to_string(),
+        worker_type: "prefill".to_string(),
+        topology_domains: island
+            .map(|island| (ISLAND_DOMAIN.to_string(), island.to_string()))
+            .into_iter()
+            .collect(),
+    };
+    let configs = HashMap::from([
+        (7, island_config("tcp://target:23280", "a")),
+        (8, island_config("tcp://attached-worker:23280", "a")),
+    ]);
+    let (other_island, unlabeled, published, inherited, partial) =
+        (owner(4), owner(5), owner(6), owner(7), owner(8));
+    let mut partial_metadata = metadata("tcp://partial:23280", None);
+    partial_metadata
+        .topology_domains
+        .insert("zone".to_string(), "z1".to_string());
+    let snapshot = Arc::new(ResidencyRoutingSnapshot::new(
+        ResidencyProjection::default(),
+        [
+            (
+                other_island,
+                metadata("tcp://other-island:23280", Some("b")),
+                None,
+            ),
+            (unlabeled, metadata("tcp://unlabeled:23280", None), None),
+            (
+                published,
+                metadata("tcp://published:23280", Some("a")),
+                None,
+            ),
+            (
+                inherited,
+                metadata("tcp://inherited:23280", None),
+                Some(WorkerWithDpRank::new(8, 0)),
+            ),
+            (partial, partial_metadata, Some(WorkerWithDpRank::new(8, 0))),
+        ],
+    ));
+    let hint = |owners: &[(CacheOwnerId, usize)]| {
+        let mut candidates = hint_candidates(
+            &[101, 102, 103, 104],
+            owners
+                .iter()
+                .map(|(owner, blocks)| (source(*owner), *blocks))
+                .collect(),
+        );
+        candidates.routing_snapshot = Some(snapshot.clone());
+        hint_endpoint(&configs, &candidates)
+    };
+
+    // Owners in another island, or in none, are skipped despite longer prefixes.
+    // An owner that publishes topology without the domain is in none, even
+    // when attached to a same-island worker.
+    assert_eq!(
+        hint(&[
+            (other_island, 4),
+            (unlabeled, 4),
+            (partial, 4),
+            (published, 2),
+            (inherited, 3)
+        ])
+        .as_deref(),
+        Some("tcp://inherited:23280")
+    );
+    assert_eq!(
+        hint(&[(other_island, 4), (unlabeled, 4), (published, 2)]).as_deref(),
+        Some("tcp://published:23280")
+    );
+    assert_eq!(hint(&[(other_island, 4), (unlabeled, 4)]), None);
 }
 
 #[tokio::test]
