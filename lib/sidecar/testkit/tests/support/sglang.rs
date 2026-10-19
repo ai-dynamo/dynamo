@@ -25,8 +25,8 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
 use super::{
-    FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture, SidecarFixture, WireFixture,
-    fast_engine_args, sidecar_command, wait_scheduler_idle,
+    DiscoveryFixture, FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture,
+    SidecarFixture, WireFixture, fast_engine_args, sidecar_command, wait_scheduler_idle,
 };
 
 pub struct Fixture {
@@ -512,7 +512,7 @@ impl Protocol for Adapter {
     }
 }
 
-impl ProcessFixture for Fixture {
+impl DiscoveryFixture for Fixture {
     fn set_served_model_name(&self, name: &str) {
         self.override_discovery(
             Value::Null,
@@ -537,12 +537,14 @@ impl ProcessFixture for Fixture {
     fn assert_unhealthy_startup(logs: &str) {
         assert!(logs.contains("did not become healthy"), "{logs}");
     }
+}
 
+impl ProcessFixture for Fixture {
     fn endpoint(&self) -> String {
         self.server.endpoint()
     }
 
-    fn command() -> Command {
+    fn command(_model: &str) -> Command {
         let mut command = sidecar_command("dynamo-sglang-sidecar", "DYNAMO_SGLANG_SIDECAR");
         command.env("SGLANG_DISAGGREGATION_BOOTSTRAP_HOST", "127.0.0.1");
         command
@@ -576,6 +578,7 @@ impl ProcessFixture for Fixture {
 }
 
 impl HandoffFixture for Fixture {
+    const KV_BLOCK_SIZE: u32 = 4;
     const HAS_BOOTSTRAP: bool = true;
 
     fn assert_handoff(

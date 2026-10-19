@@ -551,3 +551,46 @@ fn parsed_arguments_map_onto_the_worker_registration() {
         "an empty model path has nothing to tokenize with"
     );
 }
+// Regression: eager discovery must neither bypass Worker start nor reconnect
+// during that non-cancellable phase after bootstrap has already succeeded.
+#[tokio::test]
+async fn bootstrap_discovers_once_but_requires_start_before_serving() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let bootstrap = TrtllmSidecarEngine::try_from_args_async(vec![
+        "dynamo-trtllm-sidecar".into(),
+        "--grpc-endpoint".into(),
+        server.endpoint.clone(),
+        "--model-path".into(),
+        "model-source".into(),
+    ])
+    .unwrap();
+    let (engine, _) = bootstrap.1.await.unwrap();
+    assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
+    let context = dynamo_backend_common::testing::mock_context();
+    let result = engine
+        .generate(request(), GenerateContext::new(context, None))
+        .await;
+    let error = result.err().expect("bootstrap must not enable generation");
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(dynamo_backend_common::BackendError::EngineShutdown)
+    );
+    assert!(server.service.requests.lock().await.is_empty());
+
+    // Metadata was resolved already; a transient Control failure cannot make
+    // Worker repeat discovery and hang in its non-cancellable start phase.
+    server
+        .service
+        .unavailable_model_info
+        .store(true, Ordering::SeqCst);
+    let config = engine.start(0).await.unwrap();
+    assert_eq!(config.llm.unwrap().context_length, Some(4096));
+    assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
+    let outputs = collect(&engine, request()).await;
+    assert_eq!(outputs[0].token_ids, [42]);
+    assert_eq!(
+        outputs.last().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
+    engine.cleanup().await.unwrap();
+}

@@ -22,7 +22,9 @@ mod support;
 
 use support::sglang::{self as sglang_fixture, http};
 use support::vllm as vllm_fixture;
-use support::{FixtureConfig, GenerateOpening, ProcessFixture, SidecarFixture, WireFixture};
+use support::{
+    DiscoveryFixture, FixtureConfig, GenerateOpening, ProcessFixture, SidecarFixture, WireFixture,
+};
 
 fn after_token_responses(count: usize, action: StreamAction) -> RequestPlan {
     RequestPlan {
@@ -552,6 +554,7 @@ macro_rules! enroll_baseline {
 
 enroll_baseline!(vllm, support::vllm::Fixture);
 enroll_baseline!(sglang, support::sglang::Fixture);
+enroll_baseline!(trtllm, support::trtllm::Fixture);
 
 #[tokio::test]
 async fn vllm_teardown_terminates_handlers_with_clients_alive() {
@@ -750,6 +753,16 @@ async fn sglang_malformed_terminal_fails_then_recovers() {
         finish(&mut fixture, &engine).await;
     })
     .await;
+}
+
+#[tokio::test]
+async fn trtllm_teardown_terminates_handlers_with_clients_alive() {
+    let (outputs, tokens) = bounded(
+        "server teardown with live clients",
+        teardown_with_live_clients::<support::trtllm::Fixture>(),
+    )
+    .await;
+    failure(outputs, &tokens, BackendError::Unknown);
 }
 
 fn http_request() -> PreprocessedRequest {
