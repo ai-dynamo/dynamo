@@ -12,7 +12,7 @@ The [DGD Guide](deploy-with-dgd.md) reaches the Frontend with `kubectl port-forw
 | Kubernetes Ingress | You have an ingress controller (NGINX, etc.) and want a host-routed HTTP(S) entry point |
 | LoadBalancer Service | You want a cloud load balancer and manage routing yourself |
 | Gateway API HTTPRoute | Your cluster runs a Kubernetes Gateway, with or without the Gateway API Inference Extension |
-| Inference Gateway (GAIE) with the Dynamo EPP | The Gateway must pick the worker for each request, and the Dynamo EPP supports every feature the deployment needs |
+| Inference Gateway (GAIE) with the Dynamo EPP | The Gateway must pick the worker for each request. The EPP deployment style does not have full feature parity with Dynamo Frontend routing |
 
 ## Option 1: A Kubernetes Ingress
 

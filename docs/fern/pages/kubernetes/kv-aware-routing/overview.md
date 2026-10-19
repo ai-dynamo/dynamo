@@ -7,15 +7,14 @@ subtitle: Choose where Dynamo makes cache-aware worker-selection decisions in a 
 ---
 
 Dynamo supports two KV-aware request-routing topologies on Kubernetes. They use the same routing
-concepts but place worker selection in different components: the Dynamo Frontend, or a Dynamo
-Endpoint Picker Plugin (EPP) that a Kubernetes Gateway calls for each request.
+concepts but place worker selection in different components. Choose based on how your platform accepts
+and governs traffic, not because one topology uses a different KV-routing algorithm.
 
 ## Recommendation
 
-Use the **Frontend topology**, the standard Dynamo deployment: the Dynamo Frontend runs on the
-Dynamo runtime and selects workers with `--router-mode kv`. It supports the full set of Dynamo
-routing and request-handling features, has the fewest components, and works with a standard
-`DynamoGraphDeployment` (DGD).
+Use **Dynamo Frontend routing**. It has
+fewer components, requires no Gateway API installation, and works with a standard
+`DynamoGraphDeployment`.
 
 If traffic must enter through a Kubernetes Gateway, for example because a platform team
 standardizes ingress, authentication, rate limiting, traffic policy, or gateway-level telemetry
@@ -32,7 +31,7 @@ does not have full feature parity with the Frontend topology. Before you choose 
 | Choose | When it fits | Additional infrastructure | Where routing is configured |
 |---|---|---|---|
 | Using the Dynamo Frontend | Recommended for most deployments, whether clients call the Frontend Service directly or through a Kubernetes Gateway. | None beyond the normal Dynamo platform. | Frontend with `--router-mode kv`. |
-| Using GAIE with Dynamo | The Gateway must pick the worker for each request through GAIE, and the Dynamo EPP supports every feature the deployment needs. | Gateway API, GAIE, a compatible Gateway implementation, and a Dynamo EPP. | EPP; worker Frontend sidecars use `--router-mode direct`. |
+| Using GAIE with Dynamo | Traffic enters through a Gateway with GAIE. Use the Frontend deployment style, in which the Gateway routes requests to the Frontend Service, or the EPP deployment style, in which the Dynamo EPP picks the worker for each request. The EPP deployment style does not have [full feature parity](#features-not-supported-by-the-dynamo-epp) with Dynamo Frontend routing. | Gateway API, GAIE, and a compatible Gateway implementation. The EPP deployment style also needs a Dynamo EPP. | Frontend deployment style: Frontend with `--router-mode kv`. EPP deployment style: EPP; worker Frontend sidecars use `--router-mode direct`. |
 | Using GAIE with vanilla vLLM | You already run upstream vLLM pods and want to add Dynamo's advanced KV-aware routing without migrating the fleet to Dynamo workers. | Gateway API, GAIE, a compatible Gateway implementation, and standalone Dynamo EPP support. | EPP with direct vLLM worker discovery and vLLM token rendering. |
 
 The Frontend and GAIE topologies are alternatives for a request path. Do not configure the Frontend
@@ -46,14 +45,13 @@ component.
 
 Choose this topology when:
 
-- You want every Dynamo routing and request-handling feature, including the ones the Dynamo EPP does
-  not support.
+- Each deployment can expose its own Frontend Service.
+- You do not need Gateway API policy in the request path.
 - You want the fewest routing components to install and operate.
 - Dynamo should own both HTTP request handling and worker selection.
-- Clients call the Frontend Service directly, or a Kubernetes Gateway forwards requests to it.
 
-This topology works out of the box with the normal Dynamo platform and needs no Gateway API
-components. When your platform requires a Gateway, route it to the Frontend Service as shown in
+This topology works out of the box with the normal Dynamo platform; no Gateway API components are
+required. When your platform requires a Gateway, route it to the Frontend Service as shown in
 [Expose the Frontend](../model-deployment/expose-the-frontend.md#option-3-a-gateway-api-httproute).
 Use [the Dynamo Frontend](dynamo-frontend.md) to enable KV-aware worker selection in a DGD.
 
@@ -65,8 +63,8 @@ the request to a worker pod.
 
 A Gateway in front of your models does not by itself call for this topology, because the Frontend
 topology also runs behind a Gateway. Choose GAIE routing when your platform requires the Gateway to
-pick the worker through GAIE, for example when every model on the platform is served through an
-`InferencePool`, and the Dynamo EPP supports every feature the deployment needs. See
+pick the worker through the GAIE EPP `ext_proc` mechanism. This EPP deployment style does not have
+full feature parity with Dynamo Frontend routing; see
 [Features Not Supported by the Dynamo EPP](#features-not-supported-by-the-dynamo-epp).
 
 GAIE routing requires a separate installation. See
@@ -104,6 +102,10 @@ Completions requests with KV-aware routing, in aggregated and disaggregated pref
 deployments. It does not have full feature parity with the Frontend topology: the features below
 work when the Dynamo Frontend routes requests, but not when the Dynamo EPP does. If your deployment
 needs any of them, use the Frontend topology, behind a Gateway if your platform requires one.
+
+> [!NOTE]
+> This list changes over time. For the current status of each feature, check
+> [DEP #16595: Production Readiness for the Dynamo Runtime EPP](https://github.com/ai-dynamo/dynamo/issues/16595).
 
 ### Request Handling
 
@@ -168,9 +170,6 @@ them to a deployment that uses the Frontend topology. For the Frontend's endpoin
 
 ### Operations and Integrations
 
-- **Worker rolling updates:** during a rolling update of the worker components, the EPP does not
-  discover the updated workers and keeps routing to the workers being replaced. Once those workers
-  are gone, requests through the Gateway can fail until the EPP restarts.
 - **[Request migration](../fault-tolerance/request-migration.md):** when a worker fails during a
   request, the request does not move to another worker, because the Gateway, not Dynamo, owns the
   response stream.
