@@ -11,9 +11,7 @@ use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
-#[cfg(feature = "custom-policy")]
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyTimeoutError, PyValueError};
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
