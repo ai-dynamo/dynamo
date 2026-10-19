@@ -564,6 +564,26 @@ def update_engine_config_with_dynamo(
             dynamo_config.benchmark_output_path,
         )
 
+    mode = os.environ.get("DYN_DECODE_REGULATION_MODE", "off").strip().lower()
+    if mode not in ("", "off"):
+        # DecodeRegulationScheduler subclasses InstrumentedScheduler, so forward
+        # pass metrics and benchmark mode keep working when it replaces that default.
+        existing_cls = getattr(engine_config, "scheduler_cls", None)
+        if existing_cls is None:
+            defaults[
+                "scheduler_cls"
+            ] = "dynamo.vllm.decode_regulation_scheduler.DecodeRegulationScheduler"
+            logger.info(
+                "DYN_DECODE_REGULATION_MODE set: scheduler_cls set to "
+                "DecodeRegulationScheduler"
+            )
+        elif "DecodeRegulationScheduler" not in str(existing_cls):
+            raise ValueError(
+                f"DYN_DECODE_REGULATION_MODE requires DecodeRegulationScheduler but "
+                f"--scheduler-cls is set to '{existing_cls}'. Remove --scheduler-cls "
+                f"or unset DYN_DECODE_REGULATION_MODE."
+            )
+
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():
         if hasattr(engine_config, key):
