@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 use dynamo_llm::local_model::runtime_config::{StructuralTagConfig, StructuralTagScope};
+use dynamo_runtime::config::parse_bool_opt;
 
 use crate::disagg::DisaggregationMode;
 
@@ -152,10 +153,8 @@ fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infal
 }
 
 fn parse_structural_tag(value: &str) -> Result<StructuralTagFlag, String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => return Ok(StructuralTagFlag(Some(always_on()))),
-        "false" | "0" | "no" | "off" => return Ok(StructuralTagFlag(None)),
-        _ => {}
+    if let Some(enabled) = parse_bool_opt(value) {
+        return Ok(StructuralTagFlag(enabled.then(always_on)));
     }
     let mut config: serde_json::Value =
         serde_json::from_str(value).map_err(|error| error.to_string())?;
