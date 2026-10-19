@@ -621,6 +621,9 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       run_gpu_tests: false
+      # prod-tester-amd-v2 does not start the MinIO service, so the MinIO artifact
+      # tests run in vllm-test instead. Re-enable once the CPU runner hook template starts MinIO.
+      minio_service: false
     secrets: inherit
 
   sglang-test:
