@@ -56,7 +56,14 @@ fn encode_response_enforces_terminal_contract() {
 
 #[test]
 fn early_prompt_frames_retain_exact_native_metadata() {
-    for (has_prompt_logprobs, has_output) in [(false, false), (true, false), (true, true)] {
+    for (has_prompt_logprobs, has_output, has_mask) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (false, false, true),
+        (true, false, true),
+        (true, true, true),
+    ] {
         let mut request = request();
         request.output_options.prompt_logprobs = has_prompt_logprobs.then_some(1);
         let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
@@ -99,8 +106,27 @@ fn early_prompt_frames_retain_exact_native_metadata() {
             .as_mut()
             .unwrap()
             .num_output_tokens = 1 + u32::from(has_output);
-        let result = state.convert(response).unwrap().unwrap();
+        if has_mask {
+            response.outputs.as_mut().unwrap().sampling_mask =
+                vec![pb::TokenIds { ids: vec![7, 11] }; 1 + usize::from(has_output)];
+        }
+        let mut result = state.convert(response).unwrap().unwrap();
         assert!(result.finish_reason.is_some());
+        if has_mask {
+            let data = result
+                .engine_data
+                .as_mut()
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            assert_eq!(
+                data.remove("sampling_mask"),
+                Some(json!(vec![vec![7, 11]; 1 + usize::from(has_output)]))
+            );
+            if data.is_empty() {
+                result.engine_data = None;
+            }
+        }
         assert_eq!(result.engine_data, has_prompt_logprobs.then(|| json!({"prompt_logprobs": [null, {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}}, {"33": {"logprob": -0.5, "rank": 2}}]})));
     }
 }

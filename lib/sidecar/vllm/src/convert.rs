@@ -1573,6 +1573,7 @@ impl ResponseState {
             num_tokens,
             token_ids,
             finish_info,
+            sampling_mask,
             ..
         } = output;
 
@@ -1704,13 +1705,26 @@ impl ResponseState {
                 })?,
             );
         }
+        if !sampling_mask.is_empty() {
+            mapped
+                .engine_data
+                .get_or_insert_with(|| serde_json::json!({}))["sampling_mask"] = serde_json::json!(
+                sampling_mask
+                    .into_iter()
+                    .map(|row| row.ids)
+                    .collect::<Vec<_>>()
+            );
+        }
         self.attach_prompt_data(&mut mapped);
         Ok(Some(mapped))
     }
 
     fn attach_prompt_data(&mut self, output: &mut LLMEngineOutput) {
-        if output.engine_data.is_none() {
-            output.engine_data = self.prompt_info.take().map(prompt_logprobs_to_json);
+        if let Some(prompt) = self.prompt_info.take() {
+            output
+                .engine_data
+                .get_or_insert_with(|| serde_json::json!({}))["prompt_logprobs"] =
+                prompt_logprobs_to_json(prompt);
         }
     }
 
@@ -1783,12 +1797,7 @@ fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {
         positions.push(serde_json::Value::Object(entries));
     }
 
-    let mut engine_data = serde_json::Map::with_capacity(1);
-    engine_data.insert(
-        "prompt_logprobs".to_string(),
-        serde_json::Value::Array(positions),
-    );
-    serde_json::Value::Object(engine_data)
+    serde_json::Value::Array(positions)
 }
 
 fn prompt_logprob_entry(logprob: f32, rank: u32) -> serde_json::Value {
