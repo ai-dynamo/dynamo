@@ -36,20 +36,50 @@ def _touch(root: Path, rel: str) -> None:
 
 
 def test_in_tree_ffmpeg_is_allowed(tmp_path: Path):
+    """Allow the in-tree FFmpeg libraries and both standalone tools."""
     # Our own /usr/local ffmpeg libs — must classify as allowed, never violate.
+    # The names carry the --build-suffix=_dynamo the wheel_builder configure sets,
+    # so this also pins the matching deny_globs: drop them and these libraries
+    # match nothing, `allowed` comes back empty, and the gate has gone blind.
     for rel in (
-        "usr/local/lib/libavcodec.so.62",
-        "usr/local/lib/libswscale.so.9",
+        "usr/local/lib/libavcodec_dynamo.so.63",
+        "usr/local/lib/libswscale_dynamo.so.10",
         "usr/local/bin/ffmpeg",
+        "usr/local/bin/ffprobe",
     ):
         _touch(tmp_path, rel)
     violations, _exceptions, allowed = scan_filesystem(tmp_path, _POLICY)
     assert violations == []
     assert {a["path"] for a in allowed} == {
-        "/usr/local/lib/libavcodec.so.62",
-        "/usr/local/lib/libswscale.so.9",
+        "/usr/local/lib/libavcodec_dynamo.so.63",
+        "/usr/local/lib/libswscale_dynamo.so.10",
         "/usr/local/bin/ffmpeg",
+        "/usr/local/bin/ffprobe",
     }
+
+
+def test_third_party_suffixed_codec_lib_is_denied(tmp_path: Path):
+    # allow_paths re-permits the suffixed names by /usr/local path prefix only.
+    # The same soname vendored by a wheel is still a violation — otherwise the
+    # suffix would hand anyone a way past the gate just by copying our naming.
+    # auditwheel grafts a library as <name>-<hash>.so.N, so each suffixed family
+    # is planted under both names.
+    libs = "usr/local/lib/python3.12/dist-packages/somewheel/.libs"
+    rels = sorted(
+        f"{libs}/{name}"
+        for name in (
+            "libavcodec_dynamo.so.63",
+            "libavcodec_dynamo-1a2b3c4d.so.63",
+            "libswscale_dynamo.so.10",
+            "libswscale_dynamo-1a2b3c4d.so.10",
+            "libpostproc_dynamo.so.58",
+            "libpostproc_dynamo-1a2b3c4d.so.58",
+        )
+    )
+    for rel in rels:
+        _touch(tmp_path, rel)
+    violations, _, _ = scan_filesystem(tmp_path, _POLICY)
+    assert sorted(v["path"] for v in violations) == ["/" + rel for rel in rels]
 
 
 def test_dali_bundled_ffmpeg_is_a_logged_exception(tmp_path: Path):
@@ -68,17 +98,22 @@ def test_pynvvideocodec_demux_libs_waived_but_codec_denied(tmp_path: Path):
     # PyNvVideoCodec vendors libavutil + libavformat (container demux, no codec)
     # for its NVDEC path — waived. The exception is scoped to those two libs, so a
     # libavcodec bundled by a future version must STILL fail the gate.
+    #
+    # One internally consistent SONAME series is enough to keep the globs honest.
+    # They are SONAME-agnostic (`libav*.so*`) and must also cover the bare `.so`
+    # symlinks, so pinning either glob to any single series unwaives those and
+    # fails here regardless of which series this fixture names.
     pkg = "usr/local/lib/python3.12/dist-packages/PyNvVideoCodec"
     for rel in (
-        f"{pkg}/libavutil.so.60.26.102",
+        f"{pkg}/libavutil.so.61.1.101",
         f"{pkg}/libavutil.so",
-        f"{pkg}/libavformat.so.62",
+        f"{pkg}/libavformat.so.63",
         f"{pkg}/libavformat.so",
     ):
         _touch(tmp_path, rel)
-    _touch(tmp_path, f"{pkg}/libavcodec.so.62")  # a real codec must NOT be waived
+    _touch(tmp_path, f"{pkg}/libavcodec.so.63")  # a real codec must NOT be waived
     violations, exceptions, _allowed = scan_filesystem(tmp_path, _POLICY)
-    assert [v["path"] for v in violations] == [f"/{pkg}/libavcodec.so.62"]
+    assert [v["path"] for v in violations] == [f"/{pkg}/libavcodec.so.63"]
     assert len(exceptions) == 4
     assert all("PyNvVideoCodec" in (e["detail"] or "") for e in exceptions)
 
@@ -86,17 +121,31 @@ def test_pynvvideocodec_demux_libs_waived_but_codec_denied(tmp_path: Path):
 @pytest.mark.parametrize(
     "rel",
     [
+        "usr/bin/ffprobe",
+        "opt/venv/bin/ffprobe",
         "usr/lib/x86_64-linux-gnu/libx264.so.164",
         "usr/lib/x86_64-linux-gnu/libx265.so.199",
         # A third-party bundled libavcodec NOT under /usr/local and NOT DALI.
         "usr/local/lib/python3.12/dist-packages/opencv_python_headless.libs/libavcodec-156beeea.so.62.11.100",
         "opt/venv/lib/python3.12/site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.1",
+        "usr/local/bin/ffprobe.d/libx264.so.164",
+        "usr/local/bin/ffmpeg.d/libx264.so.164",
     ],
 )
 def test_nonallowlisted_media_artifacts_are_violations(tmp_path: Path, rel: str):
+    """Reject codec artifacts outside the exact tools and allowed library prefixes."""
     _touch(tmp_path, rel)
     violations, _, _ = scan_filesystem(tmp_path, _POLICY)
     assert [v["path"] for v in violations] == ["/" + rel]
+
+
+@pytest.mark.parametrize("tool", ["ffmpeg", "ffprobe"])
+def test_tool_allowance_requires_exact_path(tool: str):
+    """A tool's name cannot allow a longer path or a copy in another directory."""
+    path = f"/usr/local/bin/{tool}"
+    assert _POLICY.classify(path) == ("allowed", None)
+    for other in (f"{path}-anything", f"{path}.d/libx264.so.164", f"/usr/bin/{tool}"):
+        assert _POLICY.classify(other) == ("violation", None)
 
 
 def test_unrelated_files_are_ignored(tmp_path: Path):
@@ -112,15 +161,15 @@ def test_sbom_flags_ffmpeg_below_cve_floor(tmp_path: Path):
         json.dumps(
             {
                 "components": [
-                    {"name": "ffmpeg", "version": "8.0.1"},  # < 8.1.2 -> flagged
-                    {"name": "ffmpeg", "version": "8.1.2"},  # == floor -> ok
+                    {"name": "ffmpeg", "version": "8.1.2"},  # < 9.0.1 -> flagged
+                    {"name": "ffmpeg", "version": "9.0.1"},  # == floor -> ok
                     {"name": "libvpx", "version": "1.14.1"},  # not denied
                 ]
             }
         )
     )
     hits = scan_sbom(sbom, _POLICY)
-    assert [h["path"] for h in hits] == ["sbom:ffmpeg@8.0.1"]
+    assert [h["path"] for h in hits] == ["sbom:ffmpeg@8.1.2"]
 
 
 def test_codec_under_tmp_is_scanned(tmp_path: Path):
@@ -212,6 +261,17 @@ def test_load_rejects_scalar_allow_paths(tmp_path: Path):
         "deny_globs: ['**/libx264.so*']\nallow_paths: /usr/local/lib\n",
     )
     with pytest.raises(ValueError, match="allow_paths"):
+        CodecPolicy.load(pol)
+
+
+@pytest.mark.parametrize("value", ["/usr/local/bin/ffprobe", "['']", "[1]", "{}"])
+def test_load_rejects_malformed_exact_paths(tmp_path: Path, value: str):
+    """Reject malformed exact allowances instead of silently broadening a match."""
+    pol = _write_policy(
+        tmp_path,
+        f"deny_globs: ['**/bin/ffprobe']\nallow_exact_paths: {value}\n",
+    )
+    with pytest.raises(ValueError, match="allow_exact_paths"):
         CodecPolicy.load(pol)
 
 

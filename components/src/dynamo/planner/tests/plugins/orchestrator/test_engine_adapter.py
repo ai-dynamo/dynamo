@@ -26,8 +26,12 @@ import pytest
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import (
+    BatchDispatcherFeedback,
+    BatchJobDemand,
+    BatchSchedulingObservation,
     EngineCapabilities,
     FpmObservations,
+    PoolTrafficDemand,
     ScheduledTick,
     TickInput,
     TrafficObservation,
@@ -66,6 +70,58 @@ def _agg_config_throughput_on() -> PlannerConfig:
         enable_throughput_scaling=True,
         optimization_target="sla",
         served_model_name="test",
+    )
+
+
+def test_tick_input_to_context_maps_batch_observations():
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    tick_input = TickInput(
+        now_s=1_700_000_010.0,
+        batch=BatchSchedulingObservation(
+            job_demands=[
+                BatchJobDemand(
+                    observed_at_s=1_700_000_000.0,
+                    pool_id="pool-a",
+                    job_id="batch-123",
+                    status="in_progress",
+                    total_requests=1_000,
+                    completed_requests=275,
+                    failed_requests=25,
+                    deadline_at_s=1_700_003_600.0,
+                    work_class="chat-8k",
+                )
+            ],
+            pool_traffic=[
+                PoolTrafficDemand(
+                    observed_at_s=1_700_000_001.0,
+                    pool_id="pool-a",
+                    online_offered_rps=90.0,
+                )
+            ],
+            dispatcher_feedback=[
+                BatchDispatcherFeedback(
+                    observed_at_s=1_700_000_002.0,
+                    pool_id="pool-a",
+                    observation_window_s=30.0,
+                    queued_requests=700,
+                    inflight_requests=20,
+                    actual_dispatch_rps=9.5,
+                    applied_max_admission_rps=10.0,
+                )
+            ],
+        ),
+    )
+
+    context = adapter._tick_input_to_context(tick_input)
+
+    assert context.observations.batch is not None
+    assert context.observations.batch.job_demands[0].remaining_requests == 700
+    assert context.observations.batch.job_demands[0].deadline_at_s == 1_700_003_600.0
+    assert context.observations.batch.pool_traffic[0].online_offered_rps == 90.0
+    assert context.observations.batch.dispatcher_feedback[0].queued_requests == 700
+    assert (
+        context.observations.batch.dispatcher_feedback[0].applied_max_admission_rps
+        == 10.0
     )
 
 
@@ -994,24 +1050,33 @@ async def test_observation_prefetch_and_dispatch_share_tick_timestamp():
     assert first.at_monotonic_s == pytest.approx(5.0)
     assert first.need_worker_fpm is True
 
-    clock.set_monotonic(first.at_monotonic_s)
-    effects = await adapter.tick(
-        first,
-        TickInput(
-            now_s=first.at_s,
-            worker_counts=WorkerCounts(
-                ready_num_decode=1,
-                expected_num_decode=1,
-            ),
-            fpm_observations=FpmObservations(decode={("w1", 0): _make_fpm("w1")}),
-        ),
-    )
-
     load_plugin = adapter._orchestrator.registry.get_plugin("builtin_load_propose")
     assert load_plugin is not None
-    assert load_plugin.last_call_at == pytest.approx(first.at_monotonic_s)
-    assert effects.next_tick is not None
-    assert effects.next_tick.need_worker_fpm is True
+    scheduled = first
+    for has_fpm in (True, True, False, True):
+        assert scheduled.need_worker_fpm is True
+        clock.set_monotonic(scheduled.at_monotonic_s)
+        effects = await adapter.tick(
+            scheduled,
+            TickInput(
+                now_s=scheduled.at_s,
+                worker_counts=WorkerCounts(
+                    ready_num_decode=1,
+                    expected_num_decode=1,
+                ),
+                fpm_observations=FpmObservations(
+                    decode={("w1", 0): _make_fpm("w1")} if has_fpm else None
+                ),
+            ),
+        )
+        assert load_plugin.last_call_at == pytest.approx(scheduled.at_monotonic_s)
+        if has_fpm:
+            assert effects.diagnostics.load_decision_reason == "no_change"
+        else:
+            assert effects.scale_to is None
+            assert effects.diagnostics.load_decision_reason == "no_fpm_data"
+        assert effects.next_tick is not None
+        scheduled = effects.next_tick
 
 
 def test_throughput_only_sla_still_pulls_fpm_for_live_regression():
