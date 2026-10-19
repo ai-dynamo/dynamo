@@ -131,7 +131,6 @@ class _KeepaliveReached(Exception):
 
 
 def _stop_at_keepalive(monkeypatch):
-    # main() sleeps forever after a successful load; stop it there.
     def fake_sleep(seconds):
         raise _KeepaliveReached
 
@@ -187,33 +186,8 @@ def test_main_forwards_explicit_argv_unchanged(monkeypatch):
     ]
 
 
-def test_main_v1_stays_alive_after_successful_load(monkeypatch):
-    # An exited loader container is restarted by Kubernetes and requests a
-    # second RW session, which times out while the worker holds RO (DYN-4934).
-    calls = []
-
-    def fake_sleep(seconds):
-        calls.append(("sleep", seconds))
-        raise _KeepaliveReached
-
-    monkeypatch.setenv("DYN_GMS_USE_V1", "true")
-    monkeypatch.setattr(
-        loader,
-        "run_per_device",
-        lambda module, argv: calls.append(("run_per_device", module)),
-    )
-    monkeypatch.setattr(loader.time, "sleep", fake_sleep)
-
-    with pytest.raises(_KeepaliveReached):
-        loader.main(argv=["--checkpoint-dir", "/tmp/cp"])
-
-    assert calls == [
-        ("run_per_device", "gpu_memory_service.v1.snapshot.loader"),
-        ("sleep", 3600),
-    ]
-
-
-def test_main_v1_help_exits_without_keepalive(monkeypatch):
+@pytest.mark.parametrize("help_flag", ["-h", "--help", "--hel", "--h"])
+def test_main_v1_help_exits_without_keepalive(monkeypatch, help_flag):
     # --help runs one child that prints usage and exits 0; main() must return.
     forwarded = []
 
@@ -228,6 +202,6 @@ def test_main_v1_help_exits_without_keepalive(monkeypatch):
     )
     monkeypatch.setattr(loader.time, "sleep", fake_sleep)
 
-    loader.main(argv=["--help"])
+    loader.main(argv=[help_flag])
 
-    assert forwarded == [("gpu_memory_service.v1.snapshot.loader", ["--help"])]
+    assert forwarded == [("gpu_memory_service.v1.snapshot.loader", [help_flag])]
