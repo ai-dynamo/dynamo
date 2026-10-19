@@ -401,12 +401,6 @@ def test_router_decisions_sglang_multiple_workers(
 LORA_MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
-def _sglang_has_dynamo_kv_event_format() -> bool:
-    from sglang.srt.disaggregation.kv_events import KVEventsConfig
-
-    return "format" in KVEventsConfig.model_fields
-
-
 @pytest.mark.e2e
 @pytest.mark.model(LORA_MODEL_NAME)
 @pytest.mark.model(DEFAULT_LORA_REPO)
@@ -425,9 +419,6 @@ def test_router_lora_isolation_sglang(
 ):
     """Adapter requests reuse adapter blocks, and base-model requests with the
     same prompt never match them."""
-    if not _sglang_has_dynamo_kv_event_format():
-        pytest.skip("SGLang does not publish the dynamo KV event format")
-
     # predownload_models caches the adapter but leaves HF_HUB_OFFLINE set, and
     # hf:// sources only trust Dynamo's own cache, so load the cached snapshot.
     lora_dir = snapshot_download(DEFAULT_LORA_REPO, local_files_only=True)
