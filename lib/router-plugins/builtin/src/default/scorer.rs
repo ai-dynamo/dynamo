@@ -184,10 +184,10 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             let raw_tokens = if !context.tracks_prefill_tokens() {
                 0
             } else if load.is_available() {
-                let uncached = context.prompt_tokens().saturating_sub(cached_tokens);
+                let uncached = context.isl_tokens().saturating_sub(cached_tokens);
                 (load.active_prefill_tokens() + uncached).saturating_add(cached_tokens)
             } else {
-                context.prompt_tokens()
+                context.isl_tokens()
             };
             let prefill = (self.prepared.block_size.divide(raw_tokens as f64) - credit).max(0.0);
             self.prefill_load_scale * prefill + load.decode_cost_blocks() + request_cost

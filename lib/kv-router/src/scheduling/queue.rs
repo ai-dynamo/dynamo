@@ -27,7 +27,7 @@ use super::policy_config::{
 use super::policy_queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
-use super::request_classifier::{ClassificationOverrides, ClassifyRequest};
+use super::request_classifier::{ClassificationOverrides, RequestClassificationContext};
 use super::selector::{WorkerInputs, WorkerSelectionInput, WorkerSelector, worker_input_rows};
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
@@ -826,7 +826,7 @@ impl<
         block_hashes: Option<Vec<LocalBlockHash>>,
         lease: Option<Box<RequestLifecycleLease>>,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
-        classified_request: Option<ClassifyRequest>,
+        classified_request: Option<RequestClassificationContext>,
         ingress_at: Instant,
     ) -> Option<Box<RequestLifecycleLease>> {
         if self.capacity_updates.is_some()
@@ -894,7 +894,7 @@ impl<
         request: &SchedulingRequest,
         ingress_at: Instant,
         worker_inputs: WorkerInputs,
-    ) -> (ClassifyRequest, WorkerInputRows) {
+    ) -> (RequestClassificationContext, WorkerInputRows) {
         let available = self
             .available_worker_provider
             .as_ref()
@@ -908,11 +908,14 @@ impl<
             .as_ref()
             .map(|provider| provider())
             .unwrap_or_default();
-        let mut classification =
-            ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
-                .with_pinned_worker(request.pinned_worker)
-                .with_sequence_hashes(request.token_seq.as_deref())
-                .with_busy_thresholds(Arc::clone(&self.profile), reject_thresholds);
+        let mut classification = RequestClassificationContext::with_timing(
+            request.isl_tokens,
+            cached_tokens,
+            ingress_at,
+        )
+        .with_pinned_worker(request.pinned_worker)
+        .with_sequence_hashes(request.token_seq.as_deref())
+        .with_busy_thresholds(Arc::clone(&self.profile), reject_thresholds);
         if let Some(request_id) = request.mode.request_id() {
             classification = classification.with_request_id(request_id);
         }
@@ -996,7 +999,7 @@ impl<
     fn validate_classification(
         &self,
         request: &mut SchedulingRequest,
-        classified_request: ClassifyRequest,
+        classified_request: RequestClassificationContext,
         ingress_at: Instant,
     ) -> Result<QueueMetadata, KvSchedulerError> {
         let ClassificationOverrides {
@@ -2875,7 +2878,7 @@ mod tests {
         impl RequestClassifier for InspectHashes {
             fn classify(
                 &mut self,
-                request: ClassifyRequest,
+                request: RequestClassificationContext,
                 _workers: WorkerCandidates<'_>,
             ) -> ClassifyFuture {
                 let expected = self.0.clone();
@@ -2924,7 +2927,7 @@ mod tests {
         impl RequestClassifier for Park {
             fn classify(
                 &mut self,
-                request: ClassifyRequest,
+                request: RequestClassificationContext,
                 _workers: WorkerCandidates<'_>,
             ) -> ClassifyFuture {
                 Box::pin(async move {
@@ -2993,7 +2996,7 @@ mod tests {
                 "hashes": hashes,
                 "pending": retained,
                 "repeats_per_sample": repeats,
-                "classify_request_bytes": std::mem::size_of::<ClassifyRequest>(),
+                "classify_request_bytes": std::mem::size_of::<RequestClassificationContext>(),
                 "ns_per_request_samples": samples,
             })
         );

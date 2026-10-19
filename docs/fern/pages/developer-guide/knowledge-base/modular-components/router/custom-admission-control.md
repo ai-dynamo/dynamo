@@ -76,7 +76,7 @@ Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to
 use std::time::Duration;
 
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyFuture, ClassifyRequest, RequestClassifier,
+    ClassifierError, ClassifyFuture, RequestClassificationContext, RequestClassifier,
 };
 use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_runtime::error::{DynamoError, ErrorClass};
@@ -87,7 +87,7 @@ struct QueueBudget {
 }
 
 impl RequestClassifier for QueueBudget {
-    fn classify(&mut self, mut request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
+    fn classify(&mut self, mut request: RequestClassificationContext, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
         let deadline = request.ingress_at() + self.budget;
         Box::pin(async move {
             if Instant::now() >= deadline {
@@ -202,13 +202,13 @@ The policy class enables queueing when every eligible worker's active prefill to
 
 ### Request Inputs
 
-`classify` receives a `ClassifyRequest` with these accessors:
+`classify` receives a `RequestClassificationContext` with these accessors:
 
 | Accessor | Meaning |
 |---|---|
 | `request_id()` | Optional request ID, also used in lifecycle events |
 | `session_context()` | Optional session identity, final marker, input trigger, and captured [agent headers](../../../../use-cases/agents/agent-harnesses.mdx#agent-headers) |
-| `input_tokens()` | Input size used by the scheduler |
+| `isl_tokens()` | Input sequence length in tokens, the size the scheduler uses |
 | `scheduling_cost_tokens()` | Estimated uncached input tokens, or the classifier's override |
 | `policy_class()` | Requested policy class, or the classifier's override |
 | `queue_thresholds()` | Busy thresholds of the policy class the request resolves to now, including the classifier's override. The queue holds the request while every eligible worker is past them |
@@ -227,11 +227,12 @@ The factory receives a `RequestClassifierContext` with router-wide information:
 | `block_size()` | Tokens per KV block |
 | `workers()` | Registered worker ranks from cached discovery information, updated as worker registrations change |
 
-Each entry returned by `workers()` is a `RequestClassifierWorker`:
+Each entry returned by `workers()` is the same `WorkerInfo` that [worker-selection plugins](custom-worker-selection.mdx) read:
 
 | Accessor | Meaning |
 |---|---|
 | `worker()` | Worker ID and data-parallel rank, returned as `WorkerWithDpRank` |
+| `max_num_batched_tokens()` | Advertised prefill tokens per engine step for this rank, or `None` when unavailable |
 | `total_kv_blocks()` | Advertised total KV-block capacity for this rank, or `None` when unavailable; this is not the number of free blocks |
 
 ### Worker Inputs
@@ -240,7 +241,7 @@ A classifier can read the per-worker cache and load data that [worker-selection 
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifyFuture, ClassifyRequest, RequestClassifier,
+    ClassifyFuture, RequestClassificationContext, RequestClassifier,
 };
 use dynamo_kv_router::plugins::worker_selection::{WorkerCandidates, WorkerInputs};
 
@@ -253,7 +254,7 @@ impl RequestClassifier for LoadAwareClass {
         WorkerInputs::LOAD
     }
 
-    fn classify(&mut self, mut request: ClassifyRequest, workers: WorkerCandidates<'_>) -> ClassifyFuture {
+    fn classify(&mut self, mut request: RequestClassificationContext, workers: WorkerCandidates<'_>) -> ClassifyFuture {
         // Count only observed loads, and require at least one.
         let mut loads = workers
             .iter()
