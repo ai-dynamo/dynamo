@@ -9949,13 +9949,12 @@ def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
     ctx = zmq.Context.instance()
     sub = ctx.socket(zmq.SUB)
     sub.setsockopt(zmq.SUBSCRIBE, b"")
-    port = sub.bind_to_random_port("tcp://127.0.0.1")
-    sub.unbind(sub.getsockopt(zmq.LAST_ENDPOINT))
     publisher = instrumented_scheduler_module._FpmPublisherThread(
-        f"tcp://127.0.0.1:{port}", worker_id="", dp_rank=0
+        "tcp://127.0.0.1:*", worker_id="", dp_rank=0, start_paused=True
     )
-    sub.connect(f"tcp://127.0.0.1:{port}")
     try:
+        sub.connect(publisher._pub.getsockopt_string(zmq.LAST_ENDPOINT))
+        publisher.resume()
         scheduler = object.__new__(InstrumentedScheduler)
         scheduler._fpm_worker_id = ""
         scheduler._fpm_dp_rank = 0
