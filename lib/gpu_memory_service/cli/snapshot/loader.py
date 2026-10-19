@@ -175,11 +175,8 @@ def _list_checkpoint_devices(
 
 
 def _wait_for_termination() -> None:
-    # Keep the sidecar process alive after a successful load. If it exited,
-    # Kubernetes would restart the container and the new loader would request
-    # a second RW session. That writer cannot be admitted while the restored
-    # worker holds its RO weights lease, so it times out and crash-loops; if
-    # it is admitted, it clears the committed weights.
+    # Stay alive after a successful load: a restarted container would request a
+    # second RW session that times out on the worker's RO lease or clears the weights.
     while True:
         time.sleep(3600)
 
