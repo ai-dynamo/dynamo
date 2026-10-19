@@ -4,6 +4,7 @@
 from prometheus_client import CollectorRegistry, Counter, Enum, Gauge, Histogram
 
 PREFIX = "dynamo_planner"
+SIGNAL_DEGRADATION_OBSERVATIONS = 3
 
 LOAD_DECISION_STATES = [
     "unset",
@@ -28,6 +29,7 @@ LOAD_DECISION_STATES = [
     "rejected_by_plugin",
     "gpu_budget_guard_hold",
     "gpu_budget_reconcile",
+    "missing_engine_metadata",
 ]
 
 THROUGHPUT_DECISION_STATES = [
@@ -47,6 +49,7 @@ THROUGHPUT_DECISION_STATES = [
     "gpu_budget_guard_hold",
     "no_change",
     "gpu_budget_reconcile",
+    "missing_engine_metadata",
 ]
 
 
@@ -236,6 +239,20 @@ class PluginFrameworkMetrics:
 
     def __init__(self, registry: CollectorRegistry | None = None) -> None:
         kw: dict = {} if registry is None else {"registry": registry}
+
+        self.signal_unavailable = Gauge(
+            f"{PREFIX}_signal_unavailable",
+            "Whether a required Planner input was unavailable on its latest observation",
+            labelnames=["component", "signal"],
+            **kw,
+        )
+        self.degraded_signals_total = Counter(
+            f"{PREFIX}_degraded_signals_total",
+            "Episodes with a required input unavailable for "
+            f"{SIGNAL_DEGRADATION_OBSERVATIONS} consecutive observations",
+            labelnames=["component", "signal"],
+            **kw,
+        )
 
         self.plugin_evaluations_total = Counter(
             f"{PREFIX}_plugin_evaluations_total",

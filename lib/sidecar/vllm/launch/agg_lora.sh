@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Aggregated LoRA serving (1 GPU).
-# Requires vLLM #52840; see ../README.md for runtime requirements.
 
 set -e
 
@@ -35,6 +34,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to the managed vLLM engine."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                   Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  LORA_NAME               Example adapter (default: codelion/Qwen3-0.6B-accuracy-recovery-lora)"
             echo "  MAX_LORAS               GPU-resident adapter capacity (default: 4)"
@@ -44,7 +44,7 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_HTTP_PORT           Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT         Dynamo sidecar system port (default: 8081)"
             echo "  VLLM_RS_HTTP_PORT       vLLM HTTP port (default: 8100)"
-            echo "  VLLM_GRPC_PORT          vLLM gRPC port (default: 50051)"
+            echo "  VLLM_GRPC_PORT          vLLM gRPC port (default: 30001)"
             echo "  MAX_MODEL_LEN           Maximum model length (default: 4096)"
             echo "  MAX_CONCURRENT_SEQS     Maximum concurrent sequences (default: 2)"
             echo "  DEFAULT_KV_CACHE_BYTES  KV cache cap when not profiling (default: 1119388000)"
@@ -57,6 +57,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+resolve_sidecar vllm SIDECAR_CMD
+
 trap dynamo_exit_trap EXIT
 
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
@@ -64,7 +66,7 @@ MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 MAX_LORAS="${MAX_LORAS:-4}"
 MAX_LORA_RANK="${MAX_LORA_RANK:-64}"
 VLLM_RS_HTTP_PORT="${VLLM_RS_HTTP_PORT:-8100}"
-VLLM_GRPC_PORT="${VLLM_GRPC_PORT:-50051}"
+VLLM_GRPC_PORT="${VLLM_GRPC_PORT:-30001}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 export DYN_LORA_ENABLED=true
@@ -125,6 +127,7 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_RS_HTTP_PORT" \
     --grpc-port "$VLLM_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
@@ -135,7 +138,7 @@ vllm-rs serve "$MODEL" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_GRPC_PORT}" &
 
 wait_any_exit

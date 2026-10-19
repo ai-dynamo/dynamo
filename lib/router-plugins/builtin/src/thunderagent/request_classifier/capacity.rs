@@ -63,6 +63,10 @@ impl WorkerCapacitySnapshot {
             .is_none_or(|workers| workers.contains(&worker))
     }
 
+    pub(crate) fn capacity(&self, worker: WorkerWithDpRank) -> Option<usize> {
+        self.capacities.get(&worker).copied()
+    }
+
     pub(crate) fn has_liveness(&self) -> bool {
         self.live_workers.is_some()
     }

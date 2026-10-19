@@ -165,12 +165,26 @@ def proportional_clamp_pair(
         remaining = max(0, floor - new_p * p_gpu)
         new_d = max(decode_min_endpoint, math.ceil(remaining / d_gpu))
 
-    # If the floor push would blow past the strict ceiling, the configuration
-    # is infeasible (tight bounds incompatible with the step sizes). Best
-    # effort: keep the inputs unchanged and let the caller log; this
-    # function stays pure.
+    # Rounding prefill up must not shrink decode to meet the GPU floor.
+    decode_would_shrink = new_d < num_d
+    new_d = max(num_d, new_d)
+
     if max_gpus >= 0 and (new_p * p_gpu + new_d * d_gpu) > max_gpus:
-        return num_p, num_d
+        if not decode_would_shrink:
+            return num_p, num_d
+        # Fit prefill growth with decode held fixed, using the floor tolerance.
+        return fit_directional_budget_pair(
+            num_p,
+            num_d,
+            new_p,
+            num_d,
+            p_gpu,
+            d_gpu,
+            min_gpus,
+            max_gpus,
+            prefill_min_endpoint,
+            decode_min_endpoint,
+        )
 
     return new_p, new_d
 
