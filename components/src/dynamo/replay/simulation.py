@@ -90,6 +90,7 @@ class DynamoReplayRunnerFactory:
                 "dynamo",
                 "weka",
             ),
+            supports_tokenization=engine_capabilities.supports_tokenization,
             supports_agentic_lanes=engine_capabilities.supports_agentic_lanes,
             supports_agentic_host_offload=(
                 engine_capabilities.supports_agentic_host_offload

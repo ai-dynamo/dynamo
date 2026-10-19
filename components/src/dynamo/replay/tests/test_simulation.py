@@ -847,6 +847,7 @@ def test_agentic_capabilities_follow_engine_support_in_offline_mode(
         supports_agentic_snapshots=supported,
         supports_agentic_warmup=supported,
         supports_agentic_profile=supported,
+        supports_tokenization=supported,
     )
     monkeypatch.setattr(
         simulation.EngineReplayRunnerFactory, "capabilities", lambda self: native
@@ -857,6 +858,7 @@ def test_agentic_capabilities_follow_engine_support_in_offline_mode(
     assert capabilities.supports_agentic_snapshots is supported
     assert capabilities.supports_agentic_warmup is supported
     assert capabilities.supports_agentic_profile is supported
+    assert capabilities.supports_tokenization is supported
     # Dynamo's composed runtime retains its pre-existing HBM speculation support.
     assert capabilities.supports_agentic_speculative_decoding
 

@@ -617,6 +617,8 @@ def test_native_report_storage_exhaustion_returns_resource_exit(tmp_path, monkey
             "-m",
             "aisimulate",
             "predict",
+            "--stack",
+            "dynamo",
             "--config",
             str(path),
             "--output-dir",
