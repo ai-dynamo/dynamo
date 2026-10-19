@@ -34,7 +34,13 @@ SUBDIR = Path("reference/general")
 def tree(tmp_path: Path) -> tuple[Path, Path]:
     snapshot = tmp_path / "pages-v1.0.0"
     shared = tmp_path / "pages-dev"
-    for rel in ("reference/general/compatibility.mdx", "reference/general/support.md"):
+    # kubernetes/ sits outside --subdir, so the [Other] case below fails if the
+    # relink stops being scoped to reference/general/.
+    for rel in (
+        "reference/general/compatibility.mdx",
+        "reference/general/support.md",
+        "kubernetes/compatibility.mdx",
+    ):
         (shared / rel).parent.mkdir(parents=True, exist_ok=True)
         (shared / rel).write_text("shared\n", encoding="utf-8")
     (snapshot / "reference/general").mkdir(parents=True)

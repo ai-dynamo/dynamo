@@ -48,8 +48,11 @@ versions:
 
 redirects:
   # Exact paths that published pages link to but that no longer resolve.
-  # Kept above the pattern rules, which would otherwise send some of these
-  # to pages that are also gone.
+  # Found by crawling every published version, English and zh-CN, counting
+  # Fern's "Page Not Found" 200 responses as dead. Each maps to the page the
+  # source link named in that version's nav, or to the repository file at the
+  # version's tag when the target is not a nav page. Kept above the pattern
+  # rules, which would otherwise send some of these to pages that are also gone.
   - source: "/dynamo/archive/0.6.0/index.html"
     destination: "https://github.com/ai-dynamo/dynamo/releases/tag/v0.6.0"
   - source: "/dynamo/archive/0.6.1/index.html"

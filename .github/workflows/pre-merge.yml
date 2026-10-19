@@ -191,7 +191,9 @@ jobs:
           docs/fern/scripts/tests/test_gen_rust_api.py \
           docs/fern/scripts/tests/test_gen_kubernetes_api.py \
           docs/fern/scripts/tests/test_api_reference_regressions.py \
-          docs/fern/scripts/tests/test_api_freshness.py
+          docs/fern/scripts/tests/test_api_freshness.py \
+          docs/fern/scripts/tests/test_relink_shared_reference.py \
+          docs/fern/scripts/tests/test_resolve_translation_links.py
     - name: Generate API references from source
       # The Python/Rust references are publish-time artifacts (generated in
       # fern-docs.yml against the branch being published), not committed
