@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use super::config::RouterQueuePolicy;
 use super::overlap::OverlapSignals;
 use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
-use super::policy_config::PolicyProfile;
+use super::policy_config::{PolicyProfile, RejectThresholdsProvider};
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{
     BookingHandle, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
@@ -30,6 +30,7 @@ use super::types::{
     WorkerAvailabilityProvider,
 };
 use crate::plugins::request_classifier::{ClassifyRequest, RequestClassifier};
+use crate::plugins::worker_selection::WorkerCapacity;
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{
     LocalBlockHash, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -158,6 +159,14 @@ where
             tracing::error!(%error, "Invalid worker topology update");
             return WorkerConfigReconcileOutcome::Rejected;
         }
+        // The reject check judges each rank's projected load against the capacity it
+        // reports, so the registry learns capacities together with the topology.
+        slots.set_worker_capacities(current_workers.iter().map(|(&id, cfg)| {
+            (
+                WorkerDpRange::new(id, cfg.data_parallel_start_rank(), cfg.data_parallel_size()),
+                WorkerCapacity::of(cfg),
+            )
+        }));
         *last_workers = Some(current_workers);
         WorkerConfigReconcileOutcome::Applied
     }
@@ -173,6 +182,7 @@ where
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         available_worker_provider: Option<WorkerAvailabilityProvider>,
+        reject_thresholds: Option<RejectThresholdsProvider>,
         recheck_interval: Duration,
         track_prefill_tokens_default: bool,
         cancellation_token: CancellationToken,
@@ -189,6 +199,7 @@ where
             overlap_scores_refresh,
             overloaded_worker_provider,
             available_worker_provider,
+            reject_thresholds,
         ));
 
         let (queue_updates, _) = watch::channel(());
@@ -442,6 +453,7 @@ where
                 request.token_seq.as_deref(),
                 Instant::now(),
                 &mut request.worker_loads,
+                None,
             );
         }
         let (classification, workers) =
@@ -1152,6 +1164,7 @@ mod tests {
             DefaultWorkerSelector::new(None, "test"),
             prefill_load_estimator,
             None::<Arc<NoopOverlapScoresRefresh>>,
+            None,
             None,
             None,
             Duration::from_secs(60),
@@ -2271,6 +2284,7 @@ mod tests {
             None::<Arc<NoopOverlapScoresRefresh>>,
             None,
             None,
+            None,
             Duration::from_secs(60),
             true,
             cancel_token.clone(),
@@ -2324,6 +2338,7 @@ mod tests {
             DefaultWorkerSelector::new(None, "test"),
             None,
             None::<Arc<NoopOverlapScoresRefresh>>,
+            None,
             None,
             None,
             Duration::from_secs(60),

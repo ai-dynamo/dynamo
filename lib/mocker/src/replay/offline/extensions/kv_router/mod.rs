@@ -718,7 +718,7 @@ impl OfflineReplayRouter {
             workers_with_configs,
             slots,
             selector,
-            pending: PolicyQueue::new(profile),
+            pending: PolicyQueue::new(&profile),
             indexer,
             prefill_load_estimator,
             // This is only a base Instant for converting replay `now_ms` values into

@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
@@ -67,6 +68,10 @@ impl PolicyClassConfig {
     }
 }
 
+/// Supplies the host's live reject thresholds. Selection skips a worker whose every rank is
+/// past them, and rejects the request when no eligible worker remains.
+pub type RejectThresholdsProvider = Arc<dyn Fn() -> BusyThresholds + Send + Sync + 'static>;
+
 /// Per-rank load limits. A rank is full once its booked load passes any configured limit.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct BusyThresholds {
@@ -109,8 +114,8 @@ impl BusyThresholds {
     }
 
     /// Whether no rank of `worker_id` has room, judged on the `LOAD` rows in `loads`. A rank
-    /// without a projection counts as idle. The policy-class queue, offline replay, and the
-    /// reject scan share this loop so they enumerate ranks and read rows the same way.
+    /// without a projection counts as idle. The policy-class queue and offline replay share
+    /// this loop so they enumerate ranks and read rows the same way.
     pub fn worker_is_full<C: WorkerConfigLike>(
         &self,
         worker_id: WorkerId,
@@ -125,6 +130,56 @@ impl BusyThresholds {
             let load = WorkerLoadInput::for_worker(loads, worker, WorkerLoadProjection::default);
             !self.has_room(&load, capacity)
         })
+    }
+}
+
+/// Ranks past a set of busy thresholds, counted per worker while a request's load is
+/// projected. Only a worker with at least one full rank has an entry, so the map stays empty
+/// while no worker is near its limits and selection pays nothing to consult it.
+#[derive(Debug, Default)]
+pub(crate) struct FullRankCounts {
+    limits: BusyThresholds,
+    full_ranks: FxHashMap<WorkerId, u32>,
+}
+
+impl FullRankCounts {
+    /// Start a pass judged against `limits`, forgetting the previous pass.
+    pub(crate) fn reset(&mut self, limits: BusyThresholds) {
+        self.limits = limits;
+        self.full_ranks.clear();
+    }
+
+    /// Forget what the current pass recorded; it starts over from the first rank.
+    pub(crate) fn clear(&mut self) {
+        self.full_ranks.clear();
+    }
+
+    /// Judge one rank's projected load against the limits and count it when it has no room.
+    #[inline]
+    pub(crate) fn record(
+        &mut self,
+        worker: WorkerWithDpRank,
+        capacity: WorkerCapacity,
+        projection: &WorkerLoadProjection,
+    ) {
+        if !self
+            .limits
+            .has_room(&WorkerLoadInput::from_projection(*projection), capacity)
+        {
+            *self.full_ranks.entry(worker.worker_id).or_insert(0) += 1;
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.full_ranks.is_empty()
+    }
+
+    /// Whether every one of the worker's `dp_size` ranks was counted full.
+    #[inline]
+    pub(crate) fn worker_is_full(&self, worker_id: WorkerId, dp_size: u32) -> bool {
+        self.full_ranks
+            .get(&worker_id)
+            .is_some_and(|&full| full >= dp_size)
     }
 }
 
