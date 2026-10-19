@@ -130,9 +130,13 @@ class FakeKvRouter:
         self.chunks = chunks if chunks is not None else []
         self.error = error
         self.sent: Optional[dict[str, Any]] = None
+        self.context: Any = None
 
-    async def generate_from_request(self, preprocessed):
+    async def generate_from_request(
+        self, preprocessed, response_buffer_size=100, context=None
+    ):
         self.sent = preprocessed
+        self.context = context
 
         async def stream():
             for chunk in self.chunks:
