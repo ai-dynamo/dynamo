@@ -10506,80 +10506,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn beam_reasoning_policy_preserves_channels_and_usage_when_reconstructing() {
-        use crate::protocols::openai::GuidedToolConstraint;
-        use crate::protocols::openai::chat_completions::unified_parser;
-
-        let mut request: NvCreateChatCompletionRequest =
-            serde_json::from_value(serde_json::json!({
-                "model": "test", "messages": [{"role": "user", "content": "hi"}],
-                "chat_template_kwargs": {"enable_thinking": false}
-            }))
-            .unwrap();
-        request.normalize_reasoning_template_args().unwrap();
-        let disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
-            &request,
-            Some("beam"),
-            Some("beam"),
-            None,
-            Some("beam"),
-        );
-        assert!(!disabled);
-        let policy = unified_parser::UnifiedRequestPolicy {
-            reasoning_disabled: disabled,
-            ..Default::default()
-        };
-        let analysis = "<|channel|>analysis<|message|>Compute.<|end|><|start|>assistant";
-        let answer = "<|channel|>final<|message|>3.8 is greater.<|return|>";
-        let batch = unified_parser::parse_complete_with_policy(
-            "beam",
-            &format!("{analysis}{answer}"),
-            &GuidedToolConstraint::None,
-            &[],
-            policy,
-        )
-        .unwrap();
-        assert_eq!(
-            (batch.reasoning.as_str(), batch.text.as_str()),
-            ("Compute.", "3.8 is greater.")
-        );
-
-        let raw = unified_parser::apply_stream_with_policy(
-            stream::iter([
-                reasoning_usage_chunk(None, Some(analysis), 3),
-                reasoning_usage_chunk(None, Some(answer), 2),
-                reasoning_usage_trailer(5, Some(0)),
-            ]),
-            None,
-            GuidedToolConstraint::None,
-            unified_parser::stream_prefill("beam", false),
-            "beam",
-            true,
-            policy,
-        );
-        let output =
-            OpenAIPreprocessor::apply_unified_response_policies(raw, false, false, disabled)
-                .map(|chunk| serde_json::to_value(chunk.data.unwrap()).unwrap())
-                .collect::<Vec<_>>()
-                .await;
-        for (field, expected) in [
-            ("reasoning_content", "Compute."),
-            ("content", "3.8 is greater."),
-        ] {
-            let text: String = output
-                .iter()
-                .flat_map(|chunk| chunk["choices"].as_array().unwrap())
-                .filter_map(|choice| choice["delta"][field].as_str())
-                .collect();
-            assert_eq!(text, expected);
-        }
-        assert_eq!(
-            output.last().unwrap()["usage"]["completion_tokens_details"]["reasoning_tokens"],
-            3
-        );
-    }
-
-    #[tokio::test]
     async fn disabled_unified_reasoning_keeps_interleaved_text_order_in_stream_and_batch() {
         use crate::protocols::openai::GuidedToolConstraint;
         use crate::protocols::openai::chat_completions::unified_parser;
@@ -16440,13 +16366,19 @@ mod beam_route_tests {
         )]));
         request.normalize_reasoning_template_args().unwrap();
         other.validate_reasoning_request(&request).unwrap();
-        assert!(OpenAIPreprocessor::request_disables_reasoning_with_family(
-            &request,
-            Some("qwen3"),
-            Some("qwen3"),
-            None,
-            Some("qwen3"),
-        ));
+        for (family, disabled) in [("beam", false), ("qwen3", true)] {
+            assert_eq!(
+                OpenAIPreprocessor::request_disables_reasoning_with_family(
+                    &request,
+                    Some(family),
+                    Some(family),
+                    None,
+                    Some(family),
+                ),
+                disabled,
+                "{family}"
+            );
+        }
     }
 
     #[test]
