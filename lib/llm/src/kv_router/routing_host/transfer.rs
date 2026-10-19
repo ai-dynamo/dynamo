@@ -141,6 +141,9 @@ impl RoutingHost {
             target: selection.worker,
             target_worker_type: "prefill",
             target_transfer_domain: Some(&target_domain),
+            target_topology_domains: target_snapshot.topology_domains(),
+            target_kv_transfer_domain: target_snapshot.kv_transfer_domain(),
+            target_kv_transfer_enforcement: target_snapshot.kv_transfer_enforcement(),
             target_block_size: block_size,
             target_is_eagle: target_router.is_eagle(),
             minimum_prefix_blocks: baseline_prefix,
@@ -338,6 +341,20 @@ mod integration_tests {
         role: WorkerType,
         enabled: bool,
     ) -> (RoutingHost, u64, Arc<HintDispatch>) {
+        host_with_topology(distributed, component_name, role, enabled, None).await
+    }
+
+    async fn host_with_topology(
+        distributed: &DistributedRuntime,
+        component_name: &str,
+        role: WorkerType,
+        enabled: bool,
+        topology: Option<(
+            &str,
+            Option<&str>,
+            dynamo_kv_router::protocols::KvTransferEnforcement,
+        )>,
+    ) -> (RoutingHost, u64, Arc<HintDispatch>) {
         // Discovery instance IDs belong to a DRT, not to an endpoint. Model
         // distinct serving processes so the donor is not rejected as the target.
         let distributed = DistributedRuntime::new(
@@ -356,6 +373,15 @@ mod integration_tests {
         endpoint.register_endpoint_instance().await.unwrap();
         let worker_id = client.wait_for_instances().await.unwrap()[0].id();
         let mut runtime_config = ModelRuntimeConfig::default();
+        if let Some((domain, island, enforcement)) = topology {
+            runtime_config.kv_transfer_domain = Some(domain.to_string());
+            runtime_config.kv_transfer_enforcement = Some(enforcement);
+            if let Some(island) = island {
+                runtime_config
+                    .topology_domains
+                    .insert(domain.to_string(), island.to_string());
+            }
+        }
         runtime_config
             .runtime_data
             .insert("router_hint".to_string(), serde_json::json!(true));
@@ -652,6 +678,52 @@ mod integration_tests {
         assert_eq!(selection.kv_hint, Some(expected));
         assert_no_decode_bookings(&source).await;
         drop(target);
+        drop(source);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn cross_role_bridge_preserves_admitted_target_topology_policy() {
+        use dynamo_kv_router::protocols::KvTransferEnforcement::{Preferred, Required};
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let (source, source_id, _) = Box::pin(host_with_topology(
+            &distributed,
+            "topology-decode",
+            WorkerType::Decode,
+            true,
+            Some(("zone", Some("near"), Required)),
+        ))
+        .await;
+        let seed = request();
+        seed_host_prefix(&source, source_id, &seed.token_ids, 3).await;
+        for (name, island, enforcement, expected) in [
+            ("required-near", Some("near"), Required, true),
+            ("required-far", Some("far"), Required, false),
+            ("required-missing", None, Required, false),
+            ("preferred-far", Some("far"), Preferred, true),
+        ] {
+            let (target, _, _) = Box::pin(host_with_topology(
+                &distributed,
+                name,
+                WorkerType::Prefill,
+                true,
+                Some(("zone", island, enforcement)),
+            ))
+            .await;
+            let input = request();
+            let mut selection = selected(&target, &input).await;
+            target
+                .enrich_prefill_transfer_hint(&input, &mut selection, Some(&source))
+                .await;
+            assert_eq!(selection.kv_hint.is_some(), expected, "{name}");
+            drop(target);
+        }
+        assert_no_decode_bookings(&source).await;
         drop(source);
         runtime.shutdown();
     }

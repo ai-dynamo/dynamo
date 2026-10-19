@@ -4,6 +4,7 @@
 //! Advisory transfer-source lookup, independent of execution admission.
 
 use super::*;
+use crate::protocols::KvTransferEnforcement;
 
 pub(super) const MAX_IN_FLIGHT_TRANSFER_SOURCE_LOOKUPS: usize = 8;
 
@@ -17,6 +18,10 @@ pub struct TransferSourceQuery<'a> {
     pub target: WorkerWithDpRank,
     pub target_worker_type: &'a str,
     pub target_transfer_domain: Option<&'a str>,
+    /// Independent topology-island policy of the already admitted target.
+    pub target_topology_domains: Option<&'a HashMap<String, String>>,
+    pub target_kv_transfer_domain: Option<&'a str>,
+    pub target_kv_transfer_enforcement: Option<KvTransferEnforcement>,
     pub target_block_size: u32,
     pub target_is_eagle: bool,
     /// A donor must hold strictly more complete blocks than this baseline.
@@ -164,9 +169,18 @@ fn transfer_source_for_target(
         }
         .filter(|endpoint| !endpoint.trim().is_empty())
     };
-    let (source, block_hashes) = candidates.best_source(query.minimum_prefix_blocks, |source| {
-        endpoint(source).is_some()
-    })?;
+    let (source, block_hashes) =
+        candidates.best_ranked_source(query.minimum_prefix_blocks, |source| {
+            endpoint(source)?;
+            hint::transfer_source_topology_rank(
+                configs,
+                query.target_topology_domains,
+                query.target_kv_transfer_domain,
+                query.target_kv_transfer_enforcement,
+                candidates,
+                source,
+            )
+        })?;
     Some(TransferSourceResult {
         source,
         payload: KvSourceLocationsPayload {

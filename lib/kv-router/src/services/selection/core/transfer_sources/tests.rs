@@ -44,6 +44,9 @@ fn query(prompt: &PromptRequest) -> TransferSourceQuery<'_> {
         target: WorkerWithDpRank::new(99, 0),
         target_worker_type: "prefill",
         target_transfer_domain: Some("certified-layout-v1"),
+        target_topology_domains: None,
+        target_kv_transfer_domain: None,
+        target_kv_transfer_enforcement: None,
         target_block_size: 4,
         target_is_eagle: false,
         minimum_prefix_blocks: 1,
@@ -60,6 +63,19 @@ fn candidates(source: KvTransferCandidateSource) -> KvTransferCandidates {
         owner_prefix_blocks: vec![(source, 3)],
         routing_snapshot: None,
     }
+}
+
+fn owner_id() -> CacheOwnerId {
+    CacheOwnerId::new(
+        PoolId::new(
+            IndexerDomainId::new(
+                CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+            ),
+            DcId::new(3),
+        ),
+        StableDpSlotId::new([4; 16], IdentitySource::Explicit),
+    )
 }
 
 #[test]
@@ -130,16 +146,7 @@ fn filters_unknown_layout_wrong_role_state_agent_endpoint_and_dp_rank() {
 #[test]
 fn persistent_owner_uses_authoritative_attachment_and_rejects_unknown_domain() {
     let prompt = PromptRequest::default();
-    let owner = CacheOwnerId::new(
-        PoolId::new(
-            IndexerDomainId::new(
-                CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
-                RoutingScopeId::new([2; 16], IdentitySource::Explicit),
-            ),
-            DcId::new(3),
-        ),
-        StableDpSlotId::new([4; 16], IdentitySource::Explicit),
-    );
+    let owner = owner_id();
     let mut source = config();
     source.kv_event_source_mode = Some("state_agent_v2".to_string());
     let configs = HashMap::from([(7, source)]);
@@ -158,6 +165,7 @@ fn persistent_owner_uses_authoritative_attachment_and_rejects_unknown_domain() {
                 RouterHintSourceMetadata {
                     source_control_endpoint: "tcp://persistent:9001".to_string(),
                     worker_type: "decode".to_string(),
+                    topology_domains: HashMap::new(),
                 },
                 attached,
             )],
@@ -173,5 +181,129 @@ fn persistent_owner_uses_authoritative_attachment_and_rejects_unknown_domain() {
                 "tcp://persistent:9001"
             );
         }
+    }
+}
+
+#[test]
+fn required_topology_is_independent_of_certified_transfer_domain() {
+    let prompt = PromptRequest::default();
+    let target_domains = HashMap::from([("zone".to_string(), "near".to_string())]);
+    let empty_domains = HashMap::new();
+    let mut target = query(&prompt);
+    target.target_kv_transfer_domain = Some("zone");
+    let candidate = candidates(WorkerWithDpRank::new(7, 0).into());
+    for enforcement in [None, Some(KvTransferEnforcement::Required)] {
+        target.target_kv_transfer_enforcement = enforcement;
+        for target_topology in [None, Some(&empty_domains), Some(&target_domains)] {
+            target.target_topology_domains = target_topology;
+            for island in [None, Some("far"), Some("near")] {
+                let mut donor = config();
+                if let Some(island) = island {
+                    donor
+                        .topology_domains
+                        .insert("zone".to_string(), island.to_string());
+                }
+                let result =
+                    transfer_source_for_target(&HashMap::from([(7, donor)]), &target, &candidate);
+                assert_eq!(
+                    result.is_some(),
+                    target_topology == Some(&target_domains) && island == Some("near")
+                );
+            }
+        }
+    }
+    // A topology match never certifies a different model/layout namespace.
+    let mut donor = config();
+    donor.topology_domains = target_domains.clone();
+    donor.router_hint_transfer_domain = Some("another-layout".to_string());
+    assert!(
+        transfer_source_for_target(&HashMap::from([(7, donor)]), &target, &candidate).is_none()
+    );
+}
+
+#[test]
+fn preferred_topology_ranks_shorter_near_prefix_before_longer_far_prefix() {
+    let prompt = PromptRequest::default();
+    let domains = HashMap::from([("zone".to_string(), "near".to_string())]);
+    let mut target = query(&prompt);
+    target.target_topology_domains = Some(&domains);
+    target.target_kv_transfer_domain = Some("zone");
+    target.target_kv_transfer_enforcement = Some(KvTransferEnforcement::Preferred);
+    let near = WorkerWithDpRank::new(7, 0).into();
+    let far = WorkerWithDpRank::new(8, 0).into();
+    let mut near_config = config();
+    near_config.topology_domains = domains.clone();
+    let mut far_config = config();
+    far_config
+        .topology_domains
+        .insert("zone".to_string(), "far".to_string());
+    let mut configs = HashMap::from([(7, near_config), (8, far_config)]);
+    let candidates = KvTransferCandidates {
+        block_hashes: (101..=104).map(ExternalSequenceBlockHash).collect(),
+        owner_prefix_blocks: vec![(near, 3), (far, 4)],
+        routing_snapshot: None,
+    };
+    let result = transfer_source_for_target(&configs, &target, &candidates).unwrap();
+    assert_eq!(result.source, near);
+    assert_eq!(result.payload.block_hashes.len(), 3);
+    // An incompatible same-island donor cannot suppress the preferred fallback.
+    configs.get_mut(&7).unwrap().router_hint_transfer_domain = None;
+    assert_eq!(
+        transfer_source_for_target(&configs, &target, &candidates)
+            .unwrap()
+            .source,
+        far
+    );
+    target.target_kv_transfer_enforcement = Some(KvTransferEnforcement::Required);
+    assert!(transfer_source_for_target(&configs, &target, &candidates).is_none());
+}
+
+#[test]
+fn persistent_topology_overrides_attachment_and_only_empty_metadata_inherits() {
+    let prompt = PromptRequest::default();
+    let domains = HashMap::from([("zone".to_string(), "near".to_string())]);
+    let mut target = query(&prompt);
+    target.target_topology_domains = Some(&domains);
+    target.target_kv_transfer_domain = Some("zone");
+    let owner = owner_id();
+    let source =
+        KvTransferCandidateSource::CacheOwner(ResidencyOwner::cache_owner(owner).compact_key());
+    for (attached_island, owner_domains, expected) in [
+        ("near", HashMap::new(), true),
+        ("far", domains.clone(), true),
+        (
+            "near",
+            HashMap::from([("zone".to_string(), "far".to_string())]),
+            false,
+        ),
+        (
+            "near",
+            HashMap::from([("rack".to_string(), "near".to_string())]),
+            false,
+        ),
+    ] {
+        let mut donor = config();
+        donor.kv_event_source_mode = Some("state_agent_v2".to_string());
+        donor
+            .topology_domains
+            .insert("zone".to_string(), attached_island.to_string());
+        let mut candidates = candidates(source);
+        candidates.routing_snapshot = Some(Arc::new(ResidencyRoutingSnapshot::new(
+            ResidencyProjection::default(),
+            [(
+                owner,
+                RouterHintSourceMetadata {
+                    source_control_endpoint: "tcp://owner:9000".to_string(),
+                    worker_type: "decode".to_string(),
+                    topology_domains: owner_domains,
+                },
+                Some(WorkerWithDpRank::new(7, 0)),
+            )],
+        )));
+        assert_eq!(
+            transfer_source_for_target(&HashMap::from([(7, donor)]), &target, &candidates)
+                .is_some(),
+            expected
+        );
     }
 }
