@@ -259,9 +259,6 @@ impl Default for WorkerConfig {
             metrics_labels: Vec::new(),
             disaggregation_mode: DisaggregationMode::Aggregated,
             health_check_payload: None,
-            // Deployed workers publish their policy explicitly from
-            // `--dyn-structural-tag` (`CommonArgs::structural_tag`); library
-            // callers opt in.
             structural_tag: None,
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,

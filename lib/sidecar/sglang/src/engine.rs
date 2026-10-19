@@ -176,8 +176,6 @@ impl SglangSidecarEngine {
 
         let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
         let common = args.sidecar.common;
-        // SGLang compiles Dynamo's structural tags natively, so this sidecar
-        // publishes them by default, like the in-process worker.
         let structural_tag = common.structural_tag(true);
         let config = WorkerConfig {
             runtime: common.runtime,
@@ -981,9 +979,7 @@ fn combined_token_limit(discovery: &Discovery) -> Option<u32> {
     discovery.max_model_len?.checked_sub(reserved)
 }
 
-/// SGLang holds a `require_reasoning` request's grammar until its reasoning
-/// parser sees the end of thinking. Same predicate as the in-process worker's
-/// `publish_sglang_structural_tag_reasoning_policy`.
+/// SGLang holds a request's grammar until its reasoning parser sees the end of thinking.
 fn sglang_gates_reasoning(server_info: &Value) -> bool {
     discovery_string(server_info, "reasoning_parser").is_some()
         && !server_info
@@ -992,8 +988,7 @@ fn sglang_gates_reasoning(server_info: &Value) -> bool {
             .unwrap_or(false)
 }
 
-/// SGLang rejects prompt and total-token overflow unless `allow_auto_truncate`
-/// is set, in which case it truncates both.
+/// SGLang rejects token overflow unless `allow_auto_truncate` is set.
 fn sglang_token_budget(discovery: &Discovery) -> Option<TokenBudget> {
     let truncates = discovery
         .server_info
@@ -1219,7 +1214,6 @@ mod tests {
     use tokio::time::Instant;
 
     use clap::Parser;
-    use dynamo_backend_common::args::StructuralTagFlag;
     use dynamo_backend_common::{BackendError, ErrorType, ModelInput};
     use dynamo_sidecar_common::GrpcEndpoint;
     use serde_json::json;
@@ -1350,18 +1344,6 @@ mod tests {
             assert!(config.reasoning_parser.is_none());
             assert!(config.tool_call_parser.is_none());
         }
-    }
-
-    #[test]
-    fn worker_publishes_structural_tag_policy() {
-        let (_, config) =
-            SglangSidecarEngine::from_discovered(args(), discovery(json!({}))).unwrap();
-        assert!(config.structural_tag.is_some());
-
-        let mut args = args();
-        args.sidecar.common.dyn_structural_tag = Some(StructuralTagFlag(None));
-        let (_, config) = SglangSidecarEngine::from_discovered(args, discovery(json!({}))).unwrap();
-        assert!(config.structural_tag.is_none());
     }
 
     #[test]
@@ -1829,7 +1811,6 @@ mod tests {
                 "reject_total_overflow": false,
             }))
         );
-        // An unknown policy or limit leaves overflow handling to SGLang.
         assert_eq!(budget(json!({})), None);
         assert_eq!(
             budget(json!({

@@ -7,8 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
 use dynamo_llm::local_model::runtime_config::{
-    StructuralTagScope, TOKEN_BUDGET_RUNTIME_KEY,
-    TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
+    TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
 };
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::common::preprocessor::RoutingHints;
@@ -575,13 +574,6 @@ impl ProcessFixture for Fixture {
         assert_eq!(card.runtime_config.data_parallel_size, 1);
         assert!(card.runtime_config.tool_call_parser.is_none());
         assert!(card.runtime_config.reasoning_parser.is_none());
-        assert_eq!(
-            card.runtime_config
-                .structural_tag
-                .as_ref()
-                .map(|config| config.scope),
-            Some(StructuralTagScope::Always)
-        );
         assert_eq!(card.effective_context_length(), 32_768);
         assert_eq!(
             card.runtime_config

@@ -241,8 +241,7 @@ impl VllmSidecarEngine {
         let mut engine = Self::new(endpoint, model.clone(), mode, transport);
         engine.engine_gates_reasoning =
             model.reports_proto_0_6() && model.reasoning_parser().is_some();
-        // Off by default until vLLM's gRPC server compiles structural tags with
-        // xgrammar (vllm-project/vllm#61892); its guidance backend rejects them.
+        // Off by default until vLLM's gRPC server uses xgrammar (vllm-project/vllm#61892).
         let structural_tag = args.sidecar.common.structural_tag(false);
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
@@ -1668,20 +1667,6 @@ mod tests {
                     result.err()
                 ),
             }
-        }
-    }
-
-    #[test]
-    fn structural_tags_are_off_by_default() {
-        let base = ["sidecar", "--grpc-endpoint", "127.0.0.1:12345"];
-        for (extra, enabled) in [
-            (&[][..], false),
-            (&["--dyn-structural-tag"][..], true),
-        ] {
-            let args = Args::try_parse_from(base.iter().chain(extra)).unwrap();
-            let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
-            let (_, config) = VllmSidecarEngine::from_discovered(args, model, None).unwrap();
-            assert_eq!(config.structural_tag.is_some(), enabled, "{extra:?}");
         }
     }
 

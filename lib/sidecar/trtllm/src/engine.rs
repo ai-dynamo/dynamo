@@ -136,8 +136,7 @@ impl TrtllmSidecarEngine {
             context_length: args.context_length,
         };
         let engine = Self::new(endpoint, transport, model.clone(), mode);
-        // Off by default: the xgrammar TensorRT-LLM pins rejects several
-        // tool-call tag formats (NVIDIA/TensorRT-LLM#19913).
+        // Off by default: TensorRT-LLM's xgrammar rejects several tag formats (NVIDIA/TensorRT-LLM#19913).
         let structural_tag = args.sidecar.common.structural_tag(false);
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,

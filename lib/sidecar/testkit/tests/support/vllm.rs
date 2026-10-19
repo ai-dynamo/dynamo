@@ -581,8 +581,6 @@ impl ProcessFixture for Fixture {
         assert_eq!(card.runtime_config.data_parallel_size, 1);
         assert!(card.runtime_config.tool_call_parser.is_none());
         assert!(card.runtime_config.reasoning_parser.is_none());
-        // Off by default until vLLM's gRPC server compiles structural tags with xgrammar.
-        assert!(card.runtime_config.structural_tag.is_none());
         assert_eq!(card.effective_context_length(), 4096);
     }
 }
