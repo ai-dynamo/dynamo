@@ -1378,6 +1378,17 @@ class FpmDirectPublisher:
         ...
 
 
+class FpmHealthSnapshot:
+    @property
+    def snapshot(self) -> dict[tuple[str, int], bytes]: ...
+    @property
+    def unjoined_worker_ids(self) -> list[str]: ...
+    @property
+    def stale_rank_count(self) -> int: ...
+    @property
+    def missing_rank_count(self) -> int: ...
+
+
 class FpmEventSubscriber:
     """
     Subscriber for ForwardPassMetrics from the Dynamo event plane.
@@ -1417,9 +1428,12 @@ class FpmEventSubscriber:
         """
         ...
 
-    def start_tracking(self) -> None:
+    def start_tracking(self, max_age_seconds: float = 15.0) -> None:
         """
         Start background tracking of the latest FPM per (worker_id, dp_rank).
+
+        ``max_age_seconds`` fixes the freshness and cleanup window for this
+        subscription. It must be finite and positive.
 
         Spawns two background tasks:
 
@@ -1449,11 +1463,20 @@ class FpmEventSubscriber:
         """
         ...
 
+    def get_recent_stats_with_health(self) -> FpmHealthSnapshot:
+        """Return fresh samples, unjoined IDs, stale count, and missing rank count.
+
+        Age is measured from local receive time, including idle heartbeats.
+        The age limit is set once by ``start_tracking()``.
+        Missing ranks include discovered workers that have not published a sample.
+        """
+        ...
+
     def get_model_cards(self) -> dict[str, str]:
         """
         Snapshot of model deployment cards keyed by worker id.
 
-        The snapshot is filtered against the known-workers set so entries
+        The snapshot is filtered against the active worker lifecycle so entries
         for already-removed workers are not returned.  Values are the raw
         ``ModelDeploymentCard`` serialized as a JSON string; callers parse
         whichever fields they need (e.g. ``runtime_config``,
@@ -3232,6 +3255,11 @@ class EngineShutdown(DynamoException):
 
 class StreamIncomplete(DynamoException):
     """The response stream was terminated before completion."""
+
+    ...
+
+class WorkerOverloaded(DynamoException):
+    """The worker temporarily cannot admit another request."""
 
     ...
 
