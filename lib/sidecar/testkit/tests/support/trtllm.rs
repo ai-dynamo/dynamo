@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
 use dynamo_llm::model_card::ModelDeploymentCard;
@@ -29,6 +31,19 @@ pub struct Fixture {
     config: FixtureConfig,
     service: TrtllmMockerService,
     server: TestServer,
+    scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
+}
+
+impl Fixture {
+    pub fn respond(&self, request_id: &str, responses: Vec<pb::GenerateResponse>) {
+        assert!(
+            self.scripted
+                .lock()
+                .unwrap()
+                .insert(request_id.to_owned(), responses)
+                .is_none()
+        );
+    }
 }
 
 impl SidecarFixture for Fixture {
@@ -53,7 +68,9 @@ impl SidecarFixture for Fixture {
             args,
         )
         .unwrap();
+        let scripted = Arc::new(Mutex::new(HashMap::new()));
         let controlled = ControlledInference {
+            scripted: scripted.clone(),
             inner: service.clone(),
             control,
         };
@@ -74,6 +91,7 @@ impl SidecarFixture for Fixture {
             config,
             service,
             server,
+            scripted,
         }
     }
 
@@ -143,6 +161,27 @@ impl WireFixture for Fixture {
             native.sampling.as_ref().unwrap().temperature,
             request.sampling_options.temperature.map(f64::from)
         );
+        assert_eq!(
+            native.stopping.as_ref().unwrap().ignore_eos,
+            request.stop_conditions.ignore_eos
+        );
+        let sampling = native.sampling.as_ref().unwrap();
+        assert_eq!(sampling.num_sequences, Some(1));
+        assert_eq!(
+            sampling.presence_penalty,
+            request.sampling_options.presence_penalty.map(f64::from)
+        );
+        assert_eq!(
+            sampling.frequency_penalty,
+            request.sampling_options.frequency_penalty.map(f64::from)
+        );
+        let extra = dynamo_sidecar_common::struct_to_json(
+            native.extra.unwrap(),
+            "TensorRT-LLM",
+            "request extensions",
+        )
+        .unwrap();
+        assert_eq!(extra["detokenize"], false);
         let response = native.response.as_ref().unwrap();
         assert_eq!(response.return_output_logprobs, Some(true));
         assert_eq!(response.return_prompt_logprobs, None);
@@ -218,6 +257,7 @@ impl WireFixture for Fixture {
 
 #[derive(Clone)]
 struct ControlledInference {
+    scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
     inner: TrtllmMockerService,
     control: Controller<Adapter>,
 }
@@ -231,6 +271,16 @@ impl Inference for ControlledInference {
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
         let opened = self.control.open(request.get_ref()).await?;
+        let scripted = self
+            .scripted
+            .lock()
+            .unwrap()
+            .remove(&request.get_ref().request_id);
+        if let Some(responses) = scripted {
+            return Ok(Response::new(opened.wrap(Box::pin(futures::stream::iter(
+                responses.into_iter().map(Ok),
+            )))));
+        }
         let response = self.inner.generate(request).await?;
         Ok(Response::new(opened.wrap(response.into_inner())))
     }
@@ -290,11 +340,14 @@ impl ProcessFixture for Fixture {
 
     fn configure_request(request: &mut PreprocessedRequest) {
         request.sampling_options.temperature = Some(0.125);
+        request.sampling_options.presence_penalty = Some(0.25);
+        request.sampling_options.frequency_penalty = Some(0.75);
         request.output_options.logprobs = Some(2);
     }
 
     fn assert_registration(card: &ModelDeploymentCard) {
-        // OpenEngine currently supplies the context window, not KV-routing capacity.
+        // The sidecar does not consume GetServerInfo capacity yet; 16 is the
+        // registration default, not the Mocker's reported block size of 4.
         assert_eq!(card.effective_context_length(), 32_768);
         assert_eq!(card.kv_cache_block_size, 16);
         assert!(card.runtime_config.total_kv_blocks.is_none());
@@ -305,6 +358,7 @@ impl ProcessFixture for Fixture {
 
 impl HandoffFixture for Fixture {
     const HAS_BOOTSTRAP: bool = false;
+    // Registration default until the sidecar consumes GetServerInfo capacity.
     const KV_BLOCK_SIZE: u32 = 16;
 
     fn assert_handoff(prefill: &RequestHandle<Adapter>, decode: &RequestHandle<Adapter>, id: &str) {

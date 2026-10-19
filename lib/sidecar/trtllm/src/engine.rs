@@ -413,3 +413,6 @@ impl LLMEngine for TrtllmSidecarEngine {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;
