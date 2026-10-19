@@ -30,13 +30,15 @@ use tokio_util::sync::CancellationToken;
 
 const INITIAL_RESUBSCRIBE_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_RESUBSCRIBE_BACKOFF: Duration = Duration::from_secs(5);
-/// Delay before rebuilding a generation whose build panicked, or restarting
-/// a watcher that panicked.
-const PANIC_RETRY_DELAY: Duration = if cfg!(test) {
+/// Delay before restarting a watcher that panicked, and before the first
+/// retry of a failed build; later retries double it up to
+/// `MAX_BUILD_RETRY_DELAY`.
+const RETRY_DELAY: Duration = if cfg!(test) {
     Duration::from_millis(10)
 } else {
     Duration::from_secs(5)
 };
+const MAX_BUILD_RETRY_DELAY: Duration = Duration::from_secs(80);
 
 /// Live generations, ordered by namespace.
 pub(crate) type GenerationSet<G> = Arc<[Arc<G>]>;
@@ -60,7 +62,8 @@ impl GenerationScope {
                 .matches_with_prefix_mode(namespace, NamespacePrefixMode::WorkerGeneration)
     }
 
-    /// `instance`'s card, if it is an in-scope card that is not prefill-only.
+    /// `instance`'s card, if it is an in-scope base-model card of a decode or
+    /// aggregated worker: the workers a generation routes to and is built from.
     fn admit(
         &self,
         instance: &DiscoveryInstance,
@@ -89,10 +92,10 @@ impl GenerationScope {
                 return None;
             }
         };
-        if card.model_type.supports_prefill()
-            && !card.model_type.supports_chat()
-            && !card.model_type.supports_completions()
-        {
+        if !matches!(
+            card.effective_worker_type(),
+            WorkerType::Decode | WorkerType::Aggregated
+        ) {
             return None;
         }
         let DiscoveryInstanceId::Model(id) = instance.id() else {
@@ -246,15 +249,21 @@ impl GenerationTracker {
     }
 
     fn reconcile(&mut self, namespace: &str, changes: &mut Vec<GenerationChange>) {
-        match (self.card_for(namespace), self.serving.contains(namespace)) {
-            (Some(card), false) => {
+        // Only an appearing namespace needs its card, so other card events
+        // stay O(1).
+        let serves = self.follows(namespace) && self.namespaces.contains_key(namespace);
+        match (serves, self.serving.contains(namespace)) {
+            (true, false) => {
+                let Some(card) = self.card_for(namespace) else {
+                    return;
+                };
                 self.serving.insert(namespace.to_string());
                 changes.push(GenerationChange::Appeared {
                     namespace: namespace.to_string(),
                     card,
                 });
             }
-            (None, true) => {
+            (false, true) => {
                 self.serving.remove(namespace);
                 changes.push(GenerationChange::Vanished {
                     namespace: namespace.to_string(),
@@ -271,7 +280,13 @@ type BuildResult<G> = (String, u64, std::thread::Result<Option<G>>);
 struct PendingBuild {
     seq: u64,
     cancel: CancellationToken,
-    card: Arc<ModelDeploymentCard>,
+    /// Consecutive failed builds of this namespace before this one.
+    failures: u32,
+}
+
+/// Delay before retrying a build that has failed `failures` times in a row.
+fn retry_delay(failures: u32) -> Duration {
+    (RETRY_DELAY * 2u32.pow(failures.saturating_sub(1).min(4))).min(MAX_BUILD_RETRY_DELAY)
 }
 
 /// Published generations and in-flight builds; owned by the watcher task only.
@@ -333,14 +348,20 @@ where
                     tracing::info!(namespace, "Worker generation is serving again");
                 } else {
                     tracing::info!(namespace, "Worker generation discovered");
-                    self.spawn_build(namespace, card, Duration::ZERO);
+                    self.spawn_build(namespace, card, Duration::ZERO, 0);
                 }
             }
             GenerationChange::Vanished { namespace } => self.vanish(&namespace),
         }
     }
 
-    fn spawn_build(&mut self, namespace: String, card: Arc<ModelDeploymentCard>, delay: Duration) {
+    fn spawn_build(
+        &mut self,
+        namespace: String,
+        card: Arc<ModelDeploymentCard>,
+        delay: Duration,
+        failures: u32,
+    ) {
         let seq = self.next_seq;
         self.next_seq += 1;
         let cancel = self.cancel.child_token();
@@ -350,7 +371,7 @@ where
             PendingBuild {
                 seq,
                 cancel: cancel.clone(),
-                card,
+                failures,
             },
         );
         self.builds.spawn(async move {
@@ -391,7 +412,7 @@ where
         }
     }
 
-    fn on_built(&mut self, (namespace, seq, built): BuildResult<G>) {
+    fn on_built(&mut self, (namespace, seq, built): BuildResult<G>, tracker: &GenerationTracker) {
         let (namespace, pending) = match self.pending.entry(namespace) {
             Entry::Occupied(entry) if entry.get().seq == seq => entry.remove_entry(),
             // Drop results from retired or superseded builds.
@@ -407,11 +428,18 @@ where
                 }
                 self.publish();
             }
-            Ok(None) => {}
-            Err(_) => {
-                tracing::error!(namespace, "Worker generation build panicked; retrying");
+            // The build failed or panicked. Stop what it started and retry
+            // from the namespace's current card, which may come from another
+            // worker than the card that failed.
+            failed => {
+                if failed.is_err() {
+                    tracing::error!(namespace, "Worker generation build panicked");
+                }
                 pending.cancel.cancel();
-                self.spawn_build(namespace, pending.card, PANIC_RETRY_DELAY);
+                if let Some(card) = tracker.card_for(&namespace) {
+                    let failures = pending.failures + 1;
+                    self.spawn_build(namespace, card, retry_delay(failures), failures);
+                }
             }
         }
     }
@@ -421,7 +449,8 @@ where
 /// it panics.
 ///
 /// `subscribe` is re-called when the watch fails or ends. `build` runs in its
-/// own task and should return `None` once its token is cancelled.
+/// own task and returns `None` when it fails or is cancelled; a failed build
+/// is retried after a growing delay.
 pub(crate) async fn run_generation_watcher<G, S, SF, B, BF>(
     mut subscribe: S,
     scope: GenerationScope,
@@ -444,7 +473,7 @@ pub(crate) async fn run_generation_watcher<G, S, SF, B, BF>(
         // The published snapshot keeps serving until the restarted watch
         // publishes again.
         tracing::error!("Worker generation watcher panicked; restarting");
-        if !sleep_or_cancel(PANIC_RETRY_DELAY, &cancel).await {
+        if !sleep_or_cancel(RETRY_DELAY, &cancel).await {
             return;
         }
     }
@@ -478,7 +507,7 @@ async fn watch_generations<G, S, SF, B, BF>(
             _ = cancel.cancelled() => break,
             Some(joined) = state.builds.join_next(), if !state.builds.is_empty() => {
                 if let Ok(result) = joined {
-                    state.on_built(result);
+                    state.on_built(result, &tracker);
                 }
             }
             opened = async { opening.as_mut().expect("guarded").await }, if opening.is_some() => {
@@ -712,18 +741,34 @@ mod tests {
         out
     }
 
-    /// Prefill-only and LoRA adapter cards never start a generation.
+    /// Only decode or aggregated base-model cards start a generation, so it is
+    /// never built from a prefill, encode, or adapter card. In E/P/D the
+    /// encode card registers first.
     #[test]
-    fn tracker_ignores_prefill_only_and_adapter_cards() {
+    fn tracker_ignores_prefill_encode_and_adapter_cards() {
         let ns = "dgd-aaaaaaaa";
         let mut adapter = decode(ns, 1, MODEL);
         if let DiscoveryInstance::Model { model_suffix, .. } = &mut adapter {
             *model_suffix = Some("adapter".into());
         }
-        let prefill = registration(ns, 2, &card(MODEL, None, ModelType::Prefill));
+        let ignored = [
+            adapter,
+            registration(ns, 2, &card(MODEL, None, ModelType::Prefill)),
+            registration(
+                ns,
+                4,
+                &card(MODEL, Some(WorkerType::Prefill), ModelType::empty()),
+            ),
+            registration(
+                ns,
+                5,
+                &card(MODEL, Some(WorkerType::Encode), ModelType::empty()),
+            ),
+        ];
         let mut tracker = GenerationTracker::new(dgd());
-        assert!(tracker.on_added(&adapter).is_empty());
-        assert!(tracker.on_added(&prefill).is_empty());
+        for instance in &ignored {
+            assert!(tracker.on_added(instance).is_empty());
+        }
         assert_eq!(
             summarize(&tracker.on_added(&decode(ns, 3, MODEL))),
             [format!("+{ns}")]
@@ -979,7 +1024,8 @@ mod tests {
     /// Finish `namespace`'s pending build as the generation `value`.
     fn finish(state: &mut GenerationState<'_, String, TestBuild>, namespace: &str, value: &str) {
         let seq = state.pending[namespace].seq;
-        state.on_built((namespace.to_string(), seq, Ok(Some(value.to_string()))));
+        let result = (namespace.to_string(), seq, Ok(Some(value.to_string())));
+        state.on_built(result, &GenerationTracker::new(dgd()));
     }
 
     fn live(state: &GenerationState<'_, String, TestBuild>) -> Vec<String> {
@@ -1000,7 +1046,8 @@ mod tests {
         state.apply(vanished("dgd-bbbbbbbb"));
         state.apply(appeared("dgd-bbbbbbbb"));
 
-        state.on_built(("dgd-bbbbbbbb".into(), stale, Ok(Some("stale".into()))));
+        let result = ("dgd-bbbbbbbb".into(), stale, Ok(Some("stale".into())));
+        state.on_built(result, &GenerationTracker::new(dgd()));
         assert!(live(&state).is_empty());
         finish(&mut state, "dgd-bbbbbbbb", "current");
         assert_eq!(live(&state), ["current"]);
@@ -1041,22 +1088,50 @@ mod tests {
         assert_eq!(live(&state), ["b"]);
     }
 
+    /// A failed or panicked build is stopped and retried from the namespace's
+    /// current card: the card it failed with may name a replaced worker.
     #[tokio::test]
-    async fn panicked_build_is_cancelled_and_retried() {
-        let (build, publish, cancel): (TestBuild, _, _) =
-            (manual_build, channel(), CancellationToken::new());
-        let mut state = GenerationState::new(&build, &publish, &cancel);
-        state.apply(appeared("dgd-aaaaaaaa"));
-        let (seq, token) = {
-            let pending = &state.pending["dgd-aaaaaaaa"];
-            (pending.seq, pending.cancel.clone())
-        };
-        state.on_built(("dgd-aaaaaaaa".into(), seq, Err(Box::new("boom"))));
-        assert!(token.is_cancelled(), "the panicked build's work is stopped");
-        assert_ne!(
-            state.pending["dgd-aaaaaaaa"].seq, seq,
-            "a new build is pending"
+    async fn failed_build_is_retried_from_the_current_card() {
+        let (first, second) = (
+            decode("dgd-aaaaaaaa", 1, "first"),
+            decode("dgd-aaaaaaaa", 2, "second"),
         );
+        let mut tracker = GenerationTracker::new(dgd());
+        let mut changes = tracker.on_added(&first);
+        tracker.on_added(&second);
+
+        let built_from = Arc::new(Mutex::new(Vec::new()));
+        let build = {
+            let built_from = built_from.clone();
+            move |_: String, card: ModelDeploymentCard, _: CancellationToken| {
+                built_from.lock().unwrap().push(card.display_name);
+                futures::future::pending::<Option<String>>()
+            }
+        };
+        let (publish, cancel) = (channel(), CancellationToken::new());
+        let mut state = GenerationState::new(&build, &publish, &cancel);
+        state.apply(changes.remove(0));
+        tracker.on_removed(&first.id());
+
+        for outcome in [
+            Ok(None),
+            Err(Box::new("boom") as Box<dyn std::any::Any + Send>),
+        ] {
+            let (seq, token) = {
+                let pending = &state.pending["dgd-aaaaaaaa"];
+                (pending.seq, pending.cancel.clone())
+            };
+            state.on_built(("dgd-aaaaaaaa".into(), seq, outcome), &tracker);
+            assert!(token.is_cancelled(), "the failed build's work is stopped");
+            assert_ne!(
+                state.pending["dgd-aaaaaaaa"].seq, seq,
+                "a new build is pending"
+            );
+        }
+        assert_eq!(*built_from.lock().unwrap(), ["first", "second", "second"]);
+        assert_eq!(state.pending["dgd-aaaaaaaa"].failures, 2);
+        assert_eq!(retry_delay(1), RETRY_DELAY);
+        assert_eq!(retry_delay(9), RETRY_DELAY * 16);
     }
 
     #[tokio::test]

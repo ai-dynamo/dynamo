@@ -28,12 +28,12 @@ use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_co
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_protocols::types::Prompt;
 use dynamo_runtime::discovery::{
-    DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
+    DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
 };
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -222,18 +222,20 @@ impl Router {
                 }
             }
         };
+        let (startup_failure, mut startup_failed) = mpsc::unbounded_channel();
         let build = {
             let drt = drt.clone();
             let component = component.to_string();
             let published = generations.clone();
             move |namespace: String, card: ModelDeploymentCard, cancel: CancellationToken| {
-                build_generation_until_ready(
+                build_generation(
                     drt.clone(),
                     namespace,
                     component.clone(),
                     card,
                     kv_router_config.clone(),
                     published.clone(),
+                    startup_failure.clone(),
                     cancel,
                 )
             }
@@ -256,21 +258,23 @@ impl Router {
             "Waiting for a worker generation (controlled by K8s StartupProbe)..."
         );
         let served_model = loop {
-            match tokio::time::timeout(
+            let ready = tokio::time::timeout(
                 GENERATION_WAIT_LOG_INTERVAL,
                 generations.wait_for(|set| !set.is_empty()),
-            )
-            .await
-            {
-                Ok(Ok(set)) => break set[0].model_name.clone(),
-                Ok(Err(_)) => anyhow::bail!("Worker generation watcher stopped during startup"),
-                Err(_) => tracing::warn!(
-                    ?namespace_filter,
-                    ?namespace_prefix_mode,
-                    "No worker generation is ready yet. If this persists, set \
-                     DYN_NAMESPACE_PREFIX (or DYN_NAMESPACE) to match your workers' \
-                     registration namespace."
-                ),
+            );
+            tokio::select! {
+                ready = ready => match ready {
+                    Ok(Ok(set)) => break set[0].model_name.clone(),
+                    Ok(Err(_)) => anyhow::bail!("Worker generation watcher stopped during startup"),
+                    Err(_) => tracing::warn!(
+                        ?namespace_filter,
+                        ?namespace_prefix_mode,
+                        "No worker generation is ready yet. If this persists, set \
+                         DYN_NAMESPACE_PREFIX (or DYN_NAMESPACE) to match your workers' \
+                         registration namespace."
+                    ),
+                },
+                Some(error) = startup_failed.recv() => return Err(error),
             }
         };
 
@@ -822,52 +826,61 @@ fn completion_text_tokens_safe_to_inject(prompt: &Prompt) -> bool {
     !matches!(prompt, Prompt::StringArray(texts) if texts.len() > 1)
 }
 
-/// Build a [`Generation`], retrying until it succeeds or `cancel` fires.
-async fn build_generation_until_ready(
+/// Build a [`Generation`] in one attempt; on failure the watcher retries from
+/// the namespace's current card. Router errors while no generation is
+/// published go to `startup_failure` and end startup, as before.
+#[expect(clippy::too_many_arguments)]
+async fn build_generation(
     drt: DistributedRuntime,
     namespace: String,
     component: String,
     card: ModelDeploymentCard,
     kv_router_config: KvRouterConfig,
     published: watch::Receiver<GenerationSet<Generation>>,
+    startup_failure: mpsc::UnboundedSender<anyhow::Error>,
     cancel: CancellationToken,
 ) -> Option<Generation> {
-    loop {
-        // A failed attempt cancels its own token, stopping whatever it started.
-        let attempt_cancel = cancel.child_token();
-        let attempt = build_generation(
+    let startup = published.borrow().is_empty();
+    let prepared = tokio::select! {
+        _ = cancel.cancelled() => return None,
+        prepared = prepare_generation(&namespace, card) => prepared,
+    };
+    let (card, preprocessor) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            tracing::warn!(%error, namespace, "Failed to load the worker generation's model; retrying");
+            return None;
+        }
+    };
+    let started = tokio::select! {
+        _ = cancel.cancelled() => return None,
+        started = start_generation(
             &drt,
             &namespace,
             &component,
-            card.clone(),
-            kv_router_config.clone(),
-            attempt_cancel.clone(),
-        );
-        let error = tokio::select! {
-            _ = cancel.cancelled() => return None,
-            built = attempt => match built {
-                Ok(generation) => {
-                    let rollout = !published.borrow().is_empty();
-                    let needs_prefill = generation.requires_prefill && rollout;
-                    let present = generation.prefill_present.clone();
-                    return wait_for_topology(needs_prefill, present, &cancel, &namespace)
-                        .await
-                        .then_some(generation);
-                }
-                Err(error) => error,
-            },
-        };
-        attempt_cancel.cancel();
-        tracing::warn!(
-            %error,
-            namespace,
-            "Failed to initialize worker generation, retrying in 5s..."
-        );
-        tokio::select! {
-            _ = cancel.cancelled() => return None,
-            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+            card,
+            preprocessor,
+            kv_router_config,
+            cancel.clone(),
+        ) => started,
+    };
+    let generation = match started {
+        Ok(generation) => generation,
+        Err(error) if startup => {
+            let _ = startup_failure.send(error);
+            return None;
         }
-    }
+        Err(error) => {
+            tracing::warn!(%error, namespace, "Failed to initialize worker generation; retrying");
+            return None;
+        }
+    };
+    let rollout = !published.borrow().is_empty();
+    let needs_prefill = generation.requires_prefill && rollout;
+    let present = generation.prefill_present.clone();
+    wait_for_topology(needs_prefill, present, &cancel, &namespace)
+        .await
+        .then_some(generation)
 }
 
 /// During a rollout, hold back a generation whose decode workers need prefill
@@ -893,24 +906,38 @@ async fn wait_for_topology(
     }
 }
 
-/// Create a generation's preprocessor and routers, then wait for its decode
-/// workers' runtime config.
-async fn build_generation(
-    drt: &DistributedRuntime,
+/// Fetch the model's files and build its preprocessor. Both hash or parse
+/// files, so they run on a blocking thread, off the runtime serving requests.
+async fn prepare_generation(
     namespace: &str,
-    component: &str,
     mut card: ModelDeploymentCard,
-    kv_router_config: KvRouterConfig,
-    cancel: CancellationToken,
-) -> Result<Generation> {
+) -> Result<(ModelDeploymentCard, Arc<OpenAIPreprocessor>)> {
     tracing::info!(
         model_name = %card.display_name,
         kv_cache_block_size = card.kv_cache_block_size,
         namespace,
         "Initializing worker generation from its model card"
     );
-    card.download_config(None).await?;
-    let preprocessor = OpenAIPreprocessor::new(card.clone())?;
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        runtime.block_on(card.download_config(None))?;
+        let preprocessor = OpenAIPreprocessor::new(card.clone())?;
+        Ok((card, preprocessor))
+    })
+    .await?
+}
+
+/// Create a generation's routers, then wait for its decode workers' runtime
+/// config.
+async fn start_generation(
+    drt: &DistributedRuntime,
+    namespace: &str,
+    component: &str,
+    card: ModelDeploymentCard,
+    preprocessor: Arc<OpenAIPreprocessor>,
+    kv_router_config: KvRouterConfig,
+    cancel: CancellationToken,
+) -> Result<Generation> {
     let block_size = card.kv_cache_block_size;
     let model_name = card.display_name.clone();
     let requires_prefill = needs_prefill(&card.needs);
@@ -1383,6 +1410,9 @@ fn spawn_prefill_discovery_watcher(
     present: watch::Sender<bool>,
     cancel: CancellationToken,
 ) {
+    use futures::StreamExt;
+
+    let watch_cancel = cancel.clone();
     tokio::spawn(cancel.run_until_cancelled_owned(async move {
         let discovery = drt.discovery();
         tracing::info!(
@@ -1390,60 +1420,48 @@ fn spawn_prefill_discovery_watcher(
             "Watching for prefill workers..."
         );
 
-        // Keeps polling after activation so `present` follows the
-        // generation's live prefill workers through a rolling update.
+        // Watched rather than polled, so `present` follows the generation's
+        // live prefill workers through a rolling update.
+        let query = DiscoveryQuery::NamespacedModels {
+            namespace: target_namespace.clone(),
+        };
         let mut tx = Some(tx);
+        let mut workers = HashSet::new();
         loop {
-            if let Ok(instances) = discovery.list(DiscoveryQuery::AllModels).await {
-                let mut found = false;
-                for instance in instances {
-                    if let DiscoveryInstance::Model {
-                        namespace,
-                        component,
-                        endpoint,
-                        ..
-                    } = &instance
-                    {
-                        if namespace != &target_namespace {
-                            continue;
-                        }
-
-                        let card = match instance.deserialize_model::<ModelDeploymentCard>() {
-                            Ok(card) => card,
-                            Err(_) => continue,
-                        };
-
-                        if !card.model_type.supports_prefill()
-                            || card.model_type.supports_chat()
-                            || card.model_type.supports_completions()
-                        {
-                            continue;
-                        }
-
-                        let Some(activation) = tx.take() else {
-                            found = true;
-                            break;
-                        };
-
-                        tracing::info!(
-                            model_name = card.name(),
-                            namespace = namespace.as_str(),
-                            "Prefill worker discovered, activating PrefillRouter"
-                        );
-
-                        if let Ok(ns) = drt.namespace(namespace)
-                            && let Ok(comp) = ns.component(component)
-                        {
-                            let ep = comp.endpoint(endpoint);
-                            if activation.send(ep).is_err() {
-                                tracing::debug!("PrefillRouter activation channel already closed");
-                            }
-                            found = true;
-                            break;
-                        }
-                        tx = Some(activation);
-                    }
+            let watch = discovery
+                .list_and_watch(query.clone(), Some(watch_cancel.child_token()))
+                .await;
+            let mut events = match watch {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(%error, namespace = target_namespace, "Failed to watch for prefill workers");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
                 }
+            };
+            while let Some(event) = events.next().await {
+                match event {
+                    Ok(DiscoveryEvent::Added(instance)) => {
+                        if let Some(card) = prefill_card(&instance) {
+                            activate_prefill(&drt, &mut tx, &instance, &card);
+                            workers.insert(instance.id());
+                        }
+                    }
+                    Ok(DiscoveryEvent::Removed(id)) => {
+                        workers.remove(&id);
+                    }
+                    Ok(DiscoveryEvent::Resync(instances)) => {
+                        workers.clear();
+                        for instance in &instances {
+                            if let Some(card) = prefill_card(instance) {
+                                activate_prefill(&drt, &mut tx, instance, &card);
+                                workers.insert(instance.id());
+                            }
+                        }
+                    }
+                    Ok(DiscoveryEvent::ModelTaintsUpdated(_)) | Err(_) => continue,
+                }
+                let found = tx.is_none() && !workers.is_empty();
                 if present.send_if_modified(|present| std::mem::replace(present, found) != found) {
                     tracing::info!(
                         namespace = target_namespace,
@@ -1452,10 +1470,55 @@ fn spawn_prefill_discovery_watcher(
                     );
                 }
             }
-
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }));
+}
+
+/// `instance`'s card, if it registers a prefill worker.
+fn prefill_card(instance: &DiscoveryInstance) -> Option<ModelDeploymentCard> {
+    let card = instance.deserialize_model::<ModelDeploymentCard>().ok()?;
+    (card.model_type.supports_prefill()
+        && !card.model_type.supports_chat()
+        && !card.model_type.supports_completions())
+    .then_some(card)
+}
+
+/// Hand the prefill router its endpoint, once, from the first prefill card.
+fn activate_prefill(
+    drt: &DistributedRuntime,
+    tx: &mut Option<tokio::sync::oneshot::Sender<dynamo_runtime::component::Endpoint>>,
+    instance: &DiscoveryInstance,
+    card: &ModelDeploymentCard,
+) {
+    let DiscoveryInstance::Model {
+        namespace,
+        component,
+        endpoint,
+        ..
+    } = instance
+    else {
+        return;
+    };
+    if tx.is_none() {
+        return;
+    }
+    let Ok(comp) = drt
+        .namespace(namespace)
+        .and_then(|ns| ns.component(component))
+    else {
+        return;
+    };
+    tracing::info!(
+        model_name = card.name(),
+        namespace = namespace.as_str(),
+        "Prefill worker discovered, activating PrefillRouter"
+    );
+    if let Some(tx) = tx.take()
+        && tx.send(comp.endpoint(endpoint)).is_err()
+    {
+        tracing::debug!("PrefillRouter activation channel already closed");
+    }
 }
 
 // ---------------------------------------------------------------------------
