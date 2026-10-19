@@ -388,5 +388,7 @@ queue, or worker inputs.
 Query `GET /router_policy` on the frontend to obtain a router instance ID and revision, then
 use `PATCH /router_policy` with that ID, `expected_revision`, and
 `parameters: {"min_device_overlap_blocks": 2.0}`. Other example policies remain startup-only.
+A positive threshold requires usable device-overlap data. Cold or replay requests without
+that data, including in the Mocker walkthrough, can have no eligible workers.
 For reset semantics and response codes, see the
 [runtime policy API](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#runtime-policy-updates).

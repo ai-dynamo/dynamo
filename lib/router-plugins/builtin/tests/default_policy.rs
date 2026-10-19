@@ -87,11 +87,22 @@ fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
         ))
         .unwrap();
     assert_eq!(select(&policy), 0);
+    policy
+        .update_runtime_config(RuntimePolicyUpdate::patch(
+            2,
+            json!({"overlap_score_credit": 0.0, "prefill_load_scale": 3.0})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ))
+        .unwrap();
+    assert_eq!(select(&policy), 1);
     let reset = policy
-        .update_runtime_config(RuntimePolicyUpdate::reset(2))
+        .update_runtime_config(RuntimePolicyUpdate::reset(3))
         .unwrap();
     assert_eq!(reset.parameters(), initial.parameters());
-    assert_eq!(reset.revision(), 3);
+    assert_eq!(reset.revision(), 4);
+    assert_eq!(select(&policy), 0);
 }
 
 #[test]

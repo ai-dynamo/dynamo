@@ -104,10 +104,9 @@ async fn list(
                     target,
                     configuration: None,
                 })),
-                // A router can retire after the registry snapshot was taken.
-                Ok(Err(RuntimePolicyError::Unavailable)) => Ok(None),
+                // Retired or unresponsive routers must not hide healthy instances.
+                Ok(Err(RuntimePolicyError::Unavailable)) | Err(_) => Ok(None),
                 Ok(Err(error)) => Err(error),
-                Err(_) => Err(RuntimePolicyError::Unavailable),
             }
         }))
         .await;
@@ -177,7 +176,7 @@ mod tests {
     use dynamo_runtime::protocols::EndpointId;
     use tower::ServiceExt;
 
-    async fn fixture() -> (Router, SelectionCore, Uuid, Uuid) {
+    async fn fixture(manager: Arc<ModelManager>) -> (Router, SelectionCore, Uuid, Uuid) {
         let core = SelectionCore::try_new_local(
             KvRouterConfig {
                 use_kv_events: false,
@@ -189,7 +188,6 @@ mod tests {
             default_factory(),
         )
         .unwrap();
-        let manager = Arc::new(ModelManager::new());
         let mut ids = Vec::new();
         for (worker_id, model) in [(1, "first"), (2, "second")] {
             core.upsert_worker(WorkerRequest {
@@ -237,9 +235,63 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
+    #[test]
+    fn listing_skips_timed_out_routers_and_keeps_healthy_routers_editable() {
+        let manager = Arc::new(ModelManager::new());
+        // Leave these live actors on a runtime that stops polling after setup.
+        let stalled_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (_, stalled_core, stalled_id, _) =
+            stalled_runtime.block_on(fixture(Arc::clone(&manager)));
+        let healthy_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        healthy_runtime.block_on(async {
+            let (app, core, first, second) = fixture(manager).await;
+            let (status, listing) = call(&app, Method::GET, "/router_policy", Value::Null).await;
+            assert_eq!(status, StatusCode::OK, "{listing}");
+            let routers = listing["routers"].as_array().unwrap();
+            assert_eq!(routers.len(), 2);
+            for id in [first, second] {
+                let router = routers
+                    .iter()
+                    .find(|r| r["router_id"] == id.to_string())
+                    .unwrap();
+                assert_eq!(router["configuration"]["revision"], 0);
+            }
+            let (status, updated) = call(
+                &app,
+                Method::PATCH,
+                "/router_policy",
+                serde_json::json!({"router_id": first, "expected_revision": 0,
+                    "parameters": {"prefill_load_scale": 2.0}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{updated}");
+            assert_eq!(
+                updated["configuration"]["parameters"]["prefill_load_scale"],
+                2.0
+            );
+            let (status, _) = call(
+                &app,
+                Method::PATCH,
+                "/router_policy",
+                serde_json::json!({"router_id": stalled_id, "expected_revision": 0, "reset": true}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            core.shutdown();
+        });
+        stalled_core.shutdown();
+    }
+
     #[tokio::test]
     async fn http_updates_reach_the_live_policy_and_preserve_other_instances() {
-        let (app, core, first, second) = fixture().await;
+        let (app, core, first, second) = fixture(Arc::new(ModelManager::new())).await;
         let (status, initial) =
             call(&app, Method::GET, "/router_policy?model=first", Value::Null).await;
         assert_eq!(status, StatusCode::OK);

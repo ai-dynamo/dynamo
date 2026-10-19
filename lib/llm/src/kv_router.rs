@@ -1002,7 +1002,6 @@ impl KvRouter {
         &self.kv_router_config
     }
 
-    /// Runtime configuration for this router's worker-selection policy.
     pub fn runtime_policy(
         &self,
     ) -> &Arc<dynamo_kv_router::scheduling::queue::RuntimePolicyControl> {

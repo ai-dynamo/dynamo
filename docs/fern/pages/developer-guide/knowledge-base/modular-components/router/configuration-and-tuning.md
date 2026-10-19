@@ -597,6 +597,8 @@ by the model name returned in the response. Each entry includes `router_id`, `mo
 `namespace`, `component`, `endpoint`, `worker_type`, and `configuration`. Configuration contains
 a `revision` and the complete resolved `parameters`. A null configuration means that the
 selected custom policy does not support runtime updates. Non-KV routing paths are not listed.
+Routers that have stopped or do not respond within five seconds are omitted; healthy routers
+remain available in the listing.
 
 ```bash
 curl --get http://localhost:8000/router_policy --data-urlencode model=qwen
@@ -641,7 +643,7 @@ term does not prevent restoring its startup value later.
 | `413` | Request body exceeds 16 KiB. |
 | `415` | Request is not sent as `application/json`. |
 | `422` | Unknown request fields, missing revision, unsupported policy, unknown parameter, invalid value, or a change requiring unavailable worker signals. No parameters are changed. |
-| `503` | The scheduler stopped or did not respond within five seconds. Query its state before retrying an update. |
+| `503` | The scheduler targeted by a PATCH stopped or did not respond within five seconds. Query its state before retrying an update. |
 
 The same frontend admin switch controls both this API and `/busy_threshold`:
 `DYN_DISABLE_FRONTEND_ADMIN_API=1` disables them. Busy thresholds remain separately managed by
