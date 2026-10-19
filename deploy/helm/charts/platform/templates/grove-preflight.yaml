@@ -9,14 +9,7 @@
 {{- $podSecurityContext = dict "runAsNonRoot" true "runAsUser" 65532 "seccompProfile" (dict "type" "RuntimeDefault") -}}
 {{- end -}}
 {{- if and $operator.enabled ($grove.enabled | default false) (not ($grove.install | default false)) $config.enabled -}}
-{{/* Helm removes disabled dependencies from .Chart; the linked file preserves the original pin. */}}
-{{- $minimum := "" -}}
-{{- range (.Files.Get "files/platform-chart.yaml" | fromYaml).dependencies -}}
-{{- if eq .name "grove-charts" -}}
-{{- $minimum = .version -}}
-{{- end -}}
-{{- end -}}
-{{- $minimum = required "Grove dependency is missing from platform Chart.yaml" $minimum -}}
+{{- $minimum := index .Chart.Annotations "dynamo.nvidia.com/grove-version" | required "Grove version annotation is missing from platform Chart.yaml" -}}
 {{- if and $config.deploymentName (not $config.namespace) -}}
 {{- fail "grovePreflight.namespace is required when grovePreflight.deploymentName is set" -}}
 {{- end -}}

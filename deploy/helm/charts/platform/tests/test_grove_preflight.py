@@ -10,7 +10,7 @@ from unittest.mock import Mock
 ROOT = Path(__file__).resolve().parents[1]
 MINIMUM = (
     re.search(
-        r"(?m)^  - name: grove-charts\n(?:    .*\n)*?    version: (\S+)",
+        r"(?m)^  dynamo\.nvidia\.com/grove-version: &groveVersion (\S+)",
         (ROOT / "Chart.yaml").read_text(),
     )
     .group(1)

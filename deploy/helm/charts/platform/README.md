@@ -158,11 +158,10 @@ dependency and completed rollout before applying the operator Deployment.
 It assumes a compatible, fully rolled out controller has matching Grove CRDs installed;
 CRDs are not inspected. Upgrade Grove and matching CRDs first.
 The minimum version comes from the `grove-charts` dependency in `Chart.yaml`.
-Helm reads the original metadata through `files/platform-chart.yaml`, a symlink to
-`Chart.yaml` (disabled dependencies are absent from `.Chart.Dependencies`). Packaging
-includes the linked contents. The version is passed directly to the checker, without a
-generator or synchronization step. The standalone operator chart does not run this
-platform preflight.
+Its YAML scalar is anchored in the chart annotation and referenced by the dependency,
+so Helm can pass the same value directly to the checker even when external Grove disables
+that dependency. No symlink, generator, or synchronization step is required. The
+standalone operator chart does not run this platform preflight.
 Unknown/custom/RC image tags and digest-only images fail rather than claiming compatibility.
 To resolve missing or ambiguous discovery, select the controller explicitly:
 

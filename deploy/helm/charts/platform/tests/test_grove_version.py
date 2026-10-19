@@ -3,7 +3,6 @@
 
 import shutil
 import subprocess
-import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class GroveVersionTest(unittest.TestCase):
-    def test_packaged_hook_reads_a_changed_dependency_without_generation(self):
+    def test_git_source_and_package_read_changed_dependency_without_generation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "platform"
             (root / "templates").mkdir(parents=True)
@@ -27,36 +26,46 @@ class GroveVersionTest(unittest.TestCase):
             grove.mkdir()
 
             def helm(*args):
-                result = subprocess.run(["helm", *args], capture_output=True, text=True)
+                result = subprocess.run(
+                    ["helm", *args],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 return result.stdout
 
             # Keep Grove disabled, as it is for an externally managed installation.
-            for pin in ("v0.1.0-alpha.1", "v99.0.0"):
-                with self.subTest(pin=pin):
-                    (root / "Chart.yaml").write_text(
-                        "apiVersion: v2\nname: platform\nversion: 0.0.0\ndependencies:\n"
-                        '  - name: dynamo-operator\n    version: "*"\n'
-                        "    condition: dynamo-operator.enabled\n"
-                        f"  - name: grove-charts\n    alias: grove\n    version: {pin}\n"
-                        "    condition: global.grove.install\n"
-                    )
-                    (grove / "Chart.yaml").write_text(
-                        f"apiVersion: v2\nname: grove-charts\nversion: {pin}\n"
-                    )
-                    helm("package", str(root), "--destination", directory)
-                    archive = Path(directory) / "platform-0.0.0.tgz"
-                    with tarfile.open(archive) as package:
-                        self.assertTrue(
-                            package.getmember(
-                                "platform/files/platform-chart.yaml"
-                            ).isfile()
-                        )
-                    rendered = helm(
-                        "template",
-                        "dynamo",
-                        str(archive),
-                        "--set",
-                        "global.grove.enabled=true",
-                    )
-                    self.assertIn(f'            - "{pin}"\n', rendered)
+            pin = "v99.0.0"
+            (root / "Chart.yaml").write_text(
+                "apiVersion: v2\nname: platform\nversion: 0.0.0\n"
+                "annotations:\n"
+                f"  dynamo.nvidia.com/grove-version: &groveVersion {pin}\n"
+                "dependencies:\n"
+                '  - name: dynamo-operator\n    version: "*"\n'
+                "    condition: dynamo-operator.enabled\n"
+                "  - name: grove-charts\n    alias: grove\n"
+                "    version: *groveVersion\n"
+                "    condition: global.grove.install\n"
+            )
+            (grove / "Chart.yaml").write_text(
+                f"apiVersion: v2\nname: grove-charts\nversion: {pin}\n"
+            )
+            self.assertFalse(any(path.is_symlink() for path in root.rglob("*")))
+
+            source = helm(
+                "template", "dynamo", str(root), "--set", "global.grove.enabled=true"
+            )
+            self.assertIn(f'            - "{pin}"\n', source)
+
+            helm("package", str(root), "--destination", directory)
+            archive = Path(directory) / "platform-0.0.0.tgz"
+            packaged = helm(
+                "template",
+                "dynamo",
+                str(archive),
+                "--set",
+                "global.grove.enabled=true",
+            )
+            self.assertIn(f'            - "{pin}"\n', packaged)
