@@ -388,7 +388,8 @@ jobs:
       run: npm install -g fern-api
     - name: Check for broken links
       working-directory: docs/fern
-      run: fern docs broken-links
+      # Without --strict the command reports errors and still exits 0.
+      run: fern docs broken-links --strict
 
   operator:
     needs: changed-files
