@@ -50,7 +50,7 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 		return fmt.Errorf("active workload inventory changed")
 	}
 	for _, old := range before {
-		if old.GetKind() != upgradePodCliqueSetKind && old.GetKind() != "DynamoGraphDeployment" {
+		if old.GetKind() != upgradePodCliqueSetKind && old.GetKind() != dynamoGraphDeploymentKind {
 			continue
 		}
 		current, ok := index[old.GetKind()+"/"+old.GetName()]
@@ -58,7 +58,7 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 			return fmt.Errorf("active identity changed: %s/%s", old.GetKind(), old.GetName())
 		}
 		switch old.GetKind() {
-		case "DynamoGraphDeployment":
+		case dynamoGraphDeploymentKind:
 			const origin = "nvidia.com/dynamo-operator-origin-version"
 			oldOrigin, oldExists := old.GetAnnotations()[origin]
 			newOrigin, newExists := current.GetAnnotations()[origin]
@@ -184,7 +184,7 @@ func upgradeLatestVariables(t *testing.T, path, version string) golden.Variables
 	// Bind the version-dependent worker identity using the reviewed DGD input.
 	found := false
 	for _, object := range objects {
-		if object.GetKind() != "DynamoGraphDeployment" {
+		if object.GetKind() != dynamoGraphDeploymentKind {
 			continue
 		}
 		dgd := api.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
