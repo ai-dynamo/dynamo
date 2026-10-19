@@ -15,9 +15,11 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+import hashlib
 import json
 import logging
 import pathlib
+import signal
 import subprocess
 import sys
 from typing import Any
@@ -25,13 +27,35 @@ from typing import Any
 from . import manifests, report
 from .k8s_backend import K8sBackend
 from .kube import KubeError, retry
-from .loadgen import RESULTS_ROOT, LoadPoint, Workload, aiperf_command
+from .loadgen import (
+    PRIME_SEED_OFFSET,
+    RESULTS_ROOT,
+    LoadPoint,
+    Workload,
+    aiperf_command,
+)
 from .local_backend import LocalBackend
 
 log = logging.getLogger("gateway_ab")
 
 EXIT_PREFLIGHT = 2
 EXIT_REGRESSION = 3
+# Bumped when a change makes new rounds incomparable with stored ones, so a
+# resume refuses to mix them. 2: a seed per load point, --isl includes the
+# shared prefix.
+HARNESS_VERSION = 2
+# Flags that only one backend reads, with their argparse destinations.
+KUBERNETES_ONLY = {
+    "context": "--context",
+    "gateway_url": "--gateway-url",
+    "hf_secret": "--hf-secret",
+    "image_pull_secret": "--image-pull-secret",
+    "router_cpu": "--router-cpu",
+    "worker_cpu": "--worker-cpu",
+    "sidecar_cpu": "--sidecar-cpu",
+    "loadgen_cpu": "--loadgen-cpu",
+}
+LOCAL_ONLY = {"epp_binary": "--epp-binary", "envoy_image": "--envoy-image"}
 # Relative to the working directory. Run from the repository root, it lands
 # under benchmarks/results, which the repository already ignores.
 DEFAULT_OUTPUT = "benchmarks/results/gateway_ab"
@@ -40,6 +64,12 @@ DEFAULT_OUTPUT = "benchmarks/results/gateway_ab"
 class Bench:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
+        # Unset CPU flags keep BenchConfig's defaults.
+        cpus = {
+            k: getattr(args, k)
+            for k in ("router_cpu", "worker_cpu", "sidecar_cpu", "loadgen_cpu")
+            if getattr(args, k) is not None
+        }
         self.cfg = manifests.BenchConfig(
             model=args.model,
             dynamo_version=args.dynamo_version,
@@ -52,10 +82,7 @@ class Bench:
             block_size=args.block_size,
             speedup_ratio=args.speedup_ratio,
             mocker_extra_args=tuple(args.mocker_arg or ()),
-            router_cpu=args.router_cpu,
-            worker_cpu=args.worker_cpu,
-            sidecar_cpu=args.sidecar_cpu,
-            loadgen_cpu=args.loadgen_cpu,
+            **cpus,
             hf_secret=args.hf_secret,
             image_pull_secret=args.image_pull_secret,
             gateway_name=args.gateway_name,
@@ -86,6 +113,7 @@ class Bench:
         else:
             self.backend = K8sBackend(args, self.cfg)
         self.loadgen = self.backend.loadgen
+        self._fingerprint: str | None = None
 
     # -- backend delegation -------------------------------------------------
 
@@ -96,8 +124,35 @@ class Bench:
         self.backend.deploy_loadgen()
 
     def deploy_topology(self, topology: str) -> None:
-        self.backend.deploy_topology(topology)
+        self.backend.deploy_topology(topology, self.fingerprint())
         self._smoke(topology)
+
+    def fingerprint(self) -> str:
+        """Hash of everything a deployment is built from, stamped on it.
+
+        ``run`` compares it with the deployment it is about to measure, so
+        results are never labeled with flags other than the ones deployed.
+        """
+        if self._fingerprint is None:
+            blob = json.dumps(
+                {
+                    "config": dataclasses.asdict(self.cfg),
+                    "deployment": self.backend.deployment_identity(),
+                },
+                sort_keys=True,
+            )
+            self._fingerprint = hashlib.sha256(blob.encode()).hexdigest()[:16]
+        return self._fingerprint
+
+    def _check_deployed(self, topology: str) -> None:
+        deployed = self.backend.deployed_fingerprint(topology)
+        if deployed is None:
+            raise KubeError(f"{topology} is not deployed; run `deploy` first")
+        if deployed != self.fingerprint():
+            raise KubeError(
+                f"{topology} was deployed with other settings than these flags; "
+                "pass the flags `deploy` used, or deploy again"
+            )
 
     def teardown_topology(self, topology: str) -> None:
         self.backend.teardown_topology(topology)
@@ -132,6 +187,7 @@ class Bench:
         pending = []
         for rnd in range(w.rounds):
             for i, point in enumerate(w.points()):
+                seed = w.seed_for(rnd, i)
                 # Alternate which side goes first so slow drift (cache warmth,
                 # neighbours, thermal) does not land on one side.
                 order = manifests.SIDES if (rnd + i) % 2 == 0 else manifests.SIDES[::-1]
@@ -147,18 +203,19 @@ class Bench:
                     if _valid_run_file(out):
                         log.info("skip %s (already measured)", out.relative_to(results))
                     else:
-                        pending.append((rnd, point, side, out))
+                        pending.append((rnd, point, seed, side, out))
         if not pending:
             return 0
+        self._check_deployed(topology)
         urls = {side: self.url(topology, side) for side in manifests.SIDES}
         headers = manifests.request_headers(self.cfg, topology)
         if not self.args.no_prime:
             for side in manifests.SIDES:
                 self._prime(topology, side, urls[side], headers)
         failures = 0
-        for rnd, point, side, out in pending:
+        for rnd, point, seed, side, out in pending:
             if not self._measure_point(
-                topology, side, point, rnd, urls[side], headers, out
+                topology, side, point, rnd, seed, urls[side], headers, out
             ):
                 failures += 1
         return failures
@@ -182,7 +239,7 @@ class Bench:
             headers=headers,
             workload=w,
             point=point,
-            seed=w.seed + 10_000,
+            seed=w.seed + PRIME_SEED_OFFSET,
             artifact_dir=artifact_dir,
         )
         log.info(
@@ -199,11 +256,11 @@ class Bench:
         side: str,
         point: LoadPoint,
         rnd: int,
+        seed: int,
         url: str,
         headers: dict[str, str],
         out: pathlib.Path,
     ) -> bool:
-        seed = self.workload.seed + rnd
         artifact_dir = f"{RESULTS_ROOT}/{topology}/{side}/{point.label}/r{rnd}"
         cmd = aiperf_command(
             model=self.cfg.model,
@@ -284,24 +341,48 @@ class Bench:
             )
         )
 
-    def write_meta(self, results: pathlib.Path) -> None:
-        results.mkdir(parents=True, exist_ok=True)
+    def _identity(self) -> dict[str, Any]:
+        """Everything that must match for new rounds to join stored ones."""
+        return json.loads(
+            json.dumps(
+                {
+                    "harness": HARNESS_VERSION,
+                    "backend": self.backend.name,
+                    "workload": self._workload_meta(),
+                    "config": dataclasses.asdict(self.cfg),
+                    "deployment": self.backend.deployment_identity(),
+                    "target": self.backend.target_identity(),
+                }
+            )
+        )
+
+    def check_resume(self, results: pathlib.Path) -> dict[str, Any] | None:
+        """The stored metadata of a run these settings may extend, or None if new.
+
+        Mixing rounds measured under different settings into one comparison
+        would be silently wrong, so anything else is refused.
+        """
         path = results / "meta.json"
-        if path.exists():
-            # Resuming. Mixing rounds measured under different settings
-            # into one comparison would be silently wrong, so refuse.
-            old = json.loads(path.read_text())
-            if (
-                old.get("workload") != self._workload_meta()
-                or old.get("config")
-                != json.loads(json.dumps(dataclasses.asdict(self.cfg)))
-                or old.get("backend", "kubernetes") != self.backend.name
-            ):
-                raise KubeError(
-                    f"{results} was measured with a different workload, deployment "
-                    "config, or backend; use a new --results directory"
-                )
+        if not path.exists():
+            return None
+        old = json.loads(path.read_text())
+        if old.get("identity") != self._identity():
+            raise KubeError(
+                f"{results} was measured with a different workload, deployment, "
+                "harness version, or target; use a new --results directory"
+            )
+        return old
+
+    def write_meta(self, results: pathlib.Path) -> None:
+        old = self.check_resume(results)
+        path = results / "meta.json"
+        if old is not None:
+            # Raising --rounds extends a run; the report shows the new count.
+            if self.workload.rounds > old.get("rounds", 0):
+                old["rounds"] = self.workload.rounds
+                path.write_text(json.dumps(old, indent=2))
             return
+        results.mkdir(parents=True, exist_ok=True)
         meta: dict[str, Any] = {
             "started": _now(),
             **self.backend.environment(),
@@ -320,6 +401,7 @@ class Bench:
             "workload": self._workload_meta(),
             "rounds": self.workload.rounds,
             "config": json.loads(json.dumps(dataclasses.asdict(self.cfg))),
+            "identity": self._identity(),
         }
         path.write_text(json.dumps(meta, indent=2))
 
@@ -332,7 +414,7 @@ def cmd_preflight(bench: Bench) -> int:
     if problems:
         for p in problems:
             log.error("preflight: %s", p)
-        log.error("Install prerequisites with benchmarks/gateway_ab/setup_cluster.sh")
+        log.error("%s", bench.backend.setup_hint)
         return EXIT_PREFLIGHT
     log.info(
         "preflight OK (%s backend, %s)", bench.backend.name, bench.backend.describe()
@@ -374,22 +456,31 @@ def cmd_run(bench: Bench) -> int:
 def cmd_report(bench: Bench, results: pathlib.Path | None = None) -> int:
     results = results or _results_dir(bench.args, must_exist=True)
     summary = report.build_summary(results, min_effect_pct=bench.args.min_effect)
-    (results / "summary.json").write_text(json.dumps(summary, indent=2))
+    (results / "summary.json").write_text(
+        json.dumps(report.json_safe(summary), indent=2, allow_nan=False)
+    )
     md = report.render_markdown(summary)
     (results / "report.md").write_text(md + "\n")
     print(md)
     log.info("wrote %s and %s", results / "summary.json", results / "report.md")
-    if bench.args.max_ttft_regression is not None:
-        found = report.regressions(summary, bench.args.max_ttft_regression)
-        for r in found:
-            log.error("regression: %s", r)
-        if found:
-            return EXIT_REGRESSION
     # A side that failed outright leaves no comparison behind, and must not
     # read as a pass.
     gaps = report.incomplete(summary)
     for g in gaps:
         log.error("incomplete: %s", g)
+    if bench.args.max_ttft_regression is not None:
+        # A statistic with too few rounds cannot trip the gate, so a run
+        # that gives it no verdict must not read as a pass either.
+        unchecked = report.ungated(summary)
+        for u in unchecked:
+            log.error("regression gate not evaluated: %s", u)
+        found = report.regressions(summary, bench.args.max_ttft_regression)
+        for r in found:
+            log.error("regression: %s", r)
+        if found:
+            return EXIT_REGRESSION
+        if unchecked:
+            return 1
     return 1 if gaps else 0
 
 
@@ -411,10 +502,12 @@ def cmd_all(bench: Bench) -> int:
     if rc:
         return rc
     results = _results_dir(bench.args)
-    bench.deploy_loadgen()
-    bench.write_meta(results)
+    # Refuse an incompatible resume before anything is deployed.
+    bench.check_resume(results)
     failed = []
     try:
+        bench.deploy_loadgen()
+        bench.write_meta(results)
         for topology in bench.topologies:
             # One topology failing must not discard what the others measured.
             try:
@@ -473,8 +566,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     b.add_argument(
         "--envoy-image",
-        default="envoyproxy/envoy:v1.35.3",
-        help="local: Envoy image for the gateway",
+        help="local: Envoy image for the gateway (default: envoyproxy/envoy:v1.35.3)",
     )
 
     k = p.add_argument_group("cluster (kubernetes backend)")
@@ -485,7 +577,12 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--gateway-url", help="override the in-cluster Gateway URL")
     k.add_argument("--hf-secret", help="Secret with HF_TOKEN, for gated models")
     k.add_argument("--image-pull-secret")
-    k.add_argument("--ready-timeout", type=int, default=900, help="seconds per DGD")
+    k.add_argument(
+        "--ready-timeout",
+        type=_positive(int),
+        default=900,
+        help="seconds per DGD, or for local workers to register",
+    )
     k.add_argument("--keep", action="store_true", help="all: leave deployments up")
 
     d = p.add_argument_group("deployment (identical on both sides)")
@@ -503,21 +600,25 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument(
         "--worker-image", help="mocker image (default: dynamo-planner:<version>)"
     )
-    d.add_argument("--name-prefix", default="ab")
-    d.add_argument("--agg-workers", type=int, default=2)
-    d.add_argument("--prefill-workers", type=int, default=2)
-    d.add_argument("--decode-workers", type=int, default=2)
-    d.add_argument("--block-size", type=int, default=16)
-    d.add_argument("--speedup-ratio", type=float, default=1.0)
+    d.add_argument(
+        "--name-prefix",
+        default="ab",
+        help="names this run's objects; give concurrent runs distinct prefixes",
+    )
+    d.add_argument("--agg-workers", type=_positive(int), default=2)
+    d.add_argument("--prefill-workers", type=_positive(int), default=2)
+    d.add_argument("--decode-workers", type=_positive(int), default=2)
+    d.add_argument("--block-size", type=_positive(int), default=16)
+    d.add_argument("--speedup-ratio", type=_positive(float), default=1.0)
     d.add_argument(
         "--mocker-arg", action="append", help="extra mocker argument (repeatable)"
     )
     d.add_argument(
-        "--router-cpu", default="2", help="CPU request for the Frontend and the EPP"
+        "--router-cpu", help="kubernetes: CPU request for the Frontend and the EPP (2)"
     )
-    d.add_argument("--worker-cpu", default="1")
-    d.add_argument("--sidecar-cpu", default="1")
-    d.add_argument("--loadgen-cpu", default="4")
+    d.add_argument("--worker-cpu", help="kubernetes: CPU request per worker (1)")
+    d.add_argument("--sidecar-cpu", help="kubernetes: CPU request per sidecar (1)")
+    d.add_argument("--loadgen-cpu", help="kubernetes: CPU request of the loadgen (4)")
 
     w = p.add_argument_group("workload (identical on both sides)")
     w.add_argument(
@@ -530,26 +631,34 @@ def build_parser() -> argparse.ArgumentParser:
         type=_csv(_positive(int)),
         help="closed-loop load points instead of --request-rate, e.g. 8,32",
     )
-    w.add_argument("--isl", type=int, default=1024)
-    w.add_argument("--osl", type=int, default=128)
-    w.add_argument("--prefix-length", type=int, default=512)
-    w.add_argument("--num-prefixes", type=int, default=8)
+    w.add_argument(
+        "--isl",
+        type=_positive(int),
+        default=1024,
+        help="input tokens per request, including the shared prefix",
+    )
+    w.add_argument("--osl", type=_positive(int), default=128)
+    w.add_argument("--prefix-length", type=_non_negative(int), default=512)
+    w.add_argument("--num-prefixes", type=_positive(int), default=8)
     w.add_argument(
         "--requests",
-        type=int,
+        type=_non_negative(int),
         default=0,
         help="per point; 0 = about 40 s of arrivals (closed loop: max(200, 10 x c))",
     )
     w.add_argument(
         "--warmup-requests",
-        type=int,
+        type=_non_negative(int),
         default=0,
         help="0 = about 5 s of arrivals (closed loop: max(10, 2 x c))",
     )
     w.add_argument("--rounds", type=_positive(int), default=3)
-    w.add_argument("--seed", type=int, default=42)
+    w.add_argument("--seed", type=_non_negative(int), default=42)
     w.add_argument(
-        "--run-timeout", type=int, default=1800, help="seconds per aiperf run"
+        "--run-timeout",
+        type=_positive(int),
+        default=1800,
+        help="seconds per aiperf run",
     )
     w.add_argument(
         "--no-prime",
@@ -569,7 +678,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     r.add_argument(
         "--min-effect",
-        type=float,
+        type=_non_negative(float),
         default=2.0,
         help="percent below which a delta is 'same'",
     )
@@ -595,18 +704,45 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.concurrency and args.request_rate:
         parser.error("--concurrency and --request-rate are mutually exclusive")
+    ignored = LOCAL_ONLY if args.backend == "kubernetes" else KUBERNETES_ONLY
+    wrong = [flag for dest, flag in ignored.items() if getattr(args, dest) is not None]
+    if wrong:
+        parser.error(f"{', '.join(wrong)} does not apply to --backend {args.backend}")
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
+    previous = _exit_on_sigterm()
     try:
         if args.command == "trend":
             return cmd_trend(args)
-        return COMMANDS[args.command](Bench(args))
+        try:
+            bench = Bench(args)
+        except ValueError as e:
+            parser.error(str(e))
+        return COMMANDS[args.command](bench)
     except (KubeError, subprocess.TimeoutExpired) as e:
         log.error("%s", e)
         return 1
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def _exit_on_sigterm():
+    """Make SIGTERM unwind like Ctrl-C, so `finally` tears deployments down.
+
+    Python's default SIGTERM handling exits without unwinding, and a CI
+    cancel or `timeout` would otherwise leave every deployment running.
+    Returns the previous handler, or None off the main thread.
+    """
+    try:
+        return signal.signal(
+            signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum)
+        )
+    except ValueError:
+        return None
 
 
 def _csv(kind, choices=None):
@@ -630,6 +766,16 @@ def _positive(kind):
         value = kind(text)
         if value <= 0:
             raise argparse.ArgumentTypeError(f"must be positive: {text}")
+        return value
+
+    return parse
+
+
+def _non_negative(kind):
+    def parse(text: str):
+        value = kind(text)
+        if value < 0:
+            raise argparse.ArgumentTypeError(f"must not be negative: {text}")
         return value
 
     return parse

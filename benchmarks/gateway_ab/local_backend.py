@@ -22,6 +22,9 @@ ext_proc protocol are the production code paths.
 What differs from the Kubernetes topology: one direct-mode Frontend serves
 every B worker instead of a sidecar per worker pod, and all containers share
 the host's CPUs with the load generator.
+
+Every container, network, and volume is named after ``--name-prefix`` and
+labeled with it, so two runs with different prefixes can share a Docker host.
 """
 
 from __future__ import annotations
@@ -41,9 +44,14 @@ from .loadgen import RESULTS_ROOT, LoadGen
 
 log = logging.getLogger("gateway_ab")
 
+# Label keys. ``LABEL`` holds the run's prefix, ``TOPOLOGY_LABEL``
+# ``<prefix>/<topology>``, and ``FINGERPRINT_LABEL`` the deployment fingerprint.
 LABEL = "gateway-ab-local"
-LOADGEN = "gwab-loadgen"
+TOPOLOGY_LABEL = f"{LABEL}/topology"
+FINGERPRINT_LABEL = f"{LABEL}/fingerprint"
+# Shared by every run: it only caches tokenizers.
 HF_VOLUME = "gwab-hf"
+DEFAULT_ENVOY_IMAGE = "envoyproxy/envoy:v1.35.3"
 # Docker's default soft limit of 1024 open files is far below what Kubernetes
 # gives a container.
 NOFILE = ["--ulimit", "nofile=1048576:1048576"]
@@ -108,8 +116,21 @@ def namespace(cfg: manifests.BenchConfig, topology: str, side: str) -> str:
     return f"{cfg.name_prefix}-{topology}-{'fe' if side == 'frontend' else 'gw'}"
 
 
-def container(topology: str, role: str) -> str:
-    return f"gwab-{topology}-{role}"
+def network(cfg: manifests.BenchConfig, topology: str) -> str:
+    return f"gwab-{cfg.name_prefix}-{topology}"
+
+
+def volume(cfg: manifests.BenchConfig, topology: str) -> str:
+    """The topology's file-discovery store."""
+    return f"{network(cfg, topology)}-kv"
+
+
+def container(cfg: manifests.BenchConfig, topology: str, role: str) -> str:
+    return f"{network(cfg, topology)}-{role}"
+
+
+def loadgen_name(cfg: manifests.BenchConfig) -> str:
+    return f"gwab-{cfg.name_prefix}-loadgen"
 
 
 def envoy_config(epp_host: str) -> str:
@@ -258,16 +279,18 @@ print(json.dumps(counts))
 
 class LocalBackend:
     name = "local"
+    setup_hint = "Check that Docker is installed and its daemon is running"
 
     def __init__(self, args: argparse.Namespace, cfg: manifests.BenchConfig) -> None:
         self.args = args
         self.cfg = cfg
         self.docker = Docker()
-        self.loadgen = LoadGen(self.docker, LOADGEN)
-        self.envoy_image = args.envoy_image
+        self.loadgen = LoadGen(self.docker, loadgen_name(cfg))
+        self.envoy_image = args.envoy_image or DEFAULT_ENVOY_IMAGE
         self.epp_binary = (
             str(pathlib.Path(args.epp_binary).resolve()) if args.epp_binary else None
         )
+        self._epp_digest: str | None = None
 
     def describe(self) -> str:
         return f"docker, EPP {self.epp_binary or 'from the frontend image'}"
@@ -283,11 +306,61 @@ class LocalBackend:
             "epp_binary": self.epp_binary or "image /epp",
         }
 
+    def deployment_identity(self) -> dict[str, Any]:
+        """What containers are built from beyond BenchConfig.
+
+        The EPP binary by content, since a rebuild usually keeps its path, and
+        every image by id, since a tag can be re-pointed.
+        """
+        return {
+            "epp_binary_sha256": self._epp_sha256(),
+            "image_ids": {
+                image: self._image_id(image)
+                for image in (
+                    self.cfg.frontend_image,
+                    self.cfg.worker_image,
+                    self.envoy_image,
+                )
+            },
+        }
+
+    def target_identity(self) -> dict[str, Any]:
+        return {}
+
+    def _epp_sha256(self) -> str | None:
+        if self.epp_binary is None:
+            return None
+        if self._epp_digest is None:
+            digest = hashlib.sha256()
+            try:
+                with open(self.epp_binary, "rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        digest.update(chunk)
+            except OSError as e:
+                raise KubeError(f"cannot read --epp-binary: {e}") from e
+            self._epp_digest = digest.hexdigest()
+        return self._epp_digest
+
+    def _image_id(self, image: str) -> str | None:
+        proc = self.docker.run(
+            ["image", "inspect", "--format", "{{.Id}}", image], check=False
+        )
+        return proc.stdout.strip() if proc.returncode == 0 else None
+
+    def _labels(self, topology: str | None = None) -> list[str]:
+        out = ["--label", f"{LABEL}={self.cfg.name_prefix}"]
+        if topology is not None:
+            out += ["--label", f"{TOPOLOGY_LABEL}={self.cfg.name_prefix}/{topology}"]
+        return out
+
     # -- preflight ---------------------------------------------------------
 
     def preflight(self) -> list[str]:
-        if self.docker.run(["version"], check=False).returncode != 0:
-            return ["cannot reach the Docker daemon"]
+        try:
+            if self.docker.run(["version"], check=False).returncode != 0:
+                return ["cannot reach the Docker daemon"]
+        except KubeError as e:
+            return [str(e)]
         problems = []
         try:
             instances = int(
@@ -305,6 +378,14 @@ class LocalBackend:
             )
         if self.epp_binary and not pathlib.Path(self.epp_binary).is_file():
             problems.append(f"--epp-binary {self.epp_binary} does not exist")
+        elif self.epp_binary:
+            log.warning(
+                "Side B runs the EPP from %s while side A runs the KV router in %s. "
+                "Unless that image was built from the same commit, the deltas "
+                "include every router change between the two builds.",
+                self.epp_binary,
+                self.cfg.frontend_image,
+            )
         for image in (self.cfg.frontend_image, self.cfg.worker_image, self.envoy_image):
             if not self.docker.exists("image", image):
                 log.info("Pulling %s", image)
@@ -335,12 +416,13 @@ class LocalBackend:
             manifests.REAPER,
         ]
         spec_hash = hashlib.sha256(json.dumps(spec).encode()).hexdigest()[:16]
+        name = loadgen_name(self.cfg)
         current = self.docker.run(
             [
                 "inspect",
                 "--format",
                 f'{{{{.State.Running}}}} {{{{index .Config.Labels "{LABEL}/spec"}}}}',
-                LOADGEN,
+                name,
             ],
             check=False,
         )
@@ -348,33 +430,33 @@ class LocalBackend:
             if current.stdout.split() == ["true", spec_hash]:
                 return
             # Stopped, or started from another image or configuration.
-            self.docker.run(["rm", "-f", LOADGEN])
+            self.docker.run(["rm", "-f", name])
         self._make_writable(HF_VOLUME)
         self.docker.run(
             [
                 "run",
                 "-d",
                 "--name",
-                LOADGEN,
-                "--label",
-                f"{LABEL}=1",
+                name,
+                *self._labels(),
                 "--label",
                 f"{LABEL}/spec={spec_hash}",
                 *spec,
             ]
         )
 
-    def deploy_topology(self, topology: str) -> None:
+    def deploy_topology(self, topology: str, fingerprint: str) -> None:
         # Always from scratch: a fresh discovery store holds no stale cards
         # from killed workers, and every run starts with cold caches.
         self.teardown_topology(topology)
-        net = f"gwab-{topology}"
-        kv = f"gwab-{topology}-kv"
-        labels = ["--label", f"{LABEL}=1", "--label", f"{LABEL}/topology={topology}"]
+        net = network(self.cfg, topology)
+        kv = volume(self.cfg, topology)
+        labels = self._labels(topology)
         self.docker.run(["network", "create", *labels, net])
         self.docker.run(["volume", "create", *labels, kv])
         self._make_writable(kv, HF_VOLUME)
-        self.docker.run(["network", "connect", net, LOADGEN])
+        self.docker.run(["network", "connect", net, loadgen_name(self.cfg)])
+        labels += ["--label", f"{FINGERPRINT_LABEL}={fingerprint}"]
 
         def start(
             role: str,
@@ -383,7 +465,14 @@ class LocalBackend:
             docker_args: Sequence[str] = (),
             command: Sequence[str] = (),
         ) -> None:
-            cmd = ["run", "-d", "--name", container(topology, role), "--network", net]
+            cmd = [
+                "run",
+                "-d",
+                "--name",
+                container(self.cfg, topology, role),
+                "--network",
+                net,
+            ]
             cmd += [*labels, *NOFILE, "-v", f"{kv}:/kv", "-v", f"{HF_VOLUME}:/hf"]
             env = {
                 "DYN_DISCOVERY_BACKEND": "file",
@@ -442,7 +531,7 @@ class LocalBackend:
                 "inspect",
                 "--format",
                 f'{{{{(index .NetworkSettings.Networks "{net}").IPAddress}}}}',
-                container(topology, "direct"),
+                container(self.cfg, topology, "direct"),
             ]
         ).stdout.strip()
         epp_args = ["--entrypoint", "/epp"]
@@ -458,8 +547,6 @@ class LocalBackend:
             self.cfg.frontend_image,
             {
                 "DYN_NAMESPACE": namespace(self.cfg, topology, "gateway"),
-                "DYN_MODEL_NAME": self.cfg.model,
-                "DYN_KV_CACHE_BLOCK_SIZE": str(self.cfg.block_size),
                 # Envoy reaches the EPP over plaintext h2 on the private network.
                 "DYN_SECURE_SERVING": "false",
                 "DYN_EPP_STATIC_ENDPOINT": f"{direct_ip}:{FRONTEND_PORT}",
@@ -471,14 +558,14 @@ class LocalBackend:
                 "run",
                 "-d",
                 "--name",
-                container(topology, "gateway"),
+                container(self.cfg, topology, "gateway"),
                 "--network",
                 net,
                 *labels,
                 *NOFILE,
                 self.envoy_image,
                 "--config-yaml",
-                envoy_config(container(topology, "epp")),
+                envoy_config(container(self.cfg, topology, "epp")),
             ]
         )
         self._wait_for_workers(topology, kv)
@@ -547,14 +634,30 @@ class LocalBackend:
             what=f"{topology} workers to register",
         )
 
+    def _topology_filter(self, topology: str) -> list[str]:
+        return ["--filter", f"label={TOPOLOGY_LABEL}={self.cfg.name_prefix}/{topology}"]
+
+    def deployed_fingerprint(self, topology: str) -> str | None:
+        """The fingerprint every container of a topology carries, or None."""
+        out = self.docker.run(
+            [
+                "ps",
+                "-a",
+                *self._topology_filter(topology),
+                "--format",
+                f'{{{{.Label "{FINGERPRINT_LABEL}"}}}}',
+            ]
+        ).stdout.split()
+        prints = set(out)
+        return prints.pop() if len(prints) == 1 else None
+
     def _check_running(self, topology: str) -> None:
         """Fail fast when a container exited, e.g. an EPP without the static knob."""
         out = self.docker.run(
             [
                 "ps",
                 "-a",
-                "--filter",
-                f"label={LABEL}/topology={topology}",
+                *self._topology_filter(topology),
                 "--format",
                 "{{.Names}} {{.State}}",
             ]
@@ -567,13 +670,19 @@ class LocalBackend:
 
     def diagnose(self, topology: str, side: str) -> str:
         if side != "gateway":
-            return f"Check the logs: docker logs {container(topology, 'frontend')}"
-        epp = container(topology, "epp")
+            return (
+                "Check the logs: docker logs "
+                f"{container(self.cfg, topology, 'frontend')}"
+            )
+        epp = container(self.cfg, topology, "epp")
         state = self.docker.run(
             ["inspect", "--format", "{{.State.Status}}", epp], check=False
         ).stdout.strip()
         logs = self.docker.run(["logs", epp], check=False)
         text = logs.stdout + logs.stderr
+        # An EPP with the static endpoint says so at startup; one without it
+        # reaches for Kubernetes instead.
+        static = "DYN_EPP_STATIC_ENDPOINT is set" in text
         if state != "running":
             hint = ""
             if "Too many open files" in text:
@@ -581,7 +690,9 @@ class LocalBackend:
                     " It ran out of inotify instances, which file discovery uses; "
                     "raise them with: sudo sysctl fs.inotify.max_user_instances=1024."
                 )
-            elif "POD_NAMESPACE" in text or "kube" in text.lower():
+            elif not static and (
+                "POD_NAMESPACE" in text or "KUBERNETES_SERVICE_HOST" in text
+            ):
                 hint = (
                     " This EPP tried to reach Kubernetes, so it lacks "
                     "DYN_EPP_STATIC_ENDPOINT support; pass --epp-binary with an EPP "
@@ -590,29 +701,44 @@ class LocalBackend:
             return f"The EPP exited ({state}).{hint} See: docker logs {epp}"
         if topology == "disagg" and "Prefill worker discovered" not in text:
             return (
-                "The EPP never activated prefill routing; it predates worker_type-based "
-                f"prefill detection. Pass --epp-binary with a newer build. See: docker logs {epp}"
+                "The EPP has not discovered a prefill worker, so the direct-mode "
+                "Frontend rejects requests without a prefill worker id. Check that "
+                "the prefill workers registered: docker logs "
+                f"{container(self.cfg, topology, 'gw-prefill0')}; docker logs {epp}"
             )
-        return f"Check: docker logs {epp}; docker logs {container(topology, 'gateway')}"
+        return (
+            f"Check: docker logs {epp}; docker logs "
+            f"{container(self.cfg, topology, 'gateway')}"
+        )
 
     def teardown_topology(self, topology: str) -> None:
         log.info("Tearing down %s", topology)
         names = self.docker.run(
-            ["ps", "-aq", "--filter", f"label={LABEL}/topology={topology}"]
+            ["ps", "-aq", *self._topology_filter(topology)]
         ).stdout.split()
         if names:
             self.docker.run(["rm", "-f", *names])
-        net = f"gwab-{topology}"
-        self.docker.run(["network", "disconnect", "-f", net, LOADGEN], check=False)
+        net = network(self.cfg, topology)
+        self.docker.run(
+            ["network", "disconnect", "-f", net, loadgen_name(self.cfg)], check=False
+        )
         self.docker.run(["network", "rm", net], check=False)
-        self.docker.run(["volume", "rm", "-f", f"gwab-{topology}-kv"], check=False)
+        kv = volume(self.cfg, topology)
+        rm = self.docker.run(["volume", "rm", "-f", kv], check=False)
+        if rm.returncode != 0 and self.docker.exists("volume", kv):
+            # `volume create` would reuse it, and its model cards from the
+            # last run would pass the readiness check before any worker is up.
+            raise KubeError(
+                f"cannot remove volume {kv} (is a container outside this run "
+                f"using it?): {rm.stderr.strip()}"
+            )
 
     def teardown_all(self) -> None:
         for topology in manifests.TOPOLOGIES:
             self.teardown_topology(topology)
-        self.docker.run(["rm", "-f", LOADGEN], check=False)
+        self.docker.run(["rm", "-f", loadgen_name(self.cfg)], check=False)
 
     def url(self, topology: str, side: str) -> str:
         if side == "frontend":
-            return f"http://{container(topology, 'frontend')}:{FRONTEND_PORT}"
-        return f"http://{container(topology, 'gateway')}:{GATEWAY_PORT}"
+            return f"http://{container(self.cfg, topology, 'frontend')}:{FRONTEND_PORT}"
+        return f"http://{container(self.cfg, topology, 'gateway')}:{GATEWAY_PORT}"

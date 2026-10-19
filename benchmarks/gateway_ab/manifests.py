@@ -30,6 +30,11 @@ SIDES = ("frontend", "gateway")
 TARGET_HEADER = "X-Dynamo-AB-Target"
 MODEL_HEADER = "X-Gateway-Model-Name"
 
+PART_OF = "app.kubernetes.io/part-of"
+# Every object also carries its run's --name-prefix, so teardown of one run
+# leaves another run's objects in the same namespace alone.
+INSTANCE = "app.kubernetes.io/instance"
+
 SIDECAR_NAME = "sidecar-frontend"
 LOADGEN_LABEL = "gateway-ab-loadgen"
 # Annotation holding a hash of the loadgen pod spec, so a changed image or
@@ -52,7 +57,7 @@ REAPER = (
 
 @dataclasses.dataclass
 class BenchConfig:
-    """Everything that shapes the deployments. Workload knobs live in run.py."""
+    """Everything that shapes the deployments. Workload knobs live in loadgen.py."""
 
     model: str = "Qwen/Qwen3-0.6B"
     dynamo_version: str = "1.5.1"
@@ -64,9 +69,8 @@ class BenchConfig:
     prefill_workers: int = 2
     decode_workers: int = 2
 
-    # Must match on both sides: the EPP reads DYN_KV_CACHE_BLOCK_SIZE while the
-    # Frontend learns the block size from the worker's model card. A mismatch
-    # changes prefix block hashes and silently degrades routing on one side.
+    # The mocker's KV block size. The Frontend and the Dynamo-mode EPP both read
+    # it from the worker's model card, so the two routers always agree.
     block_size: int = 16
     speedup_ratio: float = 1.0
     mocker_extra_args: tuple[str, ...] = ()
@@ -118,6 +122,11 @@ def loadgen_pod_name(cfg: BenchConfig) -> str:
     return f"{cfg.name_prefix}-loadgen"
 
 
+def labels(cfg: BenchConfig) -> dict[str, str]:
+    """Labels on every object of one run; teardown selects by them."""
+    return {PART_OF: "gateway-ab", INSTANCE: cfg.name_prefix}
+
+
 def request_headers(cfg: BenchConfig, topology: str) -> dict[str, str]:
     """Headers sent on every request, identical for A and B.
 
@@ -140,7 +149,7 @@ def build_dgd(cfg: BenchConfig, topology: str, side: str) -> dict[str, Any]:
         "metadata": {
             "name": dgd_name(cfg, topology, side),
             "labels": {
-                "app.kubernetes.io/part-of": "gateway-ab",
+                **labels(cfg),
                 "gateway-ab/topology": topology,
                 "gateway-ab/side": side,
             },
@@ -157,7 +166,7 @@ def build_httproute(cfg: BenchConfig, topology: str) -> dict[str, Any]:
         "kind": "HTTPRoute",
         "metadata": {
             "name": route_name(cfg, topology),
-            "labels": {"app.kubernetes.io/part-of": "gateway-ab"},
+            "labels": labels(cfg),
         },
         "spec": {
             "parentRefs": [
@@ -222,18 +231,17 @@ def build_loadgen_pod(cfg: BenchConfig) -> dict[str, Any]:
         "terminationGracePeriodSeconds": 5,
     }
     _add_pull_secret(cfg, spec)
-    spec_hash = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[
-        :16
-    ]
+    pod_labels = {**labels(cfg), "app": LOADGEN_LABEL}
+    # The labels are hashed too: a pod without them would escape teardown.
+    spec_hash = hashlib.sha256(
+        json.dumps({"spec": spec, "labels": pod_labels}, sort_keys=True).encode()
+    ).hexdigest()[:16]
     return {
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": {
             "name": loadgen_pod_name(cfg),
-            "labels": {
-                "app.kubernetes.io/part-of": "gateway-ab",
-                "app": LOADGEN_LABEL,
-            },
+            "labels": pod_labels,
             "annotations": {LOADGEN_SPEC_HASH: spec_hash},
         },
         "spec": spec,
@@ -260,13 +268,11 @@ def _router_component(cfg: BenchConfig, side: str) -> dict[str, Any]:
         }
         name, ctype = "Frontend", "frontend"
     else:
+        # In Dynamo runtime mode the EPP learns the model and the block size
+        # from the workers' model cards, as the Frontend does.
         container = {
             "name": "main",
             "image": cfg.frontend_image,
-            "env": [
-                {"name": "DYN_MODEL_NAME", "value": cfg.model},
-                {"name": "DYN_KV_CACHE_BLOCK_SIZE", "value": str(cfg.block_size)},
-            ],
             "resources": {"requests": {"cpu": cfg.router_cpu, "memory": "2Gi"}},
         }
         name, ctype = "Epp", "epp"

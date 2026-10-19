@@ -21,11 +21,16 @@ pytestmark = [
 class _RecordingDocker(local_backend.Docker):
     """Records every docker invocation; answers the few that return data."""
 
-    def __init__(self):
+    def __init__(self, fail=()):
         self.calls = []
+        # Docker subcommands that fail, as (args prefix, stderr).
+        self.fail = list(fail)
 
     def run(self, args, *, input=None, check=True, timeout=600):
         self.calls.append(list(args))
+        for prefix, stderr in self.fail:
+            if args[: len(prefix)] == prefix:
+                return subprocess.CompletedProcess(args, 1, "", stderr)
         out = ""
         if args[:2] == ["inspect", "--format"] and "IPAddress" in args[2]:
             out = "172.18.0.9\n"
@@ -39,10 +44,10 @@ class _RecordingDocker(local_backend.Docker):
         return subprocess.CompletedProcess(args, 0, out, "")
 
 
-def _backend(*extra):
+def _backend(*extra, docker=None):
     args = cli.build_parser().parse_args(["all", "--backend", "local", *extra])
     bench = cli.Bench(args)
-    docker = _RecordingDocker()
+    docker = docker or _RecordingDocker()
     bench.backend.docker = docker
     return bench.backend, docker
 
@@ -67,13 +72,13 @@ def _command(call, image):
 @pytest.mark.parametrize("topology", manifests.TOPOLOGIES)
 def test_both_sides_run_identical_workers(topology):
     backend, docker = _backend()
-    backend.deploy_topology(topology)
+    backend.deploy_topology(topology, "fp")
     runs = _runs(docker)
     cfg = backend.cfg
     for ctype, replicas, mode in manifests.worker_roles(cfg, topology):
         for i in range(replicas):
-            a = runs[f"gwab-{topology}-fe-{ctype}{i}"]
-            b = runs[f"gwab-{topology}-gw-{ctype}{i}"]
+            a = runs[f"gwab-ab-{topology}-fe-{ctype}{i}"]
+            b = runs[f"gwab-ab-{topology}-gw-{ctype}{i}"]
             assert _command(a, cfg.worker_image) == _command(b, cfg.worker_image)
             assert _command(a, cfg.worker_image)[3:] == manifests.mocker_args(cfg, mode)
             assert _env(a)["DYN_NAMESPACE"] == f"ab-{topology}-fe"
@@ -82,31 +87,39 @@ def test_both_sides_run_identical_workers(topology):
 
 def test_epp_points_at_the_direct_frontend_without_kubernetes():
     backend, docker = _backend("--epp-binary", "/tmp/epp")
-    backend.deploy_topology("agg")
+    backend.deploy_topology("agg", "fp")
     runs = _runs(docker)
-    epp = runs["gwab-agg-epp"]
+    epp = runs["gwab-ab-agg-epp"]
     env = _env(epp)
     assert env["DYN_EPP_STATIC_ENDPOINT"] == "172.18.0.9:8000"
     assert env["DYN_SECURE_SERVING"] == "false"
     assert env["DYN_NAMESPACE"] == "ab-agg-gw"
-    assert env["DYN_KV_CACHE_BLOCK_SIZE"] == str(backend.cfg.block_size)
+    # A Dynamo-mode EPP reads the model and block size from the model cards.
+    assert "DYN_KV_CACHE_BLOCK_SIZE" not in env and "DYN_MODEL_NAME" not in env
     assert "/tmp/epp:/epp-dev:ro" in epp and "/epp-dev" in epp
-    direct = runs["gwab-agg-direct"]
+    direct = runs["gwab-ab-agg-direct"]
     assert _command(direct, backend.cfg.frontend_image)[-2:] == [
         "--router-mode",
         "direct",
     ]
-    assert _env(runs["gwab-agg-frontend"])["DYN_ROUTER_MODE"] == "kv"
+    assert _env(runs["gwab-ab-agg-frontend"])["DYN_ROUTER_MODE"] == "kv"
+    for name, call in runs.items():
+        assert f"{local_backend.FINGERPRINT_LABEL}=fp" in call, name
 
 
 def test_deploy_starts_from_a_clean_slate():
     backend, docker = _backend()
-    backend.deploy_topology("disagg")
+    backend.deploy_topology("disagg", "fp")
     first_create = next(
         i for i, c in enumerate(docker.calls) if c[:2] == ["network", "create"]
     )
-    assert ["volume", "rm", "-f", "gwab-disagg-kv"] in docker.calls[:first_create]
-    assert ["network", "connect", "gwab-disagg", local_backend.LOADGEN] in docker.calls
+    assert ["volume", "rm", "-f", "gwab-ab-disagg-kv"] in docker.calls[:first_create]
+    assert [
+        "network",
+        "connect",
+        "gwab-ab-disagg",
+        local_backend.loadgen_name(backend.cfg),
+    ] in docker.calls
 
 
 def test_envoy_config_matches_what_the_epp_requires():
@@ -136,8 +149,8 @@ def test_envoy_config_matches_what_the_epp_requires():
 
 def test_urls_use_container_names():
     backend, _ = _backend()
-    assert backend.url("agg", "frontend") == "http://gwab-agg-frontend:8000"
-    assert backend.url("disagg", "gateway") == "http://gwab-disagg-gateway:8080"
+    assert backend.url("agg", "frontend") == "http://gwab-ab-agg-frontend:8000"
+    assert backend.url("disagg", "gateway") == "http://gwab-ab-disagg-gateway:8080"
 
 
 def test_waits_until_every_worker_registered(monkeypatch):
@@ -189,7 +202,7 @@ def test_exited_container_is_not_waited_out(monkeypatch):
 def test_every_container_gets_a_kubernetes_like_open_file_limit():
     backend, docker = _backend()
     backend.deploy_loadgen()
-    backend.deploy_topology("agg")
+    backend.deploy_topology("agg", "fp")
     for name, call in _runs(docker).items():
         assert "nofile=1048576:1048576" in call, name
 
@@ -205,7 +218,86 @@ def test_loadgen_recreated_when_its_spec_changes(monkeypatch):
 
     monkeypatch.setattr(docker, "run", run)
     backend.deploy_loadgen()
-    assert ["rm", "-f", local_backend.LOADGEN] in seen
+    assert ["rm", "-f", local_backend.loadgen_name(backend.cfg)] in seen
     created = next(a for a in seen if a[:2] == ["run", "-d"])
     assert any(a.startswith(f"{local_backend.LABEL}/spec=") for a in created)
     assert "/results:rw,mode=1777" in created
+
+
+def test_runs_with_different_prefixes_do_not_touch_each_other():
+    one, docker_one = _backend("--name-prefix", "u1")
+    two, _ = _backend("--name-prefix", "u2")
+    assert one.url("agg", "gateway") != two.url("agg", "gateway")
+    assert local_backend.loadgen_name(one.cfg) != local_backend.loadgen_name(two.cfg)
+    one.teardown_topology("agg")
+    filters = [c[c.index("--filter") + 1] for c in docker_one.calls if "--filter" in c]
+    assert filters == [f"label={local_backend.TOPOLOGY_LABEL}=u1/agg"]
+    assert all("u2" not in " ".join(c) for c in docker_one.calls)
+
+
+def test_teardown_refuses_to_keep_a_stale_discovery_store():
+    docker = _RecordingDocker(fail=[(["volume", "rm"], "volume is in use")])
+    backend, _ = _backend(docker=docker)
+    # The volume is still there afterwards (inspect succeeds), so its model
+    # cards would pass the readiness check of the next deployment.
+    with pytest.raises(cli.KubeError, match="cannot remove volume gwab-ab-agg-kv"):
+        backend.teardown_topology("agg")
+
+
+def test_preflight_reports_missing_docker(monkeypatch):
+    backend, docker = _backend()
+
+    def missing(args, **kwargs):
+        raise cli.KubeError("docker not found on PATH")
+
+    monkeypatch.setattr(docker, "run", missing)
+    assert backend.preflight() == ["docker not found on PATH"]
+
+
+def test_identity_tracks_the_epp_binary_by_content(tmp_path):
+    epp = tmp_path / "epp"
+    epp.write_bytes(b"build one")
+    backend, _ = _backend("--epp-binary", str(epp))
+    first = backend.deployment_identity()["epp_binary_sha256"]
+    epp.write_bytes(b"build two")  # rebuilt at the same path
+    backend_again, _ = _backend("--epp-binary", str(epp))
+    assert backend_again.deployment_identity()["epp_binary_sha256"] != first
+    images = backend.deployment_identity()["image_ids"]
+    assert set(images) == {
+        backend.cfg.frontend_image,
+        backend.cfg.worker_image,
+        local_backend.DEFAULT_ENVOY_IMAGE,
+    }
+
+
+def test_deployed_fingerprint_needs_every_container_to_agree(monkeypatch):
+    backend, docker = _backend()
+    for out, want in (("fp\nfp\n", "fp"), ("fp\nold\n", None), ("", None)):
+        monkeypatch.setattr(
+            docker,
+            "run",
+            lambda args, out=out, **kw: subprocess.CompletedProcess(args, 0, out, ""),
+        )
+        assert backend.deployed_fingerprint("agg") == want
+
+
+def _diagnose(monkeypatch, state, logs, topology="disagg"):
+    backend, docker = _backend()
+
+    def run(args, **kwargs):
+        out = state if args[0] == "inspect" else logs
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    monkeypatch.setattr(docker, "run", run)
+    return backend.diagnose(topology, "gateway")
+
+
+def test_diagnose_tells_a_static_capable_epp_from_an_old_one(monkeypatch):
+    static = "DYN_EPP_STATIC_ENDPOINT is set: skipping the Kubernetes pod reflector"
+    crashed = _diagnose(monkeypatch, "exited", static + "\npanicked at src/epp.rs")
+    assert "lacks DYN_EPP_STATIC_ENDPOINT" not in crashed
+    old = _diagnose(monkeypatch, "exited", "POD_NAMESPACE is not set")
+    assert "lacks DYN_EPP_STATIC_ENDPOINT" in old
+    waiting = _diagnose(monkeypatch, "running", static)
+    assert "has not discovered a prefill worker" in waiting
+    assert "predates" not in waiting

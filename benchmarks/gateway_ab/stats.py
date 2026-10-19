@@ -3,20 +3,25 @@
 
 """Statistics for the Frontend vs Gateway+EPP A/B benchmark. Standard library only.
 
-The unit of replication is a *round*: one aiperf run per side at one
-load point. Rounds differ by more than requests within a round do (warm caches,
-node noise, neighbours), so confidence intervals come from a two-level
-bootstrap — resample rounds, then requests within each chosen round. A plain
-per-request bootstrap would treat 1,000 requests from three runs as 1,000
-independent draws and report intervals far narrower than the run-to-run noise.
+The unit of replication is a *round*: one aiperf run per side at one load
+point. Within a round both sides replay the same seed back to back, so a round
+is a matched pair. Each round reduces to one value per side (its mean, a
+percentile, or a throughput), and B is compared with A through a paired
+t-interval on the per-round log ratio B/A.
+
+Rounds differ by more than requests within a round do: the seed's arrival
+pattern, cache warmth, and node noise move a whole round. Pairing cancels the
+part both sides share, and the t-interval keeps its 95% coverage with the three
+rounds a run usually has. A per-request interval would treat 1,000 requests from three
+runs as 1,000 independent draws and come out far too narrow; a bootstrap over
+three rounds is too narrow as well.
 """
 
 from __future__ import annotations
 
 import math
-import random
 import statistics
-from typing import Literal, Sequence, Union
+from typing import Any, Literal, Mapping, Sequence, Union
 
 # A summary statistic: a percentile in [0, 100], or the mean.
 Stat = Union[float, Literal["mean"]]
@@ -64,63 +69,93 @@ def pct_delta(a: float, b: float) -> float:
     return (b - a) / a * 100.0
 
 
-def hierarchical_bootstrap_delta(
-    rounds_a: Sequence[Sequence[float]],
-    rounds_b: Sequence[Sequence[float]],
-    q: float,
-    iterations: int = 1000,
-    confidence: float = 0.95,
-    seed: int = 0,
-) -> tuple[float, float]:
-    """Confidence interval for ``pct_delta(pXX(A), pXX(B))``."""
-    return hierarchical_bootstrap_deltas(
-        rounds_a, rounds_b, (q,), iterations, confidence, seed
-    )[q]
+def t_quantile(p: float, df: int) -> float:
+    """Inverse CDF of Student's t with ``df`` degrees of freedom, ``p`` in (0.5, 1)."""
+    if not 0.5 < p < 1.0 or df < 1:
+        raise ValueError(f"t_quantile needs 0.5 < p < 1 and df >= 1, got {p}, {df}")
+    lo, hi = 0.0, 1.0
+    while _t_cdf(hi, df) < p:
+        hi *= 2.0
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        if _t_cdf(mid, df) < p:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
 
 
-def hierarchical_bootstrap_deltas(
-    rounds_a: Sequence[Sequence[float]],
-    rounds_b: Sequence[Sequence[float]],
-    quantiles: Sequence[Stat],
-    iterations: int = 1000,
-    confidence: float = 0.95,
-    seed: int = 0,
-) -> dict[Stat, tuple[float, float]]:
-    """Confidence intervals for B's percent delta at each statistic.
+def _t_cdf(t: float, df: float) -> float:
+    """CDF of Student's t at ``t >= 0``."""
+    return 1.0 - 0.5 * _betai(df / 2.0, 0.5, df / (df + t * t))
 
-    A statistic is a percentile in [0, 100] or ``"mean"``.
 
-    Each iteration resamples rounds with replacement, then requests with
-    replacement within each chosen round, independently for A and B. Every
-    quantile is read from the same resample, so one pass serves them all.
+def _betai(a: float, b: float, x: float) -> float:
+    """Regularized incomplete beta function I_x(a, b)."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    front = math.exp(
+        math.lgamma(a + b)
+        - math.lgamma(a)
+        - math.lgamma(b)
+        + a * math.log(x)
+        + b * math.log1p(-x)
+    )
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction of the incomplete beta function, by modified Lentz."""
+    tiny = 1e-300
+    c = 1.0
+    d = 1.0 - (a + b) * x / (a + 1.0)
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 300):
+        m2 = 2 * m
+        for aa in (
+            m * (b - m) * x / ((a - 1.0 + m2) * (a + m2)),
+            -(a + m) * (a + b + m) * x / ((a + m2) * (a + 1.0 + m2)),
+        ):
+            d = 1.0 + aa * d
+            d = 1.0 / (d if abs(d) > tiny else tiny)
+            c = 1.0 + aa / c
+            c = c if abs(c) > tiny else tiny
+            h *= d * c
+        if abs(d * c - 1.0) < 1e-15:
+            break
+    return h
+
+
+def paired_change(
+    a: Sequence[float], b: Sequence[float], confidence: float = 0.95
+) -> tuple[float, tuple[float, float]]:
+    """B's percent change against A, from per-round values matched by index.
+
+    Works on the log ratio, so the change is multiplicative and an interval
+    never crosses -100%. Returns the point estimate and the paired
+    t-interval; with fewer than two pairs the interval is NaN.
     """
-    rounds_a = [r for r in rounds_a if r]
-    rounds_b = [r for r in rounds_b if r]
-    if not rounds_a or not rounds_b:
-        raise ValueError("both sides need at least one non-empty round")
-    rng = random.Random(seed)
-    deltas: dict[Stat, list[float]] = {q: [] for q in quantiles}
-    for _ in range(iterations):
-        a = sorted(_resample(rng, rounds_a))
-        b = sorted(_resample(rng, rounds_b))
-        for q in quantiles:
-            d = pct_delta(_stat(a, q), _stat(b, q))
-            if math.isfinite(d):
-                deltas[q].append(d)
-    tail = (1.0 - confidence) / 2.0 * 100.0
-    return {
-        q: (percentile(ds, tail), percentile(ds, 100.0 - tail))
-        if ds
-        else (math.nan, math.nan)
-        for q, ds in deltas.items()
-    }
+    if len(a) != len(b) or not a:
+        raise ValueError("need matched, non-empty per-round values")
+    logs = [math.log(y / x) for x, y in zip(a, b)]
+    mean = statistics.fmean(logs)
+    if len(logs) < 2:
+        return _pct(mean), (math.nan, math.nan)
+    half = (
+        t_quantile(0.5 + confidence / 2.0, len(logs) - 1)
+        * statistics.stdev(logs)
+        / math.sqrt(len(logs))
+    )
+    return _pct(mean), (_pct(mean - half), _pct(mean + half))
 
 
-def _resample(rng: random.Random, rounds: Sequence[Sequence[float]]) -> list[float]:
-    pooled: list[float] = []
-    for chosen in rng.choices(rounds, k=len(rounds)):
-        pooled.extend(rng.choices(chosen, k=len(chosen)))
-    return pooled
+def _pct(log_ratio: float) -> float:
+    return math.expm1(log_ratio) * 100.0
 
 
 def verdict(
@@ -155,67 +190,91 @@ def verdict(
     return "inconclusive"
 
 
+def _compare(
+    values_a: Sequence[float],
+    values_b: Sequence[float],
+    higher_is_better: bool,
+    min_effect_pct: float,
+) -> dict[str, Any] | None:
+    """One comparison row from per-round values matched by index.
+
+    A pair with a non-positive or non-finite value has no log ratio and is
+    left out. ``a`` and ``b`` are geometric means over the kept rounds, so
+    ``delta_pct`` is exactly B's change against A as the columns show it.
+    """
+    kept = [
+        (x, y)
+        for x, y in zip(values_a, values_b)
+        if x > 0 and y > 0 and math.isfinite(x) and math.isfinite(y)
+    ]
+    if not kept:
+        return None
+    a = [x for x, _ in kept]
+    b = [y for _, y in kept]
+    delta, ci = paired_change(a, b)
+    return {
+        "a": statistics.geometric_mean(a),
+        "b": statistics.geometric_mean(b),
+        "delta_pct": delta,
+        "ci_pct": ci,
+        "verdict": verdict(ci, min_effect_pct, higher_is_better),
+        "rounds": len(kept),
+    }
+
+
+def _matched(
+    a: Mapping[int, Any], b: Mapping[int, Any], present=lambda v: v is not None
+) -> list[int]:
+    return sorted(r for r in a if r in b and present(a[r]) and present(b[r]))
+
+
 def compare_latency(
-    rounds_a: Sequence[Sequence[float]],
-    rounds_b: Sequence[Sequence[float]],
+    rounds_a: Mapping[int, Sequence[float]],
+    rounds_b: Mapping[int, Sequence[float]],
     quantiles: Sequence[Stat] = ("mean", 50.0, 90.0, 99.0),
-    iterations: int = 1000,
     min_effect_pct: float = 2.0,
-    seed: int = 0,
-) -> dict[str, dict[str, float | str | tuple[float, float]]]:
+) -> dict[str, dict[str, Any]]:
     """Per-statistic comparison of one latency metric. Lower is better.
+
+    ``rounds_a`` and ``rounds_b`` map a round index to that round's
+    per-request samples. Rounds are matched by index; a round missing or
+    empty on either side is left out.
 
     The mean is reported next to the percentiles because latency under
     batching is often multi-modal, and a percentile that sits between two
     modes jumps from one to the other on small shifts in the mix.
     """
-    pooled_a = [v for r in rounds_a for v in r]
-    pooled_b = [v for r in rounds_b for v in r]
-    cis = hierarchical_bootstrap_deltas(
-        rounds_a, rounds_b, quantiles, iterations=iterations, seed=seed
-    )
-    out: dict[str, dict[str, float | str | tuple[float, float]]] = {}
+    pairs = _matched(rounds_a, rounds_b, present=bool)
+    sorted_a = {r: sorted(rounds_a[r]) for r in pairs}
+    sorted_b = {r: sorted(rounds_b[r]) for r in pairs}
+    out: dict[str, dict[str, Any]] = {}
     for q in quantiles:
-        a = _stat(sorted(pooled_a), q)
-        b = _stat(sorted(pooled_b), q)
-        ci = cis[q]
-        out[q if q == "mean" else f"p{q:g}"] = {
-            "a": a,
-            "b": b,
-            "delta_pct": pct_delta(a, b),
-            "ci_pct": ci,
-            "verdict": verdict(ci, min_effect_pct, higher_is_better=False),
-        }
+        row = _compare(
+            [_stat(sorted_a[r], q) for r in pairs],
+            [_stat(sorted_b[r], q) for r in pairs],
+            higher_is_better=False,
+            min_effect_pct=min_effect_pct,
+        )
+        if row is not None:
+            out[q if q == "mean" else f"p{q:g}"] = row
     return out
 
 
 def compare_scalar(
-    values_a: Sequence[float],
-    values_b: Sequence[float],
+    values_a: Mapping[int, float],
+    values_b: Mapping[int, float],
     higher_is_better: bool = True,
     min_effect_pct: float = 2.0,
-) -> dict[str, float | str | tuple[float, float]]:
-    """Compare a per-run scalar (throughput) across rounds.
-
-    Too few rounds for a bootstrap to mean much, so the interval is the
-    range of the pairwise deltas, which stays conservative at n=3.
-    """
-    if not values_a or not values_b:
-        raise ValueError("both sides need at least one value")
-    a = statistics.median(values_a)
-    b = statistics.median(values_b)
-    deltas = [pct_delta(x, y) for x in values_a for y in values_b]
-    finite = [d for d in deltas if math.isfinite(d)]
-    ci = (min(finite), max(finite)) if finite else (math.nan, math.nan)
-    return {
-        "a": a,
-        "b": b,
-        "delta_pct": pct_delta(a, b),
-        "ci_pct": ci,
-        "verdict": verdict(ci, min_effect_pct, higher_is_better),
-        "a_cv_pct": cv(values_a),
-        "b_cv_pct": cv(values_b),
-    }
+) -> dict[str, Any] | None:
+    """Compare a per-run scalar (throughput), with rounds matched by index."""
+    pairs = _matched(values_a, values_b)
+    va = [values_a[r] for r in pairs]
+    vb = [values_b[r] for r in pairs]
+    row = _compare(va, vb, higher_is_better, min_effect_pct)
+    if row is not None:
+        row["a_cv_pct"] = cv(va)
+        row["b_cv_pct"] = cv(vb)
+    return row
 
 
 def cv(values: Sequence[float]) -> float:

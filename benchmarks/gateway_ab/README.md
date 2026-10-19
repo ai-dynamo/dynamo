@@ -101,9 +101,11 @@ Frontend resolves the worker role from `worker_type`.
 The EPP fix ships with this harness: `deploy/inference-gateway/ext-proc/src/epp.rs` now resolves
 the role through `ModelDeploymentCard::effective_worker_type()`. Until a release includes it, run
 the disaggregated comparison with a frontend image whose `/epp` binary is built from a branch that
-has the fix. The Python Frontend in that image is unchanged, so both sides still run the same
-Frontend code. One way to build it, on a host whose glibc matches the image (Ubuntu 24.04 for
-1.5.x):
+has the fix. Only `/epp` changes, so the HTTP and tokenizer code on both sides stays the same. The
+KV router does not: B's comes from the branch build and A's from the 1.5.1 Frontend, so any router
+change between the two lands in the deltas. For an architecture-only comparison, build the whole
+frontend image from one commit. One way to swap only `/epp`, on a host whose glibc matches the
+image (Ubuntu 24.04 for 1.5.x):
 
 ```bash
 cargo build --release -p dynamo-ext-proc
@@ -156,6 +158,15 @@ The binary is mounted into the `dynamo-frontend` image, so everything else stays
 images. The run pulls `dynamo-frontend`, `dynamo-planner`, and `envoyproxy/envoy` on first use, and
 caches the tokenizer in the `gwab-hf` Docker volume.
 
+> [!WARNING]
+> With `--epp-binary`, B's KV router is the binary's while A's is the one in `--frontend-image`.
+> Unless that image is built from the same commit, the deltas include every router change between
+> the two builds, not only the cost of the routing path. Preflight warns about this. Pass a
+> frontend image built from the binary's commit to measure the architecture alone.
+
+Containers, networks, and volumes are named and labeled after `--name-prefix`, so runs with
+different prefixes can share a Docker host. Two runs with the same prefix tear each other down.
+
 Compared with the Kubernetes backend:
 
 - **Not exercised:** the pod reflector, the operator, InferencePool, HTTPRoute, and agentgateway.
@@ -175,11 +186,16 @@ $B render                       # write the manifests to benchmarks/results/gate
 $B deploy                       # loadgen pod + both sides of every topology, smoke-tested
 $B --results out/run1 run       # measure; re-running the same command resumes
 $B --results out/run1 report    # recompute summary.json and report.md
-$B teardown                     # delete everything labeled app.kubernetes.io/part-of=gateway-ab
+$B teardown                     # delete this prefix's objects (app.kubernetes.io/instance=<prefix>)
 ```
 
 `all` deploys one topology at a time and tears each down before the next, so agg and disagg never
 compete for CPU. With `--keep`, it leaves everything running.
+
+`deploy` stamps each deployment with a fingerprint of the flags that shape it: images, worker
+counts, mocker arguments, and, locally, the EPP binary's content. `run` refuses to measure a
+deployment whose fingerprint differs from its own flags, so results are never labeled with flags
+other than the ones deployed. Give each step the same flags, as `$B` does above.
 
 `deploy` and `all` always recreate a topology's deployments rather than updating them in place.
 Every run then starts with cold caches and router state. Recreating also avoids an EPP failure
@@ -188,31 +204,36 @@ bind to the outgoing workers' generation and keep returning `503 no endpoints av
 they drain.
 
 Re-running `run` with the same `--results` resumes it. Only valid measurements count as done.
-Raising `--rounds` adds rounds. Any other workload or deployment change is refused, because it
-would mix incomparable rounds into one comparison.
+Raising `--rounds` adds rounds. Any other change is refused, because it would mix incomparable
+rounds into one comparison: the workload, the deployment settings, the EPP binary's content, an
+image id (local backend), the cluster context, namespace, or `--gateway-url`, and the harness
+version. Kubernetes image tags are compared by name, so do not re-push a tag mid-run.
 
 ## What makes the comparison fair
 
 - **Identical workers.** One function builds both DynamoGraphDeployments. Mocker arguments, worker
   counts, images, and resource requests match, and B adds only the direct-mode sidecar and the EPP.
   A unit test enforces this.
-- **Same router, same image.** The Frontend and the EPP both run the Dynamo KV router from the same
-  `dynamo-frontend` image, with equal CPU requests. The EPP's `DYN_KV_CACHE_BLOCK_SIZE` is set to the
-  mocker's `--block-size`. A mismatch would change prefix hashes and degrade B's routing without any
-  error.
+- **Same router, when built from one commit.** On Kubernetes the Frontend and the EPP both run the
+  Dynamo KV router from the same `dynamo-frontend` image, with equal CPU requests. Both read the KV
+  block size from the workers' model cards, so their prefix hashes agree. An EPP taken from another
+  build (`--epp-binary`, or an image with a swapped `/epp`) runs that build's router, and the
+  deltas then include the difference between the two builds.
 - **Same client.** One loadgen pod runs aiperf against both sides with the same arguments. Only the
   URL differs, and a unit test enforces that too. Both sides receive the routing headers. A ignores
   them.
-- **Same requests.** Each round uses one seed for both sides, so A and B see the same prompts.
-  Prompts share prefixes (`--prefix-length`, `--num-prefixes`), which gives the KV router something
-  to route on. With unique random prompts, a KV router reduces to a load balancer and most of what
-  the EPP does goes unmeasured.
+- **Same requests.** Each round and load point has its own seed, the same for both sides, so A and
+  B see the same prompts. Seeds differ across load points because aiperf draws its prompts in order
+  from the seed; with a shared seed the second load point would replay the first one's prompts and
+  find them cached. Prompts share prefixes (`--prefix-length`, `--num-prefixes`), which gives the KV
+  router something to route on. With unique random prompts, a KV router reduces to a load balancer
+  and most of what the EPP does goes unmeasured.
 - **Drift cancellation.** Within a round, the side that runs first alternates by load point, and it
   flips each round (ABBA). Slow drift such as cache warmth, noisy neighbours, or node temperature
   cannot land on only one side.
 - **Primed before measuring.** Before round 0, each side gets one unrecorded run at the highest
-  load point. Its seed is disjoint from the measured rounds, so it warms connections and code
-  paths but not the prefixes those rounds use. Without it, the first measured point carries a
+  load point. Its seed is far from every measured one, so it warms connections and code paths
+  but not the prefixes those rounds use. Without it, the first measured point carries a
   cold-start cost, which lands on whichever side runs first. Pass `--no-prime` to skip it.
 - **No CPU limits.** Containers set CPU requests but no limits, so CFS throttling cannot add latency
   spikes that would swamp the difference being measured.
@@ -256,13 +277,18 @@ latency measures the run length rather than the routing path.
 interval, and a verdict. Negative latency Δ means B is faster. Latency rows cover the mean, p50,
 p90, and p99. When the distribution is multi-modal, trust the mean more than the median.
 
-Latency intervals come from a two-level bootstrap. It resamples rounds first, then requests within
-each chosen round. Run-to-run variance is usually larger than request-to-request variance, and a
-per-request bootstrap would hide it. That is why the default is three rounds and why one round
-cannot produce a trustworthy interval. Throughput is a single number per run, so its interval is the
-range of all pairwise round deltas. Under open-loop load below saturation, each side delivers the
-rate it is offered, so throughput rows carry `n/a (open loop)` instead of a verdict. Use the
-closed-loop mode to compare capacity.
+The round is the unit of measurement. Each round reduces to one value per side, such as that run's
+TTFT p90 or its throughput. A and B are the geometric means of those values over the rounds
+measured validly on both sides, and Δ is B against A as those columns show it. The interval is a
+paired t-interval over the per-round ratios B/A: both sides replay the same seed in a round, back
+to back, so pairing cancels the round-to-round variation they share (the seed's arrival pattern,
+drift on the node), and the t distribution keeps the interval at 95% with as few as three rounds.
+Requests within a round are not independent replications, and treating them as such, or
+bootstrapping over three rounds, gives intervals that are too narrow. More rounds narrow the
+interval; three gives verdicts on clear differences, and five or more resolves `same` more often.
+
+Under open-loop load below saturation, each side delivers the rate it is offered, so throughput
+rows carry `n/a (open loop)` instead of a verdict. Use the closed-loop mode to compare capacity.
 
 Verdicts read the interval against `--min-effect` (default 2%):
 
@@ -272,7 +298,7 @@ Verdicts read the interval against `--min-effect` (default 2%):
 | `B slightly better` / `B slightly worse` | Excludes zero but reaches inside ±min-effect. The difference is real but may be negligible. |
 | `same` | Includes zero and lies within ±min-effect |
 | `inconclusive` | Includes zero but reaches past ±min-effect. The data cannot separate a negligible difference from a large one. Add rounds or use a quieter cluster. |
-| `n/a (1 round)` | Fewer than two valid rounds on a side. With no between-round variance, the interval is too narrow to support a verdict. |
+| `n/a (too few rounds)` | Fewer than two rounds measured validly on both sides. One pair has no spread to estimate an interval from. |
 | `n/a (open loop)` | Throughput rows under open-loop load, where each side delivers the rate it is offered |
 
 Under each table, the coefficient of variation of the per-round TTFT mean shows the A/A noise floor
@@ -294,15 +320,17 @@ python3 -m benchmarks.gateway_ab --context perf-cluster --namespace gateway-ab \
 ```
 
 `--max-ttft-regression` makes the command exit `3` when the lower bound of the TTFT mean, p50, or
-p90 interval exceeds that percentage at any load point, so noise alone cannot trip it. p99 over a
-few rounds is too noisy to gate on.
+p90 interval exceeds that percentage at any load point, so a delta within the run-to-run noise does
+not trip it. p99 over a few rounds is too noisy to gate on. A gated statistic without a verdict,
+for example with one round, fails the run with exit `1` rather than passing unchecked.
 
 | Exit | Meaning |
 |---|---|
 | `0` | Every point compared, and no regression gate tripped |
-| `1` | Incomplete: a point has no comparison, a run was excluded as invalid, or a step failed. The report still covers everything that was measured. |
-| `2` | Preflight failed |
+| `1` | Incomplete: a point has no comparison, a run was excluded as invalid, the regression gate could not be evaluated, or a step failed. The report still covers everything that was measured. |
+| `2` | Nothing ran: preflight failed, or the arguments were invalid |
 | `3` | The TTFT regression gate tripped |
+| `143` | Stopped by SIGTERM, after tearing down what it deployed |
 
 Keep every run directory under one parent and tabulate B's TTFT Δ across them. This needs no
 cluster access:
@@ -313,10 +341,12 @@ python3 -m benchmarks.gateway_ab trend --history /srv/gateway-ab --quantile p90
 ```
 
 The threshold gate catches a sudden jump. The trend table catches a slow drift that stays under the
-threshold in every individual run.
+threshold in every individual run. A run measured with another backend, workload, or worker shape
+than the newest one is marked `†`, since its deltas are not comparable with the rest of the column.
 
 To test a build, pass its images. The EPP binary ships inside the frontend image, so one flag swaps
-it on both sides, and the comparison stays at a single commit:
+it on both sides, and the comparison stays at a single commit as long as that image is built from
+one:
 
 ```bash
 python3 -m benchmarks.gateway_ab --context perf-cluster \
@@ -331,21 +361,22 @@ To compare two builds, run each and compare their reports. Run them back to back
 | Flag | Default | Notes |
 |---|---|---|
 | `--backend` | `kubernetes` | `local` runs everything in Docker on this host. |
-| `--epp-binary` | — | Local backend: an EPP binary to mount in place of the image's `/epp`. |
+| `--epp-binary` | — | Local backend: an EPP binary to mount in place of the image's `/epp`. See the warning in [Running without Kubernetes](#running-without-kubernetes). |
 | `--envoy-image` | `envoyproxy/envoy:v1.35.3` | Local backend: the gateway. |
 | `--topologies` | `agg,disagg` | |
 | `--request-rate` | `6,14` | Open-loop Poisson load points in requests/s, comma-separated. One measurement per value per round. |
 | `--concurrency` | — | Closed-loop load points instead, for example `8,32`. Mutually exclusive with `--request-rate`. |
-| `--rounds` | `3` | Use at least 3. Intervals need more than one round. |
-| `--isl` / `--osl` | `1024` / `128` | Synthetic input and output tokens per request. |
+| `--rounds` | `3` | Use at least 3. Intervals need two rounds, and narrow as rounds are added. |
+| `--isl` / `--osl` | `1024` / `128` | Synthetic input and output tokens per request. The input count includes the shared prefix. |
 | `--prefix-length` / `--num-prefixes` | `512` / `8` | Shared-prefix structure. Set `--prefix-length 0` for unique prompts. |
 | `--requests` / `--warmup-requests` | about 40 s / 5 s of arrivals (min 200 / 10); closed loop `max(200, 10×c)` / `max(10, 2×c)` | Per point. |
 | `--agg-workers` | `2` | |
 | `--prefill-workers` / `--decode-workers` | `2` / `2` | |
-| `--block-size` | `16` | Applied to the mocker and the EPP. |
+| `--block-size` | `16` | The mocker's KV block size. Both routers read it from the model cards. |
 | `--speedup-ratio` | `1.0` | Mocker time compression. Raise it to stress the routing tier rather than the simulated engine. |
 | `--mocker-arg` | — | Extra mocker flag, repeatable, for example `--mocker-arg=--num-gpu-blocks-override --mocker-arg=4096`. |
-| `--router-cpu` / `--worker-cpu` / `--sidecar-cpu` / `--loadgen-cpu` | `2` / `1` / `1` / `4` | CPU requests. |
+| `--router-cpu` / `--worker-cpu` / `--sidecar-cpu` / `--loadgen-cpu` | `2` / `1` / `1` / `4` | Kubernetes backend: CPU requests. |
+| `--name-prefix` | `ab` | Names this run's deployments, containers, and labels. Give concurrent runs distinct prefixes. |
 | `--dynamo-version` | `1.5.1` | Sets the default `dynamo-frontend` and `dynamo-planner` image tags. |
 | `--min-effect` | `2.0` | Percent below which a Δ is reported as `same`. |
 
@@ -375,7 +406,8 @@ To compare two builds, run each and compare their reports. Run them back to back
 | Smoke to `gateway` fails with 500 or 503 | The EPP is not ready or found no workers. Check `kubectl logs -l nvidia.com/dynamo-component-type=epp`. |
 | DGD never becomes Ready | Usually an image pull or Hugging Face download failure. Check `kubectl describe pod` and the worker logs, and pass `--hf-secret` when rate-limited. |
 | Local: an EPP container exits with `Too many open files` | File discovery ran out of inotify instances, which are capped per user across the host. Raise them with `sudo sysctl fs.inotify.max_user_instances=1024`. Preflight warns when the limit is below 512. |
-| Local: the EPP exits mentioning `POD_NAMESPACE` or Kubernetes | The EPP lacks `DYN_EPP_STATIC_ENDPOINT`. Pass `--epp-binary` with a build from this branch. |
+| Local: the EPP exits mentioning `POD_NAMESPACE` | The EPP lacks `DYN_EPP_STATIC_ENDPOINT`: an EPP that has it logs `DYN_EPP_STATIC_ENDPOINT is set` at startup. Pass `--epp-binary` with a build from this branch. |
+| `run`: deployed with other settings than these flags | Pass the flags `deploy` used, or run `deploy` again with the new ones. |
 | Excluded runs with errors | Look in the loadgen pod: `kubectl exec <prefix>-loadgen -- cat /results/<topology>/<side>/<load>/r<R>.log` (`<load>` is `c8`, `rps14`, and so on). |
 
 ## Files
@@ -388,5 +420,5 @@ To compare two builds, run each and compare their reports. Run them back to back
 | `local_backend.py` | Docker backend: containers, Envoy config, EPP with a static endpoint. |
 | `manifests.py` | DynamoGraphDeployment, HTTPRoute, and loadgen manifests for both sides. |
 | `loadgen.py` | aiperf command and in-pod result extraction. |
-| `stats.py` | Percentiles, hierarchical bootstrap, verdicts. Standard library only. |
+| `stats.py` | Percentiles, paired t-intervals, verdicts. Standard library only. |
 | `report.py` | `summary.json` and `report.md`. |

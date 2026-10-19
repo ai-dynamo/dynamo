@@ -21,7 +21,8 @@ from .loadgen import LoadGen
 
 log = logging.getLogger("gateway_ab")
 
-PART_OF = "app.kubernetes.io/part-of=gateway-ab"
+# Stamped on both DGDs at deploy time; `run` refuses a mismatch.
+FINGERPRINT = "gateway-ab/fingerprint"
 REQUIRED_CRDS = (
     "dynamographdeployments.nvidia.com",
     "inferencepools.inference.networking.k8s.io",
@@ -31,6 +32,7 @@ REQUIRED_CRDS = (
 
 class K8sBackend:
     name = "kubernetes"
+    setup_hint = "Install prerequisites with benchmarks/gateway_ab/setup_cluster.sh"
 
     def __init__(self, args: argparse.Namespace, cfg: manifests.BenchConfig) -> None:
         self.args = args
@@ -42,7 +44,12 @@ class K8sBackend:
         return f"context {self.kube.context}, namespace {self.kube.namespace}"
 
     def environment(self) -> dict[str, Any]:
-        nodes = self.kube.get_json(["nodes"], namespaced=False) or {"items": []}
+        try:
+            nodes = self.kube.get_json(["nodes"], namespaced=False) or {"items": []}
+        except KubeError:
+            # Listing nodes needs cluster-scoped RBAC that a namespace user
+            # may lack; the node list is informational only.
+            nodes = {"items": []}
         return {
             "backend": self.name,
             "context": self.kube.context,
@@ -57,6 +64,18 @@ class K8sBackend:
             ],
         }
 
+    def deployment_identity(self) -> dict[str, Any]:
+        """What deployments are built from beyond BenchConfig: nothing here."""
+        return {}
+
+    def target_identity(self) -> dict[str, Any]:
+        """Where a run measures; resuming elsewhere would mix two clusters."""
+        return {
+            "context": self.kube.context,
+            "namespace": self.kube.namespace,
+            "gateway_url": self.args.gateway_url,
+        }
+
     # -- preflight ---------------------------------------------------------
 
     def preflight(self) -> list[str]:
@@ -67,29 +86,34 @@ class K8sBackend:
             )
         except (KubeError, subprocess.TimeoutExpired) as e:
             return [f"cannot reach namespace {self.kube.namespace!r}: {e}"]
-        for crd in REQUIRED_CRDS:
-            if not self.kube.exists(["crd", crd], namespaced=False):
-                problems.append(f"CRD {crd} is not installed")
-        gw = self.kube.get_json(
-            ["-n", self.cfg.gateway_namespace, "gateway", self.cfg.gateway_name],
-            namespaced=False,
-        )
-        if gw is None:
-            problems.append(
-                f"Gateway {self.cfg.gateway_namespace}/{self.cfg.gateway_name} not found"
+        try:
+            for crd in REQUIRED_CRDS:
+                if not self.kube.exists(["crd", crd], namespaced=False):
+                    problems.append(f"CRD {crd} is not installed")
+            gw = self.kube.get_json(
+                ["-n", self.cfg.gateway_namespace, "gateway", self.cfg.gateway_name],
+                namespaced=False,
             )
-        elif not _condition_true(gw, "Programmed"):
-            problems.append(f"Gateway {self.cfg.gateway_name} is not Programmed")
-        # Name the flag, not its value: the value is only a Secret's name, but
-        # logging it trips code scanning's clear-text-secret check.
-        for flag, secret in (
-            ("--hf-secret", self.cfg.hf_secret),
-            ("--image-pull-secret", self.cfg.image_pull_secret),
-        ):
-            if secret and not self.kube.exists(["secret", secret]):
+            if gw is None:
                 problems.append(
-                    f"the Secret named by {flag} was not found in {self.kube.namespace}"
+                    f"Gateway {self.cfg.gateway_namespace}/{self.cfg.gateway_name} "
+                    "not found"
                 )
+            elif not _condition_true(gw, "Programmed"):
+                problems.append(f"Gateway {self.cfg.gateway_name} is not Programmed")
+            # Name the flag, not its value: the value is only a Secret's name,
+            # but logging it trips code scanning's clear-text-secret check.
+            for flag, secret in (
+                ("--hf-secret", self.cfg.hf_secret),
+                ("--image-pull-secret", self.cfg.image_pull_secret),
+            ):
+                if secret and not self.kube.exists(["secret", secret]):
+                    problems.append(
+                        f"the Secret named by {flag} was not found in "
+                        f"{self.kube.namespace}"
+                    )
+        except (KubeError, subprocess.TimeoutExpired) as e:
+            problems.append(f"cannot check the cluster: {e}")
         return problems
 
     # -- deploy ------------------------------------------------------------
@@ -119,7 +143,7 @@ class K8sBackend:
             self.kube.apply([want])
         self.kube.wait(f"pod/{pod}", "Ready", 600)
 
-    def deploy_topology(self, topology: str) -> None:
+    def deploy_topology(self, topology: str, fingerprint: str) -> None:
         names = [manifests.dgd_name(self.cfg, topology, s) for s in manifests.SIDES]
         if any(self.kube.exists(["dynamographdeployment", n]) for n in names):
             # Always start from fresh deployments. An in-place update that
@@ -131,13 +155,10 @@ class K8sBackend:
             self.teardown_topology(topology)
             self._wait_pods_gone(names)
         log.info("Deploying %s (frontend and gateway sides)", topology)
-        self.kube.apply(
-            [
-                manifests.build_dgd(self.cfg, topology, "frontend"),
-                manifests.build_dgd(self.cfg, topology, "gateway"),
-                manifests.build_httproute(self.cfg, topology),
-            ]
-        )
+        dgds = [manifests.build_dgd(self.cfg, topology, s) for s in manifests.SIDES]
+        for dgd in dgds:
+            dgd["metadata"]["annotations"] = {FINGERPRINT: fingerprint}
+        self.kube.apply([*dgds, manifests.build_httproute(self.cfg, topology)])
         for side in manifests.SIDES:
             name = manifests.dgd_name(self.cfg, topology, side)
             log.info("Waiting for DynamoGraphDeployment %s to settle", name)
@@ -147,6 +168,18 @@ class K8sBackend:
                 delay_s=5,
                 what=f"DynamoGraphDeployment {name} to settle",
             )
+
+    def deployed_fingerprint(self, topology: str) -> str | None:
+        """The fingerprint both of a topology's DGDs carry, or None."""
+        prints = set()
+        for side in manifests.SIDES:
+            dgd = self.kube.get_json(
+                ["dynamographdeployment", manifests.dgd_name(self.cfg, topology, side)]
+            )
+            if dgd is None:
+                return None
+            prints.add(dgd["metadata"].get("annotations", {}).get(FINGERPRINT))
+        return prints.pop() if len(prints) == 1 else None
 
     def _wait_pods_gone(self, names: list[str]) -> None:
         def check() -> None:
@@ -252,7 +285,7 @@ class K8sBackend:
     def teardown_all(self) -> None:
         self.kube.delete_by_label(
             "dynamographdeployments.nvidia.com,httproutes.gateway.networking.k8s.io,pods",
-            PART_OF,
+            ",".join(f"{k}={v}" for k, v in manifests.labels(self.cfg).items()),
         )
 
     def url(self, topology: str, side: str) -> str:

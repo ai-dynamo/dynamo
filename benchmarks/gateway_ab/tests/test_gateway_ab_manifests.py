@@ -62,15 +62,28 @@ def test_router_tiers_use_kv_routing_and_same_image(topology):
     assert fe["resources"] == epp["resources"]
 
 
-def test_epp_block_size_matches_mocker():
+def test_block_size_reaches_the_mocker_and_the_epp_reads_the_card():
     cfg = m.BenchConfig(block_size=64)
-    dgd = m.build_dgd(cfg, "disagg", "gateway")
-    comps = _components(dgd)
-    env = {e["name"]: e["value"] for e in _main(comps["Epp"])["env"]}
-    assert env["DYN_KV_CACHE_BLOCK_SIZE"] == "64"
+    comps = _components(m.build_dgd(cfg, "disagg", "gateway"))
+    # Only the standalone EPP reads DYN_KV_CACHE_BLOCK_SIZE; in Dynamo mode it
+    # takes the block size from the workers' model cards, as the Frontend does.
+    assert "env" not in _main(comps["Epp"])
     for name in ("prefill", "decode"):
         args = _main(comps[name])["args"]
         assert args[args.index("--block-size") + 1] == "64"
+
+
+def test_every_object_carries_its_run_prefix():
+    cfg = m.BenchConfig(name_prefix="u1")
+    for obj in m.build_all(cfg, m.TOPOLOGIES):
+        assert obj["metadata"]["labels"][m.INSTANCE] == "u1", obj["kind"]
+    # A loadgen from another run, or one built before the labels, is replaced.
+    other = m.build_loadgen_pod(m.BenchConfig(name_prefix="u2"))
+    mine = m.build_loadgen_pod(cfg)
+    assert (
+        other["metadata"]["annotations"][m.LOADGEN_SPEC_HASH]
+        != mine["metadata"]["annotations"][m.LOADGEN_SPEC_HASH]
+    )
 
 
 def test_disagg_modes():

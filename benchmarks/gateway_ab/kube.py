@@ -23,6 +23,16 @@ class KubeError(RuntimeError):
     pass
 
 
+def _absent(stderr: str) -> bool:
+    """Whether a failed ``kubectl get`` means the object or its kind is absent.
+
+    Anything else (API timeouts, throttling, RBAC) is an error, not absence:
+    reading it as "not found" would skip a forced recreate or end a wait for
+    pods to terminate while they are still there.
+    """
+    return "(NotFound)" in stderr or "doesn't have a resource type" in stderr
+
+
 class Kube:
     def __init__(self, context: str | None, namespace: str) -> None:
         self._context = context
@@ -74,18 +84,18 @@ class Kube:
     def get_json(
         self, args: Sequence[str], *, namespaced: bool = True
     ) -> dict[str, Any] | None:
+        """The object as JSON, or None when it does not exist."""
         proc = self.kubectl(
             ["get", *args, "-o", "json"], namespaced=namespaced, check=False
         )
         if proc.returncode != 0:
-            return None
+            if _absent(proc.stderr):
+                return None
+            raise KubeError(f"kubectl get {' '.join(args)}: {proc.stderr.strip()}")
         return json.loads(proc.stdout)
 
     def exists(self, args: Sequence[str], *, namespaced: bool = True) -> bool:
-        return (
-            self.kubectl(["get", *args], namespaced=namespaced, check=False).returncode
-            == 0
-        )
+        return self.get_json(args, namespaced=namespaced) is not None
 
     def wait(self, resource: str, condition: str, timeout_s: int) -> None:
         self.kubectl(

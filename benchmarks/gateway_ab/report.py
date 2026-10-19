@@ -23,7 +23,7 @@ from .loadgen import LoadPoint
 
 SIDE_A = "frontend"
 SIDE_B = "gateway"
-# Fewer valid rounds per side than this and no verdict is given.
+# Fewer rounds measured validly on both sides than this and no verdict is given.
 MIN_ROUNDS = 2
 GATED_STATS = ("mean", "p50", "p90")
 
@@ -41,15 +41,15 @@ def load_runs(
 
 
 def load_failures(results: pathlib.Path) -> list[tuple[str, LoadPoint, str, int]]:
-    """Measurements that failed outright: an ``.error`` marker, no valid run."""
+    """Measurements that failed outright: an ``.error`` marker and no run file.
+
+    A marker next to a run file is already covered: a valid run supersedes
+    it, and an invalid one is listed with its errors under excluded runs.
+    """
     out = []
     for marker in sorted((results / "runs").glob("*/*/*/r*.error")):
-        run_file = marker.with_suffix(".json")
-        try:
-            if is_valid(json.loads(run_file.read_text())):
-                continue
-        except (OSError, ValueError):
-            pass
+        if marker.with_suffix(".json").exists():
+            continue
         topology, side, label = marker.parts[-4], marker.parts[-3], marker.parts[-2]
         out.append((topology, LoadPoint.parse(label), side, int(marker.stem[1:])))
     return out
@@ -65,11 +65,7 @@ def is_valid(run: dict[str, Any]) -> bool:
     return bool(run.get("samples", {}).get("time_to_first_token"))
 
 
-def build_summary(
-    results: pathlib.Path,
-    min_effect_pct: float = 2.0,
-    bootstrap_iterations: int = 1000,
-) -> dict[str, Any]:
+def build_summary(results: pathlib.Path, min_effect_pct: float = 2.0) -> dict[str, Any]:
     runs = load_runs(results)
     failures = load_failures(results)
     meta_path = results / "meta.json"
@@ -99,11 +95,14 @@ def build_summary(
                     )
             sides[side] = [r for r in all_runs if is_valid(r)]
         a_runs, b_runs = sides[SIDE_A], sides[SIDE_B]
+        a_by_round = {r["round"]: r for r in a_runs}
+        b_by_round = {r["round"]: r for r in b_runs}
+        paired = sorted(set(a_by_round) & set(b_by_round))
         point: dict[str, Any] = {
             "topology": topology,
             "load": load.label,
             "load_desc": load.describe(),
-            "rounds": {"a": len(a_runs), "b": len(b_runs)},
+            "rounds": {"a": len(a_runs), "b": len(b_runs), "paired": len(paired)},
             "ttft_round_cv_pct": {
                 "a": _round_mean_cv(a_runs),
                 "b": _round_mean_cv(b_runs),
@@ -111,37 +110,33 @@ def build_summary(
             "latency": {},
             "throughput": {},
         }
-        if a_runs and b_runs:
-            for metric in stats.LATENCY_METRICS:
-                rounds_a = [r["samples"].get(metric, []) for r in a_runs]
-                rounds_b = [r["samples"].get(metric, []) for r in b_runs]
-                if any(rounds_a) and any(rounds_b):
-                    point["latency"][metric] = stats.compare_latency(
-                        rounds_a,
-                        rounds_b,
-                        iterations=bootstrap_iterations,
-                        min_effect_pct=min_effect_pct,
-                    )
-            for metric in stats.THROUGHPUT_METRICS:
-                va = [r[metric] for r in a_runs if r.get(metric) is not None]
-                vb = [r[metric] for r in b_runs if r.get(metric) is not None]
-                if va and vb:
-                    row = stats.compare_scalar(
-                        va, vb, higher_is_better=True, min_effect_pct=min_effect_pct
-                    )
-                    if load.kind == "rps":
-                        # Below saturation an open-loop run delivers what it
-                        # offers, so throughput cannot tell the sides apart.
-                        row["verdict"] = "n/a (open loop)"
-                    point["throughput"][metric] = row
-            if min(len(a_runs), len(b_runs)) < MIN_ROUNDS:
-                # One round has no between-round variance to resample, so its
-                # intervals are far too narrow to support a verdict.
-                for rows in point["latency"].values():
-                    for row in rows.values():
-                        row["verdict"] = "n/a (1 round)"
-                for row in point["throughput"].values():
-                    row["verdict"] = "n/a (1 round)"
+        # Rounds pair up by index: both sides replayed the same seed in them.
+        for metric in stats.LATENCY_METRICS:
+            rows = stats.compare_latency(
+                {r: a_by_round[r]["samples"].get(metric, []) for r in paired},
+                {r: b_by_round[r]["samples"].get(metric, []) for r in paired},
+                min_effect_pct=min_effect_pct,
+            )
+            if rows:
+                point["latency"][metric] = rows
+        for metric in stats.THROUGHPUT_METRICS:
+            row = stats.compare_scalar(
+                {r: a_by_round[r].get(metric) for r in paired},
+                {r: b_by_round[r].get(metric) for r in paired},
+                higher_is_better=True,
+                min_effect_pct=min_effect_pct,
+            )
+            if row is None:
+                continue
+            if load.kind == "rps":
+                # Below saturation an open-loop run delivers what it offers,
+                # so throughput cannot tell the sides apart.
+                row["verdict"] = "n/a (open loop)"
+            point["throughput"][metric] = row
+        for row in _rows(point):
+            if row["rounds"] < MIN_ROUNDS:
+                # One pair has no spread to estimate an interval from.
+                row["verdict"] = "n/a (too few rounds)"
         points.append(point)
     return {
         "meta": meta,
@@ -153,6 +148,23 @@ def build_summary(
             for t, lp, side, rnd in failures
         ],
     }
+
+
+def _rows(point: dict[str, Any]) -> list[dict[str, Any]]:
+    return [row for rows in point["latency"].values() for row in rows.values()] + list(
+        point["throughput"].values()
+    )
+
+
+def json_safe(value: Any) -> Any:
+    """``value`` with NaN and infinities replaced by None, for strict JSON."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return value
 
 
 def _round_mean_cv(runs: list[dict[str, Any]]) -> float:
@@ -169,7 +181,8 @@ def incomplete(summary: dict[str, Any]) -> list[str]:
     """Points that lack a comparison, and runs excluded as invalid."""
     out = [
         f"{p['topology']} {p['load_desc']}: no comparison "
-        f"(valid rounds A={p['rounds']['a']} B={p['rounds']['b']})"
+        f"(valid rounds A={p['rounds']['a']} B={p['rounds']['b']}, "
+        f"{p['rounds'].get('paired', 0)} on both sides)"
         for p in summary["points"]
         if not p["latency"]
     ]
@@ -188,9 +201,10 @@ def incomplete(summary: dict[str, Any]) -> list[str]:
 def regressions(summary: dict[str, Any], max_pct: float) -> list[str]:
     """TTFT points where B is worse than A by more than ``max_pct`` with confidence.
 
-    Uses the lower end of the interval, so noise alone cannot trip it, and
-    gates only the mean, p50, and p90: p99 over a few rounds is noisy enough
-    that testing it as well would trip the gate on A/A runs.
+    Uses the lower end of the 95% interval, so a delta within the run-to-run
+    noise does not trip it, and gates only the mean, p50, and p90: p99 over a
+    few rounds is noisy enough that testing it as well would trip the gate on
+    A/A runs.
     """
     out = []
     for p in summary["points"]:
@@ -203,6 +217,18 @@ def regressions(summary: dict[str, Any], max_pct: float) -> list[str]:
                 out.append(
                     f"{p['topology']} {p['load_desc']} TTFT {q}: "
                     f"B {row['delta_pct']:+.1f}% vs A (95% CI {lo:+.1f}%..{row['ci_pct'][1]:+.1f}%)"
+                )
+    return out
+
+
+def ungated(summary: dict[str, Any]) -> list[str]:
+    """Gated TTFT statistics the regression gate could not evaluate."""
+    out = []
+    for p in summary["points"]:
+        for q, row in p["latency"].get("time_to_first_token", {}).items():
+            if q in GATED_STATS and row["verdict"].startswith("n/a"):
+                out.append(
+                    f"{p['topology']} {p['load_desc']} TTFT {q}: {row['verdict']}"
                 )
     return out
 
@@ -225,8 +251,10 @@ def render_markdown(summary: dict[str, Any]) -> str:
         + side_b
         + "Workers are mocker in both, built from the same spec.",
         "",
-        "Δ is B relative to A; negative latency Δ means B is faster. "
-        "Intervals are 95% hierarchical-bootstrap (rounds, then requests). "
+        "Each round gives one value per side; A and B are their geometric means "
+        "over the rounds measured on both sides. Δ is B relative to A; negative "
+        "latency Δ means B is faster. Intervals are 95% paired t-intervals over "
+        "the per-round B/A ratios (both sides replay the same seed each round). "
         f"`same` means the interval lies within ±{summary['min_effect_pct']:g}%; "
         "`inconclusive` means it includes zero but reaches past that.",
         "",
@@ -293,7 +321,9 @@ def render_trend(
 
     Each subdirectory holding a ``summary.json`` is one run, ordered by its
     start time. Watching this column drift catches slow regressions that stay
-    under a per-run threshold.
+    under a per-run threshold. A run measured with another backend, workload,
+    or worker shape than the newest one is marked, since its deltas are not
+    comparable with the rest of its column.
     """
     runs = []
     for path in history.glob("*/summary.json"):
@@ -303,6 +333,7 @@ def render_trend(
         started = summary.get("meta", {}).get("started", path.parent.name)
         runs.append((started, path.parent.name, summary))
     runs.sort(key=lambda r: r[0])
+    newest = _setup(runs[-1][2]) if runs else None
     columns = sorted(
         {
             (p["topology"], LoadPoint.parse(p["load"]))
@@ -327,12 +358,28 @@ def render_trend(
                 key = (p["topology"], LoadPoint.parse(p["load"]))
                 cells[key] = f"{row['delta_pct']:+.1f}%"
         commit = summary.get("meta", {}).get("git_sha", "")
+        mark = "" if _setup(summary) == newest else " †"
         lines.append(
-            f"| {name} | {commit} | "
+            f"| {name}{mark} | {commit} | "
             + " | ".join(cells.get(col, "—") for col in columns)
             + " |"
         )
+    if any(_setup(s) != newest for _, _, s in runs):
+        lines += [
+            "",
+            "† Measured with a different backend, workload, or worker shape than "
+            "the newest run; not comparable with the rest of its column.",
+        ]
     return "\n".join(lines)
+
+
+def _setup(summary: dict[str, Any]) -> tuple[str, str, str]:
+    meta = summary.get("meta", {})
+    return (
+        meta.get("backend", "kubernetes"),
+        json.dumps(meta.get("workload"), sort_keys=True),
+        json.dumps(meta.get("workers"), sort_keys=True),
+    )
 
 
 def _row(load: str, label: str, row: dict[str, Any], fmt: str) -> str:
@@ -353,6 +400,7 @@ def _meta_table(meta: dict[str, Any]) -> list[str]:
         ("context", "Cluster context"),
         ("git_sha", "Repository commit"),
         ("frontend_image", "Frontend / EPP image"),
+        ("epp_binary", "EPP binary"),
         ("worker_image", "Mocker image"),
         ("aiperf_version", "aiperf"),
         ("model", "Model (tokenizer)"),

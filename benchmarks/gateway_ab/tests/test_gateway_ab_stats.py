@@ -18,10 +18,11 @@ pytestmark = [
 
 
 def _rounds(rng, n_rounds, n, mean, round_jitter=0.0):
-    out = []
-    for _ in range(n_rounds):
+    """Per-round request samples, keyed by round index."""
+    out = {}
+    for r in range(n_rounds):
         shift = rng.gauss(0, round_jitter)
-        out.append([max(0.1, rng.gauss(mean + shift, mean * 0.1)) for _ in range(n)])
+        out[r] = [max(0.1, rng.gauss(mean + shift, mean * 0.1)) for _ in range(n)]
     return out
 
 
@@ -43,37 +44,74 @@ def test_pct_delta():
     assert math.isinf(stats.pct_delta(0, 1))
 
 
-def test_bootstrap_detects_real_shift():
+@pytest.mark.parametrize(
+    "df,expected",
+    [(1, 12.7062047), (2, 4.30265273), (3, 3.18244631), (10, 2.22813885)],
+)
+def test_t_quantile_matches_tables(df, expected):
+    assert stats.t_quantile(0.975, df) == pytest.approx(expected, abs=1e-6)
+
+
+def test_detects_real_shift():
     rng = random.Random(1)
     a = _rounds(rng, 3, 300, 50.0)
     b = _rounds(rng, 3, 300, 60.0)
-    lo, hi = stats.hierarchical_bootstrap_delta(a, b, 50, iterations=300)
+    p50 = stats.compare_latency(a, b)["p50"]
+    lo, hi = p50["ci_pct"]
     assert lo < 20 < hi
-    assert lo > 2
+    assert p50["verdict"] == "B worse"
 
 
-def test_bootstrap_identical_distributions_are_same():
+def test_identical_distributions_are_not_called_different():
     rng = random.Random(2)
-    a = _rounds(rng, 3, 300, 50.0)
-    b = _rounds(rng, 3, 300, 50.0)
-    res = stats.compare_latency(a, b, iterations=300)
-    assert res["mean"]["verdict"] == "same"
-    # A noisier statistic may not resolve to "same", but it must not claim
-    # a difference that is not there.
-    assert res["p50"]["verdict"] in ("same", "inconclusive")
-    lo, hi = res["p50"]["ci_pct"]
-    assert lo < 0 < hi
+    a = _rounds(rng, 5, 300, 50.0)
+    b = _rounds(rng, 5, 300, 50.0)
+    res = stats.compare_latency(a, b)
+    for q in ("mean", "p50"):
+        lo, hi = res[q]["ci_pct"]
+        assert lo < 0 < hi
+        assert res[q]["verdict"] in ("same", "inconclusive")
 
 
-def test_round_level_noise_widens_interval():
-    """Between-round jitter must show up in the interval, not be averaged away."""
-    quiet = random.Random(3)
-    noisy = random.Random(3)
-    a_q, b_q = _rounds(quiet, 3, 300, 50.0), _rounds(quiet, 3, 300, 50.0)
-    a_n, b_n = _rounds(noisy, 3, 300, 50.0, 8.0), _rounds(noisy, 3, 300, 50.0, 8.0)
-    lo_q, hi_q = stats.hierarchical_bootstrap_delta(a_q, b_q, 50, iterations=300)
-    lo_n, hi_n = stats.hierarchical_bootstrap_delta(a_n, b_n, 50, iterations=300)
-    assert (hi_n - lo_n) > 2 * (hi_q - lo_q)
+def test_interval_holds_its_95_percent_on_a_a_runs():
+    """A/A rounds: about 5% of intervals may exclude zero, not 20%.
+
+    Round-to-round noise both shared by the two sides (the seed's arrival
+    pattern) and not shared (node noise) is in play. Three rounds is the
+    default, where a bootstrap over rounds is far too narrow.
+    """
+    rng = random.Random(7)
+    trials, misses = 2000, 0
+    for _ in range(trials):
+        a, b = [], []
+        for _ in range(3):
+            shared = rng.gauss(0, 0.05)
+            a.append(50 * math.exp(shared + rng.gauss(0, 0.02)))
+            b.append(50 * math.exp(shared + rng.gauss(0, 0.02)))
+        _, (lo, hi) = stats.paired_change(a, b)
+        misses += lo > 0 or hi < 0
+    assert 0.03 < misses / trials < 0.07
+
+
+def test_noise_both_sides_share_cancels_and_unshared_noise_widens():
+    """Pairing removes round effects common to A and B, not the rest."""
+    rng = random.Random(3)
+    shared = [rng.gauss(0, 5.0) for _ in range(3)]
+    a = {r: [50 + shared[r]] * 50 for r in range(3)}
+    b = {r: [55 + shared[r] * 1.1] * 50 for r in range(3)}
+    lo, hi = stats.compare_latency(a, b)["mean"]["ci_pct"]
+    assert lo > 5 and hi - lo < 4
+    unshared = {r: [55 + rng.gauss(0, 5.0)] * 50 for r in range(3)}
+    lo_u, hi_u = stats.compare_latency(a, unshared)["mean"]["ci_pct"]
+    assert hi_u - lo_u > 2 * (hi - lo)
+
+
+def test_rounds_pair_by_index_and_unmatched_rounds_are_left_out():
+    a = {0: [50.0], 1: [52.0], 2: [51.0]}
+    b = {0: [55.0], 2: [56.1], 3: [99.0]}
+    row = stats.compare_latency(a, b, quantiles=("mean",))["mean"]
+    assert row["rounds"] == 2
+    assert row["delta_pct"] == pytest.approx(10, abs=0.01)
 
 
 @pytest.mark.parametrize(
@@ -95,10 +133,15 @@ def test_verdict(ci, higher, expected):
 
 
 def test_compare_scalar():
-    res = stats.compare_scalar([100, 102, 98], [90, 91, 89], higher_is_better=True)
-    assert res["a"] == 100 and res["b"] == 90
+    res = stats.compare_scalar(
+        {0: 100, 1: 102, 2: 98}, {0: 90, 1: 91, 2: 89}, higher_is_better=True
+    )
+    assert res["a"] == pytest.approx(100, abs=0.1)
+    assert res["b"] == pytest.approx(90, abs=0.1)
     assert res["verdict"] == "B worse"
     assert res["a_cv_pct"] == pytest.approx(2.0)
+    # Columns and delta agree: delta is B against A as the columns show.
+    assert res["delta_pct"] == pytest.approx(stats.pct_delta(res["a"], res["b"]))
 
 
 def _write_run(root, topology, side, conc, rnd, samples, **extra):
@@ -133,9 +176,9 @@ def test_summary_and_regression(tmp_path):
     _write_run(tmp_path, "agg", "gateway", 8, 3, [1.0] * 200, errors=5)
     (tmp_path / "meta.json").write_text(json.dumps({"model": "m"}))
 
-    summary = report.build_summary(tmp_path, bootstrap_iterations=200)
+    summary = report.build_summary(tmp_path)
     (point,) = summary["points"]
-    assert point["rounds"] == {"a": 3, "b": 3}
+    assert point["rounds"] == {"a": 3, "b": 3, "paired": 3}
     ttft = point["latency"]["time_to_first_token"]["p50"]
     assert ttft["verdict"] == "B worse"
     assert ttft["delta_pct"] == pytest.approx(30, abs=3)
@@ -178,7 +221,7 @@ def test_trend_orders_runs_and_fills_gaps(tmp_path):
         (run / "meta.json").write_text(
             json.dumps({"started": started, "git_sha": name})
         )
-        summary = report.build_summary(run, bootstrap_iterations=50)
+        summary = report.build_summary(run)
         (run / "summary.json").write_text(json.dumps(summary))
     # A run directory without a summary is ignored.
     (tmp_path / "incomplete").mkdir()
@@ -199,29 +242,30 @@ def test_mean_reported_next_to_percentiles(tmp_path):
     for rnd in range(2):
         _write_run(tmp_path, "agg", "frontend", 8, rnd, fast_slow)
         _write_run(tmp_path, "agg", "gateway", 8, rnd, fast_slow)
-    (point,) = report.build_summary(tmp_path, bootstrap_iterations=50)["points"]
+    (point,) = report.build_summary(tmp_path)["points"]
     ttft = point["latency"]["time_to_first_token"]
     assert list(ttft) == ["mean", "p50", "p90", "p99"]
     assert ttft["mean"]["a"] == pytest.approx(56.0)
     assert ttft["p50"]["a"] == 40.0
-    assert "TTFT mean (ms)" in report.render_markdown(
-        report.build_summary(tmp_path, bootstrap_iterations=50)
-    )
+    assert "TTFT mean (ms)" in report.render_markdown(report.build_summary(tmp_path))
 
 
 def test_single_round_gets_no_verdict_and_no_gate(tmp_path):
     _write_run(tmp_path, "agg", "frontend", 8, 0, [50.0] * 100)
     _write_run(tmp_path, "agg", "gateway", 8, 0, [80.0] * 100)
-    summary = report.build_summary(tmp_path, bootstrap_iterations=50)
+    summary = report.build_summary(tmp_path)
     (point,) = summary["points"]
-    assert point["latency"]["time_to_first_token"]["p50"]["verdict"] == "n/a (1 round)"
+    p50 = point["latency"]["time_to_first_token"]["p50"]
+    assert p50["verdict"] == "n/a (too few rounds)"
     assert report.regressions(summary, 10.0) == []
+    # The gate cannot pass what it could not evaluate.
+    assert len(report.ungated(summary)) == len(report.GATED_STATS)
 
 
 def test_incomplete_flags_missing_and_excluded(tmp_path):
     _write_run(tmp_path, "agg", "frontend", 8, 0, [50.0] * 100)
     _write_run(tmp_path, "agg", "gateway", 8, 0, [50.0] * 100, errors=100)
-    gaps = report.incomplete(report.build_summary(tmp_path, bootstrap_iterations=50))
+    gaps = report.incomplete(report.build_summary(tmp_path))
     assert len(gaps) == 2
     assert "no comparison" in gaps[0] and "excluded" in gaps[1]
 
@@ -260,7 +304,7 @@ def test_open_loop_throughput_gets_no_verdict(tmp_path):
     for rnd in range(2):
         _write_rps_run(tmp_path, "frontend", rnd, [50.0] * 50)
         _write_rps_run(tmp_path, "gateway", rnd, [52.0] * 50)
-    (point,) = report.build_summary(tmp_path, bootstrap_iterations=50)["points"]
+    (point,) = report.build_summary(tmp_path)["points"]
     assert (
         point["throughput"]["output_token_throughput"]["verdict"] == "n/a (open loop)"
     )
@@ -293,7 +337,7 @@ def test_noise_line_uses_per_round_ttft_means(tmp_path):
     for rnd, mean in enumerate((50.0, 60.0)):
         _write_run(tmp_path, "agg", "frontend", 8, rnd, [mean] * 20)
         _write_run(tmp_path, "agg", "gateway", 8, rnd, [55.0] * 20)
-    (point,) = report.build_summary(tmp_path, bootstrap_iterations=50)["points"]
+    (point,) = report.build_summary(tmp_path)["points"]
     assert point["ttft_round_cv_pct"]["a"] == pytest.approx(12.856, abs=0.01)
     assert point["ttft_round_cv_pct"]["b"] == 0.0
 
@@ -302,8 +346,42 @@ def test_report_header_names_the_backend(tmp_path):
     _write_run(tmp_path, "agg", "frontend", 8, 0, [50.0] * 10)
     _write_run(tmp_path, "agg", "gateway", 8, 0, [50.0] * 10)
     (tmp_path / "meta.json").write_text(json.dumps({"backend": "local"}))
-    md = report.render_markdown(report.build_summary(tmp_path, bootstrap_iterations=20))
+    md = report.render_markdown(report.build_summary(tmp_path))
     assert "without Kubernetes" in md and "sidecars" not in md
     (tmp_path / "meta.json").write_text(json.dumps({"backend": "kubernetes"}))
-    md = report.render_markdown(report.build_summary(tmp_path, bootstrap_iterations=20))
+    md = report.render_markdown(report.build_summary(tmp_path))
     assert "sidecars" in md
+
+
+def test_run_failing_validation_twice_is_listed_once(tmp_path):
+    _write_run(tmp_path, "agg", "frontend", 8, 0, [50.0] * 10, errors=3)
+    (tmp_path / "runs/agg/frontend/c8/r0.error").write_text("failed twice\n")
+    summary = report.build_summary(tmp_path)
+    assert len(summary["invalid_runs"]) == 1
+    assert summary["failed_runs"] == []
+
+
+def test_trend_marks_runs_with_another_setup(tmp_path):
+    for name, started, isl in (
+        ("old", "2026-01-01", 4096),
+        ("new", "2026-02-01", 1024),
+    ):
+        run = tmp_path / name
+        for rnd in range(2):
+            _write_run(run, "agg", "frontend", 8, rnd, [50.0 + rnd] * 20)
+            _write_run(run, "agg", "gateway", 8, rnd, [55.0 + rnd] * 20)
+        (run / "meta.json").write_text(
+            json.dumps({"started": started, "workload": {"isl": isl}})
+        )
+        (run / "summary.json").write_text(json.dumps(report.build_summary(run)))
+    table = report.render_trend(tmp_path)
+    assert "| old † |" in table and "| new |" in table
+    assert "not comparable" in table
+
+
+def test_summary_json_is_strict(tmp_path):
+    _write_run(tmp_path, "agg", "frontend", 8, 0, [50.0] * 10)
+    _write_run(tmp_path, "agg", "gateway", 8, 0, [55.0] * 10)
+    summary = report.build_summary(tmp_path)
+    text = json.dumps(report.json_safe(summary), allow_nan=False)
+    assert json.loads(text)["points"][0]["ttft_round_cv_pct"]["a"] is None

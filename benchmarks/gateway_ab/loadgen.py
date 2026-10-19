@@ -29,8 +29,11 @@ RESULTS_ROOT = "/results"
 # aiperf renames its processes ("aiperf system_controller", "aiperf
 # worker_<id>", ...), so "aiperf profile" matches only the wrapper shell.
 # Killing just that leaves the real aiperf running, orphaned, still sending
-# load into whatever runs next.
-_AIPERF_PROCS = "^aiperf |aiperf profile"
+# load into whatever runs next. The bracket keeps the pattern from matching a
+# shell whose own command line contains it.
+_AIPERF_PROCS = "^[a]iperf |[a]iperf profile"
+# Far above any round's seed, so priming never pre-warms measured prompts.
+PRIME_SEED_OFFSET = 1_000_000
 
 
 def _num(value: float) -> str:
@@ -99,6 +102,26 @@ class Workload:
     seed: int = 42
     run_timeout_s: int = 1800
 
+    def __post_init__(self) -> None:
+        if self.prefix_tokens() >= self.isl:
+            raise ValueError(
+                f"--prefix-length ({self.prefix_length}) must be shorter than "
+                f"--isl ({self.isl}), which includes it"
+            )
+
+    def prefix_tokens(self) -> int:
+        """Shared-prefix tokens at the start of every prompt (0 when disabled)."""
+        return self.prefix_length if self.num_prefixes > 0 else 0
+
+    def seed_for(self, rnd: int, point_index: int) -> int:
+        """aiperf seed of one round at one load point, shared by both sides.
+
+        Distinct per load point as well as per round: aiperf draws its prompt
+        pool in order from the seed, so two points sharing one would send the
+        same leading prompts, and the second would find them already cached.
+        """
+        return self.seed + rnd * len(self.points()) + point_index
+
     def points(self) -> list[LoadPoint]:
         if self.request_rates:
             return [LoadPoint("rps", float(r)) for r in self.request_rates]
@@ -151,8 +174,10 @@ def aiperf_command(
         str(workload.requests_for(point)),
         "--warmup-request-count",
         str(workload.warmup_for(point)),
+        # aiperf prepends the shared prefix to a prompt of this length, so
+        # subtract it to keep --isl the length of the whole prompt.
         "--synthetic-input-tokens-mean",
-        str(workload.isl),
+        str(workload.isl - workload.prefix_tokens()),
         "--synthetic-input-tokens-stddev",
         "0",
         "--output-tokens-mean",
@@ -174,7 +199,7 @@ def aiperf_command(
         # leave it off so both sides carry the same client-side load.
         "--no-server-metrics",
     ]
-    if workload.prefix_length > 0 and workload.num_prefixes > 0:
+    if workload.prefix_tokens() > 0:
         cmd += [
             "--prefix-prompt-length",
             str(workload.prefix_length),
@@ -264,17 +289,21 @@ class LoadGen:
         self.kube.exec(
             self.pod, ["pkill", "-9", "-f", _AIPERF_PROCS], check=False, timeout=60
         )
+        # pgrep exits 1 when nothing matches, but so does a failed exec, and
+        # mistaking that for "none left" would launch a run on top of a live
+        # one. pgrep's own status therefore comes back on stdout.
+        check = f"pgrep -f {shlex.quote(_AIPERF_PROCS)} >/dev/null; echo $?"
         for _ in range(30):
-            # pgrep exits 1 when nothing matches.
-            if (
-                self.kube.exec(
-                    self.pod, ["pgrep", "-f", _AIPERF_PROCS], check=False, timeout=60
-                ).returncode
-                == 1
-            ):
+            try:
+                proc = self.kube.exec(
+                    self.pod, ["sh", "-c", check], check=False, timeout=60
+                )
+            except subprocess.TimeoutExpired:
+                proc = None
+            if proc is not None and proc.returncode == 0 and proc.stdout.strip() == "1":
                 return
             time.sleep(1)
-        raise KubeError(f"aiperf processes in {self.pod} did not exit")
+        raise KubeError(f"cannot confirm that aiperf in {self.pod} exited")
 
     def aiperf_version(self) -> str:
         return self.kube.exec(self.pod, ["aiperf", "--version"]).stdout.strip()
