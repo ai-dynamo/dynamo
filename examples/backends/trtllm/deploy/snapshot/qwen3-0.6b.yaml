@@ -123,6 +123,3 @@ spec:
           - name: engine-config
             mountPath: /etc/dynamo-engine
             readOnly: true
-      metadata:
-        annotations:
-          nvidia.com/cuda-shared-memory-support: enabled

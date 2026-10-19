@@ -9,10 +9,10 @@
 # The default Immediate policy starts workers cold during capture; only later
 # Pods restore, and snapshot readiness does not restart existing workers.
 #
-# Use a snapshot placeholder image for the worker and the matching
-# runtime/frontend image for the frontend. Replace the placeholder image names
-# below with the tags for the Dynamo/TRTLLM revision being tested. Omit the
-# deprecated checkpoint.mode and checkpoint.identity fields.
+# Use the same TensorRT-LLM runtime image for capture and restore, and a
+# matching frontend image. The operator restores only direct
+# `python3 -m dynamo.trtllm` entrypoints. Omit the deprecated checkpoint.mode
+# and checkpoint.identity fields.
 #
 # Requirements validated for the single-GPU TRTLLM path:
 # - Install standalone Snapshot and enable checkpoint support in the Dynamo
@@ -76,7 +76,7 @@ spec:
                 type: CharDevice
           containers:
             - name: main
-              image: my-registry/tensorrtllm-placeholder:my-tag
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.1
               imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command:

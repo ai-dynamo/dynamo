@@ -227,7 +227,7 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 </Indent>
 
 <ParamField path="checkpoint" type="ComponentCheckpointConfig">
-  Experimental process checkpoint/restore through standalone Snapshot. The API retains the name `checkpoint`; configure it under `spec.components[*].experimental` in a DGD. Enable checkpoint support in the Dynamo operator and install Snapshot before using this field.
+  Experimental process checkpoint/restore through standalone Snapshot. The API retains the name `checkpoint`; configure it under `spec.components[*].experimental` in a DGD. Only components whose `type` is explicitly `worker`, `prefill`, or `decode` can enable it. Enable checkpoint support in the Dynamo operator and install Snapshot before using this field.
 
   Set `enabled: true` without `checkpointRef` for DGD-managed capture through a `SnapshotJob`. Set `checkpointRef` to restore an existing compatible `PodSnapshot` in the same namespace. Omit the deprecated `mode` and `identity` fields.
 </ParamField>
