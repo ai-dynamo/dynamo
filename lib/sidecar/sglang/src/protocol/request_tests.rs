@@ -251,9 +251,6 @@ fn sampling_and_stopping_fields_preserve_native_values() {
 
 #[test]
 fn visible_stop_tokens_stop_in_engine_and_return_only_ids() {
-    // Harmony tool calls: the preprocessor moves `<|call|>` from the hidden set
-    // to the visible set. SGLang streams output_ids through the matched stop
-    // token, so the engine stops on it and the frontend still receives it.
     let mut request = request();
     request.stop_conditions.stop_token_ids = Some(vec![19]);
     request.stop_conditions.stop_token_ids_hidden = Some(vec![200002, 199999]);
@@ -270,7 +267,7 @@ fn visible_stop_tokens_stop_in_engine_and_return_only_ids() {
         mapped.sampling_params.unwrap().stop_token_ids,
         vec![19, 200002, 199999, 200012]
     );
-    // Detokenized text trims the stop token; it must stay off.
+    // SGLang text trims the stop token.
     assert_eq!(mapped.return_text, None);
 }
 

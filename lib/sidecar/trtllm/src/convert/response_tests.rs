@@ -455,3 +455,46 @@ fn a_prefill_terminal_that_ran_out_of_budget_is_rejected() {
         "the error must name the missing handoff: {error}"
     );
 }
+
+#[test]
+fn held_hidden_stop_token_is_released_unless_it_ended_the_sequence() {
+    let mut req = request();
+    req.stop_conditions.stop_token_ids_visible = Some(vec![9]);
+    let mut state = ResponseState::new(&req, AGG);
+    let mut token_ids = |tokens: Vec<pb::TokenInfo>| {
+        state
+            .convert(token_response(tokens))
+            .expect("convert token")
+            .map(|delta| delta.token_ids)
+    };
+
+    assert_eq!(
+        token_ids(vec![logprob_token(5, -0.1), logprob_token(2, -0.2)]),
+        Some(vec![5])
+    );
+    assert_eq!(
+        token_ids(vec![logprob_token(6, -0.3), logprob_token(2, -0.4)]),
+        Some(vec![2, 6])
+    );
+
+    let finished = pb::GenerateResponse {
+        request_id: "r".to_string(),
+        event: Some(pb::generate_response::Event::Finished(
+            pb::GenerationFinished {
+                output_index: Some(0),
+                reason: pb::FinishReason::Stop as i32,
+                message: String::new(),
+                stop_match: Some(pb::StopMatch {
+                    r#match: Some(pb::stop_match::Match::StopTokenId(2)),
+                }),
+            },
+        )),
+        usage: None,
+    };
+    let terminal = state
+        .convert(finished)
+        .expect("convert finished")
+        .expect("terminal");
+    assert!(terminal.token_ids.is_empty());
+    assert_eq!(terminal.completion_usage.unwrap().completion_tokens, 4);
+}

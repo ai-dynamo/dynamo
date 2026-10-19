@@ -50,11 +50,9 @@ pub(crate) fn build_generate_request(
             .map_err(|_| client::invalid_request("min_tokens does not fit in i32"))?
     };
 
-    // Visible stop tokens (e.g. Harmony's `<|call|>`) stop like hidden ones but
-    // must reach the frontend decoder. SGLang streams `output_ids` through the
-    // matched stop token and trims only detokenized text, which this sidecar
-    // never requests (`return_text` is unset), so one engine stop set serves
-    // both.
+    // SGLang keeps a matched stop token in `output_ids` and trims only text,
+    // which is never requested, so visible stops (e.g. Harmony's `<|call|>`)
+    // reach the frontend decoder.
     let mut stop_token_ids = Vec::new();
     for tokens in [
         request.stop_conditions.stop_token_ids.as_ref(),

@@ -1225,9 +1225,7 @@ async fn vllm_visible_stop_tokens_preserve_tool_delimiters() {
     .await;
 }
 
-// SGLang counterpart: the engine stops on the visible token and streams it in
-// `output_ids`; the sidecar must forward it as a stop ID and never ask for
-// detokenized text, which trims the matched stop token.
+// SGLang text trims the matched stop token, so the delimiter must arrive as an ID.
 #[tokio::test]
 async fn sglang_visible_stop_tokens_preserve_tool_delimiters() {
     bounded("visible tool delimiter", async {

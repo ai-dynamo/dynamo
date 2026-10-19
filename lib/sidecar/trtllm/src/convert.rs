@@ -102,17 +102,9 @@ pub(crate) fn build_generate_request(
             min_tokens: stop.min_tokens,
             conditions: stop_conditions(request),
             ignore_eos: stop.ignore_eos,
-            // Visible stop tokens (e.g. Harmony's `<|call|>` when tools are
-            // present) stop generation like hidden ones but must reach the
-            // frontend decoder. This maps to TensorRT-LLM's
-            // `include_stop_str_in_output`, which keeps matched stop words in
-            // the output IDs. It keeps hidden stop IDs and stop strings too;
-            // the frontend decoder strips those itself. Without visible tokens
-            // it stays unset, so the server trims as before.
-            //
-            // A visible token that is also the tokenizer EOS (`end_id`) ends
-            // the sequence as END_ID rather than as a stop word and may still
-            // be dropped. GPT-OSS's `<|call|>` is not its `end_id`.
+            // Keeps a matched visible stop token (e.g. Harmony's `<|call|>`) in
+            // the output. A visible token equal to `end_id` finishes as END_ID
+            // and may still be dropped.
             include_stop_in_output: has_visible_stop_tokens(request).then_some(true),
         }),
         response: Some(pb::ResponseOptions {
@@ -269,11 +261,8 @@ fn stop_conditions(request: &PreprocessedRequest) -> Vec<pb::StopCondition> {
     conditions
 }
 
-/// Every stop ID becomes an engine stop condition; visible ones are kept in the
-/// output by `include_stop_in_output`. TensorRT-LLM 1.3.0rc29's `min_tokens`
-/// holds back only `end_id`, so any of these can end generation before the
-/// minimum, as the generation-config EOS IDs it adds itself already do. Newer
-/// releases also hold back single-token stop words (NVIDIA/TensorRT-LLM#20188).
+/// TensorRT-LLM 1.3.0rc29's `min_tokens` holds back only `end_id`, so any of
+/// these can end generation early (NVIDIA/TensorRT-LLM#20188).
 fn stop_token_ids(request: &PreprocessedRequest) -> Vec<u32> {
     let stop = &request.stop_conditions;
     let mut ids = BTreeSet::new();
@@ -296,6 +285,23 @@ fn has_visible_stop_tokens(request: &PreprocessedRequest) -> bool {
         .stop_token_ids_visible
         .as_ref()
         .is_some_and(|ids| !ids.is_empty())
+}
+
+/// Stop IDs the engine trims by default but returns once
+/// `include_stop_in_output` is set for visible stops.
+fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
+    let visible = request
+        .stop_conditions
+        .stop_token_ids_visible
+        .as_deref()
+        .unwrap_or_default();
+    if visible.is_empty() {
+        return BTreeSet::new();
+    }
+    stop_token_ids(request)
+        .into_iter()
+        .filter(|id| !visible.contains(id))
+        .collect()
 }
 
 fn guided_decoding(
@@ -446,9 +452,7 @@ fn validate_request(
     }
     let sampling = &request.sampling_options;
     if sampling.include_stop_str_in_output == Some(true) {
-        // Retaining stop *strings* would also set `include_stop_in_output`, as
-        // visible stop tokens do, and leave the strings to the frontend
-        // decoder; reject until that path is tested end to end.
+        // Would map to `include_stop_in_output`; not yet tested end to end.
         return Err(client::invalid_argument(
             "include_stop_str_in_output is not supported by the TensorRT-LLM sidecar",
         ));
@@ -472,6 +476,10 @@ pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
     output_logprobs: Option<u32>,
+    /// See [`retained_hidden_stop_ids`]. The engine stops on these, so one at
+    /// the end of a delta is held until the terminal says whether it matched.
+    hidden_stop_ids: BTreeSet<u32>,
+    pending_stop: Option<pb::TokenInfo>,
     phase: Phase,
 }
 
@@ -508,6 +516,8 @@ impl ResponseState {
             prompt_tokens: request.token_ids.len() as u32,
             completion_tokens: 0,
             output_logprobs: request.output_options.logprobs,
+            hidden_stop_ids: retained_hidden_stop_ids(request),
+            pending_stop: None,
             phase: if mode.is_prefill() {
                 Phase::Prefill { held: Vec::new() }
             } else {
@@ -609,10 +619,20 @@ impl ResponseState {
             self.completion_tokens = held.len() as u32;
             return Ok(None);
         }
-        let (token_ids, log_probs, top_logprobs) = self.map_tokens(token.tokens)?;
         self.completion_tokens = self
             .completion_tokens
-            .saturating_add(token_ids.len() as u32);
+            .saturating_add(token.tokens.len() as u32);
+        let mut tokens = token.tokens;
+        if let Some(pending) = self.pending_stop.take() {
+            tokens.insert(0, pending);
+        }
+        if tokens
+            .last()
+            .is_some_and(|info| self.hidden_stop_ids.contains(&info.token_id))
+        {
+            self.pending_stop = tokens.pop();
+        }
+        let (token_ids, log_probs, top_logprobs) = self.map_tokens(tokens)?;
         if token_ids.is_empty() {
             // A text-only delta (e.g. stop-string holdback): the sidecar streams
             // token IDs and lets the frontend detokenize, so there is nothing to
@@ -683,7 +703,7 @@ impl ResponseState {
         // silently truncate the completion. Any other reason is a genuine stop
         // during the context phase, and with no decode leg to run, it is the
         // whole answer.
-        let held = match &mut self.phase {
+        let mut held = match &mut self.phase {
             Phase::Prefill { held } if finish_reason == FinishReason::Length => {
                 return Err(client::protocol_error(format!(
                     "context request ended at its token budget without a kv_session handoff \
@@ -694,8 +714,18 @@ impl ResponseState {
                 )));
             }
             Phase::Prefill { held } => std::mem::take(held),
-            Phase::Stream { .. } => Vec::new(),
+            Phase::Stream { .. } => self.pending_stop.take().into_iter().collect(),
         };
+        let stop_match = finished
+            .stop_match
+            .and_then(|stop_match| stop_match.r#match);
+        if let Some(pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id)) =
+            stop_match
+            && self.hidden_stop_ids.contains(&id)
+            && held.last().is_some_and(|info| info.token_id == id)
+        {
+            held.pop();
+        }
 
         let (token_ids, log_probs, top_logprobs) = if held.is_empty() {
             (Vec::new(), None, None)
@@ -715,15 +745,12 @@ impl ResponseState {
             }),
             ..Default::default()
         };
-        terminal.stop_reason = finished
-            .stop_match
-            .and_then(|stop_match| stop_match.r#match)
-            .map(|matched| match matched {
-                pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id) => {
-                    StopReason::Int(i64::from(id))
-                }
-                pb::stop_match::Match::StopText(text) => StopReason::String(text),
-            });
+        terminal.stop_reason = stop_match.map(|matched| match matched {
+            pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id) => {
+                StopReason::Int(i64::from(id))
+            }
+            pb::stop_match::Match::StopText(text) => StopReason::String(text),
+        });
         Ok(terminal)
     }
 

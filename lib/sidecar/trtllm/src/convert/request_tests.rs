@@ -29,8 +29,7 @@ fn request_maps_sampling_stop_and_output_fields() {
     assert_eq!(stopping.max_tokens, Some(16));
     assert_eq!(stopping.min_tokens, Some(1));
     assert_eq!(stopping.ignore_eos, Some(true));
-    // Stop-word retention is only for visible stop tokens; without them the
-    // server trims matched stops as before.
+    // Stop-string retention is never enabled from `include_stop_str_in_output`.
     assert_eq!(stopping.include_stop_in_output, None);
     let conditions: Vec<_> = stopping
         .conditions
@@ -77,8 +76,6 @@ fn request_maps_sampling_stop_and_output_fields() {
 
 #[test]
 fn visible_stop_tokens_stop_in_engine_and_stay_in_output() {
-    // Harmony tool calls: the preprocessor moves `<|call|>` from the hidden set
-    // to the visible set, so the engine must stop on it without trimming it.
     let mut req = request();
     req.stop_conditions.stop_token_ids = Some(vec![7]);
     req.stop_conditions.stop_token_ids_hidden = Some(vec![2, 200002]);
