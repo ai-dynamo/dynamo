@@ -21,6 +21,9 @@ gRPC server. See the [sidecar overview](../README.md) for installation.
 > which carries the latest gRPC server updates. Nightly builds are the
 > `nvcr.io/nvidia/tensorrt-llm/release:<version>.dev<date>` tags on
 > [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/tensorrt-llm/containers/release/-).
+> KV routing is available in
+> `nvcr.io/nvidia/tensorrt-llm/release:1.4.0a0.dev202610180820`, which includes
+> native KVCM2 event streaming and OpenEngine routing load support.
 
 ## Support matrix
 
