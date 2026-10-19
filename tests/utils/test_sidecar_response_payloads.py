@@ -8,6 +8,7 @@ import pytest
 
 from tests.utils.engine_metrics import EngineMetrics
 from tests.utils.payload_builder import (
+    cache_namespace_payload,
     disaggregated_token_count_payload,
     http_cancellation_payloads,
     streaming_chat_payload_with_logprobs,
@@ -116,3 +117,28 @@ def test_handoff_logprobs_match_completion_ids(first_id):
     else:
         with pytest.raises(AssertionError, match="Handoff logprobs"):
             payload.process_response(response)
+
+
+@pytest.mark.parametrize(
+    "cached_counts", [(0, 32, 0, 32), (0, 32, 32, 32), (0, 0, 0, 0)]
+)
+def test_cache_namespace_check_rejects_shared_or_disabled_cache(cached_counts):
+    payload = cache_namespace_payload()
+
+    def run():
+        for iteration, cached in enumerate(cached_counts):
+            payload.body_for_iteration(iteration)
+            response = Mock()
+            response.json.return_value = {
+                "usage": {
+                    "prompt_tokens": 64,
+                    "prompt_tokens_details": {"cached_tokens": cached},
+                }
+            }
+            payload.validate(response, "hello")
+
+    if cached_counts == (0, 32, 0, 32):
+        run()
+    else:
+        with pytest.raises(AssertionError):
+            run()

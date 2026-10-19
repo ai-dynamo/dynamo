@@ -1020,6 +1020,38 @@ class CachedTokensChatPayload(ChatPayload):
 
 
 @dataclass
+class CacheNamespaceChatPayload(ChatPayload):
+    """Require cold then warm cache behavior independently in two namespaces."""
+
+    repeat_count: int = 4
+    _namespace_prefix: str = field(
+        default_factory=lambda: str(uuid.uuid4()), init=False
+    )
+    _iteration: int = field(default=0, init=False)
+
+    def body_for_iteration(self, iteration: int) -> Dict[str, Any]:
+        self._iteration = iteration
+        return {**self.body, "cache_salt": f"{self._namespace_prefix}-{iteration // 2}"}
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        usage = response.json().get("usage") or {}
+        details = usage.get("prompt_tokens_details") or {}
+        cached = details.get("cached_tokens")
+        prompt = usage.get("prompt_tokens")
+        assert type(prompt) is int and prompt > 0, usage
+        assert type(cached) is int and 0 <= cached <= prompt, usage
+        if self._iteration % 2 == 0:
+            assert (
+                cached == 0
+            ), f"New namespace reused another namespace's cache: {usage}"
+        else:
+            assert (
+                cached > 0
+            ), f"Repeated namespace did not reuse its own cache: {usage}"
+
+
+@dataclass
 class ClearKVBlocksPayload(ChatPayload):
     """Warm the prefix cache, clear it through the system server, and infer.
 

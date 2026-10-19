@@ -131,15 +131,6 @@ fn unsupported_request_controls_are_rejected() {
     assert_rejected(
         |r| {
             r.routing = Some(dynamo_backend_common::engine::RoutingHints {
-                cache_namespace: Some("tenant-a".to_string()),
-                ..Default::default()
-            })
-        },
-        "cache namespace",
-    );
-    assert_rejected(
-        |r| {
-            r.routing = Some(dynamo_backend_common::engine::RoutingHints {
                 priority: Some(5),
                 ..Default::default()
             })
@@ -260,4 +251,32 @@ fn a_minimum_within_the_derived_budget_is_served() {
     let stopping = proto.stopping.expect("stopping options");
     assert_eq!(stopping.min_tokens, Some(8));
     assert_eq!(stopping.max_tokens, Some(64));
+}
+
+#[test]
+fn cache_namespace_preserves_the_decode_handoff() {
+    for namespace in [None, Some(""), Some("tenant-a"), Some("tenant-b")] {
+        for mode in [AGG, PREFILL, DisaggregationMode::Decode] {
+            let mut req = request();
+            req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+                cache_namespace: namespace.map(str::to_owned),
+                ..Default::default()
+            });
+            if mode == DisaggregationMode::Decode {
+                req.prefill_result = Some(dynamo_backend_common::PrefillResult {
+                    disaggregated_params: crate::disagg::session_to_json(fake_session()).unwrap(),
+                    prompt_tokens_details: None,
+                });
+            }
+            let proto = build_generate_request(&req, "req", "model", None, mode).unwrap();
+            assert_eq!(
+                proto.kv.as_ref().and_then(|kv| kv.cache_salt.as_deref()),
+                namespace
+            );
+            assert_eq!(
+                proto.kv.and_then(|kv| kv.session),
+                (mode == DisaggregationMode::Decode).then(fake_session)
+            );
+        }
+    }
 }

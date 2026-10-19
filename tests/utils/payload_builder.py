@@ -11,6 +11,7 @@ from tests.utils.payloads import (
     AnthropicMessagesStreamPayload,
     BasePayload,
     CachedTokensChatPayload,
+    CacheNamespaceChatPayload,
     ChatPayload,
     ChatPayloadWithLogprobs,
     ClassifyPayload,
@@ -844,6 +845,21 @@ def disaggregated_chat_payload() -> DisaggregatedChatPayload:
         expected_response=[],
         expected_log=[],
         expected_num_choices=1,
+    )
+
+
+def cache_namespace_payload() -> CacheNamespaceChatPayload:
+    return CacheNamespaceChatPayload(
+        body={
+            "messages": [{"role": "user", "content": LONG_PROMPT_FOR_CACHING}],
+            "max_tokens": 8,
+            "temperature": 0,
+            "stream": False,
+            "ignore_eos": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+        expected_response=[],
+        expected_log=[],
     )
 
 

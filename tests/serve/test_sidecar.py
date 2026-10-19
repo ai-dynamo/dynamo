@@ -26,6 +26,7 @@ from tests.utils.engine_metrics import (
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import (
+    cache_namespace_payload,
     chat_logprobs_and_structured_output_payloads,
     disaggregated_token_count_payload,
     http_cancellation_payloads,
@@ -195,6 +196,7 @@ sidecar_configs = {
             "PYTHONUNBUFFERED": "1",
         },
         request_payloads=[
+            cache_namespace_payload(),
             *chat_logprobs_and_structured_output_payloads(),
             # Public disconnect/recovery only: no native scheduler observations.
             *http_cancellation_payloads(None, max_tokens=CANCELLATION_MAX_TOKENS),
@@ -246,6 +248,7 @@ sidecar_configs = {
         },
         request_payloads=[
             disaggregated_token_count_payload(logprobs=True),
+            cache_namespace_payload(),
             streaming_chat_payload_with_logprobs(
                 prompt_logprobs=2,
                 max_tokens=8,
