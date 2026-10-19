@@ -14,6 +14,10 @@ FROM vllm_runtime_${TARGETARCH} AS pre_runtime
 {% else %}
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
+{% if variant == "enterprise" %}
+# The NIM base image ends as its non-root `nim` user.
+USER root
+{% endif %}
 
 ARG PYTHON_VERSION
 ARG ENABLE_GPU_MEMORY_SERVICE
@@ -101,6 +105,11 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 {% endif %}
 
+{% if variant == "enterprise" %}
+# The NIM base assigns UID 1000 to `nim`. Remove the account but keep its
+# /opt/nim home, which holds the NIM venv.
+RUN userdel nim
+{% endif %}
 # Create dynamo user with group 0 for OpenShift compatibility.
 # Pin -u 1000 explicitly: the vllm/vllm-openai >=0.22 image ships a `vllm` user at
 # UID 2000, so after freeing 1000 (ubuntu) useradd would otherwise auto-assign the
@@ -522,6 +531,9 @@ RUN rm -rf /workspace/vllm
 # omni video-encode path, which uses the royalty-free VP9 (libvpx_vp9) encoder —
 # no H.264 is built. Direct rm makes the removal robust regardless of how the
 # base image's pip is configured; the guards fail the build if any of them survive.
+{#- The enterprise variant skips this: the NIM base splits these wheels between
+    its venv and system Python, and its own media stack is left as shipped. #}
+{%- if variant != "enterprise" %}
 RUN set -eux; \
     OPENCV_VERSION="$(python3 -m pip show opencv-python-headless 2>/dev/null | awk '/^Version:/{print $2}')"; \
     if [ -z "${OPENCV_VERSION}" ]; then \
@@ -553,6 +565,7 @@ RUN set -eux; \
     python3 -c "import cv2; cv2.resize"; \
     ! ls -d "${SITE_PACKAGES}"/opencv_python*.libs 2>/dev/null; \
     python3 -c "import cv2,re,sys; enabled=[name for name,value in re.findall(r'^\s*(FFMPEG|GSTREAMER):\s*(\S+)', cv2.getBuildInformation(), re.M|re.I) if value.upper()=='YES']; sys.exit('ERROR: cv2 was built with video backends: '+', '.join(enabled) if enabled else 0)"
+{% endif %}
 
 # PyNvVideoCodec is KEPT (removed from the purge above) but REPLACED with 2.2.3 by
 # the removal and requirements install above: the base image's 2.0.4 bundles a
