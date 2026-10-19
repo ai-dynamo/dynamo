@@ -60,38 +60,6 @@ struct DiscoveredKvEventSource {
 }
 
 impl SglangSidecarEngine {
-    pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
-        match argv {
-            Some(argv) => Self::try_from_args(argv).map_err(SidecarStartupError::into_dynamo),
-            None => Self::from_parsed(<Args as clap::Parser>::parse()),
-        }
-    }
-
-    /// Parse injected arguments while retaining Clap's structured exit error.
-    ///
-    /// Embedded callers use this to distinguish help and version output from
-    /// Dynamo startup failures without changing `from_args`'s error contract.
-    pub fn try_from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), SidecarStartupError> {
-        let args = <Args as clap::Parser>::try_parse_from(argv)?;
-        Self::from_parsed(args).map_err(Into::into)
-    }
-
-    /// Parse CLI arguments without connecting; discovery runs after probe startup.
-    pub fn from_cli() -> Result<
-        (
-            RuntimeConfig,
-            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
-        ),
-        DynamoError,
-    > {
-        let args = <Args as clap::Parser>::parse();
-        Self::validate_args(&args)?;
-        Ok((
-            args.sidecar.common.runtime.clone(),
-            Self::from_parsed_async(args, false),
-        ))
-    }
-
     /// Parse embedded launcher arguments now, then discover metadata after the
     /// shared sidecar runner has started probes and connected the runtime.
     pub fn try_from_args_async(
@@ -105,19 +73,7 @@ impl SglangSidecarEngine {
     > {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
         Self::validate_args(&args)?;
-        Ok((
-            args.sidecar.common.runtime.clone(),
-            Self::from_parsed_async(args, false),
-        ))
-    }
-
-    fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
-        Self::validate_args(&args)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
-        runtime.block_on(Self::from_parsed_async(args, true))
+        Ok((args.sidecar.common.runtime.clone(), Self::from_parsed(args)))
     }
 
     pub(crate) fn validate_args(args: &Args) -> Result<(), DynamoError> {
@@ -129,16 +85,9 @@ impl SglangSidecarEngine {
         Ok(())
     }
 
-    async fn from_parsed_async(
-        args: Args,
-        bootstrap: bool,
-    ) -> Result<(Self, WorkerConfig), DynamoError> {
-        let discovery = bootstrap_discover(
-            &args.sidecar.grpc_endpoint,
-            &args.sidecar.grpc.config(),
-            bootstrap,
-        )
-        .await?;
+    async fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+        let discovery =
+            bootstrap_discover(&args.sidecar.grpc_endpoint, &args.sidecar.grpc.config()).await?;
         Self::from_discovered(args, discovery)
     }
 
@@ -632,9 +581,8 @@ impl LLMEngine for SglangSidecarEngine {
 async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: &GrpcTransportConfig,
-    bootstrap: bool,
 ) -> Result<Discovery, DynamoError> {
-    match client::bootstrap_discover(endpoint, transport, bootstrap).await? {
+    match client::bootstrap_discover(endpoint, transport).await? {
         client::StartupDiscovery::Leader(discovery) => Ok(*discovery),
         client::StartupDiscovery::Follower => {
             Err(client::invalid_arg("inference engine requires node_rank=0"))
@@ -1318,11 +1266,15 @@ mod tests {
 
     #[test]
     fn encoder_routing_is_rejected_before_discovery() {
-        let mut args = args();
-        args.sidecar.common.route_to_encoder = true;
-        let error = SglangSidecarEngine::from_parsed(args)
-            .err()
-            .expect("unsupported encoder routing");
+        let error = SglangSidecarEngine::try_from_args_async(vec![
+            "sidecar".into(),
+            "--grpc-endpoint".into(),
+            "http://127.0.0.1:1".into(),
+            "--route-to-encoder".into(),
+        ])
+        .err()
+        .expect("unsupported encoder routing")
+        .into_dynamo();
         assert_eq!(
             error.error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)

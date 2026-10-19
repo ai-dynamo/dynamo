@@ -119,9 +119,10 @@ async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> VllmSidecarEngine 
     if mode != DisaggregationMode::Aggregated {
         argv.extend(["--disaggregation-mode".to_string(), mode.to_string()]);
     }
-    tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
-        .await
+    VllmSidecarEngine::try_from_args_async(argv)
         .unwrap()
+        .1
+        .await
         .unwrap()
         .0
 }

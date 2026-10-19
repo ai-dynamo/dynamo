@@ -154,9 +154,12 @@ impl SidecarFixture for Fixture {
             "--grpc-connect-attempt-timeout-secs".into(),
             "1".into(),
         ];
-        tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)).unwrap().0)
+        VllmSidecarEngine::try_from_args_async(argv)
+            .unwrap()
+            .1
             .await
             .unwrap()
+            .0
     }
 
     fn eof_error() -> BackendError {

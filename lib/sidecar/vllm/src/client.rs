@@ -30,17 +30,14 @@ pub(crate) struct VllmClient {
 }
 
 impl VllmClient {
-    /// `bootstrap`: see `GrpcChannelPool::connect`. True for pre-logging
-    /// synchronous constructors; false for deferred discovery and engine start.
     pub(crate) async fn connect(
         endpoint: &GrpcEndpoint,
         transport: GrpcTransportConfig,
         startup_deadline: Instant,
-        bootstrap: bool,
     ) -> Result<Self, DynamoError> {
         let pool = timeout_at(
             startup_deadline,
-            GrpcChannelPool::connect("vLLM", endpoint, transport, bootstrap),
+            GrpcChannelPool::connect("vLLM", endpoint, transport, false),
         )
         .await
         .map_err(|_| {
