@@ -425,6 +425,20 @@ def supports_external_mm_hashes(engine: Any) -> bool:
     return True
 
 
+def supports_wide_mm_pad_values() -> bool:
+    """Report whether SGLang derives four wide pads from each MM item hash.
+
+    sgl-project/sglang#43043 replaced the single 30-bit pad value with these
+    pads. Older releases write the single pad value that Dynamo uses by default.
+    """
+    # SGLang 0.5.22 writes the single pad value. Remove this probe when the
+    # minimum supported SGLang includes sgl-project/sglang#43043.
+    # Deferred: schedule_batch imports torch and other SGLang runtime modules.
+    from sglang.srt.managers import schedule_batch
+
+    return hasattr(schedule_batch, "_compute_pad_values")
+
+
 def cache_salt_kwargs(engine: Any, cache_salt: str | None) -> dict[str, Any]:
     """Preserve cache isolation, rejecting salts an older engine cannot honor."""
     if not cache_salt:
@@ -503,4 +517,5 @@ __all__ = [
     "sglang_uses_mla_backend",
     "supports_require_reasoning",
     "supports_external_mm_hashes",
+    "supports_wide_mm_pad_values",
 ]

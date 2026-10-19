@@ -35,6 +35,7 @@ from dynamo.sglang._compat import (
     resolved_server_args,
     sglang_uses_mla_backend,
     supports_external_mm_hashes,
+    supports_wide_mm_pad_values,
 )
 from dynamo.sglang.args import (
     CUDA_COREDUMP_WAIT_ENV,
@@ -1118,6 +1119,18 @@ def test_external_mm_hashes_are_disabled_when_engine_lacks_kwarg():
             return None
 
     assert not supports_external_mm_hashes(LegacyEngine())
+
+
+def test_wide_mm_pad_values_follow_the_installed_sglang(monkeypatch):
+    from sglang.srt.managers import schedule_batch
+
+    monkeypatch.setattr(
+        schedule_batch, "_compute_pad_values", lambda identity: (), raising=False
+    )
+    assert supports_wide_mm_pad_values()
+
+    monkeypatch.delattr(schedule_batch, "_compute_pad_values")
+    assert not supports_wide_mm_pad_values()
 
 
 @pytest.mark.parametrize(
