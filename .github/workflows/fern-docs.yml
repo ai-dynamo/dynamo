@@ -928,6 +928,11 @@ jobs:
           done < <(find "$SHARED" -type f)
           find "docs-checkout/fern/pages-$TAG/reference" -type d -empty -delete 2>/dev/null || true
 
+          # Snapshot pages still link to the copies just dropped; point them at
+          # the shared pages-dev/ files the nav serves instead.
+          python3 source-checkout/docs/fern/scripts/relink_shared_reference.py \
+            "docs-checkout/fern/pages-$TAG" docs-checkout/fern/pages-dev
+
       - name: Snapshot translation mirrors
         run: |
           TAG="${{ steps.version.outputs.tag }}"

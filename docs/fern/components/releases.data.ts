@@ -664,7 +664,7 @@ export interface Artifact {
   badge?: "Preview" | "Experimental" | "Deprecated";
 }
 
-const NGC_C = "https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers";
+const NGC_C = "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers";
 
 export const ARTIFACTS: Artifact[] = [
   {
@@ -1016,7 +1016,7 @@ export const MODEL_EA_BUILDS: ModelEaBuild[] = [
     gaLabel: "Dev-only · v1.4.0 line",
     statusLine: "First build on the v1.4.0 line; targets the next stable release.",
     recipeLabel: "Inkling recipe (main)",
-    recipeHref: "https://github.com/ai-dynamo/dynamo/blob/main/docs/recipes/inkling.mdx",
+    recipeHref: "/dynamo/dev/recipes/inkling",
     github: `${GH}v1.4.0-inkling-dev.1`,
     coverage: MODEL_COVERAGE,
   },

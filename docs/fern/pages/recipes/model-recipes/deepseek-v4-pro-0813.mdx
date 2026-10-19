@@ -251,7 +251,7 @@ Agentic Mooncake trace, 64K median ISL / 400 median OSL, ~90% KV reuse. SLA is u
 - **One config per topology serves both workloads.** The 64K agentic workload and 1M-context requests use the same deployment; GPU KV holds roughly 3.1M tokens, about 3x a full 1M request, so no CPU KV offload is needed. At 1M context, time-to-first-token is minutes — treat it as a batch capability, not an interactive one.
 - **FP8 KV cache is required, not a tuning choice.** vLLM asserts `DeepseekV4 fp8_ds_mla layout only supports fp8 kv-cache`; the routed experts ship MXFP4 in the checkpoint. Serving precision is fixed by the model.
 - **Speculative decoding is not enabled** on the H200 targets. It measured a large regression on this checkpoint.
-- **Different checkpoint from `DeepSeek-V4-Pro`.** See the [DeepSeek-V4-Pro recipe](/dynamo/recipes/model-recipes/deepseek-v4-pro) for that model. The two use different Hugging Face repositories and must not share a model cache.
+- **Different checkpoint from `DeepSeek-V4-Pro`.** See the [DeepSeek-V4-Pro recipe](deepseek-v4-pro.mdx) for that model. The two use different Hugging Face repositories and must not share a model cache.
 
 ## Source
 
