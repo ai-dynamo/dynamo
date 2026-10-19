@@ -3,12 +3,12 @@
 
 //! Ordered reasoning, text, and tool-call parsing through one state machine.
 //!
-//! Qwen3 is gated behind
-//! [`DYN_PARSER_VERSION`](dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION).
+//! Compatible configured families use this path by default; `DYN_PARSER_VERSION=1`
+//! selects the legacy parsers when available.
 //!
 //! # What this replaces
 //!
-//! Dynamo serves a Qwen3 turn today by chaining two independent parsers: the reasoning
+//! The legacy Qwen3 route chains two independent parsers: the reasoning
 //! parser strips `<think>...</think>` across the whole stream into one assembled
 //! `reasoning_content`, and the tool-call jail then scans whatever is left. That chain
 //! cannot represent WHERE a thought happened. Given
@@ -134,8 +134,7 @@ pub(crate) fn selected_family(
     let configured = configured_family(tool_call_parser, reasoning_parser);
     let selection = super::tool_parser_v2::selected_version()
         .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    let selected =
-        selected_family_for_selection(configured, selection, tool_call_parser, reasoning_parser);
+    let selected = selected_family_for_selection(configured, selection);
     tracing::debug!(
         target: "dynamo_unified",
         ?tool_call_parser,
@@ -150,99 +149,27 @@ pub(crate) fn selected_family(
 fn selected_family_for_selection(
     configured: Option<&'static str>,
     selection: dynamo_runtime::config::ParserVersion,
-    tool_call_parser: Option<&str>,
-    reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
     match selection {
-        dynamo_runtime::config::ParserVersion::Auto => configured.filter(|family| {
-            *family == DEEPSEEK_V41_UNIFIED_FAMILY
-                && tool_call_parser == Some(DEEPSEEK_V41_UNIFIED_FAMILY)
-                && reasoning_parser == Some(DEEPSEEK_V41_UNIFIED_FAMILY)
-        }),
+        dynamo_runtime::config::ParserVersion::Auto | dynamo_runtime::config::ParserVersion::V2 => {
+            configured
+        }
         dynamo_runtime::config::ParserVersion::V1 => None,
-        dynamo_runtime::config::ParserVersion::V2 => configured,
     }
 }
 
-/// Whether the configured unified family is needed to decode content even when
-/// request-level routing may keep tool calls on the legacy path. Muse's auto
-/// route is request-mode dependent, but its decoder must remain available for
-/// reasoning-only streams and when tool-call output is suppressed.
 pub(crate) fn selected_content_decoder_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
-    let configured = configured_family(tool_call_parser, reasoning_parser);
-    let selection = super::tool_parser_v2::selected_version()
-        .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    let selected = selected_batch_family_for_selection(
-        configured,
-        selection,
-        tool_call_parser,
-        reasoning_parser,
-    );
-    tracing::debug!(
-        target: "dynamo_unified",
-        ?tool_call_parser,
-        ?reasoning_parser,
-        ?configured,
-        ?selection,
-        ?selected,
-        "unified content decoder decision"
-    );
-    selected
-}
-
-fn selected_batch_family_for_selection(
-    configured: Option<&'static str>,
-    selection: dynamo_runtime::config::ParserVersion,
-    tool_call_parser: Option<&str>,
-    reasoning_parser: Option<&str>,
-) -> Option<&'static str> {
-    match selection {
-        dynamo_runtime::config::ParserVersion::Auto if configured == Some("muse_glimmer") => {
-            configured
-        }
-        _ => {
-            selected_family_for_selection(configured, selection, tool_call_parser, reasoning_parser)
-        }
-    }
-}
-
-/// The configured family eligible to own raw aggregate text.
-///
-/// Return the compatible unified family configured on the model card, before applying
-/// the process-wide generation policy. Batch requests that suppress calls still need
-/// the unified decoder to strip native markup before the calls are discarded.
-pub(crate) fn configured_batch_family(
-    tool_call_parser: Option<&str>,
-    reasoning_parser: Option<&str>,
-) -> Option<&'static str> {
-    configured_family(tool_call_parser, reasoning_parser)
+    selected_family(tool_call_parser, reasoning_parser)
 }
 
 pub(crate) fn selected_batch_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
-    let configured = configured_batch_family(tool_call_parser, reasoning_parser);
-    let selection = super::tool_parser_v2::selected_version()
-        .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    let selected = selected_batch_family_for_selection(
-        configured,
-        selection,
-        tool_call_parser,
-        reasoning_parser,
-    );
-    tracing::debug!(
-        target: "dynamo_unified",
-        ?tool_call_parser,
-        ?reasoning_parser,
-        ?configured,
-        ?selection,
-        "unified batch parser path decision"
-    );
-    selected
+    selected_family(tool_call_parser, reasoning_parser)
 }
 
 pub(crate) fn selected_request_family(
@@ -4018,41 +3945,6 @@ pub(crate) mod tests {
         assert_eq!(
             configured_family(Some("qwen3"), Some("qwen3")),
             Some("qwen3")
-        );
-    }
-
-    #[test]
-    fn selected_family_needs_the_env_flag() {
-        // The env flag is process-wide and read once, so this asserts the relationship
-        // between the two functions rather than mutating the environment: whatever the
-        // flag says, `selected_family` never selects a pair `configured_family` rejects,
-        // and it agrees with `configured_family` exactly when the flag is on.
-        let pair = (Some("qwen3_coder"), Some("qwen3"));
-        assert_eq!(
-            configured_family(pair.0, pair.1),
-            Some(QWEN3_UNIFIED_FAMILY)
-        );
-        if parsers_v2_selected() {
-            assert_eq!(
-                selected_family(pair.0, pair.1),
-                Some(QWEN3_UNIFIED_FAMILY),
-                "flag on: the configured pair must be selected"
-            );
-        } else {
-            assert_eq!(
-                selected_family(pair.0, pair.1),
-                None,
-                "flag off: the configured pair must NOT be selected"
-            );
-        }
-        // Never selected regardless of the flag.
-        assert_eq!(
-            selected_family(Some("qwen3_coder"), None),
-            parsers_v2_selected().then_some(QWEN3_UNIFIED_FAMILY)
-        );
-        assert_eq!(
-            selected_family(None, Some("qwen3")),
-            parsers_v2_selected().then_some(QWEN3_UNIFIED_FAMILY)
         );
     }
 
@@ -9246,7 +9138,9 @@ pub(crate) mod tests {
             ("kimi-k3", "kimi-k3", KIMI_K3_UNIFIED_FAMILY),
         ] {
             assert_eq!(configured_family(Some(tool), Some(reason)), Some(family));
-            let selected = parsers_v2_selected().then_some(family);
+            let selected = (super::super::tool_parser_v2::selected_version().unwrap()
+                != dynamo_runtime::config::ParserVersion::V1)
+                .then_some(family);
             assert_eq!(
                 selected_request_family(
                     Some(tool),
@@ -11233,81 +11127,64 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn muse_content_decoder_preserves_auto_routing_without_changing_v1() {
-        let muse = configured_family(Some("muse_glimmer"), None);
-        assert_eq!(
-            selected_batch_family_for_selection(
-                muse,
-                dynamo_runtime::config::ParserVersion::Auto,
-                Some("muse_glimmer"),
-                None,
-            ),
-            Some("muse_glimmer")
-        );
-        assert_eq!(
-            selected_batch_family_for_selection(
-                muse,
-                dynamo_runtime::config::ParserVersion::V1,
-                Some("muse_glimmer"),
-                None,
-            ),
-            None
-        );
-        assert_eq!(
-            selected_batch_family_for_selection(
-                muse,
-                dynamo_runtime::config::ParserVersion::V2,
-                Some("muse_glimmer"),
-                None,
-            ),
-            Some("muse_glimmer")
-        );
-        assert_eq!(
-            selected_batch_family_for_selection(
-                configured_family(Some("qwen3"), None),
-                dynamo_runtime::config::ParserVersion::Auto,
-                Some("qwen3"),
-                None,
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn family_defaults_keep_deepseek_v41_on_v2_and_muse_on_original_modes() {
-        const CHILD: &str = "DYNAMO_PARSER_FAMILY_DEFAULTS_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let output = crate::test_utils::isolated_command(
-                "protocols::openai::chat_completions::unified_parser::tests::family_defaults_keep_deepseek_v41_on_v2_and_muse_on_original_modes",
-            )
-            .arg("--test-threads=1")
-            .env(CHILD, "1")
-            .env_remove(dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION)
-            .env_remove(
-                dynamo_runtime::config::environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
-            )
-            .output()
-            .expect("run isolated family-default routing test");
-            crate::test_utils::assert_isolated_success(&output);
+    fn default_v2_routing_in_isolated_processes() {
+        use dynamo_runtime::config::environment_names::llm::{
+            DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, DYN_PARSER_VERSION,
+        };
+        const CHILD: &str = "DYNAMO_DEFAULT_V2_ROUTING_CHILD";
+        let Ok(selection) = std::env::var(CHILD) else {
+            for selection in ["unset", "auto", "1", "2", "deprecated_false"] {
+                let mut command = crate::test_utils::isolated_command(
+                    "protocols::openai::chat_completions::unified_parser::tests::default_v2_routing_in_isolated_processes",
+                );
+                command.env(CHILD, selection);
+                match selection {
+                    "unset" => {}
+                    "deprecated_false" => {
+                        command.env(DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, "false");
+                    }
+                    value => {
+                        command.env(DYN_PARSER_VERSION, value);
+                    }
+                }
+                let output = command.output().expect("run isolated routing regression");
+                crate::test_utils::assert_isolated_success(&output);
+            }
             return;
-        }
-
-        let (tool, reasoning) = (Some("deepseek_v41"), Some("deepseek_v41"));
-        let expected = configured_family(tool, reasoning);
-        assert!(expected.is_some());
-        assert_eq!(selected_family(tool, reasoning), expected);
-        assert_eq!(selected_batch_family(tool, reasoning), expected);
-        for (tool, reasoning) in [(Some("muse_glimmer"), None), (None, Some("muse_glimmer"))] {
-            assert!(configured_family(tool, reasoning).is_some());
-            assert_eq!(selected_family(tool, reasoning), None);
-            assert_eq!(selected_batch_family(tool, reasoning), Some("muse_glimmer"));
+        };
+        // Qwen3 was previously left on V1 by both unset and auto.
+        let expected = (selection != "1").then_some(QWEN3_UNIFIED_FAMILY);
+        assert_eq!(
+            selected_family(Some("qwen3_coder"), Some("qwen3")),
+            expected
+        );
+        for &parser in FAMILY_NAMES.iter() {
+            let family = canonical_family(parser).unwrap();
+            for (tool, reasoning) in [
+                (Some(parser), Some(family)),
+                (Some(parser), None),
+                (None, Some(parser)),
+            ] {
+                let expected = (selection != "1").then_some(family);
+                assert_eq!(
+                    selected_family(tool, reasoning),
+                    expected,
+                    "{selection} {tool:?} {reasoning:?}"
+                );
+                assert_eq!(selected_batch_family(tool, reasoning), expected);
+                assert_eq!(selected_content_decoder_family(tool, reasoning), expected);
+            }
         }
         for (tool, reasoning) in [
-            (Some("qwen3_coder"), Some("qwen3")),
-            (Some("deepseek_v41"), None),
+            (Some("qwen3_coder"), Some("glm47")),
+            (Some("qwen3_coder"), Some("deepseek_r1")),
+            (Some("hermes"), None),
+            (None, Some("deepseek_r1")),
+            (None, None),
         ] {
             assert_eq!(selected_family(tool, reasoning), None);
             assert_eq!(selected_batch_family(tool, reasoning), None);
+            assert_eq!(selected_content_decoder_family(tool, reasoning), None);
         }
     }
 
