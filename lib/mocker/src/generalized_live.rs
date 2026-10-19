@@ -1943,6 +1943,7 @@ mod tests {
             tokens: (first_token..first_token + 4).collect(),
             max_output_tokens: 3,
             output_token_ids: Some(vec![10_000, 10_001, 10_002]),
+            session_id: None,
         };
 
         // One pass stores both prompts; the FIFO D2H lane finishes the copies
