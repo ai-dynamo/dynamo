@@ -81,12 +81,10 @@ impl HicacheObjectPool {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 struct HicacheObjectLayout {
     pools: Vec<HicacheObjectPool>,
-    /// Mooncake folds the backend tag and the model name into this prefix.
     #[serde(default)]
     key_prefix: Option<String>,
-    /// Absent in hand-written legacy layouts. `Some(false)` means keys embed the TP
-    /// rank, which one suffix list cannot describe, so `is_valid` rejects it (same for
-    /// `pp_size > 1`).
+    /// None for legacy layouts. Some(false) means per-rank keys that one suffix list
+    /// cannot describe, so `is_valid` rejects it (as it does `pp_size > 1`).
     #[serde(default)]
     is_mla_backend: Option<bool>,
     #[serde(default)]
@@ -169,9 +167,8 @@ impl SglangHicacheMooncakeConfig {
         }
     }
 
-    /// Prefix used for both physical keys and group IDs. An advertised physical
-    /// layout is authoritative even when its prefix is null or empty. Without a
-    /// layout, prefer the full prefix, falling back to older workers' backend tag.
+    /// Prefix for physical keys and group IDs. An advertised layout wins even if its
+    /// prefix is null or empty; otherwise `key_prefix`, then the legacy backend tag.
     fn effective_key_prefix(&self) -> Option<&str> {
         match &self.hicache_object_layout {
             Some(layout) => layout.key_prefix.as_deref(),
@@ -740,8 +737,6 @@ fn sglang_group_id(logical_page_hash: &str, config: &SglangHicacheMooncakeConfig
     format!("sglang-hicache:{logical_key}")
 }
 
-// Test fixture helper: keys required at a particular candidate prefix endpoint.
-// Production evaluates each pool once per page in layout_prefix_hits instead.
 #[cfg(test)]
 fn required_page_keys(
     logical_page_hash: &str,
@@ -1074,7 +1069,6 @@ mod tests {
                 );
                 cache.present_keys.insert(format!("legacy_{hash}__data"));
                 cache.present_keys.insert(format!("top-level_{hash}__data"));
-                // Distinguish null from empty even with otherwise matching objects.
                 let wrong_stem = if prefix.is_none() { "_" } else { "" };
                 cache
                     .present_keys
@@ -1137,7 +1131,6 @@ mod tests {
             }
         }
 
-        // Legacy empty tags still mean no prefix, including layout identity.
         let absent = mooncake_config();
         let empty = SglangHicacheMooncakeConfig {
             extra_backend_tag: Some(String::new()),
@@ -1327,7 +1320,6 @@ mod tests {
         for window_a in [1, 2, 6] {
             for window_b in [1, 3] {
                 let config = SglangHicacheMooncakeConfig {
-                    // No physical KV anchor: the two side pools determine the prefix.
                     hicache_object_layout: object_layout(vec![
                         trailing_pool("__a", window_a),
                         trailing_pool("__b", window_b),
