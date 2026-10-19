@@ -18,12 +18,16 @@ import json
 import logging
 import math
 import re
+import shutil
 import struct
+import subprocess
+import tempfile
 import time
 import uuid
 import wave
 from copy import deepcopy
 from dataclasses import dataclass, field
+from fractions import Fraction
 from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, cast
 
@@ -2816,6 +2820,9 @@ class VideoGenerationPayload(BasePayload):
 
     endpoint: str = "/v1/videos"
     timeout: int = 600
+    # Opt-in decode checks require inline media, so a URL alone cannot pass.
+    expected_video_shape: Optional[tuple[int, int, int]] = None  # frames, height, width
+    expected_video_fps: Optional[float] = None
 
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
@@ -2829,11 +2836,67 @@ class VideoGenerationPayload(BasePayload):
         ), f"Missing 'data' in response. Keys: {list(result.keys())}"
         assert len(result["data"]) > 0, "Empty data in video response"
         entry = result["data"][0]
+        if self.expected_video_shape is not None or self.expected_video_fps is not None:
+            assert entry.get("b64_json"), "Video decode checks require b64_json media"
+            self._validate_video(base64.b64decode(entry["b64_json"], validate=True))
         if "url" in entry:
             assert entry["url"], "Video response url is empty"
             return entry["url"]
         assert entry.get("b64_json"), "Video response b64_json is empty"
         return "b64_video_returned"
+
+    def _validate_video(self, video_bytes: bytes) -> None:
+        ffprobe = shutil.which("ffprobe")
+        if ffprobe is None:
+            raise RuntimeError("ffprobe is required for video decode checks")
+        assert video_bytes[4:8] == b"ftyp", "Expected an MP4 container"
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+            video.write(video_bytes)
+            video.flush()
+            # -count_frames decodes every frame without requiring the rawvideo
+            # encoder/image2pipe muxer that our restricted FFmpeg build omits.
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-err_detect",
+                    "explode",
+                    "-select_streams",
+                    "v:0",
+                    "-count_frames",
+                    "-show_entries",
+                    "stream=width,height,avg_frame_rate,nb_read_frames",
+                    "-of",
+                    "json",
+                    video.name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        # FFprobe can return zero even after reporting decode errors. With
+        # -v error, any stderr means that the clip did not decode cleanly.
+        assert (
+            result.returncode == 0 and not result.stderr.strip()
+        ), f"Could not decode video (ffprobe exit {result.returncode}): {result.stderr}"
+        streams = json.loads(result.stdout)["streams"]
+        assert len(streams) == 1, "Expected a video stream"
+        metadata = streams[0]
+        frame_count = int(metadata.get("nb_read_frames", 0))
+        assert frame_count > 0, "Decoded video contains no frames"
+        if self.expected_video_fps is not None:
+            fps = float(Fraction(metadata["avg_frame_rate"]))
+            assert (
+                fps == self.expected_video_fps
+            ), f"Expected {self.expected_video_fps} FPS, got {fps}"
+        if self.expected_video_shape is not None:
+            count, height, width = self.expected_video_shape
+            assert (metadata["width"], metadata["height"]) == (width, height), (
+                f"Expected {width}x{height} video, "
+                f"got {metadata['width']}x{metadata['height']}"
+            )
+            assert frame_count == count, f"Expected {count} frames, got {frame_count}"
 
     def validate(self, response: Any, content: str) -> None:
         assert content, "Video response content is empty"

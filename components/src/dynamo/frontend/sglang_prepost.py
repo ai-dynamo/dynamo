@@ -648,14 +648,17 @@ def build_tool_call_guided_decoding(
     if not sglang_tools:
         return None
 
-    tool_choice = request.get("tool_choice", "auto")
+    tool_choice: Any = request.get("tool_choice")
+    if tool_choice is None:
+        # An explicit null means the OpenAI default, same as an omitted field.
+        tool_choice = "auto"
     if tool_choice == "none":
         return None
 
     parallel_tool_calls = request.get("parallel_tool_calls")
     if parallel_tool_calls is None:
-        # OpenAI defaults parallel tool calls to enabled. SGLang 0.5.21 also
-        # requires this argument to be a concrete bool rather than None.
+        # OpenAI defaults parallel tool calls to enabled. SGLang requires this
+        # argument to be a concrete bool rather than None.
         parallel_tool_calls = True
     constraint: Any = None
 

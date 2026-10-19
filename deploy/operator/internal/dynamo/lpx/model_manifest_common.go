@@ -14,7 +14,8 @@ import (
 	"capnproto.org/go/capnp/v3"
 )
 
-const hxTopologyFamily = "16x8x2x3"
+// hxTopologyFamily is the GBuild topology type whose dimension order HX partition shapes use.
+const hxTopologyFamily = "HX16x8x2"
 
 func classifyManifestPartitions(filename string, partitions []BuildPartition, partSelect bool) (BuildFamily, error) {
 	family := BuildFamilyXT
@@ -35,6 +36,12 @@ func classifyManifestPartitions(filename string, partitions []BuildPartition, pa
 			return "", fmt.Errorf("%s has duplicate LPU partition id %d", filename, partition.SourcePartitionID)
 		}
 		seen[partition.SourcePartitionID] = struct{}{}
+
+		// One Agent template serves the build; mixed node widths require Dynamo rendering support.
+		if partition.DevicesPerNode != partitions[0].DevicesPerNode {
+			return "", fmt.Errorf("%s LPU partition %d has devicesPerNode %d, want %d; all LPU partitions must use the same devicesPerNode",
+				filename, partition.SourcePartitionID, partition.DevicesPerNode, partitions[0].DevicesPerNode)
+		}
 	}
 	if family == BuildFamilyHX {
 		if partSelect {
