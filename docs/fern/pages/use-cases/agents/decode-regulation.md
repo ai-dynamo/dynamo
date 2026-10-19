@@ -34,14 +34,14 @@ Every scheduler step, over the running requests in the decode phase:
 
    The step target is the smallest `tau` among running interactive requests. Without `DYN_DECODE_REGULATION_DEADLINE`, the target is the fixed `DYN_DECODE_REGULATION_TAU_INTERACTIVE_MS`.
 3. **Predict step time** as `bias × (a + b × n + c × L)`, where `n` is the number of decodes in the step and `L` their total context in tokens. `a, b, c` come from `DYN_DECODE_REGULATION_COEFFS`; `bias` tracks the ratio of measured to predicted time on decode-only steps.
-4. **Choose decodes.** If every running decode fits the target, all of them run. Otherwise interactive requests run, plus any regulated request that has been deferred `K − 1` steps in a row. The remaining regulated requests are added longest-deferred first, then smallest context first, while the predicted step stays within the target. The rest skip this step.
+4. **Choose decodes.** If no interactive request is decoding, or every running decode fits the target, all of them run. Otherwise interactive requests run, plus any regulated request that has been deferred `K − 1` steps in a row. The remaining regulated requests are added longest-deferred first, then smallest context first, while the predicted step stays within the target. The rest skip this step.
 5. **Fail open.** If `bias` stays pinned at its 0.5 or 2.0 limit for `DYN_DECODE_REGULATION_FAILSAFE_STEPS` decode-only steps, the coefficients do not fit this deployment. Regulation turns off and the worker schedules like stock vLLM until it restarts.
 
 ```mermaid
 flowchart LR
-    A[Running decodes] --> B{Batch fits target?}
-    B -->|Yes| C[All decode]
-    B -->|No| D[Interactive and forced requests decode]
+    A[Running decodes] --> B{Interactive request decoding, and batch over target?}
+    B -->|No| C[All decode]
+    B -->|Yes| D[Interactive and forced requests decode]
     D --> E[Add regulated requests while the step fits]
     E --> F[Others skip one step]
 ```
@@ -119,8 +119,7 @@ Set these on the vLLM worker.
 | `DYN_DECODE_REGULATION_PRIORITY_MIN` | unset | Requests with priority at or above this value are interactive. Unset: requests without agent session headers are interactive, and requests with them are regulated. |
 | `DYN_DECODE_REGULATION_DEADLINE` | unset | `ttft_ms,per_token_ms` of the interactive end-to-end deadline. Unset: the fixed per-token target below. |
 | `DYN_DECODE_REGULATION_SLACK_MARGIN` | `0.9` | Share of the remaining deadline the target plans on. Lower values protect more. |
-| `DYN_DECODE_REGULATION_TAU_INTERACTIVE_MS` | `18.48` | Fixed per-token target while an interactive request is running, used when `DYN_DECODE_REGULATION_DEADLINE` is unset. |
-| `DYN_DECODE_REGULATION_TAU_AGENT_MS` | `21.63` | Per-token target while no interactive request is running. |
+| `DYN_DECODE_REGULATION_TAU_INTERACTIVE_MS` | `18.48` | Fixed per-token target, used when `DYN_DECODE_REGULATION_DEADLINE` is unset. |
 | `DYN_DECODE_REGULATION_K` | `4` | A regulated request decodes at least once every `K` steps. |
 | `DYN_DECODE_REGULATION_RHO` | `0.8` | Share of the remaining step budget that regulated requests may fill. |
 | `DYN_DECODE_REGULATION_COEFFS` | MiniMax-M2, TP4, H200 | `a,b,c` of the step-time model, in ms, with `L` in tokens. |
@@ -136,7 +135,7 @@ Regulation turns itself off, with a warning, when the worker uses pipeline paral
 At startup the worker logs the active settings:
 
 ```text
-decode_regulation mode=class_blind coeffs=(6.4013, 0.227066, 1.6055e-05) tau=18.48/21.63 ms rho=0.80 K=4 guard=0 deadline=(500.0, 18.48) margin=0.90
+decode_regulation mode=class_blind coeffs=(6.4013, 0.227066, 1.6055e-05) tau=18.48 ms rho=0.80 K=4 guard=0 deadline=(500.0, 18.48) margin=0.90
 ```
 
 Every `DYN_DECODE_REGULATION_LOG_S` seconds it logs a summary of the interval:
@@ -174,21 +173,21 @@ The worker's `/metrics` endpoint exposes the same counts, labeled by `model` and
 
 Measured so far with coding agents only. MiniMax-M2 on 4 H200 GPUs (tensor parallelism 4, FP8 KV cache), 24 Claude Code agents on 64 SWE-bench Verified tasks, and one interactive request every 2 s on average with `max_tokens` 64. Deadline: 500 ms plus 18.48 ms per token after the first.
 
-| Configuration | Interactive requests on deadline | Agent tasks per hour | Agent task time, p90 |
+| Configuration (runs) | Interactive requests on deadline | Agent tasks per hour | Agent task time, p90 |
 |---|---|---|---|
-| Stock vLLM | 0.31 | 223 | 10.0 min |
-| vLLM `--scheduling-policy priority` | 0.24 | 203 | 9.6 min |
-| `DYN_DECODE_REGULATION_MODE=class_blind`, fixed target | 0.97 | 173 | 14.0 min |
-| `DYN_DECODE_REGULATION_MODE=class_blind`, `DYN_DECODE_REGULATION_DEADLINE=500,18.48` | 0.93 | 209 | 9.4 min |
+| Stock vLLM (6) | 34% | 226 | 9.9 min |
+| vLLM `--scheduling-policy priority` (1) | 24% | 203 | 9.6 min |
+| `DYN_DECODE_REGULATION_MODE=class_blind`, `DYN_DECODE_REGULATION_DEADLINE=500,18.48` (2) | 94% | 273 | 7.0 min |
 
-Stock runs varied by up to 20% in tasks per hour and 1.5× in task p90 between identical runs, so the deadline target's agent cost is within run-to-run noise. The fixed target protects every step as if an interactive request were about to miss; the deadline target deferred 20% of agent request-steps where the fixed target deferred 35%.
+Regulation deferred 4.6% of agent decode steps. Stock runs varied by up to 20% in tasks per hour and 1.5× in task p90 between identical runs, so the agent differences are within run-to-run noise.
+
+Two choices matter for the agents' cost. A fixed per-token target (`DYN_DECODE_REGULATION_DEADLINE` unset) protects every step as if an interactive request were about to miss: in an earlier version it reached 97% on deadline but cut agent throughput to 173 tasks per hour, with a 14.0 min task p90. An earlier version that also regulated agents while no interactive request was running deferred 20% of agent decode steps instead of 4.6%.
 
 ## Limitations
 
 - vLLM only. SGLang and TensorRT-LLM need their own adapters.
 - One deadline per worker. Requests cannot set their own deadline.
 - An interactive request that is already past its deadline keeps the target at its tightest until it finishes.
-- While no interactive request is running, regulated requests are held to `DYN_DECODE_REGULATION_TAU_AGENT_MS` among themselves.
 - Not supported with pipeline parallelism or speculative decoding. Not verified with the vLLM V2 model runner.
 - The decision runs in Python on every step. It costs about 1.3 µs per running request, under 1% of step time on the reference deployment.
 

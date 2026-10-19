@@ -459,3 +459,11 @@ def test_fit_recovers_step_model_from_trace(tmp_path):
     assert len(rows) == 160  # mixed prefill steps are dropped
     a, b, c = fit(rows)
     assert abs(a - 5.0) < 1e-6 and abs(b - 0.2) < 1e-8 and abs(c - 1.5e-5) < 1e-10
+
+
+def test_no_regulation_without_an_interactive_request():
+    reqs = overloaded(n_subs=16)[1:]  # agents only, far over any target
+    s = Sched(reqs, cfg())
+    assert step(s) == {r.request_id for r in reqs}
+    d = DecodeRegulationPolicy(cfg()).decide(cands(n_subs=16)[1:])
+    assert not d.engaged and not d.skip

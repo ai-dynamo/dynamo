@@ -20,8 +20,9 @@ Policy, once per ``schedule()`` call, over running requests in the decode phase:
                 step time stays inside T0 + rho * (tau - T0), most-skipped
                 first, then cheapest context
 
-Nothing is skipped when the whole batch already fits the tightest per-token
-target present, so the policy is free outside overload. The prefill chunk
+Nothing is skipped while no interactive request is decoding, or when the whole
+batch already fits the tightest interactive target, so the policy is free
+outside overload. The prefill chunk
 expected in the same step is added to every prediction.
 
 Mechanism (vLLM v0.31.0): a skipped request keeps its KV and its place in
@@ -44,8 +45,7 @@ Environment (prefix DYN_DECODE_REGULATION_):
   COEFFS            a,b,c of T(n, L) = a + b*n + c*L ms
   PREFILL_COEFFS    q,p: a step with P > 0 prefill tokens adds q + p*P ms
                     (default 0,0: prefill ignored)
-  TAU_INTERACTIVE_MS / TAU_AGENT_MS   per-token targets while an interactive
-                    request is / is not running
+  TAU_INTERACTIVE_MS  fixed per-token target when DEADLINE is unset
   RHO               share of the slack opportunistic decodes may use
   K                 a request decodes at least once every K steps
   MAX_OPP_CTX       coarse guard: opportunistic context per step (0 = off)
@@ -91,7 +91,6 @@ class DecodeRegulationConfig:
     coeffs: tuple = (6.4013, 0.227066, 0.000016055)
     prefill_coeffs: tuple = (0.0, 0.0)
     tau_interactive_ms: float = 18.48
-    tau_agent_ms: float = 21.63
     rho: float = 0.8
     k: int = 4
     max_opp_ctx: int = 0
@@ -139,9 +138,6 @@ class DecodeRegulationConfig:
             c.prefill_coeffs = tuple(parts)
         c.tau_interactive_ms = float(
             env.get("DYN_DECODE_REGULATION_TAU_INTERACTIVE_MS", c.tau_interactive_ms)
-        )
-        c.tau_agent_ms = float(
-            env.get("DYN_DECODE_REGULATION_TAU_AGENT_MS", c.tau_agent_ms)
         )
         c.rho = float(env.get("DYN_DECODE_REGULATION_RHO", c.rho))
         c.k = int(env.get("DYN_DECODE_REGULATION_K", c.k))
@@ -296,17 +292,17 @@ class DecodeRegulationPolicy:
         managed = [c for c in cands if not c.interactive]
         d.n_managed = len(managed)
         d.n_interactive = len(cands) - len(managed)
-        d.tau_ms = (
-            self.cfg.tau_interactive_ms
-            if len(managed) < len(cands)
-            else self.cfg.tau_agent_ms
-        )
+        if not managed or not d.n_interactive:
+            # nothing to regulate, or no interactive request to protect: every
+            # skip would only slow the regulated requests down
+            return self._commit(d, cands)
+        d.tau_ms = self.cfg.tau_interactive_ms
         residual = [c.tau_ms for c in cands if c.interactive and c.tau_ms is not None]
         if residual:
             d.tau_ms = min(residual)
         extra = self.predict_prefill(prefill_tokens)
         d.pred_all_ms = self.predict(len(cands), sum(c.ctx for c in cands)) + extra
-        if d.pred_all_ms <= d.tau_ms or not managed:
+        if d.pred_all_ms <= d.tau_ms:
             d.pred_kept_ms = d.pred_all_ms
             return self._commit(d, cands)
 
@@ -452,12 +448,11 @@ class DecodeRegulationMixin:
         self._reg_next_log = time.monotonic() + self._reg_cfg.log_s
         if self._reg_cfg.enabled:
             logger.info(
-                "decode_regulation mode=%s coeffs=%s tau=%.2f/%.2f ms rho=%.2f K=%d guard=%d "
+                "decode_regulation mode=%s coeffs=%s tau=%.2f ms rho=%.2f K=%d guard=%d "
                 "deadline=%s margin=%.2f",
                 self._reg_cfg.mode,
                 self._reg_cfg.coeffs,
                 self._reg_cfg.tau_interactive_ms,
-                self._reg_cfg.tau_agent_ms,
                 self._reg_cfg.rho,
                 self._reg_cfg.k,
                 self._reg_cfg.max_opp_ctx,
