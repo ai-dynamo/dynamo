@@ -45,6 +45,10 @@ inputs:
     description: 'When "true", render with --make-efa so the licenses stage adds native EFA attribution (libfabric / aws-ofi-nccl via native_packages.yaml). MUST match the build job''s make_efa so the rendered Dockerfile (and thus the licenses-stage cache key) is identical — otherwise the extract cache-misses and rebuilds.'
     required: false
     default: 'false'
+  runtime_variant:
+    description: 'render.py --variant value; must match the build job''s render. Empty = default.'
+    required: false
+    default: ''
   artifact_retention_days:
     description: 'Retention (days) for the uploaded compliance artifact (NOTICES + CSV + CycloneDX). PR passes 7; post-merge / nightly default to 30. The /sources OSRB tarball keeps its own longer retention.'
     required: false
@@ -112,6 +116,9 @@ runs:
         # licenses-stage cache key differs and the extract rebuilds.
         if [ "${{ inputs.make_efa }}" == "true" ]; then
           RENDER_ARGS+=" --make-efa"
+        fi
+        if [ -n "${{ inputs.runtime_variant }}" ]; then
+          RENDER_ARGS+=" --variant ${{ inputs.runtime_variant }}"
         fi
         # --output-short-filename writes container/rendered.Dockerfile, which
         # the extraction steps use when no explicit Dockerfile was supplied.
