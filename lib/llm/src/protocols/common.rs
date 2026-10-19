@@ -665,6 +665,13 @@ pub struct OutputOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_stop_trim: Option<bool>,
 
+    /// Keep the text of the model's own end-of-turn stop tokens (the hidden system/EOS
+    /// ids) in the decoded output while user stop strings and user stop token ids are
+    /// still trimmed. The frontend sets it for grammars whose parser must see the turn
+    /// terminator (Beam's `<|call|>` / `<|return|>`); it is not a request field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_model_stop_token_text: Option<bool>,
+
     /// Number of log probabilities to return per output token.
     /// Note that the implementation follows the OpenAI API: The return
     /// result includes the log probabilities on the `logprobs` most likely

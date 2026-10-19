@@ -117,6 +117,19 @@ fn is_kimi_k2_parser(parser_name: Option<&str>) -> bool {
     parser_name == Some("kimi_k2")
 }
 
+// Beam tool calls live on the Harmony wire: an analysis channel first, then the
+// `<|start|>assistant to=NAME<|channel|>analysis <|constrain|>xml<|message|>` call
+// header with an `rfl:parameter` body. The generic forced-tool JSON grammar replaces
+// that whole wire with a bare JSON object, so the model emits no analysis channel and
+// the response carries no `reasoning_content`; the Beam chat template then rejects the
+// follow-up request whose history replays that tool-call turn without its reasoning.
+// Forced choices therefore stay on the parser path; the preprocessor installs a regex
+// over the native wire instead (see `tool_choice.rs`), which keeps the analysis channel
+// and still forces the call header of an allowed tool.
+pub(crate) fn is_beam_parser(parser_name: Option<&str>) -> bool {
+    parser_name == Some("beam")
+}
+
 fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &ToolChoice) -> bool {
     // K2 forced calls and K3 named calls cannot use Dynamo's generic JSON-schema
     // fallback because both families emit native, marker-delimited formats.
@@ -133,12 +146,14 @@ pub(super) fn requires_native_tool_call_format(
     tool_choice: &ToolChoice,
 ) -> bool {
     // The generic forced-tool JSON grammar describes a different wire format
-    // from Kimi's native marker-delimited calls. This also covers K3 required,
-    // which uses its prompt/parser path when structural guidance is off.
-    (is_kimi_k2_parser(parser_name)
-        && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
-        || (is_kimi_k3_parser(parser_name)
-            && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
+    // from Kimi's native marker-delimited calls and from Beam's Harmony calls.
+    // This also covers K3 required, which uses its prompt/parser path when
+    // structural guidance is off.
+    let forced = matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_));
+    forced
+        && (is_kimi_k2_parser(parser_name)
+            || is_kimi_k3_parser(parser_name)
+            || is_beam_parser(parser_name))
 }
 
 fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolChoice) -> bool {
@@ -1236,6 +1251,24 @@ mod tests {
         assert!(!requires_native_tool_call_format(
             Some("kimi_k2"),
             &ToolChoice::Auto
+        ));
+    }
+
+    #[test]
+    fn beam_forced_choices_keep_the_harmony_wire_and_its_analysis_channel() {
+        let named = ToolChoice::Named("get_weather".to_string());
+        assert!(requires_native_tool_call_format(
+            Some("beam"),
+            &ToolChoice::Required
+        ));
+        assert!(requires_native_tool_call_format(Some("beam"), &named));
+        assert!(!requires_native_tool_call_format(
+            Some("beam"),
+            &ToolChoice::Auto
+        ));
+        assert!(!requires_native_tool_call_format(
+            Some("beam"),
+            &ToolChoice::None
         ));
     }
 

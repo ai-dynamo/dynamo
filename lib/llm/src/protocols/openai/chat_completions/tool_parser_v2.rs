@@ -294,7 +294,9 @@ pub(crate) fn parse_complete_guided_json(
                 })
                 .collect()
         }
-        GuidedToolConstraint::None | GuidedToolConstraint::StructuralTag => {
+        GuidedToolConstraint::None
+        | GuidedToolConstraint::StructuralTag
+        | GuidedToolConstraint::BeamTurnGrammar { .. } => {
             anyhow::bail!("request did not install guided JSON")
         }
     }
