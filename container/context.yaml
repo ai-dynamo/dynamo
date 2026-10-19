@@ -113,7 +113,7 @@ vllm:
     # the Dynamo build adds.
     enterprise:
       cuda13.0:
-        runtime_image: nvcr.io/nvstaging/nim-internal/vllm-enterprise-base
+        runtime_image: nvcr.io/nim/nvidia/vllm-enterprise-base
         runtime_image_tag: 1.7.0-cuda13
         baseline_sbom: vllm-enterprise-base@86221058
   xpu:

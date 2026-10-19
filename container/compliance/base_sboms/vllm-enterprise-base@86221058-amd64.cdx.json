@@ -86199,7 +86199,7 @@
   "metadata": {
     "component": {
       "bom-ref": "682b0ea850731180",
-      "name": "nvcr.io/nvstaging/nim-internal/vllm-enterprise-base",
+      "name": "nvcr.io/nim/nvidia/vllm-enterprise-base",
       "type": "container",
       "version": "1.7.0-cuda13"
     },
