@@ -39,8 +39,8 @@ decode requests retain the child's identity. The gateway must authorize client
 parent-session headers before they reach the router.
 
 KV routing examples require a TensorRT-LLM build with native KVCM2 event
-streaming and a Dynamo frontend and sidecar built from this PR. The pinned
-private engine image in the Kubernetes examples requires `ghcr-pull-secret`.
+streaming and a Dynamo frontend and sidecar built from this PR. The Kubernetes
+examples use `nvcr.io/nvidia/tensorrt-llm/release:1.4.0a0.dev202610180820`.
 
 ## Run locally
 
