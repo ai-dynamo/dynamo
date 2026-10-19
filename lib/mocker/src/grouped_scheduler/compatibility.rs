@@ -46,6 +46,9 @@ impl CompatibilityState {
             .lock()
             .insert(request_id, request.tokens.len());
         Request {
+            session_id: request
+                .replay_context
+                .and_then(|context| context.session_id),
             request_id,
             tokens: request.tokens,
             max_output_tokens: request.max_output_tokens,

@@ -115,6 +115,7 @@ mod tests {
             event_id,
             dp_rank,
             data: KvEventData::Stored(StoredBlocks {
+                session_id: None,
                 parent_hash,
                 start_position: Some(start_position),
                 blocks: blocks

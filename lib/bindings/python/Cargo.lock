@@ -35,7 +35,7 @@ dependencies = [
 [[package]]
 name = "aisimulate-core"
 version = "0.13.0"
-source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=e407510d20901b7f32400a63634a2f9949864966#e407510d20901b7f32400a63634a2f9949864966"
+source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=8713218112047d330da2d4952f9bec0092a573df#8713218112047d330da2d4952f9bec0092a573df"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -65,26 +65,6 @@ dependencies = [
  "tracing",
  "uuid",
  "xxhash-rust",
-]
-
-[[package]]
-name = "aisimulate-python"
-version = "0.13.0"
-source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=e407510d20901b7f32400a63634a2f9949864966#e407510d20901b7f32400a63634a2f9949864966"
-dependencies = [
- "aisimulate-core",
- "anyhow",
- "dynamo-custom-policy-builtin 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
- "dynamo-kv-router 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
- "dynamo-tokens 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
- "pyo3",
- "rustc-hash 2.1.2",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -2147,22 +2127,7 @@ name = "dynamo-custom-policy-builtin"
 version = "1.6.0"
 dependencies = [
  "async-trait",
- "dynamo-kv-router 1.6.0",
- "fastrand",
- "parking_lot",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dynamo-custom-policy-builtin"
-version = "1.6.0"
-source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
-dependencies = [
- "async-trait",
- "dynamo-kv-router 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
+ "dynamo-kv-router",
  "fastrand",
  "parking_lot",
  "serde",
@@ -2176,19 +2141,7 @@ name = "dynamo-kv-hashing"
 version = "1.6.0"
 dependencies = [
  "derive_builder",
- "dynamo-tokens 1.6.0",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "dynamo-kv-hashing"
-version = "1.6.0"
-source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
-dependencies = [
- "derive_builder",
- "dynamo-tokens 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
+ "dynamo-tokens",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2208,10 +2161,10 @@ dependencies = [
  "crossbeam-utils",
  "dashmap",
  "derive_builder",
- "dynamo-kv-hashing 1.6.0",
+ "dynamo-kv-hashing",
  "dynamo-runtime",
- "dynamo-tokens 1.6.0",
- "dynamo-truthy 1.6.0",
+ "dynamo-tokens",
+ "dynamo-truthy",
  "fastrand",
  "flume",
  "futures-util",
@@ -2220,50 +2173,6 @@ dependencies = [
  "ordered-float 4.6.0",
  "parking_lot",
  "prometheus",
- "reqwest 0.12.28",
- "rmp-serde",
- "rustc-hash 2.1.2",
- "seqlock",
- "serde",
- "serde_json",
- "serde_yaml",
- "slotmap",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-appender",
- "uuid",
- "xxhash-rust",
- "zeroize",
- "zmq",
-]
-
-[[package]]
-name = "dynamo-kv-router"
-version = "1.6.0"
-source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
-dependencies = [
- "anyhow",
- "arc-swap",
- "async-trait",
- "axum",
- "blake3",
- "chrono",
- "crossbeam-queue",
- "crossbeam-utils",
- "dashmap",
- "derive_builder",
- "dynamo-kv-hashing 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
- "dynamo-tokens 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
- "dynamo-truthy 1.6.0 (git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd)",
- "fastrand",
- "flume",
- "futures-util",
- "indexmap 2.14.0",
- "once_cell",
- "ordered-float 4.6.0",
- "parking_lot",
  "reqwest 0.12.28",
  "rmp-serde",
  "rustc-hash 2.1.2",
@@ -2311,8 +2220,8 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
- "dynamo-custom-policy-builtin 1.6.0",
- "dynamo-kv-router 1.6.0",
+ "dynamo-custom-policy-builtin",
+ "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
  "dynamo-parsers",
@@ -2322,7 +2231,7 @@ dependencies = [
  "dynamo-rl",
  "dynamo-runtime",
  "dynamo-tokenizers",
- "dynamo-tokens 1.6.0",
+ "dynamo-tokens",
  "either",
  "ffmpeg-next",
  "flate2",
@@ -2397,7 +2306,7 @@ version = "1.6.0"
 dependencies = [
  "anyhow",
  "cudarc",
- "dynamo-truthy 1.6.0",
+ "dynamo-truthy",
  "libc",
  "libloading 0.8.9",
  "nix 0.30.1",
@@ -2413,14 +2322,13 @@ name = "dynamo-mocker"
 version = "1.6.0"
 dependencies = [
  "aisimulate-core",
- "aisimulate-python",
  "anyhow",
  "blake3",
  "bytes",
  "dashmap",
- "dynamo-custom-policy-builtin 1.6.0",
- "dynamo-kv-router 1.6.0",
- "dynamo-tokens 1.6.0",
+ "dynamo-custom-policy-builtin",
+ "dynamo-kv-router",
+ "dynamo-tokens",
  "futures",
  "ndarray 0.16.1",
  "ndarray-interp",
@@ -2512,8 +2420,8 @@ dependencies = [
  "clap",
  "dashmap",
  "dynamo-backend-common",
- "dynamo-custom-policy-builtin 1.6.0",
- "dynamo-kv-router 1.6.0",
+ "dynamo-custom-policy-builtin",
+ "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-mocker",
  "dynamo-parsers",
@@ -2598,7 +2506,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
- "dynamo-truthy 1.6.0",
+ "dynamo-truthy",
  "educe",
  "either",
  "etcd-client",
@@ -2745,22 +2653,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-tokens"
-version = "1.6.0"
-source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
-dependencies = [
- "bs58",
- "bytemuck",
- "dashmap",
- "derive-getters",
- "rustc-hash 2.1.2",
- "serde",
- "thiserror 2.0.18",
- "uuid",
- "xxhash-rust",
-]
-
-[[package]]
 name = "dynamo-trtllm-sidecar"
 version = "1.6.0"
 dependencies = [
@@ -2785,14 +2677,6 @@ dependencies = [
 [[package]]
 name = "dynamo-truthy"
 version = "1.6.0"
-dependencies = [
- "anyhow",
-]
-
-[[package]]
-name = "dynamo-truthy"
-version = "1.6.0"
-source = "git+https://github.com/ai-dynamo/dynamo.git?rev=85ce615a409d61144c5b94ce74dae3f7291573dd#85ce615a409d61144c5b94ce74dae3f7291573dd"
 dependencies = [
  "anyhow",
 ]
@@ -2826,7 +2710,7 @@ dependencies = [
 name = "dynamo-worker-selection-policy-catalog"
 version = "1.6.0"
 dependencies = [
- "dynamo-kv-router 1.6.0",
+ "dynamo-kv-router",
 ]
 
 [[package]]

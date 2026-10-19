@@ -89,6 +89,7 @@ pub(crate) fn aggregated_replay_setup(
         tensor_parallel_size: replay_tensor_parallel_size(&components.args)?,
         // Mocker arguments reach this boundary with a concrete capacity,
         // whether authored directly or supplied by the Dynamo planner.
+        prefill_context_parallel_size: 1,
         num_gpu_blocks_is_explicit: Some(true),
         rank: components.rank,
         prefill: None,
@@ -112,12 +113,14 @@ pub(crate) fn disaggregated_replay_setup(
     let prefill_role = ReplayRoleConfig {
         dp_size: prefill.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&prefill.args)?,
+        prefill_context_parallel_size: 1,
         num_gpu_blocks_is_explicit: Some(true),
         rank: prefill.rank,
     };
     let decode_role = ReplayRoleConfig {
         dp_size: decode.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&decode.args)?,
+        prefill_context_parallel_size: 1,
         num_gpu_blocks_is_explicit: Some(true),
         rank: decode.rank,
     };
@@ -125,6 +128,7 @@ pub(crate) fn disaggregated_replay_setup(
         kv_eviction_policy: Default::default(),
         dp_size: prefill_role.dp_size,
         tensor_parallel_size: prefill_role.tensor_parallel_size,
+        prefill_context_parallel_size: 1,
         num_gpu_blocks_is_explicit: Some(true),
         rank: prefill_role.rank.clone(),
         prefill: Some(prefill_role),

@@ -138,13 +138,23 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
         serde_json::from_value(config.clone()).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("invalid AIS perf config: {e}"))
         })?;
-    let nextn = config
-        .speculation
-        .as_ref()
-        .map_or(config.nextn, |spec| spec.num_speculative_tokens());
     let model = ForwardPassPerfModel::best_available(config).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("AIS model construction failed: {e}"))
     })?;
+    let resolved = &model
+        .provenance()
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("AIS model omitted construction provenance")
+        })?
+        .config;
+    let nextn = resolved
+        .speculation
+        .as_ref()
+        .map_or(Ok(resolved.nextn), |spec| {
+            spec.replay_depth().map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("invalid AIS replay depth: {e}"))
+            })
+        })?;
     if model.diagnostics().readiness != ForwardPassPerfReadiness::Ready {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "AIS estimator is not ready; Router/Mocker requires a ready model because it has no FPM training source",

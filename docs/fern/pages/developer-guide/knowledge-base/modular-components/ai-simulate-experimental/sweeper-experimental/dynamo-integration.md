@@ -138,9 +138,12 @@ hook.
 
 `DynamoReplayRunnerFactory` converts each serializable `ReplaySpec` into an invocation of the
 shared AISimulate Replayer. It resolves Planner hooks into Dynamo scaling callbacks and
-Router hooks into AISimulate's native routing composition. AISimulate owns traffic
-execution, affinity lifecycle, KV feedback, and report generation. The default engine
-runner uses the same composition without this optional integration.
+Router hooks into Dynamo's native routing composition. AISimulate owns traffic
+execution, virtual time, engine observations, and report generation. Dynamo owns
+the adapter, native worker selection, admission, and affinity bindings. Select
+`aisimulate predict --stack dynamo` with matching `ai-dynamo` Python and native
+runtime builds installed. No serving process is required. The default AISimulate
+wheel and published core contain no Dynamo routing dependency.
 
 | Load | No Planner hook | Dynamo Planner hook |
 |---|---|---|

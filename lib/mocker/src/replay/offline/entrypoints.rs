@@ -32,24 +32,6 @@ use crate::replay::{
 };
 use crate::scheduler::RouterEventVisibility;
 
-// Dynamo and AISimulate can link separately pinned policy crates. This adapter
-// forwards the existing estimator without sharing crate-specific trait objects.
-#[cfg(feature = "python-replay")]
-struct CompatiblePrefillLoadEstimator(ReplayPrefillLoadEstimator);
-
-#[cfg(feature = "python-replay")]
-impl aisimulate_python::native_router::PrefillLoadEstimator for CompatiblePrefillLoadEstimator {
-    fn predict_prefill_duration(
-        &self,
-        batch_size: usize,
-        effective_isl: usize,
-        prefix: usize,
-    ) -> anyhow::Result<std::time::Duration> {
-        self.0
-            .predict_prefill_duration(batch_size, effective_isl, prefix)
-    }
-}
-
 /// Lower a serialized offline input to the same executor used by the legacy
 /// materialized entrypoints, selecting only placement and observers here.
 #[cfg(feature = "python-replay")]
@@ -146,16 +128,15 @@ pub fn run_canonical_replay_json(
             capture,
             telemetry,
         )?,
-        ReplayRouterMode::KvRouter => aisimulate_python::execute_native_router_replay(
-            &payload,
-            capture,
-            scaling_policy,
-            telemetry,
-            prefill_load_estimator.map(|estimator| {
-                std::sync::Arc::new(CompatiblePrefillLoadEstimator(estimator))
-                    as aisimulate_python::native_router::ReplayPrefillLoadEstimator
-            }),
-        )?,
+        ReplayRouterMode::KvRouter => {
+            super::extensions::kv_router::native::execute_native_router_replay(
+                &payload,
+                capture,
+                scaling_policy,
+                telemetry,
+                prefill_load_estimator,
+            )?
+        }
     };
     result.report_fields.insert(
         "lifecycle_operations".into(),

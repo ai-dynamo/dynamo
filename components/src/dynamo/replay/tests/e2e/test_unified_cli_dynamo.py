@@ -319,7 +319,7 @@ def _conversation_prediction(tmp_path: Path, backend: str, topology: str, mode: 
     return config
 
 
-def _predict_conversations(tmp_path: Path, config: dict, name: str, *, stack=None):
+def _predict_conversations(tmp_path: Path, config: dict, name: str, *, stack="dynamo"):
     path = tmp_path / f"{name}.yaml"
     path.write_text(yaml.safe_dump(config))
     output = tmp_path / name
@@ -340,13 +340,8 @@ def _predict_conversations(tmp_path: Path, config: dict, name: str, *, stack=Non
     assert (
         json.loads(result.stdout)["completed_requests"] == report["completed_requests"]
     )
-    if stack == "dynamo":
-        assert report["summary"]["completed_requests"] == report["completed_requests"]
-        assert report["coverage"]["per_request_records"] == len(report["per_request"])
-    else:
-        # The default AISimulate stack writes the canonical flat report. The
-        # optional Dynamo adapter retains its historical summary alias.
-        assert "summary" not in report
+    assert report["summary"]["completed_requests"] == report["completed_requests"]
+    assert report["coverage"]["per_request_records"] == len(report["per_request"])
     assert report["per_request"] == [
         json.loads(line)
         for line in (output / "requests.jsonl").read_text().splitlines()
@@ -438,23 +433,39 @@ def _assert_conversation_bindings(report: dict, topology: str, mode: str):
     )
 
 
-@pytest.mark.parametrize("stack", [None, "dynamo"], ids=["auto", "explicit-dynamo"])
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 @pytest.mark.parametrize("topology", ["aggregated", "disaggregated"])
 @pytest.mark.parametrize("mode", ["session", "sibling_group"])
 def test_conversation_yaml_uses_existing_native_router(
-    tmp_path, backend, topology, mode, stack
+    tmp_path, backend, topology, mode
 ):
     config = _conversation_prediction(tmp_path, backend, topology, mode)
-    report = _predict_conversations(tmp_path, config, "affinity", stack=stack)
+    report = _predict_conversations(tmp_path, config, "affinity")
     assert report["completed_requests"] == 10
     _assert_conversation_bindings(report, topology, mode)
     for worker in config["engine"]["workers"].values():
         worker["kv_cache"]["prefix_caching"] = False
-    cold = _predict_conversations(tmp_path, config, "cache-disabled", stack=stack)
+    cold = _predict_conversations(tmp_path, config, "cache-disabled")
     assert cold["completed_requests"] == report["completed_requests"]
     assert cold["first_admission_prefix_cache_reused_ratio"] == 0
     assert all(row["reused_input_tokens"] == 0 for row in cold["per_request"])
+
+
+@pytest.mark.parametrize("topology", ["aggregated", "disaggregated"])
+def test_conversation_tokenization_precedes_native_routing(tmp_path, topology):
+    config = _conversation_prediction(tmp_path, "vllm", topology, "session")
+    config["engine"]["tokenization"] = {
+        "workers": 1,
+        "base_ms": 3.0,
+        "per_input_token_us": 500.0,
+    }
+    report = _predict_conversations(tmp_path, config, "tokenization")
+    assert report["completed_requests"] == 10
+    _assert_conversation_bindings(report, topology, "session")
+    for record in report["per_request"]:
+        service_ms = 3.0 + 0.5 * record["input_length"]
+        assert record["tokenized_ms"] - record["arrival_time_ms"] >= service_ms
+        assert record["first_admit_ms"] >= record["tokenized_ms"]
 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])

@@ -162,15 +162,21 @@ def test_dynamo_pins_matching_aisimulate_sources_and_versions() -> None:
     cargo_version = Version(cargo_requirement.removeprefix("="))
 
     assert cargo_version == python_version
-    wrapper_dependency = cargo["workspace"]["dependencies"]["aisimulate-python"]
-    assert (
-        wrapper_dependency == cargo_dependency
-    ), "the native wheel host and neutral core must use the same source and version"
+    assert "aisimulate-python" not in cargo["workspace"]["dependencies"]
     assert all(
-        _locked_cargo_version(path, cargo_dependency, package_name) == cargo_version
+        _locked_cargo_version(path, cargo_dependency, "aisimulate-core")
+        == cargo_version
         for path in LOCKFILES
-        for package_name in ("aisimulate-core", "aisimulate-python")
     )
+    for path in LOCKFILES:
+        packages = tomllib.loads(path.read_text())["package"]
+        assert not any(package["name"] == "aisimulate-python" for package in packages)
+        assert not any(
+            package.get("source", "").startswith(
+                "git+https://github.com/ai-dynamo/dynamo"
+            )
+            for package in packages
+        ), "routing must use the Dynamo workspace, not another source-pinned Dynamo"
 
     with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
         binding_cargo = tomllib.load(handle)

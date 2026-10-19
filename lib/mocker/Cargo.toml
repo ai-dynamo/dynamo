@@ -17,8 +17,8 @@ default = []
 profile = []
 # Test/benchmark-only deterministic replay plumbing. Production replay never
 # enables this feature and keeps the existing random selector behavior.
-replay-bench = ["aisimulate-core/replay-bench", "aisimulate-python/replay-bench", "dynamo-kv-router/bench"]
-python-replay = ["aisimulate-core/python", "aisimulate-python/python"]
+replay-bench = ["aisimulate-core/replay-bench", "dynamo-kv-router/bench"]
+python-replay = ["aisimulate-core/python"]
 test-support = []
 zmq-events = ["dep:tmq"]
 
@@ -26,7 +26,6 @@ zmq-events = ["dep:tmq"]
 dynamo-custom-policy-builtin = { workspace = true }
 # repo
 aisimulate-core = { workspace = true }
-aisimulate-python = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
 dynamo-tokens = { workspace = true }
 
@@ -42,7 +41,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
 tmq = { workspace = true, optional = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

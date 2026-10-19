@@ -118,6 +118,18 @@ def _agg_deployment() -> BackendDeploymentSpec:
     )
 
 
+@pytest.mark.parametrize(("field", "bound"), [("ttft_ms", 800.0), ("itl_ms", 30.0)])
+def test_runner_preserves_independent_sla_bounds(monkeypatch, field, bound):
+    seen = _capture_native(monkeypatch, {"output_throughput_tok_s": 42.0})
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={"trace_path": "tiny.jsonl", "trace_format": "dynamo"},
+        goal={"target": "throughput", "strict_sla": False, "sla": {field: bound}},
+    )
+    simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+    assert seen["payload"]["spec"]["sla"] == {field: bound}
+
+
 def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
     seen = _capture_native(
         monkeypatch,

@@ -46,7 +46,7 @@ pub enum ReplayArgsMode {
     Disagg,
 }
 
-pub use aisimulate_python::native_router::{ReplayAffinityConfig, ReplayAffinityMode};
+pub use offline::extensions::kv_router::native::{ReplayAffinityConfig, ReplayAffinityMode};
 
 pub type ReplayPrefillLoadEstimator = Arc<dyn PrefillLoadEstimator>;
 
