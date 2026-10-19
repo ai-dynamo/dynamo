@@ -5,7 +5,6 @@
 # - GPU-1 subset (`-m "gpu_1"`): 92.35s total for 2 tests (+ 1 skipped).
 # These tests load a real model and can be slow/flaky when GPU resources are contended,
 # so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
-import json
 import logging
 import os
 import tempfile
@@ -105,7 +104,6 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 - disable_cuda_graph: Disable CUDA graphs (default: False)
                 - extra_args: Additional dynamo.sglang CLI flags (optional)
                 - enable_lora: Enable dynamic LoRA loading (default: False)
-                - kv_events_format: SGLang KV event format, e.g. "dynamo" (optional)
             num_workers: Number of SGLang worker processes
             single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables this many data-parallel ranks per worker process.
@@ -161,7 +159,6 @@ class SGLangProcess(ManagedEngineProcessMixin):
         disable_cuda_graph = sglang_args.get("disable_cuda_graph", False)
         extra_args = sglang_args.get("extra_args", ())
         enable_lora = sglang_args.get("enable_lora", False)
-        kv_events_format = sglang_args.get("kv_events_format")
         # Resolved memory budget, for startup logs (mirrors the command flags).
         mem_budget = (
             f"max_total_tokens={max_total_tokens}, mem_frac=0.9"
@@ -262,14 +259,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
             # ranks publish at base_port + dp_rank, so DP tests must reserve a
             # contiguous port block and pass the block's base port here.
             kv_events_port = self._kv_event_ports[worker_idx * kv_event_rank_span]
-            kv_events = {
-                "publisher": "zmq",
-                "topic": "kv-events",
-                "endpoint": f"tcp://*:{kv_events_port}",
-            }
-            if kv_events_format is not None:
-                kv_events["format"] = kv_events_format
-            kv_events_config = json.dumps(kv_events)
+            kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
             command.extend(["--kv-events-config", kv_events_config])
             command.extend(extra_args)
 
@@ -430,7 +420,6 @@ def test_router_lora_isolation_sglang(
             **SGLANG_ARGS,
             "model": LORA_MODEL_NAME,
             "enable_lora": True,
-            "kv_events_format": "dynamo",
         },
         request=request,
         request_plane=request_plane,

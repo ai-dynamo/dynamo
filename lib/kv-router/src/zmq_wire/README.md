@@ -74,8 +74,10 @@ the metadata tail, so `group_idx` and cache metadata are parsed from tail
 positions.
 
 SGLang workers should always publish with `"format": "dynamo"` in
-`--kv-events-config`, with or without LoRA. That format follows this wire
-format: map events parsed by name, with `lora_name` on `BlockStored`. Other
-SGLang shapes are legacy and parsed only for compatibility: the default format,
-and the positional `BlockStored` of older releases, which ends at `lora_id` and
+`--kv-events-config`, with or without LoRA. `dynamo.sglang` adds it when no
+format is set and the installed SGLang supports it; an SGLang server started
+another way must set it. That format follows this wire format: map events
+parsed by name, with `lora_name` on `BlockStored`. Other SGLang shapes are
+legacy and parsed only for compatibility: the default format, and the
+positional `BlockStored` of releases before 0.5.20, which ends at `lora_id` and
 parses because the tuple terminates early.
