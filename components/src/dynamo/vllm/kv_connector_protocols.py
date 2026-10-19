@@ -17,6 +17,9 @@ entry.
 from __future__ import annotations
 
 import copy
+import ipaddress
+import os
+import re
 import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Tuple, Type
@@ -70,13 +73,18 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
     worker so it can pull from this prefill's bootstrap server."""
 
     def __init__(self, vllm_config: Any) -> None:
+        """Validate the bootstrap address and allocate this request's transfer ID.
+
+        A nonempty host override changes only the advertised host; vLLM still
+        supplies the port. Invalid hosts raise ``ValueError`` at request setup,
+        before prefill runs.
+        """
         super().__init__(vllm_config)
         # Resolve vLLM's canonical bootstrap-addr helper at construction so
         # missing-mooncake / renamed-path errors surface at request setup
-        # rather than after the prefill has already run. Used over get_ip()
-        # because the helper accounts for local_engines_only and
-        # data_parallel_master_ip; an arbitrary local NIC only coincidentally
-        # matches the bootstrap server.
+        # rather than after the prefill has already run. The helper supplies
+        # the configured port and default host; local_engines_only may select
+        # loopback, requiring an advertised-host override for remote decoders.
         try:
             from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (  # noqa: E501
                 get_mooncake_bootstrap_addr,
@@ -88,10 +96,19 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
                 "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
                 "mooncake_connector.get_mooncake_bootstrap_addr"
             ) from e
-        self._get_bootstrap_addr = get_mooncake_bootstrap_addr
+        host, port = get_mooncake_bootstrap_addr(vllm_config)
+        # vLLM may return loopback for local registration in DP1 or external/hybrid
+        # load balancing. Only the address advertised to remote decoders changes.
+        advertised_host = os.environ.get("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST")
+        if advertised_host:
+            host = advertised_host
+        host = _bootstrap_url_host(host)
+        # http:// is required: decode does `remote_bootstrap_addr + "/query"`.
+        self._bootstrap_addr = f"http://{host}:{port}"
         self._transfer_id: str = str(uuid.uuid4())
 
     def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
+        """Start the prefill transfer using the ID shared with the decode request."""
         return {
             "do_remote_decode": True,
             "do_remote_prefill": False,
@@ -101,13 +118,15 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
     def decode_request_kv_transfer_params(
         self, prefill_response: Any
     ) -> Optional[Dict[str, Any]]:
-        host, port = self._get_bootstrap_addr(self._vllm_config)
+        """Advertise the bootstrap URL and transfer ID to the decode worker.
+
+        The engine's prefill response is unused by this push-based protocol.
+        """
         return {
             "do_remote_decode": False,
             "do_remote_prefill": True,
             "transfer_id": self._transfer_id,
-            # http:// is required: decode does `remote_bootstrap_addr + "/query"`.
-            "remote_bootstrap_addr": f"http://{host}:{port}",
+            "remote_bootstrap_addr": self._bootstrap_addr,
             "remote_engine_id": self._vllm_config.kv_transfer_config.engine_id,
         }
 
@@ -129,6 +148,24 @@ class LMCacheMPConnectorProtocol(KvConnectorProtocol):
         # Empty, not None: the prefill router requires the
         # disaggregated_params envelope in the prefill response.
         return {}
+
+
+def _bootstrap_url_host(host: str) -> str:
+    """Validate a bare bootstrap host and bracket IPv6 URL literals."""
+    if ":" in host:
+        # Accept raw pod IPs and already bracketed literals, but never a URL
+        # or host:port override: vLLM's helper owns the bootstrap port.
+        literal = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+        try:
+            if "%" in literal:
+                raise ValueError("Scoped IPv6 hosts are not supported")
+            ipaddress.IPv6Address(literal)
+        except ValueError as exc:
+            raise ValueError(f"Invalid Mooncake bootstrap host: {host!r}") from exc
+        return f"[{literal}]"
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", host):
+        raise ValueError(f"Invalid Mooncake bootstrap host: {host!r}")
+    return host
 
 
 # Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.
