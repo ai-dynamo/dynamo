@@ -114,17 +114,24 @@ def _written_response_keys(tree: ast.Module) -> tuple[set[str], set[str]]:
             meta |= keys(node.args[0])
         elif isinstance(node, ast.Dict) and "meta_info" in keys(node):
             top |= keys(node)
-        elif (
-            isinstance(node, ast.FunctionDef)
-            and "flat_input_top_logprobs_fields" in node.name
-        ):
-            meta |= {
-                inner.value
-                for inner in ast.walk(node)
-                if isinstance(inner, ast.Constant)
-                and isinstance(inner.value, str)
-                and inner.value.startswith("input_top_logprobs_")
-            }
+        elif isinstance(node, ast.FunctionDef) and "top_logprobs_fields" in node.name:
+            for inner in ast.walk(node):
+                if (
+                    isinstance(inner, ast.Constant)
+                    and isinstance(inner.value, str)
+                    and inner.value.startswith("input_top_logprobs_")
+                ):
+                    meta.add(inner.value)
+                # Newer builders name keys f"{side}_top_logprobs_..." for both sides.
+                elif (
+                    isinstance(inner, ast.JoinedStr)
+                    and len(inner.values) == 2
+                    and isinstance(inner.values[0], ast.FormattedValue)
+                    and isinstance(inner.values[1], ast.Constant)
+                    and str(inner.values[1].value).startswith("_top_logprobs_")
+                ):
+                    suffix = inner.values[1].value
+                    meta |= {f"input{suffix}", f"output{suffix}"}
     return meta, top - {"meta_info"}
 
 
