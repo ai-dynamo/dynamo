@@ -50,8 +50,8 @@ fn generate_request_keeps_pending_media_wire_tags() {
         mm_hashes: vec!["h".to_string()],
         ..Default::default()
     };
-    // Repeated string fields 19 to 22 come from unmerged SGLang changes; check
-    // them again against the merged upstream file.
+    // SGLang main has the media fields 19 to 21. mm_hashes (field 22) comes from
+    // an unmerged SGLang change; check it again against the merged upstream file.
     assert_eq!(
         request.encode_to_vec(),
         [
