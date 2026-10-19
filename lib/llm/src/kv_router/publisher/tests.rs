@@ -2203,11 +2203,11 @@ mod worker_metrics_tests {
         }
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn publish_debounces_per_rank_without_replay_when_disabled() {
+    #[tokio::test]
+    async fn publish_debounces_updates_independently_per_rank() {
         let publisher = WorkerMetricsPublisher::new().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        publisher.start_metrics_publishing_with(ChannelSink(tx), 42, false);
+        publisher.start_metrics_publishing_with(ChannelSink(tx), 42);
 
         publisher.publish(Some(0), None, Some(100)).unwrap();
         publisher.publish(Some(1), None, Some(200)).unwrap();
@@ -2232,44 +2232,11 @@ mod worker_metrics_tests {
         assert_eq!(published[1].kv_used_blocks, Some(200));
 
         assert!(
-            tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            tokio::time::timeout(Duration::from_millis(10), rx.recv())
                 .await
                 .is_err(),
-            "unchanged metrics must not replay when serving-load publication is disabled"
+            "same-rank updates should be coalesced"
         );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn publish_replays_every_rank_for_late_subscribers() {
-        let publisher = WorkerMetricsPublisher::new().unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let start = tokio::time::Instant::now();
-        publisher.start_metrics_publishing_with(ChannelSink(tx), 42, true);
-        publisher.publish(Some(0), None, Some(100)).unwrap();
-        publisher.publish(Some(1), Some(7), None).unwrap();
-
-        let mut next_two = async || {
-            let mut loads = Vec::new();
-            for _ in 0..2 {
-                loads.push(
-                    tokio::time::timeout(Duration::from_secs(60), rx.recv())
-                        .await
-                        .expect("timed out waiting for rank metrics")
-                        .expect("metrics publishing task stopped"),
-                );
-            }
-            loads.sort_unstable_by_key(|load| load.dp_rank);
-            loads
-        };
-        let changed = next_two().await;
-        assert!(start.elapsed() < Duration::from_secs(1));
-
-        // Nothing changed, yet both ranks are republished unchanged.
-        let replayed = next_two().await;
-        assert_eq!(start.elapsed(), Duration::from_secs(10));
-        assert_eq!(replayed, changed);
-        assert_eq!(replayed[0].kv_used_blocks, Some(100));
-        assert_eq!(replayed[1].active_decode_blocks, Some(7));
     }
 }
 

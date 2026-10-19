@@ -563,8 +563,7 @@ pub mod llm {
     pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
 
     /// Publish the serving-load streams the KV DC Relay aggregates: frontend
-    /// request load, router scheduler load and the periodic worker KV-metrics
-    /// replay. Off unless truthy.
+    /// request load and router scheduler load. Off unless truthy.
     pub const DYN_SERVING_LOAD_PUBLISH: &str = "DYN_SERVING_LOAD_PUBLISH";
 
     /// Metrics configuration

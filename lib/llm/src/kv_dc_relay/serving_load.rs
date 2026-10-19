@@ -260,7 +260,7 @@ impl SilentStream {
             tracing::warn!(
                 stream = self.stream,
                 silent_secs = SILENT_STREAM_WARNING.as_secs(),
-                "KV DC Relay has no serving-load publishers; set DYN_SERVING_LOAD_PUBLISH=1 on frontends, routers and workers"
+                "KV DC Relay has no serving-load publishers; set DYN_SERVING_LOAD_PUBLISH=1 on frontends and routers"
             );
         }
     }

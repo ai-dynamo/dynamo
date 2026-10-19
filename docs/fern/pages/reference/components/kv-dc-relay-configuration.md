@@ -74,15 +74,15 @@ environment variables.
 
 ## Serving-Load Publishers
 
-`SubscribeServingLoad` aggregates load that frontends, routers, and workers publish only when
-`DYN_SERVING_LOAD_PUBLISH` is true. It is off by default, so deployments without a Relay pay
-nothing. Set it on the processes that feed the Relay, not on the Relay itself:
+`SubscribeServingLoad` aggregates load that frontends and routers publish only when
+`DYN_SERVING_LOAD_PUBLISH` is true. It is off by default, so deployments without a Relay run no
+background serving-load publishing. Set it on the processes that feed the Relay, not on the Relay
+itself:
 
 | Process | Publishes |
 | --- | --- |
 | Frontend, including its embedded KV router | Per-model request and token load once per second, and the embedded router's scheduler load |
 | Standalone KV router | Scheduler load of every worker rank once per second |
-| Worker | Its last KV metrics every 10 seconds, for subscribers that joined late |
 
 Set it on all of them. The Relay cannot see a frontend or router that does not publish, so when
 only some do, their load reads as the complete load. Without it anywhere, every serving-load view

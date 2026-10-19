@@ -262,11 +262,9 @@ is not an outage.
 
 Producers publish at least once per second, and the Relay treats a report as fresh for three
 of those intervals; a producer must not publish less often. Producers publish only with
-`DYN_SERVING_LOAD_PUBLISH` set to a truthy value. Set it on every
-frontend (including the routers embedded in frontends), on standalone routers, and on workers,
-which then re-send their KV metrics every 10 s for subscribers that joined late. Without it the
-Relay still serves the stream, but every view is `UNAVAILABLE`, and it logs a warning after
-30 s without any publisher.
+`DYN_SERVING_LOAD_PUBLISH` set to a truthy value. Set it on every frontend (including the routers
+embedded in frontends) and on standalone routers. Without it the Relay still serves the stream,
+but every view is `UNAVAILABLE`, and it logs a warning after 30 s without any publisher.
 
 | Entry | Key | Contents |
 | --- | --- | --- |
