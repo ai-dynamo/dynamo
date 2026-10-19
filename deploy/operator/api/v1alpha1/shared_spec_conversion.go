@@ -1510,15 +1510,9 @@ func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, ma
 	// than allowing mergo to replace the VolumeMounts slice.
 	mainBase.VolumeMounts = append(slices.Clone(main.VolumeMounts), dedicatedVolumeMounts...)
 	// The v1alpha1 renderer likewise appended envFromSecret after
-	// extraPodSpec.mainContainer.envFrom; skip an entry the main list already has.
-	mainBase.EnvFrom = slices.Clone(main.EnvFrom)
-	for _, envFrom := range dedicatedEnvFrom {
-		if !slices.ContainsFunc(mainBase.EnvFrom, func(existing corev1.EnvFromSource) bool {
-			return apiequality.Semantic.DeepEqual(existing, envFrom)
-		}) {
-			mainBase.EnvFrom = append(mainBase.EnvFrom, envFrom)
-		}
-	}
+	// extraPodSpec.mainContainer.envFrom. Keep duplicates: the last source wins
+	// when two sources define the same key.
+	mainBase.EnvFrom = append(slices.Clone(main.EnvFrom), dedicatedEnvFrom...)
 	if main.Ports != nil {
 		mainBase.Ports = main.Ports
 	}
@@ -2371,11 +2365,19 @@ func restoreEnvFromSecretFromPreserved(dst, preserved *DynamoComponentDeployment
 	if dst.ExtraPodSpec == nil || dst.ExtraPodSpec.MainContainer == nil {
 		return
 	}
-	if !envFromSecretMatches(dst.ExtraPodSpec.MainContainer.EnvFrom, *preserved.EnvFromSecret) {
+
+	// The v1alpha1 renderer appends envFromSecret last, so only an exact
+	// trailing entry can still be the dedicated field; other entries come from
+	// the current v1beta1 list.
+	envFrom := dst.ExtraPodSpec.MainContainer.EnvFrom
+	if len(envFrom) == 0 || !envFromSecretMatches(envFrom[len(envFrom)-1], *preserved.EnvFromSecret) {
 		return
 	}
 	dst.EnvFromSecret = ptr.To(*preserved.EnvFromSecret)
-	dst.ExtraPodSpec.MainContainer.EnvFrom = nil
+	dst.ExtraPodSpec.MainContainer.EnvFrom = slices.Clone(envFrom[:len(envFrom)-1])
+	if len(dst.ExtraPodSpec.MainContainer.EnvFrom) == 0 {
+		dst.ExtraPodSpec.MainContainer.EnvFrom = nil
+	}
 }
 
 func sharedHasMainContainer(src *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
@@ -2423,10 +2425,6 @@ func restoreMainContainerFieldOrigins(dst, preserved *DynamoComponentDeploymentS
 		(len(preserved.Envs) > 0 || len(preservedMain.Env) > 0) {
 		dst.Envs = slices.Clone(preserved.Envs)
 		ensureExtraPodSpecMainContainer(dst).Env = slices.Clone(preservedMain.Env)
-	}
-	if apiequality.Semantic.DeepEqual(currentMain.EnvFrom, preservedSemanticMain.EnvFrom) && preserved.EnvFromSecret != nil {
-		dst.EnvFromSecret = ptr.To(*preserved.EnvFromSecret)
-		ensureExtraPodSpecMainContainer(dst).EnvFrom = slices.Clone(preservedMain.EnvFrom)
 	}
 	if resourceRequirementsEqual(currentMain.Resources, preservedSemanticMain.Resources) &&
 		(preserved.Resources != nil || !resourceRequirementsEqual(preservedMain.Resources, corev1.ResourceRequirements{})) {
@@ -2709,12 +2707,12 @@ func appendMissingVolumeMounts(dst []VolumeMount, mounts []VolumeMount) []Volume
 	return dst
 }
 
-func envFromSecretMatches(envFrom []corev1.EnvFromSource, name string) bool {
-	return apiequality.Semantic.DeepEqual(envFrom, []corev1.EnvFromSource{{
+func envFromSecretMatches(envFrom corev1.EnvFromSource, name string) bool {
+	return apiequality.Semantic.DeepEqual(envFrom, corev1.EnvFromSource{
 		SecretRef: &corev1.SecretEnvSource{
 			LocalObjectReference: corev1.LocalObjectReference{Name: name},
 		},
-	}})
+	})
 }
 
 // ---------------------------------------------------------------------------
