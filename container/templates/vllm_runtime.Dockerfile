@@ -17,6 +17,9 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% if variant == "enterprise" %}
 # The NIM base image ends as its non-root `nim` user.
 USER root
+# The NIM base removes some packages but keeps their conffiles (dpkg state rc).
+# Purge them so compliance does not attribute packages that no longer ship.
+RUN dpkg -l | awk '/^rc/ {print $2}' | xargs -r dpkg --purge
 {% endif %}
 
 ARG PYTHON_VERSION
