@@ -1552,6 +1552,11 @@ test_selection:
     trtllm:
     - components/src/dynamo/trtllm/**
   features:
+    frontend:
+      markers: [frontend]
+      paths:
+      - components/src/dynamo/frontend/**
+      - tests/frontend/**
     multimodal:
       markers: [multimodal]
       paths:
@@ -1594,7 +1599,6 @@ test_selection:
   - lib/llm/**
   - lib/**
   - components/src/dynamo/common/**
-  - components/src/dynamo/frontend/**
   - container/**
   - .dockerignore
   - Cargo.toml

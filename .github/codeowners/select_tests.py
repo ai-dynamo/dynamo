@@ -416,8 +416,38 @@ def write_summary(path: Path, selection: dict[str, Any]) -> None:
             f"| {framework} | {decision['decision']} | {markers} | "
             f"{escaped_reasons} |"
         )
+    paths = selection.get("paths", {})
+    if isinstance(paths, dict) and paths:
+        sorted_paths = sorted(paths.items())
+        shown_paths = sorted_paths[:200]
+        lines.extend(
+            [
+                "",
+                f"#### Changed-path classifications ({len(paths)} paths)",
+                "",
+                "| Path | Classification |",
+                "| --- | --- |",
+            ]
+        )
+        for changed_path, classification in shown_paths:
+            escaped_path = str(changed_path).replace("|", "\\|").replace("`", "\\`")
+            escaped_classification = str(classification).replace("|", "\\|")
+            lines.append(f"| `{escaped_path}` | `{escaped_classification}` |")
+        if len(sorted_paths) > len(shown_paths):
+            lines.append(
+                f"\nShowing first {len(shown_paths)} of {len(sorted_paths)} paths."
+            )
+    else:
+        lines.extend(["", "No changed paths to classify."])
     with path.open("a", encoding="utf-8") as stream:
         stream.write("\n".join(lines) + "\n")
+
+
+def write_github_output(path: Path, selection: dict[str, Any]) -> None:
+    output = {key: value for key, value in selection.items() if key != "paths"}
+    value = json.dumps(output, separators=(",", ":"), sort_keys=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(f"test_selection={value}\n")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -434,6 +464,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--label", action="append")
     parser.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
     parser.add_argument("--summary-file", type=Path)
+    parser.add_argument("--github-output", type=Path)
     return parser.parse_args(argv)
 
 
@@ -492,7 +523,29 @@ def main(argv: list[str] | None = None) -> int:
             except OSError:
                 pass
 
-    print(json.dumps(selection, separators=(",", ":"), sort_keys=True))
+    if args.github_output:
+        try:
+            write_github_output(args.github_output, selection)
+        except Exception as exc:
+            print(
+                f"::warning::Test selection output failed closed: {exc}",
+                file=sys.stderr,
+            )
+            selection = _full_result(
+                normalized_mode,
+                event,
+                pr,
+                f"github-output-error: {exc}",
+                policy=policy,
+                policy_path=args.policy,
+            )
+            try:
+                write_github_output(args.github_output, selection)
+            except OSError as output_error:
+                print(
+                    f"::warning::Unable to write full test selection output: {output_error}",
+                    file=sys.stderr,
+                )
     return 0
 
 

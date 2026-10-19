@@ -261,6 +261,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "smoke: small pre-merge GPU coverage sentinel kept by CI test selection",
     )
+    config.addinivalue_line(
+        "markers",
+        "frontend: marks tests that exercise Dynamo frontend behavior",
+    )
 
     models_dir = config.getoption("--models-dir", default=None)
     if models_dir and not Path(models_dir).is_dir():

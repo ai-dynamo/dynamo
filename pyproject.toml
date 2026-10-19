@@ -360,6 +360,7 @@ markers = [
     "benchmark: marks tests as benchmark tests",
     "none: marks tests that do not require a framework-specific runtime",
     "core: marks tests that exercise core/runtime functionality",
+    "frontend: marks tests that exercise Dynamo frontend behavior",
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",

@@ -143,7 +143,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 | TRT-LLM KV tokens      | requested_trtllm_kv_tokens(N)                                                          | (TRT-LLM only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` → `KvCacheConfig.max_tokens` via `--override-engine-args`. Deterministic, parallel-safe. |
 | TRT-LLM VRAM GiB       | requested_trtllm_vram_gib(N)                                                           | (TRT-LLM only) Max VRAM in GiB. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` → `KvCacheConfig.max_gpu_total_bytes` via `--override-engine-args`. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
 | Framework               | vllm, trtllm, sglang                                             | Which backend the test runs against. Pair with a component marker. |
-| Component               | core, multimodal, router, kvbm, kvbm_concurrency, fault_tolerance, planner | Which part of the backend the test exercises. Pick exactly one of {core, multimodal, router, kvbm, fault_tolerance} per framework-tagged test (disjoint); use `kvbm_concurrency` additionally for KVBM stress tests. `planner` is its own component used by the planner test suite. |
+| Component               | core, frontend, multimodal, router, kvbm, kvbm_concurrency, fault_tolerance, planner | Which part of the backend the test exercises. Pick exactly one of {core, frontend, multimodal, router, kvbm, fault_tolerance} per framework-tagged test (disjoint); use `kvbm_concurrency` additionally for KVBM stress tests. `planner` is its own component used by the planner test suite. |
 | Infrastructure          | k8s, deploy                                                      | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
 | Dependency add-ons      | lmcache                                                          | Optional dependency required by the test (paired with a framework marker, e.g. `vllm + lmcache`). |
@@ -153,7 +153,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 ### Pre-merge GPU test selection
 
 GPU tests requiring `gpu_1` or more should carry a component marker
-(`multimodal`, `router`, `kvbm`, `lmcache`, or `core` only for genuinely
+(`frontend`, `multimodal`, `router`, `kvbm`, `lmcache`, or `core` only for genuinely
 cross-cutting tests) or `smoke`. Selective CI keeps smoke tests, tests matching
 changed feature markers, tests from changed test files, and unclassified tests.
 Selection starts in shadow mode; only `GPU_TEST_SELECTION_MODE=selective`
@@ -168,7 +168,7 @@ Review additions to the smoke set with a CI owner.
 @pytest.mark.profiled_vram_gib(20.5)  # actual nvidia-smi peak
 @pytest.mark.requested_vllm_kv_cache_bytes(942_054_000)  # KV cache cap (2x safety over min=471_027_000)
 @pytest.mark.vllm
-@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
+@pytest.mark.core  # component bucket — pick exactly one of: core, frontend, multimodal, router, kvbm, fault_tolerance
 def test_kv_cache_behavior():
     ...
 ```
@@ -182,7 +182,7 @@ def test_kv_cache_behavior():
 @pytest.mark.requested_sglang_kv_tokens(96)     # KV cache cap (2x safety over min=48)
 @pytest.mark.timeout(265)
 @pytest.mark.sglang
-@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
+@pytest.mark.core  # component bucket — pick exactly one of: core, frontend, multimodal, router, kvbm, fault_tolerance
 def test_sglang_aggregated():
     ...
 ```
@@ -196,7 +196,7 @@ def test_sglang_aggregated():
 @pytest.mark.requested_trtllm_kv_tokens(2592)   # KV cache cap (2x safety over min=1296)
 @pytest.mark.timeout(300)
 @pytest.mark.trtllm
-@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
+@pytest.mark.core  # component bucket — pick exactly one of: core, frontend, multimodal, router, kvbm, fault_tolerance
 def test_trtllm_aggregated():
     ...
 ```

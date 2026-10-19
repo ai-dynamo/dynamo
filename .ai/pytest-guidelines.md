@@ -269,14 +269,16 @@ Every test must have **at least**:
      for stress tests that should run separately
    - `fault_tolerance` -- exercises fault-tolerance paths: request cancellation,
      migration, etcd HA failover, worker health checks, canary rank-pause detection
-   - `core` -- residual: anything that isn't multimodal/router/kvbm/fault_tolerance.
-     Worker handlers, scheduler, prefill/decode, frontend HTTP/gRPC, CUDA version
-     checks, predownload, etc.
+   - `frontend` -- exercises Dynamo frontend HTTP/gRPC behavior, protocol handling,
+     pre/postprocessing, and tool/reasoning parsers
+   - `core` -- residual: anything that isn't multimodal/router/kvbm/fault_tolerance/
+     frontend. Worker handlers, scheduler, prefill/decode, CUDA version checks,
+     predownload, etc.
 
 ### Pre-merge GPU test selection
 
 GPU tests requiring `gpu_1` or more should have a component marker
-(`multimodal`, `router`, `kvbm`, `lmcache`, or `core` only for genuinely
+(`frontend`, `multimodal`, `router`, `kvbm`, `lmcache`, or `core` only for genuinely
 cross-cutting tests) or an explicit `smoke` marker. In selective mode, each
 framework lane keeps smoke tests, tests matching changed feature markers,
 tests from changed test files, and tests with no selected feature marker.
@@ -339,7 +341,7 @@ def test_poll_server():
 @pytest.mark.gpu_0
 @pytest.mark.unit
 @pytest.mark.vllm
-@pytest.mark.core  # component bucket: pick one of core, multimodal, router, kvbm, fault_tolerance
+@pytest.mark.core  # component bucket: pick one of core, frontend, multimodal, router, kvbm, fault_tolerance
 def test_vllm_aggregated(...):
     ...
 ```
@@ -353,8 +355,8 @@ Timing comments let AI/automation understand requirements when shuffling test su
 - `slow` -- known slow test.
 - `parallel` -- safe to run with pytest-xdist.
 - `h100` -- requires H100 hardware.
-- `deploy`, `planner` -- additional component markers (alongside `core` / `multimodal` /
-  `router` / `kvbm` / `fault_tolerance`).
+- `deploy`, `planner` -- additional component markers (alongside `core` / `frontend` /
+  `multimodal` / `router` / `kvbm` / `fault_tolerance`).
 - `k8s` -- requires Kubernetes.
 
 ### Example
@@ -364,7 +366,7 @@ Timing comments let AI/automation understand requirements when shuffling test su
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.vllm
-@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
+@pytest.mark.core  # component bucket — pick exactly one of: core, frontend, multimodal, router, kvbm, fault_tolerance
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(300)
 def test_vllm_aggregated(start_serve_deployment):
