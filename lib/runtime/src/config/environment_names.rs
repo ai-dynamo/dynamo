@@ -869,8 +869,8 @@ pub mod request_plane {
 
 /// Response plane transport configuration.
 pub mod response_plane {
-    /// Response transport used by every runtime in this process: "tcp" or "quic".
-    /// Defaults to "tcp".
+    /// Response transport used by every runtime in this process: "tcp", "quic"
+    /// or "velo". Defaults to "tcp".
     pub const DYN_RESPONSE_PLANE: &str = "DYN_RESPONSE_PLANE";
 
     /// Seconds a frontend waits, after a worker ACKs a unary request, for that
@@ -890,7 +890,9 @@ pub mod response_plane {
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS: &str =
         "DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS";
-    /// Messenger transport for Velo responses: tcp (default) or ucx.
+    /// Messenger transport for Velo responses: tcp (default) or ucx. A ucx
+    /// service also listens on TCP, so a frontend and worker set differently
+    /// still reach each other, and the worker reports the mismatch.
     pub const DYN_VELO_RESPONSE_TRANSPORT: &str = "DYN_VELO_RESPONSE_TRANSPORT";
     /// Maximum Velo response batching delay in milliseconds (default: 5).
     /// Set to 0 for greedy flushing after transport admission. Full batches and
