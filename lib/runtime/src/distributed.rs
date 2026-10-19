@@ -12,7 +12,7 @@ use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv;
 use crate::{discovery, system_status_server, transports};
 use crate::{
-    discovery::{Discovery, DiscoverySpec, EndpointRegistrationLease, EndpointRegistrationManager},
+    discovery::Discovery,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     transports::{etcd, nats, tcp},
@@ -151,7 +151,6 @@ pub struct DistributedRuntime {
 
     // Service discovery client
     discovery_client: Arc<dyn discovery::Discovery>,
-    endpoint_registrations: Arc<EndpointRegistrationManager>,
 
     // Discovery metadata (only used for Kubernetes backend)
     // Shared with system status server to expose via /metadata endpoint
@@ -317,11 +316,6 @@ impl DistributedRuntime {
             request_plane,
         );
 
-        let endpoint_registrations = EndpointRegistrationManager::new(
-            discovery_client.clone(),
-            runtime.secondary(),
-            runtime.primary_token(),
-        );
         let distributed_runtime = Self {
             runtime,
             network_manager: Arc::new(network_manager),
@@ -330,7 +324,6 @@ impl DistributedRuntime {
             quic_response_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
-            endpoint_registrations,
             discovery_metadata,
             component_registry,
             endpoint_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -553,14 +546,6 @@ impl DistributedRuntime {
     /// Returns the discovery interface for service registration and discovery
     pub fn discovery(&self) -> Arc<dyn Discovery> {
         self.discovery_client.clone()
-    }
-
-    /// Register an endpoint until the last runtime-wide owner drops its lease.
-    pub async fn register_endpoint_lease(
-        &self,
-        spec: DiscoverySpec,
-    ) -> Result<EndpointRegistrationLease> {
-        self.endpoint_registrations.register(spec).await
     }
 
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
