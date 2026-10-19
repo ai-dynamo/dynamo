@@ -2257,14 +2257,23 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    /// Beam has no non-thinking generation mode. Validate the client's effective
-    /// toggle before deployment defaults, rendering, or backend dispatch.
-    fn validate_beam_reasoning(&self, request: &NvCreateChatCompletionRequest) -> Result<()> {
-        if self.beam_route
-            && Self::normalize_thinking_aliases(request.chat_template_args.as_ref(), Some("beam"))
+    /// Families verified to have no supported non-thinking generation mode.
+    fn reasoning_is_mandatory(family: Option<&str>) -> bool {
+        matches!(family, Some("beam"))
+    }
+
+    /// Validate the client's effective reasoning toggle against the model's policy
+    /// before deployment defaults, rendering, or backend dispatch.
+    fn validate_reasoning_request(&self, request: &NvCreateChatCompletionRequest) -> Result<()> {
+        let family = crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
+        if Self::reasoning_is_mandatory(family)
+            && Self::normalize_thinking_aliases(request.chat_template_args.as_ref(), family)
                 == Some(false)
         {
-            let message = "Beam does not support disabling reasoning. Remove the reasoning-off setting (thinking, enable_thinking, thinking_mode, or reasoning_effort=none).";
+            let message = "The selected model does not support disabling reasoning. Remove the reasoning-off setting (thinking, enable_thinking, thinking_mode, or reasoning_effort=none).";
             return Err(DynamoError::builder()
                 .error_type(ErrorType::InvalidArgument)
                 .message(message)
@@ -6907,6 +6916,11 @@ impl OpenAIPreprocessor {
         default_thinking_mode: Option<&str>,
         unified_family: Option<&str>,
     ) -> bool {
+        // Reconstructed responses must retain their reasoning channel even if
+        // an older request bypassed admission validation.
+        if Self::reasoning_is_mandatory(unified_family) {
+            return false;
+        }
         let mut chat_template_args = request.chat_template_args.clone();
         let from_client = Self::request_has_client_thinking_control(request);
         let constrained_generation = !from_client
@@ -6929,9 +6943,6 @@ impl OpenAIPreprocessor {
         if let Some(family) = unified_family {
             let thinking = dynamo_renderer::thinking_bool_from_args(chat_template_args.as_ref());
             return match family {
-                // Beam always generates analysis. A response-only/reconstructing
-                // frontend must never move it into content based on a request toggle.
-                "beam" => false,
                 "gemma4" => thinking != Some(true),
                 "deepseek_v4" | "deepseek_v41" => {
                     !Self::deepseek_renderer_reasoning_enabled(chat_template_args.as_ref(), true)
@@ -7787,7 +7798,7 @@ impl
         // it can override an implicit model default (for example Kimi K2.5),
         // while explicit request controls still take precedence.
         let thinking_control_from_client = Self::request_has_client_thinking_control(&request);
-        self.validate_beam_reasoning(&request)?;
+        self.validate_reasoning_request(&request)?;
         self.apply_default_thinking_mode(&mut request);
         Self::normalize_thinking_arg_with_source(
             &mut request,
@@ -13964,7 +13975,7 @@ mod tests {
                 ));
                 let message = error.public_message().unwrap();
                 assert!(
-                    message.contains("Beam does not support disabling reasoning"),
+                    message.contains("The selected model does not support disabling reasoning"),
                     "{message}"
                 );
                 assert!(message.contains("Remove"));
@@ -16425,7 +16436,9 @@ mod beam_route_tests {
 
     #[test]
     fn beam_reasoning_validation_keeps_history_controls_and_other_families() {
-        let beam = synthetic_preprocessor(true, HISTORY_TEMPLATE);
+        let mut beam = synthetic_preprocessor(true, HISTORY_TEMPLATE);
+        beam.tool_call_parser = Some("beam".into());
+        beam.runtime_config.reasoning_parser = Some("beam".into());
         for args in [
             serde_json::json!({}),
             serde_json::json!({"thinking": true}),
@@ -16438,7 +16451,7 @@ mod beam_route_tests {
             request.chat_template_args = Some(serde_json::from_value(args.clone()).unwrap());
             request.normalize_reasoning_template_args().unwrap();
             beam.apply_preserve_thinking(&mut request).unwrap();
-            beam.validate_beam_reasoning(&request).unwrap();
+            beam.validate_reasoning_request(&request).unwrap();
             let rendered = beam.apply_template(&request).unwrap().unwrap();
             assert!(rendered.as_str().contains("SENTINEL_THOUGHT"), "{args}");
         }
@@ -16450,7 +16463,7 @@ mod beam_route_tests {
             serde_json::json!(false),
         )]));
         request.normalize_reasoning_template_args().unwrap();
-        other.validate_beam_reasoning(&request).unwrap();
+        other.validate_reasoning_request(&request).unwrap();
         assert!(OpenAIPreprocessor::request_disables_reasoning_with_family(
             &request,
             Some("qwen3"),
