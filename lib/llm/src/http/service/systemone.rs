@@ -610,6 +610,10 @@ async fn run_branch(
         &branch_id,
     )
     .map_err(|cause| DispatchError::malformed(format!("native request: {cause:#}")))?;
+    preprocessed
+        .routing
+        .get_or_insert_default()
+        .expected_output_tokens = Some(0);
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(prepared.prompt_ids.len(), None);
     if let Some(placement) = pinned {
