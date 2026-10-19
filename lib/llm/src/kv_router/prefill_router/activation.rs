@@ -632,6 +632,11 @@ impl PrefillRouter {
         PrefillLifecycleState::from_atomic(self.lifecycle.load(Ordering::Acquire))
     }
 
+    /// Whether a prefill target is bound and reservations can be made.
+    pub fn is_active(&self) -> bool {
+        self.lifecycle_state() == PrefillLifecycleState::Active
+    }
+
     #[cfg(test)]
     pub(crate) fn target_endpoint_id(&self) -> Option<dynamo_runtime::protocols::EndpointId> {
         self.target_tx

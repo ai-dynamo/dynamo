@@ -26,6 +26,7 @@ use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
+use dynamo_llm::worker_type::WorkerType;
 use dynamo_protocols::types::Prompt;
 use dynamo_runtime::discovery::{
     DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
@@ -42,7 +43,9 @@ use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
     ResponseUsage, resolve_cache_namespace,
 };
-use crate::worker_generations::{GenerationSet, pick_weighted, run_generation_watcher};
+use crate::worker_generations::{
+    GENERATE_ENDPOINT, GenerationScope, GenerationSet, choose_generation, run_generation_watcher,
+};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
@@ -134,7 +137,7 @@ struct Generation {
     prefill_router: Arc<PrefillRouter>,
     decode_router: ManagedKvRouter,
     preprocessor: Arc<OpenAIPreprocessor>,
-    /// Cancelled on drop: stops the prefill watcher and prefill router.
+    /// Cancelled on drop: stops the client, prefill watcher, and prefill router.
     cancel: CancellationToken,
 }
 
@@ -217,10 +220,14 @@ impl Router {
                 )
             }
         };
+        let scope = GenerationScope {
+            namespace_filter: namespace_filter.clone(),
+            prefix_mode: namespace_prefix_mode,
+            component: component.to_string(),
+        };
         tokio::spawn(run_generation_watcher(
             subscribe,
-            namespace_filter.clone(),
-            namespace_prefix_mode,
+            scope,
             build,
             publish,
             drt.child_token(),
@@ -243,9 +250,10 @@ impl Router {
                 Err(_) => tracing::warn!(
                     ?namespace_filter,
                     ?namespace_prefix_mode,
+                    component,
                     "No worker generation is ready yet. If this persists, set \
-                     DYN_NAMESPACE_PREFIX (or DYN_NAMESPACE) to match your workers' \
-                     registration namespace."
+                     DYN_NAMESPACE_PREFIX (or DYN_NAMESPACE) and DYN_COMPONENT_NAME to \
+                     match where your decode workers register."
                 ),
             }
         };
@@ -279,13 +287,13 @@ impl Router {
     }
 
     /// Choose a generation weighted by routable workers, or by hinted workers
-    /// when a subset hint is present.
+    /// when a subset hint is present (see [`choose_generation`]).
     fn select_generation(
         &self,
         allowed_worker_ids: Option<&HashSet<u64>>,
     ) -> Option<Arc<Generation>> {
         let generations = self.generations.borrow().clone();
-        let weight = |generation: &Arc<Generation>| {
+        let workers = |generation: &Arc<Generation>| {
             let client = generation.decode_router.client();
             match allowed_worker_ids {
                 None => client.routing_instance_counts().routable,
@@ -298,7 +306,13 @@ impl Router {
                 }
             }
         };
-        pick_weighted(&generations, weight, |total| rand::random_range(0..total)).cloned()
+        choose_generation(
+            &generations,
+            workers,
+            |generation| generation.prefill_router.is_active(),
+            |total| rand::random_range(0..total),
+        )
+        .cloned()
     }
 }
 
@@ -853,7 +867,7 @@ async fn build_generation(
     let endpoint = drt
         .namespace(namespace)?
         .component(component)?
-        .endpoint("generate");
+        .endpoint(GENERATE_ENDPOINT);
 
     let model_manager = Arc::new(ModelManager::new());
 
@@ -1341,10 +1355,7 @@ fn spawn_prefill_discovery_watcher(
                             Err(_) => continue,
                         };
 
-                        if !card.model_type.supports_prefill()
-                            || card.model_type.supports_chat()
-                            || card.model_type.supports_completions()
-                        {
+                        if card.effective_worker_type() != WorkerType::Prefill {
                             continue;
                         }
 

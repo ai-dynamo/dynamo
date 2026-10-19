@@ -9,6 +9,7 @@
 //! it when the last one is removed. Generic over the generation type so it can
 //! be tested without a KV router.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::discovery::{
     DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryStream, ModelCardInstanceId,
 };
@@ -25,6 +27,9 @@ use futures::{FutureExt, StreamExt};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+
+/// Endpoint the EPP routes to on its worker component.
+pub(crate) const GENERATE_ENDPOINT: &str = "generate";
 
 const INITIAL_RESUBSCRIBE_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_RESUBSCRIBE_BACKOFF: Duration = Duration::from_secs(5);
@@ -38,6 +43,70 @@ const PANIC_RETRY_DELAY: Duration = if cfg!(test) {
 
 /// Live generations, ordered by namespace.
 pub(crate) type GenerationSet<G> = Arc<[Arc<G>]>;
+
+/// The worker cards this EPP routes to: its component's `generate` endpoint,
+/// in namespaces the filter matches.
+#[derive(Clone, Debug)]
+pub(crate) struct GenerationScope {
+    pub(crate) namespace_filter: NamespaceFilter,
+    pub(crate) prefix_mode: NamespacePrefixMode,
+    pub(crate) component: String,
+}
+
+impl GenerationScope {
+    /// Whether the scope holds one DGD's generations, so another model in it
+    /// can only be that DGD renamed.
+    fn single_deployment(&self) -> bool {
+        matches!(self.namespace_filter, NamespaceFilter::Prefix(_))
+            && self.prefix_mode == NamespacePrefixMode::WorkerGeneration
+    }
+
+    /// `instance`'s card, if it is a base-model card the EPP can route to:
+    /// a decode or aggregated worker serving chat or completions.
+    fn admit(
+        &self,
+        instance: &DiscoveryInstance,
+    ) -> Option<(ModelCardInstanceId, ModelDeploymentCard)> {
+        let DiscoveryInstance::Model {
+            namespace,
+            component,
+            endpoint,
+            model_suffix,
+            ..
+        } = instance
+        else {
+            return None;
+        };
+        if *component != self.component
+            || endpoint != GENERATE_ENDPOINT
+            || model_suffix.is_some()
+            || !self
+                .namespace_filter
+                .matches_with_prefix_mode(namespace, self.prefix_mode)
+        {
+            return None;
+        }
+        let card = match instance.deserialize_model::<ModelDeploymentCard>() {
+            Ok(card) => card,
+            Err(error) => {
+                tracing::debug!(%error, namespace, "Failed to deserialize model card, skipping");
+                return None;
+            }
+        };
+        let routable = matches!(
+            card.effective_worker_type(),
+            WorkerType::Decode | WorkerType::Aggregated
+        ) && (card.model_type.supports_chat()
+            || card.model_type.supports_completions());
+        if !routable {
+            return None;
+        }
+        let DiscoveryInstanceId::Model(id) = instance.id() else {
+            return None;
+        };
+        Some((id, card))
+    }
+}
 
 /// A namespace started or stopped serving the pinned model.
 #[derive(Debug)]
@@ -94,15 +163,13 @@ fn decrement<V>(map: &mut HashMap<String, V>, key: &str, count: impl Fn(&mut V) 
     }
 }
 
-/// Decode-capable base-model cards per matching namespace, and the one
-/// model this EPP serves.
+/// Routable cards per matching namespace, and the one model this EPP serves.
 ///
-/// The model is pinned to the first one seen and moves only when none of its
-/// cards remain (a rollout that renames it), so a broad namespace scope never
-/// mixes models. Prefill-only and LoRA cards are skipped.
+/// The model is pinned when first seen so a broad scope never mixes models.
+/// It moves only when none of its cards remain in a single-DGD scope, where
+/// another model can only be the same DGD renamed.
 pub(crate) struct GenerationTracker {
-    namespace_filter: NamespaceFilter,
-    prefix_mode: NamespacePrefixMode,
+    scope: GenerationScope,
     namespaces: HashMap<String, TrackedNamespace>,
     /// Card count per model across all namespaces.
     model_counts: HashMap<String, usize>,
@@ -112,10 +179,9 @@ pub(crate) struct GenerationTracker {
 }
 
 impl GenerationTracker {
-    pub(crate) fn new(namespace_filter: NamespaceFilter, prefix_mode: NamespacePrefixMode) -> Self {
+    pub(crate) fn new(scope: GenerationScope) -> Self {
         Self {
-            namespace_filter,
-            prefix_mode,
+            scope,
             namespaces: HashMap::new(),
             model_counts: HashMap::new(),
             model: None,
@@ -123,44 +189,8 @@ impl GenerationTracker {
         }
     }
 
-    /// `instance`'s card, if it is an in-scope, decode-capable base-model card.
-    fn admit(
-        &self,
-        instance: &DiscoveryInstance,
-    ) -> Option<(ModelCardInstanceId, ModelDeploymentCard)> {
-        let DiscoveryInstance::Model { namespace, .. } = instance else {
-            return None;
-        };
-        if !self
-            .namespace_filter
-            .matches_with_prefix_mode(namespace, self.prefix_mode)
-        {
-            return None;
-        }
-        let DiscoveryInstanceId::Model(id) = instance.id() else {
-            return None;
-        };
-        if id.model_suffix.is_some() {
-            return None;
-        }
-        let card = match instance.deserialize_model::<ModelDeploymentCard>() {
-            Ok(card) => card,
-            Err(error) => {
-                tracing::debug!(%error, namespace, "Failed to deserialize model card, skipping");
-                return None;
-            }
-        };
-        if card.model_type.supports_prefill()
-            && !card.model_type.supports_chat()
-            && !card.model_type.supports_completions()
-        {
-            return None;
-        }
-        Some((id, card))
-    }
-
     pub(crate) fn on_added(&mut self, instance: &DiscoveryInstance) -> Vec<GenerationChange> {
-        let Some((id, card)) = self.admit(instance) else {
+        let Some((id, card)) = self.scope.admit(instance) else {
             return Vec::new();
         };
         let namespace = id.namespace.clone();
@@ -198,7 +228,7 @@ impl GenerationTracker {
         self.namespaces.clear();
         self.model_counts.clear();
         for instance in instances {
-            if let Some((id, card)) = self.admit(instance) {
+            if let Some((id, card)) = self.scope.admit(instance) {
                 let namespace = id.namespace.clone();
                 if let Some(model) = self
                     .namespaces
@@ -216,7 +246,7 @@ impl GenerationTracker {
 
     /// The card to build `namespace`'s generation from, if it serves the
     /// pinned model.
-    pub(crate) fn card_for(&self, namespace: &str) -> Option<Arc<ModelDeploymentCard>> {
+    fn card_for(&self, namespace: &str) -> Option<Arc<ModelDeploymentCard>> {
         let model = self.model.as_ref()?;
         let (_, card) = self.namespaces.get(namespace)?.models.get(model)?;
         Some(card.clone())
@@ -232,13 +262,12 @@ impl GenerationTracker {
         changes
     }
 
-    /// Keep the pinned model while any of its cards remain; otherwise pin the
-    /// smallest remaining model name. Returns whether the pin moved.
+    /// Keep the pinned model while any of its cards remain, and for good in a
+    /// broad scope; otherwise pin the smallest remaining model name. Returns
+    /// whether the pin moved.
     fn repin(&mut self) -> bool {
-        if self
-            .model
-            .as_ref()
-            .is_some_and(|model| self.model_counts.contains_key(model))
+        if let Some(model) = &self.model
+            && (self.model_counts.contains_key(model) || !self.scope.single_deployment())
         {
             return false;
         }
@@ -292,6 +321,13 @@ impl GenerationTracker {
 
 type BuildResult<G> = (String, u64, std::thread::Result<Option<G>>);
 
+/// A build in flight. `seq` fences a stale result after a vanish/reappear.
+struct PendingBuild {
+    seq: u64,
+    cancel: CancellationToken,
+    card: Arc<ModelDeploymentCard>,
+}
+
 /// Published generations and in-flight builds; owned by the watcher task only.
 struct GenerationState<'a, G, B> {
     published: BTreeMap<String, Arc<G>>,
@@ -299,8 +335,7 @@ struct GenerationState<'a, G, B> {
     /// generation was ready. Kept so a restarting worker does not lose its
     /// generation; retired once a replacement is published.
     dormant: HashSet<String>,
-    /// In-flight builds; `seq` fences a stale result after a vanish/reappear.
-    pending: HashMap<String, (u64, CancellationToken)>,
+    pending: HashMap<String, PendingBuild>,
     next_seq: u64,
     builds: JoinSet<BuildResult<G>>,
     build: &'a B,
@@ -308,12 +343,38 @@ struct GenerationState<'a, G, B> {
     cancel: &'a CancellationToken,
 }
 
-impl<G, B, BF> GenerationState<'_, G, B>
+impl<G, B> Drop for GenerationState<'_, G, B> {
+    fn drop(&mut self) {
+        // Stops abandoned builds too, including when the watcher panics.
+        for pending in self.pending.values() {
+            pending.cancel.cancel();
+        }
+    }
+}
+
+impl<'a, G, B, BF> GenerationState<'a, G, B>
 where
     G: Send + Sync + 'static,
     B: Fn(String, ModelDeploymentCard, CancellationToken) -> BF,
     BF: Future<Output = Option<G>> + Send + 'static,
 {
+    fn new(
+        build: &'a B,
+        publish: &'a watch::Sender<GenerationSet<G>>,
+        cancel: &'a CancellationToken,
+    ) -> Self {
+        Self {
+            published: BTreeMap::new(),
+            dormant: HashSet::new(),
+            pending: HashMap::new(),
+            next_seq: 0,
+            builds: JoinSet::new(),
+            build,
+            publish,
+            cancel,
+        }
+    }
+
     fn publish(&self) {
         let set: GenerationSet<G> = self.published.values().cloned().collect();
         self.publish.send_replace(set);
@@ -336,12 +397,18 @@ where
     fn spawn_build(&mut self, namespace: String, card: Arc<ModelDeploymentCard>, delay: Duration) {
         let seq = self.next_seq;
         self.next_seq += 1;
-        let build_cancel = self.cancel.child_token();
-        self.pending
-            .insert(namespace.clone(), (seq, build_cancel.clone()));
-        let built = (self.build)(namespace.clone(), (*card).clone(), build_cancel.clone());
+        let cancel = self.cancel.child_token();
+        let built = (self.build)(namespace.clone(), (*card).clone(), cancel.clone());
+        self.pending.insert(
+            namespace.clone(),
+            PendingBuild {
+                seq,
+                cancel: cancel.clone(),
+                card,
+            },
+        );
         self.builds.spawn(async move {
-            if !delay.is_zero() && !sleep_or_cancel(delay, &build_cancel).await {
+            if !delay.is_zero() && !sleep_or_cancel(delay, &cancel).await {
                 return (namespace, seq, Ok(None));
             }
             (namespace, seq, AssertUnwindSafe(built).catch_unwind().await)
@@ -349,8 +416,8 @@ where
     }
 
     fn vanish(&mut self, namespace: &str) {
-        if let Some((_, cancel)) = self.pending.remove(namespace) {
-            cancel.cancel();
+        if let Some(pending) = self.pending.remove(namespace) {
+            pending.cancel.cancel();
         }
         if !self.published.contains_key(namespace) {
             return;
@@ -378,12 +445,12 @@ where
         }
     }
 
-    fn on_built(&mut self, (namespace, seq, built): BuildResult<G>, tracker: &GenerationTracker) {
-        // Drop results from retired or superseded builds.
-        if self.pending.get(&namespace).map(|(s, _)| *s) != Some(seq) {
-            return;
-        }
-        self.pending.remove(&namespace);
+    fn on_built(&mut self, (namespace, seq, built): BuildResult<G>) {
+        let (namespace, pending) = match self.pending.entry(namespace) {
+            Entry::Occupied(entry) if entry.get().seq == seq => entry.remove_entry(),
+            // Drop results from retired or superseded builds.
+            _ => return,
+        };
         match built {
             Ok(Some(generation)) => {
                 tracing::info!(namespace, "Worker generation ready for routing");
@@ -397,9 +464,8 @@ where
             Ok(None) => {}
             Err(_) => {
                 tracing::error!(namespace, "Worker generation build panicked; retrying");
-                if let Some(card) = tracker.card_for(&namespace) {
-                    self.spawn_build(namespace, card, PANIC_RETRY_DELAY);
-                }
+                pending.cancel.cancel();
+                self.spawn_build(namespace, pending.card, PANIC_RETRY_DELAY);
             }
         }
     }
@@ -412,8 +478,7 @@ where
 /// own task and should return `None` once its token is cancelled.
 pub(crate) async fn run_generation_watcher<G, S, SF, B, BF>(
     mut subscribe: S,
-    namespace_filter: NamespaceFilter,
-    prefix_mode: NamespacePrefixMode,
+    scope: GenerationScope,
     build: B,
     publish: watch::Sender<GenerationSet<G>>,
     cancel: CancellationToken,
@@ -425,7 +490,7 @@ pub(crate) async fn run_generation_watcher<G, S, SF, B, BF>(
     BF: Future<Output = Option<G>> + Send + 'static,
 {
     loop {
-        let tracker = GenerationTracker::new(namespace_filter.clone(), prefix_mode);
+        let tracker = GenerationTracker::new(scope.clone());
         let watched = watch_generations(&mut subscribe, tracker, &build, &publish, &cancel);
         if AssertUnwindSafe(watched).catch_unwind().await.is_ok() {
             return;
@@ -454,16 +519,7 @@ async fn watch_generations<G, S, SF, B, BF>(
     B: Fn(String, ModelDeploymentCard, CancellationToken) -> BF,
     BF: Future<Output = Option<G>> + Send + 'static,
 {
-    let mut state = GenerationState {
-        published: BTreeMap::new(),
-        dormant: HashSet::new(),
-        pending: HashMap::new(),
-        next_seq: 0,
-        builds: JoinSet::new(),
-        build,
-        publish,
-        cancel,
-    };
+    let mut state = GenerationState::new(build, publish, cancel);
     let mut backoff = INITIAL_RESUBSCRIBE_BACKOFF;
     let mut watch_cancel = cancel.child_token();
     let mut opening: Option<OpenWatch> = Some(Box::pin(subscribe(watch_cancel.clone())));
@@ -472,10 +528,11 @@ async fn watch_generations<G, S, SF, B, BF>(
     loop {
         // Builds are joined in every state, including while (re)subscribing.
         tokio::select! {
+            biased;
             _ = cancel.cancelled() => break,
             Some(joined) = state.builds.join_next(), if !state.builds.is_empty() => {
                 if let Ok(result) = joined {
-                    state.on_built(result, &tracker);
+                    state.on_built(result);
                 }
             }
             opened = async { opening.as_mut().expect("guarded").await }, if opening.is_some() => {
@@ -521,9 +578,6 @@ async fn watch_generations<G, S, SF, B, BF>(
     }
 
     watch_cancel.cancel();
-    for (_, cancel) in state.pending.values() {
-        cancel.cancel();
-    }
     state.builds.shutdown().await;
 }
 
@@ -560,20 +614,49 @@ async fn sleep_or_cancel(delay: Duration, cancel: &CancellationToken) -> bool {
     }
 }
 
+/// Choose a generation, weighted by `workers`.
+///
+/// While any generation's prefill router is active, generations whose router
+/// is not yet active are skipped: a new generation's prefill router activates
+/// after its decode workers register, and until then it would serve a
+/// disaggregated deployment aggregated. With no workers anywhere, the first
+/// generation is chosen so its router reports why. `roll(total)` returns a
+/// value in `0..total`.
+pub(crate) fn choose_generation<T>(
+    generations: &[T],
+    workers: impl Fn(&T) -> usize,
+    prefill_active: impl Fn(&T) -> bool,
+    roll: impl Fn(usize) -> usize,
+) -> Option<&T> {
+    if generations.len() <= 1 {
+        return generations.first();
+    }
+    let disaggregated = generations.iter().any(&prefill_active);
+    let disaggregated_workers = |generation: &T| {
+        if prefill_active(generation) {
+            workers(generation)
+        } else {
+            0
+        }
+    };
+    disaggregated
+        .then(|| pick_weighted(generations, disaggregated_workers, &roll))
+        .flatten()
+        .or_else(|| pick_weighted(generations, &workers, &roll))
+        .or_else(|| generations.first())
+}
+
 /// Pick an item with probability proportional to its weight; `roll(total)`
-/// returns a value in `0..total`. All-zero weights pick the first item.
-pub(crate) fn pick_weighted<T>(
+/// returns a value in `0..total`. Returns `None` when every weight is zero.
+fn pick_weighted<T>(
     items: &[T],
     weight: impl Fn(&T) -> usize,
     roll: impl FnOnce(usize) -> usize,
 ) -> Option<&T> {
-    if items.len() <= 1 {
-        return items.first();
-    }
     let weights: Vec<usize> = items.iter().map(&weight).collect();
     let total: usize = weights.iter().sum();
     if total == 0 {
-        return items.first();
+        return None;
     }
     let mut point = roll(total);
     for (item, weight) in items.iter().zip(weights) {
@@ -582,7 +665,7 @@ pub(crate) fn pick_weighted<T>(
         }
         point -= weight;
     }
-    items.last()
+    None
 }
 
 #[cfg(test)]
@@ -591,60 +674,67 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use dynamo_runtime::discovery::DiscoveryQuery;
-    use dynamo_runtime::distributed::DistributedConfig;
-    use dynamo_runtime::{DistributedRuntime, Runtime};
+    use dynamo_llm::model_type::ModelType;
     use tokio::sync::{mpsc, oneshot};
 
     const MODEL: &str = "tiny";
 
-    /// Register a card for `model` under `namespace/component/generate` in
-    /// process-local discovery.
-    async fn register(drt: &DistributedRuntime, namespace: &str, component: &str, model: &str) {
-        let endpoint = drt
-            .namespace(namespace)
-            .unwrap()
-            .component(component)
-            .unwrap()
-            .endpoint("generate");
-        endpoint.register_endpoint_instance().await.unwrap();
-        let mut card = ModelDeploymentCard::load_from_disk(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../../lib/llm/tests/data/sample-models/TinyLlama_v1.1"
-            ),
-            None,
-        )
-        .unwrap();
-        card.display_name = model.to_string();
-        dynamo_llm::local_model::register_model_card(&endpoint, &card)
-            .await
-            .unwrap();
+    fn card(
+        model: &str,
+        worker_type: Option<WorkerType>,
+        model_type: ModelType,
+    ) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only(model);
+        card.worker_type = worker_type;
+        card.model_type = model_type;
+        card
     }
 
-    /// Register one card per `(namespace, component, model)` and return the
-    /// listed instances.
-    async fn discover(cards: &[(&str, &str, &str)]) -> (Runtime, Vec<DiscoveryInstance>) {
-        let runtime = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
-        for (namespace, component, model) in cards {
-            register(&drt, namespace, component, model).await;
+    fn chat() -> ModelType {
+        ModelType::Chat | ModelType::Completions
+    }
+
+    /// A card registered on `namespace/component/endpoint`.
+    fn registration(
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+        instance_id: u64,
+        card: &ModelDeploymentCard,
+    ) -> DiscoveryInstance {
+        DiscoveryInstance::Model {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            endpoint: endpoint.to_string(),
+            instance_id,
+            card_json: serde_json::to_value(card).unwrap(),
+            model_suffix: None,
         }
-        let instances = drt
-            .discovery()
-            .list(DiscoveryQuery::AllModels)
-            .await
-            .unwrap();
-        (runtime, instances)
     }
 
-    fn cards_in<'a>(instances: &'a [DiscoveryInstance], ns: &str) -> Vec<&'a DiscoveryInstance> {
-        instances
-            .iter()
-            .filter(|i| matches!(i, DiscoveryInstance::Model { namespace, .. } if namespace == ns))
-            .collect()
+    /// A decode worker's card for `model` on the EPP's `backend/generate`.
+    fn decode(namespace: &str, instance_id: u64, model: &str) -> DiscoveryInstance {
+        let card = card(model, Some(WorkerType::Decode), chat());
+        registration(namespace, "backend", GENERATE_ENDPOINT, instance_id, &card)
+    }
+
+    fn scope(
+        namespace_filter: NamespaceFilter,
+        prefix_mode: NamespacePrefixMode,
+    ) -> GenerationScope {
+        GenerationScope {
+            namespace_filter,
+            prefix_mode,
+            component: "backend".to_string(),
+        }
+    }
+
+    /// The operator's scope for a DGD named `dgd`.
+    fn dgd() -> GenerationScope {
+        scope(
+            NamespaceFilter::Prefix("dgd".into()),
+            NamespacePrefixMode::WorkerGeneration,
+        )
     }
 
     fn summarize(changes: &[GenerationChange]) -> Vec<String> {
@@ -659,26 +749,104 @@ mod tests {
         out
     }
 
-    fn tracker(filter: NamespaceFilter) -> GenerationTracker {
-        GenerationTracker::new(filter, NamespacePrefixMode::WorkerGeneration)
+    /// Only the decode or aggregated cards on the EPP's own endpoint start a
+    /// generation; anything else could hand a generation the wrong worker role,
+    /// tokenizer, or liveness.
+    #[test]
+    fn tracker_admits_only_cards_the_epp_routes_to() {
+        let ns = "dgd-aaaaaaaa";
+        let decode_card = card(MODEL, Some(WorkerType::Decode), chat());
+        let mut lora = decode(ns, 1, MODEL);
+        if let DiscoveryInstance::Model { model_suffix, .. } = &mut lora {
+            *model_suffix = Some("adapter".into());
+        }
+        let ignored = [
+            (
+                "another component",
+                registration(ns, "prefill", GENERATE_ENDPOINT, 2, &decode_card),
+            ),
+            (
+                "another endpoint",
+                registration(ns, "backend", "clear_kv_blocks", 3, &decode_card),
+            ),
+            (
+                "legacy prefill",
+                registration(
+                    ns,
+                    "backend",
+                    GENERATE_ENDPOINT,
+                    4,
+                    &card(MODEL, None, ModelType::Prefill),
+                ),
+            ),
+            (
+                "prefill",
+                registration(
+                    ns,
+                    "backend",
+                    GENERATE_ENDPOINT,
+                    5,
+                    &card(MODEL, Some(WorkerType::Prefill), ModelType::empty()),
+                ),
+            ),
+            (
+                "encode",
+                registration(
+                    ns,
+                    "backend",
+                    GENERATE_ENDPOINT,
+                    6,
+                    &card(MODEL, Some(WorkerType::Encode), chat()),
+                ),
+            ),
+            (
+                "embedding",
+                registration(
+                    ns,
+                    "backend",
+                    GENERATE_ENDPOINT,
+                    7,
+                    &card(MODEL, Some(WorkerType::Aggregated), ModelType::Embedding),
+                ),
+            ),
+            ("LoRA", lora),
+        ];
+        let mut tracker = GenerationTracker::new(dgd());
+        for (what, instance) in &ignored {
+            assert!(
+                tracker.on_added(instance).is_empty(),
+                "{what} must be ignored"
+            );
+        }
+
+        let changes = tracker.on_added(&decode(ns, 8, MODEL));
+        let [GenerationChange::Appeared { card, .. }] = changes.as_slice() else {
+            panic!("the decode card must start the generation: {changes:?}");
+        };
+        assert_eq!(card.worker_type, Some(WorkerType::Decode));
+        let aggregated = card_on_backend("dgd-bbbbbbbb", 9, WorkerType::Aggregated);
+        assert_eq!(summarize(&tracker.on_added(&aggregated)), ["+dgd-bbbbbbbb"]);
     }
 
-    fn dgd() -> NamespaceFilter {
-        NamespaceFilter::Prefix("dgd".into())
+    fn card_on_backend(
+        namespace: &str,
+        instance_id: u64,
+        worker_type: WorkerType,
+    ) -> DiscoveryInstance {
+        let card = card(MODEL, Some(worker_type), ModelType::Chat);
+        registration(namespace, "backend", GENERATE_ENDPOINT, instance_id, &card)
     }
 
-    /// Worker generations of this DGD are admitted; a sibling DGD sharing the
-    /// prefix is excluded under worker-generation matching, and an exact
-    /// scope excludes generations.
-    #[tokio::test]
-    async fn tracker_scopes_generations_to_this_deployment() {
-        let (runtime, instances) = discover(&[
-            ("default-foo-bar", "backend", MODEL),
-            ("default-foo-1a2b3c4d", "backend", MODEL),
-        ])
-        .await;
+    /// A sibling DGD sharing the prefix is excluded under worker-generation
+    /// matching, and an exact scope excludes generations.
+    #[test]
+    fn tracker_scopes_generations_to_this_deployment() {
+        let instances = [
+            decode("default-foo-bar", 1, MODEL),
+            decode("default-foo-1a2b3c4d", 2, MODEL),
+        ];
         let resync = |filter: NamespaceFilter, mode: NamespacePrefixMode| {
-            summarize(&GenerationTracker::new(filter, mode).on_resync(&instances))
+            summarize(&GenerationTracker::new(scope(filter, mode)).on_resync(&instances))
         };
         let prefix = || NamespaceFilter::Prefix("default-foo".into());
         assert_eq!(
@@ -696,95 +864,225 @@ mod tests {
             )
             .is_empty()
         );
-        runtime.shutdown();
     }
 
     /// The rolling update from #16085: `a` is live, `b` appears beside it,
     /// then `a` drains. `b` is reported on its first card, `a` on its last.
-    #[tokio::test]
-    async fn tracker_follows_a_rolling_update() {
-        let (runtime, instances) = discover(&[
-            ("dgd-aaaaaaaa", "decode", MODEL),
-            ("dgd-aaaaaaaa", "backend", MODEL),
-            ("dgd-bbbbbbbb", "backend", MODEL),
-        ])
-        .await;
-        let (gen_a, gen_b) = (
-            cards_in(&instances, "dgd-aaaaaaaa"),
-            cards_in(&instances, "dgd-bbbbbbbb"),
+    #[test]
+    fn tracker_follows_a_rolling_update() {
+        let (a1, a2, b) = (
+            decode("dgd-aaaaaaaa", 1, MODEL),
+            decode("dgd-aaaaaaaa", 2, MODEL),
+            decode("dgd-bbbbbbbb", 3, MODEL),
         );
-        assert_eq!((gen_a.len(), gen_b.len()), (2, 1));
+        let mut tracker = GenerationTracker::new(dgd());
+        assert_eq!(summarize(&tracker.on_added(&a1)), ["+dgd-aaaaaaaa"]);
+        assert!(tracker.on_added(&a2).is_empty(), "one change per namespace");
+        assert_eq!(summarize(&tracker.on_added(&b)), ["+dgd-bbbbbbbb"]);
 
-        let mut tracker = tracker(dgd());
-        let added: Vec<_> = gen_a.iter().flat_map(|i| tracker.on_added(i)).collect();
-        assert_eq!(
-            summarize(&added),
-            ["+dgd-aaaaaaaa"],
-            "one change per namespace"
-        );
-        assert_eq!(summarize(&tracker.on_added(gen_b[0])), ["+dgd-bbbbbbbb"]);
-
-        assert!(tracker.on_removed(&gen_a[0].id()).is_empty());
+        assert!(tracker.on_removed(&a1.id()).is_empty());
         assert!(
-            tracker.on_removed(&gen_a[0].id()).is_empty(),
+            tracker.on_removed(&a1.id()).is_empty(),
             "a repeated removal is not a second card leaving"
         );
-        assert_eq!(
-            summarize(&tracker.on_removed(&gen_a[1].id())),
-            ["-dgd-aaaaaaaa"]
-        );
+        assert_eq!(summarize(&tracker.on_removed(&a2.id())), ["-dgd-aaaaaaaa"]);
 
-        assert_eq!(summarize(&tracker.on_resync(&instances)), ["+dgd-aaaaaaaa"]);
-        let only_b: Vec<DiscoveryInstance> = gen_b.into_iter().cloned().collect();
-        assert_eq!(summarize(&tracker.on_resync(&only_b)), ["-dgd-aaaaaaaa"]);
-        runtime.shutdown();
+        let all = [a1.clone(), a2.clone(), b.clone()];
+        assert_eq!(summarize(&tracker.on_resync(&all)), ["+dgd-aaaaaaaa"]);
+        assert_eq!(summarize(&tracker.on_resync(&[b])), ["-dgd-aaaaaaaa"]);
     }
 
-    /// A broad scope that sees two models serves one, and moves to the other
-    /// only once the first has no cards left.
-    #[tokio::test]
-    async fn tracker_pins_one_model() {
-        let (runtime, instances) = discover(&[
-            ("team-a", "backend", "model-a"),
-            ("team-b", "backend", "model-b"),
-        ])
-        .await;
-        let mut tracker = tracker(NamespaceFilter::Global);
-        assert_eq!(summarize(&tracker.on_resync(&instances)), ["+team-a"]);
-        let team_a = cards_in(&instances, "team-a")[0];
+    /// Within one DGD, a model left with no workers gives way to its rename.
+    /// In a broad scope another model may be a different deployment, so the
+    /// pin holds until the pinned model returns.
+    #[test]
+    fn tracker_moves_the_pin_only_within_one_deployment() {
+        let old = decode("dgd-aaaaaaaa", 1, "model-a");
+        let renamed = decode("dgd-bbbbbbbb", 2, "model-b");
+
+        let mut tracker = GenerationTracker::new(dgd());
+        assert_eq!(summarize(&tracker.on_added(&old)), ["+dgd-aaaaaaaa"]);
+        assert!(tracker.on_added(&renamed).is_empty(), "one model at a time");
         assert_eq!(
-            summarize(&tracker.on_removed(&team_a.id())),
-            ["+team-b", "-team-a"]
+            summarize(&tracker.on_removed(&old.id())),
+            ["+dgd-bbbbbbbb", "-dgd-aaaaaaaa"]
         );
-        assert!(
-            tracker.on_added(team_a).is_empty(),
-            "the old model returning does not displace the pinned one"
-        );
-        runtime.shutdown();
+
+        let mut tracker = GenerationTracker::new(scope(
+            NamespaceFilter::Global,
+            NamespacePrefixMode::WorkerGeneration,
+        ));
+        assert_eq!(summarize(&tracker.on_added(&old)), ["+dgd-aaaaaaaa"]);
+        assert!(tracker.on_added(&renamed).is_empty());
+        assert_eq!(summarize(&tracker.on_removed(&old.id())), ["-dgd-aaaaaaaa"]);
+        assert_eq!(summarize(&tracker.on_added(&old)), ["+dgd-aaaaaaaa"]);
+    }
+
+    /// `(name, workers, prefill_active)`, chosen with `roll` capped to the
+    /// weight being rolled over.
+    fn choose(generations: &[(&'static str, usize, bool)], roll: usize) -> Option<&'static str> {
+        choose_generation(generations, |g| g.1, |g| g.2, |total| roll.min(total - 1)).map(|g| g.0)
     }
 
     #[test]
-    fn pick_weighted_follows_capacity() {
-        let items = ["old", "new"];
-        let weights = |w: [usize; 2]| move |item: &&str| if *item == "old" { w[0] } else { w[1] };
-        assert_eq!(pick_weighted(&items, weights([3, 1]), |_| 0), Some(&"old"));
-        assert_eq!(pick_weighted(&items, weights([3, 1]), |_| 2), Some(&"old"));
-        assert_eq!(pick_weighted(&items, weights([3, 1]), |_| 3), Some(&"new"));
+    fn choose_generation_follows_capacity() {
+        let both = [("old", 3, false), ("new", 1, false)];
+        assert_eq!(choose(&both, 0), Some("old"));
+        assert_eq!(choose(&both, 2), Some("old"));
+        assert_eq!(choose(&both, 3), Some("new"));
         assert_eq!(
-            pick_weighted(&items, weights([0, 4]), |_| 0),
-            Some(&"new"),
+            choose(&[("old", 0, false), ("new", 4, false)], 0),
+            Some("new"),
             "a drained generation gets no traffic"
         );
         assert_eq!(
-            pick_weighted(&items, weights([0, 0]), |_| unreachable!()),
-            Some(&"old")
+            choose(&[("old", 0, false), ("new", 0, false)], 0),
+            Some("old"),
+            "with no workers anywhere the first generation reports why"
+        );
+        assert_eq!(choose(&[("only", 0, false)], 0), Some("only"));
+        assert_eq!(choose(&[], 0), None);
+    }
+
+    /// A disaggregated rollout keeps traffic off a generation until its
+    /// prefill router is active, unless nothing else has workers.
+    #[test]
+    fn choose_generation_waits_for_the_prefill_router() {
+        assert_eq!(
+            choose(&[("old", 2, true), ("new", 6, false)], 7),
+            Some("old")
         );
         assert_eq!(
-            pick_weighted(&["only"], |_| unreachable!(), |_| unreachable!()),
-            Some(&"only"),
-            "a single generation is chosen without computing weights"
+            choose(&[("old", 2, true), ("new", 6, true)], 7),
+            Some("new")
         );
-        assert_eq!(pick_weighted::<&str>(&[], |_| 0, |_| 0), None);
+        assert_eq!(
+            choose(&[("old", 0, true), ("new", 6, false)], 5),
+            Some("new"),
+            "aggregated beats no route at all"
+        );
+    }
+
+    type TestBuild = fn(
+        String,
+        ModelDeploymentCard,
+        CancellationToken,
+    ) -> futures::future::Pending<Option<String>>;
+
+    /// A build the state-machine tests finish by hand.
+    fn manual_build(
+        _: String,
+        _: ModelDeploymentCard,
+        _: CancellationToken,
+    ) -> futures::future::Pending<Option<String>> {
+        futures::future::pending()
+    }
+
+    fn appeared(namespace: &str) -> GenerationChange {
+        GenerationChange::Appeared {
+            namespace: namespace.to_string(),
+            card: Arc::new(card(MODEL, Some(WorkerType::Decode), chat())),
+        }
+    }
+
+    fn vanished(namespace: &str) -> GenerationChange {
+        GenerationChange::Vanished {
+            namespace: namespace.to_string(),
+        }
+    }
+
+    /// Finish `namespace`'s pending build as the generation `value`.
+    fn finish(state: &mut GenerationState<'_, String, TestBuild>, namespace: &str, value: &str) {
+        let seq = state.pending[namespace].seq;
+        state.on_built((namespace.to_string(), seq, Ok(Some(value.to_string()))));
+    }
+
+    fn live(state: &GenerationState<'_, String, TestBuild>) -> Vec<String> {
+        state.published.values().map(|g| (**g).clone()).collect()
+    }
+
+    fn channel() -> watch::Sender<GenerationSet<String>> {
+        watch::channel::<GenerationSet<String>>(Arc::from([])).0
+    }
+
+    #[tokio::test]
+    async fn superseded_build_never_publishes() {
+        let (build, publish, cancel): (TestBuild, _, _) =
+            (manual_build, channel(), CancellationToken::new());
+        let mut state = GenerationState::new(&build, &publish, &cancel);
+        state.apply(appeared("dgd-bbbbbbbb"));
+        let stale = state.pending["dgd-bbbbbbbb"].seq;
+        state.apply(vanished("dgd-bbbbbbbb"));
+        state.apply(appeared("dgd-bbbbbbbb"));
+
+        state.on_built(("dgd-bbbbbbbb".into(), stale, Ok(Some("stale".into()))));
+        assert!(live(&state).is_empty());
+        finish(&mut state, "dgd-bbbbbbbb", "current");
+        assert_eq!(live(&state), ["current"]);
+        assert_eq!(publish.borrow().len(), 1);
+    }
+
+    /// The only generation losing its workers (a restart) is kept and reused
+    /// when they return, not rebuilt; a new generation replaces it.
+    #[tokio::test]
+    async fn only_generation_is_kept_until_replaced() {
+        let (build, publish, cancel): (TestBuild, _, _) =
+            (manual_build, channel(), CancellationToken::new());
+        let mut state = GenerationState::new(&build, &publish, &cancel);
+        state.apply(appeared("dgd-aaaaaaaa"));
+        finish(&mut state, "dgd-aaaaaaaa", "a");
+
+        state.apply(vanished("dgd-aaaaaaaa"));
+        assert_eq!(live(&state), ["a"], "the only generation is kept");
+        state.apply(appeared("dgd-aaaaaaaa"));
+        assert!(state.pending.is_empty(), "a returning generation is reused");
+
+        state.apply(vanished("dgd-aaaaaaaa"));
+        state.apply(appeared("dgd-bbbbbbbb"));
+        finish(&mut state, "dgd-bbbbbbbb", "b");
+        assert_eq!(live(&state), ["b"]);
+    }
+
+    #[tokio::test]
+    async fn vanished_generation_is_retired_when_another_serves() {
+        let (build, publish, cancel): (TestBuild, _, _) =
+            (manual_build, channel(), CancellationToken::new());
+        let mut state = GenerationState::new(&build, &publish, &cancel);
+        for (namespace, value) in [("dgd-aaaaaaaa", "a"), ("dgd-bbbbbbbb", "b")] {
+            state.apply(appeared(namespace));
+            finish(&mut state, namespace, value);
+        }
+        state.apply(vanished("dgd-aaaaaaaa"));
+        assert_eq!(live(&state), ["b"]);
+    }
+
+    #[tokio::test]
+    async fn panicked_build_is_cancelled_and_retried() {
+        let (build, publish, cancel): (TestBuild, _, _) =
+            (manual_build, channel(), CancellationToken::new());
+        let mut state = GenerationState::new(&build, &publish, &cancel);
+        state.apply(appeared("dgd-aaaaaaaa"));
+        let (seq, token) = {
+            let pending = &state.pending["dgd-aaaaaaaa"];
+            (pending.seq, pending.cancel.clone())
+        };
+        state.on_built(("dgd-aaaaaaaa".into(), seq, Err(Box::new("boom"))));
+        assert!(token.is_cancelled(), "the panicked build's work is stopped");
+        assert_ne!(
+            state.pending["dgd-aaaaaaaa"].seq, seq,
+            "a new build is pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_state_cancels_pending_builds() {
+        let (build, publish, cancel): (TestBuild, _, _) =
+            (manual_build, channel(), CancellationToken::new());
+        let mut state = GenerationState::new(&build, &publish, &cancel);
+        state.apply(appeared("dgd-aaaaaaaa"));
+        let token = state.pending["dgd-aaaaaaaa"].cancel.clone();
+        drop(state);
+        assert!(token.is_cancelled());
     }
 
     type Events = mpsc::UnboundedSender<anyhow::Result<DiscoveryEvent>>;
@@ -796,10 +1094,16 @@ mod tests {
         Panic,
     }
 
+    fn open() -> (Events, Subscription) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (tx, Subscription::Open(rx))
+    }
+
     /// Runs the watcher over scripted subscriptions. Every build hands the
-    /// test a gate: `true` finishes it, `false` makes it panic.
+    /// test a gate that finishes it, and every `subscribe` call is reported.
     struct Harness {
-        gates: mpsc::UnboundedReceiver<(String, oneshot::Sender<bool>)>,
+        gates: mpsc::UnboundedReceiver<(String, oneshot::Sender<()>)>,
+        subscribed: mpsc::UnboundedReceiver<()>,
         published: watch::Receiver<GenerationSet<String>>,
         cancel: CancellationToken,
         task: tokio::task::JoinHandle<()>,
@@ -808,7 +1112,9 @@ mod tests {
     impl Harness {
         fn start(subscriptions: Vec<Subscription>) -> Self {
             let subscriptions = Arc::new(Mutex::new(VecDeque::from(subscriptions)));
+            let (subscribed_tx, subscribed) = mpsc::unbounded_channel();
             let subscribe = move |_cancel: CancellationToken| {
+                subscribed_tx.send(()).unwrap();
                 let next = subscriptions.lock().unwrap().pop_front();
                 let stream = match next {
                     Some(Subscription::Panic) => panic!("scripted subscribe panic"),
@@ -831,7 +1137,7 @@ mod tests {
                     async move {
                         let (open, opened) = oneshot::channel();
                         gate_tx.send((namespace.clone(), open)).ok()?;
-                        assert!(opened.await.ok()?, "scripted build panic");
+                        opened.await.ok()?;
                         Some(namespace)
                     }
                 };
@@ -840,27 +1146,34 @@ mod tests {
             let task = tokio::spawn(run_generation_watcher(
                 subscribe,
                 dgd(),
-                NamespacePrefixMode::WorkerGeneration,
                 build,
                 publish,
                 cancel.clone(),
             ));
             Self {
                 gates,
+                subscribed,
                 published,
                 cancel,
                 task,
             }
         }
 
-        /// Take the next build's gate, checking which namespace it builds.
-        async fn gate(&mut self, namespace: &str) -> oneshot::Sender<bool> {
+        /// Finish the next build, checking which namespace it builds.
+        async fn finish_build(&mut self, namespace: &str) {
             let (built, gate) = tokio::time::timeout(Duration::from_secs(5), self.gates.recv())
                 .await
                 .expect("a build must start")
                 .unwrap();
             assert_eq!(built, namespace);
-            gate
+            gate.send(()).unwrap();
+        }
+
+        async fn next_subscribe(&mut self) {
+            tokio::time::timeout(Duration::from_secs(5), self.subscribed.recv())
+                .await
+                .expect("the watcher must subscribe")
+                .unwrap();
         }
 
         async fn next_published(&mut self) -> Vec<String> {
@@ -868,22 +1181,11 @@ mod tests {
                 .await
                 .expect("the watcher must publish")
                 .unwrap();
-            self.current()
-        }
-
-        fn current(&mut self) -> Vec<String> {
             self.published
                 .borrow_and_update()
                 .iter()
                 .map(|g| (**g).clone())
                 .collect()
-        }
-
-        /// Let the watcher drain its queue, then confirm nothing was published.
-        async fn assert_unchanged(&mut self, why: &str) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            assert!(!self.published.has_changed().unwrap(), "{why}");
-            assert!(self.gates.try_recv().is_err(), "{why}: no build may start");
         }
 
         async fn stop(self) {
@@ -895,119 +1197,55 @@ mod tests {
         }
     }
 
-    fn open() -> (Events, Subscription) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (tx, Subscription::Open(rx))
-    }
-
-    async fn two_generations() -> (Runtime, DiscoveryInstance, DiscoveryInstance) {
-        let (runtime, instances) = discover(&[
-            ("dgd-aaaaaaaa", "backend", MODEL),
-            ("dgd-bbbbbbbb", "backend", MODEL),
-        ])
-        .await;
-        let a = cards_in(&instances, "dgd-aaaaaaaa")[0].clone();
-        let b = cards_in(&instances, "dgd-bbbbbbbb")[0].clone();
-        (runtime, a, b)
-    }
-
-    /// A rollout: `b` joins `a`, then `a` drains and is retired at once. A
-    /// build superseded by a vanish and reappear never publishes.
+    /// A rollout: `b` joins `a`, then `a` drains and is retired at once.
     #[tokio::test]
-    async fn watcher_publishes_and_retires_generations() {
-        let (runtime, a, b) = two_generations().await;
+    async fn watcher_follows_a_rolling_update() {
+        let (a, b) = (
+            decode("dgd-aaaaaaaa", 1, MODEL),
+            decode("dgd-bbbbbbbb", 2, MODEL),
+        );
         let (events, subscription) = open();
         let mut h = Harness::start(vec![subscription]);
 
         events.send(Ok(DiscoveryEvent::Added(a.clone()))).unwrap();
-        h.gate("dgd-aaaaaaaa").await.send(true).unwrap();
+        h.finish_build("dgd-aaaaaaaa").await;
         assert_eq!(h.next_published().await, ["dgd-aaaaaaaa"]);
-
-        events.send(Ok(DiscoveryEvent::Added(b.clone()))).unwrap();
-        let stale = h.gate("dgd-bbbbbbbb").await;
-        events.send(Ok(DiscoveryEvent::Removed(b.id()))).unwrap();
-        events.send(Ok(DiscoveryEvent::Added(b.clone()))).unwrap();
-        let current = h.gate("dgd-bbbbbbbb").await;
-        stale.send(true).unwrap();
-        h.assert_unchanged("a superseded build must not publish")
-            .await;
-        current.send(true).unwrap();
+        events.send(Ok(DiscoveryEvent::Added(b))).unwrap();
+        h.finish_build("dgd-bbbbbbbb").await;
         assert_eq!(h.next_published().await, ["dgd-aaaaaaaa", "dgd-bbbbbbbb"]);
-
         events.send(Ok(DiscoveryEvent::Removed(a.id()))).unwrap();
         assert_eq!(h.next_published().await, ["dgd-bbbbbbbb"]);
         h.stop().await;
-        runtime.shutdown();
     }
 
-    /// The only generation losing its workers (a restart) is kept and reused
-    /// when they return, not rebuilt; a new generation replaces it.
-    #[tokio::test]
-    async fn watcher_keeps_the_only_generation_until_replaced() {
-        let (runtime, a, b) = two_generations().await;
-        let (events, subscription) = open();
-        let mut h = Harness::start(vec![subscription]);
-
-        events.send(Ok(DiscoveryEvent::Added(a.clone()))).unwrap();
-        h.gate("dgd-aaaaaaaa").await.send(true).unwrap();
-        assert_eq!(h.next_published().await, ["dgd-aaaaaaaa"]);
-
-        events.send(Ok(DiscoveryEvent::Removed(a.id()))).unwrap();
-        h.assert_unchanged("the only generation is kept").await;
-        events.send(Ok(DiscoveryEvent::Added(a.clone()))).unwrap();
-        h.assert_unchanged("a returning generation is reused").await;
-
-        events.send(Ok(DiscoveryEvent::Removed(a.id()))).unwrap();
-        events.send(Ok(DiscoveryEvent::Added(b.clone()))).unwrap();
-        h.gate("dgd-bbbbbbbb").await.send(true).unwrap();
-        assert_eq!(h.next_published().await, ["dgd-bbbbbbbb"]);
-        h.stop().await;
-        runtime.shutdown();
-    }
-
-    /// A build that panics is retried rather than leaving its namespace stuck.
-    #[tokio::test]
-    async fn watcher_retries_a_panicked_build() {
-        let (runtime, a, _) = two_generations().await;
-        let (events, subscription) = open();
-        let mut h = Harness::start(vec![subscription]);
-
-        events.send(Ok(DiscoveryEvent::Added(a.clone()))).unwrap();
-        h.gate("dgd-aaaaaaaa").await.send(false).unwrap();
-        h.gate("dgd-aaaaaaaa").await.send(true).unwrap();
-        assert_eq!(h.next_published().await, ["dgd-aaaaaaaa"]);
-        h.stop().await;
-        runtime.shutdown();
-    }
-
-    /// A build that finishes while the watch is down still publishes.
+    /// A build that finishes while the watch is being reopened still publishes.
     #[tokio::test]
     async fn watcher_publishes_builds_while_resubscribing() {
-        let (runtime, a, _) = two_generations().await;
         let (events, subscription) = open();
         let mut h = Harness::start(vec![subscription]);
+        h.next_subscribe().await;
 
-        events.send(Ok(DiscoveryEvent::Added(a.clone()))).unwrap();
-        let gate = h.gate("dgd-aaaaaaaa").await;
-        drop(events); // The watch ends; the next subscribe never opens.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        gate.send(true).unwrap();
+        events
+            .send(Ok(DiscoveryEvent::Added(decode("dgd-aaaaaaaa", 1, MODEL))))
+            .unwrap();
+        let (_, gate) = h.gates.recv().await.unwrap();
+        drop(events); // The watch ends; the next subscription never opens.
+        h.next_subscribe().await;
+        gate.send(()).unwrap();
         assert_eq!(h.next_published().await, ["dgd-aaaaaaaa"]);
         h.stop().await;
-        runtime.shutdown();
     }
 
-    /// A watcher that panics restarts with a fresh watch.
     #[tokio::test]
     async fn watcher_restarts_after_a_panic() {
-        let (runtime, a, _) = two_generations().await;
         let (events, subscription) = open();
         let mut h = Harness::start(vec![Subscription::Panic, subscription]);
 
-        events.send(Ok(DiscoveryEvent::Added(a.clone()))).unwrap();
-        h.gate("dgd-aaaaaaaa").await.send(true).unwrap();
+        events
+            .send(Ok(DiscoveryEvent::Added(decode("dgd-aaaaaaaa", 1, MODEL))))
+            .unwrap();
+        h.finish_build("dgd-aaaaaaaa").await;
         assert_eq!(h.next_published().await, ["dgd-aaaaaaaa"]);
         h.stop().await;
-        runtime.shutdown();
     }
 }
