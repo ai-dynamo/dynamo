@@ -601,7 +601,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             request,
             eligibility,
             block_size,
-            None,
+            super::SelectionCapture::default(),
         )
         .map(|(result, _)| result)
     }

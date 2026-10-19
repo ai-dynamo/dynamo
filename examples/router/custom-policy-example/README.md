@@ -12,7 +12,9 @@ Use this example as the build guide for a custom Rust worker-selection policy. I
 An explicitly enabled aggregated frontend can expose current-attempt token
 observations to a picker declaring `WorkerInputs::DECODE_PROGRESS` through
 `context.decode_progress()`. Collection is controlled by
-`DYN_ROUTER_DECODE_PROGRESS=1`, independently of TRACE logging. Absence and stale
+`DYN_ROUTER_DECODE_PROGRESS=1` together with native `router_track_output_blocks: true`,
+independently of TRACE logging. Progress stays with existing slot-tracker request
+owners and reaches the picker through its derived read model. Absence and stale
 data require a policy fallback; remaining token budget does not predict GPU finish
 time. Unsupported multi-choice, disaggregated, unknown-limit, or early-stop requests
 are not collected.

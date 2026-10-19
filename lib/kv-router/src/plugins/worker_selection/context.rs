@@ -21,9 +21,11 @@ pub struct WorkerSelectionContext<'a> {
 impl WorkerSelectionContext<'_> {
     /// Frontend-local active-attempt observations captured immediately before this picker.
     /// Available only in a picker declaring `WorkerInputs::DECODE_PROGRESS`, when the
-    /// aggregated frontend explicitly enables collection. Absent on disabled, poisoned,
-    /// or inconsistent state. Facts are unweighted, borrowed for this callback, and carry
-    /// their age at capture; they do not predict GPU completion or prove completeness.
+    /// aggregated frontend enables native output tracking and raw collection. The owning
+    /// native scheduler supplies only complete, supported worker summaries. Missing or
+    /// invalid worker summaries are absent. Facts are unweighted, borrowed for this
+    /// callback, and carry their oldest observation age at capture. LOAD/progress reads
+    /// remain advisory and separate; remaining budgets do not predict GPU completion.
     pub fn decode_progress(&self) -> Option<&super::DecodeProgressSnapshot> {
         self.decode_progress
     }

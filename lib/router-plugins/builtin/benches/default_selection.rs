@@ -284,10 +284,12 @@ fn progress_group(c: &mut Criterion) {
     use dynamo_custom_policy_builtin::{default_registry, register};
     use dynamo_kv_router::protocols::{WorkerAffinityTarget, WorkerConfigLike, WorkerWithDpRank};
     use dynamo_kv_router::scheduling::{
-        AttemptId, OverlapSignals, SessionContext, decode_progress::DecodeProgressGuard,
+        OverlapSignals, SessionContext, decode_progress::DecodeProgressUpdate,
+        queue::SchedulerBookingDescriptor,
     };
     use dynamo_kv_router::{
-        RoutingPartitionRef, WorkerLoadProjection, WorkerSelectionInput, WorkerType,
+        ActiveSequencesMultiWorker, NoopSequencePublisher, RoutingPartitionRef, SequenceRequest,
+        WorkerLoadProjection, WorkerSelectionInput, WorkerType,
     };
     use std::collections::HashMap;
 
@@ -335,21 +337,44 @@ fn progress_group(c: &mut Criterion) {
         .worker_loads
         .insert(other, WorkerLoadProjection::default());
     let workers = HashMap::from([(101, SingleRankWorker), (103, SingleRankWorker)]);
-    let _guards: Vec<_> = (0..8)
-        .map(|i| {
-            let guard = DecodeProgressGuard::start(
-                dynamo_kv_router::RoutingPartitionRef::new("bench", "default"),
-                &format!("progress-bench-{i}"),
-                AttemptId::for_benchmark(i + 1),
-                source,
-                Some(128),
-                true,
+    let slots = ActiveSequencesMultiWorker::new_without_expiry(
+        NoopSequencePublisher,
+        64,
+        HashMap::from([(101, (0, 1)), (103, (0, 1))]),
+        false,
+        1,
+        "aggregated",
+    );
+    for i in 0..8 {
+        let request_id = format!("progress-bench-{i}");
+        let now = tokio::time::Instant::now();
+        let attempt_id = slots
+            .add_request_if_registered_admitted(
+                SequenceRequest {
+                    request_id: request_id.clone(),
+                    token_sequence: None,
+                    expected_output_tokens: None,
+                    track_prefill_tokens: false,
+                    prefill_load_hint: None,
+                    worker: source,
+                    lora_name: None,
+                },
+                now,
             )
             .unwrap();
-            guard.advance(8);
-            guard
-        })
-        .collect();
+        slots.mark_prefill_completed(&request_id, now).unwrap();
+        slots
+            .update_decode_progress_for_benchmark(
+                &SchedulerBookingDescriptor {
+                    request_id,
+                    worker: source,
+                    attempt_id,
+                },
+                DecodeProgressUpdate::observed(128, 8),
+            )
+            .unwrap();
+    }
+    let provider = |worker| slots.decode_progress_for_benchmark(worker);
     let mut group = c.benchmark_group("progress_group_selection");
     group
         .warm_up_time(Duration::from_millis(200))
@@ -368,6 +393,7 @@ fn progress_group(c: &mut Criterion) {
         std::fs::write(file.path(), yaml).unwrap();
         let config = KvRouterConfig {
             router_policy_config: Some(file.path().display().to_string()),
+            router_track_output_blocks: true,
             ..Default::default()
         };
         let mut registry = default_registry();
@@ -380,13 +406,13 @@ fn progress_group(c: &mut Criterion) {
         );
         let select = || {
             policy
-                .select_worker(WorkerSelectionInput::configured(
-                    &workers,
-                    &request,
-                    request.eligibility(),
-                    64,
-                ))
+                .select_worker_with_decode_progress(
+                    WorkerSelectionInput::configured(&workers, &request, request.eligibility(), 64),
+                    None,
+                    Some(&provider),
+                )
                 .unwrap()
+                .0
         };
         assert_eq!(select().worker, if enabled { other } else { source });
         let allocations = allocations(|| {

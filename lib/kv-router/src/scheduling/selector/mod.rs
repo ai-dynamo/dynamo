@@ -63,6 +63,19 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
     ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
         self.select_worker(input).map(|result| (result, None))
     }
+
+    /// Host extension supplying an optional native, scheduler-scoped progress projection.
+    /// Existing selectors keep their behavior. Opted-in pickers receive only eligible rows;
+    /// this provider never grants permission to mutate ownership or admission state.
+    #[doc(hidden)]
+    fn select_worker_with_decode_progress(
+        &self,
+        input: WorkerSelectionInput<'_, C>,
+        trace: Option<SelectionTraceSpec>,
+        _progress: Option<&super::decode_progress::DecodeProgressProvider<'_>>,
+    ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+        self.select_worker_traced(input, trace)
+    }
 }
 
 /// Inputs supplied by the selector's host.
@@ -447,9 +460,15 @@ fn log_selection<C: WorkerConfigLike>(
     }
 }
 
-#[inline(always)]
 // DefaultWorkerSelector and SelectionService both converge here. Only the scorer/picker stage is
 // dispatched; eligibility outcomes and result construction stay host-owned and shared.
+#[derive(Default)]
+struct SelectionCapture<'a> {
+    trace: Option<SelectionTraceSpec>,
+    progress: Option<&'a super::decode_progress::DecodeProgressProvider<'a>>,
+}
+
+#[inline(always)]
 fn select_worker_with_policy<C: WorkerConfigLike>(
     worker_type: &'static str,
     state: WorkerSelectionPolicyStateRef<'_>,
@@ -457,8 +476,9 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
     block_size: u32,
-    trace: Option<SelectionTraceSpec>,
+    capture: SelectionCapture<'_>,
 ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+    let SelectionCapture { trace, progress } = capture;
     eligibility.validate_pinned_worker_allowed()?;
 
     if let Some(worker) = eligibility.pinned_worker() {
@@ -525,7 +545,12 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 };
                 let decode_progress = picker_inputs
                     .contains(WorkerInputs::DECODE_PROGRESS)
-                    .then(|| super::decode_progress::snapshot_now(candidates))
+                    .then(|| {
+                        super::decode_progress::DecodeProgressSnapshot::capture(
+                            candidates.iter().map(|row| row.worker()),
+                            progress,
+                        )
+                    })
                     .flatten();
                 let picker_context = WorkerSelectionContext {
                     decode_progress: decode_progress.as_ref(),

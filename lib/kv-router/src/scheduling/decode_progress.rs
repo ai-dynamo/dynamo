@@ -1,68 +1,199 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Frontend-local, attempt-fenced observations for opt-in decoder-progress policies.
+//! Optional raw output facts owned by the native slot-tracker request lifecycle.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::collections::BTreeMap;
+use std::time::Duration;
+use tokio::time::Instant;
 
-use super::AttemptId;
-use crate::{RoutingPartitionId, RoutingPartitionRef};
-type Key = (Arc<RoutingPartitionId>, String);
-use crate::plugins::worker_selection::ScoredWorkerCandidate;
 use crate::protocols::WorkerWithDpRank;
-use rustc_hash::FxHashSet;
 
-// A full table rejects new observations; policy completeness checks must then fall back.
-const MAX_ENTRIES: usize = 4096;
-static REGISTRY: OnceLock<Arc<Registry>> = OnceLock::new();
+const MAX_OBSERVATIONS_PER_WORKER: usize = 4096;
 
-/// One frontend-observed active attempt, borrowed through a selection snapshot.
-/// Request identifiers and mutable lifecycle state are deliberately not exposed.
-#[derive(Clone, Debug)]
-pub struct DecodeProgressEntry {
-    partition: Arc<RoutingPartitionId>,
-    worker: WorkerWithDpRank,
-    max_output_tokens: Option<u32>,
-    ignore_eos: bool,
+/// Host-only metadata accompanying the native attempt-fenced output update.
+/// A supported producer supplies its explicit output bound and original token count.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct DecodeProgressUpdate {
+    observation: Option<Observation>,
+}
+
+impl DecodeProgressUpdate {
+    pub fn observed(output_limit: u32, generated_tokens: usize) -> Self {
+        Self::observed_at(output_limit, generated_tokens, Instant::now())
+    }
+
+    pub fn unavailable() -> Self {
+        Self { observation: None }
+    }
+
+    fn observed_at(output_limit: u32, generated_tokens: usize, at: Instant) -> Self {
+        Self {
+            observation: Some(Observation {
+                output_limit,
+                generated_tokens,
+                at,
+                valid: output_limit > 0
+                    && generated_tokens > 0
+                    && generated_tokens <= output_limit as usize,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Observation {
+    output_limit: u32,
     generated_tokens: usize,
+    at: Instant,
+    valid: bool,
+}
+
+impl Observation {
+    fn remaining(self) -> usize {
+        (self.output_limit as usize).saturating_sub(self.generated_tokens)
+    }
+}
+
+/// Internal derived worker snapshot supplied by the native scheduler host.
+/// All observations belong to its current worker-local request owners.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeDecodeProgress {
+    observed_requests: usize,
+    remaining_token_budget: usize,
+    oldest_observed_at: Instant,
+}
+
+/// Host-only point lookup into the owning scheduler's derived read model.
+#[doc(hidden)]
+pub type DecodeProgressProvider<'a> = dyn Fn(WorkerWithDpRank) -> Option<NativeDecodeProgress> + 'a;
+
+/// Additional bookkeeping within one native `ActiveSequences`, without request IDs,
+/// separate ownership, lifecycle registration, locks, or global state.
+#[derive(Debug, Default)]
+pub(crate) struct DecodeProgressAggregate {
+    tracked: usize,
+    invalid: usize,
+    remaining: usize,
+    // A counted timestamp index keeps oldest-observation reads O(1) and updates O(log N).
+    times: BTreeMap<Instant, usize>,
+}
+
+impl DecodeProgressAggregate {
+    fn remove_valid(&mut self, observation: Observation) {
+        if observation.valid {
+            self.remaining -= observation.remaining();
+            let count = self.times.get_mut(&observation.at).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                self.times.remove(&observation.at);
+            }
+        } else {
+            self.invalid -= 1;
+        }
+    }
+
+    pub(crate) fn retire(&mut self, observation: Option<Box<Observation>>) {
+        if let Some(observation) = observation {
+            self.remove_valid(*observation);
+            self.tracked -= 1;
+        }
+    }
+
+    pub(crate) fn update(
+        &mut self,
+        owner: &mut Option<Box<Observation>>,
+        update: DecodeProgressUpdate,
+    ) -> bool {
+        if owner.is_none() && self.tracked == MAX_OBSERVATIONS_PER_WORKER {
+            return false;
+        }
+        let mut observation = update.observation.unwrap_or(Observation {
+            output_limit: 0,
+            generated_tokens: 0,
+            at: Instant::now(),
+            valid: false,
+        });
+        if let Some(previous) = owner.as_deref().copied() {
+            // Duplicated/empty output is not evidence of a fresh observation.
+            if previous.valid
+                && observation.valid
+                && previous.output_limit == observation.output_limit
+                && previous.generated_tokens == observation.generated_tokens
+            {
+                return false;
+            }
+            observation.valid &= previous.valid
+                && previous.output_limit == observation.output_limit
+                && previous.generated_tokens <= observation.generated_tokens
+                && previous.at <= observation.at;
+            self.remove_valid(previous);
+        } else {
+            self.tracked += 1;
+        }
+        if observation.valid {
+            if let Some(remaining) = self.remaining.checked_add(observation.remaining()) {
+                self.remaining = remaining;
+                *self.times.entry(observation.at).or_default() += 1;
+            } else {
+                observation.valid = false;
+            }
+        }
+        if !observation.valid {
+            self.invalid += 1;
+        }
+        match owner {
+            Some(slot) => **slot = observation,
+            None => *owner = Some(Box::new(observation)),
+        }
+        true
+    }
+
+    pub(crate) fn snapshot(&self, active_requests: usize) -> Option<NativeDecodeProgress> {
+        if active_requests == 0 || self.invalid != 0 || self.tracked != active_requests {
+            return None;
+        }
+        Some(NativeDecodeProgress {
+            observed_requests: self.tracked,
+            remaining_token_budget: self.remaining,
+            oldest_observed_at: *self.times.first_key_value()?.0,
+        })
+    }
+}
+
+/// Callback-scoped raw summary for one eligible worker in the owning scheduler.
+/// Remaining declared budget is a bound, not a prediction of future tokens or GPU time.
+#[derive(Clone, Copy, Debug)]
+pub struct DecodeProgressEntry {
+    worker: WorkerWithDpRank,
+    observed_requests: usize,
+    remaining_token_budget: usize,
     observed_age: Duration,
 }
 
 impl DecodeProgressEntry {
-    /// Canonical logical model and routing group of the observation producer.
-    pub fn partition(&self) -> RoutingPartitionRef<'_> {
-        RoutingPartitionRef::new(&self.partition.model_name, &self.partition.routing_group)
-    }
     pub fn worker(&self) -> WorkerWithDpRank {
         self.worker
     }
-    /// The request's declared token limit, not predicted future output.
-    pub fn max_output_tokens(&self) -> Option<u32> {
-        self.max_output_tokens
+    pub fn observed_requests(&self) -> usize {
+        self.observed_requests
     }
-    pub fn ignores_eos(&self) -> bool {
-        self.ignore_eos
+    /// Sum of explicit output limits minus original tokens observed for each native owner.
+    /// Units are raw tokens; unsupported, partial or overflowed sets have no entry.
+    pub fn remaining_token_budget(&self) -> usize {
+        self.remaining_token_budget
     }
-    /// Original output token IDs observed by this frontend for this attempt.
-    pub fn generated_tokens(&self) -> usize {
-        self.generated_tokens
-    }
-    /// Age at snapshot capture; it is not updated during the picker callback.
+    /// Age of the oldest nonempty original-token observation in this worker summary.
     pub fn observed_age(&self) -> Duration {
         self.observed_age
     }
-    /// Declared remaining budget. Early stopping can make actual future work smaller.
-    pub fn remaining_token_budget(&self) -> Option<usize> {
-        usize::try_from(self.max_output_tokens?)
-            .ok()?
-            .checked_sub(self.generated_tokens)
-    }
 }
 
-/// Read-only facts captured under one lock immediately before a picker callback.
-/// This process-local snapshot is not a backend/GPU clock or a completion-time estimate.
+/// Read-only summaries materialized only for an explicitly opted-in picker.
+/// The native scheduler supplies the routing scope and owns all underlying lifetimes.
+#[derive(Debug)]
 pub struct DecodeProgressSnapshot {
     entries: Vec<DecodeProgressEntry>,
 }
@@ -71,387 +202,156 @@ impl DecodeProgressSnapshot {
     pub fn entries(&self) -> &[DecodeProgressEntry] {
         &self.entries
     }
-}
 
-struct Record {
-    attempt: AttemptId,
-    worker: WorkerWithDpRank,
-    max_output_tokens: Option<u32>,
-    ignore_eos: bool,
-    generated_tokens: usize,
-    observed_at: Instant,
-    consistent: bool,
-}
-
-struct Registry {
-    records: Mutex<HashMap<Key, Record>>,
-    capacity: usize,
-}
-
-impl Registry {
-    fn new(capacity: usize) -> Self {
-        Self {
-            records: Mutex::new(HashMap::new()),
-            capacity,
-        }
-    }
-
-    fn admit(&self, id: &Key, record: Record) -> bool {
-        let Ok(mut records) = self.records.lock() else {
-            return false;
-        };
-        // A new scheduler attempt may enter only after the old observation is retired.
-        if records.len() >= self.capacity || records.contains_key(id) {
-            return false;
-        }
-        records.insert(id.clone(), record);
-        true
-    }
-
-    fn advance(&self, id: &Key, attempt: AttemptId, generated: usize, now: Instant) {
-        let Ok(mut records) = self.records.lock() else {
-            return;
-        };
-        let Some(record) = records.get_mut(id) else {
-            return;
-        };
-        if record.attempt != attempt {
-            return;
-        }
-        if generated < record.generated_tokens
-            || now < record.observed_at
-            || record
-                .max_output_tokens
-                .is_some_and(|limit| generated > limit as usize)
-        {
-            record.consistent = false;
-            return;
-        }
-        // Empty/duplicate chunks do not make an old observation appear fresh.
-        if generated == record.generated_tokens {
-            return;
-        }
-        record.generated_tokens = generated;
-        record.observed_at = now;
-    }
-
-    fn retire(&self, id: &Key, attempt: AttemptId) {
-        let Ok(mut records) = self.records.lock() else {
-            return;
-        };
-        if records
-            .get(id)
-            .is_some_and(|record| record.attempt == attempt)
-        {
-            records.remove(id);
-        }
-    }
-
-    fn snapshot_matching(
-        &self,
-        include: impl Fn(WorkerWithDpRank) -> bool,
-        now: impl FnOnce() -> Instant,
-    ) -> Option<DecodeProgressSnapshot> {
-        let records = self.records.lock().ok()?;
-        let now = now();
-        let mut entries = Vec::new();
-        for (key, record) in records.iter() {
-            if !include(record.worker) {
-                continue;
-            }
-            if !record.consistent {
-                return None;
-            }
-            entries.push(DecodeProgressEntry {
-                partition: Arc::clone(&key.0),
-                worker: record.worker,
-                max_output_tokens: record.max_output_tokens,
-                ignore_eos: record.ignore_eos,
-                generated_tokens: record.generated_tokens,
-                observed_age: now.checked_duration_since(record.observed_at)?,
-            });
-        }
-        Some(DecodeProgressSnapshot { entries })
-    }
-
-    #[cfg(test)]
-    fn snapshot(&self, now: impl FnOnce() -> Instant) -> Option<DecodeProgressSnapshot> {
-        self.snapshot_matching(|_| true, now)
-    }
-}
-
-/// Internal frontend lifecycle hook. The frontend must explicitly enable collection.
-/// Admission failure is observation absence, never a request/booking failure.
-#[doc(hidden)]
-pub struct DecodeProgressGuard {
-    registry: Arc<Registry>,
-    key: Key,
-    attempt: AttemptId,
-}
-
-impl DecodeProgressGuard {
-    pub fn start(
-        partition: RoutingPartitionRef<'_>,
-        id: &str,
-        attempt: AttemptId,
-        worker: WorkerWithDpRank,
-        max_output_tokens: Option<u32>,
-        ignore_eos: bool,
+    pub(crate) fn capture(
+        workers: impl Iterator<Item = WorkerWithDpRank>,
+        provider: Option<&DecodeProgressProvider<'_>>,
     ) -> Option<Self> {
-        let registry = REGISTRY.get_or_init(|| Arc::new(Registry::new(MAX_ENTRIES)));
-        Self::start_in(
-            registry,
-            partition,
-            id,
-            attempt,
-            worker,
-            max_output_tokens,
-            ignore_eos,
-        )
+        let provider = provider?;
+        let observed: Vec<_> = workers
+            .filter_map(|worker| Some((worker, provider(worker)?)))
+            .collect();
+        // Capture after every lookup so lock waits cannot make old data appear fresh.
+        let now = Instant::now();
+        let entries = observed
+            .into_iter()
+            .filter_map(|(worker, source)| {
+                Some(DecodeProgressEntry {
+                    worker,
+                    observed_requests: source.observed_requests,
+                    remaining_token_budget: source.remaining_token_budget,
+                    observed_age: now.checked_duration_since(source.oldest_observed_at)?,
+                })
+            })
+            .collect::<Vec<_>>();
+        (!entries.is_empty()).then_some(Self { entries })
     }
-
-    fn start_in(
-        registry: &Arc<Registry>,
-        partition: RoutingPartitionRef<'_>,
-        id: &str,
-        attempt: AttemptId,
-        worker: WorkerWithDpRank,
-        max_output_tokens: Option<u32>,
-        ignore_eos: bool,
-    ) -> Option<Self> {
-        let key = (Arc::new(partition.into_owned()), id.to_owned());
-        if !registry.admit(
-            &key,
-            Record {
-                attempt,
-                worker,
-                max_output_tokens,
-                ignore_eos,
-                generated_tokens: 0,
-                observed_at: Instant::now(),
-                consistent: true,
-            },
-        ) {
-            return None;
-        }
-        Some(Self {
-            registry: Arc::clone(registry),
-            key,
-            attempt,
-        })
-    }
-
-    pub fn advance(&self, generated_tokens: usize) {
-        self.registry
-            .advance(&self.key, self.attempt, generated_tokens, Instant::now());
-    }
-}
-
-impl Drop for DecodeProgressGuard {
-    fn drop(&mut self) {
-        self.registry.retire(&self.key, self.attempt);
-    }
-}
-
-pub(crate) fn snapshot_now(candidates: &[ScoredWorkerCandidate]) -> Option<DecodeProgressSnapshot> {
-    // No allocation or table initialization when the producer has never been enabled.
-    let registry = REGISTRY.get()?;
-    let workers: FxHashSet<_> = candidates.iter().map(|row| row.worker()).collect();
-    registry.snapshot_matching(|worker| workers.contains(&worker), Instant::now)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn key(id: &str) -> Key {
-        (
-            Arc::new(RoutingPartitionId::new("model", "default")),
-            id.to_owned(),
+    #[test]
+    fn observation_age_includes_native_projection_lookup_time() {
+        let mut aggregate = DecodeProgressAggregate::default();
+        let mut owner = None;
+        aggregate.update(&mut owner, DecodeProgressUpdate::observed(128, 8));
+        let value = aggregate.snapshot(1).unwrap();
+        let provider = |worker: WorkerWithDpRank| {
+            if worker.worker_id == 2 {
+                std::thread::sleep(Duration::from_millis(5));
+                None
+            } else {
+                Some(value)
+            }
+        };
+        let view = DecodeProgressSnapshot::capture(
+            [WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(2, 0)].into_iter(),
+            Some(&provider),
         )
+        .unwrap();
+        assert!(view.entries()[0].observed_age() >= Duration::from_millis(5));
     }
 
-    fn record(attempt: u64, now: Instant) -> Record {
-        Record {
-            attempt: AttemptId::new(attempt),
-            worker: WorkerWithDpRank::new(7, 0),
-            max_output_tokens: Some(128),
-            ignore_eos: true,
-            generated_tokens: 0,
-            observed_at: now,
-            consistent: true,
+    #[test]
+    fn missing_native_projection_stays_absent_in_the_public_view() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        assert!(DecodeProgressSnapshot::capture([worker].into_iter(), None).is_none());
+        let provider = |_| None;
+        assert!(DecodeProgressSnapshot::capture([worker].into_iter(), Some(&provider)).is_none());
+    }
+
+    #[test]
+    fn complete_owner_set_and_native_retirement_determine_availability() {
+        let mut aggregate = DecodeProgressAggregate::default();
+        let (mut a, mut b) = (None, None);
+        aggregate.update(&mut a, DecodeProgressUpdate::observed(128, 8));
+        assert!(aggregate.snapshot(2).is_none());
+        aggregate.update(&mut b, DecodeProgressUpdate::observed(24, 8));
+        assert_eq!(aggregate.snapshot(2).unwrap().remaining_token_budget, 136);
+        aggregate.retire(a.take());
+        assert_eq!(aggregate.snapshot(1).unwrap().remaining_token_budget, 16);
+        aggregate.retire(b.take());
+        assert!(aggregate.snapshot(0).is_none());
+        assert!(aggregate.times.is_empty());
+    }
+
+    #[test]
+    fn duplicate_output_does_not_refresh_oldest_observation() {
+        let mut aggregate = DecodeProgressAggregate::default();
+        let mut a = None;
+        let now = Instant::now();
+        aggregate.update(&mut a, DecodeProgressUpdate::observed_at(128, 8, now));
+        assert!(!aggregate.update(
+            &mut a,
+            DecodeProgressUpdate::observed_at(128, 8, now + Duration::from_secs(1))
+        ));
+        assert_eq!(aggregate.snapshot(1).unwrap().oldest_observed_at, now);
+    }
+
+    #[test]
+    fn invalid_progress_stays_unavailable_until_native_owner_is_retired() {
+        for broken in [
+            DecodeProgressUpdate::observed(128, 7),
+            DecodeProgressUpdate::observed(128, 129),
+            DecodeProgressUpdate::observed(64, 9),
+            DecodeProgressUpdate::unavailable(),
+        ] {
+            let mut aggregate = DecodeProgressAggregate::default();
+            let mut a = None;
+            aggregate.update(&mut a, DecodeProgressUpdate::observed(128, 8));
+            aggregate.update(&mut a, broken);
+            aggregate.update(&mut a, DecodeProgressUpdate::observed(128, 10));
+            assert!(aggregate.snapshot(1).is_none());
+            aggregate.retire(a.take());
+            aggregate.update(&mut a, DecodeProgressUpdate::observed(128, 10));
+            assert_eq!(aggregate.snapshot(1).unwrap().remaining_token_budget, 118);
         }
     }
 
     #[test]
-    fn decode_progress_old_attempt_cannot_update_or_retire_reused_id() {
-        let registry = Registry::new(4);
+    fn oldest_timestamp_tracks_updates_and_tied_owner_removal() {
+        let mut aggregate = DecodeProgressAggregate::default();
+        let (mut a, mut b) = (None, None);
         let now = Instant::now();
-        assert!(registry.admit(&key("r"), record(1, now)));
-        registry.retire(&key("r"), AttemptId::new(1));
-        assert!(registry.admit(&key("r"), record(2, now)));
-        registry.advance(&key("r"), AttemptId::new(1), 90, now);
-        registry.retire(&key("r"), AttemptId::new(1));
+        aggregate.update(&mut a, DecodeProgressUpdate::observed_at(128, 8, now));
+        aggregate.update(&mut b, DecodeProgressUpdate::observed_at(128, 8, now));
+        aggregate.update(
+            &mut a,
+            DecodeProgressUpdate::observed_at(128, 9, now + Duration::from_millis(1)),
+        );
+        assert_eq!(aggregate.snapshot(2).unwrap().oldest_observed_at, now);
+        aggregate.retire(b.take());
         assert_eq!(
-            registry.snapshot(|| now).unwrap().entries()[0].generated_tokens(),
-            0
+            aggregate.snapshot(1).unwrap().oldest_observed_at,
+            now + Duration::from_millis(1)
         );
     }
 
     #[test]
-    fn decode_progress_duplicate_admission_does_not_replace_live_owner() {
-        let registry = Registry::new(2);
+    fn capped_native_metadata_stays_unavailable_for_a_partial_worker() {
+        let mut aggregate = DecodeProgressAggregate::default();
+        let mut owners = vec![None; MAX_OBSERVATIONS_PER_WORKER];
         let now = Instant::now();
-        assert!(registry.admit(&key("r"), record(2, now)));
-        assert!(!registry.admit(&key("r"), record(1, now)));
-        registry.advance(&key("r"), AttemptId::new(2), 10, now);
-        assert_eq!(
-            registry.snapshot(|| now).unwrap().entries()[0].generated_tokens(),
-            10
-        );
-    }
-
-    #[test]
-    fn decode_progress_capacity_rejects_without_evicting_live_entries() {
-        let registry = Registry::new(1);
-        let now = Instant::now();
-        assert!(registry.admit(&key("a"), record(1, now)));
-        assert!(!registry.admit(&key("b"), record(2, now)));
-        assert_eq!(registry.snapshot(|| now).unwrap().entries().len(), 1);
-        registry.retire(&key("a"), AttemptId::new(1));
-        assert!(registry.admit(&key("b"), record(2, now)));
-    }
-
-    #[test]
-    fn decode_progress_empty_update_does_not_refresh_age() {
-        let registry = Registry::new(1);
-        let now = Instant::now();
-        assert!(registry.admit(&key("r"), record(1, now)));
-        registry.advance(
-            &key("r"),
-            AttemptId::new(1),
-            0,
-            now + Duration::from_secs(2),
-        );
-        assert_eq!(
-            registry
-                .snapshot(|| now + Duration::from_secs(3))
-                .unwrap()
-                .entries()[0]
-                .observed_age(),
-            Duration::from_secs(3)
-        );
-    }
-
-    #[test]
-    fn decode_progress_regression_invalidates_snapshot_until_retirement() {
-        let registry = Registry::new(1);
-        let now = Instant::now();
-        assert!(registry.admit(&key("r"), record(1, now)));
-        registry.advance(&key("r"), AttemptId::new(1), 20, now);
-        registry.advance(&key("r"), AttemptId::new(1), 19, now);
-        assert!(registry.snapshot(|| now).is_none());
-        registry.retire(&key("r"), AttemptId::new(1));
-        assert!(registry.snapshot(|| now).unwrap().entries().is_empty());
-    }
-
-    #[test]
-    fn decode_progress_over_budget_is_not_saturated_to_zero() {
-        let registry = Registry::new(1);
-        let now = Instant::now();
-        assert!(registry.admit(&key("r"), record(1, now)));
-        registry.advance(&key("r"), AttemptId::new(1), 129, now);
-        assert!(registry.snapshot(|| now).is_none());
-    }
-
-    #[test]
-    fn decode_progress_unknown_budget_remains_absent() {
-        let registry = Registry::new(1);
-        let now = Instant::now();
-        let mut row = record(1, now);
-        row.max_output_tokens = None;
-        assert!(registry.admit(&key("r"), row));
-        let view = registry.snapshot(|| now).unwrap();
-        assert_eq!(view.entries()[0].max_output_tokens(), None);
-        assert_eq!(view.entries()[0].remaining_token_budget(), None);
-    }
-
-    #[test]
-    fn decode_progress_clock_regression_is_not_treated_as_fresh() {
-        let registry = Registry::new(1);
-        let now = Instant::now();
-        assert!(registry.admit(&key("r"), record(1, now)));
-        assert!(registry.snapshot(|| now - Duration::from_secs(1)).is_none());
-    }
-
-    #[test]
-    fn decode_progress_guard_drop_retires_without_logging() {
-        let registry = Arc::new(Registry::new(1));
-        let guard = DecodeProgressGuard::start_in(
-            &registry,
-            RoutingPartitionRef::new("model", "default"),
-            "r",
-            AttemptId::new(1),
-            WorkerWithDpRank::new(7, 0),
-            Some(128),
-            true,
-        )
-        .unwrap();
-        guard.advance(12);
-        assert_eq!(
-            registry.snapshot(Instant::now).unwrap().entries()[0].remaining_token_budget(),
-            Some(116)
-        );
-        drop(guard);
+        for owner in &mut owners {
+            assert!(aggregate.update(owner, DecodeProgressUpdate::observed_at(128, 8, now)));
+        }
+        let mut extra = None;
+        assert!(!aggregate.update(&mut extra, DecodeProgressUpdate::observed(128, 8)));
         assert!(
-            registry
-                .snapshot(Instant::now)
-                .unwrap()
-                .entries()
-                .is_empty()
+            aggregate
+                .snapshot(MAX_OBSERVATIONS_PER_WORKER + 1)
+                .is_none()
         );
-    }
-
-    #[test]
-    fn decode_progress_same_request_and_attempt_are_isolated_by_partition() {
-        let registry = Registry::new(3);
-        let now = Instant::now();
-        let left = (
-            Arc::new(RoutingPartitionId::new("left", "default")),
-            "same-id".into(),
-        );
-        let right = (
-            Arc::new(RoutingPartitionId::new("right", "default")),
-            "same-id".into(),
-        );
-        assert!(registry.admit(&left, record(1, now)));
-        assert!(registry.admit(&right, record(1, now)));
-        registry.advance(&left, AttemptId::new(1), 64, now);
-        let snapshot = registry.snapshot(|| now).unwrap();
+        aggregate.retire(owners[0].take());
+        assert!(aggregate.update(&mut extra, DecodeProgressUpdate::observed(128, 8)));
         assert_eq!(
-            snapshot
-                .entries()
-                .iter()
-                .find(|r| r.partition().model_name == "left")
+            aggregate
+                .snapshot(MAX_OBSERVATIONS_PER_WORKER)
                 .unwrap()
-                .generated_tokens(),
-            64
-        );
-        assert_eq!(
-            snapshot
-                .entries()
-                .iter()
-                .find(|r| r.partition().model_name == "right")
-                .unwrap()
-                .generated_tokens(),
-            0
-        );
-        registry.retire(&left, AttemptId::new(1));
-        assert_eq!(
-            registry.snapshot(|| now).unwrap().entries()[0]
-                .partition()
-                .model_name,
-            "right"
+                .remaining_token_budget,
+            MAX_OBSERVATIONS_PER_WORKER * 120
         );
     }
 }

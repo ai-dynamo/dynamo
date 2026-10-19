@@ -146,7 +146,6 @@ fn select_row(
 
 struct TwoTierCostFnPicker {
     parameters: Parameters,
-    partition: Option<dynamo_kv_router::RoutingPartitionId>,
 }
 
 impl WorkerPicker for TwoTierCostFnPicker {
@@ -171,8 +170,7 @@ impl WorkerPicker for TwoTierCostFnPicker {
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
         if let Some(parameters) = self.parameters.progress_group
-            && let Some(partition) = self.partition.as_ref()
-            && let Some(row) = crate::progress_group::select(parameters, partition, context, input)
+            && let Some(row) = crate::progress_group::select(parameters, context, input)
         {
             return Ok(row);
         }
@@ -188,19 +186,18 @@ fn provider(
     parameters.validate()?;
 
     Ok(Arc::new(
-        move |config: &KvRouterConfig, worker_type, partition| {
+        move |config: &KvRouterConfig, worker_type, _partition| {
             let mut parameters = parameters;
-            if !matches!(worker_type, dynamo_kv_router::WorkerType::Aggregated) {
+            if !matches!(worker_type, dynamo_kv_router::WorkerType::Aggregated)
+                || !config.router_track_output_blocks
+            {
                 parameters.progress_group = None;
             }
             WorkerSelectionPolicy::new(
                 config.clone(),
                 worker_type.as_str(),
                 Vec::new(),
-                Box::new(TwoTierCostFnPicker {
-                    parameters,
-                    partition: parameters.progress_group.map(|_| partition.into_owned()),
-                }),
+                Box::new(TwoTierCostFnPicker { parameters }),
             )
         },
     ))
@@ -299,10 +296,7 @@ mod tests {
             KvRouterConfig::default(),
             "test",
             Vec::new(),
-            Box::new(TwoTierCostFnPicker {
-                parameters,
-                partition: None,
-            }),
+            Box::new(TwoTierCostFnPicker { parameters }),
         )
         .select_worker(WorkerSelectionInput::configured(
             &configs,

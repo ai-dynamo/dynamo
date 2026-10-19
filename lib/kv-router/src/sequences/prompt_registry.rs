@@ -19,6 +19,7 @@ use super::sharded_lock::ShardedRwLock;
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
 use crate::protocols::WorkerWithDpRank;
+use crate::scheduling::decode_progress::NativeDecodeProgress;
 
 /// Ephemeral, request-specific view of worker load.
 ///
@@ -171,11 +172,36 @@ pub(super) struct PromptRegistry {
     // never existed atomically and make a suboptimal routing choice.
     membership: PromptMembershipTrie,
     loads: ShardedRwLock<WorkerLoadTable>,
+    // Optional derived column: ordinary load reads never copy or lock progress data.
+    decode_progress: parking_lot::Mutex<FxHashMap<WorkerWithDpRank, NativeDecodeProgress>>,
     #[cfg(test)]
     cleanup_attempts: AtomicUsize,
 }
 
 impl PromptRegistry {
+    pub(crate) fn decode_progress_for(
+        &self,
+        worker: WorkerWithDpRank,
+    ) -> Option<NativeDecodeProgress> {
+        self.decode_progress.lock().get(&worker).copied()
+    }
+
+    pub(super) fn replace_worker_decode_progress(
+        &self,
+        worker: WorkerWithDpRank,
+        progress: Option<NativeDecodeProgress>,
+    ) {
+        let mut values = self.decode_progress.lock();
+        match progress {
+            Some(value) => {
+                values.insert(worker, value);
+            }
+            None => {
+                values.remove(&worker);
+            }
+        }
+    }
+
     pub(super) fn new(workers: impl IntoIterator<Item = WorkerWithDpRank>) -> Self {
         let registry = Self::default();
         let mut loads = registry.loads.write();
@@ -249,6 +275,7 @@ impl PromptRegistry {
         for removed in &change.removed {
             self.membership.remove_worker(removed.worker);
             self.loads.write().remove(removed.worker);
+            self.decode_progress.lock().remove(&removed.worker);
         }
 
         for &worker in &change.added {

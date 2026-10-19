@@ -35,7 +35,6 @@ impl ProgressGroupParameters {
 
 pub(crate) fn select(
     parameters: ProgressGroupParameters,
-    partition: &dynamo_kv_router::RoutingPartitionId,
     context: &WorkerSelectionContext<'_>,
     input: WorkerInputView<'_>,
 ) -> Option<usize> {
@@ -103,26 +102,16 @@ pub(crate) fn select(
         return None;
     }
     let source_worker = candidates[source].worker();
-    let mut observed = 0usize;
-    let mut remaining = 0usize;
-    for row in progress.entries().iter().filter(|row| {
-        row.worker() == source_worker
-            && row.partition().model_name == partition.model_name
-            && row.partition().routing_group == partition.routing_group
-    }) {
-        observed += 1;
-        if !row.ignores_eos()
-            || row.generated_tokens() == 0
-            || row.observed_age() > Duration::from_millis(parameters.max_progress_age_ms)
-        {
-            return None;
-        }
-        remaining = remaining.checked_add(row.remaining_token_budget()?)?;
-    }
-    // A partial/unsupported observation is absence, never evidence of a lightly loaded worker.
-    if observed != load[source].active_requests() {
+    let source_progress = progress
+        .entries()
+        .iter()
+        .find(|row| row.worker() == source_worker)?;
+    if source_progress.observed_requests() != load[source].active_requests()
+        || source_progress.observed_age() > Duration::from_millis(parameters.max_progress_age_ms)
+    {
         return None;
     }
+    let remaining = source_progress.remaining_token_budget();
     // Preserve an existing move only after validating the source observations too.
     if target != source {
         return Some(target);

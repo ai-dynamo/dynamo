@@ -5,10 +5,12 @@ use super::*;
 use crate::progress_group::ProgressGroupParameters;
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::{
-    AttemptId, OverlapSignals, ScheduleMode, SessionContext, decode_progress::DecodeProgressGuard,
+    OverlapSignals, ScheduleMode, SessionContext, decode_progress::DecodeProgressUpdate,
+    queue::SchedulerBookingDescriptor,
 };
 use dynamo_kv_router::{
-    SchedulingRequest, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
+    ActiveSequencesMultiWorker, NoopSequencePublisher, SchedulingRequest, SequenceRequest,
+    WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
 };
 use std::collections::HashMap;
 use std::sync::{
@@ -44,12 +46,40 @@ fn parameters() -> ProgressGroupParameters {
     }
 }
 
+type NativeSlots = ActiveSequencesMultiWorker<NoopSequencePublisher>;
+
+struct NativeOwner {
+    slots: Arc<NativeSlots>,
+    booking: SchedulerBookingDescriptor,
+    budget: Option<u32>,
+}
+impl NativeOwner {
+    fn advance(&self, tokens: usize) {
+        if let Some(budget) = self.budget {
+            self.slots
+                .update_decode_progress_for_benchmark(
+                    &self.booking,
+                    DecodeProgressUpdate::observed(budget, tokens),
+                )
+                .unwrap();
+        }
+    }
+}
+impl Drop for NativeOwner {
+    fn drop(&mut self) {
+        self.slots
+            .free(&self.booking.request_id, tokio::time::Instant::now())
+            .unwrap();
+    }
+}
+
 struct Frame {
     workers: HashMap<u64, Worker>,
     request: SchedulingRequest,
     source: WorkerWithDpRank,
     other: WorkerWithDpRank,
-    guards: Vec<DecodeProgressGuard>,
+    guards: Vec<NativeOwner>,
+    slots: Arc<NativeSlots>,
     block_size: u32,
 }
 
@@ -102,19 +132,44 @@ impl Frame {
         request
             .worker_loads
             .insert(other, WorkerLoadProjection::default());
+        let slots = Arc::new(NativeSlots::new_without_expiry(
+            NoopSequencePublisher,
+            64,
+            HashMap::from([(id, (0, 1)), (id + 1, (0, 1))]),
+            false,
+            1,
+            "aggregated",
+        ));
         let guards = (0..8)
             .map(|i| {
-                let guard = DecodeProgressGuard::start(
-                    dynamo_kv_router::RoutingPartitionRef::new("model", "default"),
-                    &format!("progress-test-{id}-{i}"),
-                    AttemptId::for_benchmark(i + 1),
-                    source,
-                    budget,
-                    ignore_eos,
-                )
-                .unwrap();
-                guard.advance(8);
-                guard
+                let request_id = format!("progress-test-{id}-{i}");
+                let now = tokio::time::Instant::now();
+                let attempt_id = slots
+                    .add_request_if_registered_admitted(
+                        SequenceRequest {
+                            request_id: request_id.clone(),
+                            token_sequence: Some(Vec::new()),
+                            expected_output_tokens: None,
+                            track_prefill_tokens: false,
+                            prefill_load_hint: None,
+                            worker: source,
+                            lora_name: None,
+                        },
+                        now,
+                    )
+                    .unwrap();
+                slots.mark_prefill_completed(&request_id, now).unwrap();
+                let owner = NativeOwner {
+                    slots: Arc::clone(&slots),
+                    booking: SchedulerBookingDescriptor {
+                        request_id,
+                        worker: source,
+                        attempt_id,
+                    },
+                    budget: budget.filter(|_| ignore_eos),
+                };
+                owner.advance(8);
+                owner
             })
             .collect();
         Self {
@@ -123,42 +178,45 @@ impl Frame {
             source,
             other,
             guards,
+            slots,
             block_size: 64,
         }
     }
 
     fn select(&self, parameters: Option<ProgressGroupParameters>) -> WorkerWithDpRank {
-        self.select_in(
-            parameters,
-            dynamo_kv_router::RoutingPartitionId::new("model", "default"),
-        )
+        self.select_with_slots(parameters, &self.slots)
     }
 
-    fn select_in(
+    fn select_with_slots(
         &self,
         parameters: Option<ProgressGroupParameters>,
-        partition: dynamo_kv_router::RoutingPartitionId,
+        slots: &NativeSlots,
     ) -> WorkerWithDpRank {
         let policy = WorkerSelectionPolicy::new(
             KvRouterConfig::default(),
             "prefill",
             Vec::new(),
             Box::new(TwoTierCostFnPicker {
-                partition: Some(partition),
                 parameters: Parameters {
                     progress_group: parameters,
                     ..Default::default()
                 },
             }),
         );
+        let provider = |worker| slots.decode_progress_for_benchmark(worker);
         policy
-            .select_worker(WorkerSelectionInput::configured(
-                &self.workers,
-                &self.request,
-                self.request.eligibility(),
-                self.block_size,
-            ))
+            .select_worker_with_decode_progress(
+                WorkerSelectionInput::configured(
+                    &self.workers,
+                    &self.request,
+                    self.request.eligibility(),
+                    self.block_size,
+                ),
+                None,
+                Some(&provider),
+            )
             .unwrap()
+            .0
             .worker
     }
 }
@@ -320,14 +378,24 @@ fn progress_group_both_warm_does_not_pin_a_busy_source() {
 }
 
 #[test]
-fn progress_group_does_not_reuse_another_model_or_routing_groups_progress() {
+fn progress_group_uses_owning_native_scheduler_not_same_ids_in_another_scope() {
     let frame = Frame::new(Some(128), true);
-    for partition in [
-        dynamo_kv_router::RoutingPartitionId::new("other-model", "default"),
-        dynamo_kv_router::RoutingPartitionId::new("model", "other-group"),
-    ] {
-        assert_eq!(frame.select_in(Some(parameters()), partition), frame.source);
-    }
+    let other_scope = NativeSlots::new_without_expiry(
+        NoopSequencePublisher,
+        64,
+        HashMap::from([
+            (frame.source.worker_id, (0, 1)),
+            (frame.other.worker_id, (0, 1)),
+        ]),
+        false,
+        2,
+        "aggregated",
+    );
+    assert_eq!(frame.select(Some(parameters())), frame.other);
+    assert_eq!(
+        frame.select_with_slots(Some(parameters()), &other_scope),
+        frame.source
+    );
 }
 
 #[test]
@@ -341,6 +409,7 @@ fn progress_group_factory_uses_legacy_selection_for_disaggregated_roles() {
     std::fs::write(file.path(), yaml).unwrap();
     let config = KvRouterConfig {
         router_policy_config: Some(file.path().display().to_string()),
+        router_track_output_blocks: true,
         ..Default::default()
     };
     let mut registry = crate::default_registry();
@@ -356,15 +425,21 @@ fn progress_group_factory_uses_legacy_selection_for_disaggregated_roles() {
             role,
             dynamo_kv_router::RoutingPartitionRef::new("model", "default"),
         );
+        let provider = |worker| frame.slots.decode_progress_for_benchmark(worker);
         assert_eq!(
             policy
-                .select_worker(WorkerSelectionInput::configured(
-                    &frame.workers,
-                    &frame.request,
-                    frame.request.eligibility(),
-                    64
-                ))
+                .select_worker_with_decode_progress(
+                    WorkerSelectionInput::configured(
+                        &frame.workers,
+                        &frame.request,
+                        frame.request.eligibility(),
+                        64
+                    ),
+                    None,
+                    Some(&provider)
+                )
                 .unwrap()
+                .0
                 .worker,
             expected
         );
@@ -398,6 +473,7 @@ fn progress_group_public_picker_contract_requires_explicit_input_group() {
     let frame = Frame::new(Some(128), true);
     for declare in [false, true] {
         let seen = Arc::new(Mutex::new(None));
+        let provider = |worker| frame.slots.decode_progress_for_benchmark(worker);
         WorkerSelectionPolicy::new(
             KvRouterConfig::default(),
             "prefill",
@@ -407,14 +483,18 @@ fn progress_group_public_picker_contract_requires_explicit_input_group() {
                 seen: Arc::clone(&seen),
             }),
         )
-        .select_worker(WorkerSelectionInput::configured(
-            &frame.workers,
-            &frame.request,
-            frame.request.eligibility(),
-            64,
-        ))
+        .select_worker_with_decode_progress(
+            WorkerSelectionInput::configured(
+                &frame.workers,
+                &frame.request,
+                frame.request.eligibility(),
+                64,
+            ),
+            None,
+            Some(&provider),
+        )
         .unwrap();
-        assert_eq!(*seen.lock().unwrap(), declare.then_some(8));
+        assert_eq!(*seen.lock().unwrap(), declare.then_some(1));
     }
 }
 

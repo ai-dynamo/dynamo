@@ -60,34 +60,44 @@ Existing plugin imports and the `WorkerSelectionPolicyRegistry` name remain avai
 
 ## Opt-In Frontend Decoder Progress
 
-An aggregated frontend can collect active-attempt output observations with
-`DYN_ROUTER_DECODE_PROGRESS=1`. The value is read once per process and defaults to
-disabled. Collection does not require TRACE logging. It currently supports a single
-choice, an explicit positive output limit, ignored EOS, and no declared stop strings
-or stop-token lists. Disaggregated stages and unsupported requests are unobserved.
+The frontend's native `OutputBlockTracker` already consumes original output token
+counts, updates scheduler block accounting, and optionally decays block weights using
+an expected-output hint. Those weighted block totals are not remaining output tokens.
 
-A picker that declares `WorkerInputs::DECODE_PROGRESS` can read
-`context.decode_progress()`. Filters and scorers do not receive this snapshot. It
-contains only the current eligible worker/rank identities. Each entry also names its
-canonical logical model and routing group; consumers must match their factory's
-`RoutingPartitionRef` rather than inferring a model from worker identity. Each entry exposes the
-declared output limit, original output-token count observed by the frontend, EOS
-setting, and observation age at capture. The optional remaining budget uses checked
-subtraction; it is an upper budget, not predicted GPU work or completion time.
+An aggregated frontend can attach raw progress to that same native update path with
+`DYN_ROUTER_DECODE_PROGRESS=1` and `router_track_output_blocks: true` (which also
+requires active-block tracking). The environment value is read once per process and
+defaults to disabled; TRACE logging is independent. Supported requests have one choice,
+an explicit positive output limit, ignored EOS, and no other declared stops.
 
-The borrowed snapshot is captured under one progress-table lock just before the
-picker callback. It must not be retained. Missing, disabled, poisoned, or inconsistent
-state returns `None`. Updates are fenced by routing partition, request, and scheduler attempt ID. Completion,
-abort, retry release, and guard destruction retire observations. The process-local
-table admits at most 4096 entries; rejected admissions are absent from the snapshot.
+A picker declaring `WorkerInputs::DECODE_PROGRESS` can read
+`context.decode_progress()`. Each entry summarizes one currently eligible worker/rank:
+the number of observed native owners, the sum of their remaining declared output
+budgets, and the age of their oldest nonempty original-token observation at capture.
+The summary is absent unless every active native owner on that worker has supported,
+consistent observations and has left prefill. No per-request identity is exposed.
+Remaining budget is an upper bound, not predicted output work or GPU completion time.
+The expected-OSL routing hint keeps its existing estimate/decay semantics.
 
-This group adds a bounded table scan, candidate filtering, and snapshot allocation
-only for pickers that request it. Existing CACHE and LOAD consumers do not acquire
-this work. Collection adds lifecycle updates only when explicitly enabled.
+Raw metadata is stored within native `ActiveSequences` request owners, under the
+existing worker/attempt booking fence. The derived snapshot is projected through
+`PromptRegistry`; free, retry, expiry and worker removal clear it through existing
+ownership cleanup. There is no independent process-global progress table or lease.
+At most 4096 raw observations are retained per worker; incomplete sets are unavailable.
+State stays local to the owning frontend/scheduler partition and is not replica-synced.
 
-The progress and load snapshots are not one atomic scheduler snapshot. A count
-match alone does not prove absence of concurrent membership changes. Policies must
-handle missing or stale state conservatively and validate their intended workload.
+For an opted-in picker, the host reads the derived snapshots for surviving candidates
+and allocates its callback-scoped view. Filters/scorers and CACHE/LOAD-only pickers do
+not acquire these reads. Collection adds native metadata updates between output-block
+boundaries, lazy per-owner progress storage and a per-worker timestamp index when enabled;
+updates to that index cost O(log N). Progress uses a separate optional derived column;
+ordinary load snapshots keep their existing layout and do not acquire its lock.
+Native request/worker owners retain optional pointers while collection is off.
+Benchmark both default and enabled paths for the intended workload.
+
+The borrowed view must not be retained. Missing, disabled, partial, invalid or stale
+state requires a conservative fallback. Progress and LOAD are separate advisory reads;
+matching counts do not rule out concurrent membership changes.
 
 The [progress-group configuration](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/progress-group.yaml)
 is an explicitly enabled two-worker experiment using the existing advisory group
