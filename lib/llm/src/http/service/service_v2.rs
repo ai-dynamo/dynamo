@@ -158,7 +158,17 @@ const SYSTEMONE_MAX_CONCURRENT_PREFLIGHT: usize = 4;
 fn bounded_systemone_limit(env_name: &'static str, default: usize) -> usize {
     match std::env::var(env_name) {
         Ok(value) => match value.parse::<usize>() {
-            Ok(parsed) if parsed > 0 => parsed.min(default),
+            Ok(parsed) if parsed > 0 => {
+                if parsed > default {
+                    tracing::warn!(
+                        env = env_name,
+                        requested = parsed,
+                        effective = default,
+                        "lowering configured System One limit"
+                    );
+                }
+                parsed.min(default)
+            }
             _ => {
                 tracing::warn!(
                     env = env_name,
@@ -1861,10 +1871,42 @@ impl HttpServiceConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Read, Seek, SeekFrom, Write};
     use std::sync::Arc;
     use tempfile::NamedTempFile;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn bounded_systemone_limit_warns_only_when_lowered() {
+        for (configured, effective, warned) in [("128", 128, false), ("1024", 256, true)] {
+            let mut capture = tempfile::tempfile().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(capture.try_clone().unwrap())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                temp_env::with_var("DYN_TEST_DECISION_LIMIT", Some(configured), || {
+                    assert_eq!(
+                        bounded_systemone_limit("DYN_TEST_DECISION_LIMIT", 256),
+                        effective
+                    );
+                });
+            });
+            capture.seek(SeekFrom::Start(0)).unwrap();
+            let mut logs = String::new();
+            capture.read_to_string(&mut logs).unwrap();
+            assert_eq!(
+                logs.contains("lowering configured System One limit"),
+                warned
+            );
+            if warned {
+                assert!(logs.contains("requested=1024"), "{logs}");
+                assert!(logs.contains("effective=256"), "{logs}");
+            }
+        }
+    }
 
     struct MtlsTestCertificates {
         ca: NamedTempFile,
