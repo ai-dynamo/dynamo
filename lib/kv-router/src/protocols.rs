@@ -648,6 +648,10 @@ impl ResidencyProjection {
 pub struct RouterHintSourceMetadata {
     pub source_control_endpoint: String,
     pub worker_type: String,
+    /// Topology labels of the cache, like a worker's `topology_domains`. Hint
+    /// targets with a `kv_transfer_domain` only fetch from the same island.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub topology_domains: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2553,6 +2557,18 @@ mod tests {
             KvTransferEnforcement::Preferred
         );
         assert!(serde_json::from_str::<KvTransferEnforcement>(r#""fallback""#).is_err());
+    }
+
+    #[test]
+    fn router_hint_source_topology_is_optional_on_the_wire() {
+        let without_topology = serde_json::json!({
+            "source_control_endpoint": "tcp://owner:23280",
+            "worker_type": "prefill",
+        });
+        let metadata: RouterHintSourceMetadata =
+            serde_json::from_value(without_topology.clone()).unwrap();
+        assert!(metadata.topology_domains.is_empty());
+        assert_eq!(serde_json::to_value(&metadata).unwrap(), without_topology);
     }
 
     #[test]
