@@ -128,8 +128,10 @@ On restore, the checkpoint loader with `DYN_GMS_USE_V1=true` connects RW to a fr
 through `snapshot.transfer.create_transfer_backend`; `nixl`, `nixl-gds`, and
 `sharded-ssd` use the same implementations and configuration as V0. The loader
 synchronizes, releases its temporary mappings, commits the same socket RW to
-RO, closes its lease, and exits. The server retains the committed backing while
-the restored worker acquires a new RO lease and remaps its preserved VAs.
+RO, closes its lease, and exits. The `gpu_memory_service.cli.snapshot.loader`
+entry point then stays running, so that a restartable container is not
+relaunched into a second RW session. The server retains the committed backing
+while the restored worker acquires a new RO lease and remaps its preserved VAs.
 
 ## Weight construction
 

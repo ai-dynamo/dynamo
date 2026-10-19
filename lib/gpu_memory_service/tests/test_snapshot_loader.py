@@ -126,6 +126,18 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
     )
 
 
+class _KeepaliveReached(Exception):
+    pass
+
+
+def _stop_at_keepalive(monkeypatch):
+    # main() sleeps forever after a successful load; stop it there.
+    def fake_sleep(seconds):
+        raise _KeepaliveReached
+
+    monkeypatch.setattr(loader.time, "sleep", fake_sleep)
+
+
 def test_main_forwards_process_argv_to_v1_helper(monkeypatch):
     forwarded = []
 
@@ -140,8 +152,10 @@ def test_main_forwards_process_argv_to_v1_helper(monkeypatch):
         "run_per_device",
         lambda module, argv: forwarded.append((module, argv)),
     )
+    _stop_at_keepalive(monkeypatch)
 
-    loader.main()
+    with pytest.raises(_KeepaliveReached):
+        loader.main()
 
     # These base arguments are forwarded to each per-device child, so an empty
     # list here would make each child fail on a missing --checkpoint-dir.
@@ -163,9 +177,54 @@ def test_main_forwards_explicit_argv_unchanged(monkeypatch):
         "run_per_device",
         lambda module, argv: forwarded.append((module, argv)),
     )
+    _stop_at_keepalive(monkeypatch)
 
-    loader.main(argv=["--checkpoint-dir", "/tmp/cp"])
+    with pytest.raises(_KeepaliveReached):
+        loader.main(argv=["--checkpoint-dir", "/tmp/cp"])
 
     assert forwarded == [
         ("gpu_memory_service.v1.snapshot.loader", ["--checkpoint-dir", "/tmp/cp"])
     ]
+
+
+def test_main_v1_stays_alive_after_successful_load(monkeypatch):
+    # An exited loader container is restarted by Kubernetes and requests a
+    # second RW session, which times out while the worker holds RO (DYN-4934).
+    calls = []
+
+    def fake_sleep(seconds):
+        calls.append(("sleep", seconds))
+        raise _KeepaliveReached
+
+    monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    monkeypatch.setattr(
+        loader,
+        "run_per_device",
+        lambda module, argv: calls.append(("run_per_device", module)),
+    )
+    monkeypatch.setattr(loader.time, "sleep", fake_sleep)
+
+    with pytest.raises(_KeepaliveReached):
+        loader.main(argv=["--checkpoint-dir", "/tmp/cp"])
+
+    assert calls == [
+        ("run_per_device", "gpu_memory_service.v1.snapshot.loader"),
+        ("sleep", 3600),
+    ]
+
+
+def test_main_v1_load_failure_exits_without_keepalive(monkeypatch):
+    def failing_run_per_device(module, argv):
+        raise SystemExit(1)
+
+    def fake_sleep(seconds):
+        raise AssertionError("keepalive must not run after a failed load")
+
+    monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    monkeypatch.setattr(loader, "run_per_device", failing_run_per_device)
+    monkeypatch.setattr(loader.time, "sleep", fake_sleep)
+
+    with pytest.raises(SystemExit) as excinfo:
+        loader.main(argv=["--checkpoint-dir", "/tmp/cp"])
+
+    assert excinfo.value.code == 1

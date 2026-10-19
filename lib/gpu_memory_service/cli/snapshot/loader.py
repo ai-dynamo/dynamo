@@ -174,13 +174,24 @@ def _list_checkpoint_devices(
     return devices
 
 
+def _wait_for_termination() -> None:
+    # Keep the sidecar process alive after a successful load. If it exited,
+    # Kubernetes would restart the container and the new loader would request
+    # a second RW session. That writer cannot be admitted while the restored
+    # worker holds its RO weights lease, so it times out and crash-loops; if
+    # it is admitted, it clears the committed weights.
+    while True:
+        time.sleep(3600)
+
+
 def main(argv: list[str] | None = None) -> None:
     # python -m passes no argv, and run_per_device forwards argv verbatim to
     # the per-device helpers, so substitute the real command line first.
     argv = argv if argv is not None else sys.argv[1:]
     if os.environ.get("DYN_GMS_USE_V1") == "true":
         run_per_device("gpu_memory_service.v1.snapshot.loader", argv)
-        return
+        logger.info("GMS V1 load complete on all devices; waiting for termination")
+        _wait_for_termination()
 
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -228,8 +239,7 @@ def main(argv: list[str] | None = None) -> None:
     elapsed = time.monotonic() - t0
     logger.info("All %d devices loaded in %.2fs", len(devices), elapsed)
 
-    while True:
-        time.sleep(3600)
+    _wait_for_termination()
 
 
 if __name__ == "__main__":
