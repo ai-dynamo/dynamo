@@ -1090,21 +1090,33 @@ fn build_engine_config(
         }
         _ => None,
     };
-    let dp_size = client::json_u32(&discovery.server_info, "dp_size")
+    let model_dp_size = client::json_u32(&discovery.server_info, "dp_size")
         .unwrap_or(1)
         .max(1);
-    let enable_dp_attention = discovery
-        .server_info
-        .get("enable_dp_attention")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let attn_dp_size = client::json_u32(&discovery.server_info, "attn_dp_size")
+        .unwrap_or(1)
+        .max(1);
+    // dp_size describes model DP while attn_dp_size describes the additional
+    // attention-DP rank space used by KV event publishers.
+    let deployment_dp_size = model_dp_size.checked_mul(attn_dp_size).ok_or_else(|| {
+        client::invalid_arg("SGLang deployment DP size exceeds the supported range")
+    })?;
     let max_num_seqs =
         client::json_u64(&discovery.server_info, "max_running_requests").map(|value| {
-            if enable_dp_attention && dp_size > 1 {
-                value / u64::from(dp_size)
-            } else {
-                value
-            }
+            // Releases without attn_dp_size report attention DP as dp_size
+            // with enable_dp_attention, and max_running_requests covers all
+            // of those ranks.
+            let legacy_attention_dp = discovery
+                .server_info
+                .get("enable_dp_attention")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let ranks = match client::json_u32(&discovery.server_info, "attn_dp_size") {
+                Some(size) => size.max(1),
+                None if legacy_attention_dp => model_dp_size,
+                None => 1,
+            };
+            value / u64::from(ranks)
         });
     let max_num_batched_tokens =
         client::json_u64(&discovery.server_info, "max_prefill_tokens").or(max_total_tokens);
@@ -1112,7 +1124,7 @@ fn build_engine_config(
     // Native gRPC is exposed by the rank-zero frontend for the complete
     // SGLang endpoint, so one sidecar registers every pure- or attention-DP rank.
     let data_parallel_start_rank = Some(0);
-    let data_parallel_size = Some(dp_size);
+    let data_parallel_size = Some(deployment_dp_size);
 
     if mode.is_prefill() && (bootstrap_host.is_none() || bootstrap_port.is_none()) {
         return Err(client::protocol_error(
@@ -1841,6 +1853,22 @@ mod tests {
     fn attention_dp_normalizes_aggregate_max_num_seqs_per_rank() {
         let config = build_engine_config(
             &discovery(json!({
+                "attn_dp_size": 4,
+                "max_running_requests": 256,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(config.llm.unwrap().max_num_seqs, Some(64));
+    }
+
+    #[test]
+    fn legacy_attention_dp_normalizes_max_num_seqs_per_rank() {
+        let config = build_engine_config(
+            &discovery(json!({
                 "dp_size": 4,
                 "enable_dp_attention": true,
                 "max_running_requests": 256,
@@ -1851,7 +1879,28 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.llm.unwrap().max_num_seqs, Some(64));
+        let registration = config.llm.unwrap();
+        assert_eq!(registration.data_parallel_size, Some(4));
+        assert_eq!(registration.max_num_seqs, Some(64));
+    }
+
+    #[test]
+    fn split_attention_dp_fields_register_the_deployment_rank_count() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "dp_size": 2,
+                "attn_dp_size": 4,
+                "max_running_requests": 256,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let registration = config.llm.unwrap();
+        assert_eq!(registration.data_parallel_size, Some(8));
+        assert_eq!(registration.max_num_seqs, Some(64));
     }
 
     #[test]
