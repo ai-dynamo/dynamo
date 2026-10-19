@@ -749,21 +749,22 @@ their feature enabled as well as the path set.
 | `DYN_HTTP_SVC_RESPONSES_PATH` | `/v1/responses` | Always |
 | `DYN_HTTP_SVC_MODELS_PATH` | `/v1/models` | Always |
 | `DYN_HTTP_SVC_CLASSIFY_PATH` | `/v1/classify` | Always |
+| `DYN_HTTP_SVC_RERANK_PATH` | `/v1/rerank` | Always |
 | `DYN_HTTP_SVC_POOLING_PATH` | `/v1/pooling` | Always |
 | `DYN_HTTP_SVC_ANTHROPIC_PATH` | `/v1/messages` | `--enable-anthropic-api` (`DYN_ENABLE_ANTHROPIC_API`) |
 | `DYN_HTTP_SVC_VLLM_GENERATE_PATH` | `/inference/v1/generate` | `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` |
 | `DYN_HTTP_SVC_SGLANG_GENERATE_PATH` | `/generate` | `DYN_SGLANG_ENABLE_GENERATE` |
-| `DYN_HTTP_SVC_FILES_PATH` | `/v1/files` | Batch endpoints, see the note below |
-| `DYN_HTTP_SVC_BATCHES_PATH` | `/v1/batches` | Batch endpoints, see the note below |
+| `DYN_HTTP_SVC_FILES_PATH` | `/v1/files` | `--batch-gateway-url` (`DYN_BATCH_GATEWAY_URL`) |
+| `DYN_HTTP_SVC_BATCHES_PATH` | `/v1/batches` | `--batch-gateway-url` (`DYN_BATCH_GATEWAY_URL`) |
 | `DYN_HTTP_SVC_HEALTH_PATH` | `/health` | Always |
 | `DYN_HTTP_SVC_LIVE_PATH` | `/live` | Always |
 | `DYN_HTTP_SVC_METRICS_PATH` | `/metrics` | Always |
 
 <Note>
-The Batch API is a placeholder. Its routes are off by default, there is no flag or
-environment variable that turns them on, and the handlers return `501` when they are
-enabled in-process. `DYN_HTTP_SVC_FILES_PATH` and `DYN_HTTP_SVC_BATCHES_PATH` are
-therefore inert in a normal deployment and are listed here for completeness.
+`/v1/files` and `/v1/batches` are served only when `--batch-gateway-url`
+(`DYN_BATCH_GATEWAY_URL`) is set. The frontend then proxies them to that gateway at the
+paths above. The in-process Batch API is a placeholder with no flag to enable it, and its
+handlers return `501`.
 </Note>
 
 ## Deprecated
