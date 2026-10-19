@@ -108,7 +108,7 @@ vllm:
   # matching device block above; keys not set here keep the default values.
   variants:
     # NIM vLLM enterprise base: vllm/vllm-openai plus the NIM server stack.
-    # Not shipped from this repo; built by nightly-enterprise-ci.yml. The
+    # Not shipped from this repo; built by enterprise-ci.yml. The
     # self-baseline subtracts the whole base so compliance only attributes what
     # the Dynamo build adds.
     enterprise:
