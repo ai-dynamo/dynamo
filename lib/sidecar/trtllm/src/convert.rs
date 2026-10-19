@@ -125,9 +125,10 @@ pub(crate) fn build_generate_request(
             return_output_logprobs: Some(output.logprobs.is_some()),
             output_candidates: output.logprobs.map(output_candidates),
             // Decode receives prompt data in the prefill handoff.
-            return_prompt_logprobs: Some(
-                output.prompt_logprobs.is_some() && request.prefill_result.is_none(),
-            ),
+            return_prompt_logprobs: output
+                .prompt_logprobs
+                .filter(|_| request.prefill_result.is_none())
+                .map(|_| true),
             prompt_candidates: output
                 .prompt_logprobs
                 .filter(|_| request.prefill_result.is_none())
@@ -938,3 +939,8 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
         _ => client::engine_error(message),
     }
 }
+
+#[cfg(test)]
+mod request_tests;
+#[cfg(test)]
+mod response_tests;
