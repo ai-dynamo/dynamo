@@ -533,6 +533,8 @@ impl ParsingOptions {
                 )
                 .is_some();
             // Removing an incompatible tool parser must not manufacture a reasoning-only V2 route.
+            // TODO: Separate pair identity from legacy decoder activation: with suppressed calls,
+            // hermes + qwen3 must retain literal tool-call text in batch as streaming does.
             let reasoning_would_select_v2 =
                 chat_completions::unified_parser::selected_content_decoder_family(
                     None,
