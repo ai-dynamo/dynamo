@@ -321,9 +321,6 @@ def test_publish_kv_hint_capabilities_fails_with_invalid_transfer_hint_config(
     runtime_config.set_engine_specific.assert_not_called()
 
 
-# Disaggregated prefill workers wrap NIXL and the tiering OffloadingConnector in
-# vLLM's MultiConnector, which hands each child only its own config, so the KVCR
-# tier sits in the OffloadingConnector entry rather than at the top level.
 def test_publish_kv_hint_capabilities_reads_tier_inside_multi_connector():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(

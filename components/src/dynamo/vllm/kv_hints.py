@@ -54,12 +54,7 @@ def _apply_kv_hint(sampling_params: Any, kv_hint: Any) -> None:
 
 
 def _secondary_tiers(engine_args: AsyncEngineArgs) -> list[Mapping[str, Any]]:
-    """Return mapping-shaped secondary-tier configs from KVTransferConfig.
-
-    vLLM builds each child of a wrapper connector (MULTI_CONNECTOR_WRAPPERS)
-    from its own ``connectors`` entry and never reads tiers on the wrapper
-    itself, so a wrapper's tiers are read from its children.
-    """
+    """Return mapping-shaped secondary-tier configs from KVTransferConfig."""
     kv_config = getattr(engine_args, "kv_transfer_config", None)
     extra_config = getattr(kv_config, "kv_connector_extra_config", None)
     if not isinstance(extra_config, Mapping):
