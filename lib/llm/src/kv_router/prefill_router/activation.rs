@@ -794,10 +794,7 @@ mod tests {
         worker
     }
 
-    /// Poll the hop until its committed target activates. While the target is
-    /// still activating, requests must fail closed with a migratable error;
-    /// they must never reach the downstream engine as an aggregated request
-    /// (worker 99). Once active, the request routes through prefill.
+    /// Worker 99 is the downstream aggregated path, which must never be reached.
     async fn await_activation(router: &PrefillRouter, expected_prefill_worker: u32) {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
