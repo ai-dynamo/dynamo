@@ -498,13 +498,16 @@ func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testi
 
 func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
 	t.Log("Seed the shared child's current readiness")
-	child, source, kube := newLPXHandoffFixture(t, "node-local-v2-specdecode")
+	_, source, kube := newLPXHandoffFixture(t, "node-local-v2-specdecode")
 	source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1)),
 	}, v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1)),
 		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend:0"}}}},
 	})
+	handoff := &dgdLPXHandoff{client: kube}
+	child, err := handoff.Reconcile(t.Context(), source)
+	require.NoError(t, err)
 	child.Status.ObservedGeneration = child.Generation
 	child.Status.Components = map[string]v1alpha1.LPXComponentStatus{
 		"lpx": {
@@ -517,7 +520,6 @@ func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "Ready"})
 	require.NoError(t, kube.Status().Update(t.Context(), child))
 	beforeChild := child.DeepCopy()
-	handoff := &dgdLPXHandoff{client: kube}
 
 	t.Log("Retain observed conductor status when the child's draft status is missing")
 	partial := child.DeepCopy()
@@ -646,12 +648,19 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			require.Equal(t, v1beta1.RestartPhaseCompleted, source.Status.Restart.Phase)
 			require.Zero(t, pcsReads)
 
-			t.Log("A missing ordinary PCS keeps only live ordinary restart members pending")
+			t.Log("Adding an ordinary worker invalidates the child's previous serving revision")
 			source.Spec.Components = append(source.Spec.Components,
 				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1))},
 				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
 			)
 			requested := []string{"draft", "frontend", "lpx", "prefill", "removed"}
+			require.Equal(t, []string{"draft", "frontend", "lpx", "prefill"}, progress(t.Context(), source, requested))
+			child, err = handoff.Reconcile(t.Context(), source)
+			require.NoError(t, err)
+			child.Status.ObservedGeneration = child.Generation
+			require.NoError(t, kube.Status().Update(t.Context(), child))
+
+			t.Log("After the shared revision is observed, only the missing ordinary PCS remains pending")
 			beforeSource := source.DeepCopy()
 			childReads, pcsReads = 0, 0
 			require.Equal(t, []string{"frontend", "prefill"}, progress(t.Context(), source, requested))

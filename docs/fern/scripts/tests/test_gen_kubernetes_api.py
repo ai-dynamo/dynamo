@@ -41,6 +41,7 @@ _DEV_URL_RE = re.compile(r"[^\s<>()\[\]&\"']*/dynamo/dev/[^\s<>()\[\]&,;\"']*")
 EXPECTED_PACKAGES = (
     "nvidia.com/v1alpha1",
     "nvidia.com/v1beta1",
+    "nvidia.com/v1beta2",
     "operator.config.dynamo.nvidia.com/v1alpha1",
 )
 EXPECTED_TYPE_COUNTS = {
@@ -49,7 +50,8 @@ EXPECTED_TYPE_COUNTS = {
     # PodSnapshotContentSource/Spec/Status, PodSnapshotReference), which are
     # owned by github.com/ai-dynamo/snapshot.
     "nvidia.com/v1alpha1": 69,
-    "nvidia.com/v1beta1": 71,
+    "nvidia.com/v1beta1": 74,
+    "nvidia.com/v1beta2": 28,
     "operator.config.dynamo.nvidia.com/v1alpha1": 29,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
@@ -97,7 +99,7 @@ def workspace(tmp_path: Path) -> Path:
     """Clone the four generator I/O paths into ``tmp_path``.
 
     The parse input is copied from the source tree so workspace tests
-    exercise the same 3-package / 195-heading baseline as the model tests."""
+    exercise the same four-package baseline as the model tests."""
     ws = tmp_path / "repo"
     dst = ws / "docs" / "fern"
     dst.mkdir(parents=True)

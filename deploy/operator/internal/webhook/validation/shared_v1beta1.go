@@ -31,6 +31,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -48,16 +49,14 @@ func (v *sharedValidation) validatePodTemplateSpec(template *corev1.PodTemplateS
 	return append(allErrs, v.validatePodSpec(&template.Spec, fldPath.Child("spec"), role)...)
 }
 
-// validatePodSpec protects LPX-owned container names, addressing, and placement.
+// validatePodSpec requires an LPX runtime container and protects controller-owned addressing and placement.
 // spec and fldPath are non-nil; Kubernetes schema validation runs before this method.
 func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.Path, role string) field.ErrorList {
 	var allErrs field.ErrorList
-	agent := role == nvidiacomv1beta1.ComponentRoleLPXAgent
 	if !hasContainerNamed(spec.Containers, consts.MainContainerName) {
 		allErrs = append(allErrs, field.Required(fldPath.Child("containers"), fmt.Sprintf("LPX %s component requires a %q runtime container", role, consts.MainContainerName)))
 	}
 
-	// Agent names are build-independent; conductor names depend on the compiled execution mode.
 	for _, group := range []struct {
 		name       string
 		containers []corev1.Container
@@ -68,9 +67,6 @@ func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.
 		for index, container := range group.containers {
 			if strings.TrimSpace(container.Image) == "" {
 				allErrs = append(allErrs, field.Required(fldPath.Child(group.name).Index(index).Child("image"), "must specify a non-empty image"))
-			}
-			if agent && container.Name == nvidiacomv1beta1.ComponentRoleLPXAgent {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child(group.name).Index(index).Child("name"), fmt.Sprintf("LPX reserves %q for the materialized role container", container.Name)))
 			}
 		}
 	}
@@ -89,7 +85,7 @@ func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.
 	if len(spec.TopologySpreadConstraints) != 0 {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("topologySpreadConstraints"), "LPX owns role placement"))
 	}
-	if !agent {
+	if role != nvidiacomv1beta1.ComponentRoleLPXAgent {
 		return allErrs
 	}
 
@@ -145,6 +141,8 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	providerOverridesSupported        bool
 	workloadProvider                  string
 	oldComponent                      *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	groveUpdateStrategy               grovev1alpha1.UpdateStrategyType
+	groveStrategyChanged              bool
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
@@ -159,7 +157,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	allErrs := field.ErrorList{}
 
 	// Validate the provider-native fragment in this component context.
-	if spec.ProviderOverride != nil && spec.IsLPX() {
+	if spec.ProviderOverride != nil && spec.IsLPX() && provideroverride.WritesGroveTopology(spec.ProviderOverride.Target, spec.ProviderOverride.Value.Raw) {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride"), "LPX component does not support Grove topology overrides"))
 	} else if spec.ProviderOverride != nil {
 		allErrs = append(allErrs, v.validateProviderOverride(
@@ -170,8 +168,14 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				workloadProvider: options.workloadProvider,
 				scope:            provideroverride.ScopeComponent,
 				component:        spec,
+				updateStrategy:   options.groveUpdateStrategy,
 			},
 		)...)
+	}
+
+	// A shared draft has no independently configurable scaling group.
+	if spec.IsLPX() && spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil && spec.ProviderOverride != nil {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride"), "shared LPX draft availability belongs to the target component"))
 	}
 
 	// Preserve the LPX role-template boundary after conversion from the alpha schema.
@@ -191,6 +195,57 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			fldPath.Child("minAvailable"),
 			"is currently supported only for Grove-backed DynamoGraphDeployment components",
 		))
+	}
+
+	// Warn when a deprecated minimum is introduced or changed, regardless of strategy.
+	if spec.MinAvailable != nil && options.grovePathway && (options.oldComponent == nil || !k8sptr.Equal(spec.MinAvailable, options.oldComponent.MinAvailable)) {
+		minimumPath := fldPath.Child("minAvailable")
+		if spec.IsLPX() && spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil {
+			v.warnf("%s (%q) is deprecated; remove this field and configure minimum availability on the shared target component; the draft's effective minimum remains 1", minimumPath.String(), spec.ComponentName)
+		} else {
+			replacement := groveNativeMinimumPath(spec, fldPath)
+			v.warnf("%s (%q) is deprecated; use %s and migrate all component minima together without changing their effective values", minimumPath.String(), spec.ComponentName, replacement.String())
+		}
+	}
+
+	// Native availability has the same replica envelope as the deprecated typed field.
+	if spec.ProviderOverride != nil {
+		minimum, exists := provideroverride.GroveMinAvailable(spec.ProviderOverride.Value.Raw)
+		replicas := k8sptr.Deref(spec.Replicas, 1)
+		if exists && minimum > 0 && replicas > 0 && !(spec.IsLPX() && spec.Replicas == nil) && minimum > replicas {
+			minimumPath := groveNativeMinimumPath(spec, fldPath)
+			allErrs = append(allErrs, field.Invalid(minimumPath, minimum, "minAvailable must be less than or equal to replicas unless replicas is 0"))
+		}
+	}
+
+	// Explicit RollingRecreate budgets introduce outage risk beyond its established default.
+	warnForStrategy := options.groveUpdateStrategy == grovev1alpha1.CoherentStrategy
+	if options.groveUpdateStrategy == grovev1alpha1.RollingRecreateStrategy && spec.ProviderOverride != nil {
+		_, warnForStrategy = provideroverride.GroveMaxUnavailable(spec.ProviderOverride.Value.Raw)
+	}
+
+	// Warn for complete-component disruption only when admission knows the serving capacity.
+	if options.grovePathway && warnForStrategy && len(allErrs) == 0 && !(spec.IsLPX() && (spec.Replicas == nil || spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil)) {
+		replicas := k8sptr.Deref(spec.Replicas, 1)
+		minimum := provideroverride.EffectiveGroveMinAvailable(spec)
+		budget := provideroverride.EffectiveGroveMaxUnavailable(spec, options.groveUpdateStrategy)
+		old := options.oldComponent
+		relevantChange := old == nil || options.groveStrategyChanged
+		if old != nil {
+			oldBudget := provideroverride.EffectiveGroveMaxUnavailable(old, options.groveUpdateStrategy)
+			oldReplicas := k8sptr.Deref(old.Replicas, 1)
+			// Replica-only edits warn when they introduce full-component disruption risk.
+			replicaRiskIntroduced := oldReplicas != replicas && (oldReplicas <= 0 || oldBudget < oldReplicas)
+			relevantChange = relevantChange || replicaRiskIntroduced || oldBudget != budget ||
+				!apiequality.Semantic.DeepEqual(old.PodTemplate, spec.PodTemplate) || !apiequality.Semantic.DeepEqual(old.Roles, spec.Roles)
+		}
+		if relevantChange && replicas > 0 && budget >= replicas && minimum > 0 {
+			if options.groveUpdateStrategy == grovev1alpha1.CoherentStrategy {
+				v.warnf("%s (%q): Coherent updates may temporarily make this entire component unavailable (replicas=%d, minAvailable=%d, maxUnavailable=%d); provision spare serving capacity before updating", fldPath.String(), spec.ComponentName, replicas, minimum, budget)
+			} else {
+				v.warnf("%s (%q): RollingRecreate updates may temporarily make this entire component unavailable (replicas=%d, maxUnavailable=%d); provision spare serving capacity before updating", fldPath.String(), spec.ComponentName, replicas, budget)
+			}
+		}
 	}
 
 	// Validate the complete role schema against the enclosing component shape.
@@ -264,6 +319,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			))
 		}
 	}
+
+	allErrs = append(allErrs, dynamo.ValidateDynamoSidecar(spec, fldPath)...)
 
 	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
 
@@ -402,6 +459,7 @@ type providerOverrideValidationOptions struct {
 	workloadProvider string
 	scope            provideroverride.Scope
 	component        *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	updateStrategy   grovev1alpha1.UpdateStrategyType
 }
 
 // validateProviderOverride validates override. override and fldPath must not be nil.
@@ -488,6 +546,27 @@ func (v *sharedValidation) validateProviderOverride(
 			continue
 		}
 		allErrs = append(allErrs, field.Invalid(errPath, nil, valueErr.Detail))
+	}
+	// Availability belongs to a complete component, never one multinode member role.
+	if minimum, exists := provideroverride.GroveMinAvailable(override.Value.Raw); exists && options.scope != provideroverride.ScopeComponent {
+		allErrs = append(allErrs, field.Forbidden(valuePath.Child("spec", "minAvailable"), fmt.Sprintf("minAvailable (%d) belongs to the owning component", minimum)))
+	}
+
+	// Validate the budget in its authored component context before Grove admission.
+	if budget, exists := provideroverride.GroveMaxUnavailable(override.Value.Raw); exists && budget > 0 {
+		budgetPath := valuePath.Child("rollingUpdate", "maxUnavailable")
+		if options.scope != provideroverride.ScopeComponent {
+			allErrs = append(allErrs, field.Forbidden(valuePath.Child("rollingUpdate"), "member cliques use the owning component's rollingUpdate budget"))
+		} else {
+			minAvailable := provideroverride.EffectiveGroveMinAvailable(options.component)
+			if options.updateStrategy == grovev1alpha1.OnDeleteStrategy {
+				allErrs = append(allErrs, field.Forbidden(valuePath.Child("rollingUpdate"), "must not be set when the update strategy is OnDelete"))
+			}
+			// A budget survives scaling; Grove caps disruption to the live replicas.
+			if options.updateStrategy == grovev1alpha1.CoherentStrategy && budget < minAvailable {
+				allErrs = append(allErrs, field.Invalid(budgetPath, budget, fmt.Sprintf("must not be less than minAvailable (%d) under the Coherent update strategy", minAvailable)))
+			}
+		}
 	}
 	return allErrs
 }
@@ -599,6 +678,18 @@ func (v *sharedValidation) validateComponentRoleSpec(
 	options componentRoleSpecValidationOptions,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
+
+	// Role templates must not bypass the sidecar restrictions on multinode and LPX layouts.
+	if role.PodTemplate != nil {
+		for i, container := range role.PodTemplate.Spec.InitContainers {
+			if container.Name == consts.RuntimeContainerName {
+				allErrs = append(allErrs, field.Forbidden(
+					fldPath.Child("podTemplate", "spec", "initContainers").Index(i).Child("name"),
+					"Dynamo sidecar mode is not supported in multinode or LPX role pod templates",
+				))
+			}
+		}
+	}
 
 	// LPX renders role templates directly and has no provider-override lowering.
 	if options.component != nil && options.component.IsLPX() {
@@ -988,6 +1079,21 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			oldComponent.ProviderOverride,
 			fldPath.Child("providerOverride"),
 		)...)
+	}
+
+	// Preserve the immutable effective minimum while allowing an explicit API-form migration.
+	oldHasMinimum := oldComponent.MinAvailable != nil
+	if oldComponent.ProviderOverride != nil {
+		_, nativeMinimum := provideroverride.GroveMinAvailable(oldComponent.ProviderOverride.Value.Raw)
+		oldHasMinimum = oldHasMinimum || nativeMinimum
+	}
+	newMinimum := provideroverride.EffectiveGroveMinAvailable(newComponent)
+	if (oldHasMinimum || ownerKind.Kind == nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind) && newMinimum != provideroverride.EffectiveGroveMinAvailable(oldComponent) {
+		minimumPath := fldPath.Child("minAvailable")
+		if newComponent.MinAvailable == nil && (newComponent.ProviderOverride != nil || oldComponent.ProviderOverride != nil) {
+			minimumPath = groveNativeMinimumPath(newComponent, fldPath)
+		}
+		allErrs = append(allErrs, field.Invalid(minimumPath, newMinimum, "minAvailable is immutable after creation"))
 	}
 
 	// Keep the component's multinode shape stable across updates. Permit

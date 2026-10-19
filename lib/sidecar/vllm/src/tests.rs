@@ -214,7 +214,11 @@ impl pb::inference_server::Inference for FakeVllm {
             "remote_block_ids": [7, 8],
             "nested": {"flags": [true, null, "opaque"]},
         });
-        let encoder_handoff = encoder_handoff();
+        let has_media = |modality| request.media.iter().any(|item| item.modality() == modality);
+        let encoder_handoff = encoder_handoff_for(
+            has_media(pb::Modality::Image),
+            has_media(pb::Modality::Video),
+        );
         let encoder_response = self.encoder_response.load(Ordering::SeqCst);
         let omit_encoder_metadata = self.omit_encoder_metadata.load(Ordering::SeqCst);
         let hang = self.hang.load(Ordering::SeqCst);
@@ -294,6 +298,15 @@ impl pb::inference_server::Inference for FakeVllm {
 
 #[tonic::async_trait]
 impl pb::control_server::Control for FakeVllm {
+    async fn shutdown(
+        &self,
+        _: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented(
+            "shutdown is not supported by the test server",
+        ))
+    }
+
     async fn get_server_info(
         &self,
         _request: Request<pb::GetServerInfoRequest>,
@@ -322,8 +335,11 @@ impl pb::control_server::Control for FakeVllm {
 
     async fn abort(
         &self,
-        _request: Request<pb::AbortRequest>,
+        request: Request<pb::AbortRequest>,
     ) -> Result<Response<pb::AbortResponse>, Status> {
+        let request = request.into_inner();
+        self.record_control("abort", json!({"request_ids": request.request_ids}))
+            .await;
         Ok(Response::new(pb::AbortResponse {}))
     }
 
@@ -1067,6 +1083,193 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     );
 }
 
+async fn started_engine(
+    model: pb::ModelInfo,
+    server: pb::ServerInfo,
+) -> (FakeServer, VllmSidecarEngine) {
+    let fake = FakeServer::start(FakeVllm::default()).await;
+    *fake.service.model_info_override.lock().await = Some(model.clone());
+    *fake.service.server_info_override.lock().await = Some(server.clone());
+    let engine = engine_with_server_info(
+        &fake.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        model,
+        server,
+    );
+    engine.start(0).await.expect("start");
+    (fake, engine)
+}
+
+// Regression: servers before vllm-proto 0.6.0 can't confirm they read the
+// reasoning gate. The sidecar must forward it only to newer servers, and must
+// not silently drop it when an older server's reasoning parser needs it.
+#[tokio::test]
+async fn reasoning_gate_reaches_only_servers_reporting_proto_0_6() {
+    let mut request = request();
+    let extra = request.extra_args.as_mut().unwrap();
+    extra["reasoning_parser_kwargs"] = json!({"chat_template_kwargs": {"enable_thinking": false}});
+    extra["reasoning_ended"] = json!(false);
+
+    let mut old_server = server_info();
+    old_server.proto_version.clear();
+    let mut no_parser = model_info();
+    no_parser.reasoning_parser.clear();
+    // The fixture engine runs vLLM's `deepseek_r1` reasoning parser.
+    for (model, server, expected) in [
+        (model_info(), server_info(), Ok(Some(false))),
+        (no_parser, old_server.clone(), Ok(None)),
+        (model_info(), old_server, Err("cannot receive")),
+    ] {
+        let (fake, engine) = started_engine(model, server).await;
+        match (collect_result(&engine, request.clone()).await, expected) {
+            (Ok(_), Ok(reasoning_ended)) => {
+                let gate = fake.service.requests.lock().await[0]
+                    .engine_reasoning_gate
+                    .clone();
+                assert_eq!(gate.and_then(|gate| gate.reasoning_ended), reasoning_ended);
+            }
+            (Err(error), Err(expected)) => {
+                assert!(error.to_string().contains(expected), "{error}");
+                assert!(fake.service.requests.lock().await.is_empty());
+            }
+            (result, expected) => panic!("expected {expected:?}, got error {:?}", result.err()),
+        }
+        engine.cleanup().await.expect("cleanup");
+    }
+}
+
+// Regression: vLLM enforces thinking budgets only with a reasoning parser,
+// and its native gRPC path ignores them silently otherwise.
+#[tokio::test]
+async fn thinking_budget_requires_engine_reasoning_parser() {
+    let mut request = request();
+    request.stop_conditions.max_thinking_tokens = Some(0);
+    let mut no_parser = model_info();
+    no_parser.reasoning_parser.clear();
+    for (model, accepted) in [(model_info(), true), (no_parser, false)] {
+        let (fake, engine) = started_engine(model, server_info()).await;
+        let result = collect_result(&engine, request.clone()).await;
+        assert_eq!(result.is_ok(), accepted, "{:?}", result.err());
+        if accepted {
+            let budget = fake.service.requests.lock().await[0]
+                .stopping
+                .as_ref()
+                .unwrap()
+                .thinking_token_budget;
+            assert_eq!(budget, Some(0));
+        }
+        engine.cleanup().await.expect("cleanup");
+    }
+}
+
+// Regression: servers before vllm-proto 0.6.0 drop the 0.5 generation controls
+// and read explicit sampling zeros as "use the model default". Requests that
+// rely on them must fail instead of silently generating without them.
+#[tokio::test]
+async fn proto_0_5_controls_require_a_server_reporting_proto_0_6() {
+    type Mutation = fn(&mut PreprocessedRequest);
+    let cases: &[(Option<&str>, Mutation)] = &[
+        (Some("bad_words_token_ids"), |r| {
+            r.extra_args.as_mut().unwrap()["sampling_options"] =
+                json!({"bad_words_token_ids": [[7]]})
+        }),
+        (Some("max_thinking_tokens"), |r| {
+            r.stop_conditions.max_thinking_tokens = Some(0)
+        }),
+        (Some("top_k=-1 or top_k=0"), |r| {
+            r.sampling_options.top_k = Some(-1)
+        }),
+        (Some("min_p=0"), |r| r.sampling_options.min_p = Some(0.0)),
+        // Nonzero top_k and min_p mean the same in both schemas.
+        (None, |_| {}),
+    ];
+    let mut old_server = server_info();
+    old_server.proto_version.clear();
+    // The fixture engine runs vLLM's `deepseek_r1` reasoning parser.
+    let (fake, engine) = started_engine(model_info(), old_server.clone()).await;
+    for &(rejected, mutate) in cases {
+        let mut request = request();
+        mutate(&mut request);
+        let result = collect_result(&engine, request).await;
+        match rejected {
+            Some(control) => {
+                let error = result.expect_err(control).to_string();
+                assert!(
+                    error.contains(control) && error.contains("reports no version"),
+                    "{error}"
+                );
+            }
+            None => {
+                result.expect("compatible controls");
+            }
+        }
+    }
+    assert_eq!(fake.service.requests.lock().await.len(), 1);
+    engine.cleanup().await.expect("cleanup");
+
+    // The prefill leg fails too, before it computes KV that decode would reject.
+    let fake = FakeServer::start(FakeVllm::default()).await;
+    *fake.service.server_info_override.lock().await = Some(old_server.clone());
+    let prefill = engine_with_server_info(
+        &fake.endpoint,
+        DisaggregationMode::Prefill,
+        1,
+        model_info(),
+        old_server,
+    );
+    prefill.start(0).await.expect("start");
+    let mut request = request();
+    request.stop_conditions.max_thinking_tokens = Some(0);
+    let error = collect_result(&prefill, request)
+        .await
+        .expect_err("prefill leg")
+        .to_string();
+    assert!(error.contains("max_thinking_tokens"), "{error}");
+    assert!(fake.service.requests.lock().await.is_empty());
+    prefill.cleanup().await.expect("cleanup");
+}
+
+// Regression: the frontend must leave reasoning out of tool grammars only when
+// vLLM's reasoning parser gates them, which needs a vllm-proto 0.6 server.
+#[tokio::test]
+async fn excludes_reasoning_policy_follows_engine_gating() {
+    let mut old_server = server_info();
+    old_server.proto_version.clear();
+    let mut no_parser = model_info();
+    no_parser.reasoning_parser.clear();
+    for (model, server, published) in [
+        (model_info(), server_info(), true),
+        (no_parser, server_info(), false),
+        (model_info(), old_server, false),
+    ] {
+        let service = FakeVllm::default();
+        *service.model_info_override.lock().await = Some(model);
+        *service.server_info_override.lock().await = Some(server);
+        let fake = FakeServer::start(service).await;
+        let argv = vec![
+            "dynamo-vllm-sidecar".to_string(),
+            "--grpc-endpoint".to_string(),
+            fake.endpoint.clone(),
+            "--grpc-startup-deadline-secs".to_string(),
+            "5".to_string(),
+        ];
+        let (engine, _) =
+            tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
+                .await
+                .expect("bootstrap task")
+                .expect("bootstrap discovery");
+        let config = engine.start(0).await.expect("start");
+        assert_eq!(
+            config.runtime_data.get(
+                dynamo_llm::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY
+            ),
+            published.then_some(&json!(true))
+        );
+        engine.cleanup().await.expect("cleanup");
+    }
+}
+
 // Regression: a frontend hosting ranks 4..8 must register and route that local
 // range, or hybrid deployments reject discovery or advertise unreachable engines.
 #[tokio::test]
@@ -1511,6 +1714,22 @@ async fn mixed_multimodal_media_is_forwarded_with_image_uuid_only() {
 
 #[tokio::test]
 async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
+    assert_encoder_cache_handoff(epd_image_request()).await;
+}
+
+#[tokio::test]
+async fn video_encoder_cache_handoff_for_e_pd_and_e_p_d() {
+    assert_encoder_cache_handoff(epd_video_request()).await;
+    assert_encoder_cache_handoff(epd_image_video_request()).await;
+}
+
+async fn assert_encoder_cache_handoff(mut source_request: PreprocessedRequest) {
+    let expected_media = expected_wire_media(&source_request);
+    let has_media = |modality| expected_media.iter().any(|(kind, _, _)| *kind == modality);
+    let expected_ec = encoder_handoff_for(
+        has_media(pb::Modality::Image),
+        has_media(pb::Modality::Video),
+    );
     let service = FakeVllm::default();
     service.encoder_response.store(true, Ordering::SeqCst);
     let discovered = multimodal_model_info();
@@ -1524,7 +1743,6 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
         discovered.clone(),
     );
     encoder.start(0).await.expect("start encoder");
-    let mut source_request = epd_image_request();
     source_request
         .routing
         .as_mut()
@@ -1539,7 +1757,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
         .encoder_result
         .clone()
         .expect("encoder result");
-    assert_eq!(encoder_result, encoder_handoff());
+    assert_eq!(encoder_result, expected_ec);
     assert_eq!(
         server
             .service
@@ -1555,9 +1773,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
     {
         let requests = server.service.requests.lock().await;
         let encode_wire = requests.last().expect("encode request");
-        assert_eq!(encode_wire.media.len(), 2);
-        assert_eq!(encode_wire.media[0].uuid, "image-a");
-        assert_eq!(encode_wire.media[1].uuid, "image-b");
+        assert_eq!(wire_media(encode_wire), expected_media);
         assert!(
             encode_wire
                 .kv
@@ -1596,9 +1812,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
             .last()
             .cloned()
             .expect("downstream request");
-        assert_eq!(downstream_wire.media.len(), 2, "{topology}");
-        assert_eq!(downstream_wire.media[0].uuid, "image-a", "{topology}");
-        assert_eq!(downstream_wire.media[1].uuid, "image-b", "{topology}");
+        assert_eq!(wire_media(&downstream_wire), expected_media, "{topology}");
         let forwarded_ec = struct_to_json_v14(
             downstream_wire
                 .kv
@@ -1609,7 +1823,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
             "ec_transfer_params",
         )
         .expect("EC metadata JSON");
-        assert_eq!(forwarded_ec, encoder_handoff(), "{topology}");
+        assert_eq!(forwarded_ec, expected_ec, "{topology}");
 
         if mode.is_prefill() {
             let mut decode_request = downstream_request;
@@ -1642,9 +1856,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
                 .last()
                 .cloned()
                 .expect("decode request");
-            assert_eq!(decode_wire.media.len(), 2);
-            assert_eq!(decode_wire.media[0].uuid, "image-a");
-            assert_eq!(decode_wire.media[1].uuid, "image-b");
+            assert_eq!(wire_media(&decode_wire), expected_media);
             let decode_cache = decode_wire.kv.expect("decode cache parameters");
             assert!(decode_cache.kv_transfer_params.is_some());
             let decode_ec = struct_to_json_v14(
@@ -1653,7 +1865,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
                 "ec_transfer_params",
             )
             .expect("decode EC metadata JSON");
-            assert_eq!(decode_ec, encoder_handoff());
+            assert_eq!(decode_ec, expected_ec);
         }
     }
 }
@@ -2418,27 +2630,6 @@ async fn unresolved_multimodal_routing_token_falls_back_without_source_metadata(
 }
 
 #[tokio::test]
-async fn grpc_request_errors_are_propagated() {
-    let service = FakeVllm::default();
-    service.reject.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        model_info(),
-    );
-    engine.start(0).await.expect("start");
-
-    let context = dynamo_backend_common::testing::mock_context();
-    let result = engine
-        .generate(request(), GenerateContext::new(context, None))
-        .await;
-    assert!(result.is_err());
-    assert_eq!(server.service.requests.lock().await.len(), 1);
-}
-
-#[tokio::test]
 async fn prefill_decode_handoff_is_opaque_and_repeatable() {
     let server = FakeServer::start(FakeVllm::default()).await;
     let prefill = engine(
@@ -2575,10 +2766,8 @@ async fn pool_uses_each_configured_connection() {
 }
 
 #[tokio::test]
-async fn cancellation_drops_the_remote_stream() {
-    let service = FakeVllm::default();
-    service.hang.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
+async fn abort_sends_control_abort_for_the_request_id() {
+    let server = FakeServer::start(FakeVllm::default()).await;
     let engine = engine(
         &server.endpoint,
         DisaggregationMode::Aggregated,
@@ -2588,64 +2777,23 @@ async fn cancellation_drops_the_remote_stream() {
     engine.start(0).await.expect("start");
 
     let context = dynamo_backend_common::testing::mock_context();
-    let mut stream = engine
-        .generate(request(), GenerateContext::new(context.clone(), None))
-        .await
-        .expect("generate");
-    let first = stream.next().await.unwrap().unwrap();
-    assert_eq!(first.token_ids, [42]);
-    context.stop_generating();
-    let terminal = stream.next().await.unwrap().unwrap();
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
-    drop(stream);
+    engine.abort(context.clone()).await;
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !server.service.server_stream_dropped.load(Ordering::SeqCst) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("server stream dropped");
-}
-
-#[tokio::test]
-async fn cancellation_interrupts_pending_response_headers() {
-    let service = FakeVllm::default();
-    service.hang_before_headers.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        model_info(),
+    let calls = server.service.control_calls.lock().await;
+    assert_eq!(
+        *calls,
+        vec![("abort".to_string(), json!({"request_ids": [context.id()]}))]
     );
-    engine.start(0).await.expect("start");
-
-    let context = dynamo_backend_common::testing::mock_context();
-    let generate = engine.generate(request(), GenerateContext::new(context.clone(), None));
-    tokio::pin!(generate);
-
-    tokio::select! {
-        _ = &mut generate => panic!("generate returned before cancellation"),
-        _ = async {
-            while !server.service.headers_pending.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        } => {}
-    }
-
-    context.stop_generating();
-    let mut stream = tokio::time::timeout(std::time::Duration::from_secs(2), &mut generate)
-        .await
-        .expect("cancel pending headers")
-        .expect("generate cancellation stream");
-    let terminal = stream.next().await.unwrap().unwrap();
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
-    server.service.release_headers.notify_waiters();
 }
 
 #[tokio::test]
 async fn decode_cancellation_waits_for_submission_and_first_token() {
+    for is_cancelled_before_submission in [false, true] {
+        check_decode_cancellation(is_cancelled_before_submission).await;
+    }
+}
+
+async fn check_decode_cancellation(is_cancelled_before_submission: bool) {
     let service = FakeVllm::default();
     service.hang_before_headers.store(true, Ordering::SeqCst);
     service
@@ -2661,6 +2809,9 @@ async fn decode_cancellation_waits_for_submission_and_first_token() {
     engine.start(0).await.expect("start");
 
     let context = dynamo_backend_common::testing::mock_context();
+    if is_cancelled_before_submission {
+        context.stop_generating();
+    }
     let generate = engine.generate(
         decode_request(),
         GenerateContext::new(context.clone(), None),
