@@ -173,6 +173,7 @@ impl SglangSidecarEngine {
 
         let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
         let common = args.sidecar.common;
+        let router_config = common.router_config()?;
         let config = WorkerConfig {
             runtime: common.runtime,
             namespace: common.namespace,
@@ -197,6 +198,7 @@ impl SglangSidecarEngine {
             exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
             route_to_encoder: false,
             enable_rl: common.enable_rl,
+            router_config,
             ..Default::default()
         };
 

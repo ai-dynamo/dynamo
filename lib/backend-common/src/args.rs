@@ -10,8 +10,16 @@
 use std::path::PathBuf;
 
 use clap::Args;
+use dynamo_llm::discovery::LoadThresholdConfig;
+use dynamo_llm::entrypoint::RouterConfig;
+use dynamo_llm::kv_router::scheduling::config::{
+    KvRouterConfig, try_kv_router_config_from_dynamo_env,
+};
+use dynamo_llm::session_affinity::MAX_SESSION_AFFINITY_TTL_SECS;
+use dynamo_runtime::pipeline::RouterMode;
 
 use crate::disagg::DisaggregationMode;
+use crate::{BackendError, DynamoError, ErrorType};
 
 /// CLI flags that every Rust backend needs. Flatten these into your engine's
 /// `Args` struct:
@@ -103,6 +111,120 @@ pub struct CommonArgs {
     /// Publish this worker's engine control/update routes on the RL request-plane endpoint.
     #[arg(long, default_value_t = false, env = "DYN_ENABLE_RL")]
     pub enable_rl: bool,
+
+    /// Advertise a routing mode for this worker set. The frontend then routes
+    /// the set by this worker's configuration instead of its own, same as for
+    /// the Python workers; omit it to inherit the frontend's routing. The
+    /// flags below qualify it and are ignored without it.
+    #[arg(long, env = "DYN_ROUTER_MODE", value_enum)]
+    pub router_mode: Option<RouterModeArg>,
+
+    /// Session-affinity idle TTL in seconds for the advertised worker set.
+    #[arg(
+        long,
+        env = "DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",
+        value_parser = clap::value_parser!(u64).range(1..=MAX_SESSION_AFFINITY_TTL_SECS)
+    )]
+    pub router_session_affinity_ttl_secs: Option<u64>,
+
+    /// Skip a decode worker above this KV block utilization (0.0 to 1.0);
+    /// `None` disables the check.
+    #[arg(long, env = "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD")]
+    pub active_decode_blocks_threshold: Option<Nullable<f64>>,
+
+    /// Skip a prefill worker above this many active prefill tokens; `None`
+    /// disables the check.
+    #[arg(long, env = "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD")]
+    pub active_prefill_tokens_threshold: Option<Nullable<u64>>,
+
+    /// Skip a prefill worker above this fraction of `max_num_batched_tokens`;
+    /// `None` disables the check.
+    #[arg(long, env = "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC")]
+    pub active_prefill_tokens_threshold_frac: Option<Nullable<f64>>,
+}
+
+/// A numeric flag value that may also be `None` or empty, meaning unset, as
+/// the Python workers' `nullable_float` and `nullable_int` accept.
+#[derive(Clone, Copy, Debug)]
+pub struct Nullable<T>(pub Option<T>);
+
+impl<T: std::str::FromStr> std::str::FromStr for Nullable<T>
+where
+    T::Err: std::fmt::Display,
+{
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, String> {
+        match raw {
+            "" | "None" => Ok(Self(None)),
+            value => value
+                .parse()
+                .map(|value| Self(Some(value)))
+                .map_err(|error: T::Err| error.to_string()),
+        }
+    }
+}
+
+impl CommonArgs {
+    /// The router configuration this worker advertises on its model card, or
+    /// `None` without `--router-mode`. An advertised `kv` set takes its KV
+    /// tuning from the `DYN_ROUTER_*` environment, the variables the Python
+    /// worker flags default from; there are no per-setting flags here.
+    pub fn router_config(&self) -> Result<Option<RouterConfig>, DynamoError> {
+        let Some(router_mode) = self.router_mode.map(RouterMode::from) else {
+            return Ok(None);
+        };
+        let invalid = |message: String| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message(message)
+                .build()
+        };
+        let load_threshold_config = LoadThresholdConfig {
+            active_decode_blocks_threshold: self.active_decode_blocks_threshold.and_then(|v| v.0),
+            active_prefill_tokens_threshold: self.active_prefill_tokens_threshold.and_then(|v| v.0),
+            active_prefill_tokens_threshold_frac: self
+                .active_prefill_tokens_threshold_frac
+                .and_then(|v| v.0),
+        };
+        load_threshold_config.validate().map_err(invalid)?;
+        let kv_router_config = if router_mode.is_kv_routing() {
+            try_kv_router_config_from_dynamo_env().map_err(invalid)?
+        } else {
+            KvRouterConfig::default()
+        };
+        let mut config = RouterConfig::new(router_mode, kv_router_config)
+            .with_load_threshold_config(load_threshold_config);
+        config.session_affinity_ttl_secs = self.router_session_affinity_ttl_secs;
+        Ok(Some(config))
+    }
+}
+
+/// `--router-mode` values, spelled as the Python workers spell them.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum RouterModeArg {
+    RoundRobin,
+    Random,
+    #[value(name = "power-of-two")]
+    PowerOfTwoChoices,
+    Kv,
+    Direct,
+    LeastLoaded,
+    DeviceAwareWeighted,
+}
+
+impl From<RouterModeArg> for RouterMode {
+    fn from(mode: RouterModeArg) -> Self {
+        match mode {
+            RouterModeArg::RoundRobin => Self::RoundRobin,
+            RouterModeArg::Random => Self::Random,
+            RouterModeArg::PowerOfTwoChoices => Self::PowerOfTwoChoices,
+            RouterModeArg::Kv => Self::KV,
+            RouterModeArg::Direct => Self::Direct,
+            RouterModeArg::LeastLoaded => Self::LeastLoaded,
+            RouterModeArg::DeviceAwareWeighted => Self::DeviceAwareWeighted,
+        }
+    }
 }
 
 fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infallible> {
@@ -122,13 +244,114 @@ fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infal
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use dynamo_runtime::pipeline::RouterMode;
 
-    use super::CommonArgs;
+    use super::{CommonArgs, RouterConfig};
 
     #[derive(Parser)]
     struct TestArgs {
         #[command(flatten)]
         common: CommonArgs,
+    }
+
+    /// The advertisement flags read `DYN_*` variables, so the ambient
+    /// environment must not leak into these tests.
+    fn with_router_env<R>(set: &[(&str, &str)], f: impl FnOnce() -> R) -> R {
+        let vars = [
+            "DYN_ROUTER_MODE",
+            "DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",
+            "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
+            "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
+            "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
+            "DYN_ROUTER_USE_KV_EVENTS",
+            "DYN_USE_KV_EVENTS",
+        ]
+        .map(|key| (key, set.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)));
+        temp_env::with_vars(vars, f)
+    }
+
+    fn parse(argv: &[&str]) -> Result<TestArgs, clap::Error> {
+        TestArgs::try_parse_from([&["test"], argv].concat())
+    }
+
+    fn router_config(argv: &[&str]) -> Option<RouterConfig> {
+        parse(argv).unwrap().common.router_config().unwrap()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn router_advertisement_follows_router_mode() {
+        with_router_env(&[], || {
+            assert!(router_config(&[]).is_none());
+            assert!(router_config(&["--router-session-affinity-ttl-secs", "300"]).is_none());
+
+            // `None` disables a threshold, as for the Python workers.
+            let config = router_config(&[
+                "--router-mode",
+                "kv",
+                "--active-decode-blocks-threshold",
+                "None",
+                "--active-prefill-tokens-threshold",
+                "8192",
+            ])
+            .expect("advertised");
+            assert_eq!(
+                config.load_threshold_config.active_decode_blocks_threshold,
+                None
+            );
+            assert_eq!(
+                config.load_threshold_config.active_prefill_tokens_threshold,
+                Some(8192)
+            );
+
+            let config = router_config(&[
+                "--router-mode",
+                "kv",
+                "--router-session-affinity-ttl-secs",
+                "300",
+            ])
+            .expect("advertised");
+            assert_eq!(config.router_mode, RouterMode::KV);
+            assert_eq!(config.session_affinity_ttl_secs, Some(300));
+            assert!(config.kv_router_config.use_kv_events);
+        });
+        with_router_env(
+            &[
+                ("DYN_ROUTER_MODE", "kv"),
+                ("DYN_ROUTER_USE_KV_EVENTS", "false"),
+                ("DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD", "None"),
+            ],
+            || {
+                let config = router_config(&[]).expect("advertised from the environment");
+                assert_eq!(config.router_mode, RouterMode::KV);
+                assert!(!config.kv_router_config.use_kv_events);
+                assert_eq!(
+                    config.load_threshold_config.active_decode_blocks_threshold,
+                    None
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn router_advertisement_rejects_invalid_values() {
+        with_router_env(&[], || {
+            for rejected in [
+                &["--router-mode", "sticky"][..],
+                &["--router-session-affinity-ttl-secs", "0"][..],
+            ] {
+                assert!(parse(rejected).is_err(), "{rejected:?} must not parse");
+            }
+            let args = parse(&[
+                "--router-mode",
+                "kv",
+                "--active-decode-blocks-threshold",
+                "1.5",
+            ])
+            .unwrap();
+            assert!(args.common.router_config().is_err());
+        });
     }
 
     #[test]

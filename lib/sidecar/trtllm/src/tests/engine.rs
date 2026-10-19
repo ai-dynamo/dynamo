@@ -509,6 +509,23 @@ fn parsed_arguments_map_onto_the_worker_registration() {
         !aggregated.enable_kv_routing,
         "the sidecar has no KV events"
     );
+    assert!(
+        aggregated.router_config.is_none(),
+        "without --router-mode the set inherits the frontend's routing"
+    );
+
+    let (_, advertising) = parse(&[
+        "--router-mode",
+        "kv",
+        "--router-session-affinity-ttl-secs",
+        "300",
+    ])
+    .expect("router advertisement parses");
+    let advertised = advertising
+        .router_config
+        .expect("--router-mode puts a router_config on the registration");
+    assert!(advertised.router_mode.is_kv_routing());
+    assert_eq!(advertised.session_affinity_ttl_secs, Some(300));
 
     for (mode, expected) in [
         (DisaggregationMode::Prefill, "prefill"),

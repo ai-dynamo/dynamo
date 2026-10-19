@@ -108,6 +108,16 @@ port `9090`. These probes do not track engine loading, so keep the engine's own
 probes on `main`. Sidecar mode supports worker, prefill, and decode components;
 multinode deployments are not yet supported.
 
+## Routing Configuration
+
+A sidecar inherits the frontend's routing unless it advertises its own with
+`--router-mode`, `--router-session-affinity-ttl-secs`, and the busy-worker
+thresholds, as the Python workers do. Prefill and decode
+sidecars are separate worker sets, so a prefill sidecar can advertise a
+session-affinity TTL while the decode sidecar advertises `--router-mode kv`
+alone and stays load balanced. See
+[Configuration Scope and Precedence](../../modular-components/router/configuration-and-tuning.md#configuration-scope-and-precedence).
+
 ## Topologies
 
 Each engine page shows its single-node TP, multi-node TP, and multi-node DP

@@ -21,6 +21,8 @@ When a worker set advertises `--router-mode kv`, restate every non-default setti
 
 For example, if the Frontend sets `--router-kv-overlap-score-credit 2.5` but a worker set advertises only `--router-mode kv`, the worker set uses the default overlap credit of `1.0`. If both processes inherit the same environment variable, they resolve to the same value. Check the `Activating prefill router` log line to confirm the resolved configuration for each hop.
 
+The Rust sidecars (`dynamo-vllm-sidecar`, `dynamo-sglang-sidecar`, `dynamo-trtllm-sidecar`) advertise with `--router-mode`, `--router-session-affinity-ttl-secs`, `--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, and `--active-prefill-tokens-threshold-frac`, with the same environment variables as the Python workers. They have no `--router-session-affinity-mode`, because the Frontend's mode applies to every worker set, and no per-setting flags for KV tuning: a sidecar set that advertises `--router-mode kv` takes its tuning from the `DYN_ROUTER_*` environment variables of the sidecar process, such as `DYN_ROUTER_USE_KV_EVENTS`, and uses the defaults for anything not set there.
+
 ### Worker-Set Admission and Succession
 
 The first configuration retains its reservation while any matching workers remain,

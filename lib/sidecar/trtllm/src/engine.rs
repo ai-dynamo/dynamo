@@ -136,6 +136,7 @@ impl TrtllmSidecarEngine {
             context_length: args.context_length,
         };
         let engine = Self::new(endpoint, transport, model.clone(), mode);
+        let router_config = args.sidecar.common.router_config()?;
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -163,6 +164,7 @@ impl TrtllmSidecarEngine {
             route_to_encoder: false,
             enable_rl: args.sidecar.common.enable_rl,
             default_thinking_mode: args.default_thinking_mode,
+            router_config,
             ..Default::default()
         };
         Ok((engine, config))

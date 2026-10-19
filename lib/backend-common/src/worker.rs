@@ -228,6 +228,9 @@ pub struct WorkerConfig {
     pub media_fetcher: Option<MediaFetcher>,
     /// Deployment-level default thinking mode written to runtime metadata.
     pub default_thinking_mode: Option<String>,
+    /// Router configuration advertised on the model card; `None` inherits the
+    /// frontend's routing. See `CommonArgs::router_config`.
+    pub router_config: Option<dynamo_llm::entrypoint::RouterConfig>,
 }
 
 impl WorkerConfig {
@@ -269,6 +272,7 @@ impl Default for WorkerConfig {
             media_decoder: None,
             media_fetcher: None,
             default_thinking_mode: None,
+            router_config: None,
         }
     }
 }
@@ -761,6 +765,7 @@ impl Worker {
 
         if !self.config.enable_kv_routing {
             tracing::debug!("enable_kv_routing=false; skipping kv/snapshot publishers");
+            self.warn_if_kv_events_missing();
             self.lifecycle = Some(lifecycle);
             return Ok(());
         }
@@ -771,6 +776,9 @@ impl Worker {
             None
         };
         let kv_sources = self.engine.kv_event_sources().await?;
+        if kv_sources.is_empty() {
+            self.warn_if_kv_events_missing();
+        }
         if kv_sources.is_empty() && bindings.dp_ranks.is_empty() {
             tracing::debug!(
                 "engine returned no KV sources / dp_ranks; skipping KV/snapshot publishers"
@@ -818,6 +826,17 @@ impl Worker {
         self.publishers = Some(handles);
         self.lifecycle = Some(lifecycle);
         Ok(())
+    }
+
+    fn warn_if_kv_events_missing(&self) {
+        let expects_events = self.config.router_config.as_ref().is_some_and(|config| {
+            config.router_mode.is_kv_routing() && config.kv_router_config.use_kv_events
+        });
+        if expects_events {
+            tracing::warn!(
+                "--router-mode kv is advertised with KV events enabled, but this worker publishes no KV events; the frontend routes this worker set by load alone. Set DYN_ROUTER_USE_KV_EVENTS=false in this worker's environment to advertise that instead"
+            );
+        }
     }
 
     /// Register advertised engine controls on the runtime system server.
@@ -2221,6 +2240,7 @@ async fn build_local_model(
         .custom_template_path(config.custom_jinja_template.clone())
         .media_decoder(config.media_decoder.clone())
         .media_fetcher(config.media_fetcher.clone())
+        .router_config(config.router_config.clone())
         .runtime_config(rt_cfg);
 
     // Resolve model_name to a local path. Empty string or a raw media engine
@@ -2532,7 +2552,13 @@ mod tests {
 
     #[tokio::test]
     async fn build_local_model_carries_runtime_parser_settings() {
+        let mut advertised = dynamo_llm::entrypoint::RouterConfig::new(
+            dynamo_runtime::pipeline::RouterMode::KV,
+            Default::default(),
+        );
+        advertised.session_affinity_ttl_secs = Some(300);
         let config = WorkerConfig {
+            router_config: Some(advertised),
             tool_call_parser: Some("kimi_k2".to_string()),
             reasoning_parser: Some("kimi_k25".to_string()),
             default_thinking_mode: Some("disabled".to_string()),
@@ -2601,6 +2627,9 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("group-a")
         );
+        let advertised = local_model.card().router_config.as_ref().unwrap();
+        assert!(advertised.router_mode.is_kv_routing());
+        assert_eq!(advertised.session_affinity_ttl_secs, Some(300));
     }
 
     #[tokio::test]

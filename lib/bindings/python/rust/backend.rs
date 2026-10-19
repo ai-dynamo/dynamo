@@ -533,6 +533,8 @@ impl WorkerConfig {
                 rl_metadata: None,
                 media_decoder: media_decoder.map(|decoder| decoder.inner),
                 media_fetcher: media_fetcher.map(|fetcher| fetcher.inner),
+                // Not exposed to the Python worker configuration yet.
+                router_config: None,
             },
         })
     }
