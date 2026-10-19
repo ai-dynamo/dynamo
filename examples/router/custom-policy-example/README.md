@@ -379,16 +379,8 @@ Send the same `curl` request from a fourth terminal. The frontend log records se
 
 ## Runtime Parameters
 
-The `simple-filter-score-pick` provider demonstrates optional runtime updates for
-`min_device_overlap_blocks`. It supplies resolved startup parameters and a pure replacement
-builder through `WorkerSelectionPolicy::with_runtime_config`. The builder reuses startup
-validation and constructs new filter/scorer/picker state without changing the host's cache,
-queue, or worker inputs.
-
-Query `GET /router_policy` on the frontend to obtain a router instance ID and revision, then
-use `PATCH /router_policy` with that ID, `expected_revision`, and
-`parameters: {"min_device_overlap_blocks": 2.0}`. Other example policies remain startup-only.
+The `simple-filter-score-pick` provider supports runtime updates to
+`min_device_overlap_blocks`; the other examples remain startup-only. See the
+[runtime policy API](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#runtime-policy-updates).
 A positive threshold requires usable device-overlap data. Cold or replay requests without
 that data, including in the Mocker walkthrough, can have no eligible workers.
-For reset semantics and response codes, see the
-[runtime policy API](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#runtime-policy-updates).

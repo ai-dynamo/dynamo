@@ -1088,7 +1088,7 @@ impl<
             .map_err(|_| KvSchedulerError::SubscriberShutdown)
     }
 
-    pub fn runtime_policy(&self) -> &Arc<RuntimePolicyControl> {
+    pub fn policy_control(&self) -> &Arc<RuntimePolicyControl> {
         &self.runtime_policy
     }
 

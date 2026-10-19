@@ -42,7 +42,7 @@
 //! ```
 
 use super::{RouteDoc, service_v2};
-use crate::discovery::LoadThresholdConfig;
+use crate::discovery::{LoadThresholdConfig, ModelManager};
 use axum::{
     Json, Router,
     extract::Request,
@@ -123,24 +123,29 @@ pub fn busy_threshold_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let base_path = path.unwrap_or_else(|| "/busy_threshold".to_string());
+    router(
+        state.manager_clone(),
+        path.as_deref().unwrap_or("/busy_threshold"),
+    )
+}
 
+pub(super) fn router(manager: Arc<ModelManager>, base_path: &str) -> (Vec<RouteDoc>, Router) {
     let docs: Vec<RouteDoc> = vec![
-        RouteDoc::new(Method::POST, &base_path),
-        RouteDoc::new(Method::GET, &base_path),
+        RouteDoc::new(Method::POST, base_path),
+        RouteDoc::new(Method::GET, base_path),
     ];
 
     let router = Router::new()
-        .route(&base_path, post(busy_threshold_handler))
-        .route(&base_path, get(list_busy_thresholds_handler))
+        .route(base_path, post(busy_threshold_handler))
+        .route(base_path, get(list_busy_thresholds_handler))
         .layer(axum::middleware::from_fn(json_error_middleware))
-        .with_state(state);
+        .with_state(manager);
 
     (docs, router)
 }
 
 async fn busy_threshold_handler(
-    axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
+    axum::extract::State(manager): axum::extract::State<Arc<ModelManager>>,
     Json(request): Json<BusyThresholdRequest>,
 ) -> impl IntoResponse {
     let requested_config = LoadThresholdConfig {
@@ -154,8 +159,6 @@ async fn busy_threshold_handler(
             Json(serde_json::json!(ErrorResponse { error })),
         );
     }
-
-    let manager = state.manager();
 
     // Build LoadThresholdConfig from request if any threshold is being set
     let is_setting = requested_config.is_configured();
@@ -209,9 +212,8 @@ async fn busy_threshold_handler(
 }
 
 async fn list_busy_thresholds_handler(
-    axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
+    axum::extract::State(manager): axum::extract::State<Arc<ModelManager>>,
 ) -> impl IntoResponse {
-    let manager = state.manager();
     let thresholds = manager.list_busy_thresholds();
 
     let response = ListBusyThresholdsResponse {

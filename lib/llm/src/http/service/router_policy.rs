@@ -51,6 +51,11 @@ struct PolicyResponse {
     configuration: Option<RuntimePolicyConfig>,
 }
 
+#[derive(Serialize)]
+struct PolicyListResponse {
+    routers: Vec<PolicyResponse>,
+}
+
 fn error(status: StatusCode, message: impl ToString) -> Response {
     (
         status,
@@ -71,15 +76,19 @@ fn policy_error(error_value: RuntimePolicyError) -> Response {
 }
 
 pub(crate) fn router_policy_router(manager: Arc<ModelManager>) -> (Vec<RouteDoc>, Router) {
+    let (mut docs, thresholds) =
+        super::busy_threshold::router(manager.clone(), "/router_policy/busy_threshold");
+    docs.extend([
+        RouteDoc::new(Method::GET, "/router_policy"),
+        RouteDoc::new(Method::PATCH, "/router_policy"),
+    ]);
     (
-        vec![
-            RouteDoc::new(Method::GET, "/router_policy"),
-            RouteDoc::new(Method::PATCH, "/router_policy"),
-        ],
+        docs,
         Router::new()
             .route("/router_policy", get(list).patch(update))
             .layer(DefaultBodyLimit::max(16 * 1024))
-            .with_state(manager),
+            .with_state(manager)
+            .merge(thresholds),
     )
 }
 
@@ -94,31 +103,28 @@ async fn list(
     let entries = manager.router_policies.list(query.model.as_deref());
     let results =
         futures::future::join_all(entries.into_iter().map(|(target, control)| async move {
-            let result = tokio::time::timeout(CONTROL_TIMEOUT, control.get()).await;
-            match result {
-                Ok(Ok(configuration)) => Ok(Some(PolicyResponse {
-                    target,
-                    configuration: Some(configuration),
-                })),
-                Ok(Err(RuntimePolicyError::Unsupported)) => Ok(Some(PolicyResponse {
-                    target,
-                    configuration: None,
-                })),
-                // Retired or unresponsive routers must not hide healthy instances.
-                Ok(Err(RuntimePolicyError::Unavailable)) | Err(_) => Ok(None),
-                Ok(Err(error)) => Err(error),
-            }
+            (
+                target,
+                tokio::time::timeout(CONTROL_TIMEOUT, control.get()).await,
+            )
         }))
         .await;
-    let mut routers = Vec::new();
-    for result in results {
-        match result {
-            Ok(Some(router)) => routers.push(router),
-            Ok(None) => {}
-            Err(error) => return policy_error(error),
-        }
-    }
-    Json(serde_json::json!({"routers": routers})).into_response()
+    let routers = results
+        .into_iter()
+        .filter_map(|(target, result)| {
+            let configuration = match result {
+                Ok(Ok(configuration)) => Some(configuration),
+                Ok(Err(RuntimePolicyError::Unsupported)) => None,
+                // Retired or unresponsive routers must not hide healthy instances.
+                _ => return None,
+            };
+            Some(PolicyResponse {
+                target,
+                configuration,
+            })
+        })
+        .collect();
+    Json(PolicyListResponse { routers }).into_response()
 }
 
 async fn update(
@@ -211,7 +217,7 @@ mod tests {
                     name: "generate".into(),
                 },
                 WorkerType::Aggregated,
-                partition.scheduler().runtime_policy(),
+                partition.scheduler().policy_control(),
             ));
         }
         (router_policy_router(manager).1, core, ids[0], ids[1])
@@ -233,6 +239,111 @@ mod tests {
         let status = response.status();
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn busy_threshold_subresource_and_legacy_route_share_model_state() {
+        use crate::discovery::{LoadThresholdConfig, LoadThresholdHandle, WorkerSet};
+
+        let manager = Arc::new(ModelManager::new());
+        let mut first_handles = Vec::new();
+        for (model, namespace) in [("first", "old"), ("first", "new"), ("second", "other")] {
+            let thresholds = LoadThresholdHandle::new(LoadThresholdConfig::default());
+            let mut workers =
+                WorkerSet::new(namespace.into(), "checksum".into(), Default::default());
+            workers.load_thresholds = Some(thresholds.clone());
+            manager
+                .get_or_create_model(model)
+                .add_worker_set(namespace.into(), Arc::new(workers));
+            if model == "first" {
+                first_handles.push(thresholds);
+            }
+        }
+        let (app, core, first, _) = fixture(manager.clone()).await;
+        let app =
+            app.merge(super::super::busy_threshold::router(manager.clone(), "/busy_threshold").1);
+        let path = "/router_policy/busy_threshold";
+        let (status, updated) = call(&app, Method::POST, path, serde_json::json!({
+            "model": "first", "active_decode_blocks_threshold": 0.85,
+            "active_prefill_tokens_threshold": 1000, "active_prefill_tokens_threshold_frac": 0.8,
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        let (status, legacy) = call(
+            &app,
+            Method::POST,
+            "/busy_threshold",
+            serde_json::json!({"model": "first"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(legacy, updated);
+        for handle in &first_handles {
+            let config = handle.get();
+            assert_eq!(config.active_decode_blocks_threshold, Some(0.85));
+            assert_eq!(config.active_prefill_tokens_threshold, Some(1000));
+            assert_eq!(config.active_prefill_tokens_threshold_frac, Some(0.8));
+        }
+        assert!(
+            !manager
+                .load_threshold_config("second", None)
+                .unwrap()
+                .is_configured()
+        );
+
+        let (status, legacy) = call(
+            &app,
+            Method::POST,
+            "/busy_threshold",
+            serde_json::json!({
+                "model": "first", "active_prefill_tokens_threshold": 2000,
+                "active_prefill_tokens_threshold_frac": null,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, current) = call(
+            &app,
+            Method::POST,
+            path,
+            serde_json::json!({"model": "first"}),
+        )
+        .await;
+        assert_eq!(current, legacy);
+        assert_eq!(current["active_decode_blocks_threshold"], 0.85);
+        assert_eq!(current["active_prefill_tokens_threshold"], 2000);
+        assert_eq!(current["active_prefill_tokens_threshold_frac"], 0.8);
+        let (status, listing) = call(&app, Method::GET, path, Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listing["thresholds"].as_array().unwrap().len(), 2);
+        let (_, legacy_listing) = call(&app, Method::GET, "/busy_threshold", Value::Null).await;
+        assert_eq!(listing, legacy_listing);
+
+        for (body, expected) in [
+            (
+                serde_json::json!({"model": "first", "active_decode_blocks_threshold": 1.1, "active_prefill_tokens_threshold": 10}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"model": "first", "active_prefill_tokens_threshold": -1}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                serde_json::json!({"model": "missing", "active_decode_blocks_threshold": 0.9}),
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let (status, response) = call(&app, Method::POST, path, body).await;
+            assert_eq!(status, expected, "{response}");
+            assert!(response["error"].is_string());
+            for handle in &first_handles {
+                assert_eq!(handle.get().active_prefill_tokens_threshold, Some(2000));
+                assert_eq!(handle.get().active_decode_blocks_threshold, Some(0.85));
+            }
+        }
+        let (_, policy) = call(&app, Method::GET, "/router_policy?model=first", Value::Null).await;
+        assert_eq!(policy["routers"][0]["router_id"], first.to_string());
+        assert_eq!(policy["routers"][0]["configuration"]["revision"], 0);
+        core.shutdown();
     }
 
     #[test]
@@ -308,7 +419,7 @@ mod tests {
         let partition = core
             .partition(&RoutingPartitionId::new("first", "default"))
             .unwrap();
-        let actual = partition.scheduler().runtime_policy().get().await.unwrap();
+        let actual = partition.scheduler().policy_control().get().await.unwrap();
         assert_eq!(actual.parameters()["overlap_score_credit"], 2.5);
         assert_eq!(actual.parameters()["decode_active_request_weight"], 32.0);
         let (_, untouched) = call(
@@ -354,7 +465,7 @@ mod tests {
             let (status, response) = call(&app, Method::PATCH, "/router_policy", body).await;
             assert_eq!(status, expected, "{response}");
             assert_eq!(
-                partition.scheduler().runtime_policy().get().await.unwrap(),
+                partition.scheduler().policy_control().get().await.unwrap(),
                 actual
             );
         }

@@ -132,11 +132,7 @@ impl RuntimePolicyState {
             }
         };
         let replacement = (self.builder)(parameters.clone())?;
-        let revision = self
-            .current
-            .revision
-            .checked_add(1)
-            .ok_or(RuntimePolicyError::Unavailable)?;
+        let revision = self.current.revision + 1;
         Ok((
             replacement,
             Self {

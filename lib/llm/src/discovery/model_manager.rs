@@ -2486,8 +2486,8 @@ impl ModelManager {
             self.router_policies.register(
                 model,
                 endpoint.id(),
-                worker_role.unwrap_or(WorkerType::Aggregated),
-                chooser.runtime_policy(),
+                worker_type,
+                chooser.policy_control(),
             );
         }
         Ok(Arc::new(chooser))

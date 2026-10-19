@@ -586,8 +586,18 @@ Use `--router-queue-policy wspt` when your workload has a mix of short and long 
 
 ## Runtime Policy Updates
 
-**Experimental.** The frontend admin API can update the built-in default policy's scoring
-parameters without replacing the router's queue, KV index, or active request bookings.
+**Experimental.** `/router_policy` groups worker-selection parameters and model-level busy
+thresholds on the frontend HTTP port (8000 by default).
+
+| Resource | Methods | Scope |
+| --- | --- | --- |
+| `/router_policy` | GET, PATCH | One concrete router instance, with a revision |
+| `/router_policy/busy_threshold` | GET, POST | All existing WorkerSets for a model in this frontend |
+
+### Worker Selection
+
+The frontend admin API can update the built-in default policy's scoring parameters without
+replacing the router's queue, KV index, or active request bookings.
 The update replaces the scorer and picker between routing decisions. Requests that already
 have a selected worker keep that worker; subsequent selections, including queued requests,
 use the new parameters.
@@ -645,15 +655,45 @@ term does not prevent restoring its startup value later.
 | `422` | Unknown request fields, missing revision, unsupported policy, unknown parameter, invalid value, or a change requiring unavailable worker signals. No parameters are changed. |
 | `503` | The scheduler targeted by a PATCH stopped or did not respond within five seconds. Query its state before retrying an update. |
 
-The same frontend admin switch controls both this API and `/busy_threshold`:
-`DYN_DISABLE_FRONTEND_ADMIN_API=1` disables them. Busy thresholds remain separately managed by
-`/busy_threshold` and are not part of the policy revision.
+### Busy Thresholds
+
+`GET /router_policy/busy_threshold` lists the model-level thresholds. Send a model name and
+one or more threshold fields with `POST /router_policy/busy_threshold` to update them:
+
+```bash
+curl -X POST http://localhost:8000/router_policy/busy_threshold \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen","active_decode_blocks_threshold":0.85,"active_prefill_tokens_threshold":1000,"active_prefill_tokens_threshold_frac":0.8}'
+```
+
+| Field | Meaning |
+| --- | --- |
+| `active_decode_blocks_threshold` | KV block utilization threshold, from 0 to 1 |
+| `active_prefill_tokens_threshold` | Absolute active-prefill token threshold, a non-negative integer |
+| `active_prefill_tokens_threshold_frac` | Active-prefill threshold as a finite, non-negative fraction of `max_num_batched_tokens` |
+
+The response returns the model name and current values of all three fields. Omitted or null
+fields retain their current values; a body containing only `model` queries that model. A write
+to an undiscovered model returns 404. Invalid threshold ranges return 400, and invalid field
+types return 422, without changing the thresholds.
+
+The legacy `GET` and `POST /busy_threshold` routes remain compatibility aliases with the same
+handlers and state. Writes through either path are visible through the other. These updates
+retain their existing model scope and do not use the worker-selection revision or support
+reset. Updating thresholds and selection parameters is not one atomic transaction.
+
+### Scope and Access
+
+The frontend admin API remains enabled by default on the HTTP port, with no separate admin
+authentication. `DYN_DISABLE_FRONTEND_ADMIN_API=1` disables `/router_policy`, its busy-threshold
+subresource, and the legacy `/busy_threshold` routes. Restrict access to these management
+routes at the deployment's gateway or network boundary.
 
 Updates are process-local and not persisted. A rebuilt router receives a new ID and starts
 from its configured startup values. A controller must address each frontend replica directly,
 retain the desired settings, and reapply them to new router instances; a load-balanced request
 does not update every replica. The standalone Python router does not expose this HTTP API.
-Rust hosts can use `KvRouter::runtime_policy()` or `LocalScheduler::runtime_policy()` to access
+Rust hosts can use `KvRouter::policy_control()` or `LocalScheduler::policy_control()` to access
 the same actor-serialized control handle.
 
 ## Prometheus Metrics

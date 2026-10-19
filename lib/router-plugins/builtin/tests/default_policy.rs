@@ -64,6 +64,7 @@ fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
     for invalid in [
         json!({"overlap_score_credit": 2.0, "router_temperature": -1.0}),
         json!({"router_temperature": "1"}),
+        json!({"router_temperature": false}),
         json!({"tp": 2}),
     ] {
         assert!(
@@ -530,6 +531,8 @@ fn named_default_parameters_resolve_and_reject_invalid_values() {
     for (parameter, succeeds) in [
         ("overlap_score_credit: 2.0", true),
         ("overlap_score_credit: -1.0", false),
+        ("router_temperature: .inf", false),
+        ("router_temperature: .nan", false),
         ("unknown: 1", false),
     ] {
         let mut file = tempfile::NamedTempFile::new().unwrap();

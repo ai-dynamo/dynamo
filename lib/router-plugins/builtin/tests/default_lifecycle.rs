@@ -66,7 +66,7 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
     assert!(partition.scheduler().has_request("request"));
     // Replacing scorer/picker state must leave active reservations intact.
     use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
-    let control = partition.scheduler().runtime_policy();
+    let control = partition.scheduler().policy_control();
     let initial = control.get().await.unwrap();
     control
         .update(RuntimePolicyUpdate::patch(
@@ -104,7 +104,7 @@ async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
     let partition = core
         .partition(&RoutingPartitionId::new("model", "default"))
         .unwrap();
-    let control = partition.scheduler().runtime_policy();
+    let control = partition.scheduler().policy_control();
     let patch = || {
         serde_json::json!({"prefill_load_scale": 3.0})
             .as_object()
@@ -193,7 +193,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
         .partition(&RoutingPartitionId::new("model", "default"))
         .unwrap();
     assert!(matches!(
-        partition.scheduler().runtime_policy().get().await,
+        partition.scheduler().policy_control().get().await,
         Err(dynamo_kv_router::plugins::worker_selection::RuntimePolicyError::Unsupported)
     ));
     let error = core
