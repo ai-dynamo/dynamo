@@ -503,14 +503,7 @@ async fn dispatch(
             }
         };
     }
-    // One buffer reused across chunks.
-    let mut buffer = Vec::new();
-    let render = move |response: &serde_json::Value| {
-        buffer.clear();
-        serde_json::to_writer(&mut buffer, response).map_err(axum::Error::new)?;
-        let json = std::str::from_utf8(&buffer).map_err(axum::Error::new)?;
-        Ok(Event::default().data(json))
-    };
+    let render = |response: &serde_json::Value| Event::default().json_data(response);
     let stream = SglangGenerateStream::from_annotated_stream(stream, merger(), render)
         .map(|result| result.map_err(axum::Error::new).and_then(|event| event));
     let stream = monitor_for_disconnects_with_error(
@@ -808,6 +801,40 @@ mod tests {
                 request.context(),
             ))
         }
+    }
+
+    #[tokio::test]
+    async fn streaming_dispatch_preserves_native_json() {
+        let native = serde_json::json!({
+            "text": "Unicode: λ\nCR: \r",
+            "meta_info": {"routed_experts": "AQID".repeat(16384)},
+            "unknown_field": {"value": true}
+        });
+        let outputs = vec![crate::protocols::Annotated::from_data(LLMEngineOutput {
+            engine_data: Some(serde_json::json!({"sglang_response": native})),
+            ..Default::default()
+        })];
+        let state = service_v2::HttpService::builder()
+            .build()
+            .unwrap()
+            .state_clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let response = dispatch(
+            Arc::new(ReplayEngine(outputs)),
+            dispatch_test_context(),
+            "req-stream".to_string(),
+            "test-model".to_string(),
+            state,
+            ConnectionHandle::create_disabled(tx),
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert_eq!(body, format!("data: {native}\n\ndata: [DONE]\n\n"));
     }
 
     #[tokio::test]
