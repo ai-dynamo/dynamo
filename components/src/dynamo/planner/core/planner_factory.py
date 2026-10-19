@@ -11,6 +11,7 @@ from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.connectors.virtual import VirtualConnector
 from dynamo.planner.environment.base import PlannerEnvironmentImpl
+from dynamo.planner.environment.batch_runtime import NativeBatchSchedulingProvider
 from dynamo.planner.environment.interface import PlannerEnvironment
 from dynamo.planner.environment.metrics_provider.prometheus_traffic_provider import (
     PrometheusTrafficProvider,
@@ -99,6 +100,19 @@ def construct_environment(
         controller=connector,
         require_prefill=require_prefill,
         require_decode=require_decode,
+        batch_provider=(
+            NativeBatchSchedulingProvider(
+                config.batch_scheduling,
+                actuation_enabled=not config.advisory,
+                writer_fence=(
+                    cast(KubernetesConnector, connector).acquire_batch_writer_fence
+                    if not config.advisory and config.environment == "kubernetes"
+                    else None
+                ),
+            )
+            if config.batch_scheduling.enabled
+            else None
+        ),
     )
 
     namespace_binding: Optional[RuntimeNamespaceBinding] = None
