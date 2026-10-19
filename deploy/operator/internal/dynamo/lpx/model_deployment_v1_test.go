@@ -424,3 +424,61 @@ func TestDeploymentContractRejectsCorruptNewOnly(t *testing.T) {
 	_, err = registry.AcquireBuild(t.Context(), root)
 	require.ErrorContains(t, err, "parsing deployment.v1.capnp.bin")
 }
+
+func TestDeploymentContractTopologyFamilies(t *testing.T) {
+	t.Log("Accept canonical topology metadata and reject unsupported family names")
+	for _, family := range []string{"HX16x8x2", "16x8x2x3", " HX16x8x2 ", " 16x8x2x3 ", "", "hx16x8x2", "HX16x8x2x3", "unknown"} {
+		for _, geometry := range []struct {
+			name    string
+			chips   uint32
+			shape   []uint32
+			want    []int64
+			wantErr string
+		}{
+			{"cross hemisphere", 32, []uint32{16, 1, 2, 1}, []int64{16, 1, 2, 1}, ""},
+			{"subnode", 8, []uint32{8, 1, 1, 1}, []int64{16, 1, 1, 1}, ""},
+			{"cross rack", 32, []uint32{16, 1, 1, 2}, nil, "unsupported HX extent"},
+			{"count mismatch", 16, []uint32{8, 1, 1, 1}, nil, "contains 8 chips, want numChips 16"},
+		} {
+			t.Run(family+"/"+geometry.name, func(t *testing.T) {
+				t.Log("Encode a split deployment contract with explicit LP30 geometry")
+				deployment := newDeploymentV1ContractFixture(t)
+				partitions, err := deployment.Partitions()
+				require.NoError(t, err)
+				detail, err := partitions.At(0).Detail().Lpu()
+				require.NoError(t, err)
+				detail.SetArchitecture(deploymentcapnpv1.LpuArchitecture_lp30)
+				detail.SetDevicesPerNode(16)
+				detail.SetNumChips(geometry.chips)
+				metadata, err := detail.NewTopologyMetadata()
+				require.NoError(t, err)
+				require.NoError(t, metadata.SetTopologyFamily(family))
+				shape, err := metadata.NewPartitionShape(int32(len(geometry.shape)))
+				require.NoError(t, err)
+				for i, value := range geometry.shape {
+					shape.Set(i, value)
+				}
+				data, err := deployment.Message().Marshal()
+				require.NoError(t, err)
+
+				t.Log("Decode through the split reader and preserve family and shape rejection")
+				decoded, err := decodeGbuildDeploymentV1(data)
+				require.NoError(t, err)
+				build, err := buildFromGbuildDeploymentV1("gs://models/build", decoded)
+				switch family {
+				case "HX16x8x2", " HX16x8x2 ":
+					if geometry.wantErr != "" {
+						require.ErrorContains(t, err, geometry.wantErr)
+						return
+					}
+				default:
+					require.ErrorContains(t, err, "topologyMetadata.topologyFamily")
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, geometry.want, build.partitions[0].hxExtent)
+				require.EqualValues(t, geometry.chips, build.partitions[0].numChips)
+			})
+		}
+	}
+}
