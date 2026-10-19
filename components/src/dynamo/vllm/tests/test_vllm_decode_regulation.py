@@ -81,21 +81,20 @@ class Sched(DecodeRegulationMixin, FakeV031Scheduler):
         self._reg_init(cfg)
 
 
-def cfg(mode="role_aware", **kw):
+def cfg(mode="class_blind", **kw):
     c = DecodeRegulationConfig(mode=mode, log_s=1e9)
     for k, v in kw.items():
         setattr(c, k, v)
     return c
 
 
-def agent(task, role):
-    return {"task": task, "role": role, "interactive": False}
+AGENT = {"interactive": False}
 
 
 def overloaded(n_subs=8, ctx=100_000):
-    """One interactive chat, task t1's main session, and n_subs subagents of t1."""
-    reqs = [FakeRequest("chat", 20_000), FakeRequest("main", ctx, agent("t1", "main"))]
-    reqs += [FakeRequest(f"s{i}", ctx, agent("t1", "sub")) for i in range(n_subs)]
+    """One interactive chat, an agent's main session, and n_subs subagents."""
+    reqs = [FakeRequest("chat", 20_000), FakeRequest("main", ctx, AGENT)]
+    reqs += [FakeRequest(f"s{i}", ctx, AGENT) for i in range(n_subs)]
     return reqs
 
 
@@ -118,13 +117,13 @@ def test_no_skips_when_batch_fits():
     assert step(s) == {r.request_id for r in s.running}
 
 
-def test_overload_skips_subagents_but_keeps_them_running():
+def test_overload_skips_agents_but_keeps_them_running():
     reqs = overloaded()
     s = Sched(reqs, cfg())
     scheduled = step(s)
     assert {"chat", "main"} <= scheduled
     skipped = {r.request_id for r in reqs} - scheduled
-    # base 8.78 ms, limit 16.54 ms, each 100k-token subagent adds ~1.83 ms -> 4 fit
+    # base 6.95 ms, limit 16.17 ms, each 100k-token agent adds ~1.83 ms: 5 of 9 fit
     assert len(skipped) == 4
     assert s.running == reqs  # never removed from running: KV stays resident
 
@@ -156,9 +155,7 @@ def test_progress_bound_every_k_steps(k):
 
 
 def test_prefill_requests_are_never_skipped():
-    reqs = overloaded() + [
-        FakeRequest("p", 100_000, agent("t1", "sub"), prompt=200_000)
-    ]
+    reqs = overloaded() + [FakeRequest("p", 100_000, AGENT, prompt=200_000)]
     s = Sched(reqs, cfg())
     assert "p" in step(s)
 
@@ -172,18 +169,12 @@ def test_requests_without_identity_are_never_skipped():
 # --- policy ----------------------------------------------------------------
 
 
-def cands(main=True, n_subs=8, ctx=100_000, task="t1"):
-    cs = [Cand("chat", 20_000)]
-    if main:
-        cs.append(Cand("main", ctx, interactive=False, task=task, role="main"))
-    cs += [
-        Cand(f"s{i}", ctx, interactive=False, task=task, role="sub")
-        for i in range(n_subs)
-    ]
-    return cs
+def cands(n_subs=8, ctx=100_000):
+    cs = [Cand("chat", 20_000), Cand("main", ctx, interactive=False)]
+    return cs + [Cand(f"s{i}", ctx, interactive=False) for i in range(n_subs)]
 
 
-def test_class_blind_may_skip_the_main_session():
+def test_any_regulated_request_may_be_skipped():
     p = DecodeRegulationPolicy(cfg("class_blind"))
     skipped = set()
     for _ in range(4):
@@ -220,7 +211,7 @@ def test_deadline_target_from_arrival_and_max_tokens():
     # 200 ms in: (500 + 18.48 * 64 - 200) ms left for 60 tokens
     got = cand_from_request(r, c, now=100.2).tau_ms
     assert abs(got - (500 + 18.48 * 64 - 200) / 60) < 1e-6
-    agent = FakeRequest("a", 20_000, ident={"interactive": False, "task": "t"})
+    agent = FakeRequest("a", 20_000, ident=AGENT)
     agent.arrival_time, agent.sampling_params.max_tokens = 100.0, 64
     assert cand_from_request(agent, c, now=100.2).tau_ms is None
     plain = DecodeRegulationConfig(mode="class_blind")
@@ -236,37 +227,6 @@ def test_config_deadline_from_env():
     )
     assert c.deadline == (500.0, 18.48) and c.slack_margin == 0.8
     assert DecodeRegulationConfig.from_env({}).deadline is None
-
-
-def test_role_aware_never_skips_main_session():
-    p = DecodeRegulationPolicy(cfg())
-    for _ in range(20):
-        d = p.decide(cands(n_subs=12))
-        assert d.engaged and "main" not in d.skip and "chat" not in d.skip
-
-
-def test_join_stragglers_are_protected():
-    p = DecodeRegulationPolicy(cfg())
-    p.decide(cands(main=False, n_subs=12))  # fan-out width 12 observed
-    # 3 of 12 left (<= ceil(12/4)) -> stragglers protected; pad with another task
-    cs = cands(main=False, n_subs=3) + [
-        Cand(f"o{i}", 100_000, interactive=False, task="t2", role="sub")
-        for i in range(10)
-    ]
-    d = p.decide(cs)
-    assert d.engaged
-    assert not {"s0", "s1", "s2"} & d.skip
-    assert d.skip  # t2 has 10 > ceil(10/4) running: plain fan-out, opportunistic
-
-
-def test_no_roles_protects_most_attained_request():
-    p = DecodeRegulationPolicy(cfg())
-    cs = [
-        Cand(f"r{i}", 100_000, interactive=False, task="t", decoded=i)
-        for i in range(12)
-    ]
-    d = p.decide(cs)
-    assert d.engaged and "r11" not in d.skip and d.skip
 
 
 def test_coarse_guard_caps_opportunistic_context():
@@ -293,14 +253,8 @@ def test_bias_tracks_slower_steps_and_is_clamped():
     [
         (None, {"interactive": True}),
         ({"session_id": "interactive-3"}, {"interactive": True}),
-        (
-            {"session_id": "root"},
-            {"task": "root", "role": "main", "interactive": False},
-        ),
-        (
-            {"session_id": "child", "parent_session_id": "root"},
-            {"task": "root", "role": "sub", "interactive": False},
-        ),
+        ({"session_id": "root"}, {"interactive": False}),
+        ({"session_id": "child", "parent_session_id": "root"}, {"interactive": False}),
     ],
 )
 def test_identity_from_request(ctx, expected):
@@ -321,13 +275,10 @@ def test_identity_from_request(ctx, expected):
         ),
         (
             {"agent_context": {"session_id": "c", "parent_session_id": "root"}},
-            {"task": "root", "role": "sub", "interactive": False},
+            {"interactive": False},
         ),
-        # the benchmark prefix rule does not apply in priority mode
-        (
-            {"agent_context": {"session_id": "interactive-3"}},
-            {"task": "interactive-3", "role": "main", "interactive": False},
-        ),
+        # the session prefix rule does not apply in priority mode
+        ({"agent_context": {"session_id": "interactive-3"}}, {"interactive": False}),
     ],
 )
 def test_identity_from_priority(req, expected):
@@ -343,7 +294,7 @@ def test_priority_mode_regulates_plain_low_priority_requests():
     s = Sched(reqs, cfg("class_blind", priority_min=1))
     scheduled = step(s)
     assert "chat" in scheduled
-    assert len(scheduled) < len(reqs)  # each plain request is its own task
+    assert len(scheduled) < len(reqs)
 
 
 def test_summary_counts_both_classes():
@@ -423,7 +374,7 @@ def test_attach_identity_keeps_other_extra_args():
     sp = SimpleNamespace(extra_args={"kv_transfer_params": {"x": 1}})
     attach_identity(sp, {"agent_context": {"session_id": "root"}}, cfg())
     assert sp.extra_args["kv_transfer_params"] == {"x": 1}
-    assert sp.extra_args[EXTRA_ARGS_KEY]["role"] == "main"
+    assert sp.extra_args[EXTRA_ARGS_KEY] == {"interactive": False}
     sp = SimpleNamespace(extra_args=None)
     attach_identity(sp, {}, cfg("off"))
     assert sp.extra_args is None
@@ -442,9 +393,16 @@ def test_config_from_env():
     with pytest.raises(ValueError):
         DecodeRegulationConfig.from_env({"DYN_DECODE_REGULATION_MODE": "fastest"})
     with pytest.raises(ValueError):
+        DecodeRegulationConfig.from_env({"DYN_DECODE_REGULATION_MODE": "role_aware"})
+    with pytest.raises(ValueError):
         DecodeRegulationConfig.from_env(
-            {"DYN_DECODE_REGULATION_MODE": "role_aware", "DYN_DECODE_REGULATION_K": "0"}
+            {
+                "DYN_DECODE_REGULATION_MODE": "class_blind",
+                "DYN_DECODE_REGULATION_K": "0",
+            }
         )
+    on = DecodeRegulationConfig.from_env({"DYN_DECODE_REGULATION_MODE": "on"})
+    assert on.mode == "class_blind"
 
 
 def test_step_timing_ignores_empty_outputs():
@@ -454,31 +412,6 @@ def test_step_timing_ignores_empty_outputs():
     assert len(s._reg_pending) == 1
     s.update_from_output(out, None)
     assert not s._reg_pending
-
-
-def test_fan_out_protects_largest_context_subagent():
-    p = DecodeRegulationPolicy(cfg())
-    cs = cands(main=False, n_subs=12)
-    cs[5].ctx = 300_000
-    skips = {c.req_id: 0 for c in cs}
-    for _ in range(40):
-        for rid in p.decide(cs).skip:
-            skips[rid] += 1
-    others = [v for k, v in skips.items() if k not in ("chat", "s4")]
-    # cs[5] is s4; forced requests outrank it, so it is demoted only sometimes
-    assert skips["s4"] < min(others)
-
-
-def test_protected_requests_demoted_when_they_break_the_target():
-    p = DecodeRegulationPolicy(cfg())
-    # 12 tasks' main sessions alone: 6.4 + 0.227*13 + 1.6e-5*1.22M ~ 29 ms > 18.48
-    cs = [Cand("chat", 20_000)] + [
-        Cand(f"m{i}", 100_000, interactive=False, task=f"t{i}", role="main")
-        for i in range(12)
-    ]
-    d = p.decide(cs)
-    assert d.n_demoted > 0 and d.skip and "chat" not in d.skip
-    assert d.pred_kept_ms <= cfg().tau_interactive_ms
 
 
 def test_prefill_in_the_step_reduces_opportunistic_decodes():

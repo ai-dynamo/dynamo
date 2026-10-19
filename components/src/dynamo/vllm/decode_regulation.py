@@ -14,23 +14,15 @@ Policy, once per ``schedule()`` call, over running requests in the decode phase:
                 value; every lower-priority request is regulated. Unset: a
                 request without agent context, or whose session id starts with
                 DYN_DECODE_REGULATION_INTERACTIVE_PREFIX
-  protected     (``role_aware`` only) skipped only to keep interactive on
-                target; one task's critical path: the main session's request,
-                or during a fan-out the subagent with the most context plus the
-                join stragglers once the subagents drain to <= max(1, ceil(w / 4))
-                of a fan-out of width w, or with no roles the request with the
-                most decoded tokens. If interactive + protected + forced alone
-                break the target, protected requests are demoted, most context
-                first
-  forced        skipped K - 1 steps in a row; decodes this step (progress bound)
-  opportunistic the rest; first-fit while the predicted step time stays inside
-                T0 + rho * (tau - T0), most-skipped first, then join stragglers,
-                then cheapest context
+  forced        regulated, skipped K - 1 steps in a row; decodes this step
+                (progress bound)
+  opportunistic the other regulated requests; first-fit while the predicted
+                step time stays inside T0 + rho * (tau - T0), most-skipped
+                first, then cheapest context
 
-``class_blind`` (after HyGen and BROS): interactive always runs, every other
-request is opportunistic. Nothing is skipped when the whole batch already fits
-the tightest per-token target present, so the policy is free outside overload.
-The prefill chunk expected in the same step is added to every prediction.
+Nothing is skipped when the whole batch already fits the tightest per-token
+target present, so the policy is free outside overload. The prefill chunk
+expected in the same step is added to every prediction.
 
 Mechanism (vLLM v0.31.0): a skipped request keeps its KV and its place in
 ``self.running``; the skip sets ``request.next_decode_eligible_step`` to
@@ -44,10 +36,11 @@ against a fake scheduler; ``decode_regulation_scheduler.DecodeRegulationSchedule
 binds the mixin to Dynamo's ``InstrumentedScheduler``.
 
 Environment (prefix DYN_DECODE_REGULATION_):
-  MODE              off | observe | class_blind | role_aware (default off).
-                    observe decides as class_blind but never skips: the summary,
-                    metrics and trace show what regulation would do, and the
-                    trace calibrates COEFFS (decode_regulation_fit.py)
+  MODE              off | observe | class_blind (default off). class_blind
+                    regulates; observe makes the same decisions but never
+                    skips: the summary, metrics and trace show what regulation
+                    would do, and the trace calibrates COEFFS
+                    (decode_regulation_fit.py)
   COEFFS            a,b,c of T(n, L) = a + b*n + c*L ms
   PREFILL_COEFFS    q,p: a step with P > 0 prefill tokens adds q + p*P ms
                     (default 0,0: prefill ignored)
@@ -76,7 +69,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import time
 from collections import deque
@@ -85,14 +77,12 @@ from typing import Any, Iterable, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
-MODES = ("off", "observe", "class_blind", "role_aware")
+MODES = ("off", "observe", "class_blind")
 EXTRA_ARGS_KEY = "dynamo_decode_regulation"
 # Prometheus family (dynamo.prometheus_names.name_prefix.COMPONENT + suffix),
 # written from the EngineCore process through PROMETHEUS_MULTIPROC_DIR and
 # forwarded by the worker's /metrics like the embedding-cache connector's.
 DECODE_REGULATION_METRIC_PREFIX = "dynamo_component_decode_regulation"
-ROLE_MAIN = "main"
-ROLE_SUB = "sub"
 
 
 @dataclass
@@ -125,7 +115,7 @@ class DecodeRegulationConfig:
         c = cls()
         mode = env.get("DYN_DECODE_REGULATION_MODE", "off").strip().lower() or "off"
         if mode in ("1", "true", "on"):
-            mode = "role_aware"
+            mode = "class_blind"
         if mode not in MODES:
             raise ValueError(
                 f"DYN_DECODE_REGULATION_MODE={mode!r}: expected one of {MODES}"
@@ -201,44 +191,25 @@ def identity_from_request(
     interactive_prefix: str,
     priority_min: Optional[int] = None,
 ) -> dict:
-    """{"task", "role", "interactive"} for the engine.
+    """{"interactive": bool} for the engine.
 
     With ``priority_min``, a request is interactive iff its Dynamo priority is
-    at least ``priority_min``; any other request is regulated, with its task and
-    role from the agent context when it has one. Without it (the benchmark
-    rule), a request without agent context, or with a session id starting with
-    ``interactive_prefix``, is interactive. The task is the root session:
-    ``parent_session_id`` when present, else the session itself."""
+    at least ``priority_min``. Without it, a request is interactive unless it
+    carries an agent session id that does not start with ``interactive_prefix``."""
+    if priority_min is not None:
+        return {"interactive": request_priority(request) >= priority_min}
     ctx = request.get("agent_context")
     sid = ctx.get("session_id") if isinstance(ctx, Mapping) else None
-    has_sid = isinstance(sid, str) and bool(sid.strip())
-    if priority_min is not None:
-        if request_priority(request) >= priority_min:
-            return {"interactive": True}
-        if not has_sid:
-            return {"interactive": False}
-    elif not has_sid:
+    if not isinstance(sid, str) or not sid.strip():
         return {"interactive": True}
-    sid = sid.strip()
-    if (
-        priority_min is None
-        and interactive_prefix
-        and sid.startswith(interactive_prefix)
-    ):
-        return {"interactive": True}
-    parent = ctx.get("parent_session_id")
-    task = parent if isinstance(parent, str) and parent else sid
-    return {
-        "task": task,
-        "role": ROLE_MAIN if task == sid else ROLE_SUB,
-        "interactive": False,
-    }
+    prefix = interactive_prefix
+    return {"interactive": bool(prefix) and sid.strip().startswith(prefix)}
 
 
 def attach_identity(
     sampling_params: Any, request: Mapping[str, Any], cfg: DecodeRegulationConfig
 ) -> None:
-    """Copy the request's regulation class and task into ``sampling_params.extra_args``.
+    """Copy the request's regulation class into ``sampling_params.extra_args``.
 
     ``extra_args`` reaches the engine ``Request`` unchanged in vLLM v0.31.0 (the
     KV-connector transfer params ride the same field)."""
@@ -264,8 +235,6 @@ class Cand:
     req_id: str
     ctx: int
     interactive: bool = True
-    task: Optional[str] = None
-    role: str = ""
     decoded: int = 0
     skip_run: int = 0
     # Per-token time this request can still afford (ms): its remaining deadline
@@ -282,15 +251,9 @@ class Decision:
     pred_all_ms: float = 0.0
     pred_kept_ms: float = 0.0
     n_forced: int = 0
-    n_protected: int = 0
-    n_demoted: int = 0
     n_opp: int = 0
     n_managed: int = 0  # regulated (non-interactive) decode-phase requests
     n_interactive: int = 0  # decode-phase requests never skipped
-
-
-def _ceil_quarter(w: int) -> int:
-    return max(1, math.ceil(w / 4))
 
 
 class DecodeRegulationPolicy:
@@ -300,13 +263,6 @@ class DecodeRegulationPolicy:
         self.cfg = cfg
         self.bias = 1.0  # EWMA of actual / predicted on decode-only steps
         self._skip_run: dict = {}
-        self._peak_subs: dict = (
-            {}
-        )  # task -> fan-out width since its main session last ran
-        self._task_seen: dict = (
-            {}
-        )  # task -> last decision index it had a running request
-        self._n = 0
 
     def predict(self, n: int, ctx: int) -> float:
         a, b, c = self.cfg.coeffs
@@ -327,48 +283,6 @@ class DecodeRegulationPolicy:
         r = actual_ms / (predicted_ms / self.bias)
         self.bias = min(2.0, max(0.5, (1 - alpha) * self.bias + alpha * r))
 
-    def _track_widths(self, by_task: dict) -> None:
-        """Fan-out width per task: running subagents, reset while the main session runs.
-
-        Agents pause between LLM calls (tool execution), so the width is a peak
-        since the main session last ran, forgotten after ~4096 steps unseen."""
-        self._n += 1
-        for task, cs in by_task.items():
-            subs = sum(c.role == ROLE_SUB for c in cs)
-            if any(c.role == ROLE_MAIN for c in cs):
-                self._peak_subs[task] = subs
-            else:
-                self._peak_subs[task] = max(self._peak_subs.get(task, 0), subs)
-            self._task_seen[task] = self._n
-        if self._n % 4096 == 0:
-            for task in [t for t, n in self._task_seen.items() if n < self._n - 4096]:
-                self._task_seen.pop(task, None)
-                self._peak_subs.pop(task, None)
-
-    def _protected(self, by_task: dict) -> set:
-        out = set()
-        for task, cs in by_task.items():
-            mains = [c for c in cs if c.role == ROLE_MAIN]
-            subs = [c for c in cs if c.role == ROLE_SUB]
-            if mains:
-                out.update(c.req_id for c in mains)
-            elif subs:
-                # critical-path proxy for the join: the subagent with most context
-                out.add(max(subs, key=lambda c: (c.ctx, c.req_id)).req_id)
-                if len(subs) <= _ceil_quarter(self._peak_subs.get(task, len(subs))):
-                    out.update(c.req_id for c in subs)
-            else:  # no roles: attained-service proxy for the critical path
-                out.add(max(cs, key=lambda c: (c.decoded, c.req_id)).req_id)
-        return out
-
-    def _fill_key(self, c: Cand, straggler_tasks: set) -> tuple:
-        """Order in which opportunistic requests are offered the step's slack."""
-        return (-c.skip_run, 0 if c.task in straggler_tasks else 1, c.ctx, c.req_id)
-
-    def _demote_key(self, c: Cand) -> tuple:
-        """Order in which protected requests lose protection: most context first."""
-        return (-c.ctx, c.req_id)
-
     def decide(self, cands: Iterable[Cand], prefill_tokens: int = 0) -> Decision:
         cands = list(cands)
         live = {c.req_id for c in cands}
@@ -379,24 +293,15 @@ class DecodeRegulationPolicy:
         if not self.cfg.enabled or not cands:
             return self._commit(d, cands)
 
-        managed = [c for c in cands if not c.interactive and c.task is not None]
+        managed = [c for c in cands if not c.interactive]
         d.n_managed = len(managed)
         d.n_interactive = len(cands) - len(managed)
-        by_task: dict = {}
-        if self.cfg.mode == "role_aware":
-            for c in managed:
-                by_task.setdefault(c.task, []).append(c)
-            self._track_widths(by_task)
         d.tau_ms = (
             self.cfg.tau_interactive_ms
             if len(managed) < len(cands)
             else self.cfg.tau_agent_ms
         )
-        residual = [
-            c.tau_ms
-            for c in cands
-            if (c.interactive or c.task is None) and c.tau_ms is not None
-        ]
+        residual = [c.tau_ms for c in cands if c.interactive and c.tau_ms is not None]
         if residual:
             d.tau_ms = min(residual)
         extra = self.predict_prefill(prefill_tokens)
@@ -406,37 +311,19 @@ class DecodeRegulationPolicy:
             return self._commit(d, cands)
 
         d.engaged = True
-        protected = self._protected(by_task) if self.cfg.mode == "role_aware" else set()
-        base_ids = {
-            c.req_id for c in cands if c.interactive or c.task is None
-        } | protected
         forced = {c.req_id for c in managed if c.skip_run >= self.cfg.k - 1}
-        base_ids |= forced
+        base_ids = {c.req_id for c in cands if c.interactive} | forced
         n = len(base_ids)
         ctx = sum(c.ctx for c in cands if c.req_id in base_ids)
-        # interactive precedence: demote protected requests, most context first
-        demotable = sorted(
-            (c for c in managed if c.req_id in protected and c.req_id not in forced),
-            key=self._demote_key,
-        )
-        for c in demotable:
-            if self.predict(n, ctx) + extra <= d.tau_ms:
-                break
-            protected.discard(c.req_id)
-            base_ids.discard(c.req_id)
-            n, ctx = n - 1, ctx - c.ctx
-            d.n_demoted += 1
-        d.n_forced, d.n_protected = len(forced), len(protected)
+        d.n_forced = len(forced)
 
         t0 = self.predict(n, ctx) + extra
         limit = t0 + self.cfg.rho * max(0.0, d.tau_ms - t0)
         opp_ctx = 0
-        straggler_tasks = {
-            c.task for c in managed if c.req_id in protected and c.role == ROLE_SUB
-        }
+        # most-skipped first, then cheapest context
         order = sorted(
             (c for c in managed if c.req_id not in base_ids),
-            key=lambda c: self._fill_key(c, straggler_tasks),
+            key=lambda c: (-c.skip_run, c.ctx, c.req_id),
         )
         # predict(n + 1, ctx + c.ctx) + extra <= limit, unrolled: this loop
         # runs once per regulated request per step
@@ -472,8 +359,6 @@ class _Static:
     """What a request's ``Cand`` needs that does not change between steps."""
 
     interactive: bool = True
-    task: Optional[str] = None
-    role: str = ""
     max_tokens: int = 0  # 0: no deadline-aware target
     arrival_ms: float = 0.0
 
@@ -483,12 +368,7 @@ def _static_from_request(req: Any, cfg: Optional[DecodeRegulationConfig]) -> _St
     extra = getattr(sp, "extra_args", None) if sp is not None else None
     ident = extra.get(EXTRA_ARGS_KEY) if isinstance(extra, dict) else None
     if isinstance(ident, dict) and not ident.get("interactive", True):
-        # a regulated request without agent context is a task of its own
-        return _Static(
-            interactive=False,
-            task=str(ident.get("task") or req.request_id),
-            role=str(ident.get("role", "")),
-        )
+        return _Static(interactive=False)
     st = _Static()
     if cfg is not None and cfg.deadline is not None:
         max_tokens = getattr(sp, "max_tokens", None) if sp is not None else None
@@ -510,8 +390,6 @@ def _cand(
         req.request_id,
         req.num_computed_tokens,
         st.interactive,
-        st.task,
-        st.role,
         req.num_output_tokens,
     )
     if st.max_tokens and cfg is not None and cfg.deadline is not None:
@@ -685,7 +563,6 @@ class DecodeRegulationMixin:
                         "engaged": d.engaged,
                         "skip": len(d.skip),
                         "forced": d.n_forced,
-                        "protected": d.n_protected,
                         "opp": d.n_opp,
                         "tau": d.tau_ms,
                         "pred_all": round(d.pred_all_ms, 3),
