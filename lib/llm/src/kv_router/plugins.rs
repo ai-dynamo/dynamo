@@ -79,3 +79,33 @@ impl RouterPluginBuilder {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use dynamo_kv_router::{KvRouterConfig, scheduling::RequestClassifier};
+
+    use super::*;
+
+    #[test]
+    fn request_classifier_rejects_conditional_disaggregation() {
+        struct PassThrough;
+        impl RequestClassifier for PassThrough {}
+
+        let plugins = RouterPluginBuilder::new(
+            RouterPlugins::default().with_request_classifier(Arc::new(|_| Box::new(PassThrough))),
+        );
+        let config = KvRouterConfig {
+            conditional_disagg_enabled: true,
+            ..Default::default()
+        };
+        let error = plugins.validate_config(&config).unwrap_err();
+        assert!(error.to_string().contains("conditional disaggregation"));
+        assert!(
+            RouterPluginBuilder::default()
+                .validate_config(&config)
+                .is_ok()
+        );
+    }
+}
