@@ -97,11 +97,11 @@ class GMSMemorySaverImpl:
         )
 
     @contextmanager
-    def region(self, tag: str, enable_cpu_backup: bool):
+    def region(self, tag: str, enable_cpu_backup: bool, **backup_options):
         """Use the tag's RW pool and publish pending weights after clean exit."""
-        if enable_cpu_backup:
+        if enable_cpu_backup or any(backup_options.values()):
             raise ValueError(
-                "SGLang with GMS does not support CPU backup for allocations."
+                "SGLang with GMS does not support CPU or disk backup for allocations."
             )
 
         if tag not in _TAG_LOCK_TYPES:
@@ -160,6 +160,7 @@ class GMSMemorySaverImpl:
         capture_error_mode,
         tag: str,
         enable_cpu_backup: bool,
+        **kwargs,
     ):
         # The old hybrid path could delegate this to torch_memory_saver, but
         # strict GMS mode has no compatible pauseable CUDA-graph allocator hook.

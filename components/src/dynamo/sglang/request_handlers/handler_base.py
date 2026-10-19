@@ -38,6 +38,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang._compat import supports_disagg_prefill_cancel_anytime
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import kv_event_block_size
+from dynamo.sglang.engine_generate import native_generate_payload
 from dynamo.sglang.engine_routes import resolve_configured_engine_routes
 from dynamo.sglang.gateway import follow_pause_broadcasts
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -987,7 +988,7 @@ class BaseWorkerHandler(
         request_input = self.input_param_manager.get_input_param(
             request, use_tokenizer=self.use_sglang_tokenizer
         )
-        self._validate_nvext_token_data(request, request_input)
+        self._validate_request_token_ids(request, request_input)
 
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
@@ -1056,39 +1057,65 @@ class BaseWorkerHandler(
         self,
         token_ids: Any,
         allowed_oov_ids: frozenset[int] = frozenset(),
+        *,
+        label: str = "token_ids",
     ) -> None:
+        """Reject IDs outside the model vocabulary in one ID list or a batch of them.
+
+        ``label`` names the request field in error messages.
+        """
         if not isinstance(token_ids, list):
-            raise HttpError(400, "nvext.token_data must resolve to a token ID list")
+            raise HttpError(400, f"{label} must resolve to a token ID list")
 
+        batched = bool(token_ids) and isinstance(token_ids[0], list)
+        prompts = token_ids if batched else [token_ids]
         max_input_token_id = self._max_input_token_id
-        for index, token_id in enumerate(token_ids):
-            if isinstance(token_id, bool) or not isinstance(token_id, int):
-                raise HttpError(
-                    400,
-                    f"nvext.token_data[{index}] must be an integer token ID",
-                )
-            # Dynamo's Rust frontend uses u32 token IDs, so negatives are not expected.
-            if (
-                max_input_token_id is not None and token_id > max_input_token_id
-            ) and token_id not in allowed_oov_ids:
-                raise HttpError(400, f"Token id {token_id} is out of vocabulary")
+        for prompt_index, prompt_ids in enumerate(prompts):
+            prompt_label = f"{label}[{prompt_index}]" if batched else label
+            if not isinstance(prompt_ids, list):
+                raise HttpError(400, f"{prompt_label} must be a token ID list")
+            for index, token_id in enumerate(prompt_ids):
+                if isinstance(token_id, bool) or not isinstance(token_id, int):
+                    raise HttpError(
+                        400,
+                        f"{prompt_label}[{index}] must be an integer token ID",
+                    )
+                # Packed int32 token_ids decode ids above i32::MAX as negative numbers.
+                if token_id < 0:
+                    raise HttpError(
+                        400, f"{prompt_label}[{index}] must not be negative"
+                    )
+                if (
+                    max_input_token_id is not None and token_id > max_input_token_id
+                ) and token_id not in allowed_oov_ids:
+                    raise HttpError(
+                        400,
+                        f"Token id {token_id} is out of vocabulary at "
+                        f"{prompt_label}[{index}]",
+                    )
 
-    def _validate_nvext_token_data(
+    def _validate_request_token_ids(
         self,
         request: Dict[str, Any],
-        token_ids: Any,
+        request_input: Any,
     ) -> None:
-        """Reject out-of-vocabulary IDs supplied through ``nvext.token_data``."""
+        """Reject token IDs outside the model vocabulary on every token input path."""
         extra_args = request.get("extra_args")
-        if not isinstance(extra_args, dict):
+        nvext = extra_args.get("nvext") if isinstance(extra_args, dict) else None
+        if isinstance(nvext, dict) and nvext.get("token_in") is True:
+            label = "nvext.token_data"
+        elif not isinstance(request_input, list):
+            # Not token input, for example text for the SGLang tokenizer.
             return
-        nvext = extra_args.get("nvext")
-        if not isinstance(nvext, dict) or nvext.get("token_in") is not True:
-            return
+        elif native_generate_payload(request) is not None:
+            label = "input_ids"
+        else:
+            label = "token_ids"
 
         self._validate_token_ids(
-            token_ids,
+            request_input,
             self._resolve_request_multimodal_token_ids(request),
+            label=label,
         )
 
     @staticmethod

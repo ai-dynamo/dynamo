@@ -65,6 +65,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:
+      gpu_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       # TODO: widen to include `post_merge` — today it picks up tests
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
@@ -217,9 +218,6 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
-      # Lets sidecar-vllm-test (pr.yaml) fall back to this floating tag via its
-      # source_ref input instead of rebuilding vllm-runtime on every
-      # lib/sidecar/**-only PR.
       test_extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime-test' || '' }}
       archive_sources: false
@@ -287,9 +285,6 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
-      # Lets sidecar-sglang-test (pr.yaml) fall back to this floating tag via
-      # its source_ref input instead of rebuilding sglang-runtime on every
-      # lib/sidecar/**-only PR.
       test_extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime-test' || '' }}
       archive_sources: false
@@ -357,9 +352,6 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
-      # Lets sidecar-trtllm-test (pr.yaml) fall back to this floating tag via
-      # its source_ref input instead of rebuilding trtllm-runtime on every
-      # lib/sidecar/**-only PR.
       test_extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime-test' || '' }}
       archive_sources: false
@@ -471,6 +463,11 @@ jobs:
 
   # ============================================================================
   # TEST JOBS
+  # Whole-job placement uses mean successful main-branch runtimes from
+  # 2026-10-07 17:10 through 2026-10-14 17:10 UTC (141 runs). Per full run:
+  # 1-GPU east/west: 169.5/168.3 min; 2-GPU: 78.1/70.7 min.
+  # The sole 4-GPU job stays west (21.9 min). These are cumulative job
+  # times, not pipeline wall time; historical selectors did not identify region.
   # ============================================================================
 
   sidecar-vllm-test:
@@ -487,11 +484,12 @@ jobs:
       framework: vllm
       test_type: ${{ format('vLLM Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
       amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
+      amd_runner_labels: ${{ format('["{0}","amd64","v2","us-east-1"]', matrix.gpu_count == 2 && 'gpu-2' || 'gpu-1') }}
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: ${{ format('(pre_merge or post_merge) and sidecar and vllm and gpu_{0}', matrix.gpu_count) }}
+      gpu_test_markers: ${{ format('post_merge and sidecar and vllm and gpu_{0}', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       sidecar_backend: vllm
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
@@ -511,11 +509,12 @@ jobs:
       framework: sglang
       test_type: ${{ format('SGLang Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
       amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
+      amd_runner_labels: ${{ format('["{0}","amd64","v2","{1}"]', matrix.gpu_count == 2 && 'gpu-2' || 'gpu-1', matrix.gpu_count == 2 && 'us-east-1' || 'us-west-2') }}
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: ${{ format('(pre_merge or post_merge) and sidecar and sglang and gpu_{0}', matrix.gpu_count) }}
+      gpu_test_markers: ${{ format('post_merge and sidecar and sglang and gpu_{0}', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       sidecar_backend: sglang
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
@@ -529,13 +528,14 @@ jobs:
       dd_env: post-merge
       test_suite_name: trtllm
       framework: trtllm
-      test_type: Sidecar E2E Test
+      test_type: TensorRT-LLM Sidecar 1-GPU E2E Test
       amd_runner: prod-tester-amd-gpu-v2
+      amd_runner_labels: '["gpu-1","amd64","v2","us-east-1"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: '(pre_merge or post_merge) and sidecar and trtllm and gpu_1'
+      gpu_test_markers: 'post_merge and sidecar and trtllm and gpu_1'
       gpu_test_timeout_minutes: 45
       sidecar_backend: trtllm
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
@@ -551,14 +551,13 @@ jobs:
       framework: vllm  # matches the framework passed to vllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner_labels: '["gpu-1","amd64","v2","us-east-1"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      # not sidecar: sidecar-marked tests need dynamo-vllm-sidecar layered onto
-      # the image (see pr.yaml's sidecar-vllm-test), which this plain
-      # vllm-runtime image doesn't have.
+      # Plain runtime images do not include sidecar binaries.
       gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests (those carrying @pytest.mark.profiled_vram_gib(N)) run concurrently in
@@ -578,6 +577,7 @@ jobs:
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner_labels: '["gpu-2","amd64","v2","us-east-1"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -596,6 +596,7 @@ jobs:
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 4-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner_labels: '["gpu-4","amd64","v2","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -632,14 +633,13 @@ jobs:
       framework: sglang  # matches the framework passed to sglang-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
-      # not sidecar: sidecar-marked tests need dynamo-sglang-sidecar layered
-      # onto the image (see pr.yaml's sidecar-sglang-test), which this plain
-      # sglang-runtime image doesn't have.
+      # Plain runtime images do not include sidecar binaries.
       gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
@@ -659,6 +659,7 @@ jobs:
       framework: sglang  # matches the framework passed to sglang-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner_labels: '["gpu-2","amd64","v2","us-west-2"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -677,14 +678,13 @@ jobs:
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      # not sidecar: sidecar-marked tests need dynamo-trtllm-sidecar layered
-      # onto the image (see pr.yaml's sidecar-trtllm-test), which this plain
-      # trtllm-runtime image doesn't have.
+      # Plain runtime images do not include sidecar binaries.
       gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
@@ -704,6 +704,7 @@ jobs:
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner_labels: '["gpu-2","amd64","v2","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -760,6 +761,7 @@ jobs:
   #     test_suite_name: triton
   #     test_type: QA Test
   #     amd_runner: prod-tester-amd-gpu-v2
+  #     amd_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
   #     target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
   #     cuda_version: '[""]'
   #     platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
@@ -799,7 +801,10 @@ jobs:
   vllm-test-xpu:
     name: vllm-xpu
     needs: [config]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    # XPU is not validated on release branches.
+    if: >-
+      !startsWith(github.ref_name, 'release/') &&
+      (github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true')
     uses: $/.github/workflows/xpu-ci.yaml
     with:
       framework: vllm
@@ -972,6 +977,7 @@ jobs:
     needs: [deploy-operator, vllm-copy-to-acr]
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
+      dd_env: post-merge
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
       image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
@@ -984,6 +990,7 @@ jobs:
     needs: [deploy-operator, sglang-copy-to-acr]
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
+      dd_env: post-merge
       framework: sglang
       profiles: '["agg", "agg_logging", "agg_router"]'
       image_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
@@ -996,6 +1003,7 @@ jobs:
     needs: [deploy-operator, trtllm-copy-to-acr]
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
+      dd_env: post-merge
       framework: trtllm
       profiles: '["agg", "agg_router"]'
       image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
@@ -1010,6 +1018,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     uses: $/.github/workflows/shared-dgdr-deploy-test.yml
     with:
+      dd_env: post-merge
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -1019,6 +1028,7 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       DOCKERHUB_LOGIN_USER: ${{ secrets.DOCKERHUB_LOGIN_USER }}
       DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      DD_API_KEY: ${{ secrets.DD_API_KEY }}
 
   deploy-operator-checkpoint-vllm:
     name: vLLM Snapshot Operator Setup
@@ -1313,6 +1323,8 @@ jobs:
       - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: post-merge
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1381,6 +1393,8 @@ jobs:
       - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: post-merge
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1449,6 +1463,8 @@ jobs:
       - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: post-merge
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1569,6 +1585,8 @@ jobs:
         id: deploy-test
         uses: $/.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: post-merge
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}

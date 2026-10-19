@@ -1288,19 +1288,6 @@ a.fern-card:hover{
   fill: #76b900 !important;
   stroke: #76b900 !important;
 }
-
-
-/* ===================== Community page ===================== */
-
-:root {
-  --dynamo-community-green: #76b900;
-  --dynamo-community-green-bright: #8ed600;
-  --dynamo-community-ink: var(--grayscale-a12);
-  --dynamo-community-muted: var(--grayscale-a10);
-  --dynamo-community-rule: color-mix(in srgb, var(--grayscale-a12) 14%, transparent);
-  --dynamo-community-soft: #f3f4f3;
-  --dynamo-community-titlebar-text: #555755;
-}
 `;
 // sync-site-css:end
 

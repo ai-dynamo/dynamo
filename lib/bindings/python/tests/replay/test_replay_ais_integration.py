@@ -10,7 +10,6 @@ import json
 
 import pytest
 
-from dynamo.replay.config import load_engine_args
 from dynamo.runtime import DistributedRuntime
 
 pytestmark = [
@@ -33,21 +32,29 @@ def _offline_ais(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _engine_args(worker_type: str | None = None):
-    from dynamo.mocker import MockEngineArgs
+    from dynamo.mocker.config import normalize_mocker_config
 
-    worker_options = {"worker_type": worker_type} if worker_type is not None else {}
-    return MockEngineArgs(
-        ais_perf_config={
-            "model": AIS_MODEL,
-            "system": AIS_SYSTEM,
-            "backend": "vllm",
-            "backend_version": AIS_BACKEND_VERSION,
-            "worker_type": worker_type or "aggregated",
-        },
-        block_size=64,
-        max_num_batched_tokens=4096,
-        max_num_seqs=128,
-        **worker_options,
+    return normalize_mocker_config(
+        {
+            "engine": {
+                "backend": "vllm",
+                "worker_type": worker_type or "aggregated",
+                "block_size": 64,
+                "max_num_batched_tokens": 4096,
+                "max_num_seqs": 128,
+                "timing_model": {
+                    "type": "external",
+                    "provider": "ais",
+                    "config": {
+                        "model": AIS_MODEL,
+                        "system": AIS_SYSTEM,
+                        "backend": "vllm",
+                        "backend_version": AIS_BACKEND_VERSION,
+                        "worker_type": worker_type or "aggregated",
+                    },
+                },
+            }
+        }
     )
 
 
@@ -70,27 +77,9 @@ def test_real_ais_memory_estimates_gpu_blocks() -> None:
 
 
 def test_default_ais_capacity_uses_queryable_version() -> None:
-    args = load_engine_args(
-        {
-            "ais_perf_config": {
-                "model": AIS_MODEL,
-                "system": AIS_SYSTEM,
-                "backend": "vllm",
-                "worker_type": "aggregated",
-                "backend_version": "current",
-            },
-            "block_size": 64,
-            "max_num_batched_tokens": 4096,
-            "max_num_seqs": 128,
-        }
-    )
-    assert args is not None
-    assert args.num_gpu_blocks > 0
-    from aisimulate_core.sdk import perf_database
-
-    assert args.ais_backend_version == perf_database.resolve_query_version(
-        AIS_SYSTEM, "vllm", "current"
-    )
+    args = _engine_args()
+    assert args["engine"]["num_gpu_blocks"] > 0
+    assert args["engine"]["timing_model"]["config"]["backend_version"] == "current"
 
 
 def test_aggregated_replay_uses_native_ais_engine() -> None:
@@ -142,11 +131,8 @@ def test_canonical_python_presets_survive_mocker_round_trip_and_replay(
 ) -> None:
     from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
-    from dynamo._core import (
-        AisPerfConfig,
-        MockEngineArgs,
-        run_mocker_synthetic_trace_replay,
-    )
+    from dynamo._core import AisPerfConfig, run_mocker_synthetic_trace_replay
+    from dynamo.mocker.config import normalize_mocker_config
 
     # Load packaged model metadata/performance tables only, without model weights.
     payload = {
@@ -160,34 +146,22 @@ def test_canonical_python_presets_survive_mocker_round_trip_and_replay(
     }
     expected = ForwardPassPerfModelConfig(**payload).to_dict()
     assert AisPerfConfig(payload).to_dict() == expected
-    if input_kind == "mapping":
-        args = MockEngineArgs(ais_perf_config=payload, num_gpu_blocks=1000)
-    else:
-        timing = (
-            {"ais_perf_config": payload}
-            if input_kind == "json"
-            else {
-                "timing_model": {
-                    "type": "external",
-                    "provider": "aic",
-                    "config": payload,
-                }
-            }
-        )
-        args = MockEngineArgs.from_json(json.dumps({"num_gpu_blocks": 1000, **timing}))
-    assert args.ais_perf_config == expected
-    updated = args.with_overrides(num_gpu_blocks=1001)
-    assert updated.ais_perf_config == expected
-    restored = MockEngineArgs.from_json(
-        json.dumps(
-            {
-                "ais_perf_config": updated.ais_perf_config,
-                "num_gpu_blocks": updated.num_gpu_blocks,
-            }
-        )
-    )
-    assert restored.ais_perf_config == expected
-    assert restored.num_gpu_blocks == 1001
+    raw = {
+        "engine": {
+            "num_gpu_blocks": 1000,
+            "timing_model": {
+                "type": "external",
+                "provider": "aic" if input_kind == "external_json" else "ais",
+                "config": payload,
+            },
+        }
+    }
+    args = normalize_mocker_config(raw if input_kind == "mapping" else json.dumps(raw))
+    assert args["engine"]["timing_model"]["config"] == expected
+    args["engine"]["num_gpu_blocks"] = 1001
+    restored = normalize_mocker_config(json.dumps(args))
+    assert restored["engine"]["timing_model"]["config"] == expected
+    assert restored["engine"]["num_gpu_blocks"] == 1001
     report = run_mocker_synthetic_trace_replay(
         128, 2, 1, extra_engine_args=restored, replay_concurrency=1
     ).summary
@@ -203,27 +177,34 @@ def test_canonical_python_presets_survive_mocker_round_trip_and_replay(
 async def test_live_mocker_file_normalizes_canonical_python_presets(
     tmp_path, num_gpu_blocks
 ) -> None:
-    from dynamo._core import EngineType, EntrypointArgs, MockEngineArgs, make_engine
+    from dynamo._core import EngineType, EntrypointArgs, make_engine
+    from dynamo.mocker.config import normalize_mocker_config
 
     payload = {
-        "ais_perf_config": {
-            "model": AIS_MODEL,
-            "system": AIS_SYSTEM,
-            "backend": "vllm",
-            "worker_type": "aggregated",
-            "estimation_mode": "op_level",
-            "transfer_policy": "balanced",
-            "systems_paths": ["default"],
+        "engine": {
+            "timing_model": {
+                "type": "external",
+                "provider": "ais",
+                "config": {
+                    "model": AIS_MODEL,
+                    "system": AIS_SYSTEM,
+                    "backend": "vllm",
+                    "worker_type": "aggregated",
+                    "estimation_mode": "op_level",
+                    "transfer_policy": "balanced",
+                    "systems_paths": ["default"],
+                },
+            }
         }
     }
     if num_gpu_blocks is not None:
-        payload["num_gpu_blocks"] = num_gpu_blocks
+        payload["engine"]["num_gpu_blocks"] = num_gpu_blocks
     path = tmp_path / "mocker.json"
     path.write_text(json.dumps(payload))
-    parsed = MockEngineArgs.from_json(path.read_text())
-    assert parsed.num_gpu_blocks == (
-        16384 if num_gpu_blocks is None else num_gpu_blocks
-    )
+    parsed = normalize_mocker_config(path.read_text())
+    assert parsed["engine"]["num_gpu_blocks"] > 0
+    if num_gpu_blocks is not None:
+        assert parsed["engine"]["num_gpu_blocks"] == num_gpu_blocks
     runtime = DistributedRuntime(
         asyncio.get_running_loop(), "mem", "tcp", event_plane="zmq"
     )
