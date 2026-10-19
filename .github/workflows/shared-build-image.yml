@@ -449,6 +449,8 @@ jobs:
       - name: Generate Dockerfile
         id: gen-dockerfile
         shell: bash
+        env:
+          RUNTIME_VARIANT: ${{ inputs.runtime_variant }}
         run: |
           echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
           MAKE_EFA_FLAG=""
@@ -456,8 +458,8 @@ jobs:
             MAKE_EFA_FLAG="--make-efa"
           fi
           VARIANT_FLAG=""
-          if [ -n "${{ inputs.runtime_variant }}" ]; then
-            VARIANT_FLAG="--variant=${{ inputs.runtime_variant }}"
+          if [ -n "${RUNTIME_VARIANT}" ]; then
+            VARIANT_FLAG="--variant=${RUNTIME_VARIANT}"
           fi
           # If CUDA version is empty, use empty arg to fallback to default (eg. for planner)
           if [ "${{ matrix.cuda_version }}" == "" ]; then
