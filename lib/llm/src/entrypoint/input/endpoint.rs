@@ -358,37 +358,4 @@ mod integration_tests {
             }
         }
     }
-
-    #[tokio::test]
-    #[ignore = "DistributedRuntime drop issue persists - test logic validates error propagation correctly"]
-    async fn test_run_function_invalid_endpoint() {
-        // Test that invalid endpoints fail validation during run()
-        let invalid_path = "dyn://@@@123.mocker.generate";
-
-        // Create test environment
-        let (runtime, engine_config) = create_test_environment()
-            .await
-            .expect("Failed to create test environment");
-
-        // Call run() directly - it should fail quickly for invalid endpoints
-        let result = run(runtime, invalid_path.to_string(), engine_config).await;
-
-        // Should return an error for invalid endpoints
-        assert!(
-            result.is_err(),
-            "run() should fail for invalid endpoint: {:?}",
-            result
-        );
-
-        // Check that the error message contains validation-related keywords
-        let error_msg = result.unwrap_err().to_string().to_lowercase();
-        assert!(
-            error_msg.contains("invalid")
-                || error_msg.contains("namespace")
-                || error_msg.contains("validation")
-                || error_msg.contains("failed"),
-            "Error message should contain validation keywords, got: {}",
-            error_msg
-        );
-    }
 }
