@@ -19,14 +19,16 @@ use dynamo_kv_router::config::{
     KvRouterConfig, RouterConfigOverride, try_kv_router_config_from_dynamo_env,
 };
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
-use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::discovery::{LoadThresholdHandle, ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
-use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
+use dynamo_llm::kv_router::{
+    FindBestMatchOutcome, ManagedKvRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext,
+    SelectionPolicySource,
+};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
-use dynamo_llm::worker_type::WorkerType;
 use dynamo_protocols::types::Prompt;
 use dynamo_runtime::discovery::{
     DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
@@ -44,7 +46,8 @@ use crate::picker::{
     ResponseUsage, resolve_cache_namespace,
 };
 use crate::worker_generations::{
-    GENERATE_ENDPOINT, GenerationScope, GenerationSet, choose_generation, run_generation_watcher,
+    GENERATE_ENDPOINT, GenerationScope, GenerationSet, choose_generation, needs_prefill,
+    run_generation_watcher,
 };
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
@@ -134,6 +137,13 @@ pub struct Router {
 struct Generation {
     namespace: String,
     model_name: String,
+    aliases: Vec<String>,
+    /// Whether the decode workers need a prefill peer, so the generation is
+    /// ready only once its own prefill workers are found.
+    requires_prefill: bool,
+    /// Set when the prefill watcher hands this generation's prefill workers
+    /// to its prefill router.
+    prefill_found: Arc<AtomicBool>,
     prefill_router: Arc<PrefillRouter>,
     decode_router: ManagedKvRouter,
     preprocessor: Arc<OpenAIPreprocessor>,
@@ -144,6 +154,16 @@ struct Generation {
 impl Drop for Generation {
     fn drop(&mut self) {
         self.cancel.cancel();
+    }
+}
+
+impl Generation {
+    fn serves(&self, model: &str) -> bool {
+        !model.is_empty() && (self.model_name == model || self.aliases.iter().any(|a| a == model))
+    }
+
+    fn ready(&self) -> bool {
+        !self.requires_prefill || self.prefill_found.load(Ordering::Acquire)
     }
 }
 
@@ -286,10 +306,12 @@ impl Router {
         &self.served_model
     }
 
-    /// Choose a generation weighted by routable workers, or by hinted workers
-    /// when a subset hint is present (see [`choose_generation`]).
+    /// Choose a generation for a request for `model` (see
+    /// [`choose_generation`]), weighted by routable workers, or by hinted
+    /// workers when a subset hint is present.
     fn select_generation(
         &self,
+        model: &str,
         allowed_worker_ids: Option<&HashSet<u64>>,
     ) -> Option<Arc<Generation>> {
         let generations = self.generations.borrow().clone();
@@ -308,8 +330,9 @@ impl Router {
         };
         choose_generation(
             &generations,
+            |generation| generation.serves(model),
+            |generation| generation.ready(),
             workers,
-            |generation| generation.prefill_router.is_active(),
             |total| rand::random_range(0..total),
         )
         .cloned()
@@ -535,7 +558,7 @@ impl Generation {
     /// required/preferred taints (lifted from `nvext.routing_constraints`); a
     /// hard `required_taints` mismatch excludes a worker from selection.
     #[expect(clippy::too_many_arguments)]
-    async fn route_prefill(
+    pub async fn route_prefill(
         &self,
         reservation_id: &str,
         tokens: &[u32],
@@ -575,7 +598,7 @@ impl Generation {
     /// A per-class queue limit rejection surfaces as an error here, the same as
     /// it does for the integrated frontend.
     #[allow(clippy::too_many_arguments)]
-    async fn route_decode(
+    pub async fn route_decode(
         &self,
         tokens: &[u32],
         is_disaggregated: bool,
@@ -624,7 +647,7 @@ impl Generation {
     }
 
     /// Register a request with the decode router for bookkeeping.
-    async fn add_request(
+    pub async fn add_request(
         &self,
         request_id: &str,
         tokens: &[u32],
@@ -669,7 +692,7 @@ impl Generation {
     }
 
     /// Mark prefill as completed for a request.
-    async fn mark_prefill_complete(&self, request_id: &str) -> Result<()> {
+    pub async fn mark_prefill_complete(&self, request_id: &str) -> Result<()> {
         let decode_router = self.decode_router.clone();
         let request_id = request_id.to_owned();
 
@@ -684,7 +707,7 @@ impl Generation {
     }
 
     /// Free a request from the router's bookkeeping.
-    async fn free_request(&self, request_id: &str) -> Result<()> {
+    pub async fn free_request(&self, request_id: &str) -> Result<()> {
         let decode_router = self.decode_router.clone();
         let request_id = request_id.to_owned();
 
@@ -863,6 +886,7 @@ async fn build_generation(
     let preprocessor = OpenAIPreprocessor::new(card.clone())?;
     let block_size = card.kv_cache_block_size;
     let model_name = card.display_name.clone();
+    let requires_prefill = needs_prefill(&card.needs);
 
     let endpoint = drt
         .namespace(namespace)?
@@ -871,21 +895,39 @@ async fn build_generation(
 
     let model_manager = Arc::new(ModelManager::new());
 
+    // Built as `ModelManager::managed_kv_router_for_with_worker_role` builds
+    // it, but over a client whose background task stops with this generation
+    // instead of running until the process exits.
     let client = endpoint
         .client_with_cancellation(cancel.child_token())
         .await?;
-    let decode_router = model_manager
-        .managed_kv_router_for_client_with_worker_role(
+    let load_context = RoutingLoadContext::start(
+        client.clone(),
+        card.worker_type.map_or(
+            RouterLoadSource::Aggregated,
+            RouterLoadSource::from_worker_type,
+        ),
+        LoadThresholdHandle::new(Default::default()),
+        &cancel,
+        None,
+    )
+    .await?;
+    let kv_router = model_manager
+        .kv_chooser_for_with_policy_and_client(
             client,
             block_size,
+            SelectionPolicySource::Registry,
             Some(kv_router_config.clone()),
             None,
             card.worker_type,
             WORKER_TYPE_DECODE,
             Some(model_name.clone()),
             card.runtime_config.enable_eagle,
+            load_context.scheduler_load_sender(),
+            load_context.cancellation_token(),
         )
         .await?;
+    let decode_router = ManagedKvRouter::new(load_context, kv_router);
 
     // Wait for runtime config watch to populate
     {
@@ -929,10 +971,12 @@ async fn build_generation(
         cancel.child_token(),
     );
 
+    let prefill_found = Arc::new(AtomicBool::new(false));
     spawn_prefill_discovery_watcher(
         drt.clone(),
         namespace.to_string(),
         prefill_tx,
+        prefill_found.clone(),
         cancel.child_token(),
     );
 
@@ -940,6 +984,9 @@ async fn build_generation(
     Ok(Generation {
         namespace: namespace.to_string(),
         model_name,
+        aliases: card.aliases,
+        requires_prefill,
+        prefill_found,
         prefill_router,
         decode_router,
         preprocessor,
@@ -1327,6 +1374,7 @@ fn spawn_prefill_discovery_watcher(
     drt: DistributedRuntime,
     target_namespace: String,
     tx: tokio::sync::oneshot::Sender<dynamo_runtime::component::Endpoint>,
+    found: Arc<AtomicBool>,
     cancel: CancellationToken,
 ) {
     tokio::spawn(cancel.run_until_cancelled_owned(async move {
@@ -1355,7 +1403,10 @@ fn spawn_prefill_discovery_watcher(
                             Err(_) => continue,
                         };
 
-                        if card.effective_worker_type() != WorkerType::Prefill {
+                        if !card.model_type.supports_prefill()
+                            || card.model_type.supports_chat()
+                            || card.model_type.supports_completions()
+                        {
                             continue;
                         }
 
@@ -1371,6 +1422,8 @@ fn spawn_prefill_discovery_watcher(
                             let ep = comp.endpoint(endpoint);
                             if tx.send(ep).is_err() {
                                 tracing::debug!("PrefillRouter activation channel already closed");
+                            } else {
+                                found.store(true, Ordering::Release);
                             }
                             return;
                         }
@@ -1521,7 +1574,7 @@ impl EndpointPicker for Router {
             .map_err(|e| PickError::InvalidRequest(format!("Invalid UTF-8: {e}")))?;
 
         let generation = self
-            .select_generation(allowed_worker_ids.as_ref())
+            .select_generation(&req.model, allowed_worker_ids.as_ref())
             .ok_or_else(|| {
                 PickError::RoutingFailed("No worker generation is available".to_string())
             })?;

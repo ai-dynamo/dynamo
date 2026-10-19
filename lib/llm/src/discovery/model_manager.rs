@@ -2238,63 +2238,6 @@ impl ModelManager {
         is_eagle: bool,
     ) -> anyhow::Result<crate::kv_router::ManagedKvRouter> {
         let client = endpoint.client().await?;
-        self.managed_kv_router_for_client_with_policy(
-            client,
-            kv_cache_block_size,
-            policy,
-            kv_router_config,
-            prefill_load_estimator,
-            worker_role,
-            metric_worker_type,
-            model_name,
-            is_eagle,
-        )
-        .await
-    }
-
-    /// Like [`Self::managed_kv_router_for_with_worker_role`], but routes over
-    /// `client`. A caller scoped narrower than the process builds it with
-    /// [`Endpoint::client_with_cancellation`] so its background task stops with
-    /// that scope.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn managed_kv_router_for_client_with_worker_role(
-        &self,
-        client: Client,
-        kv_cache_block_size: u32,
-        kv_router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        worker_role: Option<WorkerType>,
-        metric_worker_type: &'static str,
-        model_name: Option<String>,
-        is_eagle: bool,
-    ) -> anyhow::Result<crate::kv_router::ManagedKvRouter> {
-        self.managed_kv_router_for_client_with_policy(
-            client,
-            kv_cache_block_size,
-            SelectionPolicySource::Registry,
-            kv_router_config,
-            prefill_load_estimator,
-            worker_role,
-            metric_worker_type,
-            model_name,
-            is_eagle,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn managed_kv_router_for_client_with_policy(
-        &self,
-        client: Client,
-        kv_cache_block_size: u32,
-        policy: SelectionPolicySource,
-        kv_router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        worker_role: Option<WorkerType>,
-        metric_worker_type: &'static str,
-        model_name: Option<String>,
-        is_eagle: bool,
-    ) -> anyhow::Result<crate::kv_router::ManagedKvRouter> {
         let source = crate::kv_router::RouterLoadSource::from_worker_role_or_metric(
             worker_role,
             metric_worker_type,
@@ -2303,7 +2246,7 @@ impl ModelManager {
             client.clone(),
             source,
             crate::discovery::LoadThresholdHandle::new(Default::default()),
-            &client.endpoint.component().drt().child_token(),
+            &endpoint.component().drt().child_token(),
             None,
         )
         .await?;

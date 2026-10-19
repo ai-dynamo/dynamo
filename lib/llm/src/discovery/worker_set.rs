@@ -89,16 +89,13 @@ impl WorkerSetTarget {
     }
 
     pub(crate) async fn client(&self, cancellation: CancellationToken) -> anyhow::Result<Client> {
+        let client = self.endpoint().client().await?;
         Ok(match self {
-            Self::Committed(target) => self
-                .endpoint()
-                .client()
-                .await?
-                .with_admitted_instances_and_cancellation(
-                    target.admitted_ids.clone(),
-                    cancellation,
-                ),
-            Self::Legacy(endpoint) => endpoint.client_with_cancellation(cancellation).await?,
+            Self::Committed(target) => client.with_admitted_instances_and_cancellation(
+                target.admitted_ids.clone(),
+                cancellation,
+            ),
+            Self::Legacy(_) => client,
         })
     }
 }

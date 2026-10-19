@@ -54,8 +54,8 @@ pub(crate) struct GenerationScope {
 }
 
 impl GenerationScope {
-    /// Whether the scope holds one DGD's generations, so another model in it
-    /// can only be that DGD renamed.
+    /// Whether the scope holds only one DGD's generations. A broad scope can
+    /// also hold unrelated deployments.
     fn single_deployment(&self) -> bool {
         matches!(self.namespace_filter, NamespaceFilter::Prefix(_))
             && self.prefix_mode == NamespacePrefixMode::WorkerGeneration
@@ -108,7 +108,7 @@ impl GenerationScope {
     }
 }
 
-/// A namespace started or stopped serving the pinned model.
+/// A namespace started or stopped serving.
 #[derive(Debug)]
 pub(crate) enum GenerationChange {
     Appeared {
@@ -130,49 +130,45 @@ struct TrackedNamespace {
 }
 
 impl TrackedNamespace {
-    /// Returns the card's model if the card is new.
-    fn insert(&mut self, id: ModelCardInstanceId, card: ModelDeploymentCard) -> Option<String> {
+    /// Returns whether the card is new.
+    fn insert(&mut self, id: ModelCardInstanceId, card: ModelDeploymentCard) -> bool {
         if self.cards.contains_key(&id) {
-            return None;
+            return false;
         }
         let model = card.display_name.clone();
         self.cards.insert(id, model.clone());
         self.models
-            .entry(model.clone())
+            .entry(model)
             .or_insert_with(|| (0, Arc::new(card)))
             .0 += 1;
-        Some(model)
+        true
     }
 
-    /// Returns the removed card's model.
-    fn remove(&mut self, id: &ModelCardInstanceId) -> Option<String> {
-        let model = self.cards.remove(id)?;
-        decrement(&mut self.models, &model, |(count, _)| count);
-        Some(model)
-    }
-}
-
-/// Decrement `key`'s count, removing the entry at zero.
-fn decrement<V>(map: &mut HashMap<String, V>, key: &str, count: impl Fn(&mut V) -> &mut usize) {
-    if let Some(value) = map.get_mut(key) {
-        let count = count(value);
-        *count -= 1;
-        if *count == 0 {
-            map.remove(key);
+    /// Returns whether the card was tracked.
+    fn remove(&mut self, id: &ModelCardInstanceId) -> bool {
+        let Some(model) = self.cards.remove(id) else {
+            return false;
+        };
+        if let Some((count, _)) = self.models.get_mut(&model) {
+            *count -= 1;
+            if *count == 0 {
+                self.models.remove(&model);
+            }
         }
+        true
     }
 }
 
-/// Routable cards per matching namespace, and the one model this EPP serves.
+/// Routable cards per matching namespace.
 ///
-/// The model is pinned when first seen so a broad scope never mixes models.
-/// It moves only when none of its cards remain in a single-DGD scope, where
-/// another model can only be the same DGD renamed.
+/// In one DGD's scope each generation is an isolated serving unit that serves
+/// whatever its own workers registered, including a different model during a
+/// rollout that renames it. A broad scope can hold unrelated deployments, so
+/// it serves only the first model seen.
 pub(crate) struct GenerationTracker {
     scope: GenerationScope,
     namespaces: HashMap<String, TrackedNamespace>,
-    /// Card count per model across all namespaces.
-    model_counts: HashMap<String, usize>,
+    /// The model a broad scope serves; unset in one DGD's scope.
     model: Option<String>,
     /// Namespaces last reported as `Appeared`.
     serving: HashSet<String>,
@@ -183,7 +179,6 @@ impl GenerationTracker {
         Self {
             scope,
             namespaces: HashMap::new(),
-            model_counts: HashMap::new(),
             model: None,
             serving: HashSet::new(),
         }
@@ -194,15 +189,14 @@ impl GenerationTracker {
             return Vec::new();
         };
         let namespace = id.namespace.clone();
-        let Some(model) = self
+        if !self
             .namespaces
             .entry(namespace.clone())
             .or_default()
             .insert(id, card)
-        else {
+        {
             return Vec::new();
-        };
-        *self.model_counts.entry(model).or_default() += 1;
+        }
         self.settle(&namespace)
     }
 
@@ -213,48 +207,48 @@ impl GenerationTracker {
         let Some(tracked) = self.namespaces.get_mut(&id.namespace) else {
             return Vec::new();
         };
-        let Some(model) = tracked.remove(id) else {
+        if !tracked.remove(id) {
             return Vec::new();
-        };
+        }
         if tracked.cards.is_empty() {
             self.namespaces.remove(&id.namespace);
         }
-        decrement(&mut self.model_counts, &model, |count| count);
         self.settle(&id.namespace)
     }
 
     /// Replace the tracked cards with a full snapshot; report namespace changes.
     pub(crate) fn on_resync(&mut self, instances: &[DiscoveryInstance]) -> Vec<GenerationChange> {
         self.namespaces.clear();
-        self.model_counts.clear();
         for instance in instances {
             if let Some((id, card)) = self.scope.admit(instance) {
-                let namespace = id.namespace.clone();
-                if let Some(model) = self
-                    .namespaces
-                    .entry(namespace)
+                self.namespaces
+                    .entry(id.namespace.clone())
                     .or_default()
-                    .insert(id, card)
-                {
-                    *self.model_counts.entry(model).or_default() += 1;
-                }
+                    .insert(id, card);
             }
         }
-        self.repin();
+        self.pin();
         self.reconcile_all()
     }
 
-    /// The card to build `namespace`'s generation from, if it serves the
-    /// pinned model.
+    /// The card to build `namespace`'s generation from: its own model in one
+    /// DGD's scope, the pinned model in a broad one.
     fn card_for(&self, namespace: &str) -> Option<Arc<ModelDeploymentCard>> {
-        let model = self.model.as_ref()?;
-        let (_, card) = self.namespaces.get(namespace)?.models.get(model)?;
-        Some(card.clone())
+        let models = &self.namespaces.get(namespace)?.models;
+        let entry = match &self.model {
+            Some(model) => models.get(model),
+            None if self.scope.single_deployment() => models
+                .iter()
+                .min_by_key(|(model, _)| *model)
+                .map(|(_, entry)| entry),
+            None => None,
+        };
+        entry.map(|(_, card)| card.clone())
     }
 
-    /// Re-evaluate `namespace`, or every namespace if the pinned model moved.
+    /// Re-evaluate `namespace`, or every namespace once a model is pinned.
     fn settle(&mut self, namespace: &str) -> Vec<GenerationChange> {
-        if self.repin() {
+        if self.pin() {
             return self.reconcile_all();
         }
         let mut changes = Vec::new();
@@ -262,26 +256,24 @@ impl GenerationTracker {
         changes
     }
 
-    /// Keep the pinned model while any of its cards remain, and for good in a
-    /// broad scope; otherwise pin the smallest remaining model name. Returns
-    /// whether the pin moved.
-    fn repin(&mut self) -> bool {
-        if let Some(model) = &self.model
-            && (self.model_counts.contains_key(model) || !self.scope.single_deployment())
-        {
+    /// In a broad scope, pin the first model seen (the smallest name when a
+    /// snapshot shows several) for good. Returns whether it was just pinned.
+    fn pin(&mut self) -> bool {
+        if self.model.is_some() || self.scope.single_deployment() {
             return false;
         }
-        let next = self.model_counts.keys().min().cloned();
-        if next == self.model {
-            return false;
-        }
-        let others: Vec<&String> = self
-            .model_counts
-            .keys()
-            .filter(|model| Some(*model) != next.as_ref())
+        let mut models: Vec<&String> = self
+            .namespaces
+            .values()
+            .flat_map(|tracked| tracked.models.keys())
             .collect();
-        tracing::info!(from = ?self.model, to = ?next, ignored = ?others, "Serving model pinned");
-        self.model = next;
+        models.sort_unstable();
+        models.dedup();
+        let Some((model, ignored)) = models.split_first() else {
+            return false;
+        };
+        tracing::info!(%model, ?ignored, "Serving model pinned");
+        self.model = Some((*model).clone());
         true
     }
 
@@ -614,36 +606,53 @@ async fn sleep_or_cancel(delay: Duration, cancel: &CancellationToken) -> bool {
     }
 }
 
-/// Choose a generation, weighted by `workers`.
+/// Choose a generation for a request.
 ///
-/// While any generation's prefill router is active, generations whose router
-/// is not yet active are skipped: a new generation's prefill router activates
-/// after its decode workers register, and until then it would serve a
-/// disaggregated deployment aggregated. With no workers anywhere, the first
-/// generation is chosen so its router reports why. `roll(total)` returns a
-/// value in `0..total`.
+/// Generations are isolated serving units, each judged on its own, as the
+/// Frontend does. Candidates are the generations that `serve` the requested
+/// model, or all of them when none does (an alias or adapter the cards do not
+/// list). Among candidates, those that are `ready` (their own topology is
+/// complete) are weighted by `workers`; when none is ready they serve as they
+/// can, and with no workers anywhere the first candidate is chosen so its
+/// router reports why. `roll(total)` returns a value in `0..total`.
 pub(crate) fn choose_generation<T>(
     generations: &[T],
+    serves: impl Fn(&T) -> bool,
+    ready: impl Fn(&T) -> bool,
     workers: impl Fn(&T) -> usize,
-    prefill_active: impl Fn(&T) -> bool,
     roll: impl Fn(usize) -> usize,
 ) -> Option<&T> {
     if generations.len() <= 1 {
         return generations.first();
     }
-    let disaggregated = generations.iter().any(&prefill_active);
-    let disaggregated_workers = |generation: &T| {
-        if prefill_active(generation) {
+    let restricted = generations.iter().any(&serves);
+    let candidate = |generation: &T| !restricted || serves(generation);
+    let ready_workers = |generation: &T| {
+        if candidate(generation) && ready(generation) {
             workers(generation)
         } else {
             0
         }
     };
-    disaggregated
-        .then(|| pick_weighted(generations, disaggregated_workers, &roll))
-        .flatten()
-        .or_else(|| pick_weighted(generations, &workers, &roll))
-        .or_else(|| generations.first())
+    let candidate_workers = |generation: &T| {
+        if candidate(generation) {
+            workers(generation)
+        } else {
+            0
+        }
+    };
+    pick_weighted(generations, ready_workers, &roll)
+        .or_else(|| pick_weighted(generations, candidate_workers, &roll))
+        .or_else(|| generations.iter().find(|generation| candidate(generation)))
+}
+
+/// Whether a worker with these `needs` (alternatives, any one of which
+/// suffices) can serve only alongside prefill workers.
+pub(crate) fn needs_prefill(needs: &[Vec<WorkerType>]) -> bool {
+    !needs.is_empty()
+        && needs
+            .iter()
+            .all(|alternative| alternative.contains(&WorkerType::Prefill))
 }
 
 /// Pick an item with probability proportional to its weight; `roll(total)`
@@ -892,75 +901,140 @@ mod tests {
         assert_eq!(summarize(&tracker.on_resync(&[b])), ["-dgd-aaaaaaaa"]);
     }
 
-    /// Within one DGD, a model left with no workers gives way to its rename.
-    /// In a broad scope another model may be a different deployment, so the
-    /// pin holds until the pinned model returns.
+    /// Within one DGD every generation serves its own model, so a rollout
+    /// that renames the model serves both names until the old one drains.
     #[test]
-    fn tracker_moves_the_pin_only_within_one_deployment() {
+    fn tracker_serves_every_generation_of_one_deployment() {
         let old = decode("dgd-aaaaaaaa", 1, "model-a");
         let renamed = decode("dgd-bbbbbbbb", 2, "model-b");
-
         let mut tracker = GenerationTracker::new(dgd());
         assert_eq!(summarize(&tracker.on_added(&old)), ["+dgd-aaaaaaaa"]);
-        assert!(tracker.on_added(&renamed).is_empty(), "one model at a time");
-        assert_eq!(
-            summarize(&tracker.on_removed(&old.id())),
-            ["+dgd-bbbbbbbb", "-dgd-aaaaaaaa"]
-        );
+        assert_eq!(summarize(&tracker.on_added(&renamed)), ["+dgd-bbbbbbbb"]);
+        assert_eq!(summarize(&tracker.on_removed(&old.id())), ["-dgd-aaaaaaaa"]);
+    }
 
+    /// A broad scope can hold unrelated deployments, so it serves the first
+    /// model for good, even while that model has no workers.
+    #[test]
+    fn tracker_pins_one_model_in_a_broad_scope() {
+        let first = decode("team-a", 1, "model-a");
+        let other = decode("team-b", 2, "model-b");
         let mut tracker = GenerationTracker::new(scope(
             NamespaceFilter::Global,
             NamespacePrefixMode::WorkerGeneration,
         ));
-        assert_eq!(summarize(&tracker.on_added(&old)), ["+dgd-aaaaaaaa"]);
-        assert!(tracker.on_added(&renamed).is_empty());
-        assert_eq!(summarize(&tracker.on_removed(&old.id())), ["-dgd-aaaaaaaa"]);
-        assert_eq!(summarize(&tracker.on_added(&old)), ["+dgd-aaaaaaaa"]);
+        assert_eq!(summarize(&tracker.on_added(&first)), ["+team-a"]);
+        assert!(tracker.on_added(&other).is_empty());
+        assert_eq!(summarize(&tracker.on_removed(&first.id())), ["-team-a"]);
+        assert!(tracker.on_resync(&[other]).is_empty());
+        assert_eq!(summarize(&tracker.on_added(&first)), ["+team-a"]);
     }
 
-    /// `(name, workers, prefill_active)`, chosen with `roll` capped to the
-    /// weight being rolled over.
-    fn choose(generations: &[(&'static str, usize, bool)], roll: usize) -> Option<&'static str> {
-        choose_generation(generations, |g| g.1, |g| g.2, |total| roll.min(total - 1)).map(|g| g.0)
+    /// `(name, workers, ready, serves the requested model)`, chosen with
+    /// `roll` capped to the weight being rolled over.
+    fn choose(
+        generations: &[(&'static str, usize, bool, bool)],
+        roll: usize,
+    ) -> Option<&'static str> {
+        choose_generation(
+            generations,
+            |g| g.3,
+            |g| g.2,
+            |g| g.1,
+            |total| roll.min(total - 1),
+        )
+        .map(|g| g.0)
     }
 
     #[test]
     fn choose_generation_follows_capacity() {
-        let both = [("old", 3, false), ("new", 1, false)];
+        let both = [("old", 3, true, false), ("new", 1, true, false)];
         assert_eq!(choose(&both, 0), Some("old"));
         assert_eq!(choose(&both, 2), Some("old"));
         assert_eq!(choose(&both, 3), Some("new"));
         assert_eq!(
-            choose(&[("old", 0, false), ("new", 4, false)], 0),
+            choose(&[("old", 0, true, false), ("new", 4, true, false)], 0),
             Some("new"),
             "a drained generation gets no traffic"
         );
         assert_eq!(
-            choose(&[("old", 0, false), ("new", 0, false)], 0),
+            choose(&[("old", 0, true, false), ("new", 0, true, false)], 0),
             Some("old"),
             "with no workers anywhere the first generation reports why"
         );
-        assert_eq!(choose(&[("only", 0, false)], 0), Some("only"));
+        assert_eq!(choose(&[("only", 0, false, false)], 0), Some("only"));
         assert_eq!(choose(&[], 0), None);
     }
 
-    /// A disaggregated rollout keeps traffic off a generation until its
-    /// prefill router is active, unless nothing else has workers.
+    /// Each generation's readiness is its own: a disaggregated generation
+    /// waits for its own prefill router, whatever the other generation is.
     #[test]
-    fn choose_generation_waits_for_the_prefill_router() {
+    fn choose_generation_judges_each_generation_on_its_own() {
+        let pending_disagg = [("aggregated", 8, true, false), ("disagg", 2, false, false)];
+        assert_eq!(choose(&pending_disagg, 9), Some("aggregated"));
+        let ready_disagg = [("aggregated", 8, true, false), ("disagg", 2, true, false)];
         assert_eq!(
-            choose(&[("old", 2, true), ("new", 6, false)], 7),
-            Some("old")
+            choose(&ready_disagg, 7),
+            Some("aggregated"),
+            "a ready generation is weighted by capacity, not given every request"
+        );
+        assert_eq!(choose(&ready_disagg, 9), Some("disagg"));
+        assert_eq!(
+            choose(
+                &[("disagg", 2, true, false), ("aggregated", 6, true, false)],
+                7
+            ),
+            Some("aggregated"),
+            "an aggregated generation is not held back by a disaggregated one"
         );
         assert_eq!(
-            choose(&[("old", 2, true), ("new", 6, true)], 7),
-            Some("new")
-        );
-        assert_eq!(
-            choose(&[("old", 0, true), ("new", 6, false)], 5),
+            choose(&[("old", 0, true, false), ("new", 6, false, false)], 5),
             Some("new"),
-            "aggregated beats no route at all"
+            "serving aggregated beats no route at all"
         );
+    }
+
+    /// A request goes to a generation serving its model when one does, ready
+    /// or not, and anywhere when none does.
+    #[test]
+    fn choose_generation_routes_by_requested_model() {
+        assert_eq!(
+            choose(
+                &[("model-a", 4, true, false), ("model-b", 1, true, true)],
+                3
+            ),
+            Some("model-b")
+        );
+        assert_eq!(
+            choose(
+                &[("model-a", 4, true, false), ("model-b", 1, false, true)],
+                3
+            ),
+            Some("model-b")
+        );
+        assert_eq!(
+            choose(
+                &[("model-a", 4, true, false), ("model-b", 0, true, true)],
+                3
+            ),
+            Some("model-b")
+        );
+        assert_eq!(
+            choose(
+                &[("model-a", 3, true, false), ("model-b", 1, true, false)],
+                3
+            ),
+            Some("model-b")
+        );
+    }
+
+    #[test]
+    fn needs_prefill_only_when_every_alternative_does() {
+        use WorkerType::{Encode, Prefill};
+        assert!(!needs_prefill(&[]), "aggregated workers need nothing");
+        assert!(needs_prefill(&[vec![Prefill]]));
+        assert!(needs_prefill(&[vec![Prefill, Encode]]));
+        assert!(!needs_prefill(&[vec![Prefill], vec![Encode]]));
     }
 
     type TestBuild = fn(
