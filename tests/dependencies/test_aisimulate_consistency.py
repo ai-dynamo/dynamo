@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tomllib
 from importlib import metadata
 from pathlib import Path
 
@@ -17,11 +18,6 @@ from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 from tests.wheels.smoke_install import AISIMULATE_FIND_LINKS
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
 
 pytestmark = [
     pytest.mark.gpu_0,
