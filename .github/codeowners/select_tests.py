@@ -228,13 +228,46 @@ def classify_paths(
     )
 
 
-def _full_result(mode: str, event: str, pr: int | None, reason: str) -> dict[str, Any]:
+def _feature_marker_universe(policy: Any) -> list[str]:
+    if not isinstance(policy, dict):
+        return []
+    selection = policy.get("test_selection", {})
+    if not isinstance(selection, dict):
+        return []
+    features = selection.get("features", {})
+    if not isinstance(features, dict):
+        return []
+    markers = set()
+    for feature in features.values():
+        if not isinstance(feature, dict):
+            continue
+        configured = feature.get("markers", [])
+        if isinstance(configured, (list, tuple, set)):
+            markers.update(marker for marker in configured if isinstance(marker, str))
+    return sorted(markers)
+
+
+def _full_result(
+    mode: str,
+    event: str,
+    pr: int | None,
+    reason: str,
+    *,
+    policy: dict[str, Any] | None = None,
+    policy_path: Path = DEFAULT_POLICY,
+) -> dict[str, Any]:
+    if policy is None:
+        try:
+            loaded_policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, yaml.YAMLError):
+            loaded_policy = {}
+        policy = loaded_policy if isinstance(loaded_policy, dict) else {}
     return {
         "version": 1,
         "mode": mode,
         "event": event,
         "pr": pr,
-        "feature_markers": [],
+        "feature_markers": _feature_marker_universe(policy),
         "frameworks": {
             framework: {
                 "decision": "full",
@@ -283,7 +316,7 @@ def select_changed_files(
     if labels is not None and FULL_TEST_LABEL in labels:
         full_reasons.add(FULL_TEST_LABEL)
 
-    feature_markers = sorted(set().union(*markers.values()))
+    feature_markers = _feature_marker_universe(policy)
     selected_frameworks: dict[str, dict[str, Any]] = {}
     for framework in FRAMEWORKS:
         framework_reasons = set(reasons[framework])
@@ -410,6 +443,7 @@ def main(argv: list[str] | None = None) -> int:
     normalized_mode = "selective" if args.mode == "selective" else "shadow"
     pr: int | None = args.pr
     selection: dict[str, Any]
+    policy: dict[str, Any] | None = None
 
     try:
         changed_files = list(args.changed_file)
@@ -444,7 +478,14 @@ def main(argv: list[str] | None = None) -> int:
             write_summary(args.summary_file, selection)
     except Exception as exc:
         print(f"::warning::Test selection failed closed: {exc}", file=sys.stderr)
-        selection = _full_result(normalized_mode, event, pr, f"selector-error: {exc}")
+        selection = _full_result(
+            normalized_mode,
+            event,
+            pr,
+            f"selector-error: {exc}",
+            policy=policy,
+            policy_path=args.policy,
+        )
         if args.summary_file:
             try:
                 write_summary(args.summary_file, selection)

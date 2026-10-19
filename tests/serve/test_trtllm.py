@@ -169,7 +169,6 @@ trtllm_configs = {
         script_name="disagg_same_gpu.sh",
         marks=[
             pytest.mark.core,
-            pytest.mark.smoke,
             pytest.mark.skip(
                 reason="Nightly CI failure: https://linear.app/nvidia/issue/OPS-4450"
             ),

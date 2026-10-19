@@ -185,8 +185,13 @@ cd "${CONTAINER_WORKSPACE}"
 TEST_EXIT_CODE=0
 python -m pytest "${pytest_args[@]}" || TEST_EXIT_CODE=$?
 if [[ "${TEST_EXIT_CODE}" -eq 5 && "${DYNAMO_CI_TEST_SELECTION_MODE:-}" == "selective" ]]; then
-  echo "✅ No tests selected in selective mode."
-  TEST_EXIT_CODE=0
+  SELECTION_REPORT="${TEST_RESULTS_DIR}/ci_test_selection_${TEST_TYPE}.json"
+  if [[ -f "${SELECTION_REPORT}" ]] && python3 -c \
+    'import json, sys; from pathlib import Path; report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")); sys.exit(0 if isinstance(report, dict) and report.get("intentional_empty") is True else 1)' \
+    "${SELECTION_REPORT}" > /dev/null 2>&1; then
+    echo "✅ No tests selected in selective mode."
+    TEST_EXIT_CODE=0
+  fi
 fi
 echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 

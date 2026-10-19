@@ -66,6 +66,7 @@ def _write_report(
     collected: list[pytest.Item],
     would_run: list[pytest.Item],
     would_skip: list[pytest.Item],
+    intentional_empty: bool,
 ) -> None:
     safe_test_type = re.sub(r"[^A-Za-z0-9_.-]", "_", test_type or "unknown")
     output = (
@@ -83,6 +84,7 @@ def _write_report(
         "collected": len(collected),
         "would_run": [item.nodeid for item in would_run],
         "would_skip": [item.nodeid for item in would_skip],
+        "intentional_empty": intentional_empty,
     }
     output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
@@ -164,6 +166,7 @@ def pytest_collection_modifyitems(
             original,
             would_run,
             would_skip,
+            False,
         )
         if diagnostic:
             _stderr_line(diagnostic)
@@ -177,9 +180,23 @@ def pytest_collection_modifyitems(
                 print(f"  would skip: {item.nodeid}")
             return
 
-        if selection_decision == "selective" and would_skip:
+        if mode == "selective" and selection_decision == "selective" and would_skip:
             config.hook.pytest_deselected(items=would_skip)
             items[:] = would_run
+            if original and not would_run:
+                _write_report(
+                    config,
+                    framework,
+                    test_type,
+                    pytest_marks,
+                    selection_decision,
+                    reasons,
+                    original,
+                    would_run,
+                    would_skip,
+                    True,
+                )
+
     except Exception as exc:
         try:
             items[:] = original
