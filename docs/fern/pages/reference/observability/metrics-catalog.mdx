@@ -375,7 +375,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_session_affinity_decisions_total" type="counter">
-  Dispatched requests that have a session ID when [session affinity](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity) is enabled. The labels are `phase` (`aggregated`, `prefill`, `decode`) and `outcome`:
+  **Experimental.** Dispatched requests that have a session ID. The router exports this metric only when [session affinity](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity) is enabled. The labels are `phase` (`aggregated`, `prefill`, `decode`) and `outcome`:
 
   - `new`: The session had no live binding, so the router selected a worker.
   - `followed`: The request went to the bound worker, and to the bound DP rank if there is one.

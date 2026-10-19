@@ -436,6 +436,9 @@ impl RoutingHost {
         // and the standalone router create RoutingHost, so this covers both.
         let request_metrics =
             RouterRequestMetrics::from_component(kv_router.client().endpoint.component());
+        if affinity.is_some() {
+            request_metrics.precreate_session_affinity_decisions();
+        }
 
         RoutingHost {
             inner,
@@ -514,6 +517,9 @@ impl RoutingHost {
         });
         let request_metrics =
             RouterRequestMetrics::from_component(inner.client.endpoint.component());
+        if affinity.is_some() {
+            request_metrics.precreate_session_affinity_decisions();
+        }
         Ok(Self {
             inner,
             policy,

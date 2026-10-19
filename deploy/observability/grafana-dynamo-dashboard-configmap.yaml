@@ -2922,10 +2922,73 @@ data:
           "type": "timeseries"
         },
         {
-          "collapsed": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Session-affinity requests by outcome. new and rerouted are new routing decisions. followed is a request that went to its bound worker. The router exports this metric only when session affinity is enabled.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 20,
+                "lineWidth": 1,
+                "showPoints": "never",
+                "stacking": {
+                  "group": "A",
+                  "mode": "normal"
+                }
+              },
+              "unit": "reqps",
+              "noValue": "0"
+            },
+            "overrides": []
+          },
           "gridPos": {
             "x": 0,
             "y": 63,
+            "w": 8,
+            "h": 8
+          },
+          "id": 112,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "11.5.2",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (phase, outcome) (rate(dynamo_component_router_session_affinity_decisions_total[$__rate_interval]))",
+              "legendFormat": "{{phase}} | {{outcome}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Session Affinity Decisions",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 71,
             "w": 24,
             "h": 1
           },
@@ -2999,7 +3062,7 @@ data:
           },
           "gridPos": {
             "x": 0,
-            "y": 64,
+            "y": 72,
             "w": 8,
             "h": 8
           },
@@ -3121,7 +3184,7 @@ data:
           },
           "gridPos": {
             "x": 8,
-            "y": 64,
+            "y": 72,
             "w": 8,
             "h": 8
           },
@@ -3262,7 +3325,7 @@ data:
           },
           "gridPos": {
             "x": 16,
-            "y": 64,
+            "y": 72,
             "w": 8,
             "h": 8
           },

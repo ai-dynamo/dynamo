@@ -9,3 +9,11 @@
 - `routing_host.rs` owns selection, dispatch, and response cleanup. `routing_host/kv_selection.rs` chooses KV-routed workers, `routing_host/request_guard.rs` tracks progress and cleanup, and `routing_host/cancellation.rs` stops unfinished work when the client cancels.
 - `prefill_router/` optionally runs a request on a prefill worker before sending it to decode.
 - `encoder_router.rs` optionally runs multimodal inputs through an encoder worker before token generation.
+
+## Metrics
+
+- `dynamo_component_router_session_affinity_decisions_total{phase, outcome}` (experimental) counts dispatched requests that have a session ID. `RoutingHost::bind_affinity` records it after the binding commits. The router exports it only when session affinity is enabled.
+  - `new`: the session had no live binding, so the router selected a worker.
+  - `followed`: the request went to its bound worker.
+  - `rerouted`: soft mode sent the request to a different worker or DP rank.
+- Use it to see how often the router makes a new routing decision: `sum by (phase, outcome) (rate(dynamo_component_router_session_affinity_decisions_total[5m]))`. The "Session Affinity Decisions" panel of the Dynamo Grafana dashboard shows this query.

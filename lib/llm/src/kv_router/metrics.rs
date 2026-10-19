@@ -1288,6 +1288,21 @@ impl RouterRequestMetrics {
             .inc_by(selected_tokens);
         self.kv_worker_reused_tokens.with_label_values(labels)
     }
+
+    /// Export zero for each session-affinity phase and outcome, so `rate()`
+    /// works from the first scrape.
+    pub(crate) fn precreate_session_affinity_decisions(&self) {
+        for phase in [
+            RequestPhase::Aggregated,
+            RequestPhase::Prefill,
+            RequestPhase::Decode,
+        ] {
+            for outcome in ["new", "followed", "rerouted"] {
+                self.session_affinity_decisions_total
+                    .with_label_values(&[phase.as_str(), outcome]);
+            }
+        }
+    }
 }
 
 /// Process-local observability for the experimental approximate LRU.
@@ -1596,17 +1611,21 @@ mod tests {
     fn session_affinity_decisions_are_labeled_by_phase_and_outcome() {
         let registry = dynamo_runtime::MetricsRegistry::new();
         let metrics = RouterRequestMetrics::for_test(&registry);
+        metrics.precreate_session_affinity_decisions();
         metrics
             .session_affinity_decisions_total
             .with_label_values(&["prefill", "rerouted"])
             .inc();
         let output = registry.prometheus_expfmt_combined().unwrap();
-        assert!(
-            output.contains(
-                "router_session_affinity_decisions_total{outcome=\"rerouted\",phase=\"prefill\"} 1\n"
-            ),
-            "{output}"
-        );
+        for sample in [
+            "{outcome=\"rerouted\",phase=\"prefill\"} 1\n",
+            "{outcome=\"new\",phase=\"decode\"} 0\n",
+        ] {
+            assert!(
+                output.contains(&format!("router_session_affinity_decisions_total{sample}")),
+                "{output}"
+            );
+        }
     }
 
     fn gather_pef(registry: &prometheus::Registry) -> String {
