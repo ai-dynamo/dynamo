@@ -10,9 +10,8 @@
 # Pods restore, and snapshot readiness does not restart existing workers.
 #
 # Use the same TensorRT-LLM runtime image for capture and restore, and a
-# matching frontend image. The operator restores only direct
-# `python3 -m dynamo.trtllm` entrypoints. Omit the deprecated checkpoint.mode
-# and checkpoint.identity fields.
+# matching frontend image. Omit the deprecated checkpoint.mode and
+# checkpoint.identity fields.
 #
 # Requirements validated for the single-GPU TRTLLM path:
 # - Install standalone Snapshot and enable checkpoint support in the Dynamo

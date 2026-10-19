@@ -23,8 +23,8 @@ using another backend or topology.
   [driver, runtime, and privilege requirements](https://github.com/ai-dynamo/snapshot/tree/v0.1.0#prerequisites).
 - A storage class that supports `ReadWriteMany` (RWX) for Snapshot artifacts, and a
   writable `model-cache` PersistentVolumeClaim (PVC) in the workload namespace.
-  These are separate volumes. Use `ReadWriteMany` for `model-cache` too, unless
-  the capture and serving Pods always run on the same node. See
+  These are separate volumes. `model-cache` also needs `ReadWriteMany` unless
+  the capture and serving Pods run on the same node. See
   [Model Storage](../../installation/model-storage/overview.md).
 - `helm`, `kubectl`, `curl`, and `jq`, plus access to the runtime image registry and
   Hugging Face. The capture Pod downloads the model if it is not cached.

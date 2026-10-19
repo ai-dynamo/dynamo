@@ -83,8 +83,7 @@ The following diagram illustrates same-node process-level recovery:
   as a complete failover workflow.
 - Do not use it for hardware failure, GPU loss, node loss, cross-node recovery,
   in-flight request recovery, or KV-cache recovery.
-- Do not combine it with Snapshot. The operator rejects a component that sets
-  both `checkpoint.enabled: true` and `failover`.
+- Do not combine it with Snapshot. A component cannot enable both.
 
 ## GPU Memory Service
 
@@ -117,7 +116,7 @@ The backend integrations rely on inference-engine changes that are still being u
 | **SGLang** | Not supported | Not supported | Not supported | Not supported |
 | **TensorRT-LLM** | Not supported | Not supported | Not supported | Not supported |
 
-The operator supports failover only for vLLM workers. It reports a reconcile error for other backends.
+Failover is available only for vLLM workers.
 
 KV-cache reuse means remapping the existing cache into the standby engine so in-flight requests can
 continue after failover. Hardware fault tolerance requires placing the active and standby engines on
@@ -142,8 +141,8 @@ For the cross-feature backend overview, see [Compatibility](../../../../referenc
 - It does not diagnose or fix the backend failure.
 - It does not preserve in-flight requests, network sockets, or KV cache state.
 - It does not make Snapshot restore supported for GPU memory workloads.
-- Admission rejects Snapshot (`checkpoint.enabled: true`) combined with
-  `failover`, or with `gpuMemoryService` in `InterPod` mode.
+- Snapshot cannot be combined with failover, or with GPU Memory Service in
+  `InterPod` mode.
 - It is not covered by the normal v1beta1 compatibility guarantees while it
   lives under `experimental`.
 
