@@ -1144,6 +1144,22 @@ mod tests_non_nixl {
         panic!("error chain did not contain InvalidArgument: {error}");
     }
 
+    /// Reads the request head so the test server never closes with unread
+    /// request bytes, which would reset the connection instead of closing it.
+    async fn read_request_head(connection: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt;
+
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let n = connection.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..n]);
+        }
+    }
+
     #[test]
     fn media_input_error_keeps_classified_errors() {
         let host_fault: anyhow::Error = DynamoError::builder()
@@ -1494,6 +1510,7 @@ mod tests_non_nixl {
         let source_port = source.local_addr().unwrap().port();
         let source_task = tokio::spawn(async move {
             let (mut connection, _) = source.accept().await.unwrap();
+            read_request_head(&mut connection).await;
             let response = format!(
                 "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             );
@@ -1537,6 +1554,7 @@ mod tests_non_nixl {
         let source_task = tokio::spawn(async move {
             loop {
                 let (mut connection, _) = source.accept().await.unwrap();
+                read_request_head(&mut connection).await;
                 let response = format!(
                     "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{source_port}/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 );

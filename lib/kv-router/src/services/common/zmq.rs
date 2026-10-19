@@ -51,7 +51,11 @@ pub(crate) struct ZmqSocket(AsyncFd<SocketWrapper>);
 
 impl ZmqSocket {
     fn new(socket: zmq::Socket) -> Result<Self> {
-        Ok(Self(AsyncFd::new(SocketWrapper::new(socket)?)?))
+        let wrapper = SocketWrapper::new(socket)?;
+        // SAFETY: `fd` is the socket's `ZMQ_FD`, owned by the `zmq::Socket` that the wrapper
+        // owns, so it stays open until the wrapper is dropped, and `as_raw_fd` always returns it.
+        let fd = unsafe { AsyncFd::register(wrapper) }.map_err(std::io::Error::from)?;
+        Ok(Self(fd))
     }
 
     fn socket(&self) -> &zmq::Socket {
