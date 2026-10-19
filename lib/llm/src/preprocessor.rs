@@ -2257,6 +2257,32 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
+    /// Families verified to have no supported non-thinking generation mode.
+    fn reasoning_is_mandatory(family: Option<&str>) -> bool {
+        matches!(family, Some("beam"))
+    }
+
+    /// Validate the client's effective reasoning toggle against the model's policy.
+    fn validate_reasoning_request(&self, request: &NvCreateChatCompletionRequest) -> Result<()> {
+        let family = crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
+        if Self::reasoning_is_mandatory(family)
+            && Self::normalize_thinking_aliases(request.chat_template_args.as_ref(), family)
+                == Some(false)
+        {
+            let message = "The selected model does not support disabling reasoning. Remove the reasoning-off setting (thinking, enable_thinking, thinking_mode, or reasoning_effort=none).";
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(message)
+                .public_message(message)
+                .build()
+                .into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn has_structured_response_format<R: OAIChatLikeRequest>(request: &R) -> bool {
         request.response_format().is_some_and(|format| {
             format
@@ -6889,6 +6915,9 @@ impl OpenAIPreprocessor {
         default_thinking_mode: Option<&str>,
         unified_family: Option<&str>,
     ) -> bool {
+        if Self::reasoning_is_mandatory(unified_family) {
+            return false;
+        }
         let mut chat_template_args = request.chat_template_args.clone();
         let from_client = Self::request_has_client_thinking_control(request);
         let constrained_generation = !from_client
@@ -7766,6 +7795,7 @@ impl
         // it can override an implicit model default (for example Kimi K2.5),
         // while explicit request controls still take precedence.
         let thinking_control_from_client = Self::request_has_client_thinking_control(&request);
+        self.validate_reasoning_request(&request)?;
         self.apply_default_thinking_mode(&mut request);
         Self::normalize_thinking_arg_with_source(
             &mut request,
@@ -13792,6 +13822,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn beam_reasoning_off_is_rejected_before_backend_dispatch() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.model_type = crate::model_type::ModelType::Chat;
+        mdc.runtime_config.tool_call_parser = Some("beam".to_string());
+        mdc.runtime_config.reasoning_parser = Some("beam".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        for extra in [
+            serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
+            serde_json::json!({"chat_template_kwargs": {"thinking": false}}),
+            serde_json::json!({"chat_template_args": {"thinking": false}}),
+            serde_json::json!({"chat_template_kwargs": {"thinking_mode": "disabled"}}),
+            serde_json::json!({"thinking": {"type": "disabled"}}),
+            serde_json::json!({"reasoning_effort": "none"}),
+            serde_json::json!({"chat_template_kwargs": {"reasoning_effort": "none"}}),
+        ] {
+            for streaming in [false, true] {
+                let mut body = serde_json::json!({
+                    "model": "test-model", "messages": [{"role": "user", "content": "hi"}],
+                    "stream": streaming
+                });
+                body.as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                let mut request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(body).unwrap();
+                request.normalize_reasoning_template_args().unwrap();
+                let error = match Operator::generate(
+                    preprocessor.as_ref(),
+                    PipelineContext::new(request),
+                    Arc::new(UnreachableBackend),
+                )
+                .await
+                {
+                    Ok(_) => panic!("reasoning-off request must fail before dispatch"),
+                    Err(error) => error,
+                };
+                let error = error.downcast_ref::<DynamoError>().unwrap();
+                assert!(matches!(
+                    crate::http::service::error::http_action_for_error(error),
+                    crate::http::service::error::ClientErrorAction::Respond {
+                        status: axum::http::StatusCode::BAD_REQUEST,
+                        ..
+                    }
+                ));
+                let message = error.public_message().unwrap();
+                assert!(
+                    message.contains("The selected model does not support disabling reasoning"),
+                    "{message}"
+                );
+                assert!(message.contains("Remove"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_completion_operator_rejects_token_budget_overflow() {
         let mut mdc = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
@@ -16240,6 +16330,57 @@ mod beam_route_tests {
             body["preserve_thinking"] = serde_json::json!(value);
         }
         serde_json::from_value(body).unwrap()
+    }
+
+    #[test]
+    fn beam_reasoning_validation_keeps_history_controls_and_other_families() {
+        let mut beam = synthetic_preprocessor(true, HISTORY_TEMPLATE);
+        beam.tool_call_parser = Some("beam".into());
+        beam.runtime_config.reasoning_parser = Some("beam".into());
+        for extra in [
+            serde_json::json!({}),
+            serde_json::json!({"reasoning_effort": null}),
+            serde_json::json!({"chat_template_kwargs": {"reasoning_effort": null}}),
+            serde_json::json!({"reasoning_effort": "low"}),
+            serde_json::json!({"chat_template_kwargs": {"thinking": true}}),
+            serde_json::json!({"chat_template_kwargs": {"enable_thinking": true}}),
+            serde_json::json!({"chat_template_kwargs": {"thinking": true, "enable_thinking": false}}),
+            serde_json::json!({"chat_template_kwargs": {"preserve_thinking": false}}),
+            serde_json::json!({"chat_template_kwargs": {"allow_missing_thinking": false}}),
+        ] {
+            let mut body = serde_json::to_value(history_request(Some(false))).unwrap();
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(body).unwrap();
+            request.normalize_reasoning_template_args().unwrap();
+            beam.apply_preserve_thinking(&mut request).unwrap();
+            beam.validate_reasoning_request(&request).unwrap();
+            let rendered = beam.apply_template(&request).unwrap().unwrap();
+            assert!(rendered.as_str().contains("SENTINEL_THOUGHT"), "{extra}");
+        }
+
+        let other = synthetic_preprocessor(false, HISTORY_TEMPLATE);
+        let mut request = history_request(None);
+        request.chat_template_args = Some(HashMap::from([(
+            "enable_thinking".into(),
+            serde_json::json!(false),
+        )]));
+        request.normalize_reasoning_template_args().unwrap();
+        other.validate_reasoning_request(&request).unwrap();
+        for (family, disabled) in [("beam", false), ("qwen3", true)] {
+            assert_eq!(
+                OpenAIPreprocessor::request_disables_reasoning_with_family(
+                    &request,
+                    Some(family),
+                    Some(family),
+                    None,
+                    Some(family),
+                ),
+                disabled,
+                "{family}"
+            );
+        }
     }
 
     #[test]
