@@ -218,6 +218,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sparse_backend_usage_preserves_metadata_and_counts_interleaved_tokens() {
+        let mut state = DeltaGeneratorState::new(
+            "request".into(),
+            "chat.completion.chunk".into(),
+            "model".into(),
+            DeltaGeneratorOptions {
+                enable_usage: true,
+                continuous_usage_stats: true,
+                ..Default::default()
+            },
+        );
+        let chunks = [
+            serde_json::json!({
+                "index": 0, "token_ids": [1], "tokens": ["a"],
+                "completion_usage": {
+                    "prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4,
+                    "prompt_tokens_details": {"cached_tokens": 0}
+                }
+            }),
+            serde_json::json!({"index": 1, "token_ids": [2, 3], "tokens": ["b", "c"]}),
+            serde_json::json!({
+                "index": 0, "token_ids": [4], "tokens": ["d"],
+                "completion_usage": {
+                    "prompt_tokens": 4, "completion_tokens": 4, "total_tokens": 8,
+                    "prompt_tokens_details": {"cached_tokens": 2}
+                }
+            }),
+            serde_json::json!({"index": 1, "token_ids": [5], "tokens": ["e"]}),
+            serde_json::json!({
+                "index": 0, "token_ids": [], "tokens": [], "finish_reason": "stop",
+                "completion_usage": {
+                    "prompt_tokens": 4, "completion_tokens": 5, "total_tokens": 9
+                }
+            }),
+        ];
+        for (chunk, (prompt_tokens, completion_tokens, cached_tokens)) in
+            chunks
+                .into_iter()
+                .zip([(3, 1, 0), (3, 3, 0), (4, 4, 2), (4, 5, 2), (4, 5, 2)])
+        {
+            let output: BackendOutput = serde_json::from_value(chunk).unwrap();
+            state.update_usage_from_backend_output(&output);
+            let usage = state.get_usage();
+            assert_eq!(usage.prompt_tokens, prompt_tokens);
+            assert_eq!(usage.completion_tokens, completion_tokens);
+            assert_eq!(usage.total_tokens, prompt_tokens + completion_tokens);
+            assert_eq!(
+                usage.prompt_tokens_details.unwrap().cached_tokens,
+                Some(cached_tokens)
+            );
+        }
+    }
+
+    #[test]
     fn force_include_usage_inserts_missing_options() {
         let mut options = None;
 
