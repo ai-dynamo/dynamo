@@ -111,8 +111,7 @@ async fn e2e_real_disagg_handoff() {
     );
 }
 
-/// Exercises the same real prefill/decode handoff with an image request. Both
-/// servers may share one sufficiently large GPU for local validation.
+/// Both servers may share one sufficiently large GPU for local validation.
 ///
 /// ```text
 /// TRTLLM_E2E_PREFILL_ENDPOINT=http://127.0.0.1:50051 \
@@ -304,10 +303,9 @@ async fn e2e_real_openengine_server() {
     );
 }
 
-/// Drives an image request through the real Rust sidecar conversion layer and
-/// a live TensorRT-LLM OpenEngine server. The fixed token IDs are Qwen3-VL's
-/// chat-template rendering of one image marker and a short question; the tiny
-/// PNG is split red/blue so a manual run also produces an obvious answer.
+/// The fixed token IDs are Qwen3-VL's chat-template rendering of one image
+/// marker and a short question. The tiny PNG is split red/blue so a manual run
+/// produces an obvious answer.
 ///
 /// ```text
 /// TRTLLM_E2E_ENDPOINT=http://127.0.0.1:50051 \

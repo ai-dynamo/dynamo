@@ -59,9 +59,8 @@ fn prefill_request_is_marked_context_only() {
     assert!(proto.kv.is_none(), "prefill carries no session to replay");
 }
 
-/// Image inputs must survive both RPC legs. TensorRT-LLM reconstructs its
-/// multimodal position/hash state while resuming the KV session, so the decode
-/// request needs the same ordered media metadata as the context request.
+/// TensorRT-LLM needs the same ordered media metadata to reconstruct
+/// multimodal position/hash state when resuming the KV session.
 #[test]
 fn image_media_is_preserved_across_prefill_and_decode_requests() {
     let mut req = request();
