@@ -214,13 +214,22 @@ fn pin_to_placement(preprocessed: &mut PreprocessedRequest, placement: Placement
     routing.dp_rank = Some(placement.dp_rank);
 }
 
-#[expect(dead_code, reason = "Called by the decision HTTP adapter")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Called by the decision HTTP adapter")
+)]
 async fn handle_request(
     state: Arc<service_v2::State>,
     request_id: String,
     request: CanonicalRequest,
 ) -> Response {
     let dialect = request.dialect;
+    if request.questions.is_empty() {
+        return decision_error(DecisionError::validation(
+            dialect,
+            "request must contain at least one question",
+        ));
+    }
     let deadline = tokio::time::Instant::now() + state.systemone_request_timeout();
     if super::openai::check_ready(&state).is_err() {
         return error(

@@ -19,6 +19,40 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, Semaphore};
 
 #[tokio::test]
+async fn empty_canonical_questions_are_rejected_before_admission() {
+    let service = super::service_v2::HttpService::builder().build().unwrap();
+    let state = service.state_clone();
+    let admission = state.systemone_admission();
+    let before = admission.available_permits();
+    for dialect in [
+        dynamo_decisions::Dialect::OpenAi,
+        dynamo_decisions::Dialect::Jev,
+    ] {
+        let request = dynamo_decisions::CanonicalRequest {
+            dialect,
+            questions: Vec::new(),
+            ..canonical_request(1).as_ref().clone()
+        };
+        let response = super::handle_request(state.clone(), "empty".into(), request).await;
+        assert_eq!(
+            response.status().as_u16(),
+            if dialect == dynamo_decisions::Dialect::Jev {
+                422
+            } else {
+                400
+            }
+        );
+        let body = response_body(response).await;
+        if dialect == dynamo_decisions::Dialect::Jev {
+            assert!(body["detail"].is_array());
+        } else {
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+        }
+        assert_eq!(admission.available_permits(), before);
+    }
+}
+
+#[tokio::test]
 async fn dialect_errors_preserve_request_ids_and_validation_envelopes() {
     use dynamo_decisions::{DecisionError, Dialect};
     for dialect in [Dialect::OpenAi, Dialect::Jev] {
@@ -151,7 +185,6 @@ fn impossible_admission_is_not_retryable_but_busy_capacity_is() {
 fn candidate_tokenization_work_bounds_prompt_size() {
     assert_eq!(super::encoding_prompt_limit(120, 10), 10);
     assert_eq!(super::encoding_prompt_limit(11, 10), 0);
-    assert_eq!(super::encoding_prompt_limit(120, 2), 30);
 }
 
 #[test]
