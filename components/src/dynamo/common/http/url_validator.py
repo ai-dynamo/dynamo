@@ -18,6 +18,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import re
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -124,16 +125,20 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     A ``data:`` URI carries the whole media payload inline, so echoing one into
     an error message serializes megabytes of base64 -- to the client, and to
     every log sink that records the failure. Describe those by media type and
-    size instead, never by content. Other sources are truncated, since a URL
-    identifies the request without being unbounded.
+    size instead, never by content. HTTP credentials, queries and fragments
+    are omitted, and other sources are truncated.
 
     Lives here rather than in ``multimodal.media_source`` so the validators
     below can bound their own messages: importing that package pulls in torch.
     """
     if not isinstance(source, str):
         return "<non-string media source>"
-    if source.startswith("data:"):
-        meta = source[len("data:") :].partition(",")[0]
+    try:
+        parsed = urlparse(source)
+    except ValueError:
+        return f"<invalid media source> ({len(source)} chars)"
+    if parsed.scheme == "data":
+        meta = parsed.path.partition(",")[0]
         media_type = meta.split(";")[0] or "application/octet-stream"
         # The media-type field is client-supplied and unbounded: a reference of
         # ``"data:" + "A" * 200_000 + ",AAAA"`` puts all of it here, so eliding
@@ -142,9 +147,27 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
         if len(media_type) > limit:
             media_type = f"{media_type[:limit]}... ({len(media_type)} chars)"
         return f"data:{media_type} ({len(source)} chars, payload elided)"
+    if parsed.scheme in ("http", "https"):
+        source = parsed._replace(
+            netloc=parsed.netloc.rsplit("@", 1)[-1], query="", fragment=""
+        ).geturl()
     if len(source) > limit:
         return f"{source[:limit]}... ({len(source)} chars)"
     return source
+
+
+# A URL embedded in free text: a scheme, then everything up to whitespace, a
+# double quote or an angle bracket (how exception messages delimit a URL).
+# Apostrophes, square brackets and parentheses are part of the match: an IPv6
+# host is bracketed and a path or query can contain any of them, so stopping
+# there would leave the rest of the URL, query included, unredacted. Anything
+# the match over-captures (a closing quote, say) only ends up in a bounded label.
+_URL_IN_TEXT: Final = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s\"<>]+")
+
+
+def mentions_url(text: str) -> bool:
+    """Whether ``text`` contains a URL that :func:`describe_error_detail` would bound."""
+    return isinstance(text, str) and _URL_IN_TEXT.search(text) is not None
 
 
 def describe_error_detail(detail: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
@@ -154,9 +177,15 @@ def describe_error_detail(detail: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     end: aiohttp renders the client-supplied host *before* the errno, so a
     head-only truncation would keep the attacker's string and drop the
     diagnosis.
+
+    Any URL inside the text is first rendered with :func:`describe_media_source`.
+    Some exceptions (an invalid URL, for one) quote the full request URL, and
+    keeping the end of the text would otherwise keep the end of a presigned
+    URL: its signature.
     """
     if not isinstance(detail, str):
         return "<non-string error detail>"
+    detail = _URL_IN_TEXT.sub(lambda match: describe_media_source(match[0]), detail)
     if len(detail) <= limit:
         return detail
     # The marker comes out of the budget, not on top of it: a caller that sizes

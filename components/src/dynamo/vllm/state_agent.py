@@ -8,7 +8,7 @@ import ipaddress
 import logging
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -143,6 +143,7 @@ async def start_attachment_owner(
     vllm_config: "VllmConfig",
     image_token_id: int | None,
     video_token_id: int | None = None,
+    topology_domains: Mapping[str, str] | None = None,
 ) -> KvStateAttachmentOwner | None:
     settings = state_agent_settings(config)
     if settings is None:
@@ -197,6 +198,9 @@ async def start_attachment_owner(
                     {
                         "source_control_endpoint": kv_transfer_hint_source.source_control_endpoint,
                         "worker_type": kv_transfer_hint_source.worker_type,
+                        # KVCR runs in this worker's pod, so its cache
+                        # owners share the worker's island.
+                        "topology_domains": dict(topology_domains or {}),
                     }
                     if kv_transfer_hint_source is not None
                     else None

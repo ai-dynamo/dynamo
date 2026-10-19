@@ -24,15 +24,9 @@ import (
 const (
 	otherFixtureValue  = "other"
 	v2TestBuildName    = "v2-test-build"
-	v3HXTopologyFamily = "16x8x2x3"
+	v3HXTopologyFamily = "HX16x8x2"
 	v3OpaqueTopology   = "opaque-v3-topology"
 )
-
-type unreachableBuildSnapshotSource struct{}
-
-func (unreachableBuildSnapshotSource) AcquireBuildSnapshot(context.Context, string) (*BuildSnapshot, error) {
-	return nil, fmt.Errorf("unexpected build snapshot acquisition")
-}
 
 type staticBuildSnapshotSource map[string]*BuildSnapshot
 
@@ -111,7 +105,6 @@ func newV2CompilerFixture() testV3CapnpFixture {
 	fixture := newV3CompilerFixture()
 	fixture.architecture = "polaris"
 	fixture.buildDirectoryName = v2TestBuildName
-	fixture.numLPUNodes = 4
 	fixture.selectedPropSyncChains = [][]uint32{{7, 8}}
 	fixture.partitions = []testV3CapnpPartition{
 		{id: 7, deviceType: manifestcapnp.DeviceType_lpu, topology: registryTestTopology, numChips: 16, devicesPerNode: 8},
@@ -131,7 +124,6 @@ type testV3CapnpFixture struct {
 	pipelineName           string
 	compilationMode        manifestcapnp.CompilationMode
 	architecture           string
-	numLPUNodes            uint32
 	selectedPropSyncChains [][]uint32
 	partSelect             bool
 	cpuEmbeddings          bool
@@ -154,7 +146,6 @@ func newV3CompilerFixture() testV3CapnpFixture {
 		pipelineName:     "default",
 		compilationMode:  manifestcapnp.CompilationMode_lpuOnly,
 		architecture:     "polarisB0",
-		numLPUNodes:      2,
 		partitions: []testV3CapnpPartition{{
 			id:             1,
 			deviceType:     manifestcapnp.DeviceType_lpu,
@@ -201,11 +192,9 @@ func writeTestV3CapnpManifest(t *testing.T, buildDir string, fixture testV3Capnp
 	deployment, err := manifest.NewDeployment()
 	require.NoError(t, err)
 	deployment.SetCompilationMode(fixture.compilationMode)
-	deployment.SetNumLpuNodes(fixture.numLPUNodes)
 	program, err := deployment.NewProgram()
 	require.NoError(t, err)
 	require.NoError(t, program.SetProgramName(fixture.pipelineName))
-	program.SetBatchSize(1)
 	program.SetSequenceLength(8192)
 	program.SetInputSize(1)
 	program.SetOutputSize(1)
@@ -214,7 +203,6 @@ func writeTestV3CapnpManifest(t *testing.T, buildDir string, fixture testV3Capnp
 	program.SetStandaloneTokenEmbeddings(fixture.cpuEmbeddings)
 	runtimeIO, err := deployment.NewRuntimeIo()
 	require.NoError(t, err)
-	runtimeIO.SetProtocol(runtimeIOProtocolHost)
 	runtimeIO.SetReserved1(0)
 	runtimeIO.SetIoFpgaCount(1)
 	runtimeIO.SetFanoutFactor(1)

@@ -828,6 +828,10 @@ impl KvRouter {
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
+        let client_for_registration = client.clone();
+        let registration_availability_provider: metrics::RegistrationAvailabilityProvider =
+            Arc::new(move || client_for_registration.available_instance_ids());
+
         let client_for_availability = client.clone();
         let workers_for_availability = workers_with_configs.clone();
         let available_worker_provider: WorkerAvailabilityProvider = Arc::new(move |request| {
@@ -875,6 +879,7 @@ impl KvRouter {
                 prefill_load_estimator: prefill_load_estimator.clone(),
                 overloaded_worker_provider,
                 available_worker_provider,
+                registration_availability_provider,
                 shared_cache: shared_cache.clone(),
                 // The availability provider refreshes LoRA eligibility at admission.
                 lora_worker_filter: None,
@@ -1406,7 +1411,7 @@ impl KvRouter {
             Err(error) => return Err(error.into()),
         };
         let Selected {
-            response,
+            mut response,
             advisory_load,
             isl_tokens,
             kv_hint,
@@ -1417,6 +1422,13 @@ impl KvRouter {
         } = selected;
         if update_states && is_admitted_routing && booking.is_none() {
             anyhow::bail!("booked selection returned no booking handle");
+        }
+        // Publish the selection trace here, on the routing task and before any
+        // awaited bookkeeping (the session prefix refresh below can be cancelled),
+        // so every caller of this method (routing hosts, prefill reservations, the
+        // Python binding) emits exactly one row.
+        if let (Some(request_id), Some(trace)) = (context_id, response.selection_trace.take()) {
+            crate::request_trace::emit_router_selection(request_id, self.worker_type(), trace);
         }
         // Indexing failures never affect routing.
         if let (Some(session_id), Some(block_hashes)) =

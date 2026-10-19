@@ -17,7 +17,7 @@
   "properties": {
     "id": {
       "type": "string",
-      "description": "Stable slug; must match the filename and the page slug in docs/index.yml.",
+      "description": "Stable identifier; must match the filename.",
       "pattern": "^[a-z0-9][a-z0-9-]*$"
     },
     "title": {
@@ -29,9 +29,15 @@
       "description": "docs-relative path to the rendered MDX page (active recipes only).",
       "pattern": "\\.mdx$"
     },
+    "slug": {
+      "type": "string",
+      "description": "URL slug for the page (active recipes only). Defaults to the page file name without .mdx; set it only to keep an existing URL.",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
     "provider": {
       "type": "string",
-      "description": "Model provider key used by landing-page filters (e.g. moonshot, nvidia, qwen)."
+      "description": "Model provider key: groups the Recipes sidebar and drives the landing-page provider filter. Must be a key in providers.yaml (e.g. moonshot, nvidia, qwen).",
+      "pattern": "^[a-z0-9]+$"
     },
     "model": {
       "type": "object",
@@ -39,6 +45,11 @@
       "required": ["name"],
       "properties": {
         "name": { "type": "string" },
+        "generation": {
+          "type": "string",
+          "description": "Optional. Overrides the model generation that docs/fern/scripts/gen_recipe_nav.py reads from the title (the first version number, e.g. 4.1 in DeepSeek-V4.1-Flash). Set it, quoted, only when the title misleads that rule. Within a provider, recipes are listed newest generation first.",
+          "pattern": "^[0-9]+(\\.[0-9]+)*$"
+        },
         "hf_id": { "type": "string" },
         "precision": { "type": "string" }
       },

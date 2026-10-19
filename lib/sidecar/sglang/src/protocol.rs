@@ -168,6 +168,7 @@ pub(crate) fn build_generate_request(
         require_reasoning: Some(request.require_reasoning),
         max_thinking_tokens: request.stop_conditions.max_thinking_tokens,
         kv_hints,
+        return_text: None,
         disaggregated_params: resolve_disaggregated_params(
             request,
             mode,
@@ -466,6 +467,7 @@ fn cached_prompt_tokens(
     meta_u32(meta, "cached_tokens").map(|cached_tokens| PromptTokensDetails {
         audio_tokens: None,
         cached_tokens: Some(cached_tokens.min(prompt_tokens)),
+        ..Default::default()
     })
 }
 

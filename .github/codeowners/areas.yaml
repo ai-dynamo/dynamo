@@ -45,7 +45,6 @@ areas:
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
   path_globs:
-  - components/src/dynamo/kv_dc_relay/
   - components/src/dynamo/squeeze_evolve/
   - components/src/dynamo/kv_state_agent/
   - components/src/dynamo/global_router/
@@ -69,9 +68,22 @@ areas:
   - lib/router-plugins/
   - examples/router/policy-class-queues.yaml
   - examples/router/custom-policy-example/
+- label: global-router
+  github_team: '@ai-dynamo/dynamo-global-router-codeowners'
+  path_globs:
+  - components/src/dynamo/kv_dc_relay/
+  - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
+  - docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md
+  - docs/fern/pages/reference/components/kv-dc-relay-configuration.md
+  - lib/bindings/python/rust/llm/kv_dc_relay.rs
+  - lib/llm/src/kv_dc_relay.rs
+  - lib/llm/src/kv_dc_relay/
+  - lib/llm/tests/fixtures/relay-sources-canonical.json
+  - tests/router/test_kv_dc_relay_e2e.py
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:
+  - components/src/dynamo/artifacts/vllm/
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
@@ -209,6 +221,7 @@ areas:
 - label: planner
   github_team: '@ai-dynamo/dynamo-planner-codeowners'
   path_globs:
+  - components/src/dynamo/aisimulate/
   - components/src/dynamo/global_planner/
   - components/src/dynamo/global_planner/tests/
   - components/src/dynamo/planner/
@@ -223,9 +236,11 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - examples/power-aware-budget/
+  - gyms/planner-gym/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
+  - components/src/dynamo/artifacts/
   - components/src/dynamo/common/
   - components/src/dynamo/common/backend/
   - components/src/dynamo/common/config_dump/
@@ -426,6 +441,9 @@ areas:
   - deploy/utils/manifests/
   - deploy/utils/tests/
   - examples/deployments/
+  - examples/gpu-sharing/
+  - recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json
+  - recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json
   - tests/deploy/
 - label: lpx
   github_team: '@ai-dynamo/dynamo-lpx-codeowners'
@@ -866,6 +884,10 @@ shared:
   owners:
   - performance
   - planner
+- glob: components/src/dynamo/aisimulate/output/dgd/
+  owners:
+  - planner
+  - operator
 - glob: components/src/dynamo/planner/connectors/kubernetes.py
   owners:
   - planner
@@ -955,10 +977,6 @@ shared:
   owners:
   - operator
   - planner
-- glob: deploy/operator/internal/gpu/discovery.go
-  owners:
-  - operator
-  - observability
 - glob: deploy/operator/internal/controller/lpx/
   owners:
   - operator
@@ -968,6 +986,8 @@ shared:
   - operator
   - lpx
 - glob: deploy/**/*lpx*
+  owners: [operator]
+- glob: deploy/helm/**/*lpx*
   owners: [operator, lpx]
 - glob: deploy/operator/internal/controller/*checkpoint*
   owners:
@@ -1009,6 +1029,11 @@ shared:
   owners:
   - performance
   - router
+- glob: lib/bench/kv_router/dc_ckf_relay_bench.rs
+  owners:
+  - performance
+  - router
+  - global-router
 - glob: lib/kv-router/src/services/shared_cache/
   owners:
   - router

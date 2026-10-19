@@ -658,6 +658,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         })
     }
 
