@@ -339,9 +339,9 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
 ### Recipes on Model-Specific Images
 
 Some recipes pin a model-specific runtime image, tagged `X.Y.Z-<model>-post.N` or
-`X.Y.Z-<model>-dev.N` (for example, `vllm-runtime:1.4.1-a.x-k2-post.1`). These images
-carry engine patches for one model that the stock `:X.Y.Z` runtime, later stock
-releases, and release candidates do not have.
+`X.Y.Z-<model>-dev.N` (for example, `vllm-runtime:1.4.1-a.x-k2-post.1`). Until the recipe
+is promoted, these images carry engine patches for one model that the stock runtime and
+its release candidates do not have.
 
 - **Do not replace a model-specific tag with a stock or release-candidate tag.** The
   worker can fail at startup. For example, Transformers rejects a checkpoint whose
