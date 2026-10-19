@@ -168,6 +168,7 @@ pub(crate) fn build_generate_request(
         require_reasoning: Some(request.require_reasoning),
         max_thinking_tokens: request.stop_conditions.max_thinking_tokens,
         kv_hints,
+        return_text: None,
         disaggregated_params: resolve_disaggregated_params(
             request,
             mode,
