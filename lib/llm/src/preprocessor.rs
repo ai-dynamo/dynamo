@@ -2257,6 +2257,24 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
+    /// Beam has no non-thinking generation mode. Validate the client's effective
+    /// toggle before deployment defaults, rendering, or backend dispatch.
+    fn validate_beam_reasoning(&self, request: &NvCreateChatCompletionRequest) -> Result<()> {
+        if self.beam_route
+            && Self::normalize_thinking_aliases(request.chat_template_args.as_ref(), Some("beam"))
+                == Some(false)
+        {
+            let message = "Beam does not support disabling reasoning. Remove the reasoning-off setting (thinking, enable_thinking, thinking_mode, or reasoning_effort=none).";
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(message)
+                .public_message(message)
+                .build()
+                .into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn has_structured_response_format<R: OAIChatLikeRequest>(request: &R) -> bool {
         request.response_format().is_some_and(|format| {
             format
@@ -6911,6 +6929,9 @@ impl OpenAIPreprocessor {
         if let Some(family) = unified_family {
             let thinking = dynamo_renderer::thinking_bool_from_args(chat_template_args.as_ref());
             return match family {
+                // Beam always generates analysis. A response-only/reconstructing
+                // frontend must never move it into content based on a request toggle.
+                "beam" => false,
                 "gemma4" => thinking != Some(true),
                 "deepseek_v4" | "deepseek_v41" => {
                     !Self::deepseek_renderer_reasoning_enabled(chat_template_args.as_ref(), true)
@@ -7766,6 +7787,7 @@ impl
         // it can override an implicit model default (for example Kimi K2.5),
         // while explicit request controls still take precedence.
         let thinking_control_from_client = Self::request_has_client_thinking_control(&request);
+        self.validate_beam_reasoning(&request)?;
         self.apply_default_thinking_mode(&mut request);
         Self::normalize_thinking_arg_with_source(
             &mut request,
@@ -10473,6 +10495,102 @@ mod tests {
                 .and_then(|details| details.reasoning_tokens),
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn beam_reasoning_policy_preserves_channels_and_usage_when_reconstructing() {
+        use crate::protocols::openai::GuidedToolConstraint;
+        use crate::protocols::openai::chat_completions::unified_parser;
+
+        let analysis = "<|channel|>analysis<|message|>Compute.<|end|><|start|>assistant";
+        let answer = "<|channel|>final<|message|>3.8 is greater.<|return|>";
+        // Admission rejects these toggles. A response-only frontend may still
+        // reconstruct an older worker's response and must keep its real channels.
+        for key in ["thinking", "enable_thinking"] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "messages": [{"role": "user", "content": "hi"}],
+                    "chat_template_kwargs": {key: false}
+                }))
+                .unwrap();
+            request.normalize_reasoning_template_args().unwrap();
+            let disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
+                &request,
+                Some("beam"),
+                Some("beam"),
+                None,
+                Some("beam"),
+            );
+            assert!(!disabled);
+            let policy = unified_parser::UnifiedRequestPolicy {
+                reasoning_disabled: disabled,
+                structured_response: false,
+            };
+            let batch = unified_parser::parse_complete_with_policy(
+                "beam",
+                &format!("{analysis}{answer}"),
+                &GuidedToolConstraint::None,
+                &[],
+                policy,
+            )
+            .unwrap();
+            assert_eq!(batch.reasoning, "Compute.");
+            assert_eq!(batch.text, "3.8 is greater.");
+
+            let raw = unified_parser::apply_stream_with_policy(
+                stream::iter([
+                    reasoning_usage_chunk(None, Some(analysis), 3),
+                    reasoning_usage_chunk(None, Some(answer), 2),
+                    reasoning_usage_trailer(5, Some(0)),
+                ]),
+                None,
+                GuidedToolConstraint::None,
+                unified_parser::stream_prefill("beam", false),
+                "beam",
+                true,
+                policy,
+            );
+            let output =
+                OpenAIPreprocessor::apply_unified_response_policies(raw, false, false, disabled)
+                    .collect::<Vec<_>>()
+                    .await;
+            let choices: Vec<_> = output
+                .iter()
+                .flat_map(|r| r.data.iter())
+                .flat_map(|r| &r.inner.choices)
+                .collect();
+            let reasoning: String = choices
+                .iter()
+                .filter_map(|c| c.delta.reasoning_content.as_deref())
+                .collect();
+            let content: String = choices
+                .iter()
+                .filter_map(|c| match &c.delta.content {
+                    Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(reasoning, "Compute.");
+            assert_eq!(content, "3.8 is greater.");
+            let usage = output
+                .last()
+                .unwrap()
+                .data
+                .as_ref()
+                .unwrap()
+                .inner
+                .usage
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                usage
+                    .completion_tokens_details
+                    .as_ref()
+                    .unwrap()
+                    .reasoning_tokens,
+                Some(3)
+            );
+        }
     }
 
     #[tokio::test]
@@ -13792,6 +13910,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn beam_reasoning_off_is_rejected_before_backend_dispatch() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.model_type = crate::model_type::ModelType::Chat;
+        mdc.runtime_config.tool_call_parser = Some("beam".to_string());
+        mdc.runtime_config.reasoning_parser = Some("beam".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        for extra in [
+            serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
+            serde_json::json!({"chat_template_kwargs": {"thinking": false}}),
+            serde_json::json!({"chat_template_args": {"thinking": false}}),
+            serde_json::json!({"chat_template_kwargs": {"thinking_mode": "disabled"}}),
+            serde_json::json!({"thinking": {"type": "disabled"}}),
+            serde_json::json!({"reasoning_effort": "none"}),
+            serde_json::json!({"chat_template_kwargs": {"reasoning_effort": "none"}}),
+        ] {
+            for streaming in [false, true] {
+                let mut body = serde_json::json!({
+                    "model": "test-model", "messages": [{"role": "user", "content": "hi"}],
+                    "stream": streaming
+                });
+                body.as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                let mut request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(body).unwrap();
+                request.normalize_reasoning_template_args().unwrap();
+                let next: Arc<
+                    dyn AsyncEngine<
+                            SingleIn<PreprocessedRequest>,
+                            ManyOut<Annotated<BackendOutput>>,
+                            Error,
+                        >,
+                > = Arc::new(UnreachableBackend);
+                let result =
+                    Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next)
+                        .await;
+                let Err(error) = result else {
+                    panic!("Beam reasoning-off request must fail before dispatch: {extra}");
+                };
+                let error = error.downcast_ref::<DynamoError>().unwrap();
+                assert!(matches!(
+                    crate::http::service::error::http_action_for_error(error),
+                    crate::http::service::error::ClientErrorAction::Respond {
+                        status: axum::http::StatusCode::BAD_REQUEST,
+                        ..
+                    }
+                ));
+                let message = error.public_message().unwrap();
+                assert!(
+                    message.contains("Beam does not support disabling reasoning"),
+                    "{message}"
+                );
+                assert!(message.contains("Remove"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_completion_operator_rejects_token_budget_overflow() {
         let mut mdc = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
@@ -16240,6 +16421,43 @@ mod beam_route_tests {
             body["preserve_thinking"] = serde_json::json!(value);
         }
         serde_json::from_value(body).unwrap()
+    }
+
+    #[test]
+    fn beam_reasoning_validation_keeps_history_controls_and_other_families() {
+        let beam = synthetic_preprocessor(true, HISTORY_TEMPLATE);
+        for args in [
+            serde_json::json!({}),
+            serde_json::json!({"thinking": true}),
+            serde_json::json!({"enable_thinking": true}),
+            serde_json::json!({"thinking": true, "enable_thinking": false}),
+            serde_json::json!({"preserve_thinking": false}),
+            serde_json::json!({"allow_missing_thinking": false}),
+        ] {
+            let mut request = history_request(Some(false));
+            request.chat_template_args = Some(serde_json::from_value(args.clone()).unwrap());
+            request.normalize_reasoning_template_args().unwrap();
+            beam.apply_preserve_thinking(&mut request).unwrap();
+            beam.validate_beam_reasoning(&request).unwrap();
+            let rendered = beam.apply_template(&request).unwrap().unwrap();
+            assert!(rendered.as_str().contains("SENTINEL_THOUGHT"), "{args}");
+        }
+
+        let other = synthetic_preprocessor(false, HISTORY_TEMPLATE);
+        let mut request = history_request(None);
+        request.chat_template_args = Some(HashMap::from([(
+            "enable_thinking".into(),
+            serde_json::json!(false),
+        )]));
+        request.normalize_reasoning_template_args().unwrap();
+        other.validate_beam_reasoning(&request).unwrap();
+        assert!(OpenAIPreprocessor::request_disables_reasoning_with_family(
+            &request,
+            Some("qwen3"),
+            Some("qwen3"),
+            None,
+            Some("qwen3"),
+        ));
     }
 
     #[test]
