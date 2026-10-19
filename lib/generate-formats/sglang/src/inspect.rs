@@ -16,7 +16,7 @@ pub struct Inspected {
     pub terminal: bool,
     pub has_output: bool,
 }
-use crate::protocols::common::llm_backend::LLMEngineOutput;
+use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 
 fn backend(kind: BackendError, message: String) -> DynamoError {
     DynamoError::builder()
@@ -131,7 +131,7 @@ pub fn inspect(response: Value, is_prefill: bool) -> Result<Inspected, DynamoErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::FinishReason;
+    use dynamo_llm::protocols::common::FinishReason;
 
     #[test]
     fn decode_terminals_report_typed_finish_and_usage() {

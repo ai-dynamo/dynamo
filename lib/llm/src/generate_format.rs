@@ -8,8 +8,8 @@
 //! client responses, and continues migrated requests. The frontend reads no
 //! request or response field.
 //!
-//! Formats are statically linked plugins. Dynamo registers its own first; a
-//! binary adds a catalog's with [`install`], and `DYN_GENERATE_FORMAT` selects
+//! Formats are statically linked plugins. A host builds a registry through its
+//! catalog and calls [`install`]; `DYN_GENERATE_FORMAT` selects
 //! one by name.
 
 use std::collections::BTreeMap;
@@ -22,9 +22,6 @@ use serde_json::{Value, json};
 
 use crate::migration::RequestContinuation;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
-
-#[cfg(any(test, feature = "generate-testkit"))]
-pub mod testkit;
 
 /// Runtime-config key under which a worker advertises engine facts its
 /// format needs, such as engine-side defaults. Absent on older workers.
@@ -145,24 +142,10 @@ pub trait GenerateFormat: Send + Sync + 'static {
 
 pub type SharedFormat = Arc<dyn GenerateFormat>;
 
-/// Formats by name. A later registration never replaces an earlier one, so a
-/// catalog cannot shadow a built-in format.
-#[derive(Clone)]
+/// Formats by name. Starts empty; the host catalog registers its formats.
+/// Duplicate names are rejected.
+#[derive(Clone, Default)]
 pub struct Registry(BTreeMap<String, SharedFormat>);
-
-impl Default for Registry {
-    /// The formats Dynamo ships.
-    fn default() -> Self {
-        let sglang: SharedFormat = Arc::new(crate::protocols::sglang::SglangFormat::native());
-        let vllm: SharedFormat = Arc::new(crate::protocols::openai::vllm_generate::VllmFormat);
-        Self(
-            [sglang, vllm]
-                .into_iter()
-                .map(|f| (f.name().to_string(), f))
-                .collect(),
-        )
-    }
-}
 
 impl Registry {
     pub fn register(&mut self, format: SharedFormat) -> anyhow::Result<()> {
@@ -198,79 +181,14 @@ pub fn selected() -> anyhow::Result<SharedFormat> {
     let name = std::env::var(FORMAT_ENV)
         .ok()
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| crate::protocols::sglang::NAME.to_string());
+        .unwrap_or_else(|| "sglang".to_string());
     named(&name)
 }
 
 /// A linked format by name.
 pub fn named(name: &str) -> anyhow::Result<SharedFormat> {
-    INSTALLED.get_or_init(Registry::default).get(name)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocols::sglang::{ClientCodec, Encoded, SglangFormat};
-
-    struct Wrapped;
-    impl ClientCodec for Wrapped {
-        fn decode_request(&self, body: &[u8]) -> Result<Option<Value>, ClientError> {
-            let value: Value = serde_json::from_slice(body)
-                .map_err(|error| ClientError::new(error.to_string()))?;
-            Ok(Some(value["request"].clone()))
-        }
-        fn encode_response(&self, response: &Value) -> Encoded {
-            Encoded::Replace(json!({"response": response}))
-        }
-        fn error_body(&self, message: &str) -> Value {
-            json!({"failure": message})
-        }
-    }
-
-    #[test]
-    fn catalog_format_owns_client_shape_and_reuses_native_exchange() {
-        let mut registry = Registry::default();
-        registry
-            .register(Arc::new(SglangFormat::with_codec("wrapped", Wrapped)))
-            .unwrap();
-        assert!(registry.register(Arc::new(SglangFormat::native())).is_err());
-        assert!(registry.get("missing").is_err());
-        let format = registry.get("wrapped").unwrap();
-        assert_eq!(format.capability(), crate::protocols::sglang::CAPABILITY);
-        assert_eq!(
-            format.error_body(StatusCode::BAD_REQUEST, "bad"),
-            json!({"failure": "bad"})
-        );
-        let opened = format
-            .open(ClientRequest {
-                body: br#"{"request":{"input_ids":[1],"sampling_params":{"max_new_tokens":2}}}"#,
-                headers: &HeaderMap::new(),
-                default_request_id: "public",
-            })
-            .unwrap();
-        let mut bound = (opened.bind)(&testkit::worker(&json!({}))).unwrap();
-        assert_eq!(bound.request.token_ids.as_slice(), &[1]);
-        assert!(bound.migration.is_ok());
-        for (ids, finish) in [
-            (json!([2]), Value::Null),
-            (json!([3]), json!({"type":"length"})),
-        ] {
-            let output = crate::protocols::sglang::inspect(
-                json!({"output_ids": ids, "meta_info": {
-                    "id": "private", "finish_reason": finish, "custom_metadata": {"score": 7},
-                }}),
-                false,
-            )
-            .unwrap()
-            .output;
-            bound.exchange.chunk(output, false, &mut |_| {}).unwrap();
-        }
-        let response = bound.exchange.finish().unwrap().unwrap();
-        assert_eq!(response["response"]["output_ids"], json!([2, 3]));
-        assert_eq!(response["response"]["meta_info"]["id"], "public");
-        assert_eq!(
-            response["response"]["meta_info"]["custom_metadata"]["score"],
-            7
-        );
-    }
+    INSTALLED
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("generate format catalog is not installed"))?
+        .get(name)
 }

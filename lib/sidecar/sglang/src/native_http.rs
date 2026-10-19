@@ -15,7 +15,7 @@ use dynamo_backend_common::{
     PreprocessedRequest,
 };
 use dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
-use dynamo_llm::protocols::sglang::{Inspected, PAYLOAD_KEY, inspect};
+use dynamo_sglang_generate::{Inspected, PAYLOAD_KEY, inspect};
 use dynamo_sidecar_common::{GrpcEndpoint, HttpEndpoint};
 use futures::{StreamExt, TryStreamExt, future::BoxFuture, stream::BoxStream};
 use reqwest::{Response, StatusCode, header};

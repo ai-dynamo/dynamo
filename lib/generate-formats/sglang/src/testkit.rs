@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Testing SGLang-backed `/generate` formats without GPUs (feature `generate-testkit`).
+//! Testing SGLang-backed `/generate` formats without GPUs (feature `testkit`).
 //!
 //! - [`sim`] models SGLang's incremental stream and answers the body a format
 //!   builds, including the retry bodies of migrated requests.
@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 
-use crate::generate_format::Worker;
-use crate::protocols::response_merge::RuleSet;
+use crate::response_merge::RuleSet;
+use dynamo_llm::generate_format::Worker;
 
 /// A worker set advertising `engine_info`.
 pub fn worker(engine_info: &Value) -> Worker<'_> {
@@ -93,6 +93,6 @@ impl ClientShape for NativeShape {
     }
 
     fn client_rules(&self) -> Option<Arc<RuleSet>> {
-        Some(crate::protocols::sglang::rules())
+        Some(crate::rules())
     }
 }

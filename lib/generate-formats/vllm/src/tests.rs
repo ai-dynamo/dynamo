@@ -153,8 +153,8 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
             .unwrap()
             .get("dynamo_mm_routing_hashes"),
         Some(&serde_json::json!([
-            crate::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-a"),
-            crate::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-b")
+            dynamo_llm::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-a"),
+            dynamo_llm::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-b")
         ]))
     );
 

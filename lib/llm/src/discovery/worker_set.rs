@@ -283,6 +283,12 @@ impl WorkerSet {
         }
     }
 
+    /// Attach the token-level engine served by this worker set's generate formats.
+    pub fn with_generate_engine(mut self, engine: GenerateStreamingEngine) -> Self {
+        self.generate_engine = Some(engine);
+        self
+    }
+
     pub fn namespace(&self) -> &str {
         &self.namespace
     }

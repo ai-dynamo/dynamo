@@ -42,13 +42,14 @@ use super::migrate::{Continuation, RequestRules};
 use super::{CAPABILITY, PAYLOAD_KEY, RESPONSE_KEY};
 use axum::http::StatusCode;
 
-use crate::generate_format::{
+use crate::response_merge::{Assembler, RuleSet};
+use dynamo_llm::generate_format::{
     Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened,
 };
-use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
-use crate::protocols::common::preprocessor::RoutingHints;
-use crate::protocols::common::{FinishReason, OutputOptions, SamplingOptions, StopConditions};
-use crate::protocols::response_merge::{Assembler, RuleSet, prefill_annotations};
+use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+use dynamo_llm::protocols::common::preprocessor::RoutingHints;
+use dynamo_llm::protocols::common::{FinishReason, OutputOptions, SamplingOptions, StopConditions};
+use dynamo_llm::protocols::response_merge::prefill_annotations;
 
 /// Shared with the SGLang contract test.
 pub(super) const RULES_JSON: &str = include_str!("merge_rules.json");
@@ -75,9 +76,10 @@ pub trait ClientCodec: Send + Sync + 'static {
     }
 
     /// The client response for one joined SGLang response: a streamed chunk,
-    /// or the unary response.
-    fn encode_response(&self, _response: &Value) -> Encoded {
-        Encoded::Native
+    /// or the unary response. Invalid backend data may return an error; the
+    /// frontend applies its normal HTTP/SSE error handling.
+    fn encode_response(&self, _response: &Value) -> Result<Encoded, DynamoError> {
+        Ok(Encoded::Native)
     }
 
     fn error_body(&self, message: &str) -> Value {
@@ -274,13 +276,14 @@ impl<C: ClientCodec> GenerateExchange for Exchange<C> {
             return Ok(());
         }
         let codec = &self.codec;
-        self.assembler
-            .render(response, |joined| match codec.encode_response(joined) {
+        self.assembler.render(response, |joined| {
+            match codec.encode_response(joined)? {
                 Encoded::Native => emit(joined),
                 Encoded::Replace(value) => emit(&value),
                 Encoded::Skip => {}
-            });
-        Ok(())
+            }
+            Ok(())
+        })
     }
 
     fn migrate(
@@ -332,7 +335,7 @@ impl<C: ClientCodec> GenerateExchange for Exchange<C> {
             .assembler
             .finish()
             .ok_or_else(|| DynamoError::msg("SGLang stream ended without a response"))?;
-        match self.codec.encode_response(&response) {
+        match self.codec.encode_response(&response)? {
             Encoded::Native => Ok(Some(response)),
             Encoded::Replace(value) => Ok(Some(value)),
             Encoded::Skip => Err(DynamoError::msg("the client codec skipped the response")),
@@ -343,8 +346,8 @@ impl<C: ClientCodec> GenerateExchange for Exchange<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generate_format::testkit::laws::Harness;
-    use crate::protocols::response_merge::FieldClass;
+    use crate::response_merge::FieldClass;
+    use crate::testkit::laws::Harness;
 
     #[test]
     fn sglang_native_format_passes_every_law() {
@@ -354,7 +357,7 @@ mod tests {
     /// Streams and unary responses recorded from SGLang v0.5.21 (Qwen3-0.6B,
     /// greedy), one request shape per line.
     fn fixtures() -> Vec<Value> {
-        include_str!("../../../tests/data/sglang/generate/qwen3-0.6b.jsonl")
+        include_str!("../tests/data/qwen3-0.6b.jsonl")
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
@@ -396,7 +399,7 @@ mod tests {
                     default_request_id: "id",
                 })
                 .unwrap();
-            let mut exchange = bind(&crate::generate_format::testkit::worker(&Value::Null))
+            let mut exchange = bind(&crate::testkit::worker(&Value::Null))
                 .unwrap()
                 .exchange;
             for chunk in fixture["stream"].as_array().unwrap() {
@@ -424,7 +427,7 @@ mod tests {
 
     #[test]
     fn simulator_sends_each_field_the_way_sglang_does() {
-        use crate::generate_format::testkit::sim::{self, Role, Truth};
+        use crate::testkit::sim::{self, Role, Truth};
         for fixture in fixtures() {
             let (request, unary, recorded) =
                 (&fixture["request"], &fixture["unary"], &fixture["stream"]);

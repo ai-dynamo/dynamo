@@ -13,7 +13,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Map, Value, json};
 
-use crate::protocols::sglang::DEFAULT_MAX_NEW_TOKENS;
+use crate::DEFAULT_MAX_NEW_TOKENS;
 /// Generated when a request asks for more tokens than the ground truth holds,
 /// so an over-long budget shows up as extra output.
 pub const FILLER_TOKEN: u32 = 0;

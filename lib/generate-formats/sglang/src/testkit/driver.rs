@@ -14,11 +14,11 @@ use serde_json::{Map, Value, json};
 
 use super::sim::{self, Role, Truth};
 use super::{ClientShape, RequestSpec};
-use crate::generate_format::{ClientRequest, GenerateFormat, Opened};
-use crate::protocols::response_merge::{
+use crate::PAYLOAD_KEY;
+use dynamo_llm::generate_format::{ClientRequest, GenerateFormat, Opened};
+use dynamo_llm::protocols::response_merge::{
     PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION,
 };
-use crate::protocols::sglang::PAYLOAD_KEY;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Topology {
@@ -142,7 +142,7 @@ fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Resul
             )
             .pop()
             .ok_or("prefill sent no response")?;
-            let inspected = crate::protocols::sglang::inspect(response, true)
+            let inspected = crate::inspect(response, true)
                 .map_err(|e| format!("inspect rejected prefill's response: {e}"))?;
             if !inspected.output.token_ids.is_empty() || !inspected.terminal {
                 return Err("prefill's final response must report no tokens and a terminal".into());
@@ -185,7 +185,7 @@ fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Resul
             }
             let ids: Vec<u32> =
                 serde_json::from_value(chunk["output_ids"].clone()).map_err(|e| e.to_string())?;
-            let inspected = crate::protocols::sglang::inspect(chunk, false)
+            let inspected = crate::inspect(chunk, false)
                 .map_err(|e| format!("inspect rejected a response: {e}"))?;
             if inspected.output.token_ids != ids || inspected.terminal != (last && !lost) {
                 return Err(format!(

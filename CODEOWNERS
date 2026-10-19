@@ -94,6 +94,7 @@
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===
 /lib/sidecar/vllm/                                                                                      @ai-dynamo/dynamo-backend-vllm-codeowners
 /examples/backends/vllm/                                                                                @ai-dynamo/dynamo-backend-vllm-codeowners
+/lib/generate-formats/vllm/                                                                             @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/                                                                            @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/tests/                                                                      @ai-dynamo/dynamo-backend-vllm-codeowners
 
@@ -112,6 +113,7 @@
 # === backend-sglang  (@ai-dynamo/dynamo-backend-sglang-codeowners) ===
 /lib/sidecar/sglang/                                                                                    @ai-dynamo/dynamo-backend-sglang-codeowners
 /examples/backends/sglang/                                                                              @ai-dynamo/dynamo-backend-sglang-codeowners
+/lib/generate-formats/sglang/                                                                           @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/                                                                          @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/tests/                                                                    @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/request_handlers/                                                         @ai-dynamo/dynamo-backend-sglang-codeowners
@@ -510,7 +512,6 @@ requirements.txt                                                                
 /lib/llm/src/preprocessor.rs                                                                            @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/block_manager.md                                                                           @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager.rs                                                                           @ai-dynamo/dynamo-kv-memory-codeowners
-/lib/llm/src/generate_format/                                                                           @ai-dynamo/dynamo-frontend-codeowners
 /tests/benchmarks/multimodal/                                                                           @ai-dynamo/dynamo-multimodal-codeowners
 /tests/serve/test_vllm_xpu.py                                                                           @ai-dynamo/dynamo-xpu-codeowners
 /.github/codeowners/areas.yaml                                                                          @ai-dynamo/dynamo-process-codeowners
@@ -713,6 +714,7 @@ requirements.txt                                                                
 /deploy/operator/internal/controller/lpx/                                                               @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners
 /lib/kv-router/src/services/shared_cache/                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/kv-router/src/zmq_wire/extra_keys.rs                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/lib/mocker/servers/vllm/tests/sidecar.rs                                                               @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /lib/runtime/src/metrics/frontend_perf.rs                                                               @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /tests/fault_tolerance/migration/utils.py                                                               @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/test_generate_kustomize_openapi.py                                                               @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-ops-codeowners

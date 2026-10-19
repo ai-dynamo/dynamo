@@ -241,7 +241,7 @@ impl Migration {
 
     /// Migration for engine-native Generate requests, which migrate only
     /// through their format's [`RequestContinuation`].
-    pub(crate) fn for_generate(
+    pub fn for_generate(
         mdc: &ModelDeploymentCard,
         migration_limit: u32,
         max_seq_len: Option<u32>,

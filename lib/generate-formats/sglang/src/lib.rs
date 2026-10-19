@@ -16,8 +16,16 @@ pub use migrate::DEFAULT_MAX_NEW_TOKENS;
 
 pub const NAME: &str = "sglang";
 /// The runtime capability workers serving SGLang's `/generate` advertise.
-pub const CAPABILITY: &str = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+pub const CAPABILITY: &str = dynamo_llm::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
 /// `extra_args` key carrying SGLang's request to the worker.
 pub const PAYLOAD_KEY: &str = "sglang_tito";
 /// `engine_data` key carrying each SGLang response back.
 pub const RESPONSE_KEY: &str = "sglang_response";
+
+pub mod response_merge;
+
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
+
+#[cfg(test)]
+mod tests;

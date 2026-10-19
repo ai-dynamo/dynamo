@@ -1749,8 +1749,7 @@ impl HttpServiceConfigBuilder {
                 }
                 let generate_path =
                     generate_path.or_else(|| Some("/inference/v1/generate".to_string()));
-                let format =
-                    crate::generate_format::named(crate::protocols::openai::vllm_generate::NAME)?;
+                let format = crate::generate_format::named("vllm")?;
                 let (docs, route) =
                     super::format_generate::router(state.clone(), generate_path, format);
                 generate_docs.extend(docs);
@@ -2213,8 +2212,41 @@ mod tests {
         handle.abort();
     }
 
+    // These tests own route readiness, not either backend's wire format.
+    fn install_readiness_formats() {
+        use crate::generate_format::{
+            ClientError, ClientRequest, GenerateFormat, Opened, Registry,
+        };
+        struct ReadinessFormat(&'static str, &'static str);
+        impl GenerateFormat for ReadinessFormat {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn capability(&self) -> &'static str {
+                self.1
+            }
+            fn open(&self, _: ClientRequest<'_>) -> Result<Opened, ClientError> {
+                unreachable!("route readiness must not parse inference requests")
+            }
+        }
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let mut registry = Registry::default();
+            for (name, capability) in [
+                ("sglang", SGLANG_GENERATE_CAPABILITY),
+                ("vllm", VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+            ] {
+                registry
+                    .register(Arc::new(ReadinessFormat(name, capability)))
+                    .unwrap();
+            }
+            assert!(crate::generate_format::install(registry));
+        });
+    }
+
     #[tokio::test]
     async fn model_readiness_waits_for_generate_route_without_dispatching_inference() {
+        install_readiness_formats();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let service = HttpService::builder()
@@ -3607,6 +3639,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn generate_capabilities_follow_startup_gates() {
+        install_readiness_formats();
         temp_env::with_vars(
             [
                 (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
@@ -3647,6 +3680,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn generate_route_paths_follow_backend_env_overrides() {
+        install_readiness_formats();
         temp_env::with_vars(
             [
                 (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1")),

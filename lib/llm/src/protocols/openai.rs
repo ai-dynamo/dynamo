@@ -22,7 +22,6 @@ pub mod common_ext;
 pub mod completions;
 pub(crate) mod delta_common;
 pub mod embeddings;
-pub mod generate;
 pub mod images;
 pub mod models;
 pub mod pooling;
@@ -33,7 +32,6 @@ mod strict_schema;
 pub mod tools;
 pub mod validate;
 pub mod videos;
-pub mod vllm_generate;
 
 use validate::{
     BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MAX_STOP_SEQUENCES, MIN_P_RANGE, N_RANGE,
@@ -288,7 +286,7 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
 
 /// Converts a token string to its UTF-8 byte representation for OpenAI logprobs responses.
 /// Returns `None` for empty tokens (unknown/unresolved tokens from the backend).
-pub(crate) fn token_to_utf8_bytes(token: &str) -> Option<Vec<u8>> {
+pub fn token_to_utf8_bytes(token: &str) -> Option<Vec<u8>> {
     if token.is_empty() {
         None
     } else {
@@ -298,7 +296,7 @@ pub(crate) fn token_to_utf8_bytes(token: &str) -> Option<Vec<u8>> {
 
 /// Converts a list of internal backend `TopLogprob` entries into the OpenAI-compatible
 /// `TopLogprobs` format. Ensures the selected token is present in the list.
-pub(crate) fn convert_backend_top_logprobs(
+pub fn convert_backend_top_logprobs(
     top_lps: &[common::llm_backend::TopLogprob],
     selected_token: &str,
     selected_token_id: TokenIdType,

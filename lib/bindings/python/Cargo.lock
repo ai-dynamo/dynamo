@@ -2142,6 +2142,8 @@ version = "1.6.0"
 dependencies = [
  "anyhow",
  "dynamo-llm",
+ "dynamo-sglang-generate",
+ "dynamo-vllm-generate",
 ]
 
 [[package]]
@@ -2575,6 +2577,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sglang-generate"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "dynamo-llm",
+ "dynamo-protocols",
+ "dynamo-runtime",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-sglang-sidecar"
 version = "1.6.0"
 dependencies = [
@@ -2585,6 +2602,7 @@ dependencies = [
  "dynamo-backend-common",
  "dynamo-llm",
  "dynamo-runtime",
+ "dynamo-sglang-generate",
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
@@ -2687,6 +2705,22 @@ name = "dynamo-truthy"
 version = "1.6.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "dynamo-vllm-generate"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "dynamo-kv-router",
+ "dynamo-llm",
+ "dynamo-protocols",
+ "dynamo-runtime",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

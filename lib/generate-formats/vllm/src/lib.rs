@@ -13,14 +13,14 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_runtime::error::DynamoError;
 use serde_json::{Value, json};
 
-use super::generate::{GenerateAggregator, GenerateRequest, GenerateResponseOptions};
-use crate::generate_format::{
+use crate::generate::{GenerateAggregator, GenerateRequest, GenerateResponseOptions};
+use dynamo_llm::generate_format::{
     Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened, Worker,
 };
-use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
-use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
-use crate::protocols::common::preprocessed_mm_identifier;
-use crate::protocols::common::preprocessor::MmRoutingInfo;
+use dynamo_llm::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+use dynamo_llm::protocols::common::preprocessed_mm_identifier;
+use dynamo_llm::protocols::common::preprocessor::MmRoutingInfo;
 
 pub const NAME: &str = "vllm";
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
@@ -410,17 +410,19 @@ fn preprocessed_from_generate(
         .sampling_options(sampling_options)
         .output_options(output_options)
         .mm_routing_info(mm_routing_info)
-        .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
-            dp_rank: data_parallel_rank,
-            expected_output_tokens: max_tokens,
-            lora_name: worker.lora_name.map(str::to_owned),
-            cache_namespace: cache_salt,
-            // `priority_jump` is a boost-only scheduler input. Preserve penalties
-            // in signed `priority`, matching the standard preprocessor projection.
-            priority_jump: Some(routing_priority.max(0) as f64),
-            priority: Some(routing_priority),
-            ..Default::default()
-        }))
+        .routing(Some(
+            dynamo_llm::protocols::common::preprocessor::RoutingHints {
+                dp_rank: data_parallel_rank,
+                expected_output_tokens: max_tokens,
+                lora_name: worker.lora_name.map(str::to_owned),
+                cache_namespace: cache_salt,
+                // `priority_jump` is a boost-only scheduler input. Preserve penalties
+                // in signed `priority`, matching the standard preprocessor projection.
+                priority_jump: Some(routing_priority.max(0) as f64),
+                priority: Some(routing_priority),
+                ..Default::default()
+            },
+        ))
         .extra_args(Some(serde_json::Value::Object(extra_args)))
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
@@ -547,3 +549,5 @@ impl GenerateExchange for VllmExchange {
 
 #[cfg(test)]
 mod tests;
+
+pub mod generate;

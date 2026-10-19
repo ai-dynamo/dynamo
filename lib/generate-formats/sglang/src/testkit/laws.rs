@@ -9,9 +9,9 @@
 
 use std::sync::Arc;
 
-use crate::generate_format::{ClientRequest, Opened, SharedFormat};
-use crate::protocols::common::llm_backend::LLMEngineOutput;
-use crate::protocols::response_merge::{Assembler, FieldClass, RuleSet};
+use crate::response_merge::{Assembler, FieldClass, RuleSet};
+use dynamo_llm::generate_format::{ClientRequest, Opened, SharedFormat};
+use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use proptest::collection::vec;
 use proptest::prelude::*;
 use proptest::sample::Index;
@@ -431,7 +431,7 @@ impl Harness {
             |(scenario, values, prefill)| {
                 for is_prefill in [false, true] {
                     for value in &values {
-                        let _ = crate::protocols::sglang::inspect(value.clone(), is_prefill);
+                        let _ = crate::inspect(value.clone(), is_prefill);
                     }
                 }
                 let Some(body) = self.shape.body(&scenario.request) else {
@@ -451,7 +451,7 @@ impl Harness {
                 let mut exchange = bound.exchange;
                 for value in values {
                     let output = LLMEngineOutput {
-                        engine_data: Some(json!({ crate::protocols::sglang::RESPONSE_KEY: value })),
+                        engine_data: Some(json!({ crate::RESPONSE_KEY: value })),
                         ..Default::default()
                     };
                     let _ = exchange.chunk(output, prefill, &mut |_| {});
