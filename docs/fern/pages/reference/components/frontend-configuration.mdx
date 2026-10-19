@@ -582,6 +582,29 @@ See the [KServe gRPC Frontend](../../developer-guide/knowledge-base/modular-comp
   Environment variable: `DYN_DUMP_CONFIG_TO`
 </ParamField>
 
+### TTFT Detail
+
+Set `--ttft-detail` or `DYN_FRONTEND_TTFT_DETAIL` before startup. The CLI value takes precedence.
+
+| Value | Detail histogram | Per-request DEBUG event | Collection |
+| --- | --- | --- | --- |
+| `off` (default) | Disabled | Disabled | None |
+| `metrics` | Enabled | Disabled | One request-local timeline |
+| `logs` | Disabled | Enabled when `DYN_LOG` permits `dynamo_frontend::ttft` at DEBUG | Only when that target is enabled |
+| `both` | Enabled | Enabled when the target is enabled | One timeline shared by both outputs |
+
+Existing total TTFT, operation histograms, and stage gauges remain enabled with their original
+semantics. The optional detail view partitions each request's TTFT into mutually exclusive
+contributions. To enable both outputs:
+
+```bash
+export DYN_FRONTEND_TTFT_DETAIL=both
+export DYN_LOG='info,dynamo_frontend::ttft=debug'
+```
+
+See [TTFT stage durations](../observability/metrics-catalog.mdx#ttft-stage-durations) for boundaries
+and [Per-Request First-Token Log](../observability/logging.mdx#per-request-first-token-log) for fields.
+
 ### Histogram buckets
 
 Most frontend latency and size histograms use log-spaced buckets, rounded to two significant figures, always starting with a `0` edge. Each histogram is tuned by three environment variables that share a prefix: `_MIN` and `_MAX` bound the range, and `_COUNT` is the total number of bucket edges **including** that leading `0`, so `COUNT - 1` edges are spread across the range. Every edge, including the top one, is rounded to two significant figures, so the highest exported edge is `MAX` rounded rather than `MAX` itself. These variables have no CLI equivalent, and the frontend reads them once while building its metrics, so changing one requires a restart.
@@ -607,7 +630,7 @@ Rounding can move the top edge either way, so pick a `MAX` that is already two s
 
 `dynamo_frontend_cached_tokens` shares the input sequence buckets, so `DYN_METRICS_INPUT_SEQUENCE_*` changes both histograms.
 
-`dynamo_frontend_ttft_stage_seconds` has 17 fixed `stage`/`phase` combinations per model. Each
+When detail metrics are enabled, `dynamo_frontend_ttft_stage_seconds` has 17 fixed `stage`/`phase` combinations per model. Each
 combination has the same bucket boundaries. With the default 26 finite boundaries, the `_bucket`,
 `_sum`, and `_count` series total 493 per model, including the `+Inf` bucket. See
 [TTFT stage durations](../observability/metrics-catalog.mdx#ttft-stage-durations) for the stage

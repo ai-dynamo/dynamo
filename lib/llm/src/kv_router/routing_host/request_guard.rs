@@ -365,13 +365,13 @@ struct RequestObservability {
 
 impl RequestObservability {
     fn new(
-        tracker: Option<Arc<RequestTracker>>,
+        request: &PreprocessedRequest,
         request_metrics: Arc<RouterRequestMetrics>,
         phase: RequestPhase,
     ) -> Self {
-        let timings = tracker.as_ref().and_then(|tracker| tracker.ttft()).cloned();
+        let timings = request.ttft_timings().cloned();
         Self {
-            tracker,
+            tracker: request.tracker.clone(),
             request_metrics,
             cumulative_osl: 0,
             metrics_recorded: false,
@@ -400,7 +400,7 @@ impl RequestObservability {
         let Some(tracker) = &self.tracker else {
             return;
         };
-        let includes_prefill = self.ttft.phase != RequestPhase::Decode
+        let includes_prefill = tracker.phase() != RequestPhase::Decode
             || request
                 .annotations
                 .iter()
@@ -416,17 +416,16 @@ impl RequestObservability {
     }
 
     fn observe_response(&mut self, has_tokens: bool) {
-        // Taking the guard ends dispatch latency exactly once; later responses see None.
+        // End the in-flight dispatch gauge once; later responses see None.
         self.dispatch_guard.take();
         self.ttft.observe_response(has_tokens);
     }
 
     fn observe_tokens(&mut self, new_tokens: usize) {
         if !self.first_token_recorded && new_tokens > 0 {
-            self.ttft.observe_first_token();
             if let Some(tracker) = &self.tracker {
                 tracker.record_first_token();
-                if self.ttft.phase == RequestPhase::Decode {
+                if tracker.phase() == RequestPhase::Decode {
                     tracker.record_decode_first_token();
                 }
                 if let Some(ttft) = tracker.ttft_ms() {
@@ -739,11 +738,7 @@ impl RequestGuard {
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
         Self {
             cleanup: RequestCleanup::Kv(cleanup),
-            observability: RequestObservability::new(
-                request.tracker.clone(),
-                request_metrics,
-                phase,
-            ),
+            observability: RequestObservability::new(request, request_metrics, phase),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,
                 isl_tokens,
@@ -777,11 +772,7 @@ impl RequestGuard {
                 },
                 None => RequestCleanup::Stateless { worker_id },
             },
-            observability: RequestObservability::new(
-                request.tracker.clone(),
-                request_metrics,
-                phase,
-            ),
+            observability: RequestObservability::new(request, request_metrics, phase),
             // Builtin policies do not track scheduler blocks. Emit one final ITL sample
             // when the request completes rather than observing every streamed token.
             output_blocks: OutputBlockTracker::new(false, request.token_ids.len(), 1, None),
@@ -807,10 +798,6 @@ impl RequestGuard {
 
     pub(super) fn request_metrics(&self) -> &RouterRequestMetrics {
         self.observability.request_metrics()
-    }
-
-    pub(super) fn phase(&self) -> RequestPhase {
-        self.observability.ttft.phase
     }
 
     pub(super) fn start_dispatch(&mut self, phase_label: &str) {
@@ -860,9 +847,12 @@ impl RequestGuard {
 
     pub(super) async fn on_item(&mut self, item: &Annotated<LLMEngineOutput>) {
         let new_tokens = item.data.as_ref().map_or(0, |data| data.token_ids.len());
-        // Observe arrival before async scheduler work, which belongs to postprocessing.
+        // Detail observes arrival before async work. Keep legacy token metrics
+        // at their original point below, after scheduler/output processing.
         self.observability.observe_response(new_tokens > 0);
-        self.observability.observe_tokens(new_tokens);
+        if !self.observability.first_token_recorded && new_tokens > 0 {
+            self.observability.ttft.observe_first_token();
+        }
         if new_tokens > 0
             && let Some(lifecycle) = self.cleanup.lifecycle()
         {
@@ -928,6 +918,7 @@ impl RequestGuard {
                 "Failed to materialize approximate LRU output blocks"
             );
         }
+        self.observability.observe_tokens(new_tokens);
         self.capture_kv_worker_hit(item);
         let cumulative_osl = self.observability.cumulative_osl();
         let Some(update) = self.output_blocks.observe(cumulative_osl) else {
@@ -1284,8 +1275,7 @@ mod prefill_start_tests {
         let tracker = Arc::new(RequestTracker::new());
         let _permit = tracker.set_phase(phase).await;
         let request = test_request(tracker.clone(), annotations);
-        RequestObservability::new(request.tracker.clone(), test_metrics(), phase)
-            .record_prefill_start(&request);
+        RequestObservability::new(&request, test_metrics(), phase).record_prefill_start(&request);
         tracker
     }
 
@@ -1329,18 +1319,14 @@ mod prefill_start_tests {
         let request = test_request(tracker.clone(), Vec::new());
 
         let prefill_permit = tracker.set_phase(RequestPhase::Prefill).await;
-        RequestObservability::new(
-            Some(tracker.clone()),
-            metrics.clone(),
-            RequestPhase::Prefill,
-        )
-        .record_prefill_start(&request);
+        RequestObservability::new(&request, metrics.clone(), RequestPhase::Prefill)
+            .record_prefill_start(&request);
         let recorded_by_prefill = tracker.prefill_wait_time_ms();
         assert!(recorded_by_prefill.is_some());
         drop(prefill_permit);
 
         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
-        RequestObservability::new(Some(tracker.clone()), metrics, RequestPhase::Decode)
+        RequestObservability::new(&request, metrics, RequestPhase::Decode)
             .record_prefill_start(&request);
         assert_eq!(tracker.prefill_wait_time_ms(), recorded_by_prefill);
     }
@@ -1350,6 +1336,48 @@ mod prefill_start_tests {
 mod ttft_tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    fn request_without_tracker() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn detail_without_tracker_preserves_legacy_ttft_sample_population() {
+        let start = Instant::now();
+        let timeline = Arc::new(TtftTimings::new(start));
+        let mut request = request_without_tracker();
+        request.ttft = Some(timeline.clone());
+        let metrics = RouterRequestMetrics::for_test(&dynamo_runtime::MetricsRegistry::new());
+        let mut guard = RequestGuard::new_builtin(
+            metrics.clone(),
+            1,
+            None,
+            None,
+            &request,
+            RequestPhase::Aggregated,
+        );
+        guard.start_dispatch("aggregated");
+        guard
+            .on_item(&Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![2],
+                ..Default::default()
+            }))
+            .await;
+        assert!(request.tracker.is_none());
+        assert!(guard.observability.tracker.is_none());
+        assert_eq!(metrics.time_to_first_token_seconds.get_sample_count(), 0);
+        let end = Instant::now();
+        let stages = timeline.finish(end);
+        assert!(stages[TtftStage::BackendAggregated as usize] > Duration::ZERO);
+        assert_eq!(stages.into_iter().sum::<Duration>(), end - start);
+    }
 
     #[test]
     fn first_token_keeps_postprocessing_open_after_dispatch_is_dropped() {
@@ -1436,14 +1464,21 @@ mod ttft_tests {
         tracker.set_ttft(timeline.clone());
         drop(tracker.set_phase(RequestPhase::Prefill).await);
         let metrics = RouterRequestMetrics::for_test(&dynamo_runtime::MetricsRegistry::new());
-        let mut observability =
-            RequestObservability::new(Some(tracker.clone()), metrics, RequestPhase::Prefill);
+        let mut request = request_without_tracker();
+        request.tracker = Some(tracker.clone());
+        let mut observability = RequestObservability::new(&request, metrics, RequestPhase::Prefill);
         observability.start_dispatch("prefill");
         drop(tracker.set_phase(RequestPhase::Decode).await);
         observability.observe_response(true);
+        observability.ttft.observe_first_token();
+        // Only the new attribution snapshots the dispatch phase. Legacy timing
+        // continues to observe the tracker's current phase at its old boundary.
+        tracker.record_prefill_complete();
         observability.observe_tokens(1);
+        assert!(tracker.kv_transfer_estimated_latency_secs().is_some());
         let end = Instant::now() + Duration::from_secs(1);
         let stages = timeline.finish(end);
+        assert!(stages[TtftStage::BackendPrefill as usize] > Duration::ZERO);
         assert_eq!(stages[TtftStage::BackendDecode as usize], Duration::ZERO);
         assert_eq!(stages[TtftStage::FirstTokenDecode as usize], Duration::ZERO);
         assert_eq!(

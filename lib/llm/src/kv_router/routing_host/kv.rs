@@ -211,8 +211,7 @@ impl RoutingHost {
         self.validate_explicit_worker(request.content(), phase)?;
 
         let phase_label = phase.to_string();
-        let _ttft_route = start_ttft_route(request, phase);
-        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let (route_guard, _ttft_route) = start_route(request, phase, &phase_label);
         let (outcome, _) = self
             .select_with_session_affinity(request, phase, true, &budget, |target| {
                 self.select_request_outcome(
@@ -258,8 +257,7 @@ impl RoutingHost {
 
         let phase = preview.phase;
         let phase_label = phase.to_string();
-        let _ttft_route = start_ttft_route(request, phase);
-        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let (route_guard, _ttft_route) = start_route(request, phase, &phase_label);
         let planned_worker = preview.signals.worker;
         let select = || {
             self.select_with_session_affinity(request, phase, false, &budget, |target| {
@@ -547,9 +545,10 @@ impl RoutingHost {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
         let route_trace_context = get_route_trace_context(&request);
-        let phase = guard.phase();
+        let phase = request.phase();
         let staged_kv = StagedKv::for_request(request.content());
         let phase_label = phase.to_string();
+        guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
         let (mut backend_input, context) = request.into_parts();
@@ -557,8 +556,9 @@ impl RoutingHost {
         backend_input.kv_hint = selection.kv_hint;
         let updated_request = context.map(|_| backend_input);
         guard.record_prefill_start(updated_request.content());
+        // Dispatch uses the legacy entry point. Route precedence attributes
+        // dispatch preparation here without moving the existing gauge boundary.
         drop(ttft_route);
-        guard.start_dispatch(&phase_label);
 
         let dispatch = self
             .inner
@@ -665,8 +665,7 @@ impl RoutingHost {
         let budget = CleanupBudget::default();
         let phase = RequestPhase::Prefill;
         let phase_label = phase.to_string();
-        let ttft_route = start_ttft_route(&request, phase);
-        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let (route_guard, ttft_route) = start_route(&request, phase, &phase_label);
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let (mut selection, mut operation) = self
             .select_with_affinity(&request, phase, is_query_only, &budget)

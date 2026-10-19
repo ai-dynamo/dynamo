@@ -286,8 +286,7 @@ impl RoutingHost {
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
         let phase_label = phase.to_string();
-        let ttft_route = start_ttft_route(&request, phase);
-        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let (route_guard, ttft_route) = start_route(&request, phase, &phase_label);
         let explicit = explicit_target(request.content(), phase)?;
         let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
         let is_direct = matches!(&self.policy, RoutingPolicy::Direct);

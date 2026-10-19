@@ -24,15 +24,9 @@ import (
 const (
 	otherFixtureValue  = "other"
 	v2TestBuildName    = "v2-test-build"
-	v3HXTopologyFamily = "16x8x2x3"
+	v3HXTopologyFamily = "HX16x8x2"
 	v3OpaqueTopology   = "opaque-v3-topology"
 )
-
-type unreachableBuildSnapshotSource struct{}
-
-func (unreachableBuildSnapshotSource) AcquireBuildSnapshot(context.Context, string) (*BuildSnapshot, error) {
-	return nil, fmt.Errorf("unexpected build snapshot acquisition")
-}
 
 type staticBuildSnapshotSource map[string]*BuildSnapshot
 

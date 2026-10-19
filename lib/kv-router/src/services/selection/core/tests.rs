@@ -11,7 +11,7 @@ use super::*;
 use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;
-use crate::services::indexer::backend::test_util::store_event;
+use crate::services::indexer::backend::{RemotePrimary, test_util::store_event};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::sleep;
@@ -401,8 +401,6 @@ async fn bookings_populate_the_approximate_primary_without_kv_events(
 #[tokio::test]
 async fn unreachable_remote_indexer_is_reported_not_ready() {
     use crate::indexer::{KvRouterError, TieredMatchDetails};
-    use crate::services::indexer::backend::RemotePrimary;
-
     struct OfflineRemote;
     #[async_trait::async_trait]
     impl RemotePrimary for OfflineRemote {
@@ -734,6 +732,40 @@ fn capturing_policy_factory() -> (
     (factory, observed)
 }
 
+// Keep clock- and poll-order tests independent of the native indexer thread.
+struct ReadyIndexer;
+#[async_trait::async_trait]
+impl RemotePrimary for ReadyIndexer {
+    async fn find_matches_by_tier(
+        &self,
+        _: Vec<LocalBlockHash>,
+        _: bool,
+    ) -> anyhow::Result<TieredMatchDetails> {
+        Ok(TieredMatchDetails::default())
+    }
+    async fn record_routing_decision(
+        &self,
+        _: WorkerWithDpRank,
+        _: RoutingDecisionHashes,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn use_kv_events(&self) -> bool {
+        true
+    }
+}
+struct ReadyIngress;
+#[async_trait::async_trait]
+impl KvEventIngress for ReadyIngress {
+    fn open(&self, _: &WorkerRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
+        Indexer::Remote {
+            primary: Arc::new(ReadyIndexer),
+            approx: None,
+            primary_records_routing_decisions: false,
+        }
+    }
+}
+
 type SharedCacheCalls = Arc<parking_lot::Mutex<Vec<(Vec<u32>, u32, Option<String>)>>>;
 
 /// Shared cache that reports every block as a hit and records each query.
@@ -795,6 +827,77 @@ async fn injected_lora_filter_narrows_candidates() {
         request.prompt.lora_name = Some("adapter-a".to_string());
         let response = core.select(request).await.expect("select");
         assert_eq!(response.worker_id, 2);
+    }
+}
+
+#[rstest::rstest]
+#[case::shutdown(true)]
+#[case::completes(false)]
+#[tokio::test(start_paused = true)]
+async fn shutdown_interrupts_shared_cache_wait(#[case] shutdown: bool) {
+    #[derive(Default)]
+    struct PausedSharedCache {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl SharedKvCache for PausedSharedCache {
+        async fn check_blocks(
+            &self,
+            _: &[u32],
+            _: u32,
+            _: Option<&str>,
+        ) -> Result<SharedCacheHits, crate::indexer::KvRouterError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(SharedCacheHits::from_hits(&[false]))
+        }
+    }
+
+    let shared = Arc::new(PausedSharedCache::default());
+    let core = Arc::new(core_with_host(SelectionHost {
+        cache: HostCache {
+            index: KvIndexSource::Owned(Arc::new(ReadyIngress)),
+            shared: Some(shared.clone()),
+        },
+        ..SelectionHost::default()
+    }));
+    core.upsert_worker(worker(1)).await.unwrap();
+    let entry = core.entry(&default_key()).unwrap();
+    let request = {
+        let core = core.clone();
+        tokio::spawn(async move {
+            core.select_and_reserve(reserve_request("shared-wait"))
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), shared.entered.notified())
+        .await
+        .expect("request did not reach the shared-cache wait");
+    assert!(!entry.scheduler.has_request("shared-wait"));
+    assert!(core.reservation_index.read().contains_key("shared-wait"));
+    if shutdown {
+        core.shutdown();
+    } else {
+        shared.release.notify_one();
+    }
+    let result = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .expect("request did not finish after shutdown or shared-cache release")
+        .unwrap();
+    if shutdown {
+        assert!(matches!(
+            result,
+            Err(SelectionError::Scheduler(
+                KvSchedulerError::SubscriberShutdown
+            ))
+        ));
+        assert!(core.reservation_index.read().get("shared-wait").is_none());
+        assert!(!entry.scheduler.has_request("shared-wait"));
+    } else {
+        result.expect("live request should complete normally");
+        core.free_reservation("shared-wait").await.unwrap();
     }
 }
 
@@ -1208,9 +1311,9 @@ async fn shutdown_reports_not_ready_and_rejects_new_work() {
 
     assert_eq!(core.list_workers(None, None).len(), 1);
     assert_eq!(core.loads(None, None).len(), 1);
-    let deleted = core
-        .delete_worker(1)
+    let deleted = tokio::time::timeout(Duration::from_secs(5), core.delete_worker(1))
         .await
+        .expect("delete must not wait for a stopped config monitor")
         .expect("delete should remain available after shutdown");
     assert_eq!(deleted.lifecycle, WorkerLifecycle::Unschedulable);
 }
@@ -1406,6 +1509,148 @@ async fn dropped_selection_future_frees_its_booking() {
     })
     .await;
     assert!(core.reservation_index.read().get("dropped").is_none());
+}
+
+#[rstest::rstest]
+#[case::lookup_shutdown(true, false, true, false)]
+#[case::lookup_completes(true, false, false, false)]
+#[case::record_shutdown(false, false, true, false)]
+#[case::record_completes(false, false, false, false)]
+#[case::explicit_record_shutdown(false, true, true, false)]
+#[case::explicit_record_completes(false, true, false, false)]
+#[case::record_error(false, false, false, true)]
+#[case::explicit_record_error(false, true, false, true)]
+#[tokio::test(start_paused = true)]
+async fn shutdown_interrupts_indexer_waits(
+    #[case] block_lookup: bool,
+    #[case] explicit: bool,
+    #[case] shutdown: bool,
+    #[case] record_error: bool,
+) {
+    struct PausedIndexer {
+        block_lookup: bool,
+        record_error: bool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl RemotePrimary for PausedIndexer {
+        async fn find_matches_by_tier(
+            &self,
+            _: Vec<LocalBlockHash>,
+            _: bool,
+        ) -> anyhow::Result<TieredMatchDetails> {
+            if self.block_lookup {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(TieredMatchDetails::default())
+        }
+
+        async fn record_routing_decision(
+            &self,
+            _: WorkerWithDpRank,
+            _: RoutingDecisionHashes,
+        ) -> anyhow::Result<()> {
+            if !self.block_lookup {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            if self.record_error {
+                anyhow::bail!("injected routing-record failure");
+            }
+            Ok(())
+        }
+
+        fn use_kv_events(&self) -> bool {
+            false
+        }
+    }
+
+    struct PausedIngress(Arc<PausedIndexer>);
+    #[async_trait::async_trait]
+    impl KvEventIngress for PausedIngress {
+        fn open(&self, _: &WorkerRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
+            Indexer::Remote {
+                primary: self.0.clone(),
+                approx: None,
+                primary_records_routing_decisions: true,
+            }
+        }
+    }
+
+    let indexer = Arc::new(PausedIndexer {
+        block_lookup,
+        record_error,
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let core = Arc::new(core_with(
+        test_config(false),
+        SelectionHost {
+            cache: HostCache {
+                index: KvIndexSource::Owned(Arc::new(PausedIngress(indexer.clone()))),
+                shared: None,
+            },
+            ..SelectionHost::default()
+        },
+        None,
+        WorkerType::Aggregated,
+        None,
+    ));
+    core.upsert_worker(worker(1)).await.unwrap();
+    let entry = core.entry(&default_key()).unwrap();
+    let request = {
+        let core = core.clone();
+        tokio::spawn(async move {
+            if explicit {
+                core.create_reservation(ReservationRequest {
+                    worker_id: Some(1),
+                    prompt: prompt(),
+                    ..replay_reservation("in-flight")
+                })
+                .await
+                .map(|_| ())
+            } else {
+                core.select_and_reserve(reserve_request("in-flight"))
+                    .await
+                    .map(|_| ())
+            }
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), indexer.entered.notified())
+        .await
+        .expect("request did not reach the indexer wait");
+    assert_eq!(entry.scheduler.has_request("in-flight"), !block_lookup);
+    assert!(core.reservation_index.read().contains_key("in-flight"));
+
+    if shutdown {
+        core.shutdown();
+    } else {
+        indexer.release.notify_one();
+    }
+    let result = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .expect("request did not finish after shutdown or indexer release")
+        .unwrap();
+    if shutdown {
+        assert!(matches!(
+            result,
+            Err(SelectionError::Scheduler(
+                KvSchedulerError::SubscriberShutdown
+            ))
+        ));
+        wait_until("cancelled booking release", || {
+            !entry.scheduler.has_request("in-flight")
+        })
+        .await;
+        assert!(core.reservation_index.read().get("in-flight").is_none());
+    } else {
+        result.expect("live request should complete normally");
+        assert!(entry.scheduler.has_request("in-flight"));
+        core.free_reservation("in-flight").await.unwrap();
+    }
 }
 
 /// The routing-decision record is an await between the booking (and the
@@ -1858,7 +2103,8 @@ async fn repeated_affinity_invalidation_yields_and_preserves_new_bindings() {
                 }
             }
         }));
-        let mut pending = Box::pin(core.hold_session(&table, "s", &key));
+        let mut pending =
+            Box::pin(core.select_and_reserve(session_reservation("invalidation", "s")));
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(pending.as_mut().poll(&mut context).is_pending());
         assert_eq!(invalidations.load(Ordering::SeqCst), 32);
@@ -1880,8 +2126,9 @@ async fn repeated_affinity_invalidation_yields_and_preserves_new_bindings() {
                     writer_id: 99,
                 },
             );
-            let hold = pending.await.unwrap().unwrap();
-            assert!(matches!(hold, Hold::Bound { target, .. } if target == healthy));
+            let selected = pending.await.unwrap();
+            assert_eq!(selected.worker_id, healthy.worker_id);
+            core.free_reservation("invalidation").await.unwrap();
             assert_eq!(invalidations.load(Ordering::SeqCst), 32);
         }
     }
@@ -3311,6 +3558,7 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
             RouterHintSourceMetadata {
                 source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
                 worker_type: "prefill".to_string(),
+                topology_domains: Default::default(),
             },
             None,
         )],
@@ -3319,6 +3567,303 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
         transfer_hint_for_selection(&configs, WorkerWithDpRank::new(7, 0), 0, Some(&candidates))
             .expect("hint");
     assert_eq!(hint.source_control_endpoint, "tcp://persistent-owner:23280");
+}
+
+const ISLAND_DOMAIN: &str = "rdma-island";
+
+fn island_config(endpoint: &str, island: &str) -> SelectionWorkerConfig {
+    let mut config = hint_config("prefill", &[(0, endpoint)]);
+    config.topology_domains = HashMap::from([(ISLAND_DOMAIN.to_string(), island.to_string())]);
+    config.kv_transfer_domain = Some(ISLAND_DOMAIN.to_string());
+    config.kv_transfer_enforcement = Some(crate::protocols::KvTransferEnforcement::Required);
+    config
+}
+
+fn hint_endpoint(
+    configs: &HashMap<WorkerId, SelectionWorkerConfig>,
+    candidates: &KvTransferCandidates,
+) -> Option<String> {
+    transfer_hint_for_selection(configs, WorkerWithDpRank::new(7, 0), 0, Some(candidates))
+        .map(|hint| hint.source_control_endpoint)
+}
+
+#[test]
+fn hint_source_must_share_the_target_island() {
+    let mut configs = HashMap::from([
+        (7, island_config("tcp://target:23280", "a")),
+        (8, island_config("tcp://same-island:23280", "a")),
+        (9, island_config("tcp://other-island:23280", "b")),
+        (10, hint_config("prefill", &[(0, "tcp://unlabeled:23280")])),
+    ]);
+    let cross_island: Vec<(KvTransferCandidateSource, usize)> = vec![
+        (WorkerWithDpRank::new(9, 0).into(), 3),
+        (WorkerWithDpRank::new(10, 0).into(), 3),
+    ];
+    let mut all = cross_island.clone();
+    all.push((WorkerWithDpRank::new(8, 0).into(), 2));
+    let all = hint_candidates(&[101, 102, 103], all);
+    let cross_island = hint_candidates(&[101, 102, 103], cross_island);
+
+    // Longer prefixes in another island, or in none, are skipped.
+    assert_eq!(
+        hint_endpoint(&configs, &all).as_deref(),
+        Some("tcp://same-island:23280")
+    );
+    // Without a same-island source there is no hint, and the target recomputes.
+    assert_eq!(hint_endpoint(&configs, &cross_island), None);
+    // A target without a transfer domain is not filtered.
+    configs.get_mut(&7).unwrap().kv_transfer_domain = None;
+    assert_eq!(
+        hint_endpoint(&configs, &cross_island).as_deref(),
+        Some("tcp://other-island:23280")
+    );
+}
+
+#[test]
+fn preferred_island_falls_back_to_a_cross_island_source() {
+    let mut target = island_config("tcp://target:23280", "a");
+    target.kv_transfer_enforcement = Some(crate::protocols::KvTransferEnforcement::Preferred);
+    let configs = HashMap::from([
+        (7, target),
+        (8, island_config("tcp://same-island:23280", "a")),
+        (9, island_config("tcp://other-island:23280", "b")),
+    ]);
+    let both = hint_candidates(
+        &[101, 102, 103],
+        vec![
+            (WorkerWithDpRank::new(8, 0).into(), 2),
+            (WorkerWithDpRank::new(9, 0).into(), 3),
+        ],
+    );
+    let cross_island = hint_candidates(
+        &[101, 102, 103],
+        vec![(WorkerWithDpRank::new(9, 0).into(), 3)],
+    );
+
+    assert_eq!(
+        hint_endpoint(&configs, &both).as_deref(),
+        Some("tcp://same-island:23280")
+    );
+    assert_eq!(
+        hint_endpoint(&configs, &cross_island).as_deref(),
+        Some("tcp://other-island:23280")
+    );
+}
+
+#[test]
+fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
+    use crate::identity::{
+        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
+    use crate::protocols::{
+        ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
+    let owner = |slot: u8| {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(3),
+            ),
+            StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
+        )
+    };
+    let source = |owner| {
+        KvTransferCandidateSource::CacheOwner(ResidencyOwner::cache_owner(owner).compact_key())
+    };
+    let metadata = |endpoint: &str, island: Option<&str>| RouterHintSourceMetadata {
+        source_control_endpoint: endpoint.to_string(),
+        worker_type: "prefill".to_string(),
+        topology_domains: island
+            .map(|island| (ISLAND_DOMAIN.to_string(), island.to_string()))
+            .into_iter()
+            .collect(),
+    };
+    let configs = HashMap::from([
+        (7, island_config("tcp://target:23280", "a")),
+        (8, island_config("tcp://attached-worker:23280", "a")),
+    ]);
+    let (other_island, unlabeled, published, inherited, partial) =
+        (owner(4), owner(5), owner(6), owner(7), owner(8));
+    let mut partial_metadata = metadata("tcp://partial:23280", None);
+    partial_metadata
+        .topology_domains
+        .insert("zone".to_string(), "z1".to_string());
+    let snapshot = Arc::new(ResidencyRoutingSnapshot::new(
+        ResidencyProjection::default(),
+        [
+            (
+                other_island,
+                metadata("tcp://other-island:23280", Some("b")),
+                None,
+            ),
+            (unlabeled, metadata("tcp://unlabeled:23280", None), None),
+            (
+                published,
+                metadata("tcp://published:23280", Some("a")),
+                None,
+            ),
+            (
+                inherited,
+                metadata("tcp://inherited:23280", None),
+                Some(WorkerWithDpRank::new(8, 0)),
+            ),
+            (partial, partial_metadata, Some(WorkerWithDpRank::new(8, 0))),
+        ],
+    ));
+    let hint = |owners: &[(CacheOwnerId, usize)]| {
+        let mut candidates = hint_candidates(
+            &[101, 102, 103, 104],
+            owners
+                .iter()
+                .map(|(owner, blocks)| (source(*owner), *blocks))
+                .collect(),
+        );
+        candidates.routing_snapshot = Some(snapshot.clone());
+        hint_endpoint(&configs, &candidates)
+    };
+
+    // Owners in another island, or in none, are skipped despite longer prefixes.
+    // An owner that publishes topology without the domain is in none, even
+    // when attached to a same-island worker.
+    assert_eq!(
+        hint(&[
+            (other_island, 4),
+            (unlabeled, 4),
+            (partial, 4),
+            (published, 2),
+            (inherited, 3)
+        ])
+        .as_deref(),
+        Some("tcp://inherited:23280")
+    );
+    assert_eq!(
+        hint(&[(other_island, 4), (unlabeled, 4), (published, 2)]).as_deref(),
+        Some("tcp://published:23280")
+    );
+    assert_eq!(hint(&[(other_island, 4), (unlabeled, 4)]), None);
+}
+
+#[tokio::test]
+async fn deleting_worker_releases_booking_before_same_id_returns() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let core = local_core(test_config(false));
+        core.upsert_worker(worker(1)).await.unwrap();
+        core.select_and_reserve(reserve_request("old"))
+            .await
+            .unwrap();
+        let entry = core.entry(&default_key()).unwrap();
+        let old = core.indexed_booking("old").unwrap().1;
+        assert!(entry.scheduler.has_booking(&old));
+
+        // With no event ingress, both catalog operations can finish without
+        // yielding. A watch-only consumer can miss the intervening removal.
+        core.delete_worker(1).await.unwrap();
+        core.upsert_worker(worker(1)).await.unwrap();
+        assert!(
+            !entry.scheduler.has_booking(&old),
+            "completed deletion left a booking on the replacement worker"
+        );
+        assert!(core.prefill_complete("old").await.is_err());
+        core.select_and_reserve(reserve_request("old"))
+            .await
+            .unwrap();
+        let fresh = core.indexed_booking("old").unwrap().1;
+        assert_ne!(old.attempt_id, fresh.attempt_id);
+        assert!(!entry.scheduler.has_booking(&old));
+        assert_eq!(
+            entry.scheduler.free_if_booking(&old).await.unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        assert!(entry.scheduler.has_booking(&fresh));
+        core.free_reservation("old").await.unwrap();
+        assert!(core.loads(None, None).iter().all(|p| p.pending_count == 0
+            && p.loads.iter().all(|w| w.active_requests == 0
+                && w.potential_prefill_tokens == 0
+                && w.potential_decode_blocks == 0)));
+        core.shutdown();
+    })
+    .await
+    .expect("worker deletion deadline");
+}
+
+#[tokio::test]
+async fn cancelled_worker_delete_is_finished_before_re_registration() {
+    struct PausedDetach {
+        calls: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl KvEventIngress for PausedDetach {
+        fn open(
+            &self,
+            registry: &WorkerRegistry,
+            key: &RoutingPartitionId,
+            block_size: u32,
+        ) -> Indexer {
+            registry.get_or_create_indexer(key.clone(), block_size)
+        }
+        async fn detach(&self, _: &WorkerRegistry, _: &WorkerCatalogRecord) {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let ingress = Arc::new(PausedDetach {
+            calls: AtomicUsize::new(0),
+        });
+        let core = core_with_host(SelectionHost {
+            cache: HostCache {
+                index: KvIndexSource::Owned(ingress.clone()),
+                shared: None,
+            },
+            ..SelectionHost::default()
+        });
+        core.upsert_worker(worker(1)).await.unwrap();
+        core.select_and_reserve(reserve_request("old"))
+            .await
+            .unwrap();
+        let entry = core.entry(&default_key()).unwrap();
+        let old = core.indexed_booking("old").unwrap().1;
+        {
+            let deletion = core.delete_worker(1);
+            tokio::pin!(deletion);
+            let pending = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(
+                    std::future::Future::poll(deletion.as_mut(), cx).is_pending(),
+                )
+            })
+            .await;
+            assert!(pending, "deletion must wait for the paused indexer detach");
+            assert_eq!(ingress.calls.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(
+            core.catalog.get(1).unwrap().lifecycle,
+            WorkerLifecycle::Draining
+        );
+        core.upsert_worker(worker(1)).await.unwrap();
+        assert!(
+            !entry.scheduler.has_booking(&old),
+            "cancelled deletion left a booking on the replacement worker"
+        );
+        assert_eq!(ingress.calls.load(Ordering::SeqCst), 2);
+        core.select(select_request()).await.unwrap();
+        assert!(core.free_reservation("old").await.is_err());
+        core.select_and_reserve(reserve_request("old"))
+            .await
+            .unwrap();
+        core.free_reservation("old").await.unwrap();
+        assert!(core.loads(None, None).iter().all(|p| p.pending_count == 0
+            && p.loads.iter().all(|w| w.active_requests == 0
+                && w.potential_prefill_tokens == 0
+                && w.potential_decode_blocks == 0)));
+        core.shutdown();
+    })
+    .await
+    .expect("cancelled worker deletion deadline");
 }
 
 #[tokio::test]

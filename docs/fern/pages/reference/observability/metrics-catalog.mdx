@@ -121,7 +121,7 @@ The ratio is defined only when the model has an active L1 cache and observed tok
 
 <ParamField path="dynamo_frontend_ttft_stage_seconds" type="histogram">
   Exclusive wall-clock contributions to frontend Time To First Token (TTFT), in seconds. Labeled by
-  `model`, `stage`, and `phase`. Every request that records total TTFT records all 17 stage/phase
+  `model`, `stage`, and `phase`. Disabled by default. When metrics are enabled, every request that records total TTFT records all 17 stage/phase
   combinations, including zeros for unused stages. See [TTFT stage durations](#ttft-stage-durations).
 </ParamField>
 
@@ -136,34 +136,58 @@ the request's total TTFT, subject to floating-point rounding.
 | `stage` | `phase` | Measured interval |
 |---------|---------|-------------------|
 | `frontend_overhead` | `""` | Time outside instrumented stages, including request setup and gaps between stages |
-| `python_preprocess` | `""` | Python chat preprocessing, including process-pool dispatch and IPC when used, excluding separately attributed nested stages |
+| `preprocess` | `""` | Native or Python chat preprocessing, including process-pool dispatch and IPC when used, excluding separately attributed nested stages |
 | `preprocess_queue` | `""` | Waiting for the Python preprocessing concurrency semaphore |
 | `template_tokenize` | `""` | Chat-template application and tokenization in the Python or native Rust preprocessor |
 | `multimodal_prepare` | `""` | Frontend multimodal input preparation, including media processing and shared-memory or NIXL sender preparation |
 | `mm_routing_build` | `""` | Building multimodal routing information from prepared inputs |
-| `kv_route` | `prefill`, `decode`, `aggregated` | Worker selection, scheduling, and dispatch preparation for the backend phase, for KV and built-in routing policies |
-| `backend_first_response` | `prefill`, `decode`, `aggregated` | Backend dispatch to the first response, including transport, backend work, and waiting |
+| `route` | `prefill`, `decode`, `aggregated` | Worker selection, scheduling, and dispatch preparation for the backend phase, for KV and built-in routing policies |
+| `dispatch` | `prefill`, `decode`, `aggregated` | Backend dispatch to the first response, including transport, backend work, and waiting |
 | `backend_first_token` | `prefill`, `decode`, `aggregated` | First backend response to its first nonempty token output; zero when the first response contains tokens |
 | `backend_overlap` | `prefill_decode` | Concurrent prefill and decode backend waits, counted once |
 | `first_token_postprocess` | `""` | First decode or aggregated backend token to the HTTP first-token observation, including detokenization, parser buffering, and delivery |
+
+The existing metric contracts remain unchanged:
+
+| Existing view | Reuse in TTFT detail | Preserved contract |
+| --- | --- | --- |
+| `stage_requests{stage="route",phase=...}` | Shared route entry and canonical `route` stage name | The KV gauge ends after selection/tracking; the TTFT interval continues through dispatch preparation. Built-in policies close both at dispatch. |
+| `stage_requests{stage="dispatch",phase=...}` | Same dispatch entry and first-response event; canonical `dispatch` name | The gauge still starts before KV dispatch preparation and counts in-flight requests. Route precedence removes the preparation overlap only from the new TTFT contribution. |
+| `stage_requests{stage="preprocess",phase=""}` | Finer template, multimodal, and Python preprocessing intervals | Original gauge scopes remain unchanged. |
+| `template_seconds`, `tokenize_seconds` | Native chat timing results feed `template_tokenize` without a second measurement | Inclusive operation durations retain their boundaries and sample populations. |
+| `stage_duration_seconds{stage=...}` | Native chat `preprocess` reuses the same timing result | Existing stage values, buckets, and samples remain unchanged; no `model` or `phase` label is added. |
+| `time_to_first_token_seconds{model=...}` | Same start, first-token observation, and request population | Existing total TTFT remains enabled in all modes. |
+
+The detail histogram is a distinct statistical view: it removes overlap, clips at the first HTTP
+token, and records zero for unused stages. Summing existing inclusive operation histograms would
+neither remove overlap nor preserve the total-TTFT denominator.
+
+Python requests carry the optional timeline separately from the legacy request tracker. Enabling
+detail does not create a tracker or add requests to existing router timing metrics.
 
 The empty `phase` means the stage does not distinguish serving phases. `aggregated` identifies a
 single worker serving both prefill and decode. `backend_overlap` includes first-response and
 first-token waits. Routing takes precedence over backend waits, so a routing interval does not also
 contribute to a backend wait or overlap stage. Template/tokenizer, multimodal preparation, routing
-metadata, and preprocessing queue intervals take precedence over `python_preprocess`. Routing
+metadata, and preprocessing queue intervals take precedence over `preprocess`. Routing
 metadata construction takes precedence over an enclosing `multimodal_prepare` interval. Once a
 decode or aggregated worker produces a token, `first_token_postprocess` takes precedence until the
 HTTP first-token observation, including any remaining overlapping work. If that attempt is
 aborted or retried before HTTP observes a token, its postprocessing interval closes so the
 replacement attempt retains its own routing and backend contributions.
 
-The metric is enabled by default on the frontend's existing `/metrics` endpoint, independently of
-the per-request TTFT log filter. The SGLang and vLLM Python chat processors and native Rust
+Enable the metric on the frontend's existing `/metrics` endpoint with
+`DYN_FRONTEND_TTFT_DETAIL=metrics` or `both` (default: `off`). The `metrics` and `both` modes
+collect regardless of the log filter. In `logs` mode, collection also requires the
+`dynamo_frontend::ttft` DEBUG target to be enabled. With `off`, or `logs` with that target disabled,
+requests allocate no detail timeline or histogram handles, read no additional stage clocks, and
+skip Python stage calls and pool timing results. The setting is resolved at startup; CLI
+`--ttft-detail` takes precedence over the environment. See
+[TTFT Detail](../components/frontend-configuration.mdx#ttft-detail). The SGLang and vLLM Python chat processors and native Rust
 preprocessor provide preprocessing timings. Chat and text completions carry the HTTP timing context
 through the in-process routing host, including KV, round-robin, random, direct, and other built-in
 policies. These paths record worker selection,
-backend waits, and first-token postprocessing. The `kv_route` label also covers the built-in
+backend waits, and first-token postprocessing. The `route` label also covers the built-in
 policies. Batched text completion children share the parent HTTP timeline, so overlapping child
 work is counted once.
 
@@ -176,14 +200,14 @@ All boundaries use the frontend's local timing context. Process-pool template/to
 are aligned to the frontend clock using elapsed ages, with a small boundary uncertainty from the
 Python-to-Rust call overhead. No worker clock synchronization or timing fields in backend RPCs are
 required. Backend stages include transport, scheduling, and processing; they do not isolate GPU
-prefill, decode computation, or KV transfer. A control response can end `backend_first_response`
+prefill, decode computation, or KV transfer. A control response can end `dispatch`
 before a token is available, which is why `backend_first_token` is separate. These values are
 exclusive contributions to HTTP TTFT, not independent elapsed times for overlapping operations.
 Processor boundaries differ by backend: vLLM chat rendering can fetch media inside
 `template_tokenize`, while later media processing and transfer preparation contribute to
 `multimodal_prepare`.
 
-For each model, all 17 combinations have the same sample count and request population as total
+When metrics are enabled, all 17 combinations for each model have the same sample count and request population as total
 TTFT. Requests that end, fail, or are canceled before the first output token produce neither total
 nor stage TTFT observations. Later tokens do not add TTFT observations. Labels never contain
 request IDs. See [Per-Request First-Token Log](logging.mdx#per-request-first-token-log) for the

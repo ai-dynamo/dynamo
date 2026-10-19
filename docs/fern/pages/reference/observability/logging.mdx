@@ -73,26 +73,31 @@ emit the event. Later tokens do not emit additional TTFT events.
 The event contains the canonical HTTP context `request_id`, `model`, `ttft_ms`, and 17 numeric stage
 durations in milliseconds. Field names use `<stage>_ms` for an empty phase and
 `<stage>_<phase>_ms` otherwise, such as `template_tokenize_ms`, `multimodal_prepare_ms`,
-`kv_route_prefill_ms`, `backend_first_response_decode_ms`, and
+`route_prefill_ms`, `dispatch_decode_ms`, and
 `backend_overlap_prefill_decode_ms`. All stage/phase combinations are present, including zeros for
-unused stages. These frozen values match the
+unused stages. In `both` mode these frozen values match the
 [TTFT stage histogram](metrics-catalog.mdx#ttft-stage-durations), and their sum equals `ttft_ms`,
 subject to floating-point rounding.
 
-These events are disabled at the default INFO level. TTFT timing and Prometheus stage histograms
-remain enabled regardless of the log filter. To enable TTFT events while keeping other logs at INFO,
-set this environment variable before starting the frontend:
+Detail collection defaults to `off`. To enable events while keeping other logs at INFO, set both
+the detail mode and log target before starting the frontend:
 
 ```bash
+export DYN_FRONTEND_TTFT_DETAIL=logs
 export DYN_LOG='info,dynamo_frontend::ttft=debug'
 ```
 
-A global DEBUG or TRACE level also enables these events. To disable them while retaining other
+Use `both` instead of `logs` to also emit detail histograms from the same frozen result. With
+`logs` or `both` selected, a global DEBUG or TRACE level also enables these events. To disable them while retaining other
 DEBUG logs, set:
 
 ```bash
 export DYN_LOG='debug,dynamo_frontend::ttft=off'
 ```
+
+With `logs` and a disabled target, no detail timeline is collected. With `metrics` or `both`,
+metrics remain independent of the filter. With `off`, no detail metrics or events are emitted,
+even at DEBUG. Existing total TTFT and other metrics remain enabled in every mode.
 
 Set `DYN_LOGGING_CONSOLE_FORMAT=jsonl` for machine-readable records; duration fields remain JSON
 numbers. Readable and JSONL formats use the same filters. TOML `log_filters` entries are applied

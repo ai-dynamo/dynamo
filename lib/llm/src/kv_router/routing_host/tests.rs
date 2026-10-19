@@ -4529,3 +4529,36 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
 
     runtime.shutdown();
 }
+
+#[test]
+fn ttft_route_keeps_legacy_gauge_exit_before_dispatch_preparation() {
+    use crate::protocols::common::ttft::TtftTimings;
+    use dynamo_runtime::metrics::frontend_perf::STAGE_REQUESTS;
+
+    let start = Instant::now();
+    let timeline = Arc::new(TtftTimings::new(start));
+    let tracker = Arc::new(RequestTracker::new());
+    tracker.set_ttft(timeline.clone());
+    let mut timed_request = request();
+    timed_request.tracker = Some(tracker);
+    // A unique gauge label isolates this lifecycle assertion from parallel tests.
+    let gauge = STAGE_REQUESTS.with_label_values(&[STAGE_ROUTE, "ttft_boundary_test"]);
+    let (route_guard, timing) =
+        start_route(&timed_request, RequestPhase::Decode, "ttft_boundary_test");
+    assert_eq!(gauge.get(), 1);
+    drop(route_guard);
+    assert_eq!(gauge.get(), 0);
+    // The timing remains open after the legacy selection/tracking gauge ends.
+    let end = Instant::now() + Duration::from_secs(1);
+    let stages = timeline.finish(end);
+    assert!(stages[TtftStage::RouteDecode as usize] >= Duration::from_secs(1));
+    assert_eq!(stages.iter().sum::<Duration>(), end - start);
+    drop(timing);
+    assert_eq!(gauge.get(), 0);
+
+    let (gauge_guard, timing) = start_route(&request(), RequestPhase::Decode, "ttft_boundary_test");
+    assert!(timing.is_none());
+    assert_eq!(gauge.get(), 1);
+    drop(gauge_guard);
+    assert_eq!(gauge.get(), 0);
+}

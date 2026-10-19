@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use dynamo_runtime::metrics::frontend_perf::{STAGE_DISPATCH, STAGE_PREPROCESS, STAGE_ROUTE};
 use parking_lot::Mutex;
 
 /// Local pipeline context entry, shared with the Python processor and routed engine.
@@ -19,7 +20,7 @@ pub const TTFT_CONTEXT_KEY: &str = "frontend_ttft_timings";
 #[repr(usize)]
 pub enum TtftStage {
     FrontendOverhead,
-    PythonPreprocess,
+    Preprocess,
     PreprocessQueue,
     TemplateTokenize,
     MultimodalPrepare,
@@ -40,7 +41,7 @@ pub enum TtftStage {
 impl TtftStage {
     pub const ALL: [Self; 17] = [
         Self::FrontendOverhead,
-        Self::PythonPreprocess,
+        Self::Preprocess,
         Self::PreprocessQueue,
         Self::TemplateTokenize,
         Self::MultimodalPrepare,
@@ -61,17 +62,17 @@ impl TtftStage {
     pub const fn labels(self) -> [&'static str; 2] {
         match self {
             Self::FrontendOverhead => ["frontend_overhead", ""],
-            Self::PythonPreprocess => ["python_preprocess", ""],
+            Self::Preprocess => [STAGE_PREPROCESS, ""],
             Self::PreprocessQueue => ["preprocess_queue", ""],
             Self::TemplateTokenize => ["template_tokenize", ""],
             Self::MultimodalPrepare => ["multimodal_prepare", ""],
             Self::MmRoutingBuild => ["mm_routing_build", ""],
-            Self::RoutePrefill => ["kv_route", "prefill"],
-            Self::RouteDecode => ["kv_route", "decode"],
-            Self::RouteAggregated => ["kv_route", "aggregated"],
-            Self::BackendPrefill => ["backend_first_response", "prefill"],
-            Self::BackendDecode => ["backend_first_response", "decode"],
-            Self::BackendAggregated => ["backend_first_response", "aggregated"],
+            Self::RoutePrefill => [STAGE_ROUTE, "prefill"],
+            Self::RouteDecode => [STAGE_ROUTE, "decode"],
+            Self::RouteAggregated => [STAGE_ROUTE, "aggregated"],
+            Self::BackendPrefill => [STAGE_DISPATCH, "prefill"],
+            Self::BackendDecode => [STAGE_DISPATCH, "decode"],
+            Self::BackendAggregated => [STAGE_DISPATCH, "aggregated"],
             Self::FirstTokenPrefill => ["backend_first_token", "prefill"],
             Self::FirstTokenDecode => ["backend_first_token", "decode"],
             Self::FirstTokenAggregated => ["backend_first_token", "aggregated"],
@@ -83,7 +84,7 @@ impl TtftStage {
     /// Restrict Python instrumentation to the fixed frontend stage vocabulary.
     pub fn from_python(stage: &str) -> Option<Self> {
         match stage {
-            "python_preprocess" => Some(Self::PythonPreprocess),
+            STAGE_PREPROCESS => Some(Self::Preprocess),
             "preprocess_queue" => Some(Self::PreprocessQueue),
             "template_tokenize" => Some(Self::TemplateTokenize),
             "multimodal_prepare" => Some(Self::MultimodalPrepare),
@@ -137,6 +138,23 @@ impl TtftTimings {
         TtftSpan {
             timings: Some(Arc::clone(self)),
             index,
+        }
+    }
+
+    /// Reuse an existing operation's start and elapsed result. The inclusive
+    /// histogram keeps its own population; the sweep clips this interval and
+    /// subtracts nested work only in the exclusive TTFT view.
+    pub fn record_duration(&self, stage: TtftStage, start: Instant, elapsed: Duration) {
+        if self.finished.load(Ordering::Acquire) {
+            return;
+        }
+        let mut intervals = self.intervals.lock();
+        if !self.finished.load(Ordering::Acquire) {
+            intervals.push(Interval {
+                stage,
+                start: start.saturating_duration_since(self.start),
+                end: Some((start + elapsed).saturating_duration_since(self.start)),
+            });
         }
     }
 
@@ -255,7 +273,7 @@ fn attribute(active: &[usize; 17]) -> TtftStage {
         MmRoutingBuild,
         MultimodalPrepare,
         PreprocessQueue,
-        PythonPreprocess,
+        Preprocess,
     ] {
         if active[stage as usize] > 0 {
             return stage;
@@ -303,17 +321,32 @@ mod tests {
     }
 
     #[test]
+    fn reused_operation_timing_is_clipped_nested_and_frozen() {
+        let start = Instant::now();
+        let timings = TtftTimings::new(start);
+        timings.record_duration(Preprocess, start, ms(20));
+        timings.record_duration(TemplateTokenize, start + ms(2), ms(7));
+        timings.record_duration(MultimodalPrepare, start + ms(7), ms(20));
+        let result = timings.finish(start + ms(15));
+        assert_total(&result, 15);
+        assert_eq!(result[TemplateTokenize as usize], ms(7));
+        assert_eq!(result[MultimodalPrepare as usize], ms(6));
+        timings.record_duration(RouteDecode, start, ms(100));
+        assert_eq!(timings.finish(start + ms(100)), result);
+    }
+
+    #[test]
     fn nested_preprocessing_is_exclusive_and_preserves_gaps() {
         let result = partition(
             &[
-                interval(PythonPreprocess, 2, 18),
+                interval(Preprocess, 2, 18),
                 interval(PreprocessQueue, 3, 7),
                 interval(TemplateTokenize, 9, 15),
             ],
             ms(20),
         );
         assert_eq!(result[FrontendOverhead as usize], ms(4));
-        assert_eq!(result[PythonPreprocess as usize], ms(6));
+        assert_eq!(result[Preprocess as usize], ms(6));
         assert_eq!(result[PreprocessQueue as usize], ms(4));
         assert_eq!(result[TemplateTokenize as usize], ms(6));
         assert_eq!(result[MultimodalPrepare as usize], Duration::ZERO);
@@ -324,13 +357,13 @@ mod tests {
     fn routing_metadata_is_exclusive_within_multimodal_preparation() {
         let result = partition(
             &[
-                interval(PythonPreprocess, 0, 20),
+                interval(Preprocess, 0, 20),
                 interval(MultimodalPrepare, 2, 18),
                 interval(MmRoutingBuild, 6, 12),
             ],
             ms(20),
         );
-        assert_eq!(result[PythonPreprocess as usize], ms(4));
+        assert_eq!(result[Preprocess as usize], ms(4));
         assert_eq!(result[MultimodalPrepare as usize], ms(10));
         assert_eq!(result[MmRoutingBuild as usize], ms(6));
         assert_total(&result, 20);
@@ -436,7 +469,7 @@ mod tests {
     #[test]
     fn python_stage_names_are_fixed_and_invalid_ages_are_rejected() {
         for stage in [
-            PythonPreprocess,
+            Preprocess,
             PreprocessQueue,
             TemplateTokenize,
             MultimodalPrepare,
@@ -447,7 +480,7 @@ mod tests {
         assert_eq!(TtftStage::from_python("request_id"), None);
         assert_eq!(TtftStage::from_python("backend_first_response"), None);
         let timings = TtftTimings::new(Instant::now());
-        timings.record_ago(PythonPreprocess, ms(1), ms(2));
+        timings.record_ago(Preprocess, ms(1), ms(2));
         assert!(timings.intervals.lock().is_empty());
     }
 

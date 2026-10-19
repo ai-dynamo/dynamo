@@ -11,7 +11,6 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use dynamo_llm::entrypoint::PrefillRoutedEngine;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
-use dynamo_llm::protocols::common::timing::RequestTracker;
 use dynamo_runtime::logging::{DistributedTraceContext, otel_parent_context_from_distributed};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated as RsAnnotated;
@@ -29,12 +28,9 @@ impl RoutedEngine {
     }
 }
 
-fn copy_ttft_tracker(parent_context: &crate::context::Context, request: &mut PreprocessedRequest) {
+fn copy_ttft_timeline(parent_context: &crate::context::Context, request: &mut PreprocessedRequest) {
     if let Some(ttft) = parent_context.ttft() {
-        let tracker = request
-            .tracker
-            .get_or_insert_with(|| Arc::new(RequestTracker::new()));
-        tracker.set_ttft(Arc::clone(ttft));
+        request.ttft = Some(Arc::clone(ttft));
     }
 }
 
@@ -51,7 +47,7 @@ impl RoutedEngine {
         let mut request: PreprocessedRequest =
             depythonize(preprocessed.bind(py)).map_err(to_pyerr)?;
         let request_context = if let Some(parent_context) = context.as_ref() {
-            copy_ttft_tracker(parent_context, &mut request);
+            copy_ttft_timeline(parent_context, &mut request);
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_context = parent_context.inner();
             let child_context = SingleIn::with_id_and_metadata(
@@ -155,7 +151,8 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
 
     #[test]
-    fn request_tracker_shares_http_timeline_across_python_boundary() {
+    fn http_timeline_crosses_python_without_changing_legacy_tracker_population() {
+        use dynamo_llm::protocols::common::timing::RequestTracker;
         use dynamo_llm::protocols::common::ttft::{TTFT_CONTEXT_KEY, TtftTimings};
 
         let timeline = Arc::new(TtftTimings::new(std::time::Instant::now()));
@@ -167,12 +164,19 @@ mod tests {
                 .unwrap();
         let mut request: PreprocessedRequest =
             serde_json::from_value(serde_json::json!({"token_ids": []})).unwrap();
+        copy_ttft_timeline(&python_context, &mut request);
+        assert!(request.tracker.is_none());
+        assert!(Arc::ptr_eq(&timeline, request.ttft_timings().unwrap()));
+        assert!(Arc::ptr_eq(
+            &timeline,
+            request.clone().ttft_timings().unwrap()
+        ));
         // Preserve any existing local tracker (and its other timing state).
         let tracker = Arc::new(RequestTracker::new());
         request.tracker = Some(Arc::clone(&tracker));
-        copy_ttft_tracker(&python_context, &mut request);
+        copy_ttft_timeline(&python_context, &mut request);
         assert!(Arc::ptr_eq(&tracker, request.tracker.as_ref().unwrap()));
-        assert!(Arc::ptr_eq(&timeline, tracker.ttft().unwrap()));
+        assert!(tracker.ttft().is_none());
         assert!(Arc::ptr_eq(
             &tracker,
             request.clone().tracker.as_ref().unwrap(),
@@ -183,6 +187,7 @@ mod tests {
         assert!(serialized.get("ttft").is_none());
         let round_trip: PreprocessedRequest = serde_json::from_value(serialized).unwrap();
         assert!(round_trip.tracker.is_none());
+        assert!(round_trip.ttft.is_none());
     }
 
     fn make_trace_context(

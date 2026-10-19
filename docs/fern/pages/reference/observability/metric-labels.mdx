@@ -67,7 +67,7 @@ Added by an individual metric family. Each label appears only on the metrics not
   `[Shared]` On `dynamo_frontend_stage_requests` — the frontend pipeline stage a request currently occupies. See [Stage values](#stage-values).
 
   On `dynamo_frontend_ttft_stage_seconds`, identifies an exclusive TTFT contribution. Its values
-  differ from the request gauge; see [TTFT stage durations](metrics-catalog.mdx#ttft-stage-durations).
+  reuse `preprocess`, `route`, and `dispatch` from the request gauge and add finer contributions; see [TTFT stage durations](metrics-catalog.mdx#ttft-stage-durations).
 
   <span className="enum-values"><span className="enum-label">Request gauge values:</span> <Badge intent="note" minimal>preprocess</Badge> <Badge intent="note" minimal>route</Badge> <Badge intent="note" minimal>dispatch</Badge></span>
 </ParamField>

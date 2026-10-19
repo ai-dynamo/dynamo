@@ -12,8 +12,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import test_sglang_processor_metrics_unit as processor_tests
 from test_sglang_processor_metrics_unit import _load_processor_module
-from test_sglang_processor_metrics_unit import module_stubs as module_stubs
+
+# Register the shared fixture for pytest discovery.
+module_stubs = processor_tests.module_stubs
 
 pytestmark = [
     pytest.mark.unit,
@@ -24,6 +27,8 @@ pytestmark = [
 
 
 class RecordingContext:
+    ttft_enabled = True
+
     def __init__(self):
         self.events = []
         self.intervals = []
@@ -138,10 +143,10 @@ def test_sglang_inline_preprocess_and_legacy_context(sglang_modules):
 
     assert asyncio.run(collect(context)) == [{"ok": True}]
     assert context.events == [
-        ("start", "python_preprocess"),
+        ("start", "preprocess"),
         ("start", "template_tokenize"),
         ("end", "template_tokenize"),
-        ("end", "python_preprocess"),
+        ("end", "preprocess"),
     ]
     assert asyncio.run(collect(None)) == [{"ok": True}]
     assert asyncio.run(collect(object())) == [{"ok": True}]
@@ -169,7 +174,7 @@ def test_sglang_template_error_closes_spans(sglang_modules):
         asyncio.run(collect())
     assert context.events[-2:] == [
         ("end", "template_tokenize"),
-        ("end", "python_preprocess"),
+        ("end", "preprocess"),
     ]
 
 
@@ -228,8 +233,8 @@ def test_sglang_worker_returns_picklable_monotonic_intervals(
 def test_sglang_worker_rejects_unsupported_ttft_stage(sglang_modules):
     module, _ = sglang_modules
     timing = module._WorkerPreprocessTiming()
-    with pytest.raises(ValueError, match="Unsupported TTFT stage: python_preprocess"):
-        with timing.start_ttft_stage("python_preprocess"):
+    with pytest.raises(ValueError, match="Unsupported TTFT stage: preprocess"):
+        with timing.start_ttft_stage("preprocess"):
             pass
     assert timing.intervals_ns == []
 
@@ -266,10 +271,10 @@ def test_sglang_pool_reattaches_worker_intervals(sglang_modules, monkeypatch):
     assert asyncio.run(collect()) == [{"ok": True}]
     assert context.intervals == [("template_tokenize", 1.0, 0.8)]
     assert context.events == [
-        ("start", "python_preprocess"),
+        ("start", "preprocess"),
         ("start", "preprocess_queue"),
         ("end", "preprocess_queue"),
-        ("end", "python_preprocess"),
+        ("end", "preprocess"),
     ]
     assert processor._worker_semaphore._value == 2
 
@@ -298,7 +303,7 @@ def test_sglang_pool_cancellation_preserves_semaphore(sglang_modules, queued):
             await task
 
     asyncio.run(cancel())
-    assert context.events[-1] == ("end", "python_preprocess")
+    assert context.events[-1] == ("end", "preprocess")
     assert processor._worker_semaphore._value == initial_capacity
 
 
@@ -448,11 +453,13 @@ def test_vllm_template_tokenizer_preserves_tokens_and_closes_on_error(
 
 
 @pytest.mark.parametrize("has_media", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
 def test_vllm_generator_forwards_timeline_and_times_input_preparation(
-    vllm_modules, monkeypatch, has_media
+    vllm_modules, monkeypatch, has_media, enabled
 ):
     module, _ = vllm_modules
     context = RecordingContext()
+    context.ttft_enabled = enabled
 
     class RequestForSampling(SimpleNamespace):
         model_fields = frozenset()
@@ -467,8 +474,12 @@ def test_vllm_generator_forwards_timeline_and_times_input_preparation(
     )
 
     async def preprocess(request, **kwargs):
-        assert kwargs["context"] is context
-        assert context.events[-1] == ("start", "python_preprocess")
+        if enabled:
+            assert kwargs["context"].start_ttft_stage == context.start_ttft_stage
+            assert context.events[-1] == ("start", "preprocess")
+        else:
+            assert kwargs["context"] is None
+            assert context.events == []
         return SimpleNamespace(
             request_for_sampling=request_for_sampling,
             tool_parser=None,
@@ -484,13 +495,16 @@ def test_vllm_generator_forwards_timeline_and_times_input_preparation(
         "extract_mm_urls",
         lambda messages: ({"image_url": ["image"]} if has_media else None, None),
     )
-    expected_stage = "multimodal_prepare" if has_media else "python_preprocess"
+    expected_stage = "multimodal_prepare" if has_media else "preprocess"
 
     class ReachedInputPreparation(Exception):
         pass
 
     async def build_inputs(*args, **kwargs):
-        assert context.events[-1] == ("start", expected_stage)
+        if enabled:
+            assert context.events[-1] == ("start", expected_stage)
+        else:
+            assert context.events == []
         raise ReachedInputPreparation()
 
     monkeypatch.setattr(module, "_build_engine_inputs", build_inputs)
@@ -512,12 +526,16 @@ def test_vllm_generator_forwards_timeline_and_times_input_preparation(
 
     with pytest.raises(ReachedInputPreparation):
         asyncio.run(collect())
-    assert context.events == [
-        ("start", "python_preprocess"),
-        ("end", "python_preprocess"),
-        ("start", expected_stage),
-        ("end", expected_stage),
-    ]
+    assert context.events == (
+        [
+            ("start", "preprocess"),
+            ("end", "preprocess"),
+            ("start", expected_stage),
+            ("end", expected_stage),
+        ]
+        if enabled
+        else []
+    )
 
 
 @pytest.mark.parametrize("fail_transfer", [False, True])
@@ -596,3 +614,46 @@ def test_vllm_text_and_uuid_only_paths_skip_mm_stages(vllm_modules):
             )
         ) == (None, [], False)
     assert context.events == []
+
+
+@pytest.mark.parametrize("pool", [False, True])
+def test_disabled_context_skips_native_calls_and_pool_clocks(
+    sglang_modules, monkeypatch, pool
+):
+    module, _ = sglang_modules
+
+    class DisabledContext:
+        ttft_enabled = False
+
+        def start_ttft_stage(self, *args):
+            pytest.fail("OFF must not call PyO3 stage entry")
+
+        def record_ttft_stage_ago(self, *args):
+            pytest.fail("OFF must not import pool timing")
+
+    def unexpected_clock():
+        pytest.fail("OFF must not read the pool timing clock")
+
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic_ns=unexpected_clock))
+    monkeypatch.setattr(module, "_w_tokenizer", Tokenizer())
+
+    class Pool:
+        def submit(self, fn, *args):
+            assert args[-1] is False
+            result = fn(*args)
+            assert result.template_tokenize_intervals_ns is None
+            future = Future()
+            future.set_result(result)
+            return future
+
+    processor = make_sglang_processor(module, preprocess_pool=Pool() if pool else None)
+
+    async def collect():
+        return [
+            item
+            async for item in processor.generator(
+                chat_request(), context=DisabledContext()
+            )
+        ]
+
+    assert asyncio.run(collect()) == [{"ok": True}]

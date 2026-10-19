@@ -3052,14 +3052,19 @@ impl OpenAIPreprocessor {
 
         let template_start = Instant::now();
         let formatted_prompt = {
-            let _ttft_stage = tracker
-                .and_then(RequestTracker::ttft)
-                .map(|timings| timings.start_span(TtftStage::TemplateTokenize));
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
             off_runtime(|| self.apply_template(request))
                 .with_context(|| "Failed to apply prompt template")?
         };
-        TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
+        let template_elapsed = template_start.elapsed();
+        TEMPLATE_SECONDS.observe(template_elapsed.as_secs_f64());
+        if let Some(timings) = tracker.and_then(RequestTracker::ttft) {
+            timings.record_duration(
+                TtftStage::TemplateTokenize,
+                template_start,
+                template_elapsed,
+            );
+        }
 
         // Generic reasoning parsers start from `<think>`; MiniMax M3 starts
         // from `<mm:think>`. If the chat template injected that opener at the
@@ -3077,7 +3082,15 @@ impl OpenAIPreprocessor {
                 .await
                 .with_context(|| "Failed to gather tokens")?
         };
-        TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
+        let tokenize_elapsed = tokenize_start.elapsed();
+        TOKENIZE_SECONDS.observe(tokenize_elapsed.as_secs_f64());
+        if let Some(timings) = tracker.and_then(RequestTracker::ttft) {
+            timings.record_duration(
+                TtftStage::TemplateTokenize,
+                tokenize_start,
+                tokenize_elapsed,
+            );
+        }
 
         let (_mm_routing_entries, image_tokens) = self
             .gather_multi_modal_data_with_image_tokens(
@@ -3095,9 +3108,12 @@ impl OpenAIPreprocessor {
         // moves once.
         builder.token_ids(token_ids);
 
-        STAGE_DURATION_SECONDS
-            .with_label_values(&[STAGE_PREPROCESS])
-            .observe(preprocess_start.elapsed().as_secs_f64());
+        let preprocess_histogram = STAGE_DURATION_SECONDS.with_label_values(&[STAGE_PREPROCESS]);
+        let preprocess_elapsed = preprocess_start.elapsed();
+        preprocess_histogram.observe(preprocess_elapsed.as_secs_f64());
+        if let Some(timings) = tracker.and_then(RequestTracker::ttft) {
+            timings.record_duration(TtftStage::Preprocess, preprocess_start, preprocess_elapsed);
+        }
 
         if let Some(nvext) = request.nvext()
             && let Some(router_params) = &nvext.router
@@ -4732,9 +4748,6 @@ impl OpenAIPreprocessor {
         formatted_prompt: Option<&RenderedPrompt>,
         tracker: Option<&RequestTracker>,
     ) -> Result<(Vec<crate::protocols::TokenIdType>, HashMap<String, String>)> {
-        let _ttft_stage = tracker
-            .and_then(RequestTracker::ttft)
-            .map(|timings| timings.start_span(TtftStage::TemplateTokenize));
         let mut annotations = HashMap::new();
         let mut tokens_out: Vec<crate::protocols::TokenIdType> = Vec::new();
         // match request type before any conversion/processing
@@ -7941,9 +7954,14 @@ impl
         } else {
             // Normal path: tokenize the prompt; embeddings don't need MM routing,
             // so install tokens on the builder right away.
+            let _ttft_stage = tracker
+                .as_deref()
+                .and_then(RequestTracker::ttft)
+                .map(|timings| timings.start_span(TtftStage::TemplateTokenize));
             let (token_ids, ann) = self
                 .gather_tokens(&request, None, tracker.as_deref())
                 .await?;
+            drop(_ttft_stage);
             builder.token_ids(token_ids);
             ann
         };

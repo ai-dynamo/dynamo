@@ -351,6 +351,12 @@ impl Context {
         self.inner.is_stopped()
     }
 
+    /// Whether HTTP enabled detail collection for this request.
+    #[getter]
+    fn ttft_enabled(&self) -> bool {
+        self.ttft.is_some()
+    }
+
     /// Start a process-local frontend stage; no-op outside an HTTP timeline.
     fn start_ttft_stage(&self, stage: &str) -> PyResult<TtftStageGuard> {
         let stage = python_ttft_stage(stage)?;

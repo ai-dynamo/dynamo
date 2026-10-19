@@ -371,6 +371,8 @@ pub mod kvbm {
 
 /// LLM (Language Model) inference environment variables
 pub mod llm {
+    /// Exclusive frontend TTFT detail: off (default), metrics, logs, or both.
+    pub const DYN_FRONTEND_TTFT_DETAIL: &str = "DYN_FRONTEND_TTFT_DETAIL";
     /// Delay between tokens emitted by the token echo engine, in milliseconds.
     pub const DYN_TOKEN_ECHO_DELAY_MS: &str = "DYN_TOKEN_ECHO_DELAY_MS";
 
@@ -743,6 +745,12 @@ pub mod llm {
         /// are recorded unredacted; avoid credential-bearing headers.
         pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
             "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
+
+        /// Lowest-cost candidates retained per `router_selection` record. `0`
+        /// retains every scored candidate. The selected worker is always
+        /// retained. Default `16`.
+        pub const DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K: &str =
+            "DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K";
 
         /// S3 bucket for the S3 request-trace sink. Required when
         /// `DYN_REQUEST_TRACE_SINKS` includes `s3`.

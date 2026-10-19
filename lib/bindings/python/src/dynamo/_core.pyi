@@ -492,11 +492,17 @@ class TtftStageGuard:
         self, _exc_type: Any = None, _exc_value: Any = None, _traceback: Any = None
     ) -> bool: ...
 
+
 class Context:
     """
     Context wrapper around AsyncEngineContext for Python bindings.
     Provides tracing and cancellation capabilities for request handling.
     """
+
+    @property
+    def ttft_enabled(self) -> bool:
+        """Whether this request carries an enabled TTFT detail timeline."""
+        ...
 
     def start_ttft_stage(self, stage: str) -> TtftStageGuard:
         """Start a frontend stage; no-op if no HTTP TTFT timeline is attached."""
@@ -3064,6 +3070,7 @@ class EntrypointArgs:
         *,
         tls_client_ca_cert_path: Optional[str] = None,
         metrics_prefix: Optional[str] = None,
+        ttft_detail: Optional[str] = None,
         enable_anthropic_api: Optional[bool] = None,
         strip_anthropic_preamble: Optional[bool] = None,
         enable_streaming_tool_dispatch: Optional[bool] = None,
@@ -3224,6 +3231,11 @@ class EngineShutdown(DynamoException):
 
 class StreamIncomplete(DynamoException):
     """The response stream was terminated before completion."""
+
+    ...
+
+class WorkerOverloaded(DynamoException):
+    """The worker temporarily cannot admit another request."""
 
     ...
 
