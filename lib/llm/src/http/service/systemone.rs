@@ -52,7 +52,7 @@ const MAX_CONCURRENT_SIBLINGS: usize = 4;
 fn metric_endpoint(dialect: Dialect) -> Endpoint {
     match dialect {
         Dialect::Jev => Endpoint::SystemOne,
-        Dialect::OpenAi | Dialect::SglangNative => Endpoint::Decisions,
+        Dialect::OpenAi => Endpoint::Decisions,
     }
 }
 
@@ -662,7 +662,11 @@ async fn finish_branch(
         tracker,
         stream,
     } = started;
-    let responses = SglangGenerateStream::from_annotated_stream(stream);
+    let responses = SglangGenerateStream::from_annotated_stream(
+        stream,
+        crate::protocols::sglang::merge::merger(),
+        serde_json::Value::clone,
+    );
     tokio::pin!(responses);
     let mut terminal = None;
     loop {
