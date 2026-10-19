@@ -12,11 +12,19 @@
 //! 3. Commit the schemas. The `generate-media-protocols` pre-commit hook
 //!    regenerates the Python models from them.
 //! 4. A new media module gets an [`OpenApi`] struct here, an entry in
-//!    [`media_schemas`], and an entry in `MODULES` in
-//!    `scripts/generate_media_protocols.py`.
+//!    [`media_schemas`], a bounds test like [`image_schema_bounds_hold_on_the_rust_types`],
+//!    and an entry in `MODULES` in `scripts/generate_media_protocols.py`.
+//!
+//! A numeric bound is written twice: `#[schema(minimum, maximum)]` feeds the
+//! schema and the generated model, `#[validate(range)]` feeds the frontend
+//! check. The bounds tests tie the two together: every bound the schema
+//! states is checked against the Rust type, so the generated model never
+//! rejects a value the frontend forwards.
 
 use std::path::Path;
 
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 use utoipa::openapi::schema::{AdditionalProperties, ObjectBuilder, Schema, SchemaType, Type};
 use utoipa::openapi::{Info, OpenApi as Document, RefOr};
 use utoipa::{OpenApi, ToSchema};
@@ -24,6 +32,7 @@ use utoipa::{OpenApi, ToSchema};
 use super::audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest};
 use super::images::{NvCreateImageRequest, NvImagesResponse};
 use super::videos::{NvCreateVideoRequest, NvVideosResponse};
+use crate::engines::ValidateRequest;
 
 /// Set to rewrite the committed schemas instead of checking them.
 const UPDATE_VAR: &str = "DYNAMO_UPDATE_MEDIA_SCHEMAS";
@@ -114,5 +123,207 @@ fn media_schemas_match_the_committed_files() {
         "{stale:?} in {} are out of date. Run `{UPDATE_VAR}=1 cargo test -p dynamo-llm --lib \
          media_schemas` and commit the result.",
         dir.display()
+    );
+}
+
+// --- Schema bounds versus the Rust types ---
+
+/// A numeric bound a schema states for one property: the JSON pointer of
+/// the property in an instance, whether the property is an integer, and
+/// the inclusive bounds.
+struct SchemaBound {
+    pointer: String,
+    integer: bool,
+    minimum: Option<f64>,
+    maximum: Option<f64>,
+}
+
+/// Every bound the schema named `root` states, following `$ref`, the
+/// `oneOf` that utoipa writes for an `Option`, and array items.
+fn schema_bounds(document: &Document, root: &str) -> Vec<SchemaBound> {
+    let document = serde_json::to_value(document).unwrap();
+    let schemas = &document["components"]["schemas"];
+    let schema = schemas
+        .get(root)
+        .unwrap_or_else(|| panic!("the document has no schema named {root}"));
+    let mut bounds = Vec::new();
+    collect_bounds(schemas, schema, String::new(), &mut bounds);
+    bounds
+}
+
+fn collect_bounds(schemas: &Value, schema: &Value, pointer: String, bounds: &mut Vec<SchemaBound>) {
+    if let Some(reference) = schema["$ref"].as_str() {
+        let name = reference.rsplit('/').next().unwrap();
+        let target = schemas
+            .get(name)
+            .unwrap_or_else(|| panic!("{pointer}: {reference} is not in the document"));
+        collect_bounds(schemas, target, pointer, bounds);
+        return;
+    }
+    if let Some(variants) = schema["oneOf"].as_array() {
+        for variant in variants.iter().filter(|variant| variant["type"] != "null") {
+            collect_bounds(schemas, variant, pointer.clone(), bounds);
+        }
+        return;
+    }
+    if let Some(items) = schema.get("items") {
+        collect_bounds(schemas, items, format!("{pointer}/0"), bounds);
+        return;
+    }
+    if let Some(properties) = schema["properties"].as_object() {
+        for (name, property) in properties {
+            collect_bounds(schemas, property, format!("{pointer}/{name}"), bounds);
+        }
+        return;
+    }
+    for exclusive in ["exclusiveMinimum", "exclusiveMaximum"] {
+        assert!(
+            schema.get(exclusive).is_none(),
+            "{pointer}: {exclusive} is not checked here"
+        );
+    }
+    let minimum = schema["minimum"].as_f64();
+    let maximum = schema["maximum"].as_f64();
+    if minimum.is_some() || maximum.is_some() {
+        let integer = match &schema["type"] {
+            Value::String(kind) => kind == "integer",
+            Value::Array(kinds) => kinds.iter().any(|kind| kind == "integer"),
+            _ => false,
+        };
+        bounds.push(SchemaBound {
+            pointer,
+            integer,
+            minimum,
+            maximum,
+        });
+    }
+}
+
+/// The fixture `file` in `media_fixtures/`, as JSON.
+fn fixture(file: &str) -> Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/protocols/openai/media_fixtures")
+        .join(file);
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+    serde_json::from_str(&text).unwrap()
+}
+
+/// Checks every bound that the schema `root` states against `T`, starting
+/// from the fixture `file`, which must set every bounded field: `T` accepts
+/// the bound and rejects the value just outside it, in the parser or in
+/// `accepts`.
+fn assert_bounds_hold<T: DeserializeOwned>(
+    document: Document,
+    root: &str,
+    file: &str,
+    accepts: impl Fn(&T) -> bool,
+) {
+    let fixture = fixture(file);
+    let accepted = |pointer: &str, value: f64| {
+        let mut instance = fixture.clone();
+        let field = instance
+            .pointer_mut(pointer)
+            .unwrap_or_else(|| panic!("{file} does not set {pointer}, which {root} bounds"));
+        // A whole value is written as an integer: serde rejects `11.0` for
+        // an integer field, which would pass the check for the wrong reason.
+        *field = if value.fract() == 0.0 {
+            Value::from(value as i64)
+        } else {
+            Value::from(value)
+        };
+        serde_json::from_value::<T>(instance).is_ok_and(|parsed| accepts(&parsed))
+    };
+    for bound in schema_bounds(&document, root) {
+        let SchemaBound {
+            pointer,
+            integer,
+            minimum,
+            maximum,
+        } = bound;
+        let outside = |bound: f64, above: bool| match (integer, above) {
+            (true, true) => bound + 1.0,
+            (true, false) => bound - 1.0,
+            (false, true) => bound.next_up(),
+            (false, false) => bound.next_down(),
+        };
+        if let Some(minimum) = minimum {
+            assert!(
+                accepted(&pointer, minimum),
+                "{root}{pointer}: the minimum {minimum} is rejected"
+            );
+            assert!(
+                !accepted(&pointer, outside(minimum, false)),
+                "{root}{pointer}: a value below the minimum {minimum} is accepted"
+            );
+        }
+        if let Some(maximum) = maximum {
+            assert!(
+                accepted(&pointer, maximum),
+                "{root}{pointer}: the maximum {maximum} is rejected"
+            );
+            assert!(
+                !accepted(&pointer, outside(maximum, true)),
+                "{root}{pointer}: a value above the maximum {maximum} is accepted"
+            );
+        }
+    }
+}
+
+#[test]
+fn schema_bounds_follow_the_nested_request_types() {
+    let pointers: Vec<String> =
+        schema_bounds(&VideoSchemas::openapi(), &NvCreateVideoRequest::name())
+            .into_iter()
+            .map(|bound| bound.pointer)
+            .collect();
+    assert!(pointers.contains(&"/nvext/fps".to_string()), "{pointers:?}");
+}
+
+#[test]
+fn audio_schema_bounds_hold_on_the_rust_types() {
+    assert_bounds_hold(
+        AudioSchemas::openapi(),
+        &NvCreateAudioSpeechRequest::name(),
+        "audio_request.json",
+        |request: &NvCreateAudioSpeechRequest| ValidateRequest::validate(request).is_ok(),
+    );
+    assert_bounds_hold(
+        AudioSchemas::openapi(),
+        &NvAudioSpeechResponse::name(),
+        "audio_response.json",
+        |_: &NvAudioSpeechResponse| true,
+    );
+}
+
+#[test]
+fn image_schema_bounds_hold_on_the_rust_types() {
+    assert_bounds_hold(
+        ImageSchemas::openapi(),
+        &NvCreateImageRequest::name(),
+        "image_request.json",
+        |request: &NvCreateImageRequest| ValidateRequest::validate(request).is_ok(),
+    );
+    assert_bounds_hold(
+        ImageSchemas::openapi(),
+        &NvImagesResponse::name(),
+        "image_response.json",
+        |_: &NvImagesResponse| true,
+    );
+}
+
+#[test]
+fn video_schema_bounds_hold_on_the_rust_types() {
+    assert_bounds_hold(
+        VideoSchemas::openapi(),
+        &NvCreateVideoRequest::name(),
+        "video_request.json",
+        |request: &NvCreateVideoRequest| ValidateRequest::validate(request).is_ok(),
+    );
+    assert_bounds_hold(
+        VideoSchemas::openapi(),
+        &NvVideosResponse::name(),
+        "video_response.json",
+        |_: &NvVideosResponse| true,
     );
 }
