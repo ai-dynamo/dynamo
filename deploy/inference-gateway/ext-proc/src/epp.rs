@@ -42,9 +42,7 @@ use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
     ResponseUsage, resolve_cache_namespace,
 };
-use crate::worker_generations::{
-    GenerationSet, GenerationTracker, pick_weighted, run_generation_watcher,
-};
+use crate::worker_generations::{GenerationSet, pick_weighted, run_generation_watcher};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
@@ -119,36 +117,24 @@ const DYNAMO_CONTAINER_PORT_NAME: &str = "http";
 /// This is the async-native equivalent of `RouterHandles` from the C bindings,
 /// without the `block_on` / unsafe FFI overhead.
 pub struct Router {
-    /// The live worker generations, maintained by the generation watcher
-    /// (see [`crate::worker_generations`]).
+    /// Live worker generations (see [`crate::worker_generations`]).
     generations: watch::Receiver<GenerationSet<Generation>>,
-    /// The generation each picked request was routed through, by reservation
-    /// id, so its bookkeeping callbacks reach the same routers even after the
-    /// generation is retired.
-    request_generations: DashMap<String, Arc<Generation>>,
-    prefill_bookings: DashMap<String, PrefillReservation>,
+    /// Per reservation: the generation that routed it and its prefill booking.
+    bookings: DashMap<String, Booking>,
     runtime: Runtime,
     worker_index: Arc<RwLock<WorkerEndpointIndex>>,
     pod_store_ready: Arc<AtomicBool>,
     served_model: String,
 }
 
-/// The routers for one worker generation: the workers registered under one
-/// generation-suffixed Dynamo namespace (`<namespace>-<8 hex>`).
-///
-/// A DGD rolling update starts the new workers under a new namespace with
-/// their own event-plane channels, so routers bound to one generation never
-/// see the next one's workers. The EPP keeps one `Generation` per live
-/// namespace instead (see [`crate::worker_generations`]).
+/// Routers for one worker generation (one `<namespace>-<8 hex>` namespace).
 struct Generation {
     namespace: String,
     model_name: String,
     prefill_router: Arc<PrefillRouter>,
     decode_router: ManagedKvRouter,
     preprocessor: Arc<OpenAIPreprocessor>,
-    /// Stops the prefill discovery watcher and prefill router once the last
-    /// reference is gone, after in-flight requests on a retired generation
-    /// complete.
+    /// Cancelled on drop: stops the prefill watcher and prefill router.
     cancel: CancellationToken,
 }
 
@@ -158,14 +144,19 @@ impl Drop for Generation {
     }
 }
 
+struct Booking {
+    generation: Arc<Generation>,
+    prefill: Option<PrefillReservation>,
+}
+
 /// Remove and release a booking once. Both response lifecycle callbacks use
 /// this helper so terminal completion before first output and duplicate signals
 /// have identical behavior.
-async fn release_prefill_booking(
-    prefill_bookings: &DashMap<String, PrefillReservation>,
-    booking_id: &str,
-) {
-    if let Some((_, reservation)) = prefill_bookings.remove(booking_id)
+async fn release_prefill_booking(bookings: &DashMap<String, Booking>, booking_id: &str) {
+    let reservation = bookings
+        .get_mut(booking_id)
+        .and_then(|mut booking| booking.prefill.take());
+    if let Some(reservation) = reservation
         && let Err(error) = reservation.release().await
     {
         tracing::debug!(
@@ -176,16 +167,14 @@ async fn release_prefill_booking(
     }
 }
 
-/// How often startup logs that it is still waiting for a worker generation.
+/// How often startup logs while waiting for the first generation.
 const GENERATION_WAIT_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 impl Router {
     /// Initialize the router from discovery.
     ///
-    /// This starts the worker-generation watcher and waits for the first
-    /// generation to be ready (model card fetched, preprocessor and both
-    /// routers created, decode workers registered). Later generations,
-    /// created by rolling updates, are picked up and retired by the watcher.
+    /// This waits for at least one decode worker to appear, fetches the model
+    /// card, initializes the preprocessor, and creates both routers.
     pub(crate) async fn from_discovery(
         namespace_filter: NamespaceFilter,
         namespace_prefix_mode: NamespacePrefixMode,
@@ -230,7 +219,8 @@ impl Router {
         };
         tokio::spawn(run_generation_watcher(
             subscribe,
-            GenerationTracker::new(namespace_filter.clone(), namespace_prefix_mode),
+            namespace_filter.clone(),
+            namespace_prefix_mode,
             build,
             publish,
             drt.child_token(),
@@ -265,19 +255,14 @@ impl Router {
         // (e.g. "atchernych-qwen-9f792849"), but the K8s pod label
         // `nvidia.com/dynamo-namespace` is always set to the base
         // ("atchernych-qwen") by the operator. Using the suffixed name here
-        // would silently match zero pods during/after a DGD rolling update,
-        // and the base name covers every generation at once.
+        // would silently match zero pods during/after a DGD rolling update.
         let (worker_index, pod_store_ready) =
             spawn_pod_reflector(&namespace_filter, container_discovery).await?;
 
-        // `drt` is intentionally not stored on the Router. The generation
-        // watcher and the pod reflector clone whatever they need from it
-        // before this scope ends, so dropping it here does not tear down any
-        // background work.
+        // `drt` is not stored: the watcher and reflector hold their own clones.
         Ok(Self {
             generations,
-            request_generations: DashMap::new(),
-            prefill_bookings: DashMap::new(),
+            bookings: DashMap::new(),
             runtime,
             worker_index,
             pod_store_ready,
@@ -293,13 +278,8 @@ impl Router {
         &self.served_model
     }
 
-    /// Choose the worker generation a request routes through, weighted by
-    /// worker count so traffic follows capacity across a rolling update.
-    ///
-    /// With a subset hint, only the hinted workers count, so a generation
-    /// none of them belongs to is never chosen while another holds some.
-    /// Outside a rollout there is one generation and this is a clone of its
-    /// `Arc`.
+    /// Choose a generation weighted by routable workers, or by hinted workers
+    /// when a subset hint is present.
     fn select_generation(
         &self,
         allowed_worker_ids: Option<&HashSet<u64>>,
@@ -309,10 +289,13 @@ impl Router {
             let client = generation.decode_router.client();
             match allowed_worker_ids {
                 None => client.routing_instance_counts().routable,
-                Some(ids) => ids
-                    .iter()
-                    .filter(|id| client.is_instance_discovered(**id))
-                    .count(),
+                Some(ids) => {
+                    let routable = client.instance_avail_watcher();
+                    let routable = routable.borrow();
+                    ids.iter()
+                        .filter(|id| routable.binary_search(id).is_ok())
+                        .count()
+                }
             }
         };
         pick_weighted(&generations, weight, |total| rand::random_range(0..total)).cloned()
@@ -806,8 +789,7 @@ fn completion_text_tokens_safe_to_inject(prompt: &Prompt) -> bool {
     !matches!(prompt, Prompt::StringArray(texts) if texts.len() > 1)
 }
 
-/// Build a [`Generation`] for `namespace`, retrying until it succeeds or
-/// `cancel` fires (the generation was retired, or the EPP is shutting down).
+/// Build a [`Generation`], retrying until it succeeds or `cancel` fires.
 async fn build_generation_until_ready(
     drt: DistributedRuntime,
     namespace: String,
@@ -817,13 +799,15 @@ async fn build_generation_until_ready(
     cancel: CancellationToken,
 ) -> Option<Generation> {
     loop {
+        // A failed attempt cancels its own token, stopping whatever it started.
+        let attempt_cancel = cancel.child_token();
         let attempt = build_generation(
             &drt,
             &namespace,
             &component,
             card.clone(),
             kv_router_config.clone(),
-            cancel.clone(),
+            attempt_cancel.clone(),
         );
         let error = tokio::select! {
             _ = cancel.cancelled() => return None,
@@ -832,6 +816,7 @@ async fn build_generation_until_ready(
                 Err(error) => error,
             },
         };
+        attempt_cancel.cancel();
         tracing::warn!(
             %error,
             namespace,
@@ -844,9 +829,8 @@ async fn build_generation_until_ready(
     }
 }
 
-/// Fetch the model's tokenizer config, create the preprocessor and both
-/// routers for one worker generation, and wait for its decode workers to
-/// register their runtime config.
+/// Create a generation's preprocessor and routers, then wait for its decode
+/// workers' runtime config.
 async fn build_generation(
     drt: &DistributedRuntime,
     namespace: &str,
@@ -873,9 +857,12 @@ async fn build_generation(
 
     let model_manager = Arc::new(ModelManager::new());
 
+    let client = endpoint
+        .client_with_cancellation(cancel.child_token())
+        .await?;
     let decode_router = model_manager
-        .managed_kv_router_for_with_worker_role(
-            &endpoint,
+        .managed_kv_router_for_client_with_worker_role(
+            client,
             block_size,
             Some(kv_router_config.clone()),
             None,
@@ -935,9 +922,7 @@ async fn build_generation(
         cancel.child_token(),
     );
 
-    // `model_manager` is intentionally not stored on the Generation. The KV
-    // chooser, prefill router, and prefill discovery watcher all clone what
-    // they need from it before this scope ends.
+    // `model_manager` is not stored: the routers hold what they need.
     Ok(Generation {
         namespace: namespace.to_string(),
         model_name,
@@ -1634,13 +1619,6 @@ impl EndpointPicker for Router {
             .as_ref()
             .ok()
             .map(|booking| (booking.worker_id(), booking.dp_rank()));
-        if let Ok(booking) = prefill_booking {
-            self.prefill_bookings
-                .insert(reservation_id.clone(), booking);
-        }
-        let namespace = generation.namespace.clone();
-        self.request_generations
-            .insert(reservation_id.clone(), generation);
 
         // Build routing headers: x-dynamo-worker-instance-id, x-dynamo-dp-rank,
         // x-dynamo-prefill-instance-id, x-dynamo-prefill-dp-rank, x-dynamo-routing-mode
@@ -1682,7 +1660,7 @@ impl EndpointPicker for Router {
             worker_id_hex = format!("{:x}", decode_worker.worker_id),
             dp_rank = decode_worker.dp_rank,
             is_disaggregated,
-            namespace = %namespace,
+            namespace = %generation.namespace,
             endpoint = %endpoint,
             token_count = tokens.len(),
             priority_jump,
@@ -1700,6 +1678,13 @@ impl EndpointPicker for Router {
         // `TokenizeResult`), so omit it and let the backend tokenize each
         // prompt itself.
         let token_ids = tokens_safe_to_inject.then_some(tokens);
+        self.bookings.insert(
+            reservation_id.clone(),
+            Booking {
+                generation,
+                prefill: prefill_booking.ok(),
+            },
+        );
 
         Ok(PickResult {
             endpoint,
@@ -1720,13 +1705,12 @@ impl EndpointPicker for Router {
         if booking_id.is_empty() {
             return;
         }
-        release_prefill_booking(&self.prefill_bookings, booking_id).await;
-        // Clone the `Arc` out so the map's shard lock is not held across the
-        // await below.
+        release_prefill_booking(&self.bookings, booking_id).await;
+        // Clone out so the shard lock is not held across the await.
         let Some(generation) = self
-            .request_generations
+            .bookings
             .get(booking_id)
-            .map(|entry| Arc::clone(entry.value()))
+            .map(|booking| Arc::clone(&booking.generation))
         else {
             return;
         };
@@ -1753,8 +1737,8 @@ impl EndpointPicker for Router {
                 "Request complete with usage"
             );
         }
-        release_prefill_booking(&self.prefill_bookings, booking_id).await;
-        let Some((_, generation)) = self.request_generations.remove(booking_id) else {
+        release_prefill_booking(&self.bookings, booking_id).await;
+        let Some((_, Booking { generation, .. })) = self.bookings.remove(booking_id) else {
             return;
         };
         if let Err(e) = generation.free_request(booking_id).await {
