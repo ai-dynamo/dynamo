@@ -214,21 +214,32 @@ class TestBuildEngineInputs:
         assert sp.width == 512
 
     @pytest.mark.asyncio
-    async def test_image_generation_normalizes_output_format(self):
+    async def test_image_generation_keeps_output_format(self):
         handler = _make_handler()
-        req = NvCreateImageRequest(prompt="a cat", size="512x512", output_format="JPEG")
+        req = NvCreateImageRequest(prompt="a cat", size="512x512", output_format="jpeg")
 
         inputs = await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
 
         assert inputs.output_format == "jpeg"
 
     @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("output_format", "gif"),
+            ("output_format", "JPEG"),
+            ("response_format", "file"),
+        ],
+    )
+    def test_image_request_rejects_a_value_outside_the_enum(self, field, value):
+        # The frontend rejects the value too. The model matches the frontend.
+        with pytest.raises(ValidationError, match=field):
+            NvCreateImageRequest(prompt="a cat", **{field: value})
+
+    @pytest.mark.parametrize(
         ("request_overrides", "error"),
         [
-            ({"output_format": "gif"}, "Unsupported output_format"),
             ({"quality": "high"}, "quality is not supported"),
             ({"background": "transparent"}, "background is not supported"),
-            ({"response_format": "file"}, "Unsupported response_format"),
         ],
     )
     @pytest.mark.asyncio
