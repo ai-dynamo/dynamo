@@ -32,6 +32,7 @@ pub fn blocking_fields() -> Vec<(bool, &'static str, Value)> {
         (true, "json_schema", json!("{}")),
         (false, "session_params", json!({"id": "s"})),
         (false, "return_hidden_states", json!(true)),
+        (false, "return_flat_raw_output_top_logprobs", json!(true)),
         (false, "return_not_yet_classified", json!(true)),
     ]
 }

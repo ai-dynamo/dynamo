@@ -509,7 +509,9 @@ fn resolve_event_transport_kind(
     match event_plane {
         Some("nats") => Ok(EventTransportKind::Nats),
         Some("zmq") => Ok(EventTransportKind::Zmq),
-        Some("") | None => Ok(discovery_backend.resolve_event_transport_kind()),
+        Some("") | None => discovery_backend
+            .resolve_event_transport_kind()
+            .map_err(to_pyerr),
         Some(other) => Err(PyValueError::new_err(format!(
             "Invalid event_plane value '{other}'. Valid values: 'nats', 'zmq'"
         ))),
