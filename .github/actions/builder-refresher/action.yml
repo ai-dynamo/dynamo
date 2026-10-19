@@ -89,7 +89,7 @@ runs:
 
     - name: Re-initialize builder (if unhealthy)
       if: steps.check-health.outcome == 'failure'
-      uses: $/.github/actions/init-dynamo-builder
+      uses: ai-dynamo/.github/.github/actions/init-dynamo-builder@dillon/ops-8928-enable-kvcr-ci-image-builds-using-shared-buildkit
       with:
         builder_name: ${{ inputs.builder_name }}
         flavor: ${{ inputs.flavor }}

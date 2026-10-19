@@ -309,7 +309,7 @@ jobs:
             echo "builder_flavor=${{ inputs.framework }}" >> $GITHUB_OUTPUT
           fi
       - name: Initialize Dynamo Builder
-        uses: $/.github/actions/init-dynamo-builder
+        uses: ai-dynamo/.github/.github/actions/init-dynamo-builder@dillon/ops-8928-enable-kvcr-ci-image-builds-using-shared-buildkit
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
