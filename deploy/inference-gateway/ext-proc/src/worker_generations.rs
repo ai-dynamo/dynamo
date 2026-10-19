@@ -49,12 +49,15 @@ pub(crate) struct GenerationScope {
 }
 
 impl GenerationScope {
-    /// Whether the scope is one DGD's worker generations: the operator's
-    /// strict namespace prefix. Any other scope binds to one namespace, as
-    /// the EPP did before it followed rolling updates.
-    fn follows_generations(&self) -> bool {
+    /// Whether `namespace` is one of the DGD's worker generations: the
+    /// operator-set prefix itself, or the prefix plus a generation suffix.
+    /// Decided the same way with or without `DYN_NAMESPACE_PREFIX_STRICT`, so
+    /// operators that do not set it are followed too.
+    fn is_generation(&self, namespace: &str) -> bool {
         matches!(self.namespace_filter, NamespaceFilter::Prefix(_))
-            && self.prefix_mode == NamespacePrefixMode::WorkerGeneration
+            && self
+                .namespace_filter
+                .matches_with_prefix_mode(namespace, NamespacePrefixMode::WorkerGeneration)
     }
 
     /// `instance`'s card, if it is an in-scope card that is not prefill-only.
@@ -113,13 +116,14 @@ pub(crate) enum GenerationChange {
 
 /// In-scope cards per namespace.
 ///
-/// Within one DGD's scope every namespace is a worker generation: an isolated
-/// serving unit that serves whatever its own workers registered. Any other
-/// scope binds to the first namespace seen.
+/// The EPP binds to the first namespace seen, as it always has. When that is
+/// one of the DGD's worker generations, it follows every generation: each an
+/// isolated serving unit that serves whatever its own workers registered.
+/// Otherwise it stays on that one namespace.
 pub(crate) struct GenerationTracker {
     scope: GenerationScope,
     namespaces: HashMap<String, HashMap<ModelCardInstanceId, Arc<ModelDeploymentCard>>>,
-    /// The namespace a scope that does not follow generations is bound to.
+    /// The first namespace seen.
     bound: Option<String>,
     /// Namespaces last reported as `Appeared`.
     serving: HashSet<String>,
@@ -179,9 +183,19 @@ impl GenerationTracker {
         self.reconcile_all()
     }
 
+    /// Whether `namespace` is followed: every generation when the bound
+    /// namespace is one, otherwise the bound namespace alone.
+    fn follows(&self, namespace: &str) -> bool {
+        match &self.bound {
+            Some(bound) if self.scope.is_generation(bound) => self.scope.is_generation(namespace),
+            Some(bound) => bound == namespace,
+            None => false,
+        }
+    }
+
     /// The card to build `namespace`'s generation from, if it serves.
     fn card_for(&self, namespace: &str) -> Option<Arc<ModelDeploymentCard>> {
-        if !self.scope.follows_generations() && self.bound.as_deref() != Some(namespace) {
+        if !self.follows(namespace) {
             return None;
         }
         let cards = self.namespaces.get(namespace)?;
@@ -199,17 +213,20 @@ impl GenerationTracker {
         changes
     }
 
-    /// Outside one DGD's scope, bind to the first namespace seen (the smallest
-    /// name when a snapshot shows several), for good. Returns whether it was
-    /// just bound.
+    /// Bind to the first namespace seen (the smallest name when a snapshot
+    /// shows several), for good. Returns whether it was just bound.
     fn bind(&mut self) -> bool {
-        if self.bound.is_some() || self.scope.follows_generations() {
+        if self.bound.is_some() {
             return false;
         }
         let Some(namespace) = self.namespaces.keys().min().cloned() else {
             return false;
         };
-        tracing::info!(namespace, "Bound to worker namespace");
+        tracing::info!(
+            namespace,
+            follows_generations = self.scope.is_generation(&namespace),
+            "Bound to worker namespace"
+        );
         self.bound = Some(namespace);
         true
     }
@@ -781,8 +798,34 @@ mod tests {
         assert_eq!(summarize(&tracker.on_removed(&old.id())), ["-dgd-aaaaaaaa"]);
     }
 
-    /// Outside one DGD's scope the EPP binds to one namespace for good, as it
-    /// did before it followed rolling updates.
+    /// Without `DYN_NAMESPACE_PREFIX_STRICT` (operators before 1.6) the EPP
+    /// still follows the DGD's generations, but never a sibling DGD sharing
+    /// the prefix; bound to a sibling first, it stays there as before.
+    #[test]
+    fn tracker_follows_generations_under_a_literal_prefix() {
+        let literal = || {
+            GenerationTracker::new(scope(
+                NamespaceFilter::Prefix("dgd".into()),
+                NamespacePrefixMode::Literal,
+            ))
+        };
+        let (old, new, sibling) = (
+            decode("dgd-aaaaaaaa", 1, MODEL),
+            decode("dgd-bbbbbbbb", 2, MODEL),
+            decode("dgd-bar", 3, MODEL),
+        );
+        let mut tracker = literal();
+        assert_eq!(summarize(&tracker.on_added(&old)), ["+dgd-aaaaaaaa"]);
+        assert!(tracker.on_added(&sibling).is_empty());
+        assert_eq!(summarize(&tracker.on_added(&new)), ["+dgd-bbbbbbbb"]);
+        assert_eq!(summarize(&tracker.on_removed(&old.id())), ["-dgd-aaaaaaaa"]);
+
+        let mut tracker = literal();
+        assert_eq!(summarize(&tracker.on_added(&sibling)), ["+dgd-bar"]);
+        assert!(tracker.on_added(&old).is_empty());
+    }
+
+    /// An exact or global scope binds to one namespace for good, as before.
     #[test]
     fn tracker_binds_one_namespace_outside_one_deployment() {
         let first = decode("team-a", 1, MODEL);
