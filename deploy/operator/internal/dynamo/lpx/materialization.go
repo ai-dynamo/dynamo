@@ -78,7 +78,7 @@ func (w *Workload) PlanNodeLocalMaterialization(pcsName string) (*Materializatio
 
 	// Nova and Cyborg both implement the authored conductor role.
 	conductorTemplate, cyborgTemplate := conductorTemplateName, ""
-	if w.Pipeline() == PipelineLPX {
+	if w.Pipeline() == PipelineHybrid {
 		conductorTemplate, cyborgTemplate = "", conductorTemplateName
 	}
 	agents := make([]ExpectedAgent, 0, len(w.modelProjections))
@@ -118,6 +118,9 @@ func (p *MaterializationPlan) ValidateReplicaCount() error {
 		}
 	}
 	for _, agent := range p.Agents {
+		if agent.Replicas == 0 {
+			continue
+		}
 		if err := p.validatePodHostname("Agent", agent.TemplateName, agent.Replicas-1); err != nil {
 			return err
 		}

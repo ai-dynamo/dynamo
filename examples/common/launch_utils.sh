@@ -28,6 +28,7 @@
 # Requires: bash 4.3+ (wait -n)
 #
 # Functions:
+#   resolve_sidecar        Select a native binary or Python module command
 #   print_launch_banner    Print startup banner with model info and example curl
 #   print_curl_footer      Print a custom curl example with standard framing (heredoc)
 #   wait_any_exit          Wait for any background process to exit, propagate its code
@@ -39,6 +40,27 @@ fi
 
 EXAMPLE_PROMPT="Who is the tennis GOAT: Federer, Djokovic, or Nadal?"
 EXAMPLE_PROMPT_VISUAL="A golden retriever riding a skateboard through a neon-lit city"
+
+# Usage: resolve_sidecar <backend> <command-array>
+resolve_sidecar() {
+    local backend="$1"
+    local -n sidecar_command="$2"
+    local name="dynamo-${backend}-sidecar"
+    local native_binary
+
+    if [[ -v DYNAMO_SIDECAR_BIN ]]; then
+        if [[ "$DYNAMO_SIDECAR_BIN" != /* || ! -f "$DYNAMO_SIDECAR_BIN" || ! -x "$DYNAMO_SIDECAR_BIN" ]]; then
+            echo "ERROR: DYNAMO_SIDECAR_BIN must name an executable file at an absolute path: $DYNAMO_SIDECAR_BIN" >&2
+            return 1
+        fi
+        sidecar_command=("$DYNAMO_SIDECAR_BIN")
+    elif native_binary=$(type -P "$name"); then
+        sidecar_command=("$native_binary")
+    else
+        echo "WARNING: $name not found; falling back to python3 -m dynamo.${backend}.sidecar" >&2
+        sidecar_command=(python3 -m "dynamo.${backend}.sidecar")
+    fi
+}
 
 # Resolve an indexed managed port, retaining a standalone fallback.
 # Usage: dyn_port DYN_SYSTEM_PORT 1 8081
