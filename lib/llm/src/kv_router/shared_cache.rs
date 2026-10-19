@@ -81,11 +81,12 @@ impl HicacheObjectPool {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 struct HicacheObjectLayout {
     pools: Vec<HicacheObjectPool>,
-    // Mooncake folds the backend tag and the model name into this prefix.
+    /// Mooncake folds the backend tag and the model name into this prefix.
     #[serde(default)]
     key_prefix: Option<String>,
-    // Optional for older, manually supplied layouts. Production layouts describe
-    // rank-local objects; only single-PP, rank-replicated/MLA layouts are safe.
+    /// Absent in hand-written legacy layouts. `Some(false)` means keys embed the TP
+    /// rank, which one suffix list cannot describe, so `is_valid` rejects it (same for
+    /// `pp_size > 1`).
     #[serde(default)]
     is_mla_backend: Option<bool>,
     #[serde(default)]
