@@ -711,6 +711,49 @@ def test_registration_disables_l3_without_failing_worker(
         assert not any(record.levelname == "WARNING" for record in caplog.records)
 
 
+def _disabled_envelope(**layout):
+    return {
+        "enabled": False,
+        "backend": "mooncake",
+        "page_size": 16,
+        "hicache_object_layout": {"pools": [], "pp_rank": 0, **layout},
+        "reason": "private-reason",
+    }
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [{"pp_size": 1, "is_mla_backend": False}, {"pp_size": 2, "is_mla_backend": True}],
+)
+def test_registration_keeps_legacy_metadata_for_rank_local_layouts(
+    mooncake_registration, layout
+):
+    infos = mooncake_registration.engine._scheduler_init_result.scheduler_infos
+    for info in infos:
+        info["hicache_object_layout"] = _disabled_envelope(**layout)
+    config = mooncake_registration.run()
+    metadata = json.loads(config.runtime_data["sglang_hicache_mooncake"])
+    assert metadata["backend"] == "mooncake"
+    assert "hicache_object_layout" not in metadata
+
+
+@pytest.mark.parametrize("mixed_with", ["enabled", "auxiliary_disabled"])
+def test_registration_disables_l3_for_mixed_disabled_layouts(
+    mooncake_registration, hicache_layout_envelope, mixed_with
+):
+    infos = mooncake_registration.engine._scheduler_init_result.scheduler_infos
+    infos[0]["hicache_object_layout"] = _disabled_envelope(
+        pp_size=1, is_mla_backend=False
+    )
+    infos[1]["hicache_object_layout"] = (
+        hicache_layout_envelope
+        if mixed_with == "enabled"
+        else _disabled_envelope(pp_size=1, is_mla_backend=True)
+    )
+    config = mooncake_registration.run()
+    assert "sglang_hicache_mooncake" not in config.runtime_data
+
+
 @pytest.mark.parametrize(
     "field, value",
     [

@@ -512,6 +512,17 @@ def _validate_hicache_layout(envelope: Any, server_args: ServerArgs) -> dict[str
     return layout
 
 
+def _is_rank_local_layout(envelope: dict[str, Any]) -> bool:
+    """Whether SGLang disabled the layout only because keys embed TP/PP ranks."""
+    layout = envelope.get("hicache_object_layout")
+    if envelope.get("backend") != "mooncake" or not isinstance(layout, dict):
+        return False
+    pp_size = layout.get("pp_size")
+    return layout.get("is_mla_backend") is False or (
+        type(pp_size) is int and pp_size > 1
+    )
+
+
 def _get_registration_mooncake_runtime_data(
     engine: Optional[sgl.Engine], server_args: ServerArgs
 ) -> Optional[dict[str, Any]]:
@@ -528,6 +539,7 @@ def _get_registration_mooncake_runtime_data(
             )
             return None
         if any("hicache_object_layout" in info for info in infos):
+            rank_local = 0
             try:
                 for info in infos:
                     if "hicache_object_layout" not in info:
@@ -536,19 +548,27 @@ def _get_registration_mooncake_runtime_data(
                         )
                     envelope = info["hicache_object_layout"]
                     if isinstance(envelope, dict) and envelope.get("enabled") is False:
-                        logging.debug("SGLang HiCache is disabled; disabling L3 lookup")
-                        return None
+                        if not _is_rank_local_layout(envelope):
+                            logging.debug(
+                                "SGLang HiCache is disabled; disabling L3 lookup"
+                            )
+                            return None
+                        rank_local += 1
+                        continue
                     current = _validate_hicache_layout(envelope, server_args)
                     if layout is not None and current != layout:
                         raise ValueError(
                             "scheduler_infos HiCache layouts are inconsistent"
                         )
                     layout = current
+                if rank_local and layout is not None:
+                    raise ValueError("scheduler_infos HiCache layouts are inconsistent")
             except ValueError as error:
                 logging.warning("SGLang %s; disabling L3 lookup", error)
                 return None
-    # Only absent envelopes (legacy engines), or engine=None, retain the old
-    # static path. Explicit disabled/invalid envelopes returned above.
+    # Absent envelopes (legacy engines), engine=None and rank-local layouts that
+    # the envelope cannot describe keep the static path. Other disabled or
+    # invalid envelopes returned above.
     try:
         metadata = _get_mooncake_runtime_data(server_args)
     except (TypeError, ValueError, OverflowError):
