@@ -123,6 +123,7 @@ type admissionTestCase struct {
 
 	wantSchemaError   string
 	wantCELError      string
+	wantStatusError   string
 	wantAdmissionErrs []string
 	wantWebhookErrors []string
 	wantWarnings      []string
@@ -175,7 +176,16 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 	t.Log("Compare the API server admission result with the table expectations")
 	wantErrors := expectedAdmissionErrors(t, test)
 	wantErrors = rewriteExpectedNamespace(wantErrors, originalNamespace, env.Namespace())
-	assertAdmissionErrors(t, err, wantErrors, test.notWantError)
+	if test.wantStatusError != "" {
+		wantStatusError := rewriteExpectedNamespace(
+			[]string{test.wantStatusError},
+			originalNamespace,
+			env.Namespace(),
+		)[0]
+		assertAdmissionStatusError(t, err, wantStatusError)
+	} else {
+		assertAdmissionErrors(t, err, wantErrors, test.notWantError)
+	}
 	wantWarnings := rewriteExpectedNamespace(test.wantWarnings, originalNamespace, env.Namespace())
 	if got := warnings.list(); !slices.Equal(got, wantWarnings) {
 		t.Fatalf("warnings = %v, want %v", got, wantWarnings)
@@ -509,6 +519,9 @@ func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {
 	if test.wantCELError != "" {
 		categories++
 	}
+	if test.wantStatusError != "" {
+		categories++
+	}
 	if len(test.wantAdmissionErrs) != 0 {
 		categories++
 	}
@@ -528,6 +541,20 @@ func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {
 		return test.wantAdmissionErrs
 	}
 	return test.wantWebhookErrors
+}
+
+func assertAdmissionStatusError(t *testing.T, err error, want string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("admission error = nil, want status error containing %q", want)
+	}
+	statusError, ok := err.(interface{ Status() metav1.Status })
+	if !ok {
+		t.Fatalf("admission error = %T %v, want Kubernetes status error", err, err)
+	}
+	if message := statusError.Status().Message; !strings.Contains(message, want) {
+		t.Fatalf("admission status error = %q, want substring %q", message, want)
+	}
 }
 
 func assertAdmissionErrors(t *testing.T, err error, want []string, notWant string) {

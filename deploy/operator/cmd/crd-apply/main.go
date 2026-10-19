@@ -30,6 +30,7 @@ const (
 	fieldManager       = "dynamo-crd-apply"
 	versionAnnotation  = "dynamo.nvidia.com/operator-version"
 	dgdrV1Beta2Flag    = "dgdr-v1beta2-enabled"
+	apiV1Alpha1Version = "v1alpha1"
 	dgdrV1Beta2Version = "v1beta2"
 
 	dgdrCRDName      = "dynamographdeploymentrequests.nvidia.com"
@@ -228,7 +229,7 @@ func removeDGDRV1Beta2Envelope(version *apiextensionsv1.CustomResourceDefinition
 		},
 	)
 	switch version.Name {
-	case "v1alpha1":
+	case apiV1Alpha1Version:
 		spec.Required = appendRequired(spec.Required, "model", "backend", "profilingConfig")
 	case "v1beta1":
 		spec.Required = appendRequired(spec.Required, "model")

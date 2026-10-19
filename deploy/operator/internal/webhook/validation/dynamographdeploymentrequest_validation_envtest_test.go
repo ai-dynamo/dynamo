@@ -63,6 +63,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		wantImage          string
 		wantSchemaErr      string
 		wantCELErr         string
+		wantStatusErr      string
 		wantWebhook        []string
 		wantWarnings       []string
 	}{
@@ -117,8 +118,8 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 					},
 				}
 			}),
-			gpuDiscovery: true,
-			wantCELErr:   `spec: Invalid value: v1beta2 is mutually exclusive with native v1beta1 fields`,
+			gpuDiscovery:  true,
+			wantStatusErr: "v1beta1 spec contains both native fields and v1beta2 envelope",
 		},
 		{
 			name: "v1beta1 SLA optimization enum is rejected by source schema",
@@ -530,9 +531,11 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				seedWithoutWebhook: tt.seedWithoutWebhook,
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
+				wantStatusError:    tt.wantStatusErr,
 				wantWebhookErrors:  tt.wantWebhook,
 				wantWarnings:       tt.wantWarnings,
 			}
+
 			if tt.oldRequest != nil && !tt.gpuDiscovery {
 				seedGates := gates
 				seedGates.GPUDiscovery = true
