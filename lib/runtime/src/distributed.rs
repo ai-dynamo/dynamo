@@ -556,6 +556,10 @@ impl DistributedRuntime {
     }
 
     /// Register an endpoint until the last runtime-wide owner drops its lease.
+    ///
+    /// The first lease publishes the current specification, replacing any existing
+    /// registration for this runtime's endpoint identity. Lease-managed endpoint
+    /// identities must not also be registered directly.
     pub async fn register_endpoint_lease(
         &self,
         spec: DiscoverySpec,

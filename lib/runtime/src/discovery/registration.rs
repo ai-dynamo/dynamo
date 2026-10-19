@@ -8,15 +8,11 @@ use dashmap::{DashMap, mapref::entry::Entry as DashEntry};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    Discovery, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, DiscoverySpec,
-    EndpointInstanceId,
-};
+use super::{Discovery, DiscoveryInstance, DiscoveryInstanceId, DiscoverySpec, EndpointInstanceId};
 
 struct RegistrationEntry {
     instance: DiscoveryInstance,
     leases: usize,
-    owned: bool,
 }
 
 type RegistrationSlot = Arc<Mutex<Option<RegistrationEntry>>>;
@@ -78,31 +74,10 @@ impl EndpointRegistrationManager {
             return Ok(EndpointRegistrationLease::new(self.clone(), id));
         }
 
-        let registration = async {
-            let existing = self
-                .discovery
-                .list(DiscoveryQuery::Endpoint {
-                    namespace: id.namespace.clone(),
-                    component: id.component.clone(),
-                    endpoint: id.endpoint.clone(),
-                })
-                .await?
-                .into_iter()
-                .find(|instance| instance.id() == DiscoveryInstanceId::Endpoint(id.clone()));
-            match existing {
-                Some(existing) => {
-                    anyhow::ensure!(
-                        existing == candidate,
-                        "endpoint registration lease conflicts with a pre-existing specification"
-                    );
-                    Ok((existing, false))
-                }
-                None => Ok((self.discovery.register(spec).await?, true)),
-            }
-        }
-        .await;
-        let (instance, owned) = match registration {
-            Ok(registration) => registration,
+        // The discovery identity can survive a process restart while its transport changes.
+        // Publish the current specification on first acquisition instead of borrowing stale metadata.
+        let instance = match self.discovery.register(spec).await {
+            Ok(instance) => instance,
             Err(error) => {
                 drop(entry);
                 self.remove_unused_slot(&id, &slot);
@@ -112,7 +87,6 @@ impl EndpointRegistrationManager {
         *entry = Some(RegistrationEntry {
             instance,
             leases: 1,
-            owned,
         });
         Ok(EndpointRegistrationLease::new(self.clone(), id))
     }
@@ -129,29 +103,27 @@ impl EndpointRegistrationManager {
         if registration.leases != 0 {
             return;
         }
-        if registration.owned {
-            let mut retry_delay = Duration::from_millis(50);
-            loop {
-                match self
-                    .discovery
-                    .unregister(registration.instance.clone())
-                    .await
-                {
-                    Ok(()) => break,
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            instance = ?registration.instance.id(),
-                            "Failed to release endpoint discovery registration; retrying"
-                        );
-                    }
+        let mut retry_delay = Duration::from_millis(50);
+        loop {
+            match self
+                .discovery
+                .unregister(registration.instance.clone())
+                .await
+            {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        instance = ?registration.instance.id(),
+                        "Failed to release endpoint discovery registration; retrying"
+                    );
                 }
-                tokio::select! {
-                    _ = self.cancellation.cancelled() => return,
-                    _ = tokio::time::sleep(retry_delay) => {}
-                }
-                retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
             }
+            tokio::select! {
+                _ = self.cancellation.cancelled() => return,
+                _ = tokio::time::sleep(retry_delay) => {}
+            }
+            retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
         }
         *entry = None;
         drop(entry);
@@ -209,7 +181,7 @@ mod tests {
     use super::*;
     use crate::{
         component::TransportType,
-        discovery::{DiscoveryStream, MockDiscovery, SharedMockRegistry},
+        discovery::{DiscoveryQuery, DiscoveryStream, MockDiscovery, SharedMockRegistry},
     };
     use async_trait::async_trait;
 
@@ -249,12 +221,12 @@ mod tests {
         }
     }
 
-    fn endpoint_spec() -> DiscoverySpec {
+    fn endpoint_spec(port: u16) -> DiscoverySpec {
         DiscoverySpec::Endpoint {
             namespace: "ns".to_string(),
             component: "frontend".to_string(),
             endpoint: "router".to_string(),
-            transport: TransportType::Tcp("127.0.0.1:1/7/router".to_string()),
+            transport: TransportType::Tcp(format!("127.0.0.1:{port}/7/router")),
             device_type: None,
             request_plane_codec: None,
         }
@@ -290,7 +262,7 @@ mod tests {
         );
         let caller = tokio::spawn({
             let manager = manager.clone();
-            async move { manager.register(endpoint_spec()).await }
+            async move { manager.register(endpoint_spec(1)).await }
         });
 
         registered.notified().await;
@@ -310,14 +282,66 @@ mod tests {
             tokio::runtime::Handle::current(),
             CancellationToken::new(),
         );
-        let first = manager.register(endpoint_spec()).await.unwrap();
-        let second = manager.register(endpoint_spec()).await.unwrap();
+        let first = manager.register(endpoint_spec(1)).await.unwrap();
+        let second = manager.register(endpoint_spec(1)).await.unwrap();
         wait_for_endpoint_count(discovery.as_ref(), 1).await;
 
         drop(first);
         tokio::task::yield_now().await;
         wait_for_endpoint_count(discovery.as_ref(), 1).await;
         drop(second);
+        wait_for_endpoint_count(discovery.as_ref(), 0).await;
+    }
+
+    #[tokio::test]
+    async fn first_lease_republishes_and_owns_existing_registration() {
+        for previous_port in [1, 2] {
+            let discovery: Arc<dyn Discovery> =
+                Arc::new(MockDiscovery::new(Some(7), SharedMockRegistry::new()));
+            discovery
+                .register(endpoint_spec(previous_port))
+                .await
+                .unwrap();
+            let manager = EndpointRegistrationManager::new(
+                discovery.clone(),
+                tokio::runtime::Handle::current(),
+                CancellationToken::new(),
+            );
+
+            let lease = manager.register(endpoint_spec(2)).await.unwrap();
+            assert_eq!(
+                discovery.list(DiscoveryQuery::AllEndpoints).await.unwrap(),
+                vec![endpoint_spec(2).into_instance(7)]
+            );
+
+            drop(lease);
+            wait_for_endpoint_count(discovery.as_ref(), 0).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn conflicting_active_lease_preserves_registration() {
+        let discovery: Arc<dyn Discovery> =
+            Arc::new(MockDiscovery::new(Some(7), SharedMockRegistry::new()));
+        let manager = EndpointRegistrationManager::new(
+            discovery.clone(),
+            tokio::runtime::Handle::current(),
+            CancellationToken::new(),
+        );
+        let lease = manager.register(endpoint_spec(1)).await.unwrap();
+
+        let error = manager.register(endpoint_spec(2)).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("endpoint registration lease conflicts with the existing specification")
+        );
+        assert_eq!(
+            discovery.list(DiscoveryQuery::AllEndpoints).await.unwrap(),
+            vec![endpoint_spec(1).into_instance(7)]
+        );
+
+        drop(lease);
         wait_for_endpoint_count(discovery.as_ref(), 0).await;
     }
 }
