@@ -1659,8 +1659,8 @@ pub fn create_indexer_with_policy(
 mod session_tests {
     use super::test_util::store_event;
     use super::*;
-    use crate::SessionPrefixIndexer;
     use crate::protocols::{KvCacheEvent, KvCacheRemoveData, StorageTier};
+    use crate::{SessionPrefixIndexer, SessionResidencyOwner};
 
     fn make_session_test_indexer() -> (Indexer, Arc<SessionPrefixIndexer>) {
         let session_prefix_index = Arc::new(SessionPrefixIndexer::new());
@@ -1833,7 +1833,12 @@ mod session_tests {
             };
             let lineage = |tier| {
                 session_prefix_index
-                    .get_session_block_lineage_in_tier("session-1", worker, tier, None)
+                    .get_session_block_lineage_in_tier(
+                        "session-1",
+                        SessionResidencyOwner::Worker(worker),
+                        tier,
+                        None,
+                    )
                     .unwrap()
             };
 
@@ -1902,7 +1907,12 @@ mod session_tests {
             };
             let lineage = |tier| {
                 session_prefix_index
-                    .get_session_block_lineage_in_tier("session-1", worker, tier, None)
+                    .get_session_block_lineage_in_tier(
+                        "session-1",
+                        SessionResidencyOwner::Worker(worker),
+                        tier,
+                        None,
+                    )
                     .unwrap()
             };
 

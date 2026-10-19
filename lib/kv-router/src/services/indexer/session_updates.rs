@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::{
-    ConcurrentRadixTreeCompressed, SessionPrefixIndexer,
+    ConcurrentRadixTreeCompressed, SessionPrefixIndexer, SessionResidencyOwner,
     indexer::{KvIndexer, KvRouterError, ThreadPoolIndexer},
     protocols::{
         ExternalSequenceBlockHash, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
@@ -199,7 +199,7 @@ impl SessionMutation {
             } => {
                 if let Err(error) = index.update_session_from_stored_blocks_in_tier(
                     &session_id,
-                    worker,
+                    SessionResidencyOwner::Worker(worker),
                     tier,
                     parent_hash,
                     &block_hashes,
@@ -212,7 +212,11 @@ impl SessionMutation {
                 tier,
                 block_hashes,
             } => {
-                index.inherit_stored_blocks(worker, tier, &block_hashes);
+                index.inherit_stored_blocks(
+                    SessionResidencyOwner::Worker(worker),
+                    tier,
+                    &block_hashes,
+                );
             }
             Self::Removed {
                 worker,
@@ -223,11 +227,15 @@ impl SessionMutation {
                 if tier.is_gpu() {
                     residency_versions.advance(worker);
                 }
-                index.update_session_from_removed_blocks_in_tier(worker, tier, &block_hashes);
+                index.update_session_from_removed_blocks_in_tier(
+                    SessionResidencyOwner::Worker(worker),
+                    tier,
+                    &block_hashes,
+                );
             }
             Self::Cleared { worker } => {
                 residency_versions.advance(worker);
-                index.clear_worker_frontiers(worker);
+                index.clear_owner_frontiers(SessionResidencyOwner::Worker(worker));
             }
             Self::WorkerRemoved { worker_id } => {
                 residency_versions.advance_worker_id(worker_id);
