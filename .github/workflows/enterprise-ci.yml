@@ -6,7 +6,7 @@
 # Images carry an -enterprise tag suffix so they never collide with post-merge
 # or nightly images at the same SHA.
 
-name: Nightly Enterprise CI Pipeline
+name: Enterprise CI Pipeline
 
 on:
   schedule:
@@ -114,7 +114,7 @@ jobs:
         gpu_count: [1, 2]
     uses: $/.github/workflows/shared-test.yml
     with:
-      dd_env: nightly-enterprise
+      dd_env: enterprise
       test_suite_name: vllm
       framework: vllm
       test_type: ${{ format('vLLM Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
@@ -136,7 +136,7 @@ jobs:
     needs: [vllm-build]
     uses: $/.github/workflows/shared-test.yml
     with:
-      dd_env: nightly-enterprise
+      dd_env: enterprise
       test_suite_name: vllm
       framework: vllm
       test_type: Test
@@ -159,7 +159,7 @@ jobs:
     needs: [vllm-build]
     uses: $/.github/workflows/shared-test.yml
     with:
-      dd_env: nightly-enterprise
+      dd_env: enterprise
       test_suite_name: vllm
       framework: vllm
       test_type: 2-GPU Test
@@ -179,7 +179,7 @@ jobs:
     needs: [vllm-build]
     uses: $/.github/workflows/shared-test.yml
     with:
-      dd_env: nightly-enterprise
+      dd_env: enterprise
       test_suite_name: vllm
       framework: vllm
       test_type: 4-GPU Test
@@ -254,7 +254,7 @@ jobs:
     needs: [deploy-operator, vllm-copy-to-acr]
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
-      dd_env: nightly-enterprise
+      dd_env: enterprise
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
       image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
@@ -312,7 +312,7 @@ jobs:
         uses: $/.github/actions/dynamo-deploy-test
         with:
           dd_api_key: ${{ secrets.DD_API_KEY }}
-          dd_env: nightly-enterprise
+          dd_env: enterprise
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -454,7 +454,7 @@ jobs:
         uses: $/.github/actions/dynamo-deploy-test
         with:
           dd_api_key: ${{ secrets.DD_API_KEY }}
-          dd_env: nightly-enterprise
+          dd_env: enterprise
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -552,6 +552,6 @@ jobs:
       actions: read   # grant the reusable notifier read access to list this run's jobs
     uses: $/.github/workflows/notify-slack.yml
     with:
-      pipeline_name: Nightly Enterprise
+      pipeline_name: Enterprise
       runs_on: ubuntu-slim
     secrets: inherit
