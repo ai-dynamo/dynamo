@@ -60,10 +60,11 @@ adapter so callers (mode subclasses) have a single entry point.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from dynamo.common.forward_pass_metrics import encode as _encode_fpm_record
-from dynamo.planner.config.planner_config import resolve_min_endpoint
+from dynamo.planner.config.planner_config import PlannerConfig, resolve_min_endpoint
 from dynamo.planner.monitoring.signal_health import PlannerSignalHealth
 
 if TYPE_CHECKING:
@@ -528,7 +529,7 @@ class OrchestratorEngineAdapter:
     # EngineProtocol
     # ------------------------------------------------------------------
 
-    def initial_tick(self, start_s: float) -> ScheduledTick:
+    def initial_tick(self, start_s: float, *, force_due: bool = False) -> ScheduledTick:
         """First scheduled tick under the scale_interval cadence model.
 
         Pipeline fires at ``start_s + scale_interval`` regardless of
@@ -541,10 +542,46 @@ class OrchestratorEngineAdapter:
         self._last_tick_monotonic = self._clock.monotonic()
         self._last_load_loop_monotonic = self._last_tick_monotonic
         self._last_throughput_loop_monotonic = self._last_tick_monotonic
+        if force_due:
+            self._orchestrator.invalidate_runtime_configuration()
+            self._last_load_loop_monotonic -= (
+                self._config.load_adjustment_interval_seconds
+            )
+            self._last_throughput_loop_monotonic -= (
+                self._config.throughput_adjustment_interval_seconds
+            )
         for plugin in self._orchestrator._registry.all_plugins():
             if plugin.is_builtin and plugin.last_call_at == float("-inf"):
                 plugin.registered_at = self._last_tick_monotonic
         return self._compute_next_scheduled_tick()
+
+    def apply_runtime_configuration(
+        self,
+        candidate: PlannerConfig,
+        fields: Iterable[str],
+        predictor: BuiltinLoadPredict | None,
+    ) -> None:
+        if predictor is not None:
+            active = self._builtins["load_predict"]
+            if not isinstance(active, BuiltinLoadPredict):
+                raise TypeError(
+                    "runtime prediction updates require the builtin load predictor"
+                )
+        p_min, d_min = candidate.active_min_endpoints()
+        for field in fields:
+            setattr(self._config, field, getattr(candidate, field))
+        if predictor is not None:
+            active.install_prepared_predictors(predictor)
+        self._orchestrator.invalidate_runtime_configuration()
+        # Throughput floors were computed under the old SLA. Recompute them
+        # before allowing an old floor to drive a new scaling decision.
+        self._scaling_state._throughput_lower_bound_p = p_min or 0
+        self._scaling_state._throughput_lower_bound_d = d_min or 0
+        self._orchestrator.set_throughput_lower_bound("prefill", p_min or 0)
+        self._orchestrator.set_throughput_lower_bound("decode", d_min or 0)
+        self._startup_down_candidate = None
+        self._startup_down_inventory = None
+        self._startup_down_sources = frozenset()
 
     async def tick(
         self,

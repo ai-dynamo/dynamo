@@ -178,6 +178,7 @@ pub struct DistributedRuntime {
 
     // Registry for /engine/* route callbacks
     engine_routes: crate::engine_routes::EngineRouteRegistry,
+    control_routes: crate::control_routes::ControlRegistry,
 
     // Backs `/v1/metadata/{model_slug}/{model_suffix}/{filename}`.
     metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry,
@@ -341,6 +342,7 @@ impl DistributedRuntime {
             response_plane,
             local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
             engine_routes: crate::engine_routes::EngineRouteRegistry::new(),
+            control_routes: crate::control_routes::ControlRegistry::default(),
             metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry::new(),
             event_transport_kind,
         };
@@ -526,6 +528,10 @@ impl DistributedRuntime {
     /// Get the engine route registry for registering custom /engine/* routes
     pub fn engine_routes(&self) -> &crate::engine_routes::EngineRouteRegistry {
         &self.engine_routes
+    }
+
+    pub fn control_routes(&self) -> &crate::control_routes::ControlRegistry {
+        &self.control_routes
     }
 
     pub fn metadata_artifacts(&self) -> &crate::metadata_registry::MetadataArtifactRegistry {

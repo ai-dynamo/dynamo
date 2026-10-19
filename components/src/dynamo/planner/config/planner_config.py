@@ -813,6 +813,14 @@ class PlannerConfig(BaseModel):
         ),
     )
 
+    enable_runtime_reconfiguration: bool = Field(
+        default=False,
+        description=(
+            "Expose /control/planner on DYN_SYSTEM_PORT. Restrict this management "
+            "listener to trusted callers; no application authentication is added."
+        ),
+    )
+
     decode_engine_num_gpu: Optional[int] = None
     prefill_engine_num_gpu: Optional[int] = None
 

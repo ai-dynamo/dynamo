@@ -13,16 +13,21 @@ rather than a concrete implementation. Runtime planner execution uses
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from dynamo.planner.core.types import PlannerEffects, ScheduledTick, TickInput
+
+if TYPE_CHECKING:
+    from dynamo.planner.config.planner_config import PlannerConfig
+    from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
 
 
 @runtime_checkable
 class EngineProtocol(Protocol):
     """Tick-engine abstraction consumed by ``NativePlannerBase``."""
 
-    def initial_tick(self, start_s: float) -> ScheduledTick:
+    def initial_tick(self, start_s: float, *, force_due: bool = False) -> ScheduledTick:
         """Build the first ``ScheduledTick`` for the main loop to wait on."""
 
     async def tick(
@@ -36,6 +41,14 @@ class EngineProtocol(Protocol):
 
     async def shutdown(self) -> None:
         """Release any engine-owned resources. Idempotent."""
+
+    def apply_runtime_configuration(
+        self,
+        candidate: PlannerConfig,
+        fields: Iterable[str],
+        predictor: BuiltinLoadPredict | None,
+    ) -> None:
+        """Activate prepared predictor state and invalidate cached decisions."""
 
 
 __all__ = ["EngineProtocol"]

@@ -143,6 +143,14 @@ class LocalPlannerOrchestrator:
     def get_throughput_lower_bound(self, component: str) -> int:
         return self._throughput_lower_bound.get(component, 1)
 
+    def invalidate_runtime_configuration(self) -> None:
+        self._scheduler.invalidate_cache(reason="config_reload")
+        for plugin in self._registry.all_plugins():
+            if plugin.is_builtin:
+                plugin.last_call_at = (
+                    self._clock.monotonic() - plugin.execution_interval_seconds
+                )
+
     # ------------------------------------------------------------------
     # Plugin lifecycle (delegates)
     # ------------------------------------------------------------------

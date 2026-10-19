@@ -90,9 +90,20 @@ class BasePredictor(ABC):
         return self.data_buffer[-1]
 
     @abstractmethod
-    def predict_next(self) -> float:
+    def predict_next(self, *, strict: bool = False) -> float:
         """Predict the next value"""
         pass
+
+    def prepare(self) -> None:
+        """Require enough history and a successful forecast before activation."""
+        if len(self.data_buffer) < self.minimum_data_points:
+            raise ValueError(
+                f"{type(self).__name__} needs {self.minimum_data_points} effective warmup points; "
+                f"received {len(self.data_buffer)}"
+            )
+        forecast = self.predict_next(strict=True)
+        if not math.isfinite(forecast) or forecast < 0:
+            raise ValueError("warmup forecast must be finite and nonnegative")
 
 
 class ConstantPredictor(BasePredictor):
@@ -103,7 +114,7 @@ class ConstantPredictor(BasePredictor):
     def __init__(self, _config: PlannerConfig) -> None:
         super().__init__(minimum_data_points=1)
 
-    def predict_next(self) -> float:
+    def predict_next(self, *, strict: bool = False) -> float:
         return self.get_last_value()
 
 
@@ -146,7 +157,7 @@ class ARIMAPredictor(BasePredictor):
             if self._mode == ARIMAPredictor.Mode.LOG1P:
                 self.data_buffer[-1] = math.log1p(raw)
 
-    def predict_next(self) -> float:
+    def predict_next(self, *, strict: bool = False) -> float:
         """Predict the next value(s)"""
         if len(self._raw_buffer) < self.minimum_data_points:
             return self.get_last_value()
@@ -241,6 +252,8 @@ class ARIMAPredictor(BasePredictor):
                 return max(0.0, math.expm1(forecast))
             return max(0.0, forecast)
         except Exception as e:
+            if strict:
+                raise
             # Log the specific error for debugging
             logger.warning(f"ARIMA prediction failed: {e}, using last value")
             self._pending_raw_updates = []
@@ -288,7 +301,7 @@ class ProphetPredictor(BasePredictor):
         y = float(self.data_buffer[-1]["y"])
         return max(0.0, math.expm1(y)) if self._use_log1p else y
 
-    def predict_next(self) -> float:
+    def predict_next(self, *, strict: bool = False) -> float:
         """Predict the next value"""
         if len(self.data_buffer) < self.minimum_data_points:
             return self.get_last_value()
@@ -371,7 +384,7 @@ class KalmanPredictor(BasePredictor):
         # Consumed this step; clear cached forecast for next interval.
         self._has_cached_pred = False
 
-    def predict_next(self) -> float:
+    def predict_next(self, *, strict: bool = False) -> float:
         if not self._initialized:
             return self.get_last_value()
         if len(self.data_buffer) < self.minimum_data_points:

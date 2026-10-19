@@ -383,6 +383,91 @@ curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
 
 PATCH is atomic. Malformed JSON, unknown fields, and empty patches return HTTP `400`. `null`, a negative `min_endpoint`, component-specific minimums below `1`, fields that are inactive for the current mode, and minimums that exceed the configured GPU or power budget return HTTP `422` without changing the active configuration.
 
+### System-port reconfiguration API
+
+<ParamField path="enable_runtime_reconfiguration" type="boolean" default="false">
+  Enable the Planner control API on the existing `DYN_SYSTEM_PORT` listener.
+  The runtime must have a system listener enabled. Kubernetes Planner deployments
+  configure this port as `9090`.
+</ParamField>
+
+<Warning>
+  This API changes scaling behavior and has no application authentication. Restrict
+  access to the system listener to trusted controllers and operators before enabling it.
+  The existing localhost `9086` API remains available with its original configuration.
+</Warning>
+
+| Method and path | Response |
+| --- | --- |
+| `GET /control/planner/config` | Applied settings, `instance_id`, `revision`, and `supported_fields`. |
+| `PATCH /control/planner/config` | `202` with an operation ID after validation and admission. |
+| `GET /control/planner/operations/{request_id}` | Operation state: `preparing`, `warming`, `applied`, or `failed`. |
+
+The supported configuration groups are:
+
+| Group | Fields |
+| --- | --- |
+| Endpoint floors and GPU budgets | Mode-specific minimum endpoint fields from the table above, `min_gpu_budget`, `max_gpu_budget`. |
+| SLA targets | `ttft_ms`, `itl_ms`. |
+| Scaling policy | `max_throughput_scaling_replicas`, `load_scaling_down_sensitivity`, `prefill_scale_up_queue_tokens`, `prefill_scale_down_queue_tokens`, `decode_scale_up_kv_rate`, `decode_scale_down_kv_rate`. |
+| Load prediction | `load_predictor`, `load_predictor_log1p`, `prophet_window_size`, `kalman_q_level`, `kalman_q_trend`, `kalman_r`, `kalman_min_points`. |
+
+Fields retain their normal mode-specific meaning. For example, the explicit queue/KV
+thresholds are used by `optimization_target: load`. Predictor replacement requires
+`optimization_target: sla` with throughput scaling enabled. Scheduling intervals,
+AIS performance models, deployment topology, and other fields are rejected by this API.
+
+Use the instance ID and revision returned by GET when submitting an update:
+
+```json
+{
+  "instance_id": "<instance_id from GET>",
+  "expected_revision": 0,
+  "request_id": "sweep-42",
+  "config": {
+    "ttft_ms": 800,
+    "load_predictor": "kalman",
+    "kalman_min_points": 5
+  },
+  "warmup_trace": "/data/recent-traffic.jsonl"
+}
+```
+
+`config` is a nonempty partial update. A predictor change requires either `warmup_trace`
+or explicit `cold_start: true`. The trace must be accessible inside the Planner process;
+it uses the same Dynamo/Mooncake file, directory, or glob formats as
+`load_predictor_warmup_trace`. Observations are aggregated at the unchanged throughput
+adjustment interval. Warmup must provide enough effective samples for request count, ISL,
+and OSL and complete a successful forecast. ARIMA fitting failures fail preparation
+instead of being accepted as a last-value fallback. SLA/budget-only updates do not
+require warmup. Supplying a trace explicitly also allows rewarming an unchanged predictor.
+
+The active configuration continues serving while a candidate is prepared. Preparation
+has a 120-second deadline and only one preparation can run at a time. If a background
+fit outlives its deadline, its result cannot activate and further preparations are
+rejected until that work exits. Invalid data, failed fitting, or a changed revision
+leave the active settings unchanged. Successful activation occurs between decisions,
+invalidates cached proposals, and increments the revision. It preserves performance
+models, worker state, and already-admitted scaling operations. `applied` means the
+configuration is active; it does not mean the deployment has finished scaling.
+
+Both this API and the legacy minimum-endpoint API update the same internal generation.
+A legacy write during preparation causes the candidate to fail with `error_type: conflict`.
+Updates are process-local and are not written to the Planner ConfigMap. A restart creates
+a new `instance_id` and restores startup settings. Address the intended Planner instance
+directly rather than distributing a conditional write across replicas.
+
+Retry the identical request with the same `request_id` to retrieve its retained operation
+without applying it twice. IDs start with an alphanumeric character and contain at most
+128 alphanumeric, underscore, hyphen, or dot characters. The last 32 operations are
+retained in memory. Reusing an ID for different content returns `409`; an evicted operation
+returns `404`, so inspect the applied revision before submitting another update.
+
+Malformed JSON returns `400`; invalid or unsupported updates return `422`; instance,
+revision, idempotency, and concurrent-update conflicts return `409`; unavailable control
+returns `503`. Requests exceeding 64 KiB return `413`. Preparation failures after `202`
+are reported by the operation's `state`, `error`, and `error_type` fields.
+
 ## Scheduling and plugin pipeline
 
 The Planner runs the builtin plugin pipeline by default. `scheduling` controls pipeline cadence; `plugin_registration` controls how plugins register, authenticate, and communicate. For the pipeline model, see the [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md#scheduling--plugin-pipeline).

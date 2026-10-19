@@ -247,6 +247,7 @@ fn build_system_status_router(
     server_state: Arc<SystemStatusState>,
     policy: SystemProbePolicy,
 ) -> Router {
+    let control_routes = crate::control_routes::router(server_state.drt().control_routes().clone());
     let system_health = server_state.drt().system_health();
     let (health_path, live_path) = {
         let health = system_health.lock();
@@ -281,6 +282,7 @@ fn build_system_status_router(
                 }),
             ),
     };
+    app = app.merge(control_routes);
     // Check if LoRA feature is enabled
     let lora_enabled =
         crate::config::env_is_truthy(crate::config::environment_names::llm::DYN_LORA_ENABLED);

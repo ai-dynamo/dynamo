@@ -1484,6 +1484,45 @@ impl DistributedRuntime {
             .map(|info| format!("http://{}", info.advertised_socket_addr()))
     }
 
+    /// Register a component handler under `/control/{name}/...` on the system listener.
+    /// The callback receives `{method, path, body}` and returns `{status, body}`.
+    fn register_control_handler(
+        &self,
+        py: Python<'_>,
+        name: String,
+        callback: PyObject,
+    ) -> PyResult<()> {
+        if self.inner.system_status_server_info().is_none() {
+            return Err(to_pyerr("control handlers require DYN_SYSTEM_PORT"));
+        }
+        let locals = Arc::new(pyo3_async_runtimes::tokio::get_current_locals(py)?);
+        let callback = Arc::new(callback);
+        let handler: rs::control_routes::ControlHandler = Arc::new(move |request| {
+            let callback = Arc::clone(&callback);
+            let locals = Arc::clone(&locals);
+            Box::pin(async move {
+                let future = Python::with_gil(|py| {
+                    let request = pythonize::pythonize(py, &request)?;
+                    let coroutine = callback.call1(py, (request,))?;
+                    pyo3_async_runtimes::into_future_with_locals(&locals, coroutine.into_bound(py))
+                })?;
+                let result = future.await?;
+                Python::with_gil(|py| {
+                    pythonize::depythonize::<rs::control_routes::ControlResponse>(result.bind(py))
+                        .map_err(anyhow::Error::from)
+                })
+            })
+        });
+        self.inner
+            .control_routes()
+            .register(name, handler)
+            .map_err(to_pyerr)
+    }
+
+    fn unregister_control_handler(&self, name: &str) {
+        self.inner.control_routes().unregister(name);
+    }
+
     /// Register an async Python callback for /engine/{route_name}
     ///
     /// Args:

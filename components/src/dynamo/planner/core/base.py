@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Optional
 
@@ -49,10 +49,12 @@ from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
+from dynamo.planner.reconfiguration import PlannerReconfiguration
 from dynamo.runtime import DistributedRuntime
 
 if TYPE_CHECKING:
     from dynamo.planner.monitoring.worker_info import WorkerInfo
+    from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +158,7 @@ class NativePlannerBase:
         self._config_lock = asyncio.Lock()
         self._effect_admission_lock = asyncio.Lock()
         self._config_generation = 0
+        self.reconfiguration = PlannerReconfiguration(self)
         self._effect_submission_task: Optional[asyncio.Task[None]] = None
         self._effect_submission_outcome_unknown: Optional[str] = None
         self._effect_submission_hold_logged = False
@@ -174,6 +177,11 @@ class NativePlannerBase:
 
             await self._bootstrap_regression()
             await self._bootstrap_engine_plugins_if_needed()
+
+            if self.config.enable_runtime_reconfiguration:
+                if self.runtime is None:
+                    raise ValueError("system-port reconfiguration requires a runtime")
+                self.reconfiguration.register(self.runtime)
 
             if self.config.advisory:
                 logger.info(
@@ -205,6 +213,8 @@ class NativePlannerBase:
 
     async def _shutdown_runtime(self) -> None:
         """Release initialized planner resources after normal or failed startup."""
+
+        await self.reconfiguration.close()
 
         if not self._diagnostics_finalized:
             self._diagnostics_finalized = True
@@ -374,6 +384,29 @@ class NativePlannerBase:
 
         async with self._bounded_config_lock():
             return self._min_endpoint_response()
+
+    def validate_runtime_candidate(self, candidate: PlannerConfig) -> None:
+        p_min, d_min = candidate.active_min_endpoints()
+        errors = self._runtime_configuration_errors(
+            p_min, d_min, candidate.min_gpu_budget, candidate.max_gpu_budget
+        )
+        if errors:
+            raise ValueError("; ".join(errors))
+
+    def apply_runtime_candidate(
+        self,
+        candidate: PlannerConfig,
+        fields: Iterable[str],
+        predictor: BuiltinLoadPredict | None,
+    ) -> None:
+        engine = self._ensure_engine()
+        engine.apply_runtime_configuration(candidate, fields, predictor)
+        self._config_generation += 1
+        self.prometheus_metrics.sla_target_ttft_ms.set(self.config.ttft_ms)
+        self.prometheus_metrics.sla_target_itl_ms.set(self.config.itl_ms)
+        logger.info(
+            "Activated planner configuration revision %d", self._config_generation
+        )
 
     @asynccontextmanager
     async def _bounded_config_lock(self) -> AsyncIterator[None]:
@@ -1031,6 +1064,7 @@ class NativePlannerBase:
     async def run(self) -> None:
         engine = self._ensure_engine()
         next_tick = engine.initial_tick(time.time())
+        scheduled_generation = self._config_generation
         poll_interval = self.config.load_adjustment_interval_seconds / 10
         gpu_shape_retry_interval = min(
             max(poll_interval, _GPU_SHAPE_RETRY_MIN_SECONDS),
@@ -1040,6 +1074,9 @@ class NativePlannerBase:
         try:
             while True:
                 now = time.time()
+                if scheduled_generation != self._config_generation:
+                    next_tick = engine.initial_tick(now, force_due=True)
+                    scheduled_generation = self._config_generation
                 if now < next_tick.at_s:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
                     continue
