@@ -213,18 +213,21 @@ def test_main_v1_stays_alive_after_successful_load(monkeypatch):
     ]
 
 
-def test_main_v1_load_failure_exits_without_keepalive(monkeypatch):
-    def failing_run_per_device(module, argv):
-        raise SystemExit(1)
+def test_main_v1_help_exits_without_keepalive(monkeypatch):
+    # --help runs one child that prints usage and exits 0; main() must return.
+    forwarded = []
 
     def fake_sleep(seconds):
-        raise AssertionError("keepalive must not run after a failed load")
+        raise AssertionError("keepalive must not run for --help")
 
     monkeypatch.setenv("DYN_GMS_USE_V1", "true")
-    monkeypatch.setattr(loader, "run_per_device", failing_run_per_device)
+    monkeypatch.setattr(
+        loader,
+        "run_per_device",
+        lambda module, argv: forwarded.append((module, argv)),
+    )
     monkeypatch.setattr(loader.time, "sleep", fake_sleep)
 
-    with pytest.raises(SystemExit) as excinfo:
-        loader.main(argv=["--checkpoint-dir", "/tmp/cp"])
+    loader.main(argv=["--help"])
 
-    assert excinfo.value.code == 1
+    assert forwarded == [("gpu_memory_service.v1.snapshot.loader", ["--help"])]

@@ -190,6 +190,8 @@ def main(argv: list[str] | None = None) -> None:
     argv = argv if argv is not None else sys.argv[1:]
     if os.environ.get("DYN_GMS_USE_V1") == "true":
         run_per_device("gpu_memory_service.v1.snapshot.loader", argv)
+        if "-h" in argv or "--help" in argv:
+            return
         logger.info("GMS V1 load complete on all devices; waiting for termination")
         _wait_for_termination()
 
