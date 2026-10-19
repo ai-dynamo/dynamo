@@ -6,8 +6,8 @@
 # GPUs: 2
 # Prerequisites: ./setup_minio.sh (starts MinIO, uploads LoRA)
 #
-# The workers publish KV events in the "dynamo" format, which carries the LoRA
-# adapter name so the router can tell adapter blocks from base-model blocks.
+# dynamo.sglang publishes KV events in the "dynamo" format, which carries the
+# LoRA adapter name so the router can tell adapter blocks from base-model blocks.
 
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
@@ -74,7 +74,7 @@ run_worker() {
     --enable-lora \
     --max-lora-rank 64 \
     --lora-target-modules all \
-    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${kv_port}\",\"format\":\"dynamo\"}" \
+    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${kv_port}\"}" \
     $GPU_MEM_ARGS &
 }
 
