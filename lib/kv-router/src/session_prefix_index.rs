@@ -10,12 +10,13 @@ use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slotmap::{SlotMap, new_key_type};
 
-use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
+use crate::protocols::{ExternalSequenceBlockHash, WorkerId, WorkerWithDpRank};
 
 /// Logical session identity as owned by this index.
 pub type SessionId = String;
 
 const DEFAULT_MAX_SESSIONS: usize = 16_384;
+const MAX_SESSION_PREFIX_ID_BYTES: usize = 256;
 const CLEANUP_INTERVAL: Duration = Duration::from_millis(crate::cleanup::CLEANUP_INTERVAL_MS);
 
 new_key_type! {
@@ -207,6 +208,9 @@ impl SessionPrefixIndexer {
         worker: WorkerWithDpRank,
         matched_hash: ExternalSequenceBlockHash,
     ) -> Result<bool, SessionPrefixIndexError> {
+        if !valid_session_id(session_id) {
+            return Ok(false);
+        }
         let mut state = self.state.write();
         let node = state.resolve_or_insert_root(matched_hash);
         let updated = state.advance_frontier(session_id, worker, node);
@@ -223,6 +227,9 @@ impl SessionPrefixIndexer {
         block_hashes: &[ExternalSequenceBlockHash],
     ) -> Result<bool, SessionPrefixIndexError> {
         if block_hashes.is_empty() {
+            return Ok(false);
+        }
+        if !valid_session_id(session_id) {
             return Ok(false);
         }
 
@@ -276,6 +283,14 @@ impl SessionPrefixIndexer {
         updated
     }
 
+    /// Removes every session frontier associated with all ranks of one worker.
+    pub fn clear_worker_id_frontiers(&self, worker_id: WorkerId) -> usize {
+        let mut state = self.state.write();
+        let updated = state.clear_worker_id_frontiers(worker_id);
+        state.maybe_cleanup();
+        updated
+    }
+
     pub fn node_count(&self) -> usize {
         self.state.read().nodes.len()
     }
@@ -283,6 +298,10 @@ impl SessionPrefixIndexer {
     pub fn session_count(&self) -> usize {
         self.state.read().session_to_worker_frontiers.len()
     }
+}
+
+fn valid_session_id(session_id: &str) -> bool {
+    session_id.len() <= MAX_SESSION_PREFIX_ID_BYTES
 }
 
 impl IndexState {
@@ -310,44 +329,69 @@ impl IndexState {
         parent_hash: Option<ExternalSequenceBlockHash>,
         block_hashes: &[ExternalSequenceBlockHash],
     ) -> Result<(), SessionPrefixIndexError> {
-        let mut dominators =
+        let mut chain_hashes =
             FxHashSet::with_capacity_and_hasher(block_hashes.len(), Default::default());
-        let mut unknown_parent = None;
-        if let Some(parent_hash) = parent_hash {
-            dominators.insert(parent_hash);
-            if let Some(&parent_node) = self.hash_to_node.get(&parent_hash) {
-                dominators.extend(
-                    self.path_to_root(parent_node)
-                        .into_iter()
-                        .map(|node| self.nodes[node].block_hash),
-                );
-            } else if !block_hashes.iter().any(|block_hash| {
-                self.hash_to_node
-                    .get(block_hash)
-                    .is_some_and(|&node| self.nodes[node].parent.is_none())
-            }) {
-                unknown_parent = Some(parent_hash);
+        let mut reconnects_unknown_parent = false;
+        let mut needs_ancestry_check = false;
+        let mut conflicting_block = None;
+        let mut expected_parent = parent_hash;
+        for &block_hash in block_hashes {
+            if Some(block_hash) == parent_hash || !chain_hashes.insert(block_hash) {
+                return Err(SessionPrefixIndexError::CyclicParent { block: block_hash });
+            }
+            if let Some(&node) = self.hash_to_node.get(&block_hash) {
+                let entry = &self.nodes[node];
+                match entry.parent {
+                    Some(recorded_parent)
+                        if Some(self.nodes[recorded_parent].block_hash) != expected_parent =>
+                    {
+                        conflicting_block.get_or_insert(block_hash);
+                    }
+                    None => {
+                        reconnects_unknown_parent = true;
+                        needs_ancestry_check |= expected_parent.is_some() && entry.child_count > 0;
+                    }
+                    Some(_) => {}
+                }
+            }
+            expected_parent = Some(block_hash);
+        }
+
+        let parent_node = parent_hash.and_then(|hash| self.hash_to_node.get(&hash).copied());
+        let unknown_parent =
+            parent_hash.filter(|_| parent_node.is_none() && !reconnects_unknown_parent);
+
+        // Only grafting an existing subtree can introduce a cycle. New blocks,
+        // existing edges, and parentless leaves do not require an ancestry walk.
+        if needs_ancestry_check && let Some(parent_node) = parent_node {
+            let mut current = Some(parent_node);
+            let mut steps = 0usize;
+            while let Some(node) = current {
+                let entry = &self.nodes[node];
+                if chain_hashes.contains(&entry.block_hash) {
+                    return Err(SessionPrefixIndexError::CyclicParent {
+                        block: entry.block_hash,
+                    });
+                }
+                steps += 1;
+                if steps > self.nodes.len() {
+                    debug_assert!(false, "parent cycle in session prefix index forest");
+                    tracing::error!(
+                        "session prefix index ancestry walk exceeded the arena; aborting"
+                    );
+                    break;
+                }
+                current = entry.parent;
             }
         }
 
-        let mut expected_parent = parent_hash;
-        for &block_hash in block_hashes {
-            if dominators.contains(&block_hash) {
-                return Err(SessionPrefixIndexError::CyclicParent { block: block_hash });
-            }
-            if let Some(&existing) = self.hash_to_node.get(&block_hash)
-                && let Some(recorded) = self.nodes[existing].parent
-                && Some(self.nodes[recorded].block_hash) != expected_parent
-            {
-                return Err(SessionPrefixIndexError::ConflictingParent { block: block_hash });
-            }
-            dominators.insert(block_hash);
-            expected_parent = Some(block_hash);
+        if let Some(block) = conflicting_block {
+            return Err(SessionPrefixIndexError::ConflictingParent { block });
         }
-        if let Some(parent) = unknown_parent {
-            return Err(SessionPrefixIndexError::UnknownParent { parent });
+        match unknown_parent {
+            Some(parent) => Err(SessionPrefixIndexError::UnknownParent { parent }),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     fn touch_session(&mut self, session_id: &str) {
@@ -680,6 +724,19 @@ impl IndexState {
         }
         affected.len()
     }
+
+    fn clear_worker_id_frontiers(&mut self, worker_id: WorkerId) -> usize {
+        let workers: Vec<_> = self
+            .worker_frontier_to_sessions
+            .keys()
+            .copied()
+            .filter(|worker| worker.worker_id == worker_id)
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| self.clear_worker_frontiers(worker))
+            .sum()
+    }
 }
 
 #[cfg(test)]
@@ -994,6 +1051,36 @@ mod tests {
     }
 
     #[test]
+    fn oversized_session_ids_do_not_mutate_the_index() {
+        let chain = hashes(vec![1, 2]);
+        let indexer = SessionPrefixIndexer::new();
+        let valid_session = "s".repeat(MAX_SESSION_PREFIX_ID_BYTES);
+        let oversized_session = "s".repeat(MAX_SESSION_PREFIX_ID_BYTES + 1);
+
+        assert!(
+            indexer
+                .update_session_from_match(&valid_session, worker(1), chain[0])
+                .unwrap()
+        );
+
+        assert_eq!(
+            indexer.update_session_from_match(&oversized_session, worker(1), chain[1]),
+            Ok(false)
+        );
+        assert_eq!(
+            indexer.update_session_from_stored_blocks(
+                &oversized_session,
+                worker(1),
+                Some(chain[0]),
+                &chain[1..],
+            ),
+            Ok(false)
+        );
+        assert_eq!(indexer.node_count(), 1);
+        assert_eq!(indexer.session_count(), 1);
+    }
+
+    #[test]
     fn removal_recedes_only_the_affected_worker_frontier() {
         let chain = hashes(vec![1, 2, 3]);
         let indexer = SessionPrefixIndexer::new();
@@ -1098,6 +1185,29 @@ mod tests {
         assert!(lineage_on_worker(&indexer, "s1", worker(2)).is_empty());
         assert_eq!(lineage_on_worker(&indexer, "s1", worker(1)), vec![chain]);
         assert_eq!(indexer.node_count(), 2, "clear preserves logical topology");
+    }
+
+    #[test]
+    fn worker_id_clear_removes_all_ranks_only_for_that_worker() {
+        let chain = hashes(vec![1, 2]);
+        let indexer = SessionPrefixIndexer::new();
+        let first_rank = WorkerWithDpRank::new(1, 0);
+        let second_rank = WorkerWithDpRank::new(1, 1);
+        let retained_worker = WorkerWithDpRank::new(2, 0);
+
+        for target in [first_rank, second_rank, retained_worker] {
+            indexer
+                .update_session_from_stored_blocks("s1", target, None, &chain)
+                .unwrap();
+        }
+
+        assert_eq!(indexer.clear_worker_id_frontiers(1), 2);
+        assert!(lineage_on_worker(&indexer, "s1", first_rank).is_empty());
+        assert!(lineage_on_worker(&indexer, "s1", second_rank).is_empty());
+        assert_eq!(
+            lineage_on_worker(&indexer, "s1", retained_worker),
+            vec![chain]
+        );
     }
 
     #[test]

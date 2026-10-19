@@ -213,7 +213,7 @@ spec:
               --async-scheduling \
               -cc.pass_config.fuse_norm_quant=True \
               -cc.pass_config.fuse_act_quant=True \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
               --disaggregation-mode prefill \
               --dyn-tool-call-parser qwen3_coder \
               --dyn-reasoning-parser nemotron3 \
@@ -358,7 +358,7 @@ spec:
               --async-scheduling \
               -cc.pass_config.fuse_norm_quant=True \
               -cc.pass_config.fuse_act_quant=True \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
               --disaggregation-mode decode \
               --dyn-tool-call-parser qwen3_coder \
               --dyn-reasoning-parser nemotron3 \

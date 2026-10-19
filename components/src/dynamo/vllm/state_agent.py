@@ -8,7 +8,7 @@ import ipaddress
 import logging
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 from dynamo.llm import KvStateAttachmentOwner, WorkerType
 from dynamo.runtime import Endpoint
 
+from .cache_info import get_configured_kv_event_block_size
 from .constants import DisaggregationMode
 from .dp_topology import get_dp_range_for_worker
 from .kv_hints import resolve_kv_transfer_hint_sources
@@ -142,6 +143,7 @@ async def start_attachment_owner(
     vllm_config: "VllmConfig",
     image_token_id: int | None,
     video_token_id: int | None = None,
+    topology_domains: Mapping[str, str] | None = None,
 ) -> KvStateAttachmentOwner | None:
     settings = state_agent_settings(config)
     if settings is None:
@@ -162,7 +164,7 @@ async def start_attachment_owner(
         )
 
     events = config.engine_args.kv_events_config
-    block_size = int(vllm_config.cache_config.block_size)
+    block_size = get_configured_kv_event_block_size(vllm_config)
     kv_transfer_hint_sources = resolve_kv_transfer_hint_sources(
         config.engine_args,
         _state_agent_worker_type(config),
@@ -196,6 +198,9 @@ async def start_attachment_owner(
                     {
                         "source_control_endpoint": kv_transfer_hint_source.source_control_endpoint,
                         "worker_type": kv_transfer_hint_source.worker_type,
+                        # KVCR runs in this worker's pod, so its cache
+                        # owners share the worker's island.
+                        "topology_domains": dict(topology_domains or {}),
                     }
                     if kv_transfer_hint_source is not None
                     else None

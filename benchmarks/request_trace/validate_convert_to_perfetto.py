@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import sys
 from pathlib import Path
 
@@ -184,12 +185,80 @@ def check_convert_records_accepts_context_free_request_trace_schema():
     )
     assert request["name"] == "LLM request: test-model"
     assert request["args"]["request_id"] == "req-plain"
+    assert "agent_context" not in request["args"]
     thread_names = [
         event["args"]["name"]
         for event in trace["traceEvents"]
         if event.get("name") == "thread_name"
     ]
     assert thread_names == ["request-only"]
+
+
+def check_convert_records_preserves_raw_agent_context():
+    context = {
+        "session_id": "child-session",
+        "parent_session_id": "parent-session",
+        "session_final": False,
+        "input_trigger": "tool_result",
+        "agent_headers": {
+            "x-claude-code-future-hint": ["new-value", "", " padded ", "new-value"],
+            "x-codex-turn-metadata": [
+                '{"request_kind":"compaction","unknown":null}',
+                "{invalid json",
+            ],
+        },
+        "future_field": {"values": [None, False, {"nested": "value"}]},
+    }
+    records = [
+        {
+            "event": {
+                "schema": "dynamo.request.trace.v1",
+                "event_type": "request_end",
+                "event_time_unix_ms": 1050,
+                "agent_context": context,
+                "request": {
+                    "request_id": "req-1",
+                    "model": "test-model",
+                    "request_received_ms": 1000,
+                    "total_time_ms": 50,
+                },
+            }
+        }
+    ]
+    for event_type, tool in (
+        (
+            "tool_end",
+            {"tool_call_id": "call-1", "tool_class": "shell", "duration_ms": 10},
+        ),
+        ("tool_start", {"tool_call_id": "call-2", "tool_class": "shell"}),
+    ):
+        records.append(
+            {
+                "schema": "dynamo.request.trace.v1",
+                "event_type": event_type,
+                "event_time_unix_ms": 1100,
+                "agent_context": context,
+                "tool": tool,
+            }
+        )
+    original = json.dumps(records)
+    trace, converted = convert_records(
+        records, include_stages=False, include_markers=False
+    )
+
+    assert converted == 3
+    assert json.dumps(records) == original
+    serialized = json.loads(json.dumps(trace))
+    events = [event for event in serialized["traceEvents"] if event["ph"] != "M"]
+    assert len(events) == 3
+    for event in events:
+        assert event["args"]["agent_context"] == context
+        assert event["args"]["session_id"] == context["session_id"]
+        assert event["args"]["parent_session_id"] == context["parent_session_id"]
+    request = next(event for event in events if event.get("cat") == "dynamo.llm")
+    assert request["name"] == "LLM request: test-model"
+    assert request["ts"] == 1_000_000
+    assert request["dur"] == 50_000
 
 
 def check_convert_records_clamps_stage_rounding_overlap():
@@ -682,6 +751,7 @@ CHECKS = [
     check_convert_records_emits_request_stages_and_metadata,
     check_convert_records_accepts_enriched_request_trace_schema,
     check_convert_records_accepts_context_free_request_trace_schema,
+    check_convert_records_preserves_raw_agent_context,
     check_convert_records_clamps_stage_rounding_overlap,
     check_convert_records_splits_overlapping_session_requests_into_lanes,
     check_convert_records_uses_one_process_for_all_sessions,
