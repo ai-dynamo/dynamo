@@ -198,8 +198,6 @@ on:
         required: false
       NGC_PUBLISH_TOKEN:
         required: false
-      NGC_PUBLISH_USERNAME:
-        required: false
     outputs:
       target_tag_plain:
         description: 'Plain runtime image tag prefix'
@@ -248,15 +246,7 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: NGC Login
-        if: ${{ inputs.runtime_variant == 'enterprise' }}
-        shell: bash
-        env:
-          NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
-          NGC_USERNAME: ${{ secrets.NGC_PUBLISH_USERNAME }}
-        run: |
-          set -euo pipefail
-          echo "${NGC_TOKEN}" | docker login nvcr.io -u "${NGC_USERNAME}" --password-stdin
+          ngc_ci_access_token: ${{ inputs.runtime_variant == 'enterprise' && secrets.NGC_PUBLISH_TOKEN || '' }}
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
