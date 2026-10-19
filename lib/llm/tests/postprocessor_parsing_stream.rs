@@ -6051,7 +6051,7 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
         (
             "kimi_k2",
             "kimi_k25",
-            "reasoning</think>",
+            "<think>reasoning</think>",
             "<|tool_calls_section_begin|><|tool_call_begin|>functions.write_file:0<|tool_call_argument_begin|>{\"count\":7,\"content\":\"",
             "\"}",
             "<|tool_call_end|>",
@@ -6114,8 +6114,12 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
                         futures::pin_mut!(output);
                         let warmup = if thinking == "disabled" {
                             ""
-                        } else if thinking == "prefill" && tool != "kimi_k2" {
-                            "reasoning<|close|>think<|sep|>"
+                        } else if thinking == "prefill" {
+                            if tool == "kimi_k2" {
+                                "reasoning</think>"
+                            } else {
+                                "reasoning<|close|>think<|sep|>"
+                            }
                         } else {
                             warmup
                         };
