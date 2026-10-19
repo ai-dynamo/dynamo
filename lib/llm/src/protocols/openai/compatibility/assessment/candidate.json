@@ -1,0 +1,7 @@
+{
+  "target": "vllm",
+  "repository": "https://github.com/vllm-project/vllm",
+  "ref": "refs/heads/main",
+  "owner": "@ai-dynamo/dynamo-frontend-codeowners",
+  "purpose": "Weekly source-only candidate assessment; resolve and record an exact commit each run without changing configured runtime pins."
+}
