@@ -18,6 +18,7 @@ import dataclasses
 import functools
 import inspect
 import logging
+import math
 import os
 import re
 from collections.abc import AsyncGenerator
@@ -1410,6 +1411,18 @@ class HandlerBase(BaseGenerativeHandler):
                             "token_ids": output.token_ids[tokens_so_far:],
                             "index": output_idx,
                         }
+                        # Forward the engine's running average on every chunk:
+                        # the frontend may stop before the engine's final response.
+                        # Clients opt in through nvext.extra_fields=["engine_data"].
+                        avg_decoded = getattr(res, "avg_decoded_tokens_per_iter", None)
+                        if (
+                            isinstance(avg_decoded, (int, float))
+                            and math.isfinite(avg_decoded)
+                            and avg_decoded >= 0
+                        ):
+                            out["engine_data"] = {
+                                "avg_decoded_tokens_per_iter": avg_decoded
+                            }
                         if (
                             self.first_token_source is not None
                             and out["token_ids"]
