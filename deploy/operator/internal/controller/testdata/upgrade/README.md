@@ -76,15 +76,19 @@ uses its existing Python proxy to connect the API server to those webhooks.
 Helm, kubectl, Go and Docker/Kind are prerequisites.
 
 ```bash
-export KUBECONFIG="$(mktemp)"
-export DYNAMO_CLUSTERTEST_CONTEXT=kind-operator-upgrade
-make -C deploy/operator kind
-deploy/operator/bin/kind create cluster --name operator-upgrade --kubeconfig "$KUBECONFIG" \
-  --image kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
-make -C deploy/operator install-upgrade-crds
-make -C deploy/operator upgrade-contract
-deploy/operator/bin/kind delete cluster --name operator-upgrade
+make -C deploy/operator clustertest-upgrade-contract
 ```
+
+The wrapper creates a uniquely named Kind cluster with the pinned node image,
+uses a temporary kubeconfig, installs the shared clustertest CRDs, and removes
+only its own cluster on completion, failure, or interruption. It refuses to
+reuse an existing cluster. CI calls the same target. Runtime images are not
+needed by this suite.
+
+For an already prepared, exclusively owned cluster, set `KUBECONFIG` and
+`DYNAMO_CLUSTERTEST_CONTEXT` explicitly, then run
+`clustertest-upgrade-contract-in-cluster`. The `-in-cluster` targets fail if the
+context is unset; they never select the current context implicitly.
 
 A golden mismatch writes `output.yaml.new`. Review the difference and replace
 only `output.yaml` when it is intentional. Never update historical input or relax
@@ -121,24 +125,41 @@ graph after 1.5 has persisted it. Normal CI does not fetch or compile old operat
 While the chart still reports version N, run:
 
 ```bash
-make -C deploy/operator regen-upgrade-fixtures
+make -C deploy/operator clustertest-upgrade-fixtures-regen
 ```
 
 The command validates the predecessor marker, reconciles every historical and
 latest scenario with the current checkout, requires both checks to pass, stages
 concrete API captures, promotes latest to history/N, and publishes the new fixture
 tree with `RECONCILED_VERSION=N`. Failure leaves the committed history and marker
-unchanged. Regeneration at the same minor is rejected. This initial suite applies
-that lifecycle to its three Grove scenarios only; broader DEP coverage remains
-follow-up work.
+unchanged. Regeneration at the same minor is rejected.
+
+Ordinary checks discover every available scenario recursively. The required
+release matrix is declared in `required-matrix.json`: 24 component/Grove cases
+(three engines × four deployment shapes × two programs), plus three supported
+multi-node disaggregated DisaggregatedSet cases. Additional scenarios are valid.
+Both regeneration and a minor `appVersion` bump relative to `--base` reject a
+missing required scenario. The initial three cases can therefore land before
+broader coverage, but cannot advance the release boundary alone. Keep #16650
+open for the complete matrix, missing-origin history and rollout safety across
+all workload programs.
 
 After that commit, bump the operator subchart's **appVersion** to N+1. The check
 rejects premature, skipped-minor and major bumps. CI checks the PR/merge-group base
 version as well as current consistency; pre-commit runs the inexpensive local
 consistency check. Patch/prerelease changes do not add history generations.
-Give latest scenarios fresh namespaces when advancing to a new origin so they
-cannot collide with older promoted scenarios; review their resulting golden
-outputs through current CREATE admission.
+Promotion derives a namespace from `history/<version>/<complete-scenario-path>`
+and runs CREATE admission and reconciliation there before capturing the new
+history. Existing history retains its original namespace. Latest namespaces
+are derived separately from `latest/<complete-scenario-path>` and stay stable
+across releases; namespace collisions across all roles are rejected. Long
+namespace names include a digest to remain within Kubernetes' length limit.
+
+Latest origin annotations use `$var:operator-version`, bound exactly to the
+operator chart's `appVersion` by the golden matcher. The independent CREATE
+origin assertion remains active. All other lowering fields remain exact, and
+historical origins remain concrete. Accepting a golden never bypasses rollout
+safety assertions.
 
 CI detects operator-affecting changes before running the suite. It retains test
 output and .new differences, and deletes its dedicated cluster on completion.

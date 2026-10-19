@@ -51,11 +51,7 @@ jobs:
     if: needs.changes.outputs.operator == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      DYNAMO_CLUSTERTEST_CONTEXT: kind-operator-upgrade
     steps:
-      - name: Set isolated kubeconfig
-        run: echo "KUBECONFIG=$RUNNER_TEMP/operator-upgrade.kubeconfig" >> "$GITHUB_ENV"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
@@ -65,6 +61,8 @@ jobs:
           go-version-file: deploy/operator/go.mod
           cache-dependency-path: deploy/operator/go.sum
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+      - name: Install fixture tooling
+        run: python3 -m pip install PyYAML==6.0.3
       - name: Verify frozen inputs and version-bump boundary
         env:
           BASE_SHA: ${{ needs.changes.outputs.base }}
@@ -72,31 +70,17 @@ jobs:
           args=()
           if [[ -n "$BASE_SHA" ]]; then args=(--base "$BASE_SHA"); fi
           python3 deploy/operator/hack/generate_upgrade_fixtures.py --check "${args[@]}"
-          python3 -m unittest discover -s deploy/operator/hack -p test_upgrade_versions.py
+          python3 -m unittest discover -s deploy/operator/hack -p 'test_upgrade*.py'
           go test -C deploy/operator ./internal/testing/golden ./internal/testing/clusterenv ./internal/controller -run 'TestUpgradeSafetyIndependentOfGolden|TestReadManifests|TestApply|TestMatch|TestLoadRESTConfig' -count=1
-      - name: Create an exclusive CPU test cluster
-        run: |
-          make -C deploy/operator kind
-          deploy/operator/bin/kind create cluster --name operator-upgrade --image kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5 --kubeconfig "$KUBECONFIG"
-          make -C deploy/operator install-upgrade-crds
-      - name: Verify historical storage and cleanup
-        run: go test -C deploy/operator -tags=clustertest ./internal/testing/clusterenv -run '^TestClusterHistoryStorage$' -count=1 -v -timeout=3m
-      - name: Replay through candidate admission and controllers
+      - name: Replay with the shared exclusive clustertest lifecycle
         shell: bash
-        run: |
-          go test -C deploy/operator -tags='clustertest upgradecontract' ./internal/controller -run '^TestClusterOperatorUpgrade$' -count=1 -json -timeout=15m | tee "$RUNNER_TEMP/operator-upgrade.jsonl"
+        run: make -C deploy/operator clustertest-upgrade-contract 2>&1 | tee "$RUNNER_TEMP/operator-upgrade.log"
       - name: Retain concrete golden differences
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: operator-upgrade-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/operator-upgrade.jsonl
+            ${{ runner.temp }}/operator-upgrade.log
             deploy/operator/internal/controller/testdata/upgrade/**/*.new
           if-no-files-found: ignore
-      - name: Remove the exclusive cluster
-        if: always()
-        run: |
-          if [[ -x deploy/operator/bin/kind ]]; then
-            deploy/operator/bin/kind delete cluster --name operator-upgrade
-          fi
