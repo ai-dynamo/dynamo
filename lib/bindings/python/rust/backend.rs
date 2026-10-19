@@ -533,6 +533,9 @@ impl WorkerConfig {
                 rl_metadata: None,
                 media_decoder: media_decoder.map(|decoder| decoder.inner),
                 media_fetcher: media_fetcher.map(|fetcher| fetcher.inner),
+                // Python workers advertise through `register_llm`'s
+                // `router_config`, not through this worker configuration.
+                router_config: None,
             },
         })
     }

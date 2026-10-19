@@ -108,6 +108,27 @@ port `9090`. These probes do not track engine loading, so keep the engine's own
 probes on `main`. Sidecar mode supports worker, prefill, and decode components;
 multinode deployments are not yet supported.
 
+## Routing Configuration
+
+A sidecar inherits the frontend's `--router-mode` and session-affinity settings
+unless it advertises its own with `--router-mode`,
+`--router-session-affinity-ttl-secs`, and the busy-worker thresholds, the same
+flags the Python workers accept. Prefill and decode sidecars are separate
+worker sets, so they can route differently, for example session-affine prefill
+in front of load-balanced decode:
+
+```bash
+dynamo-vllm-sidecar --disaggregation-mode prefill --grpc-endpoint 127.0.0.1:30021 \
+  --router-mode kv --router-session-affinity-ttl-secs 14400
+dynamo-vllm-sidecar --disaggregation-mode decode --grpc-endpoint 127.0.0.1:30001 \
+  --router-mode kv
+```
+
+An advertisement replaces the frontend configuration for that set rather than
+merging with it; KV tuning for an advertised `kv` set comes from the sidecar's
+`DYN_ROUTER_*` environment variables. See
+[Configuration Scope and Precedence](../../modular-components/router/configuration-and-tuning.md#configuration-scope-and-precedence).
+
 ## Topologies
 
 Each engine page shows its single-node TP, multi-node TP, and multi-node DP

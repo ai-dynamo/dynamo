@@ -241,6 +241,7 @@ impl VllmSidecarEngine {
         let mut engine = Self::new(endpoint, model.clone(), mode, transport);
         engine.engine_gates_reasoning =
             model.reports_proto_0_6() && model.reasoning_parser().is_some();
+        let router_config = args.sidecar.common.router_config()?;
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -267,6 +268,7 @@ impl VllmSidecarEngine {
             route_to_encoder: args.sidecar.common.route_to_encoder,
             enable_rl,
             rl_metadata,
+            router_config,
             ..Default::default()
         };
         Ok((engine, config))
