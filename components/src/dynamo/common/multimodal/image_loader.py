@@ -308,7 +308,7 @@ class ImageLoader:
             )
             raise HttpStatusError(
                 408,
-                f"Timeout loading image: '{image_url}' "
+                f"Timeout loading image: '{describe_media_source(image_url)}' "
                 f"(timeout={self._http_timeout}s)",
                 image_url,
             ) from e
@@ -322,7 +322,8 @@ class ImageLoader:
             )
             raise HttpStatusError(
                 400,
-                f"Connection error loading image: '{image_url}': {e}",
+                "Connection error loading image: "
+                f"'{describe_media_source(image_url)}': {e}",
                 image_url,
             ) from e
         except HttpError as e:
@@ -353,7 +354,9 @@ class ImageLoader:
                 type(e).__name__,
                 describe_media_source(image_url),
             )
-            raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
+            raise ValueError(
+                f"Failed to load image: '{describe_media_source(image_url)}': {e}"
+            ) from e
         except Exception as e:
             logger.error(
                 "%s loading image: '%s'",

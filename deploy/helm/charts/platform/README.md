@@ -153,9 +153,15 @@ dependency or platform chart does not upgrade separately managed Grove installat
 #### External Grove installation preflight
 
 With `global.grove.enabled=true` and `global.grove.install=false`, a read-only
-`pre-install,pre-upgrade` Job verifies the Grove controller version (currently alpha.15 or
-later), completed rollout, and established CRDs before applying the operator Deployment.
-It does not verify CRD schema/version equality; upgrade Grove and matching CRDs first.
+`pre-install,pre-upgrade` Job verifies the Grove controller version against the pinned
+dependency and completed rollout before applying the operator Deployment.
+It assumes a compatible, fully rolled out controller has matching Grove CRDs installed;
+CRDs are not inspected. Upgrade Grove and matching CRDs first.
+The minimum version comes from the `grove-charts` dependency in `Chart.yaml`.
+Its YAML scalar is anchored in the chart annotation and referenced by the dependency,
+so Helm can pass the same value directly to the checker even when external Grove disables
+that dependency. No symlink, generator, or synchronization step is required. The
+standalone operator chart does not run this platform preflight.
 Unknown/custom/RC image tags and digest-only images fail rather than claiming compatibility.
 To resolve missing or ambiguous discovery, select the controller explicitly:
 

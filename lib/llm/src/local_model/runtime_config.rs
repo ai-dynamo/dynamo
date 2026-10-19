@@ -746,7 +746,8 @@ impl ModelRuntimeConfig {
         self.validate().map_err(|error| error.to_string())
     }
 
-    pub(crate) fn data_parallel_rank_range(&self) -> Result<Range<u32>, String> {
+    /// Return the validated global DP ranks advertised by this worker.
+    pub fn data_parallel_rank_range(&self) -> Result<Range<u32>, String> {
         if self.data_parallel_size == 0 {
             return Err("data_parallel_size must be at least 1".to_string());
         }
