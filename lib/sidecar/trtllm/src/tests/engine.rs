@@ -112,7 +112,17 @@ async fn aggregated_generation_streams_delta_then_terminal() {
     // GetModelInfo reports max_context_length 4096.
     assert_eq!(config.llm.unwrap().context_length, Some(4096));
 
-    let outputs = collect(&engine, request()).await;
+    // The single-rank router supplies logical rank zero even for legacy servers.
+    let mut req = request();
+    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        dp_rank: Some(0),
+        ..Default::default()
+    });
+    let outputs = collect(&engine, req).await;
+    assert_eq!(
+        server.service.target_dp_ranks.lock().await.as_slice(),
+        [None]
+    );
     assert_eq!(outputs.len(), 2);
     assert_eq!(outputs[0].token_ids, [42]);
     assert!(outputs[0].finish_reason.is_none());
@@ -271,6 +281,14 @@ async fn kv_routing_discovers_contract_and_forwards_selected_rank() {
     assert_eq!(
         server.service.target_dp_ranks.lock().await.as_slice(),
         [Some("1".to_string())]
+    );
+    let requests = server.service.requests.lock().await;
+    let sent = requests.last().unwrap();
+    assert_eq!(
+        sent.extra.as_ref().unwrap().fields["conversation_id"].kind,
+        Some(prost_types::value::Kind::StringValue(
+            sent.request_id.clone()
+        ))
     );
 }
 
@@ -766,4 +784,88 @@ fn parsed_arguments_map_onto_the_worker_registration() {
         .is_err(),
         "an empty model path has nothing to tokenize with"
     );
+}
+
+// Regression: reconnecting to a restarted native group must withdraw stale
+// engine discovery instead of leaving followers waiting for the old UUID.
+#[tokio::test]
+async fn leader_monitor_rejects_restarted_native_engine() {
+    let service = FakeTrtllm::default();
+    service.kv_routing.store(true, Ordering::SeqCst);
+    *service.node_metadata.lock().await = Some(crate::node::NodeMetadata {
+        version: 1,
+        engine_id: "original".into(),
+        node_id: "leader".into(),
+        leader: true,
+        node_count: 1,
+        kv_block_size: 32,
+        local_dp_ranks: vec![0],
+        source_owners: [(0, "leader".into())].into(),
+    });
+    let server = FakeServer::start(service.clone()).await;
+    let engine = engine_with_kv_routing(&server.endpoint);
+    engine.start(0).await.expect("start original engine");
+    service
+        .node_metadata
+        .lock()
+        .await
+        .as_mut()
+        .unwrap()
+        .engine_id = "restarted".into();
+    let error = tokio::time::timeout(Duration::from_secs(1), engine.monitor_routing())
+        .await
+        .expect("detect changed incarnation")
+        .expect_err("must withdraw stale discovery");
+    assert!(error.to_string().contains("Local engine changed"));
+}
+
+// Regression: a follower must honor shutdown even while reconnecting to a
+// missing engine, instead of waiting for the default 30-minute retry budget.
+#[tokio::test]
+async fn follower_shutdown_cancels_initial_reconnect() {
+    use clap::Parser;
+    use dynamo_runtime::distributed::DistributedConfig;
+    use dynamo_runtime::{DistributedRuntime, Runtime};
+    use tokio_util::sync::CancellationToken;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let args = crate::args::Args::try_parse_from([
+        "sidecar",
+        "--grpc-endpoint",
+        &format!("http://{address}"),
+        "--model-path",
+        "model-source",
+    ])
+    .unwrap();
+    let drt = DistributedRuntime::new(
+        Runtime::from_current().unwrap(),
+        DistributedConfig::process_local(),
+    )
+    .await
+    .unwrap();
+    let node = crate::node::NodeMetadata {
+        version: 1,
+        engine_id: "engine".into(),
+        node_id: "follower".into(),
+        leader: false,
+        node_count: 2,
+        kv_block_size: 32,
+        local_dp_ranks: vec![],
+        source_owners: Default::default(),
+    };
+    let cancel = CancellationToken::new();
+    let shutdown = cancel.clone();
+    let relay = crate::headless::relay(drt, args, node, cancel);
+    let signal = async move {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        shutdown.cancel();
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        let (result, ()) = tokio::join!(relay, signal);
+        result.expect("clean cancellation");
+    })
+    .await
+    .expect("follower must stop promptly");
 }
