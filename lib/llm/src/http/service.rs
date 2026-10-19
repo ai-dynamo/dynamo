@@ -225,6 +225,7 @@ mod tests {
                         result.reasoning_disabled,
                         match family {
                             "gpt_oss" => false,
+                            "beam" => false,
                             "gemma4" => thinking != Some(true),
                             _ => thinking == Some(false),
                         },

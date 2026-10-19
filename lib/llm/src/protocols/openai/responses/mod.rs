@@ -1063,6 +1063,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .transpose()?;
 
         Ok(NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             inner: CreateChatCompletionRequest {
                 messages,
                 model: resp.inner.model.unwrap_or_default(),

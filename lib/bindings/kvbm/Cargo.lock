@@ -2343,9 +2343,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "8.0.3"
+version = "8.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "144979b6e4a9fe44556c02ea92d17413d803b704de73e1f1f8255da9ce9dd99d"
+checksum = "8b5c361a7b901b99ba89b7c6a4a0a1688ddf53d4980fa28ada41bd46299cec10"
 dependencies = [
  "anyhow",
  "chrono",
