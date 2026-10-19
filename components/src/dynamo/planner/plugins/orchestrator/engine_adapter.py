@@ -555,6 +555,9 @@ class OrchestratorEngineAdapter:
                 plugin.registered_at = self._last_tick_monotonic
         return self._compute_next_scheduled_tick()
 
+    def reconfiguration_tick(self, start_s: float) -> ScheduledTick:
+        return self.initial_tick(start_s, force_due=True)
+
     def apply_runtime_configuration(
         self,
         candidate: PlannerConfig,

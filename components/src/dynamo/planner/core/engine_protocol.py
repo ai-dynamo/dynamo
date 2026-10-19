@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 class EngineProtocol(Protocol):
     """Tick-engine abstraction consumed by ``NativePlannerBase``."""
 
-    def initial_tick(self, start_s: float, *, force_due: bool = False) -> ScheduledTick:
+    def initial_tick(self, start_s: float) -> ScheduledTick:
         """Build the first ``ScheduledTick`` for the main loop to wait on."""
 
     async def tick(
@@ -42,6 +42,14 @@ class EngineProtocol(Protocol):
     async def shutdown(self) -> None:
         """Release any engine-owned resources. Idempotent."""
 
+
+@runtime_checkable
+class ReconfigurableEngineProtocol(EngineProtocol, Protocol):
+    """Optional configuration activation capability for production engines."""
+
+    def reconfiguration_tick(self, start_s: float) -> ScheduledTick:
+        """Schedule fresh observations and decisions after activation."""
+
     def apply_runtime_configuration(
         self,
         candidate: PlannerConfig,
@@ -51,4 +59,4 @@ class EngineProtocol(Protocol):
         """Activate prepared predictor state and invalidate cached decisions."""
 
 
-__all__ = ["EngineProtocol"]
+__all__ = ["EngineProtocol", "ReconfigurableEngineProtocol"]

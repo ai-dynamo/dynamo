@@ -196,6 +196,8 @@ def _extract_metrics(
     paths: Sequence[Path],
     trace_format: TraceFormat,
     throughput_adjustment_interval_seconds: int,
+    *,
+    max_intervals: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     if throughput_adjustment_interval_seconds <= 0:
         raise ValueError("throughput_adjustment_interval_seconds must be positive")
@@ -231,6 +233,11 @@ def _extract_metrics(
         return metrics
 
     sorted_starts = sorted(interval_groups)
+    interval_count = (
+        sorted_starts[-1] - sorted_starts[0]
+    ) // throughput_adjustment_interval_seconds + 1
+    if max_intervals is not None and interval_count > max_intervals:
+        raise ValueError(f"warmup trace exceeds {max_intervals} aggregation intervals")
     for interval_start in range(
         sorted_starts[0],
         sorted_starts[-1] + 1,
@@ -252,7 +259,10 @@ def _extract_metrics(
 
 
 def extract_metrics_from_trace(
-    dataset: str, throughput_adjustment_interval_seconds: int
+    dataset: str,
+    throughput_adjustment_interval_seconds: int,
+    *,
+    max_intervals: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Extract warmup metrics from auto-detected Mooncake or Dynamo v1 traces.
 
@@ -263,7 +273,12 @@ def extract_metrics_from_trace(
     trace_format = detect_trace_format(dataset)
     if trace_format is None:
         return []
-    return _extract_metrics(paths, trace_format, throughput_adjustment_interval_seconds)
+    return _extract_metrics(
+        paths,
+        trace_format,
+        throughput_adjustment_interval_seconds,
+        max_intervals=max_intervals,
+    )
 
 
 def extract_metrics_from_trace_paths(
@@ -286,7 +301,10 @@ def extract_metrics_from_trace_paths(
 
 
 def extract_traffic_observations_from_trace(
-    dataset: str, throughput_adjustment_interval_seconds: int
+    dataset: str,
+    throughput_adjustment_interval_seconds: int,
+    *,
+    max_intervals: Optional[int] = None,
 ) -> List[TrafficObservation]:
     return [
         TrafficObservation(
@@ -296,7 +314,9 @@ def extract_traffic_observations_from_trace(
             osl=float(metric["avg_osl"]),
         )
         for metric in extract_metrics_from_trace(
-            dataset, throughput_adjustment_interval_seconds
+            dataset,
+            throughput_adjustment_interval_seconds,
+            max_intervals=max_intervals,
         )
     ]
 

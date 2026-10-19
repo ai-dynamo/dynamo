@@ -30,7 +30,10 @@ from dynamo.planner.control_api import (
 )
 from dynamo.planner.core import util
 from dynamo.planner.core.budget import minimum_power_footprint_fits
-from dynamo.planner.core.engine_protocol import EngineProtocol
+from dynamo.planner.core.engine_protocol import (
+    EngineProtocol,
+    ReconfigurableEngineProtocol,
+)
 from dynamo.planner.core.types import (
     EngineCapabilities,
     FpmObservations,
@@ -181,6 +184,7 @@ class NativePlannerBase:
             if self.config.enable_runtime_reconfiguration:
                 if self.runtime is None:
                     raise ValueError("system-port reconfiguration requires a runtime")
+                self._reconfigurable_engine()
                 self.reconfiguration.register(self.runtime)
 
             if self.config.advisory:
@@ -392,6 +396,13 @@ class NativePlannerBase:
         )
         if errors:
             raise ValueError("; ".join(errors))
+        self._reconfigurable_engine()
+
+    def _reconfigurable_engine(self) -> ReconfigurableEngineProtocol:
+        engine = self._ensure_engine()
+        if not isinstance(engine, ReconfigurableEngineProtocol):
+            raise ValueError("this engine does not support runtime reconfiguration")
+        return engine
 
     def apply_runtime_candidate(
         self,
@@ -399,7 +410,7 @@ class NativePlannerBase:
         fields: Iterable[str],
         predictor: BuiltinLoadPredict | None,
     ) -> None:
-        engine = self._ensure_engine()
+        engine = self._reconfigurable_engine()
         engine.apply_runtime_configuration(candidate, fields, predictor)
         self._config_generation += 1
         self.prometheus_metrics.sla_target_ttft_ms.set(self.config.ttft_ms)
@@ -1075,7 +1086,10 @@ class NativePlannerBase:
             while True:
                 now = time.time()
                 if scheduled_generation != self._config_generation:
-                    next_tick = engine.initial_tick(now, force_due=True)
+                    if isinstance(engine, ReconfigurableEngineProtocol):
+                        next_tick = engine.reconfiguration_tick(now)
+                    else:
+                        next_tick = engine.initial_tick(now)
                     scheduled_generation = self._config_generation
                 if now < next_tick.at_s:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))

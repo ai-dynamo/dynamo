@@ -6,12 +6,19 @@
 from __future__ import annotations
 
 import asyncio
+import glob
+import gzip
+import io
 import json
 import logging
 import math
+import os
+import stat
 import uuid
 import weakref
 from collections import OrderedDict
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -23,7 +30,7 @@ from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
 
 if TYPE_CHECKING:
     from dynamo.planner.core.base import NativePlannerBase
-    from dynamo.planner.core.types import WorkerCapabilities
+    from dynamo.planner.core.types import TrafficObservation, WorkerCapabilities
     from dynamo.runtime import DistributedRuntime
 
 logger = logging.getLogger(__name__)
@@ -56,6 +63,8 @@ RUNTIME_FIELDS = PREDICTOR_FIELDS | {
 }
 PREPARATION_TIMEOUT_SECONDS = 120.0
 OPERATION_HISTORY_SIZE = 32
+MAX_WARMUP_TRACE_BYTES = 16 * 1024 * 1024
+MAX_WARMUP_INTERVALS = 4096
 
 
 class ConfigurationConflict(ValueError):
@@ -131,13 +140,54 @@ def _prepare_predictor(
     capabilities: WorkerCapabilities,
     trace: str | None,
 ) -> BuiltinLoadPredict:
-    predictor = BuiltinLoadPredict(config, capabilities)
+    observations = None
     if trace is not None:
-        observations = extract_traffic_observations_from_trace(
+        observations = _load_runtime_warmup(
             trace, config.throughput_adjustment_interval_seconds
         )
+    predictor = BuiltinLoadPredict(config, capabilities)
+    if observations is not None:
         predictor.prepare_reconfiguration(observations)
     return predictor
+
+
+def _load_runtime_warmup(trace: str, interval: int) -> list[TrafficObservation]:
+    if glob.has_magic(trace):
+        raise ValueError(
+            "runtime warmup requires a single regular file; globs are not supported"
+        )
+    # Nonblocking open rejects FIFOs without waiting for a writer. Check the
+    # opened descriptor rather than a path that may be replaced before reading.
+    descriptor = os.open(trace, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("runtime warmup requires a single regular file")
+        if metadata.st_size > MAX_WARMUP_TRACE_BYTES:
+            raise ValueError(f"warmup trace exceeds {MAX_WARMUP_TRACE_BYTES} bytes")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            payload = source.read(MAX_WARMUP_TRACE_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if len(payload) > MAX_WARMUP_TRACE_BYTES:
+        raise ValueError(f"warmup trace exceeds {MAX_WARMUP_TRACE_BYTES} bytes")
+    if trace.endswith(".gz"):
+        with gzip.GzipFile(fileobj=io.BytesIO(payload)) as compressed:
+            payload = compressed.read(MAX_WARMUP_TRACE_BYTES + 1)
+        if len(payload) > MAX_WARMUP_TRACE_BYTES:
+            raise ValueError(
+                f"decompressed warmup trace exceeds {MAX_WARMUP_TRACE_BYTES} bytes"
+            )
+    # Freeze bounded input for the loader's format/origin/aggregation passes;
+    # later appends or path replacement cannot bypass the read limit.
+    with TemporaryDirectory(prefix="dynamo-planner-warmup-") as directory:
+        snapshot = Path(directory) / "trace.jsonl"
+        snapshot.write_bytes(payload)
+        return extract_traffic_observations_from_trace(
+            str(snapshot),
+            interval,
+            max_intervals=MAX_WARMUP_INTERVALS,
+        )
 
 
 class PlannerReconfiguration:

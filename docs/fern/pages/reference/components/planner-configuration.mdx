@@ -434,10 +434,14 @@ Use the instance ID and revision returned by GET when submitting an update:
 ```
 
 `config` is a nonempty partial update. A predictor change requires either `warmup_trace`
-or explicit `cold_start: true`. The trace must be accessible inside the Planner process;
-it uses the same Dynamo/Mooncake file, directory, or glob formats as
-`load_predictor_warmup_trace`. Observations are aggregated at the unchanged throughput
-adjustment interval. Warmup must provide enough effective samples for request count, ISL,
+or explicit `cold_start: true`. The trace must be a single regular Dynamo/Mooncake JSONL
+or JSONL.GZ file accessible inside the Planner process. Runtime warmup accepts at most
+16 MiB of stored data and 16 MiB after decompression, and at most 4,096 aggregation
+intervals (including idle gaps). Directories and globs remain supported by the startup
+`load_predictor_warmup_trace` option but are rejected by runtime reconfiguration.
+The bounded input is snapshotted before parsing and predictor construction, so a growing
+or replaced source file cannot bypass the read limit. Observations are aggregated at the
+unchanged throughput adjustment interval. Warmup must provide enough effective samples for request count, ISL,
 and OSL and complete a successful forecast. ARIMA fitting failures fail preparation
 instead of being accepted as a last-value fallback. SLA/budget-only updates do not
 require warmup. Supplying a trace explicitly also allows rewarming an unchanged predictor.
