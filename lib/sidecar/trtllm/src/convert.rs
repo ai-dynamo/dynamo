@@ -349,7 +349,12 @@ fn media(
                 .get_mut(kind.key)
                 .and_then(|items| items.get_mut(index))
                 .and_then(Option::take)
-                .expect("media order was validated");
+                .ok_or_else(|| {
+                    client::protocol_error(format!(
+                        "validated media order lost `{}` item {index}",
+                        kind.key
+                    ))
+                })?;
             let source = match item {
                 MultimodalData::Url(url) => media_source(url.to_string(), kind.key, index)?,
                 MultimodalData::RawUrl(url) => media_source(url, kind.key, index)?,
