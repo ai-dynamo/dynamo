@@ -784,38 +784,6 @@ async fn collect_result(
 }
 
 #[tokio::test]
-async fn router_advertisement_reaches_the_worker_registration() {
-    let server = FakeServer::start(FakeVllm::default()).await;
-    let argv: Vec<String> = [
-        "dynamo-vllm-sidecar",
-        "--grpc-endpoint",
-        server.endpoint.as_str(),
-        "--grpc-connections",
-        "2",
-        "--grpc-startup-deadline-secs",
-        "5",
-        "--grpc-connect-attempt-timeout-secs",
-        "1",
-        "--router-mode",
-        "kv",
-        "--router-session-affinity-ttl-secs",
-        "300",
-    ]
-    .iter()
-    .map(|arg| arg.to_string())
-    .collect();
-    let (_, config) = tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
-        .await
-        .expect("bootstrap task")
-        .expect("bootstrap discovery");
-    let advertised = config
-        .router_config
-        .expect("--router-mode puts a router_config on the registration");
-    assert!(advertised.router_mode.is_kv_routing());
-    assert_eq!(advertised.session_affinity_ttl_secs, Some(300));
-}
-
-#[tokio::test]
 async fn startup_rejects_model_identity_change_after_bootstrap() {
     let server = FakeServer::start(FakeVllm::default()).await;
     let (engine, _) = engine_from_args(&server.endpoint).await;

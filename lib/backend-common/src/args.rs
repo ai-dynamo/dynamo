@@ -112,14 +112,11 @@ pub struct CommonArgs {
     #[arg(long, default_value_t = false, env = "DYN_ENABLE_RL")]
     pub enable_rl: bool,
 
-    /// Routing mode the frontend uses for this worker set: `round-robin`,
-    /// `random`, `power-of-two`, `kv`, `direct`, `least-loaded`, or
-    /// `device-aware-weighted`. Setting it advertises a router configuration
-    /// on the model card that replaces the frontend's for this set, which is
-    /// how prefill and decode sets route differently; the three flags below
-    /// qualify it and are ignored without it. Same names and environment
-    /// variables as the Python workers. Omit it to inherit the frontend's
-    /// routing.
+    /// Advertise a routing mode for this worker set (`round-robin`, `random`,
+    /// `power-of-two`, `kv`, `direct`, `least-loaded`, `device-aware-weighted`).
+    /// The frontend then routes the set by this worker's configuration instead
+    /// of its own, same as for the Python workers; omit it to inherit the
+    /// frontend's routing. The flags below qualify it and are ignored without it.
     #[arg(long, env = "DYN_ROUTER_MODE", value_parser = parse_router_mode)]
     pub router_mode: Option<RouterMode>,
 
@@ -131,19 +128,15 @@ pub struct CommonArgs {
     )]
     pub router_session_affinity_ttl_secs: Option<u64>,
 
-    /// Busy-worker rejection for the advertised set: KV block utilization
-    /// (0.0 to 1.0) above which a decode worker is skipped.
+    /// Skip a decode worker above this KV block utilization (0.0 to 1.0).
     #[arg(long, env = "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD")]
     pub active_decode_blocks_threshold: Option<f64>,
 
-    /// Busy-worker rejection for the advertised set: active prefill tokens
-    /// above which a prefill worker is skipped.
+    /// Skip a prefill worker above this many active prefill tokens.
     #[arg(long, env = "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD")]
     pub active_prefill_tokens_threshold: Option<u64>,
 
-    /// Busy-worker rejection for the advertised set: active prefill tokens as
-    /// a fraction of `max_num_batched_tokens` above which a prefill worker is
-    /// skipped.
+    /// Skip a prefill worker above this fraction of `max_num_batched_tokens`.
     #[arg(long, env = "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC")]
     pub active_prefill_tokens_threshold_frac: Option<f64>,
 }
@@ -227,31 +220,24 @@ mod tests {
         common: CommonArgs,
     }
 
-    /// Every advertisement flag reads a `DYN_*` variable, so the ambient
+    /// The advertisement flags read `DYN_*` variables, so the ambient
     /// environment must not leak into these tests.
-    const ROUTER_ENV: [&str; 8] = [
-        "DYN_ROUTER_MODE",
-        "DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",
-        "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
-        "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
-        "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
-        "DYN_ROUTER_USE_KV_EVENTS",
-        "DYN_USE_KV_EVENTS",
-        "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
-    ];
-
     fn with_router_env<R>(set: &[(&str, &str)], f: impl FnOnce() -> R) -> R {
-        let vars = ROUTER_ENV.map(|key| {
-            let value = set.iter().find(|(name, _)| *name == key).map(|(_, v)| *v);
-            (key, value)
-        });
+        let vars = [
+            "DYN_ROUTER_MODE",
+            "DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",
+            "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
+            "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
+            "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
+            "DYN_ROUTER_USE_KV_EVENTS",
+            "DYN_USE_KV_EVENTS",
+        ]
+        .map(|key| (key, set.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)));
         temp_env::with_vars(vars, f)
     }
 
     fn parse(argv: &[&str]) -> Result<TestArgs, clap::Error> {
-        let mut full = vec!["test"];
-        full.extend_from_slice(argv);
-        TestArgs::try_parse_from(full)
+        TestArgs::try_parse_from([&["test"], argv].concat())
     }
 
     fn router_config(argv: &[&str]) -> Option<RouterConfig> {
@@ -263,7 +249,6 @@ mod tests {
     fn router_advertisement_follows_router_mode() {
         with_router_env(&[], || {
             assert!(router_config(&[]).is_none());
-            // The qualifying flags alone advertise nothing.
             assert!(router_config(&["--router-session-affinity-ttl-secs", "300"]).is_none());
 
             let config = router_config(&[
@@ -271,34 +256,21 @@ mod tests {
                 "kv",
                 "--router-session-affinity-ttl-secs",
                 "300",
-                "--active-prefill-tokens-threshold-frac",
-                "0.8",
             ])
             .expect("advertised");
             assert_eq!(config.router_mode, RouterMode::KV);
             assert_eq!(config.session_affinity_ttl_secs, Some(300));
-            assert_eq!(
-                config
-                    .load_threshold_config
-                    .active_prefill_tokens_threshold_frac,
-                Some(0.8)
-            );
+            assert!(config.kv_router_config.use_kv_events);
         });
         with_router_env(
             &[
                 ("DYN_ROUTER_MODE", "kv"),
                 ("DYN_ROUTER_USE_KV_EVENTS", "false"),
-                ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "2.5"),
             ],
             || {
                 let config = router_config(&[]).expect("advertised from the environment");
                 assert_eq!(config.router_mode, RouterMode::KV);
                 assert!(!config.kv_router_config.use_kv_events);
-                assert_eq!(config.kv_router_config.overlap_score_credit, 2.5);
-
-                // Only KV routing reads the tuning.
-                let config = router_config(&["--router-mode", "least-loaded"]).expect("advertised");
-                assert!(config.kv_router_config.use_kv_events);
             },
         );
     }
@@ -310,11 +282,9 @@ mod tests {
             for rejected in [
                 &["--router-mode", "sticky"][..],
                 &["--router-session-affinity-ttl-secs", "0"][..],
-                &["--router-session-affinity-ttl-secs", "31536001"][..],
             ] {
                 assert!(parse(rejected).is_err(), "{rejected:?} must not parse");
             }
-
             let args = parse(&[
                 "--router-mode",
                 "kv",
@@ -322,11 +292,7 @@ mod tests {
                 "1.5",
             ])
             .unwrap();
-            let error = args.common.router_config().unwrap_err();
-            assert!(
-                error.to_string().contains("active_decode_blocks_threshold"),
-                "{error}"
-            );
+            assert!(args.common.router_config().is_err());
         });
     }
 

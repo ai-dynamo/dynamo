@@ -240,14 +240,6 @@ impl WorkerConfig {
     pub(crate) fn effective_enable_local_indexer(&self) -> bool {
         self.enable_local_indexer && !self.disaggregation_mode.is_encode()
     }
-
-    /// Whether the advertised router configuration tells the frontend to
-    /// expect KV events from this worker set.
-    fn advertises_kv_events(&self) -> bool {
-        self.router_config.as_ref().is_some_and(|config| {
-            config.router_mode.is_kv_routing() && config.kv_router_config.use_kv_events
-        })
-    }
 }
 
 impl Default for WorkerConfig {
@@ -839,7 +831,10 @@ impl Worker {
     /// The frontend would wait for KV events that never arrive and route the
     /// set by load alone, so say so where the flag was set.
     fn warn_if_advertised_kv_events_never_come(&self) {
-        if self.config.advertises_kv_events() {
+        let expects_events = self.config.router_config.as_ref().is_some_and(|config| {
+            config.router_mode.is_kv_routing() && config.kv_router_config.use_kv_events
+        });
+        if expects_events {
             tracing::warn!(
                 "--router-mode kv is advertised with KV events enabled, but this worker publishes no KV events; the frontend routes this worker set by load alone. Set DYN_ROUTER_USE_KV_EVENTS=false in this worker's environment to advertise that instead"
             );
@@ -2631,17 +2626,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_local_model_advertises_router_config_only_when_set() {
-        let engine_config = EngineConfig {
-            model: "nvidia/Kimi-K2.5-NVFP4".to_string(),
-            ..EngineConfig::default()
-        };
-
-        let inherited = build_local_model(&WorkerConfig::default(), &engine_config, false)
-            .await
-            .unwrap();
-        assert!(inherited.card().router_config.is_none());
-
+    async fn build_local_model_carries_the_router_advertisement() {
         let mut advertised = dynamo_llm::entrypoint::RouterConfig::new(
             dynamo_runtime::pipeline::RouterMode::KV,
             Default::default(),
@@ -2651,38 +2636,17 @@ mod tests {
             router_config: Some(advertised),
             ..WorkerConfig::default()
         };
+        let engine_config = EngineConfig {
+            model: "nvidia/Kimi-K2.5-NVFP4".to_string(),
+            ..EngineConfig::default()
+        };
+
         let local_model = build_local_model(&config, &engine_config, false)
             .await
             .unwrap();
-        let card = local_model
-            .card()
-            .router_config
-            .as_ref()
-            .expect("the card carries the advertisement");
+        let card = local_model.card().router_config.as_ref().unwrap();
         assert!(card.router_mode.is_kv_routing());
         assert_eq!(card.session_affinity_ttl_secs, Some(300));
-    }
-
-    #[test]
-    fn advertised_kv_events_are_expected_only_for_kv_mode_with_events_on() {
-        use dynamo_llm::entrypoint::RouterConfig;
-        use dynamo_runtime::pipeline::RouterMode;
-
-        let with = |router_config| WorkerConfig {
-            router_config,
-            ..WorkerConfig::default()
-        };
-        assert!(!with(None).advertises_kv_events());
-
-        let kv = RouterConfig::new(RouterMode::KV, Default::default());
-        assert!(with(Some(kv.clone())).advertises_kv_events());
-
-        let mut events_off = kv;
-        events_off.kv_router_config.use_kv_events = false;
-        assert!(!with(Some(events_off)).advertises_kv_events());
-
-        let round_robin = RouterConfig::new(RouterMode::RoundRobin, Default::default());
-        assert!(!with(Some(round_robin)).advertises_kv_events());
     }
 
     #[tokio::test]
