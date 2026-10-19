@@ -2262,8 +2262,7 @@ impl OpenAIPreprocessor {
         matches!(family, Some("beam"))
     }
 
-    /// Validate the client's effective reasoning toggle against the model's policy
-    /// before deployment defaults, rendering, or backend dispatch.
+    /// Validate the client's effective reasoning toggle against the model's policy.
     fn validate_reasoning_request(&self, request: &NvCreateChatCompletionRequest) -> Result<()> {
         let family = crate::protocols::openai::chat_completions::unified_parser::selected_family(
             self.tool_call_parser.as_deref(),
@@ -6916,8 +6915,6 @@ impl OpenAIPreprocessor {
         default_thinking_mode: Option<&str>,
         unified_family: Option<&str>,
     ) -> bool {
-        // Reconstructed responses must retain their reasoning channel even if
-        // an older request bypassed admission validation.
         if Self::reasoning_is_mandatory(unified_family) {
             return false;
         }
@@ -10513,95 +10510,73 @@ mod tests {
         use crate::protocols::openai::GuidedToolConstraint;
         use crate::protocols::openai::chat_completions::unified_parser;
 
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test", "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": {"enable_thinking": false}
+            }))
+            .unwrap();
+        request.normalize_reasoning_template_args().unwrap();
+        let disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
+            &request,
+            Some("beam"),
+            Some("beam"),
+            None,
+            Some("beam"),
+        );
+        assert!(!disabled);
+        let policy = unified_parser::UnifiedRequestPolicy {
+            reasoning_disabled: disabled,
+            ..Default::default()
+        };
         let analysis = "<|channel|>analysis<|message|>Compute.<|end|><|start|>assistant";
         let answer = "<|channel|>final<|message|>3.8 is greater.<|return|>";
-        // Admission rejects these toggles. A response-only frontend may still
-        // reconstruct an older worker's response and must keep its real channels.
-        for key in ["thinking", "enable_thinking"] {
-            let mut request: NvCreateChatCompletionRequest =
-                serde_json::from_value(serde_json::json!({
-                    "model": "test", "messages": [{"role": "user", "content": "hi"}],
-                    "chat_template_kwargs": {key: false}
-                }))
-                .unwrap();
-            request.normalize_reasoning_template_args().unwrap();
-            let disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
-                &request,
-                Some("beam"),
-                Some("beam"),
-                None,
-                Some("beam"),
-            );
-            assert!(!disabled);
-            let policy = unified_parser::UnifiedRequestPolicy {
-                reasoning_disabled: disabled,
-                structured_response: false,
-            };
-            let batch = unified_parser::parse_complete_with_policy(
-                "beam",
-                &format!("{analysis}{answer}"),
-                &GuidedToolConstraint::None,
-                &[],
-                policy,
-            )
-            .unwrap();
-            assert_eq!(batch.reasoning, "Compute.");
-            assert_eq!(batch.text, "3.8 is greater.");
+        let batch = unified_parser::parse_complete_with_policy(
+            "beam",
+            &format!("{analysis}{answer}"),
+            &GuidedToolConstraint::None,
+            &[],
+            policy,
+        )
+        .unwrap();
+        assert_eq!(
+            (batch.reasoning.as_str(), batch.text.as_str()),
+            ("Compute.", "3.8 is greater.")
+        );
 
-            let raw = unified_parser::apply_stream_with_policy(
-                stream::iter([
-                    reasoning_usage_chunk(None, Some(analysis), 3),
-                    reasoning_usage_chunk(None, Some(answer), 2),
-                    reasoning_usage_trailer(5, Some(0)),
-                ]),
-                None,
-                GuidedToolConstraint::None,
-                unified_parser::stream_prefill("beam", false),
-                "beam",
-                true,
-                policy,
-            );
-            let output =
-                OpenAIPreprocessor::apply_unified_response_policies(raw, false, false, disabled)
-                    .collect::<Vec<_>>()
-                    .await;
-            let choices: Vec<_> = output
+        let raw = unified_parser::apply_stream_with_policy(
+            stream::iter([
+                reasoning_usage_chunk(None, Some(analysis), 3),
+                reasoning_usage_chunk(None, Some(answer), 2),
+                reasoning_usage_trailer(5, Some(0)),
+            ]),
+            None,
+            GuidedToolConstraint::None,
+            unified_parser::stream_prefill("beam", false),
+            "beam",
+            true,
+            policy,
+        );
+        let output =
+            OpenAIPreprocessor::apply_unified_response_policies(raw, false, false, disabled)
+                .map(|chunk| serde_json::to_value(chunk.data.unwrap()).unwrap())
+                .collect::<Vec<_>>()
+                .await;
+        for (field, expected) in [
+            ("reasoning_content", "Compute."),
+            ("content", "3.8 is greater."),
+        ] {
+            let text: String = output
                 .iter()
-                .flat_map(|r| r.data.iter())
-                .flat_map(|r| &r.inner.choices)
+                .flat_map(|chunk| chunk["choices"].as_array().unwrap())
+                .filter_map(|choice| choice["delta"][field].as_str())
                 .collect();
-            let reasoning: String = choices
-                .iter()
-                .filter_map(|c| c.delta.reasoning_content.as_deref())
-                .collect();
-            let content: String = choices
-                .iter()
-                .filter_map(|c| match &c.delta.content {
-                    Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(reasoning, "Compute.");
-            assert_eq!(content, "3.8 is greater.");
-            let usage = output
-                .last()
-                .unwrap()
-                .data
-                .as_ref()
-                .unwrap()
-                .inner
-                .usage
-                .as_ref()
-                .unwrap();
-            assert_eq!(
-                usage
-                    .completion_tokens_details
-                    .as_ref()
-                    .unwrap()
-                    .reasoning_tokens,
-                Some(3)
-            );
+            assert_eq!(text, expected);
         }
+        assert_eq!(
+            output.last().unwrap()["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            3
+        );
     }
 
     #[tokio::test]
@@ -13952,19 +13927,14 @@ mod tests {
                 let mut request: NvCreateChatCompletionRequest =
                     serde_json::from_value(body).unwrap();
                 request.normalize_reasoning_template_args().unwrap();
-                let next: Arc<
-                    dyn AsyncEngine<
-                            SingleIn<PreprocessedRequest>,
-                            ManyOut<Annotated<BackendOutput>>,
-                            Error,
-                        >,
-                > = Arc::new(UnreachableBackend);
-                let result =
-                    Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next)
-                        .await;
-                let Err(error) = result else {
-                    panic!("Beam reasoning-off request must fail before dispatch: {extra}");
-                };
+                let error = Operator::generate(
+                    preprocessor.as_ref(),
+                    PipelineContext::new(request),
+                    Arc::new(UnreachableBackend),
+                )
+                .await
+                .err()
+                .expect("reasoning-off request must fail before dispatch");
                 let error = error.downcast_ref::<DynamoError>().unwrap();
                 assert!(matches!(
                     crate::http::service::error::http_action_for_error(error),
@@ -16439,21 +16409,27 @@ mod beam_route_tests {
         let mut beam = synthetic_preprocessor(true, HISTORY_TEMPLATE);
         beam.tool_call_parser = Some("beam".into());
         beam.runtime_config.reasoning_parser = Some("beam".into());
-        for args in [
+        for extra in [
             serde_json::json!({}),
-            serde_json::json!({"thinking": true}),
-            serde_json::json!({"enable_thinking": true}),
-            serde_json::json!({"thinking": true, "enable_thinking": false}),
-            serde_json::json!({"preserve_thinking": false}),
-            serde_json::json!({"allow_missing_thinking": false}),
+            serde_json::json!({"reasoning_effort": null}),
+            serde_json::json!({"chat_template_kwargs": {"reasoning_effort": null}}),
+            serde_json::json!({"reasoning_effort": "low"}),
+            serde_json::json!({"chat_template_kwargs": {"thinking": true}}),
+            serde_json::json!({"chat_template_kwargs": {"enable_thinking": true}}),
+            serde_json::json!({"chat_template_kwargs": {"thinking": true, "enable_thinking": false}}),
+            serde_json::json!({"chat_template_kwargs": {"preserve_thinking": false}}),
+            serde_json::json!({"chat_template_kwargs": {"allow_missing_thinking": false}}),
         ] {
-            let mut request = history_request(Some(false));
-            request.chat_template_args = Some(serde_json::from_value(args.clone()).unwrap());
+            let mut body = serde_json::to_value(history_request(Some(false))).unwrap();
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(body).unwrap();
             request.normalize_reasoning_template_args().unwrap();
             beam.apply_preserve_thinking(&mut request).unwrap();
             beam.validate_reasoning_request(&request).unwrap();
             let rendered = beam.apply_template(&request).unwrap().unwrap();
-            assert!(rendered.as_str().contains("SENTINEL_THOUGHT"), "{args}");
+            assert!(rendered.as_str().contains("SENTINEL_THOUGHT"), "{extra}");
         }
 
         let other = synthetic_preprocessor(false, HISTORY_TEMPLATE);
