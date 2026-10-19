@@ -12,6 +12,8 @@ use crate::protocols::common::FinishReason;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 
 const PAYLOAD_KEY: &str = "sglang_tito";
+const MAX_CANDIDATE_TOKEN_IDS: usize = 255;
+const MAX_OUTPUT_CANDIDATE_ENTRIES: u64 = 65_536;
 
 /// The part of the opaque native payload the mocker has to reproduce. Unknown
 /// fields are ignored, so a newer SGLang control set still parses.
@@ -40,6 +42,24 @@ pub(super) fn response_metadata(
     };
     let controls = NativeControls::deserialize(payload)
         .map_err(|error| invalid_argument(format!("invalid extra_args.{PAYLOAD_KEY}: {error}")))?;
+    let candidate_token_ids = controls.token_ids_logprob.filter(|ids| !ids.is_empty());
+    if let Some(ids) = candidate_token_ids.as_ref() {
+        if ids.len() > MAX_CANDIDATE_TOKEN_IDS {
+            return Err(invalid_argument(format!(
+                "token_ids_logprob must contain at most {MAX_CANDIDATE_TOKEN_IDS} token IDs"
+            )));
+        }
+        let max_tokens = request.stop_conditions.max_tokens.ok_or_else(|| {
+            invalid_argument("max_tokens is required when requesting token_ids_logprob")
+        })?;
+        // Reserve one scored position for an empty terminal frame, including zero-output scoring.
+        let scored_positions = u64::from(max_tokens) + 1;
+        if ids.len() as u64 * scored_positions > MAX_OUTPUT_CANDIDATE_ENTRIES {
+            return Err(invalid_argument(format!(
+                "token_ids_logprob and max_tokens exceed the {MAX_OUTPUT_CANDIDATE_ENTRIES} output candidate-entry budget"
+            )));
+        }
+    }
     let logprobs = LogprobOptions::new(
         controls.return_logprob.unwrap_or(false),
         controls.top_logprobs_num.unwrap_or(0),
@@ -50,7 +70,7 @@ pub(super) fn response_metadata(
         .rid
         .unwrap_or_else(|| fallback_request_id.to_string());
     let metadata = ResponseMetadata::new(request_id, &request.token_ids, logprobs);
-    Ok(Some(match controls.token_ids_logprob {
+    Ok(Some(match candidate_token_ids {
         Some(token_ids) => metadata.with_candidate_token_ids(token_ids),
         None => metadata,
     }))
@@ -222,5 +242,40 @@ mod tests {
             response["meta_info"]["output_token_ids_logprobs"],
             json!([[[-10.8, 17, null], [-10.5, 4, null]]])
         );
+    }
+
+    #[test]
+    fn bounds_candidate_count_and_total_output_entries() {
+        let check = |count: usize, max_tokens| {
+            let mut request = request(Some(json!({"sglang_tito": {
+                "return_logprob": true,
+                "token_ids_logprob": (0..count as u32).collect::<Vec<_>>()
+            }})));
+            request.stop_conditions.max_tokens = max_tokens;
+            response_metadata(&request, "bounded")
+        };
+        assert!(check(255, Some(0)).is_ok());
+        assert!(check(256, Some(0)).is_err());
+        assert!(check(1, Some(65_535)).is_ok());
+        assert!(check(1, Some(65_536)).is_err());
+        assert!(check(255, Some(256)).is_ok());
+        assert!(check(255, Some(257)).is_err());
+        assert!(check(255, Some(u32::MAX)).is_err());
+        assert!(check(1, None).is_err());
+    }
+
+    #[test]
+    fn empty_candidate_ids_match_omission() {
+        let omitted = native_metadata(json!({"return_logprob": true}));
+        let empty = native_metadata(json!({
+            "return_logprob": true, "token_ids_logprob": []
+        }));
+        for tokens in [&[][..], &[42][..]] {
+            let finish = Some(json!({"type": "length"}));
+            assert_eq!(
+                empty.response(tokens, tokens.len(), finish.clone()),
+                omitted.response(tokens, tokens.len(), finish)
+            );
+        }
     }
 }
