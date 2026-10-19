@@ -510,6 +510,9 @@ class FindingReportTests(unittest.TestCase):
         ]
         self.assertEqual([entry[0] for entry in CATEGORY_GUIDE], order)
         report, sources = self.fixture({"properties": {"deleted": ["value"]}})
+        del sources["dynamo.requests.normalized.json"]["components"]["schemas"][
+            "Request"
+        ]["properties"]["value"]
         inventory = build_findings(report, sources)
         self.assertNotIn(
             "**Next check:**", render({**report, "finding_inventory": inventory})
@@ -766,28 +769,76 @@ class FindingReportTests(unittest.TestCase):
         self.assertEqual(explicit["declarations"]["dynamo"]["summary"], "default=null")
         self.assertEqual(explicit["id"], by_change["default"]["id"])
 
-    def test_union_and_allof_movement_stay_one_ambiguous_group(self):
-        """A root field removed beside added allOf is not reported as a removed wire field."""
-        delta = {
-            "allOf": {"added": [{"properties": {"value": {"type": "string"}}}]},
-            "properties": {"deleted": ["value"]},
-            "required": {"deleted": ["value"]},
-        }
-        report, sources = self.fixture(delta)
-        result = build_findings(report, sources)
-        self.assertEqual(len(result["findings"]), 1)
-        row = result["findings"][0]
-        self.assertEqual(row["category"], "representation_ambiguity")
-        self.assertEqual(row["delta"], delta)
-        self.assertIn("not established", row["interpretation"])
-        for keyword in ("anyOf", "oneOf"):
+    def test_composition_movement_is_not_a_missing_field(self):
+        """Resolve declarations through each composition kind without inferring removal."""
+        for keyword in ("allOf", "anyOf", "oneOf"):
             report, sources = self.fixture(
-                {"properties": {"modified": {"value": {keyword: {"deleted": [0]}}}}}
+                {
+                    keyword: {"added": [{"index": 0}]},
+                    "properties": {"deleted": ["value"]},
+                    "required": {"deleted": ["value"]},
+                }
             )
-            self.assertEqual(
-                build_findings(report, sources)["findings"][0]["category"],
-                "representation_ambiguity",
+            schemas = sources["dynamo.requests.normalized.json"]["components"][
+                "schemas"
+            ]
+            schemas["Moved"] = schemas["Request"]
+            schemas["Request"] = {keyword: [{"$ref": "#/components/schemas/Moved"}]}
+            result = build_findings(report, sources)
+            with self.subTest(keyword=keyword):
+                self.assertEqual(len(result["findings"]), 3)
+                self.assertTrue(
+                    all(
+                        row["category"] == "representation_ambiguity"
+                        for row in result["findings"]
+                    )
+                )
+                field = next(
+                    row for row in result["findings"] if row["field"] == "value"
+                )
+                self.assertEqual(
+                    field["declarations"]["dynamo"]["evidence"][0]["pointer"],
+                    "#/components/schemas/Moved/properties/value",
+                )
+                self.assertEqual(
+                    result["accounting"],
+                    {"raw_terminal_count": 3, "owned_terminal_count": 3},
+                )
+                del schemas["Moved"]["properties"]["value"]
+                missing = next(
+                    row
+                    for row in build_findings(report, sources)["findings"]
+                    if row["field"] == "value"
+                )
+                self.assertEqual(missing["category"], "target_only")
+
+    def test_request_composition_does_not_hide_supported_constraint_delta(self):
+        """A union fragment and a sibling scalar constraint retain distinct raw owners."""
+        for keyword in ("allOf", "anyOf", "oneOf"):
+            report, sources = self.fixture(
+                {
+                    keyword: {"added": [{"index": 0}]},
+                    "properties": {
+                        "modified": {"value": {"maxLength": {"from": 10, "to": 5}}}
+                    },
+                }
             )
+            for side, maximum in (("framework", 10), ("dynamo", 5)):
+                sources[f"{side}.requests.normalized.json"]["components"]["schemas"][
+                    "Request"
+                ]["properties"]["value"]["maxLength"] = maximum
+            result = build_findings(report, sources)
+            with self.subTest(keyword=keyword):
+                self.assertEqual(len(result["findings"]), 2)
+                field = next(
+                    row for row in result["findings"] if row["field"] == "value"
+                )
+                self.assertEqual(field["category"], "both_declared_mismatch")
+                self.assertEqual(field["change"], "maxLength")
+                self.assertEqual(
+                    result["accounting"],
+                    {"raw_terminal_count": 3, "owned_terminal_count": 3},
+                )
 
     def test_nested_fields_unknown_keys_and_empty_fragments_are_accounted(self):
         """Unknown sibling keys must have distinct stable IDs, including empty deltas."""

@@ -286,6 +286,8 @@ def build_findings(report: dict, projections: dict | None = None) -> dict:
     absent annotations do not make an otherwise declared field absent.
     Exact declared aliases classify spelling-only deltas as alias evidence. Value
     comparisons, parent constraints and ambiguous structures remain separate.
+    Request composition fragments do not suppress recognized sibling deltas.
+    An added/deleted field declared on both sides is representation ambiguity.
     Gap and alias status/media come only from the endpoint's POST operation
     containers; schema property names do not supply transport context.
     Raw deltas and their report pointers remain in each finding. Raise ValueError
@@ -386,6 +388,14 @@ def build_findings(report: dict, projections: dict | None = None) -> dict:
                 }[presence]
         if any(source[side]["limitations"] for side in source):
             category = "missing_coverage"
+        if (
+            kind == "request"
+            and change in {"added", "deleted"}
+            and category == "both_declared_mismatch"
+        ):
+            category = "representation_ambiguity"
+            interpretation = "Both sides declare this field. The comparator's added/deleted entry does not establish removal or a value-constraint mismatch."
+            action = "Compare the linked declarations and enclosing branches before assessing accepted values."
         matches = report.get("alias_matches", [])
         aliases = related_aliases(matches, endpoint, steps) if kind == "request" else []
         exact_aliases = (
@@ -526,12 +536,14 @@ def build_findings(report: dict, projections: dict | None = None) -> dict:
         )
         rows.append(row)
 
-    def schema_walk(delta, raw, root, emit_at, steps=()):
-        """Explain supported nested fields; keep union/allOf changes as indivisible ambiguous groups."""
+    def schema_walk(delta, raw, root, emit_at, steps=(), request=False):
+        """Explain request siblings independently; preserve response grouping and ambiguous branches."""
         if (
             not isinstance(delta, dict)
             or not delta
-            or any(key in delta for key in ("anyOf", "oneOf", "allOf"))
+            or (
+                not request and any(key in delta for key in ("anyOf", "oneOf", "allOf"))
+            )
         ):
             emit_at(root, steps, "structure", raw)
             return
@@ -548,6 +560,7 @@ def build_findings(report: dict, projections: dict | None = None) -> dict:
                                 root,
                                 emit_at,
                                 (*steps, "properties", name),
+                                request,
                             )
                     elif (
                         change in {"added", "deleted"}
@@ -571,10 +584,24 @@ def build_findings(report: dict, projections: dict | None = None) -> dict:
                 and isinstance(value, dict)
                 and not {"schemaAdded", "schemaDeleted"}.intersection(value)
             ):
-                schema_walk(value, location, root, emit_at, (*steps, key))
+                schema_walk(value, location, root, emit_at, (*steps, key), request)
+            elif key in {"allOf", "anyOf", "oneOf"}:
+                emit_at(root, steps, "unknown", location)
             else:
                 change = key if keywords.get(key, key) in scalar else "unknown"
-                emit_at(root, steps, change, location)
+                if request and any(
+                    branch in delta for branch in ("allOf", "anyOf", "oneOf")
+                ):
+                    emit_at(
+                        root,
+                        steps,
+                        change,
+                        location,
+                        category="representation_ambiguity",
+                        interpretation="This annotation or constraint changed beside composition branches. Its effect on the combined schema remains unresolved.",
+                    )
+                else:
+                    emit_at(root, steps, change, location)
 
     def content_walk(delta, raw, kind, endpoint, status, parent):
         """Walk oasdiff media maps while retaining unsupported fragments verbatim."""
@@ -596,7 +623,13 @@ def build_findings(report: dict, projections: dict | None = None) -> dict:
                         location = raw + pointer(change, media, key)[1:]
                         root = parent + pointer("content", media, key)[1:]
                         if key == "schema":
-                            schema_walk(value, location, root, emit_at)
+                            schema_walk(
+                                value,
+                                location,
+                                root,
+                                emit_at,
+                                request=kind == "request",
+                            )
                         else:
                             emit_at(root, (), "unknown", location)
             elif (

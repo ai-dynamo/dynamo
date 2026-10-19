@@ -172,11 +172,23 @@ pointers. Raw deltas and provenance remain supporting evidence in the same repor
 Agents and scripts do not need to parse Markdown.
 
 Finding IDs identify locations and change kinds, not unchanged content or confirmed defects.
-The accounting check assigns each raw delta terminal to one finding. Unresolved union or
-`allOf` changes remain whole findings. Suggested actions are investigation guidance, not
-approved fixes. See the guide's
+The accounting check assigns each raw delta terminal to one finding. Unresolved
+request composition fragments remain ambiguity findings; recognized sibling deltas
+are processed independently. Response grouping is unchanged. Suggested actions are
+investigation guidance, not approved fixes. See the guide's
 [review workflow](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#from-generated-findings-to-reviewed-actions)
 for deciding and validating changes.
+
+Unsupported constructs such as `prefixItems` remain explicit coverage gaps in the
+existing `report.json.finding_inventory` and `report.md`. Supported request-field
+deltas still produce findings. If an added/deleted property is declared on both
+sides, including through references or composition branches, its finding is
+ambiguous rather than a missing-field verdict. Moving a declaration into `allOf`
+does not establish removal or equivalent accepted values.
+
+This reporting change does not discover additional fields absent from comparator
+deltas or change the global flattening guard. Overall status remains
+`incomplete_coverage` while gaps remain; recognized results are still usable.
 
 ### Re-render Saved Evidence
 
