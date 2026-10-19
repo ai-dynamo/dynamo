@@ -54,6 +54,7 @@ tonic = { workspace = true }
 tonic-health = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
+rand = { workspace = true }
 uuid = { workspace = true }
 validator = { workspace = true }
 

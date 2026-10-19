@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dashmap::DashMap;
-use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
+use dynamo_kv_router::config::{
+    KvRouterConfig, RouterConfigOverride, try_kv_router_config_from_dynamo_env,
+};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
@@ -31,12 +33,17 @@ use dynamo_runtime::discovery::{
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
     ResponseUsage, resolve_cache_namespace,
+};
+use crate::worker_generations::{
+    GenerationSet, GenerationTracker, pick_weighted, run_generation_watcher,
 };
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
@@ -112,14 +119,43 @@ const DYNAMO_CONTAINER_PORT_NAME: &str = "http";
 /// This is the async-native equivalent of `RouterHandles` from the C bindings,
 /// without the `block_on` / unsafe FFI overhead.
 pub struct Router {
-    prefill_router: Arc<PrefillRouter>,
+    /// The live worker generations, maintained by the generation watcher
+    /// (see [`crate::worker_generations`]).
+    generations: watch::Receiver<GenerationSet<Generation>>,
+    /// The generation each picked request was routed through, by reservation
+    /// id, so its bookkeeping callbacks reach the same routers even after the
+    /// generation is retired.
+    request_generations: DashMap<String, Arc<Generation>>,
     prefill_bookings: DashMap<String, PrefillReservation>,
-    decode_router: ManagedKvRouter,
-    preprocessor: Arc<OpenAIPreprocessor>,
     runtime: Runtime,
     worker_index: Arc<RwLock<WorkerEndpointIndex>>,
     pod_store_ready: Arc<AtomicBool>,
     served_model: String,
+}
+
+/// The routers for one worker generation: the workers registered under one
+/// generation-suffixed Dynamo namespace (`<namespace>-<8 hex>`).
+///
+/// A DGD rolling update starts the new workers under a new namespace with
+/// their own event-plane channels, so routers bound to one generation never
+/// see the next one's workers. The EPP keeps one `Generation` per live
+/// namespace instead (see [`crate::worker_generations`]).
+struct Generation {
+    namespace: String,
+    model_name: String,
+    prefill_router: Arc<PrefillRouter>,
+    decode_router: ManagedKvRouter,
+    preprocessor: Arc<OpenAIPreprocessor>,
+    /// Stops the prefill discovery watcher and prefill router once the last
+    /// reference is gone, after in-flight requests on a retired generation
+    /// complete.
+    cancel: CancellationToken,
+}
+
+impl Drop for Generation {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 /// Remove and release a booking once. Both response lifecycle callbacks use
@@ -139,11 +175,17 @@ async fn release_prefill_booking(
         );
     }
 }
+
+/// How often startup logs that it is still waiting for a worker generation.
+const GENERATION_WAIT_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
 impl Router {
     /// Initialize the router from discovery.
     ///
-    /// This waits for at least one decode worker to appear, fetches the model
-    /// card, initializes the preprocessor, and creates both routers.
+    /// This starts the worker-generation watcher and waits for the first
+    /// generation to be ready (model card fetched, preprocessor and both
+    /// routers created, decode workers registered). Later generations,
+    /// created by rolling updates, are picked up and retired by the watcher.
     pub(crate) async fn from_discovery(
         namespace_filter: NamespaceFilter,
         namespace_prefix_mode: NamespacePrefixMode,
@@ -154,104 +196,92 @@ impl Router {
         let runtime = Runtime::from_settings()?;
         let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
 
-        // Wait for workers
-        wait_for_discovery_sync(&drt).await;
-
-        let bootstrap = init_preprocessor(&drt, &namespace_filter, namespace_prefix_mode).await?;
-        let block_size = bootstrap.card.kv_cache_block_size;
-        let model_name = bootstrap.card.display_name.clone();
-        let enable_eagle = bootstrap.card.runtime_config.enable_eagle;
-        let actual_namespace = &bootstrap.actual_namespace;
-
-        // TODO(epp-rolling-namespace): Rebind both routers when the active
-        // generation-suffixed worker namespace changes during a rolling update.
         let mut kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
         // TODO(epp-multi-replica): Provide authoritative admission across EPP
         // replicas; replica-sync alone does not close the selection-to-booking race.
         kv_router_config.skip_initial_worker_wait = true;
 
-        let component_handle = drt.namespace(actual_namespace)?.component(component)?;
-        let endpoint = component_handle.endpoint("generate");
-
-        let model_manager = Arc::new(ModelManager::new());
-
-        let decode_router = model_manager
-            .managed_kv_router_for_with_worker_role(
-                &endpoint,
-                block_size,
-                Some(kv_router_config.clone()),
-                None,
-                bootstrap.card.worker_type,
-                WORKER_TYPE_DECODE,
-                Some(model_name.clone()),
-                enable_eagle,
-            )
-            .await?;
-
-        // Wait for runtime config watch to populate
-        {
-            let mut config_watch = model_manager
-                .get_or_create_runtime_config_watcher(&endpoint)
-                .await?;
-            tracing::info!("Waiting for decode workers to register ModelRuntimeConfig...");
-            config_watch
-                .wait_for(|m| !m.is_empty())
-                .await
-                .map(|_| ())
-                .map_err(|_| {
-                    anyhow::anyhow!("Runtime config watch closed before any workers appeared")
-                })?;
-            tracing::info!(
-                worker_count = config_watch.borrow().len(),
-                "Runtime config watch populated"
-            );
-        }
-
-        let mut prefill_config = kv_router_config;
-        prefill_config.router_track_active_blocks = false;
-
-        let (prefill_tx, prefill_rx) = tokio::sync::oneshot::channel();
-        let prefill_router = PrefillRouter::new(
-            prefill_rx,
-            model_manager.clone(),
-            RouterMode::KV,
-            block_size,
-            Some(prefill_config),
-            None,
-            None,
-            dynamo_llm::session_affinity::SessionAffinityMode::Hard,
-            model_name.clone(),
-            actual_namespace.to_string(),
-            decode_router.load_context().load_thresholds(),
+        let (publish, mut generations) = watch::channel::<GenerationSet<Generation>>(Arc::from([]));
+        let subscribe = {
+            let discovery = drt.discovery();
+            move |cancel: CancellationToken| {
+                let discovery = discovery.clone();
+                async move {
+                    discovery
+                        .list_and_watch(DiscoveryQuery::AllModels, Some(cancel))
+                        .await
+                }
+            }
+        };
+        let build = {
+            let drt = drt.clone();
+            let component = component.to_string();
+            move |namespace: String, card: ModelDeploymentCard, cancel: CancellationToken| {
+                build_generation_until_ready(
+                    drt.clone(),
+                    namespace,
+                    component.clone(),
+                    card,
+                    kv_router_config.clone(),
+                    cancel,
+                )
+            }
+        };
+        tokio::spawn(run_generation_watcher(
+            subscribe,
+            GenerationTracker::new(namespace_filter.clone(), namespace_prefix_mode),
+            build,
+            publish,
             drt.child_token(),
-        );
+        ));
 
-        spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);
+        tracing::info!(
+            ?namespace_filter,
+            ?namespace_prefix_mode,
+            "Waiting for a worker generation (controlled by K8s StartupProbe)..."
+        );
+        let served_model = loop {
+            match tokio::time::timeout(
+                GENERATION_WAIT_LOG_INTERVAL,
+                generations.wait_for(|set| !set.is_empty()),
+            )
+            .await
+            {
+                Ok(Ok(set)) => break set[0].model_name.clone(),
+                Ok(Err(_)) => anyhow::bail!("Worker generation watcher stopped during startup"),
+                Err(_) => tracing::warn!(
+                    ?namespace_filter,
+                    ?namespace_prefix_mode,
+                    "No worker generation is ready yet. If this persists, set \
+                     DYN_NAMESPACE_PREFIX (or DYN_NAMESPACE) to match your workers' \
+                     registration namespace."
+                ),
+            }
+        };
 
         // Namespace-scoped pod selectors use the BASE namespace for the pod
         // selector. Workers register in discovery under the suffixed namespace
         // (e.g. "atchernych-qwen-9f792849"), but the K8s pod label
         // `nvidia.com/dynamo-namespace` is always set to the base
         // ("atchernych-qwen") by the operator. Using the suffixed name here
-        // would silently match zero pods during/after a DGD rolling update.
+        // would silently match zero pods during/after a DGD rolling update,
+        // and the base name covers every generation at once.
         let (worker_index, pod_store_ready) =
             spawn_pod_reflector(&namespace_filter, container_discovery).await?;
 
-        // `model_manager` and `drt` are intentionally not stored on the
-        // Router. The KV chooser, prefill router, prefill discovery watcher,
-        // and pod reflector all clone whatever they need from these
-        // constructor-locals before this scope ends, so dropping them here
-        // does not tear down any background work.
+        // `drt` is intentionally not stored on the Router. The generation
+        // watcher and the pod reflector clone whatever they need from it
+        // before this scope ends, so dropping it here does not tear down any
+        // background work.
         Ok(Self {
-            prefill_router,
+            generations,
+            request_generations: DashMap::new(),
             prefill_bookings: DashMap::new(),
-            decode_router,
-            preprocessor: bootstrap.preprocessor,
             runtime,
             worker_index,
             pod_store_ready,
-            served_model: model_name,
+            served_model,
         })
     }
 
@@ -263,6 +293,33 @@ impl Router {
         &self.served_model
     }
 
+    /// Choose the worker generation a request routes through, weighted by
+    /// worker count so traffic follows capacity across a rolling update.
+    ///
+    /// With a subset hint, only the hinted workers count, so a generation
+    /// none of them belongs to is never chosen while another holds some.
+    /// Outside a rollout there is one generation and this is a clone of its
+    /// `Arc`.
+    fn select_generation(
+        &self,
+        allowed_worker_ids: Option<&HashSet<u64>>,
+    ) -> Option<Arc<Generation>> {
+        let generations = self.generations.borrow().clone();
+        let weight = |generation: &Arc<Generation>| {
+            let client = generation.decode_router.client();
+            match allowed_worker_ids {
+                None => client.routing_instance_counts().routable,
+                Some(ids) => ids
+                    .iter()
+                    .filter(|id| client.is_instance_discovered(**id))
+                    .count(),
+            }
+        };
+        pick_weighted(&generations, weight, |total| rand::random_range(0..total)).cloned()
+    }
+}
+
+impl Generation {
     /// Tokenize a JSON request body and extract router queue priorities and
     /// routing constraints.
     ///
@@ -408,7 +465,9 @@ impl Router {
             .await?;
         Ok(tokens)
     }
+}
 
+impl Router {
     /// Resolve a worker_id to a pod endpoint address (ip:port).
     /// Lock-free-on-the-writer-side read from the incrementally maintained
     /// worker index — O(1), no K8s API calls, no pod scan, no worker-ID
@@ -467,7 +526,9 @@ impl Router {
             .map(|(id, _)| *id)
             .collect()
     }
+}
 
+impl Generation {
     /// Atomically select and reserve a prefill worker.
     ///
     /// Queue priorities are forwarded to the prefill scheduler. `priority_jump`
@@ -477,7 +538,7 @@ impl Router {
     /// required/preferred taints (lifted from `nvext.routing_constraints`); a
     /// hard `required_taints` mismatch excludes a worker from selection.
     #[expect(clippy::too_many_arguments)]
-    pub async fn route_prefill(
+    async fn route_prefill(
         &self,
         reservation_id: &str,
         tokens: &[u32],
@@ -517,7 +578,7 @@ impl Router {
     /// A per-class queue limit rejection surfaces as an error here, the same as
     /// it does for the integrated frontend.
     #[allow(clippy::too_many_arguments)]
-    pub async fn route_decode(
+    async fn route_decode(
         &self,
         tokens: &[u32],
         is_disaggregated: bool,
@@ -566,7 +627,7 @@ impl Router {
     }
 
     /// Register a request with the decode router for bookkeeping.
-    pub async fn add_request(
+    async fn add_request(
         &self,
         request_id: &str,
         tokens: &[u32],
@@ -611,7 +672,7 @@ impl Router {
     }
 
     /// Mark prefill as completed for a request.
-    pub async fn mark_prefill_complete(&self, request_id: &str) -> Result<()> {
+    async fn mark_prefill_complete(&self, request_id: &str) -> Result<()> {
         let decode_router = self.decode_router.clone();
         let request_id = request_id.to_owned();
 
@@ -626,7 +687,7 @@ impl Router {
     }
 
     /// Free a request from the router's bookkeeping.
-    pub async fn free_request(&self, request_id: &str) -> Result<()> {
+    async fn free_request(&self, request_id: &str) -> Result<()> {
         let decode_router = self.decode_router.clone();
         let request_id = request_id.to_owned();
 
@@ -639,7 +700,9 @@ impl Router {
         .await
         .map_err(|_| anyhow::anyhow!("free_request timed out"))?
     }
+}
 
+impl Router {
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
     }
@@ -743,135 +806,145 @@ fn completion_text_tokens_safe_to_inject(prompt: &Prompt) -> bool {
     !matches!(prompt, Prompt::StringArray(texts) if texts.len() > 1)
 }
 
-struct DiscoveredModelBootstrap {
-    preprocessor: Arc<OpenAIPreprocessor>,
+/// Build a [`Generation`] for `namespace`, retrying until it succeeds or
+/// `cancel` fires (the generation was retired, or the EPP is shutting down).
+async fn build_generation_until_ready(
+    drt: DistributedRuntime,
+    namespace: String,
+    component: String,
     card: ModelDeploymentCard,
-    actual_namespace: String,
-}
-
-async fn wait_for_discovery_sync(drt: &DistributedRuntime) {
-    tracing::info!("Waiting for discovery to sync (controlled by K8s StartupProbe)...");
-    let discovery = drt.discovery();
-
+    kv_router_config: KvRouterConfig,
+    cancel: CancellationToken,
+) -> Option<Generation> {
     loop {
-        match discovery.list(DiscoveryQuery::AllModels).await {
-            Ok(instances) if !instances.is_empty() => {
-                tracing::info!(count = instances.len(), "Discovery sync complete");
-                return;
-            }
-            Ok(_) => {
-                tracing::debug!("No instances yet, waiting...");
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            Err(e) => {
-                tracing::warn!("Discovery list error: {}, retrying...", e);
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
+        let attempt = build_generation(
+            &drt,
+            &namespace,
+            &component,
+            card.clone(),
+            kv_router_config.clone(),
+            cancel.clone(),
+        );
+        let error = tokio::select! {
+            _ = cancel.cancelled() => return None,
+            built = attempt => match built {
+                Ok(generation) => return Some(generation),
+                Err(error) => error,
+            },
+        };
+        tracing::warn!(
+            %error,
+            namespace,
+            "Failed to initialize worker generation, retrying in 5s..."
+        );
+        tokio::select! {
+            _ = cancel.cancelled() => return None,
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
         }
     }
 }
 
-async fn init_preprocessor(
+/// Fetch the model's tokenizer config, create the preprocessor and both
+/// routers for one worker generation, and wait for its decode workers to
+/// register their runtime config.
+async fn build_generation(
     drt: &DistributedRuntime,
-    namespace_filter: &NamespaceFilter,
-    namespace_prefix_mode: NamespacePrefixMode,
-) -> Result<DiscoveredModelBootstrap> {
-    loop {
-        match fetch_preprocessor_from_discovery(drt, namespace_filter, namespace_prefix_mode).await
-        {
-            Ok(result) => return Ok(result),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    ?namespace_filter,
-                    ?namespace_prefix_mode,
-                    "Model card not available yet, retrying in 5s..."
-                );
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        }
-    }
-}
-
-async fn fetch_preprocessor_from_discovery(
-    drt: &DistributedRuntime,
-    namespace_filter: &NamespaceFilter,
-    namespace_prefix_mode: NamespacePrefixMode,
-) -> Result<DiscoveredModelBootstrap> {
-    let discovery = drt.discovery();
-    let instances = discovery.list(DiscoveryQuery::AllModels).await?;
-
-    let mut model_card: Option<(ModelDeploymentCard, String)> = None;
-
-    let discovered_namespaces: Vec<String> = instances
-        .iter()
-        .filter_map(|i| {
-            if let DiscoveryInstance::Model { namespace, .. } = i {
-                Some(namespace.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    tracing::debug!(
-        ?discovered_namespaces,
-        ?namespace_filter,
-        "Discovery returned {} model instances",
-        discovered_namespaces.len()
-    );
-
-    for instance in instances {
-        if let DiscoveryInstance::Model { namespace, .. } = &instance {
-            if !namespace_filter.matches_with_prefix_mode(namespace, namespace_prefix_mode) {
-                continue;
-            }
-
-            let actual_namespace = namespace.clone();
-            match instance.deserialize_model::<ModelDeploymentCard>() {
-                Ok(card) => {
-                    if card.model_type.supports_prefill()
-                        && !card.model_type.supports_chat()
-                        && !card.model_type.supports_completions()
-                    {
-                        continue;
-                    }
-                    model_card = Some((card, actual_namespace));
-                    break;
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "Failed to deserialize model card, skipping");
-                    continue;
-                }
-            }
-        }
-    }
-
-    let (mut card, actual_namespace) = model_card.ok_or_else(|| {
-        anyhow::anyhow!(
-            "No model found in namespace scope '{:?}' via discovery. \
-             Found {} instances in namespaces: {:?}. \
-             Set DYN_NAMESPACE_PREFIX (or DYN_NAMESPACE) to match your workers' registration namespace.",
-            namespace_filter,
-            discovered_namespaces.len(),
-            discovered_namespaces,
-        )
-    })?;
-
+    namespace: &str,
+    component: &str,
+    mut card: ModelDeploymentCard,
+    kv_router_config: KvRouterConfig,
+    cancel: CancellationToken,
+) -> Result<Generation> {
     tracing::info!(
         model_name = %card.display_name,
         kv_cache_block_size = card.kv_cache_block_size,
-        actual_namespace = %actual_namespace,
-        "Found model card via discovery"
+        namespace,
+        "Initializing worker generation from its model card"
     );
-
     card.download_config(None).await?;
     let preprocessor = OpenAIPreprocessor::new(card.clone())?;
+    let block_size = card.kv_cache_block_size;
+    let model_name = card.display_name.clone();
 
-    Ok(DiscoveredModelBootstrap {
-        preprocessor, // already Arc<OpenAIPreprocessor>
-        card,
-        actual_namespace,
+    let endpoint = drt
+        .namespace(namespace)?
+        .component(component)?
+        .endpoint("generate");
+
+    let model_manager = Arc::new(ModelManager::new());
+
+    let decode_router = model_manager
+        .managed_kv_router_for_with_worker_role(
+            &endpoint,
+            block_size,
+            Some(kv_router_config.clone()),
+            None,
+            card.worker_type,
+            WORKER_TYPE_DECODE,
+            Some(model_name.clone()),
+            card.runtime_config.enable_eagle,
+        )
+        .await?;
+
+    // Wait for runtime config watch to populate
+    {
+        let mut config_watch = model_manager
+            .get_or_create_runtime_config_watcher(&endpoint)
+            .await?;
+        tracing::info!(
+            namespace,
+            "Waiting for decode workers to register ModelRuntimeConfig..."
+        );
+        config_watch
+            .wait_for(|m| !m.is_empty())
+            .await
+            .map(|_| ())
+            .map_err(|_| {
+                anyhow::anyhow!("Runtime config watch closed before any workers appeared")
+            })?;
+        tracing::info!(
+            namespace,
+            worker_count = config_watch.borrow().len(),
+            "Runtime config watch populated"
+        );
+    }
+
+    let mut prefill_config = kv_router_config;
+    prefill_config.router_track_active_blocks = false;
+
+    let (prefill_tx, prefill_rx) = tokio::sync::oneshot::channel();
+    let prefill_router = PrefillRouter::new(
+        prefill_rx,
+        model_manager.clone(),
+        RouterMode::KV,
+        block_size,
+        Some(prefill_config),
+        None,
+        None,
+        dynamo_llm::session_affinity::SessionAffinityMode::Hard,
+        model_name.clone(),
+        namespace.to_string(),
+        decode_router.load_context().load_thresholds(),
+        cancel.child_token(),
+    );
+
+    spawn_prefill_discovery_watcher(
+        drt.clone(),
+        namespace.to_string(),
+        prefill_tx,
+        cancel.child_token(),
+    );
+
+    // `model_manager` is intentionally not stored on the Generation. The KV
+    // chooser, prefill router, and prefill discovery watcher all clone what
+    // they need from it before this scope ends.
+    Ok(Generation {
+        namespace: namespace.to_string(),
+        model_name,
+        prefill_router,
+        decode_router,
+        preprocessor,
+        cancel,
     })
 }
 
@@ -1255,8 +1328,9 @@ fn spawn_prefill_discovery_watcher(
     drt: DistributedRuntime,
     target_namespace: String,
     tx: tokio::sync::oneshot::Sender<dynamo_runtime::component::Endpoint>,
+    cancel: CancellationToken,
 ) {
-    tokio::spawn(async move {
+    tokio::spawn(cancel.run_until_cancelled_owned(async move {
         let discovery = drt.discovery();
         tracing::info!(
             namespace = target_namespace,
@@ -1310,7 +1384,7 @@ fn spawn_prefill_discovery_watcher(
 
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-    });
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1450,6 +1524,12 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::InvalidRequest(format!("Invalid UTF-8: {e}")))?;
 
+        let generation = self
+            .select_generation(allowed_worker_ids.as_ref())
+            .ok_or_else(|| {
+                PickError::RoutingFailed("No worker generation is available".to_string())
+            })?;
+
         let TokenizeResult {
             tokens,
             cache_namespace,
@@ -1457,7 +1537,7 @@ impl EndpointPicker for Router {
             strict_priority,
             routing_constraints,
             tokens_safe_to_inject,
-        } = self
+        } = generation
             .tokenize(body_str, &req.headers)
             .await
             .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
@@ -1468,7 +1548,7 @@ impl EndpointPicker for Router {
         //
         // If the prefill router is not activated (no prefill workers discovered yet, or the inner
         // router has been deactivated), fall back to aggregated routing.
-        let prefill_booking = self
+        let prefill_booking = generation
             .route_prefill(
                 &format!("epp-prefill/{reservation_id}"),
                 &tokens,
@@ -1492,7 +1572,7 @@ impl EndpointPicker for Router {
             }
         };
 
-        let (decode_worker, _overlap) = self
+        let (decode_worker, _overlap) = generation
             .route_decode(
                 &tokens,
                 is_disaggregated,
@@ -1532,7 +1612,7 @@ impl EndpointPicker for Router {
         };
 
         // Register the request with the router for bookkeeping (load tracking).
-        if let Err(e) = self
+        if let Err(e) = generation
             .add_request(
                 &reservation_id,
                 &tokens,
@@ -1558,6 +1638,9 @@ impl EndpointPicker for Router {
             self.prefill_bookings
                 .insert(reservation_id.clone(), booking);
         }
+        let namespace = generation.namespace.clone();
+        self.request_generations
+            .insert(reservation_id.clone(), generation);
 
         // Build routing headers: x-dynamo-worker-instance-id, x-dynamo-dp-rank,
         // x-dynamo-prefill-instance-id, x-dynamo-prefill-dp-rank, x-dynamo-routing-mode
@@ -1599,6 +1682,7 @@ impl EndpointPicker for Router {
             worker_id_hex = format!("{:x}", decode_worker.worker_id),
             dp_rank = decode_worker.dp_rank,
             is_disaggregated,
+            namespace = %namespace,
             endpoint = %endpoint,
             token_count = tokens.len(),
             priority_jump,
@@ -1637,7 +1721,16 @@ impl EndpointPicker for Router {
             return;
         }
         release_prefill_booking(&self.prefill_bookings, booking_id).await;
-        if let Err(e) = self.mark_prefill_complete(booking_id).await {
+        // Clone the `Arc` out so the map's shard lock is not held across the
+        // await below.
+        let Some(generation) = self
+            .request_generations
+            .get(booking_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return;
+        };
+        if let Err(e) = generation.mark_prefill_complete(booking_id).await {
             tracing::debug!(
                 reservation_id = booking_id,
                 error = %e,
@@ -1661,7 +1754,10 @@ impl EndpointPicker for Router {
             );
         }
         release_prefill_booking(&self.prefill_bookings, booking_id).await;
-        if let Err(e) = self.free_request(booking_id).await {
+        let Some((_, generation)) = self.request_generations.remove(booking_id) else {
+            return;
+        };
+        if let Err(e) = generation.free_request(booking_id).await {
             tracing::debug!(
                 reservation_id = booking_id,
                 error = %e,
@@ -1691,94 +1787,6 @@ mod tests {
                 "nvidia.com/dynamo-namespace=default-foo,nvidia.com/dynamo-component-class=worker"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn bootstrap_namespace_scope_excludes_sibling_deployments() {
-        use dynamo_runtime::distributed::DistributedConfig;
-
-        let runtime = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
-        let card = ModelDeploymentCard::load_from_disk(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../../lib/llm/tests/data/sample-models/TinyLlama_v1.1"
-            ),
-            None,
-        )
-        .unwrap();
-        let sibling = drt
-            .namespace("default-foo-bar")
-            .unwrap()
-            .component("backend")
-            .unwrap()
-            .endpoint("generate");
-        sibling.register_endpoint_instance().await.unwrap();
-        dynamo_llm::local_model::register_model_card(&sibling, &card)
-            .await
-            .unwrap();
-
-        let manual = fetch_preprocessor_from_discovery(
-            &drt,
-            &NamespaceFilter::Prefix("default-foo".into()),
-            NamespacePrefixMode::Literal,
-        )
-        .await
-        .unwrap();
-        assert_eq!(manual.actual_namespace, "default-foo-bar");
-
-        let global = fetch_preprocessor_from_discovery(
-            &drt,
-            &NamespaceFilter::Global,
-            NamespacePrefixMode::WorkerGeneration,
-        )
-        .await
-        .unwrap();
-        assert_eq!(global.actual_namespace, "default-foo-bar");
-
-        let filter = NamespaceFilter::Prefix("default-foo".into());
-        let rejected =
-            fetch_preprocessor_from_discovery(&drt, &filter, NamespacePrefixMode::WorkerGeneration)
-                .await
-                .err()
-                .expect("sibling model must be excluded");
-        assert!(
-            rejected
-                .to_string()
-                .contains("No model found in namespace scope")
-        );
-
-        let generation = drt
-            .namespace("default-foo-1a2b3c4d")
-            .unwrap()
-            .component("backend")
-            .unwrap()
-            .endpoint("generate");
-        generation.register_endpoint_instance().await.unwrap();
-        dynamo_llm::local_model::register_model_card(&generation, &card)
-            .await
-            .unwrap();
-        let selected =
-            fetch_preprocessor_from_discovery(&drt, &filter, NamespacePrefixMode::WorkerGeneration)
-                .await
-                .unwrap();
-        assert_eq!(selected.actual_namespace, "default-foo-1a2b3c4d");
-        let exact = fetch_preprocessor_from_discovery(
-            &drt,
-            &NamespaceFilter::Exact("default-foo".into()),
-            NamespacePrefixMode::WorkerGeneration,
-        )
-        .await
-        .err()
-        .expect("exact scope must exclude worker generations");
-        assert!(
-            exact
-                .to_string()
-                .contains("No model found in namespace scope")
-        );
-        runtime.shutdown();
     }
 
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a
