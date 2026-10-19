@@ -17,6 +17,7 @@ if not HAS_GMS:
 from _fake_vmm import FakeVMM
 
 try:
+    import gpu_memory_service.cli.snapshot as snapshot_cli
     from gpu_memory_service.cli.snapshot import loader
 except ModuleNotFoundError:
     pytest.skip(
@@ -176,10 +177,9 @@ def test_main_forwards_explicit_argv_unchanged(monkeypatch):
         "run_per_device",
         lambda module, argv: forwarded.append((module, argv)),
     )
-    _stop_at_keepalive(monkeypatch)
+    monkeypatch.setattr(loader, "_wait_for_termination", lambda: None)
 
-    with pytest.raises(_KeepaliveReached):
-        loader.main(argv=["--checkpoint-dir", "/tmp/cp"])
+    loader.main(argv=["--checkpoint-dir", "/tmp/cp"])
 
     assert forwarded == [
         ("gpu_memory_service.v1.snapshot.loader", ["--checkpoint-dir", "/tmp/cp"])
@@ -205,3 +205,34 @@ def test_main_v1_help_exits_without_keepalive(monkeypatch, help_flag):
     loader.main(argv=[help_flag])
 
     assert forwarded == [("gpu_memory_service.v1.snapshot.loader", [help_flag])]
+
+
+@pytest.mark.parametrize("help_flag", ["-h", "--help", "--hel", "--h"])
+def test_run_per_device_help_starts_one_child_without_cuda(monkeypatch, help_flag):
+    # Help must not initialize CUDA or print usage once per GPU.
+    started = []
+
+    class FakeProcess:
+        pid = 1
+
+        def poll(self):
+            return 0
+
+        def wait(self):
+            return 0
+
+    def fake_popen(command):
+        started.append(command)
+        return FakeProcess()
+
+    def fail_init_vmm(device_type):
+        raise AssertionError("help must not initialize CUDA")
+
+    monkeypatch.setattr(snapshot_cli, "init_vmm", fail_init_vmm)
+    monkeypatch.setattr(snapshot_cli.subprocess, "Popen", fake_popen)
+
+    snapshot_cli.run_per_device("gpu_memory_service.v1.snapshot.loader", [help_flag])
+
+    assert started == [
+        [sys.executable, "-m", "gpu_memory_service.v1.snapshot.loader", help_flag]
+    ]

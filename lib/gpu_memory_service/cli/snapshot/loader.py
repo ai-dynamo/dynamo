@@ -19,7 +19,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from gpu_memory_service.cli.snapshot import run_per_device
+from gpu_memory_service.cli.snapshot import requests_help, run_per_device
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
@@ -174,14 +174,6 @@ def _list_checkpoint_devices(
     return devices
 
 
-def _requests_help(argv: list[str]) -> bool:
-    # argparse also accepts unambiguous abbreviations of --help, such as --hel.
-    return any(
-        argument == "-h" or (len(argument) > 2 and "--help".startswith(argument))
-        for argument in argv
-    )
-
-
 def _wait_for_termination() -> None:
     # Stay alive after a successful load: a restarted container would request a
     # second RW session that times out on the worker's RO lease or clears the weights.
@@ -195,10 +187,11 @@ def main(argv: list[str] | None = None) -> None:
     argv = argv if argv is not None else sys.argv[1:]
     if os.environ.get("DYN_GMS_USE_V1") == "true":
         run_per_device("gpu_memory_service.v1.snapshot.loader", argv)
-        if _requests_help(argv):
+        if requests_help(argv):
             return
         logger.info("GMS V1 load complete on all devices; waiting for termination")
         _wait_for_termination()
+        return
 
     parser = _build_parser()
     args = parser.parse_args(argv)
