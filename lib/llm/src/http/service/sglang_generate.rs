@@ -503,7 +503,14 @@ async fn dispatch(
             }
         };
     }
-    let render = |response: &serde_json::Value| Event::default().json_data(response);
+    // One buffer reused across chunks.
+    let mut buffer = Vec::new();
+    let render = move |response: &serde_json::Value| {
+        buffer.clear();
+        serde_json::to_writer(&mut buffer, response).map_err(axum::Error::new)?;
+        let json = std::str::from_utf8(&buffer).map_err(axum::Error::new)?;
+        Ok(Event::default().data(json))
+    };
     let stream = SglangGenerateStream::from_annotated_stream(stream, merger(), render)
         .map(|result| result.map_err(axum::Error::new).and_then(|event| event));
     let stream = monitor_for_disconnects_with_error(
