@@ -145,9 +145,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             request_blocks: IntegerDivisor::new(context.request_blocks().max(1)),
             overlap_credit,
             needs_decay: context.tracks_prefill_tokens() && self.overlap_score_credit_decay > 0.0,
-            needs_decode_subtraction: self.is_decode
-                && !context.tracks_prefill_tokens()
-                && overlap_credit > 0.0,
+            needs_decode_subtraction: self.is_decode && !context.tracks_prefill_tokens(),
         };
         if self.prepared.needs_decay {
             let mut minimum = usize::MAX;
@@ -232,10 +230,12 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
     for DefaultScorer<REQUEST_COST, SHARED_CREDIT>
 {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        // The builtin's load-only modes must book the full prompt without cache credit.
-        // Hosts still start indexing solely from the policy's declared inputs.
         let inputs = WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT;
-        if !self.is_plain_decode && self.overlap_score_credit != 0.0 {
+        if self.overlap_score_credit != 0.0
+            || self.host_cache_hit_weight != 0.0
+            || self.disk_cache_hit_weight != 0.0
+            || self.shared_cache_multiplier != 0.0
+        {
             inputs | WorkerInputs::CACHE
         } else {
             inputs

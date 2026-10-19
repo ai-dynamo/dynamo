@@ -72,10 +72,20 @@ impl Parameters {
     }
 
     fn resolve(&self, config: &KvRouterConfig) -> PolicyParameters {
+        let overlap_score_credit = self
+            .overlap_score_credit
+            .unwrap_or(config.overlap_score_credit);
+        // Legacy load-only configs retain tier weights for host accounting. Only explicit
+        // policy parameters enable tier scoring independently of device credit.
+        let inherited_cache_weight = |weight| {
+            if overlap_score_credit == 0.0 {
+                0.0
+            } else {
+                weight
+            }
+        };
         PolicyParameters {
-            overlap_score_credit: self
-                .overlap_score_credit
-                .unwrap_or(config.overlap_score_credit),
+            overlap_score_credit,
             overlap_score_credit_decay: self
                 .overlap_score_credit_decay
                 .unwrap_or(config.overlap_score_credit_decay),
@@ -85,17 +95,18 @@ impl Parameters {
                 .unwrap_or(config.decode_active_request_weight),
             host_cache_hit_weight: self
                 .host_cache_hit_weight
-                .unwrap_or(config.host_cache_hit_weight),
+                .unwrap_or(inherited_cache_weight(config.host_cache_hit_weight)),
             disk_cache_hit_weight: self
                 .disk_cache_hit_weight
-                .unwrap_or(config.disk_cache_hit_weight),
-            shared_cache_multiplier: self
-                .shared_cache_multiplier
-                .or(config.shared_cache_multiplier)
-                .unwrap_or(match config.shared_cache_type {
-                    SharedCacheType::None => 0.0,
-                    SharedCacheType::Hicache => 0.5,
-                }),
+                .unwrap_or(inherited_cache_weight(config.disk_cache_hit_weight)),
+            shared_cache_multiplier: self.shared_cache_multiplier.unwrap_or_else(|| {
+                inherited_cache_weight(config.shared_cache_multiplier.unwrap_or(
+                    match config.shared_cache_type {
+                        SharedCacheType::None => 0.0,
+                        SharedCacheType::Hicache => 0.5,
+                    },
+                ))
+            }),
             router_temperature: self.router_temperature.unwrap_or(config.router_temperature),
         }
     }

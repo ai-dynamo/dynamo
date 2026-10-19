@@ -82,6 +82,19 @@ fn policy_for_role(
 ) -> WorkerSelectionPolicy {
     let is_plain_decode =
         role == dynamo_kv_router::WorkerType::Decode && !config.conditional_disagg_enabled;
+    // Plain decode has no cache inputs; expose its effective startup values so runtime
+    // attempts to enable any cache credit are rejected by the input-capability check.
+    let parameters = if is_plain_decode {
+        PolicyParameters {
+            overlap_score_credit: 0.0,
+            host_cache_hit_weight: 0.0,
+            disk_cache_hit_weight: 0.0,
+            shared_cache_multiplier: 0.0,
+            ..parameters
+        }
+    } else {
+        parameters
+    };
     runtime_policy(
         config,
         parameters,

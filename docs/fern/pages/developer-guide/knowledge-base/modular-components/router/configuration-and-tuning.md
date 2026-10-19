@@ -644,6 +644,16 @@ example, a policy initialized without cache inputs cannot enable cache-dependent
 runtime. Rebuild that router with cache inputs enabled first. Temporarily disabling a scoring
 term does not prevent restoring its startup value later.
 
+Any nonzero device, host, disk, or shared-cache scoring weight requires cache inputs. A
+router that started with those inputs can set device credit to zero while keeping another
+cache tier's scoring weight active. A cache-free router rejects attempts to enable any of
+these weights, without advancing its revision.
+
+Legacy load-only configurations inherit zero effective cache-scoring weights when device
+credit is zero; explicit policy parameters can enable individual tiers at startup. Plain
+disaggregated decode resolves all four cache-scoring weights to zero. Runtime snapshots and
+resets use these effective values; host-owned cache accounting settings are unchanged.
+
 | Status | Meaning |
 | --- | --- |
 | `200` | Query succeeded, or the complete update was applied. |
