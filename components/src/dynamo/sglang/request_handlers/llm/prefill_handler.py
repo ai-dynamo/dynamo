@@ -27,6 +27,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _kv_cache_hit_engine_data,
     _native_payload_is_batched,
     _ordered_cancellation_request_id,
+    _raise_if_sglang_error,
     _sampling_option_params,
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -287,6 +288,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         final_meta_info = await task
         if final_meta_info is None:
             return
+        finish_reason = final_meta_info.get("finish_reason")
+        if isinstance(finish_reason, dict) and finish_reason.get("type") == "abort":
+            # Error-bearing aborts raise while consuming the engine stream.
+            # An ordinary backend cancellation must also terminate decode,
+            # rather than looking like a successful prefill handoff.
+            yield {"token_ids": [], "finish_reason": "cancelled"}
+            return
         # Bootstrap happens before prefill runs, so the cache-hit report for
         # this attempt needs its own trailing chunk.
         kv_cache_hit = _kv_cache_hit_engine_data(final_meta_info)
@@ -329,6 +337,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New Prefill Request ID: {sglang_request_id}")
+
+                finish_reason = meta_info.get("finish_reason")
+                if isinstance(finish_reason, dict):
+                    # Bootstrap has already been sent. Surface failures now so
+                    # the router can cancel decode instead of waiting for KV.
+                    _raise_if_sglang_error(finish_reason)
+                    if finish_reason.get("type") == "abort":
+                        break
 
                 # The shared iterator briefly drains after abort so SGLang can
                 # clean up, then closes a stream that does not terminate.
