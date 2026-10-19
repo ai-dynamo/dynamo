@@ -5,7 +5,7 @@ kind: DynamoGraphDeployment
 metadata:
   annotations:
     nvidia.com/current-worker-hash-v2: 3df79a72
-    nvidia.com/dynamo-operator-origin-version: 1.6.0
+    nvidia.com/dynamo-operator-origin-version: $var:operator-version
     nvidia.com/workload-provider: grove
   creationTimestamp: $ignore
   finalizers:
@@ -222,7 +222,7 @@ spec:
     cliques:
     - annotations:
         nvidia.com/dynamo-discovery-backend: kubernetes
-        nvidia.com/dynamo-operator-origin-version: 1.6.0
+        nvidia.com/dynamo-operator-origin-version: $var:operator-version
       labels:
         nvidia.com/dynamo-component: SglangPrefill
         nvidia.com/dynamo-component-type: prefill
@@ -337,7 +337,7 @@ spec:
         roleName: sglangprefill
     - annotations:
         nvidia.com/dynamo-discovery-backend: kubernetes
-        nvidia.com/dynamo-operator-origin-version: 1.6.0
+        nvidia.com/dynamo-operator-origin-version: $var:operator-version
       labels:
         nvidia.com/dynamo-component: SglangDecode
         nvidia.com/dynamo-component-type: decode

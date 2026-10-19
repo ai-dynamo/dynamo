@@ -8,6 +8,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,12 +36,22 @@ const upgradeRoot = "testdata/upgrade"
 
 func TestMain(m *testing.M) { os.Exit(runClusterTests(m, prepareUpgradeHistory)) }
 
-func upgradeInputs() ([]string, error) {
-	return filepath.Glob(filepath.Join(upgradeRoot, "history", "*", "*", "input.yaml"))
+func upgradeInputs(role string) ([]string, error) {
+	var inputs []string
+	err := filepath.WalkDir(filepath.Join(upgradeRoot, role), func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && entry.Name() == "input.yaml" {
+			inputs = append(inputs, path)
+		}
+		return nil
+	})
+	return inputs, err
 }
 
 func prepareUpgradeHistory(ctx context.Context, c client.Client) (func(context.Context) error, error) {
-	inputs, err := upgradeInputs()
+	inputs, err := upgradeInputs("history")
 	if err != nil {
 		return nil, err
 	}
@@ -100,23 +111,61 @@ func captureUpgrade(t *testing.T, env *clusterenv.TestEnv) []unstructured.Unstru
 }
 
 func TestClusterOperatorUpgrade(t *testing.T) {
-	historical, err := upgradeInputs()
+	historical, err := upgradeInputs("history")
 	require.NoError(t, err)
-	latest, err := filepath.Glob(filepath.Join(upgradeRoot, "latest", "*", "input.yaml"))
+	latest, err := upgradeInputs("latest")
 	require.NoError(t, err)
 	require.NotEmpty(t, historical)
 	require.NotEmpty(t, latest)
 	version, err := clusterTestOperatorVersion()
 	require.NoError(t, err)
+
+	// Capturing also admits each latest scenario in its final historical namespace.
+	type scenario struct {
+		input, relative string
+		promote         bool
+	}
+	var scenarios []scenario
 	for _, input := range append(historical, latest...) {
 		relative, err := filepath.Rel(upgradeRoot, filepath.Dir(input))
 		require.NoError(t, err)
+		scenarios = append(scenarios, scenario{input: input, relative: relative})
+	}
+	if os.Getenv("DYNAMO_UPGRADE_CAPTURE_DIR") != "" {
+		parts := strings.Split(version, ".")
+		generation := parts[0] + "." + parts[1] + ".0"
+		for _, input := range latest {
+			path, err := filepath.Rel(filepath.Join(upgradeRoot, "latest"), filepath.Dir(input))
+			require.NoError(t, err)
+			scenarios = append(scenarios, scenario{input: input, relative: filepath.Join("history", generation, path), promote: true})
+		}
+	}
+
+	// Reject collisions across historical, latest and promoted roles before creating any latest namespace.
+	namespaces := map[string]string{}
+	for _, item := range scenarios {
+		objects, err := golden.ReadManifests(item.input)
+		require.NoError(t, err)
+		namespace := objects[0].GetNamespace()
+		if item.promote {
+			namespace = upgradeScenarioNamespace(item.relative)
+		} else if strings.HasPrefix(item.relative, "latest/") {
+			require.Equal(t, upgradeScenarioNamespace(item.relative), namespace)
+		}
+		require.NotContains(t, namespaces, namespace, "namespace collision: %s", item.relative)
+		namespaces[namespace] = item.relative
+	}
+	for _, item := range scenarios {
+		input, relative := item.input, item.relative
 		t.Run(relative, func(t *testing.T) {
 			ctx := t.Context()
-			isHistory := strings.HasPrefix(relative, "history/")
+			isHistory := strings.HasPrefix(relative, "history/") && !item.promote
 			objects, err := golden.ReadManifests(input)
 			require.NoError(t, err)
 			namespace := objects[0].GetNamespace()
+			if item.promote {
+				namespace = upgradeScenarioNamespace(relative)
+			}
 			var env *clusterenv.TestEnv
 			if isHistory {
 				env = clusterTestEnv.RunTInNamespace(t, namespace)
@@ -129,7 +178,11 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 			}
 			env.BlockWorkloads()
 			if !isHistory {
-				golden.ApplyManifests(t, input, env.Client(), namespace)
+				// Set the namespace on CREATE, never on a reconciled snapshot.
+				for i := range objects {
+					objects[i].SetNamespace(namespace)
+					require.NoError(t, env.Client().Create(ctx, &objects[i]))
+				}
 			}
 			before := captureUpgrade(t, env)
 			if isHistory {
@@ -169,6 +222,14 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 			})
 			t.Log("Wait for a completed production reconcile, then compare the full owned resource graph")
 			require.Eventually(t, func() bool { return completedUpgradeReconciles(t) >= baseline+1 }, 90*time.Second, 200*time.Millisecond, "candidate did not complete a successful reconciliation")
+			if !isHistory {
+				t.Log("Wait for the admitted DGD and its worker hash to converge before capture")
+				require.Eventually(t, func() bool {
+					live := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
+					want, err := dynamo.ComputeDGDWorkersSpecHash(live)
+					return err == nil && live.Status.ObservedGeneration == live.Generation && live.Annotations[consts.AnnotationCurrentWorkerHashV2] == want
+				}, 90*time.Second, 200*time.Millisecond)
+			}
 			after := captureUpgrade(t, env)
 			if isHistory {
 				if err := upgradeSafetyError(transition.hashChanged, before, after); err != nil {
@@ -178,7 +239,9 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				dgd = getOnlyClusterDGD(t, ctx, env.Client(), namespace)
 				require.Equal(t, version, dgd.Annotations["nvidia.com/dynamo-operator-origin-version"])
 			}
-			golden.MatchCapturedManifests(t, after, filepath.Join(filepath.Dir(input), "output.yaml"))
+			if !item.promote {
+				golden.MatchCapturedManifestsWithVariables(t, after, filepath.Join(filepath.Dir(input), "output.yaml"), golden.Variables{"operator-version": version})
+			}
 			if root := os.Getenv("DYNAMO_UPGRADE_CAPTURE_DIR"); root != "" && !t.Failed() {
 				path := filepath.Join(root, relative, "input.yaml")
 				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))

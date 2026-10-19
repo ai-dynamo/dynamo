@@ -21,9 +21,18 @@ import (
 // resource kinds absent from the golden. Mismatches emit a reviewable .new file.
 func MatchCapturedManifests(t testing.TB, objects []unstructured.Unstructured, path string) {
 	t.Helper()
+	MatchCapturedManifestsWithVariables(t, objects, path, nil)
+}
+
+// MatchCapturedManifestsWithVariables binds exact values before comparing the complete graph.
+func MatchCapturedManifestsWithVariables(t testing.TB, objects []unstructured.Unstructured, path string, variables Variables) {
+	t.Helper()
 	expected, err := readDocuments(path)
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
+	}
+	if err := resolveVariables(expected, variables); err != nil {
+		t.Fatalf("resolve golden variables: %v", err)
 	}
 	result := comparison{expected: expected, actual: map[schema.GroupVersionKind][]actualDocument{}}
 	for _, object := range objects {

@@ -4,7 +4,11 @@
 package controller
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -128,4 +132,37 @@ func TestUpgradeSafetyIndependentOfGolden(t *testing.T) {
 	changed = old.DeepCopy()
 	changed.SetUID("replacement")
 	require.ErrorContains(t, upgradeSafetyError(false, before, []unstructured.Unstructured{*changed}), "active identity")
+}
+
+// Namespace is fixed before admission so generated names and hashes belong to the captured state.
+func upgradeScenarioNamespace(relative string) string {
+	name := "upgrade-" + regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(strings.ToLower(filepath.ToSlash(relative)), "-")
+	if len(name) > 63 {
+		sum := sha256.Sum256([]byte(relative))
+		name = strings.TrimRight(name[:50], "-") + fmt.Sprintf("-%x", sum[:6])
+	}
+	return name
+}
+
+func TestUpgradeScenarioNamespaces(t *testing.T) {
+	t.Log("Derive separate stable namespaces for complete latest paths and each promoted version")
+	paths := []string{
+		"latest/sglang-1.4",
+		"history/1.6.0/sglang/aggregated/single/grove",
+		"history/1.7.0/sglang/aggregated/single/grove",
+		"latest/sglang/aggregated/single/grove",
+		"latest/sglang/disaggregated/multi/disaggregatedset",
+		"latest/" + strings.Repeat("long/", 20) + "grove",
+		"latest/" + strings.Repeat("long/", 20) + "component",
+	}
+	seen := map[string]bool{}
+	for _, path := range paths {
+		name := upgradeScenarioNamespace(path)
+		require.LessOrEqual(t, len(name), 63)
+		require.Regexp(t, `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, name)
+		require.Equal(t, name, upgradeScenarioNamespace(path))
+		require.NotContains(t, seen, name)
+		seen[name] = true
+	}
+	require.Equal(t, "upgrade-history-1-6-0-sglang-aggregated-single-grove", upgradeScenarioNamespace(paths[1]))
 }
