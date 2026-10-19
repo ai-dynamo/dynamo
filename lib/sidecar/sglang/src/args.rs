@@ -15,7 +15,7 @@ pub struct Args {
     #[command(flatten)]
     pub sidecar: SidecarArgs,
 
-    /// Bearer token for the local SGLang HTTP server, including readiness and cancellation.
+    /// Bearer token for the local SGLang HTTP and native gRPC servers.
     #[arg(long, env = "DYN_SGLANG_API_KEY", hide_env_values = true)]
     pub sglang_api_key: Option<String>,
 

@@ -36,6 +36,7 @@ pub struct SglangSidecarEngine {
     endpoint: GrpcEndpoint,
     transport: GrpcTransportConfig,
     http_api_key: Option<String>,
+    grpc_auth: client::ApiKeyAuth,
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
@@ -93,7 +94,8 @@ impl SglangSidecarEngine {
 
         let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
-        let discovery = bootstrap_discover(&endpoint, &transport)?;
+        let grpc_auth = client::ApiKeyAuth::new(args.sglang_api_key.as_deref())?;
+        let discovery = bootstrap_discover(&endpoint, &transport, &grpc_auth)?;
         let disaggregation_mode = discovery_mode(&discovery)?;
         let bootstrap_host = if disaggregation_mode.is_prefill() {
             resolve_bootstrap_host(
@@ -150,6 +152,7 @@ impl SglangSidecarEngine {
                 endpoint,
                 transport,
                 http_api_key: args.sglang_api_key,
+                grpc_auth,
                 disaggregation_mode,
                 bootstrap_host,
                 bootstrap_port,
@@ -195,7 +198,8 @@ impl LLMEngine for SglangSidecarEngine {
         }
 
         let deadline = Instant::now() + self.transport.startup_deadline;
-        let pool = Pool::connect(&self.endpoint, &self.transport, deadline).await?;
+        let pool =
+            Pool::connect(&self.endpoint, &self.transport, deadline, &self.grpc_auth).await?;
         let mut control = pool.control_client();
         let mut stream = client::watch_engine_state(&mut control, deadline).await?;
         let engine_state = loop {
@@ -742,6 +746,7 @@ impl SglangSidecarEngine {
 fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: &GrpcTransportConfig,
+    auth: &client::ApiKeyAuth,
 ) -> Result<Discovery, DynamoError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -749,7 +754,7 @@ fn bootstrap_discover(
         .map_err(|err| client::engine_shutdown(format!("bootstrap runtime: {err}")))?;
     runtime.block_on(async {
         let deadline = Instant::now() + transport.startup_deadline;
-        let mut grpc_client = client::connect(endpoint, transport, deadline, true).await?;
+        let mut grpc_client = client::connect(endpoint, transport, deadline, true, auth).await?;
         client::discover(&mut grpc_client, deadline).await
     })
 }
@@ -1631,6 +1636,7 @@ mod tests {
             endpoint: GrpcEndpoint::parse("http://127.0.0.1:1", "test").unwrap(),
             transport: GrpcTransportConfig::default(),
             http_api_key: None,
+            grpc_auth: client::ApiKeyAuth::default(),
             disaggregation_mode: DisaggregationMode::Aggregated,
             bootstrap_host: None,
             bootstrap_port: None,
