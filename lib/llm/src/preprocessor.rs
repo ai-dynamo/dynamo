@@ -13853,14 +13853,16 @@ mod tests {
                 let mut request: NvCreateChatCompletionRequest =
                     serde_json::from_value(body).unwrap();
                 request.normalize_reasoning_template_args().unwrap();
-                let error = Operator::generate(
+                let error = match Operator::generate(
                     preprocessor.as_ref(),
                     PipelineContext::new(request),
                     Arc::new(UnreachableBackend),
                 )
                 .await
-                .err()
-                .expect("reasoning-off request must fail before dispatch");
+                {
+                    Ok(_) => panic!("reasoning-off request must fail before dispatch"),
+                    Err(error) => error,
+                };
                 let error = error.downcast_ref::<DynamoError>().unwrap();
                 assert!(matches!(
                     crate::http::service::error::http_action_for_error(error),
