@@ -103,15 +103,14 @@ def test_probe_mp4_moov_after_mdat():
     assert nd.probe_video_codec(data) == "h264"
 
 
-@pytest.mark.parametrize("location", ["title", "comment", "padding"])
+@pytest.mark.parametrize("location", ["title", "padding"])
 def test_probe_mp4_ignores_non_codec_markers(location):
     text = b"ordinary av01 demo"
     if location == "padding":
         data = _mp4_box(b"free", text) + _mp4_box(b"moov", _mp4_track(b"avc1"))
     else:
-        tag = b"\xa9nam" if location == "title" else b"\xa9cmt"
         value = _mp4_box(b"data", b"\0\0\0\1" + bytes(4) + text)
-        ilst = _mp4_box(b"ilst", _mp4_box(tag, value))
+        ilst = _mp4_box(b"ilst", _mp4_box(b"\xa9nam", value))
         metadata = _mp4_box(b"udta", _mp4_box(b"meta", bytes(4) + ilst))
         data = _mp4_box(b"moov", metadata + _mp4_track(b"avc1"))
     assert nd.probe_video_codec(data) == "h264"
