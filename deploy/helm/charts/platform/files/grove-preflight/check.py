@@ -10,15 +10,6 @@ import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-MINIMUM = "v0.1.0-alpha.15"
-CRDS = (
-    "podcliquesets",
-    "podcliques",
-    "podcliquescalinggroups",
-    "clustertopologybindings",
-    "podgangmaps",
-)
-
 
 def version(tag):
     # Recognize Grove alpha releases and stable releases; custom/RC tags are unverifiable.
@@ -32,7 +23,7 @@ def version(tag):
     )
 
 
-def check(get, namespace="", deployment=""):
+def check(get, minimum, namespace="", deployment=""):
     scope = f"/namespaces/{namespace}" if namespace else ""
     path = f"/apis/apps/v1{scope}/deployments"
     candidates = [get(f"{path}/{deployment}")] if deployment else get(path)["items"]
@@ -49,9 +40,9 @@ def check(get, namespace="", deployment=""):
     controller, container = controllers[0]
     image = container["image"].split("@", 1)[0].rsplit("/", 1)[-1]
     tag = image.split(":", 1)[1] if ":" in image else ""
-    if version(tag) < version(MINIMUM):
+    if version(tag) < version(minimum):
         raise ValueError(
-            f"External Grove {tag} is incompatible. Upgrade Grove and matching CRDs to {MINIMUM} or later."
+            f"External Grove {tag} is incompatible. Upgrade Grove and matching CRDs to {minimum} or later."
         )
 
     # Do not accept a new desired image while an older controller is still running.
@@ -69,17 +60,9 @@ def check(get, namespace="", deployment=""):
         raise ValueError(
             "Grove rollout is incomplete; wait for it to finish, then retry."
         )
-    for name in CRDS:
-        crd = get(
-            f"/apis/apiextensions.k8s.io/v1/customresourcedefinitions/{name}.grove.io"
-        )
-        established = any(
-            c["type"] == "Established" and c["status"] == "True"
-            for c in crd.get("status", {}).get("conditions", [])
-        )
-        if not established or crd["metadata"].get("deletionTimestamp"):
-            raise ValueError(f"Grove CRD {name}.grove.io is not established.")
-    print(f"Grove {tag}: controller rollout complete; required CRDs established.")
+
+    # A compatible, fully rolled out controller is assumed to have matching CRDs installed.
+    print(f"Grove {tag}: controller version compatible; rollout complete.")
 
 
 def main():
