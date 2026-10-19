@@ -608,3 +608,31 @@ worker_selection:
 ```
 
 The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. Omitted parameters inherit router configuration. If no shared-cache multiplier is set, the default policy uses `0.5` when shared cache is enabled. Values must be finite and non-negative. Per-request score and temperature overrides do not apply to this policy. The builtin skips cache inputs at zero overlap credit and for plain disaggregated decode.
+
+## Runtime Configuration
+
+Policies can opt in to process-local configuration updates with
+`WorkerSelectionPolicy::with_runtime_config(initial_parameters, builder)`. The initial JSON
+object defines the patchable parameter names and their resolved reset values. The builder
+receives a complete parameter object and must validate it before returning a replacement policy.
+It runs synchronously on the scheduler actor: do not perform I/O or mutate shared policy state
+while constructing a replacement. Return `RuntimePolicyError::InvalidParameters` for invalid
+values. Policies that do not opt in remain startup-only.
+
+The scheduler control handle exposes `get()` and `update(RuntimePolicyUpdate)`. An update
+requires the expected revision; use `RuntimePolicyUpdate::patch` for partial replacement or
+`RuntimePolicyUpdate::reset` to restore startup parameters. Null values in a patch restore the
+corresponding startup parameter. Unknown keys, empty patches, and stale revisions are rejected.
+`RuntimePolicyConfig::revision()` and `parameters()` expose the applied state. Revisions start
+at zero and are local to one policy instance; external controllers must also identify the router
+instance to avoid applying a stale update after a rebuild.
+
+Updates run between selection calls. A replacement cannot add worker-input groups beyond those
+declared at startup, change the worker label, or change exclusive-affinity behavior. Queues,
+worker discovery, cache indexes, and host accounting are retained. Scorer/picker-local scratch
+state is rebuilt. A cancelled control request still waiting in the actor queue is skipped.
+
+The [simple-filter-score-pick example](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/simple-filter-score-pick/src/lib.rs)
+opts in for its `min_device_overlap_blocks` parameter. The built-in default policy opts in for
+its scoring weights and temperature. See [Runtime Policy Updates](configuration-and-tuning.md#runtime-policy-updates)
+for the frontend HTTP contract, scope, and persistence limits.

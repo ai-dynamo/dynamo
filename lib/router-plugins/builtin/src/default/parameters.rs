@@ -75,6 +75,51 @@ impl Parameters {
     }
 }
 
+impl PolicyParameters {
+    pub(super) fn snapshot(&self) -> serde_json::Map<String, serde_json::Value> {
+        [
+            ("overlap_score_credit", self.overlap_score_credit),
+            (
+                "overlap_score_credit_decay",
+                self.overlap_score_credit_decay,
+            ),
+            ("prefill_load_scale", self.prefill_load_scale),
+            (
+                "decode_active_request_weight",
+                self.decode_active_request_weight,
+            ),
+            ("host_cache_hit_weight", self.host_cache_hit_weight),
+            ("disk_cache_hit_weight", self.disk_cache_hit_weight),
+            ("shared_cache_multiplier", self.shared_cache_multiplier),
+            ("router_temperature", self.router_temperature),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value.into()))
+        .collect()
+    }
+
+    pub(super) fn from_runtime(
+        values: serde_json::Map<String, serde_json::Value>,
+        config: &KvRouterConfig,
+    ) -> Result<Self, dynamo_kv_router::plugins::worker_selection::RuntimePolicyError> {
+        use dynamo_kv_router::plugins::worker_selection::RuntimePolicyError;
+        // The host supplies a complete resolved map. Reject null, booleans, and non-finite values.
+        for (name, value) in &values {
+            if !value
+                .as_f64()
+                .is_some_and(|value| value.is_finite() && value >= 0.0)
+            {
+                return Err(RuntimePolicyError::InvalidParameters(format!(
+                    "{name} must be a finite non-negative number"
+                )));
+            }
+        }
+        let parameters: Parameters = serde_json::from_value(serde_json::Value::Object(values))
+            .map_err(|error| RuntimePolicyError::InvalidParameters(error.to_string()))?;
+        Ok(parameters.resolve(config))
+    }
+}
+
 pub(crate) fn register(
     registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {

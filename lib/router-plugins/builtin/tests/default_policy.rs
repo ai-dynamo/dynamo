@@ -12,6 +12,116 @@ use std::collections::{HashMap, HashSet};
 use support::*;
 
 #[test]
+fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
+    use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
+    use serde_json::json;
+
+    let (workers, mut request) = fixture(2, 160);
+    for (worker, load) in &mut request.worker_loads {
+        load.active_prefill_tokens = 0;
+        load.active_requests = 0;
+        load.active_decode_blocks = if worker.worker_id == 0 { 8 } else { 0 };
+        load.additional_active_blocks = 0;
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(*worker, if worker.worker_id == 0 { 10 } else { 0 });
+    }
+    let config = KvRouterConfig {
+        overlap_score_credit: 2.0,
+        host_cache_hit_weight: 0.0,
+        disk_cache_hit_weight: 0.0,
+        router_temperature: 0.0,
+        ..Default::default()
+    };
+    let mut policy = default_policy(config, "prefill");
+    let select = |policy: &WorkerSelectionPolicy| {
+        policy
+            .select_worker(selection_input(&workers, &request, 16))
+            .unwrap()
+            .worker
+            .worker_id
+    };
+    assert_eq!(select(&policy), 0);
+    let initial = policy.runtime_config().unwrap();
+    let patch = json!({"overlap_score_credit": 0.0})
+        .as_object()
+        .unwrap()
+        .clone();
+    let changed = policy
+        .update_runtime_config(RuntimePolicyUpdate::patch(
+            initial.revision(),
+            patch.clone(),
+        ))
+        .unwrap();
+    assert_eq!(select(&policy), 1);
+    assert_eq!(changed.revision(), 1);
+    assert!(matches!(
+        policy.update_runtime_config(RuntimePolicyUpdate::patch(0, patch)),
+        Err(RuntimePolicyError::Conflict { .. })
+    ));
+    for invalid in [
+        json!({"overlap_score_credit": 2.0, "router_temperature": -1.0}),
+        json!({"router_temperature": "1"}),
+        json!({"tp": 2}),
+    ] {
+        assert!(
+            policy
+                .update_runtime_config(RuntimePolicyUpdate::patch(
+                    1,
+                    invalid.as_object().unwrap().clone()
+                ))
+                .is_err()
+        );
+        assert_eq!(policy.runtime_config().unwrap(), changed);
+        assert_eq!(select(&policy), 1);
+    }
+    policy
+        .update_runtime_config(RuntimePolicyUpdate::patch(
+            1,
+            json!({"overlap_score_credit": null})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ))
+        .unwrap();
+    assert_eq!(select(&policy), 0);
+    let reset = policy
+        .update_runtime_config(RuntimePolicyUpdate::reset(2))
+        .unwrap();
+    assert_eq!(reset.parameters(), initial.parameters());
+    assert_eq!(reset.revision(), 3);
+}
+
+#[test]
+fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
+    use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
+    let mut policy = default_policy(
+        KvRouterConfig {
+            overlap_score_credit: 0.0,
+            host_cache_hit_weight: 0.0,
+            disk_cache_hit_weight: 0.0,
+            shared_cache_multiplier: Some(0.0),
+            ..Default::default()
+        },
+        "prefill",
+    );
+    let initial = policy.runtime_config().unwrap();
+    assert!(matches!(
+        policy.update_runtime_config(RuntimePolicyUpdate::patch(
+            0,
+            serde_json::json!({"overlap_score_credit": 1.0})
+                .as_object()
+                .unwrap()
+                .clone()
+        )),
+        Err(RuntimePolicyError::InvalidParameters(_))
+    ));
+    assert_eq!(policy.runtime_config().unwrap(), initial);
+}
+
+#[test]
 fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
     for temperature in [0.0, 0.7] {
         for prompt in [1, 17, 127, 2048] {

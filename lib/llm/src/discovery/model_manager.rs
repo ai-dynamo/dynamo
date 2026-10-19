@@ -158,6 +158,7 @@ pub(crate) struct RemovedDiscoveryGroup {
 ///
 /// Note: Don't implement Clone for this, put it in an Arc instead.
 pub struct ModelManager {
+    pub(crate) router_policies: super::router_policy::RouterPolicyRegistry,
     /// Model name → Model (which contains WorkerSets with engines)
     models: DashMap<String, Arc<Model>>,
 
@@ -275,6 +276,7 @@ impl ModelManager {
 
     pub fn new() -> Self {
         Self {
+            router_policies: Default::default(),
             models: DashMap::new(),
             catalog: ArcSwap::from_pointee(CommittedCatalog::default()),
             cards: DashMap::new(),
@@ -2400,6 +2402,7 @@ impl ModelManager {
             None
         };
 
+        let runtime_model_name = model_name.clone();
         let mut chooser = KvRouter::new_with_worker_role_and_scheduler_load(
             endpoint.clone(),
             client,
@@ -2479,6 +2482,14 @@ impl ModelManager {
             }
         }
 
+        if let Some(model) = runtime_model_name {
+            self.router_policies.register(
+                model,
+                endpoint.id(),
+                worker_role.unwrap_or(WorkerType::Aggregated),
+                chooser.runtime_policy(),
+            );
+        }
         Ok(Arc::new(chooser))
     }
 

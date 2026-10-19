@@ -584,6 +584,76 @@ Use `--router-prefill-load-model ais` when you want prompt-side load tracking to
 
 Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize average TTFT. Use the default `fcfs` when you want to minimize tail TTFT.
 
+## Runtime Policy Updates
+
+**Experimental.** The frontend admin API can update the built-in default policy's scoring
+parameters without replacing the router's queue, KV index, or active request bookings.
+The update replaces the scorer and picker between routing decisions. Requests that already
+have a selected worker keep that worker; subsequent selections, including queued requests,
+use the new parameters.
+
+`GET /router_policy` lists frontend-local KV router instances. Use `?model=<name>` to filter
+by the model name returned in the response. Each entry includes `router_id`, `model`,
+`namespace`, `component`, `endpoint`, `worker_type`, and `configuration`. Configuration contains
+a `revision` and the complete resolved `parameters`. A null configuration means that the
+selected custom policy does not support runtime updates. Non-KV routing paths are not listed.
+
+```bash
+curl --get http://localhost:8000/router_policy --data-urlencode model=qwen
+```
+
+Use a returned `router_id` and revision in `PATCH /router_policy`:
+
+```json
+{
+  "router_id": "<router_id from GET>",
+  "expected_revision": 0,
+  "parameters": {
+    "overlap_score_credit": 1.5,
+    "prefill_load_scale": 2.0,
+    "router_temperature": 0.1
+  }
+}
+```
+
+The default policy accepts the following finite, non-negative parameters:
+`overlap_score_credit`, `overlap_score_credit_decay`, `prefill_load_scale`,
+`decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`,
+`shared_cache_multiplier`, and `router_temperature`. These change policy scoring only;
+host-owned load accounting and queue settings remain unchanged.
+
+Omitted parameters retain their current values. A parameter set to `null` restores that
+parameter's resolved startup value, including explicit policy YAML overrides. To restore all
+startup parameters, send `reset: true` instead of `parameters`. Every successful update or
+reset advances the revision. The response returns the target metadata and applied configuration.
+
+Updates must preserve the worker signals available when the pipeline was constructed. For
+example, a policy initialized without cache inputs cannot enable cache-dependent scoring at
+runtime. Rebuild that router with cache inputs enabled first. Temporarily disabling a scoring
+term does not prevent restoring its startup value later.
+
+| Status | Meaning |
+| --- | --- |
+| `200` | Query succeeded, or the complete update was applied. |
+| `400` | Invalid JSON/query, empty patch, or conflicting reset/parameters. |
+| `404` | The router instance ID is unknown or has expired. |
+| `409` | `expected_revision` does not match. Query the current configuration before retrying. |
+| `413` | Request body exceeds 16 KiB. |
+| `415` | Request is not sent as `application/json`. |
+| `422` | Unknown request fields, missing revision, unsupported policy, unknown parameter, invalid value, or a change requiring unavailable worker signals. No parameters are changed. |
+| `503` | The scheduler stopped or did not respond within five seconds. Query its state before retrying an update. |
+
+The same frontend admin switch controls both this API and `/busy_threshold`:
+`DYN_DISABLE_FRONTEND_ADMIN_API=1` disables them. Busy thresholds remain separately managed by
+`/busy_threshold` and are not part of the policy revision.
+
+Updates are process-local and not persisted. A rebuilt router receives a new ID and starts
+from its configured startup values. A controller must address each frontend replica directly,
+retain the desired settings, and reapply them to new router instances; a load-balanced request
+does not update every replica. The standalone Python router does not expose this HTTP API.
+Rust hosts can use `KvRouter::runtime_policy()` or `LocalScheduler::runtime_policy()` to access
+the same actor-serialized control handle.
+
 ## Prometheus Metrics
 
 The router exposes Prometheus metrics on the frontend's HTTP port (default 8000) at `/metrics`:

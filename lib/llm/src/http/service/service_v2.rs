@@ -838,7 +838,7 @@ pub struct HttpServiceConfig {
     enable_nvext: bool,
 
     /// Master switch for the frontend admin API surface (`GET` /
-    /// `POST /busy_threshold`). Default `true`; env-truthy
+    /// `POST /busy_threshold`, `GET` / `PATCH /router_policy`). Default `true`; env-truthy
     /// `DYN_DISABLE_FRONTEND_ADMIN_API` overrides to `false`.
     #[builder(default = "true")]
     enable_admin_api: bool,
@@ -1482,6 +1482,9 @@ impl HttpServiceConfigBuilder {
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
         if admin_api_enabled {
+            system_routes.push(super::router_policy::router_policy_router(
+                state.manager_clone(),
+            ));
             system_routes.push(super::busy_threshold::busy_threshold_router(
                 state.clone(),
                 None,
@@ -2617,6 +2620,13 @@ mod tests {
         assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 
         // And /live still works (sanity: only the admin surface is gated).
+        let policy = reqwest::Client::new()
+            .get(format!("http://localhost:{}/router_policy", port))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(policy.status(), reqwest::StatusCode::NOT_FOUND);
+
         let live = reqwest::Client::new()
             .get(format!("http://localhost:{}/live", port))
             .send()

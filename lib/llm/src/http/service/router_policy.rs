@@ -1,0 +1,321 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Frontend-local worker-selection policy administration.
+
+use std::{sync::Arc, time::Duration};
+
+use axum::{
+    Json, Router,
+    extract::{
+        DefaultBodyLimit, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
+    http::{Method, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+};
+use dynamo_kv_router::plugins::worker_selection::{
+    RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use uuid::Uuid;
+
+use super::RouteDoc;
+use crate::discovery::{ModelManager, router_policy::RouterPolicyTarget};
+
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyQuery {
+    model: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyPatch {
+    router_id: Uuid,
+    expected_revision: u64,
+    parameters: Option<Map<String, Value>>,
+    #[serde(default)]
+    reset: bool,
+}
+
+#[derive(Serialize)]
+struct PolicyResponse {
+    #[serde(flatten)]
+    target: RouterPolicyTarget,
+    /// Null means the selected policy has not opted in to runtime configuration.
+    configuration: Option<RuntimePolicyConfig>,
+}
+
+fn error(status: StatusCode, message: impl ToString) -> Response {
+    (
+        status,
+        Json(serde_json::json!({"error": message.to_string()})),
+    )
+        .into_response()
+}
+
+fn policy_error(error_value: RuntimePolicyError) -> Response {
+    let status = match &error_value {
+        RuntimePolicyError::Conflict { .. } => StatusCode::CONFLICT,
+        RuntimePolicyError::Unsupported | RuntimePolicyError::InvalidParameters(_) => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+        RuntimePolicyError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    error(status, error_value)
+}
+
+pub(crate) fn router_policy_router(manager: Arc<ModelManager>) -> (Vec<RouteDoc>, Router) {
+    (
+        vec![
+            RouteDoc::new(Method::GET, "/router_policy"),
+            RouteDoc::new(Method::PATCH, "/router_policy"),
+        ],
+        Router::new()
+            .route("/router_policy", get(list).patch(update))
+            .layer(DefaultBodyLimit::max(16 * 1024))
+            .with_state(manager),
+    )
+}
+
+async fn list(
+    State(manager): State<Arc<ModelManager>>,
+    query: Result<Query<PolicyQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(rejection) => return error(rejection.status(), rejection.body_text()),
+    };
+    let entries = manager.router_policies.list(query.model.as_deref());
+    let results =
+        futures::future::join_all(entries.into_iter().map(|(target, control)| async move {
+            let result = tokio::time::timeout(CONTROL_TIMEOUT, control.get()).await;
+            match result {
+                Ok(Ok(configuration)) => Ok(Some(PolicyResponse {
+                    target,
+                    configuration: Some(configuration),
+                })),
+                Ok(Err(RuntimePolicyError::Unsupported)) => Ok(Some(PolicyResponse {
+                    target,
+                    configuration: None,
+                })),
+                // A router can retire after the registry snapshot was taken.
+                Ok(Err(RuntimePolicyError::Unavailable)) => Ok(None),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(RuntimePolicyError::Unavailable),
+            }
+        }))
+        .await;
+    let mut routers = Vec::new();
+    for result in results {
+        match result {
+            Ok(Some(router)) => routers.push(router),
+            Ok(None) => {}
+            Err(error) => return policy_error(error),
+        }
+    }
+    Json(serde_json::json!({"routers": routers})).into_response()
+}
+
+async fn update(
+    State(manager): State<Arc<ModelManager>>,
+    payload: Result<Json<PolicyPatch>, JsonRejection>,
+) -> Response {
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(rejection) => return error(rejection.status(), rejection.body_text()),
+    };
+    let update = match (request.reset, request.parameters) {
+        (true, None) => RuntimePolicyUpdate::reset(request.expected_revision),
+        (false, Some(parameters)) if !parameters.is_empty() => {
+            RuntimePolicyUpdate::patch(request.expected_revision, parameters)
+        }
+        _ => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "provide either nonempty parameters or reset: true",
+            );
+        }
+    };
+    let Some((target, control)) = manager.router_policies.get(request.router_id) else {
+        return error(
+            StatusCode::NOT_FOUND,
+            "router instance not found; query /router_policy on this frontend",
+        );
+    };
+    match tokio::time::timeout(CONTROL_TIMEOUT, control.update(update)).await {
+        Ok(Ok(configuration)) => {
+            tracing::info!(router_id = %target.router_id, model = %target.model, revision = configuration.revision(), "Updated router policy parameters");
+            Json(PolicyResponse {
+                target,
+                configuration: Some(configuration),
+            })
+            .into_response()
+        }
+        Ok(Err(error)) => policy_error(error),
+        Err(_) => policy_error(RuntimePolicyError::Unavailable),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use dynamo_custom_policy_builtin::default_factory;
+    use dynamo_kv_router::services::selection::{
+        SelectionCacheConfig, SelectionCore, WorkerRequest,
+    };
+    use dynamo_kv_router::{KvRouterConfig, RoutingPartitionId, WorkerType};
+    use dynamo_runtime::protocols::EndpointId;
+    use tower::ServiceExt;
+
+    async fn fixture() -> (Router, SelectionCore, Uuid, Uuid) {
+        let core = SelectionCore::try_new_local(
+            KvRouterConfig {
+                use_kv_events: false,
+                ..Default::default()
+            },
+            1,
+            Default::default(),
+            SelectionCacheConfig::default(),
+            default_factory(),
+        )
+        .unwrap();
+        let manager = Arc::new(ModelManager::new());
+        let mut ids = Vec::new();
+        for (worker_id, model) in [(1, "first"), (2, "second")] {
+            core.upsert_worker(WorkerRequest {
+                worker_id,
+                model_name: model.into(),
+                routing_group: "default".into(),
+                endpoint: Some(format!("http://worker-{worker_id}:8000")),
+                block_size: Some(4),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let partition = core
+                .partition(&RoutingPartitionId::new(model, "default"))
+                .unwrap();
+            ids.push(manager.router_policies.register(
+                model.into(),
+                EndpointId {
+                    namespace: "test".into(),
+                    component: model.into(),
+                    name: "generate".into(),
+                },
+                WorkerType::Aggregated,
+                partition.scheduler().runtime_policy(),
+            ));
+        }
+        (router_policy_router(manager).1, core, ids[0], ids[1])
+    }
+
+    async fn call(app: &Router, method: Method, uri: &str, body: Value) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn http_updates_reach_the_live_policy_and_preserve_other_instances() {
+        let (app, core, first, second) = fixture().await;
+        let (status, initial) =
+            call(&app, Method::GET, "/router_policy?model=first", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(initial["routers"].as_array().unwrap().len(), 1);
+        assert_eq!(initial["routers"][0]["router_id"], first.to_string());
+        assert_eq!(initial["routers"][0]["worker_type"], "aggregated");
+        let startup = initial["routers"][0]["configuration"]["parameters"].clone();
+
+        let (status, changed) = call(&app, Method::PATCH, "/router_policy", serde_json::json!({
+            "router_id": first, "expected_revision": 0, "parameters": {"overlap_score_credit": 2.5, "decode_active_request_weight": 32.0}
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{changed}");
+        assert_eq!(changed["configuration"]["revision"], 1);
+        let partition = core
+            .partition(&RoutingPartitionId::new("first", "default"))
+            .unwrap();
+        let actual = partition.scheduler().runtime_policy().get().await.unwrap();
+        assert_eq!(actual.parameters()["overlap_score_credit"], 2.5);
+        assert_eq!(actual.parameters()["decode_active_request_weight"], 32.0);
+        let (_, untouched) = call(
+            &app,
+            Method::GET,
+            "/router_policy?model=second",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(untouched["routers"][0]["router_id"], second.to_string());
+        assert_eq!(untouched["routers"][0]["configuration"]["revision"], 0);
+
+        for (body, expected) in [
+            (
+                serde_json::json!({"router_id": first, "expected_revision": 0, "reset": true}),
+                StatusCode::CONFLICT,
+            ),
+            (
+                serde_json::json!({"router_id": first, "expected_revision": 1, "parameters": {"overlap_score_credit": 8.0, "router_temperature": -1.0}}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                serde_json::json!({"router_id": first, "expected_revision": 1, "parameters": {"routing_mode": "random"}}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                serde_json::json!({"router_id": first, "expected_revision": 1, "parameters": {}, "reset": true}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"router_id": Uuid::new_v4(), "expected_revision": 0, "reset": true}),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                serde_json::json!({"router_id": first, "reset": true}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                serde_json::json!({"router_id": first, "expected_revision": 1, "parameters": {"router_temperature": "x".repeat(16 * 1024)}}),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+        ] {
+            let (status, response) = call(&app, Method::PATCH, "/router_policy", body).await;
+            assert_eq!(status, expected, "{response}");
+            assert_eq!(
+                partition.scheduler().runtime_policy().get().await.unwrap(),
+                actual
+            );
+        }
+        let (status, reset) = call(
+            &app,
+            Method::PATCH,
+            "/router_policy",
+            serde_json::json!({"router_id": first, "expected_revision": 1, "reset": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reset["configuration"]["revision"], 2);
+        assert_eq!(reset["configuration"]["parameters"], startup);
+        core.shutdown();
+    }
+}

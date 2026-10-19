@@ -22,6 +22,10 @@ use crate::plugins::worker_selection::{
     WorkerCandidates, WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
     WorkerSelectionContext,
 };
+use crate::plugins::worker_selection::{
+    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyState,
+    RuntimePolicyUpdate,
+};
 
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
 pub(super) enum WorkerSelectionPolicyState {
@@ -59,6 +63,7 @@ pub struct WorkerSelectionPolicy {
     worker_label: &'static str,
     state: WorkerSelectionPolicyState,
     exclusive_affinity: bool,
+    runtime: Option<Box<RuntimePolicyState>>,
 }
 
 impl WorkerSelectionPolicy {
@@ -109,6 +114,7 @@ impl WorkerSelectionPolicy {
         Self {
             worker_label,
             exclusive_affinity: false,
+            runtime: None,
             state: WorkerSelectionPolicyState::Composed(RefCell::new(ComposedPolicyState {
                 filters,
                 scorers,
@@ -132,6 +138,68 @@ impl WorkerSelectionPolicy {
         self
     }
 
+    /// Opt in to runtime parameter updates with a pure replacement builder.
+    /// The initial parameters define the patchable keys and reset values. Replacements must
+    /// require no new worker-input groups and preserve affinity behavior; queue and tracking state are retained.
+    pub fn with_runtime_config(
+        mut self,
+        parameters: serde_json::Map<String, serde_json::Value>,
+        builder: RuntimePolicyBuilder,
+    ) -> Self {
+        self.runtime = Some(Box::new(RuntimePolicyState::new(
+            parameters,
+            builder,
+            self.input_requirements(),
+        )));
+        self
+    }
+
+    /// Return the current complete parameters for this policy instance.
+    pub fn runtime_config(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        self.runtime
+            .as_deref()
+            .map(RuntimePolicyState::config)
+            .ok_or(RuntimePolicyError::Unsupported)
+    }
+
+    /// Validate and replace the policy. Hosts must serialize this with selection.
+    pub fn update_runtime_config(
+        &mut self,
+        update: RuntimePolicyUpdate,
+    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or(RuntimePolicyError::Unsupported)?;
+        let (mut replacement, state) = runtime.prepare(update)?;
+        // Hosts freeze these requirements when constructing their routing pipeline.
+        if !runtime
+            .available_inputs
+            .contains(replacement.input_requirements())
+            || self.exclusive_affinity != replacement.exclusive_affinity
+            || self.worker_label != replacement.worker_label
+        {
+            return Err(RuntimePolicyError::InvalidParameters(
+                "replacement changes routing requirements".into(),
+            ));
+        }
+        let response = state.config();
+        replacement.runtime = Some(Box::new(state));
+        *self = replacement;
+        Ok(response)
+    }
+
+    fn input_requirements(&self) -> WorkerInputs {
+        match &self.state {
+            #[cfg(any(test, feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(..) => WorkerInputs::CACHE | WorkerInputs::LOAD,
+            WorkerSelectionPolicyState::Composed(state) => {
+                let state = state.borrow();
+                state.filter_inputs | state.scorer_picker_inputs
+            }
+        }
+    }
+
     /// Construct the native reference implementation for parity tests and benchmarks.
     ///
     /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
@@ -142,6 +210,7 @@ impl WorkerSelectionPolicy {
         Self {
             worker_label,
             exclusive_affinity: false,
+            runtime: None,
             state: WorkerSelectionPolicyState::Reference(Box::new(kv_router_config), picker),
         }
     }
@@ -332,6 +401,16 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
+    fn runtime_config(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        self.runtime_config()
+    }
+
+    fn update_runtime_config(
+        &mut self,
+        update: RuntimePolicyUpdate,
+    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        self.update_runtime_config(update)
+    }
     fn uses_exclusive_affinity_target(&self) -> bool {
         #[cfg(any(test, feature = "bench"))]
         if matches!(&self.state, WorkerSelectionPolicyState::Reference(..)) {
@@ -341,14 +420,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     }
 
     fn required_worker_inputs(&self) -> WorkerInputs {
-        match &self.state {
-            #[cfg(any(test, feature = "bench"))]
-            WorkerSelectionPolicyState::Reference(..) => WorkerInputs::CACHE | WorkerInputs::LOAD,
-            WorkerSelectionPolicyState::Composed(state) => {
-                let state = state.borrow();
-                state.filter_inputs | state.scorer_picker_inputs
-            }
-        }
+        self.input_requirements()
     }
 
     #[inline(always)]

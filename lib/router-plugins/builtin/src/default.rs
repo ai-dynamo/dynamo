@@ -23,7 +23,36 @@ use std::sync::Arc;
 /// Per-request score overrides are not used. Request load-tracking remains host-owned.
 pub fn default_policy(config: KvRouterConfig, worker_label: &'static str) -> WorkerSelectionPolicy {
     let parameters = PolicyParameters::from(&config);
-    policy_with_rng(config, parameters, worker_label, None, false)
+    runtime_policy(config, parameters, worker_label, false)
+}
+
+fn runtime_policy(
+    config: KvRouterConfig,
+    parameters: PolicyParameters,
+    worker_label: &'static str,
+    is_plain_decode: bool,
+) -> WorkerSelectionPolicy {
+    let initial = parameters.snapshot();
+    let policy = policy_with_rng(
+        config.clone(),
+        parameters,
+        worker_label,
+        None,
+        is_plain_decode,
+    );
+    policy.with_runtime_config(
+        initial,
+        Arc::new(move |values| {
+            let parameters = PolicyParameters::from_runtime(values, &config)?;
+            Ok(policy_with_rng(
+                config.clone(),
+                parameters,
+                worker_label,
+                None,
+                is_plain_decode,
+            ))
+        }),
+    )
 }
 
 fn policy_with_rng(
@@ -53,11 +82,10 @@ fn policy_for_role(
 ) -> WorkerSelectionPolicy {
     let is_plain_decode =
         role == dynamo_kv_router::WorkerType::Decode && !config.conditional_disagg_enabled;
-    policy_with_rng(
+    runtime_policy(
         config,
         parameters,
         role.default_selector_label(),
-        None,
         is_plain_decode,
     )
 }
