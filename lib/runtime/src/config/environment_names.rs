@@ -420,10 +420,10 @@ pub mod llm {
     /// Enable the experimental System One typed-decisions endpoint (/v1/systemone)
     pub const DYN_ENABLE_SYSTEMONE_API: &str = "DYN_ENABLE_SYSTEMONE_API";
 
-    /// Maximum number of System One question branches admitted concurrently.
+    /// Maximum concurrent System One question branches; values above 256 are clamped with a warning.
     pub const DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES: &str = "DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES";
 
-    /// Maximum cumulative prompt tokens accepted by one System One request.
+    /// Maximum cumulative prompt tokens per System One request; values above 65,536 are clamped with a warning.
     pub const DYN_SYSTEMONE_MAX_INPUT_TOKENS: &str = "DYN_SYSTEMONE_MAX_INPUT_TOKENS";
     /// Total decision preflight and execution deadline, bounded to 300 seconds.
     pub const DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS: &str = "DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS";
