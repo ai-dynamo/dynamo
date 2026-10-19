@@ -87,7 +87,6 @@ areas:
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
-  - lib/sidecar/vllm/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
@@ -100,8 +99,6 @@ areas:
   - components/src/dynamo/trtllm/utils/
   - components/src/dynamo/trtllm/workers/
   - examples/backends/trtllm/
-  - lib/mocker/servers/trtllm/
-  - lib/sidecar/trtllm/
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
   path_globs:
@@ -109,13 +106,22 @@ areas:
   - components/src/dynamo/sglang/request_handlers/
   - components/src/dynamo/sglang/tests/
   - examples/backends/sglang/
-  - lib/mocker/servers/sglang/
-  - lib/sidecar/sglang/
 - label: backend-triton
   github_team: '@ai-dynamo/dynamo-backend-triton-codeowners'
   path_globs:
   - components/src/dynamo/triton/**
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
+- label: sidecar
+  github_team: '@ai-dynamo/dynamo-sidecar-codeowners'
+  path_globs:
+  - components/src/dynamo/sglang/sidecar.py
+  - components/src/dynamo/trtllm/sidecar.py
+  - components/src/dynamo/vllm/sidecar.py
+  - docs/fern/**/*sidecar*
+  - lib/bindings/python/tests/test_sidecar_startup.py
+  - lib/mocker/servers/
+  - lib/sidecar/
+  - tests/serve/test_sidecar.py
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
@@ -255,10 +261,6 @@ areas:
   - examples/custom_backend/
   - lib/backend-common/
   - lib/backend-common/examples/
-  - lib/sidecar/dynamo-sidecar
-  - lib/sidecar/README.md
-  - lib/sidecar/common/
-  - lib/sidecar/testkit/
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
@@ -1095,26 +1097,14 @@ shared:
   owners:
   - frontend
   - diffusion
-- glob: lib/mocker/servers/sglang/
-  owners:
-  - performance
-  - backend-sglang
-- glob: lib/mocker/servers/trtllm/
-  owners:
-  - performance
-  - backend-trtllm
 - glob: lib/runtime/src/nvtx.rs
   owners:
   - runtime
   - performance
-- glob: lib/sidecar/testkit/tests/support/vllm.rs
+- glob: lib/sidecar/Dockerfile
   owners:
-  - runtime
-  - backend-vllm
-- glob: lib/sidecar/testkit/tests/support/sglang.rs
-  owners:
-  - runtime
-  - backend-sglang
+  - sidecar
+  - ops
 - glob: tests/deploy/
   owners:
   - ops
