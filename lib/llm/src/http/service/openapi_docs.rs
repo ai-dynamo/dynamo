@@ -1325,10 +1325,9 @@ mod tests {
         assert!(operation["responses"]["200"]["content"]["application/json"]["schema"].is_object());
         assert!(operation["responses"].get("429").is_some());
         assert!(value["paths"]["/v1/decisions"]["post"]["requestBody"]["content"].is_object());
-        assert!(
-            value["paths"]["/v1/systemone"]["post"]["requestBody"]
-                .get("content")
-                .is_none()
+        assert_eq!(
+            value["paths"]["/v1/systemone"]["post"]["requestBody"]["content"],
+            serde_json::json!({})
         );
         assert!(
             value["paths"]["/v1/decisions"]["get"]
