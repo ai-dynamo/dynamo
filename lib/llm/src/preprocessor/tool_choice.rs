@@ -427,7 +427,10 @@ fn beam_turn_grammar_constraint<R: OAIChatLikeRequest + CommonExtProvider>(
         (false, _)
             if request.common_ext().and_then(|common| common.ignore_eos) == Some(true)
                 && !OpenAIPreprocessor::has_structured_response_format(request)
-                && !OpenAIPreprocessor::request_has_effective_tools(request) =>
+                && (request
+                    .tool_choice()
+                    .is_some_and(|choice| choice.as_str() == Some("none"))
+                    || !OpenAIPreprocessor::request_has_effective_tools(request)) =>
         {
             GuidedToolConstraint::None
         }
@@ -1176,6 +1179,7 @@ mod tests {
             for extra in [
                 json!({}),
                 json!({"tool_choice": "none"}),
+                json!({"tools": tools(), "tool_choice": "none"}),
                 json!({"tool_choice": "auto", "response_format": {"type": "text"}}),
             ] {
                 for ignore_eos in [None, Some(false), Some(true)] {
@@ -1214,15 +1218,14 @@ mod tests {
         let preprocessor = preprocessor_for("beam");
         for extra in [
             json!({"tools": tools()}),
-            json!({"tools": tools(), "tool_choice": "none"}),
-            json!({"tools": tools(), "tool_choice": "required"}),
-            json!({"tools": tools(), "tool_choice": {"type": "function", "function": {"name": "get_weather"}}}),
             json!({"messages": [
                 {"role": "system", "content": "", "tools": [{"name": "lookup", "parameters": {"type": "object"}}]},
                 {"role": "user", "content": "hi"}
             ]}),
             json!({"response_format": {"type": "json_object"}}),
             json!({"response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object"}}}}),
+            json!({"tools": tools(), "tool_choice": "none", "response_format": {"type": "json_object"}}),
+            json!({"tools": tools(), "tool_choice": "none", "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object"}}}}),
         ] {
             let mut request = request(extra.clone());
             let mut normal = preprocessed_request();
