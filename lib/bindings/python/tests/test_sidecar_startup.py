@@ -30,7 +30,7 @@ def sidecar_env():
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("DYN_", "ETCD_", "NATS_"))
+        if not key.startswith(("DYN_", "ETCD_", "NATS_", "SGLANG_GRPC_"))
     }
     env.update(
         DYN_DISCOVERY_BACKEND="mem",
@@ -42,10 +42,20 @@ def sidecar_env():
     return env
 
 
-@pytest.mark.parametrize("engine", ["vllm", "sglang", "trtllm"])
+@pytest.mark.parametrize(
+    "engine,endpoint_source",
+    [
+        ("vllm", "cli"),
+        ("sglang", "cli"),
+        ("sglang", "engine_env"),
+        ("sglang", "dynamo_override"),
+        ("sglang", "cli_override"),
+        ("trtllm", "cli"),
+    ],
+)
 @pytest.mark.timeout(40)
 def test_python_sidecar_probes_during_initialization(
-    engine, sidecar_env, tmp_path, monkeypatch
+    engine, endpoint_source, sidecar_env, tmp_path, monkeypatch
 ):
     # ManagedProcess checks health in this process; bypass ambient proxies.
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
@@ -61,11 +71,20 @@ def test_python_sidecar_probes_during_initialization(
             sys.executable,
             "-m",
             f"dynamo.{engine}.sidecar",
-            "--grpc-endpoint",
-            f"http://127.0.0.1:{engine_listener.getsockname()[1]}",
             "--grpc-startup-deadline-secs",
             "60",
         ]
+        endpoint = f"http://127.0.0.1:{engine_listener.getsockname()[1]}"
+        if endpoint_source == "engine_env":
+            sidecar_env["SGLANG_GRPC_ENDPOINT"] = endpoint
+        elif endpoint_source == "dynamo_override":
+            sidecar_env["SGLANG_GRPC_ENDPOINT"] = "invalid-endpoint"
+            sidecar_env["DYN_SIDECAR_GRPC_ENDPOINT"] = endpoint
+        else:
+            if endpoint_source == "cli_override":
+                sidecar_env["SGLANG_GRPC_ENDPOINT"] = "invalid-endpoint"
+                sidecar_env["DYN_SIDECAR_GRPC_ENDPOINT"] = "invalid-endpoint"
+            args.extend(["--grpc-endpoint", endpoint])
         if engine == "trtllm":
             args.extend(["--model-path", "unused"])
         with ManagedProcess(
