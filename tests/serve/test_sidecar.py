@@ -35,11 +35,7 @@ from tests.utils.payload_builder import (
     sglang_generate_cancellation_payloads,
 )
 from tests.utils.payloads import KvTransferPayload, OmittedMaxTokensChatPayload
-from tests.utils.port_utils import (
-    allocate_contiguous_ports,
-    allocate_ports,
-    deallocate_ports,
-)
+from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/vllm"
@@ -150,10 +146,12 @@ def _engine_metrics(
 
 @dataclass
 class SidecarConfig(EngineConfig):
-    """Engine config plus the GPU variables its launch script reads."""
+    """Engine config plus the GPU and port variables its launch script reads."""
 
     # Variable name -> logical GPU indices, mapped through CUDA_VISIBLE_DEVICES.
     gpu_env: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    # Variable name -> (block size, range); set to the first port of a reserved block.
+    port_env: dict[str, tuple[int, DynamoPortRange]] = field(default_factory=dict)
 
 
 def _on_first_gpu(*names: str) -> dict[str, tuple[int, ...]]:
@@ -479,6 +477,11 @@ sidecar_configs = {
         directory=sglang_sidecar_dir,
         script_name="dep_kv_router.sh",
         gpu_env={"CUDA_VISIBLE_DEVICES": (0, 1)},
+        # DP attention also uses the ports after its distributed-init port.
+        port_env={
+            "DYN_DIST_INIT_PORT1": (9, DynamoPortRange.SERVE),
+            "DYN_NCCL_PORT1": (1, DynamoPortRange.NCCL),
+        },
         script_args=[
             *SGLANG_KV_ROUTING_ARGS,
             "--attention-backend",
@@ -528,12 +531,10 @@ def sidecar_config_test(request, monkeypatch, discovery_backend):
             len(set(devices)) == len(indices) and "-1" not in devices
         ), f"{name} requires {len(indices)} distinct visible GPU(s)"
         monkeypatch.setenv(name, ",".join(devices))
-    # SGLang DEP also takes the ports after its distributed-init port.
-    dist_init_ports = allocate_contiguous_ports(1, 9, DynamoPortRange.SERVE.value)
-    nccl_ports = allocate_ports(1, DynamoPortRange.NCCL.value)
-    request.addfinalizer(lambda: deallocate_ports(dist_init_ports + nccl_ports))
-    monkeypatch.setenv("DYN_DIST_INIT_PORT1", str(dist_init_ports[0]))
-    monkeypatch.setenv("DYN_NCCL_PORT1", str(nccl_ports[0]))
+    for name, (block_size, port_range) in config.port_env.items():
+        ports = allocate_contiguous_ports(1, block_size, port_range.value)
+        request.addfinalizer(lambda ports=ports: deallocate_ports(ports))
+        monkeypatch.setenv(name, str(ports[0]))
     return config
 
 
