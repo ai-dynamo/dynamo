@@ -152,7 +152,7 @@ fn cache_usage_retains_admission_measurement_without_inventing_missing_counts() 
     );
     assert_eq!(
         compatibility.output_signal(output(true)).cached_tokens,
-        Some(2)
+        None
     );
     compatibility.native_request(request(29, 0));
     assert_eq!(
@@ -184,6 +184,41 @@ fn cache_usage_retains_admission_measurement_without_inventing_missing_counts() 
         compatibility.output_signal(output(true)).cached_tokens,
         None
     );
+}
+
+#[test]
+fn terminal_cache_usage_preserves_explicit_counts_and_cleans_up() {
+    for (explicit, expected) in [(None, Some(2)), (Some(0), Some(0)), (Some(3), Some(3))] {
+        let compatibility = CompatibilityState::new(args(1));
+        let request_id = Uuid::from_u128(30);
+        compatibility.native_request(request(30, 0));
+        compatibility.record_admissions(&[Admission {
+            request_id,
+            reused_input_tokens: 2,
+            cache_tier_attribution: None,
+        }]);
+        let output = aisimulate_core::engine::Output {
+            request_id,
+            token_id: None,
+            completed: true,
+            rejected: false,
+            cached_tokens: explicit,
+        };
+        assert_eq!(compatibility.output_signal(output).cached_tokens, expected);
+        compatibility.native_request(request(30, 0));
+        assert_eq!(
+            compatibility
+                .output_signal(aisimulate_core::engine::Output {
+                    request_id,
+                    token_id: None,
+                    completed: true,
+                    rejected: false,
+                    cached_tokens: None,
+                })
+                .cached_tokens,
+            None
+        );
+    }
 }
 
 #[tokio::test]

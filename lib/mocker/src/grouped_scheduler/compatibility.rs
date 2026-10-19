@@ -124,9 +124,7 @@ impl CompatibilityState {
         };
         let cached_tokens = output.cached_tokens.or_else(|| {
             accounting
-                .filter(|request| {
-                    !output.rejected && (output.completed || !request.cache_usage_reported)
-                })
+                .filter(|request| !output.rejected && !request.cache_usage_reported)
                 .and_then(|request| request.cached_tokens)
         });
         if output.completed {
