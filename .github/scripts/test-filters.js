@@ -175,7 +175,6 @@ const testCases = [
     desc: 'AISimulate Dynamo adapter triggers planner validation'
   },
 
-  // Sidecar Rust and proto files trigger Rust checks and their native E2E only.
   {
     file: 'lib/sidecar/common/src/lib.rs',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },

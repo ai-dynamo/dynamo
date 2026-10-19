@@ -174,6 +174,7 @@ jobs:
       - deploy-operator
       - deploy-test-vllm
       - deploy-test-sglang
+      - cross-version-compatibility
       - deploy-test-trtllm
       - deploy-test-dgdr
       - deploy-operator-checkpoint-vllm
@@ -545,7 +546,7 @@ jobs:
       # Drop this source overlay after the upstream TensorRT-LLM change ships.
       extra_build_args: |
         TRTLLM_SOURCE_REPOSITORY=https://github.com/krishung5/TensorRT-LLM
-        TRTLLM_SOURCE_COMMIT=9db976c9c2fb7f6a03fc5db96bf58c71d3b0d689
+        TRTLLM_SOURCE_COMMIT=8745cae734447a4eb33241850953a3e4ea43356d
     # actions: read lets the build download a prior run's baseline compliance
     # artifact to diff against (a reusable workflow's token can't exceed the
     # caller's). Missing -> the diff soft-degrades, build stays green.
@@ -1420,6 +1421,26 @@ jobs:
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  cross-version-compatibility:
+    name: SGLang N-2 compatibility
+    needs: [changed-files, operator, frontend-copy-to-acr, sglang-copy-to-acr, deploy-test-sglang]
+    if: |
+      always() && !cancelled() &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
+      (needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true') &&
+      needs.deploy-test-sglang.result == 'success' &&
+      needs.operator.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success' &&
+      needs.sglang-copy-to-acr.result == 'success'
+    uses: $/.github/workflows/cross-version-compatibility.yml
+    with:
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+      worker_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+      operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
     secrets: inherit
 
   deploy-test-dgdr:

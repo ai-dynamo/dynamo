@@ -1021,15 +1021,24 @@ impl<
             return;
         }
 
+        let _ = self.admission_barrier().await;
+    }
+
+    /// Process previously submitted admission commands and recheck ready work.
+    ///
+    /// Unlike [`Self::update`], this waits for the actor even when queueing is
+    /// disabled. It does not wait for capacity-blocked requests to be admitted,
+    /// or submit scheduling futures that the caller has not polled yet.
+    /// Returns an error if the actor stops before acknowledging the barrier.
+    pub async fn admission_barrier(&self) -> Result<(), KvSchedulerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
-        if self
-            .admission_tx
+        self.admission_tx
             .send(AdmissionCommand::Update { ack_tx })
             .await
-            .is_ok()
-        {
-            let _ = ack_rx.await;
-        }
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+        ack_rx
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)
     }
 
     /// Notify pending admission after the authoritative mutation is complete.
