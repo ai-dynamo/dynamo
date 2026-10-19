@@ -37,6 +37,8 @@ from tests.utils.port_utils import (
 
 _logger = logging.getLogger(__name__)
 
+pytest_plugins = ("tests.utils.ci_test_selection",)
+
 
 # Typed stash keys for GPU-parallel config (avoids setting unknown attrs on Config)
 _gpu_parallel_gpus_key: pytest.StashKey[list[dict]] = pytest.StashKey()
@@ -254,6 +256,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "framework_with_kvcr: marks deployment tests that require a KVCR-capable "
         "image and multi-host RDMA",
+    )
+    config.addinivalue_line(
+        "markers",
+        "smoke: small pre-merge GPU coverage sentinel kept by CI test selection",
     )
 
     models_dir = config.getoption("--models-dir", default=None)

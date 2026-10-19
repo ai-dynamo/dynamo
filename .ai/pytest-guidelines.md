@@ -273,6 +273,18 @@ Every test must have **at least**:
      Worker handlers, scheduler, prefill/decode, frontend HTTP/gRPC, CUDA version
      checks, predownload, etc.
 
+### Pre-merge GPU test selection
+
+GPU tests requiring `gpu_1` or more should have a component marker
+(`multimodal`, `router`, `kvbm`, `lmcache`, or `core` only for genuinely
+cross-cutting tests) or an explicit `smoke` marker. In selective mode, each
+framework lane keeps smoke tests, tests matching changed feature markers,
+tests from changed test files, and tests with no selected feature marker.
+Selection defaults to shadow mode; only the exact repository variable value
+`GPU_TEST_SELECTION_MODE=selective` enables deselection. Adding `ci:full-tests`
+to the PR labels forces full framework coverage. Smoke cases are CI sentinels:
+review additions with a CI owner.
+
 ### Scheduling marker guidance
 
 CI compute is finite. Choose placement carefully:
@@ -584,4 +596,3 @@ vllm_configs = {
 
 Configs are parametrized into test functions via `params_with_model_mark()`, which
 auto-applies the `model` marker from the config's model field.
-

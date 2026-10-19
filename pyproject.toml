@@ -368,6 +368,7 @@ markers = [
     "lmcache: marks tests as requiring lmcache",
     "framework_agnostic: marks tests that inspect the container image itself; they carry framework markers for CI selection but need no framework module installed",
     "multimodal: marks tests as multimodal (image/video) tests",
+    "smoke: marks a small pre-merge GPU coverage sentinel",
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
     "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",

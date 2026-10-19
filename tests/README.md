@@ -150,6 +150,16 @@ Markers are required for all tests. They are used for test selection in CI and l
 | Selector-only           | none                                                             | Defined in `pyproject.toml` for CI selector expressions (e.g. `pre_merge and none and gpu_1` to target tests with no framework marker). Not applied to individual tests. |
 | Other                   | slow, skip, xfail, custom_build, model, aiconfigurator           | Special handling                   |
 
+### Pre-merge GPU test selection
+
+GPU tests requiring `gpu_1` or more should carry a component marker
+(`multimodal`, `router`, `kvbm`, `lmcache`, or `core` only for genuinely
+cross-cutting tests) or `smoke`. Selective CI keeps smoke tests, tests matching
+changed feature markers, tests from changed test files, and unclassified tests.
+Selection starts in shadow mode; only `GPU_TEST_SELECTION_MODE=selective`
+enables deselection. The `ci:full-tests` PR label forces full framework lanes.
+Review additions to the smoke set with a CI owner.
+
 ### Example (vLLM)
 ```python
 @pytest.mark.pre_merge

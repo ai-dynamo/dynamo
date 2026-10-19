@@ -1543,3 +1543,67 @@ classify:
     coowner: ops
   - pattern: requirements.txt
     coowner: ops
+test_selection:
+  frameworks:
+    vllm:
+    - components/src/dynamo/vllm/**
+    sglang:
+    - components/src/dynamo/sglang/**
+    trtllm:
+    - components/src/dynamo/trtllm/**
+  features:
+    multimodal:
+      markers: [multimodal]
+      paths:
+      - components/src/dynamo/*/multimodal_utils/**
+      - components/src/dynamo/common/backend/multimodal.py
+      - components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py
+      - components/src/dynamo/common/multimodal/**
+      - components/src/dynamo/sglang/init_multimodal.py
+      - components/src/dynamo/sglang/request_handlers/multimodal/**
+      - components/src/dynamo/trtllm/multimodal/**
+      - components/src/dynamo/trtllm/multimodal_processor.py
+      - components/src/dynamo/vllm/multimodal_handlers/**
+      - tests/**/multimodal/**
+      - tests/serve/multimodal_profiles/**
+      - tests/utils/multimodal.py
+    router:
+      markers: [router]
+      areas: [router]
+      paths:
+      - lib/llm/src/kv_router/**
+      - tests/router/**
+    kvbm:
+      markers: [kvbm]
+      paths:
+      - lib/kvbm*/**
+      - tests/kvbm_integration/**
+    lmcache:
+      markers: [lmcache]
+      paths:
+      - tests/lmcache/**
+      - examples/backends/vllm/deploy/v1beta1/*lmcache*
+      - examples/backends/vllm/launch/*lmcache*
+  smoke_only:
+  - docs/**
+  - '**/*.md'
+  - '**/*.mdx'
+  shared_full:
+  - lib/runtime/**
+  - lib/bindings/**
+  - lib/llm/**
+  - lib/**
+  - components/src/dynamo/common/**
+  - components/src/dynamo/frontend/**
+  - container/**
+  - .dockerignore
+  - Cargo.toml
+  - Cargo.lock
+  - pyproject.toml
+  - '**/requirements*.txt'
+  - conftest.py
+  - tests/conftest.py
+  - tests/serve/conftest.py
+  - tests/utils/**
+  - tests/serve/common.py
+  - .github/**

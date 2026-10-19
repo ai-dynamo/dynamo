@@ -184,6 +184,10 @@ cd "${CONTAINER_WORKSPACE}"
 # renamed and the status file is written.
 TEST_EXIT_CODE=0
 python -m pytest "${pytest_args[@]}" || TEST_EXIT_CODE=$?
+if [[ "${TEST_EXIT_CODE}" -eq 5 && "${DYNAMO_CI_TEST_SELECTION_MODE:-}" == "selective" ]]; then
+  echo "✅ No tests selected in selective mode."
+  TEST_EXIT_CODE=0
+fi
 echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
 # Unique per-stage name so several stages can share one test-results/

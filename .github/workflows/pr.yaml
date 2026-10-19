@@ -22,6 +22,10 @@ jobs:
   # ============================================================================
   changed-files:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
     outputs:
       core: ${{ steps.changes.outputs.core }}
       dev_images: ${{ steps.changes.outputs.dev_images }}
@@ -48,6 +52,7 @@ jobs:
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
       run_deploy_tests: ${{ steps.deploy-test-configuration.outputs.enabled }}
       run_multigpu_tests: ${{ steps.multigpu-test-configuration.outputs.enabled }}
+      test_selection: ${{ steps.test-selection.outputs.test_selection }}
     steps:
       - name: Validate deploy test configuration
         id: deploy-test-configuration
@@ -117,6 +122,39 @@ jobs:
         uses: $/.github/actions/changed-files
         with:
           gh_token: ${{ github.token }}
+      # Use the complete changed-path list here; the existing filter outputs and coverage report stay unchanged.
+      - name: Compute GPU test selection
+        id: test-selection
+        env:
+          CHANGED_FILES_FILE: ${{ steps.changes.outputs.all_files_json }}
+          DYNAMO_CI_TEST_SELECTION_MODE: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/codeowners/select_tests.py \
+            --changed-files-file "$CHANGED_FILES_FILE" \
+            --summary-file "$GITHUB_STEP_SUMMARY" \
+            > "$RUNNER_TEMP/ci-test-selection.json"
+          python3 - "$RUNNER_TEMP/ci-test-selection.json" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          selection = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          selection.pop("paths", None)
+          with Path(sys.argv[2]).open("a", encoding="utf-8") as output:
+              output.write(
+                  "test_selection="
+                  + json.dumps(selection, separators=(",", ":"), sort_keys=True)
+                  + "\n"
+              )
+          PY
+      - name: Upload complete GPU test selection
+        if: always() && steps.test-selection.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ci-test-selection
+          path: ${{ runner.temp }}/ci-test-selection.json
+          retention-days: 7
       - name: Export builder name
         id: export-builder-name
         run: |
@@ -831,6 +869,8 @@ jobs:
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
+      test_selection: ${{ needs.changed-files.outputs.test_selection }}
+      test_selection_mode: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -854,6 +894,8 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: pre_merge and vllm and gpu_2 and not sidecar
       gpu_test_timeout_minutes: 60
+      test_selection: ${{ needs.changed-files.outputs.test_selection }}
+      test_selection_mode: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
     secrets: inherit
 
   sglang-test:
@@ -879,6 +921,8 @@ jobs:
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
+      test_selection: ${{ needs.changed-files.outputs.test_selection }}
+      test_selection_mode: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -902,6 +946,8 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: pre_merge and sglang and gpu_2 and not sidecar
       gpu_test_timeout_minutes: 60
+      test_selection: ${{ needs.changed-files.outputs.test_selection }}
+      test_selection_mode: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
     secrets: inherit
 
   trtllm-test:
@@ -927,6 +973,8 @@ jobs:
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
+      test_selection: ${{ needs.changed-files.outputs.test_selection }}
+      test_selection_mode: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -950,6 +998,8 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: pre_merge and trtllm and gpu_2
       gpu_test_timeout_minutes: 60
+      test_selection: ${{ needs.changed-files.outputs.test_selection }}
+      test_selection_mode: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
     secrets: inherit
 
   triton-test:
