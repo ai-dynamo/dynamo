@@ -78,7 +78,7 @@ run_worker() {
     $GPU_MEM_ARGS &
 }
 
-run_worker 0 "$SYSTEM_PORT1" 5557
-run_worker 1 "$SYSTEM_PORT2" 5558
+run_worker 0 "$SYSTEM_PORT1" "${DYN_SGLANG_KV_EVENT_PORT1:-5557}"
+run_worker 1 "$SYSTEM_PORT2" "${DYN_SGLANG_KV_EVENT_PORT2:-5558}"
 
 wait_any_exit
