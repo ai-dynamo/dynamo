@@ -116,14 +116,18 @@ class NvCreateImageRequest(BaseModel):
     )
     response_format: Literal['url', 'b64_json'] | None = None
     output_format: Literal['png', 'jpeg', 'webp'] | None = None
-    output_compression: conint(ge=0) | None = None
+    output_compression: conint(ge=0, le=100) | None = None
     """
-    Compression level (0-100%) of jpeg and webp output
+    Compression level of jpeg and webp output, 0 to 100 percent as the
+    OpenAI API documents. The frontend rejects a value outside the range,
+    so a worker never sees one.
     """
     stream: bool | None = None
-    partial_images: conint(ge=0) | None = None
+    partial_images: conint(ge=0, le=3) | None = None
     """
-    Number of partial images to stream before the final image
+    Number of partial images to stream before the final image, 0 to 3 as
+    the OpenAI API documents. The frontend rejects a value outside the
+    range, so a worker never sees one.
     """
     size: str | None = None
     """

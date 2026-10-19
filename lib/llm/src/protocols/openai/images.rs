@@ -44,15 +44,27 @@ pub struct NvCreateImageRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_format: Option<ImageOutputFormat>,
 
-    /// Compression level (0-100%) of jpeg and webp output
+    /// Compression level of jpeg and webp output, 0 to 100 percent as the
+    /// OpenAI API documents. The frontend rejects a value outside the range,
+    /// so a worker never sees one.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 0, maximum = 100)]
+    #[validate(range(
+        min = 0,
+        max = 100,
+        message = "output_compression must be between 0 and 100"
+    ))]
     pub output_compression: Option<u8>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
 
-    /// Number of partial images to stream before the final image
+    /// Number of partial images to stream before the final image, 0 to 3 as
+    /// the OpenAI API documents. The frontend rejects a value outside the
+    /// range, so a worker never sees one.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 0, maximum = 3)]
+    #[validate(range(min = 0, max = 3, message = "partial_images must be between 0 and 3"))]
     pub partial_images: Option<u8>,
 
     /// Image size in WxH format, or "auto"
@@ -539,6 +551,36 @@ mod tests {
                 message.contains("n must be between 1 and 10"),
                 "expected the error for {json} to state the rule; got: {message}"
             );
+        }
+    }
+
+    #[test]
+    fn image_request_output_compression_and_partial_images_bounds() {
+        // 0 to 100 and 0 to 3 as the OpenAI API documents; the bounds are
+        // inclusive. serde already rejects a negative value for a u8.
+        for (json, rule) in [
+            (r#"{"prompt":"a cat","output_compression":0}"#, None),
+            (r#"{"prompt":"a cat","output_compression":100}"#, None),
+            (
+                r#"{"prompt":"a cat","output_compression":101}"#,
+                Some("output_compression must be between 0 and 100"),
+            ),
+            (r#"{"prompt":"a cat","partial_images":0}"#, None),
+            (r#"{"prompt":"a cat","partial_images":3}"#, None),
+            (
+                r#"{"prompt":"a cat","partial_images":4}"#,
+                Some("partial_images must be between 0 and 3"),
+            ),
+        ] {
+            let req: NvCreateImageRequest = serde_json::from_str(json).unwrap();
+            match (ValidateRequest::validate(&req), rule) {
+                (Ok(()), None) => {}
+                (Err(err), Some(rule)) => assert!(
+                    err.to_string().contains(rule),
+                    "expected the error for {json} to state the rule; got: {err}"
+                ),
+                (result, _) => panic!("unexpected result for {json}: {result:?}"),
+            }
         }
     }
 }

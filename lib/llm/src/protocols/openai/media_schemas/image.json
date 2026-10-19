@@ -274,7 +274,8 @@
               "null"
             ],
             "format": "int32",
-            "description": "Compression level (0-100%) of jpeg and webp output",
+            "description": "Compression level of jpeg and webp output, 0 to 100 percent as the\nOpenAI API documents. The frontend rejects a value outside the range,\nso a worker never sees one.",
+            "maximum": 100,
             "minimum": 0
           },
           "stream": {
@@ -289,7 +290,8 @@
               "null"
             ],
             "format": "int32",
-            "description": "Number of partial images to stream before the final image",
+            "description": "Number of partial images to stream before the final image, 0 to 3 as\nthe OpenAI API documents. The frontend rejects a value outside the\nrange, so a worker never sees one.",
+            "maximum": 3,
             "minimum": 0
           },
           "size": {

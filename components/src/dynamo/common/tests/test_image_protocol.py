@@ -103,3 +103,23 @@ def test_image_request_rejects_n_outside_supported_range(n):
     # The frontend rejects the value too. The model matches the frontend.
     with pytest.raises(ValidationError):
         NvCreateImageRequest(prompt="a cat", n=n)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("output_compression", 101), ("partial_images", 4)],
+)
+def test_image_request_rejects_a_value_above_the_api_maximum(field, value):
+    # The frontend rejects the value too. The model matches the frontend.
+    with pytest.raises(ValidationError):
+        NvCreateImageRequest(prompt="a cat", **{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("output_compression", 100), ("partial_images", 3)],
+)
+def test_image_request_accepts_the_api_maximum(field, value):
+    request = NvCreateImageRequest(prompt="a cat", **{field: value})
+
+    assert getattr(request, field) == value
