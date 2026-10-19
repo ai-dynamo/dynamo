@@ -534,8 +534,7 @@ RUN rm -rf /workspace/vllm
 # omni video-encode path, which uses the royalty-free VP9 (libvpx_vp9) encoder —
 # no H.264 is built. Direct rm makes the removal robust regardless of how the
 # base image's pip is configured; the guards fail the build if any of them survive.
-{#- The enterprise variant skips this: the NIM base splits these wheels between
-    its venv and system Python, and its own media stack is left as shipped. #}
+{#- The enterprise variant has its own branch below. #}
 {%- if variant != "enterprise" %}
 RUN set -eux; \
     OPENCV_VERSION="$(python3 -m pip show opencv-python-headless 2>/dev/null | awk '/^Version:/{print $2}')"; \
@@ -567,6 +566,26 @@ RUN set -eux; \
     rm -rf /root/.cache/pip; \
     python3 -c "import cv2; cv2.resize"; \
     ! ls -d "${SITE_PACKAGES}"/opencv_python*.libs 2>/dev/null; \
+    python3 -c "import cv2,re,sys; enabled=[name for name,value in re.findall(r'^\s*(FFMPEG|GSTREAMER):\s*(\S+)', cv2.getBuildInformation(), re.M|re.I) if value.upper()=='YES']; sys.exit('ERROR: cv2 was built with video backends: '+', '.join(enabled) if enabled else 0)"
+{% else %}
+# The NIM base keeps its media wheels in its venv; the Dynamo layers above
+# install codec-bearing wheels (PyAV, full OpenCV) into system Python, and the
+# base ships torchcodec there. Purge them from system Python only. The venv's
+# codec-free cv2 shadows system Python, so no OpenCV rebuild is needed.
+RUN set -eux; \
+    /usr/bin/python3 -m pip uninstall --yes \
+        av decord decord2 opencv-python opencv-python-headless torchcodec \
+        || true; \
+    SITE_PACKAGES="$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    rm -rf \
+        "${SITE_PACKAGES}"/av "${SITE_PACKAGES}"/av-*.dist-info "${SITE_PACKAGES}"/av.libs \
+        "${SITE_PACKAGES}"/cv2 "${SITE_PACKAGES}"/opencv_python*.dist-info "${SITE_PACKAGES}"/opencv_python*.libs \
+        "${SITE_PACKAGES}"/decord "${SITE_PACKAGES}"/decord-*.dist-info "${SITE_PACKAGES}"/decord.libs \
+        "${SITE_PACKAGES}"/decord2 "${SITE_PACKAGES}"/decord2-*.dist-info "${SITE_PACKAGES}"/decord2.libs \
+        "${SITE_PACKAGES}"/torchcodec "${SITE_PACKAGES}"/torchcodec-*.dist-info "${SITE_PACKAGES}"/torchcodec.libs \
+        /root/.cache/pip; \
+    /usr/bin/python3 -c "import importlib.util as u, sys; left=[m for m in ('cv2', 'av', 'decord', 'torchcodec') if u.find_spec(m)]; sys.exit('ERROR: still in system Python: ' + ', '.join(left) if left else 0)"; \
+    python3 -c "import cv2; cv2.resize"; \
     python3 -c "import cv2,re,sys; enabled=[name for name,value in re.findall(r'^\s*(FFMPEG|GSTREAMER):\s*(\S+)', cv2.getBuildInformation(), re.M|re.I) if value.upper()=='YES']; sys.exit('ERROR: cv2 was built with video backends: '+', '.join(enabled) if enabled else 0)"
 {% endif %}
 
