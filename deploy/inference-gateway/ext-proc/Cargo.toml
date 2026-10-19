@@ -37,6 +37,7 @@ kube = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
+rand = { workspace = true }
 rcgen = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }
@@ -54,7 +55,6 @@ tonic = { workspace = true }
 tonic-health = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
-rand = { workspace = true }
 uuid = { workspace = true }
 validator = { workspace = true }
 

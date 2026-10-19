@@ -1,46 +1,38 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Tracks worker generations across DGD rolling updates.
+//! Follows worker generations across DGD rolling updates with the Frontend's
+//! discovery controller.
 //!
 //! Each generation runs under its own Dynamo namespace (`<namespace>-<8 hex>`).
-//! Like the Frontend's per-namespace `WorkerSet`s, this builds one generation
-//! when a namespace registers its first decode-capable model card and retires
-//! it when the last one is removed. Generic over the generation type so it can
-//! be tested without a KV router.
+//! The EPP runs the same [`ModelDiscoveryController`] as the Frontend, which
+//! groups worker cards per namespace, endpoint, model, and role, admits each
+//! group's workers by card checksum, and builds, retries, and reconciles. The
+//! [`GenerationHost`] here turns committed decode and aggregated groups into
+//! routing generations, judges each namespace's readiness from its committed
+//! groups as the Frontend does, and publishes the generations requests choose
+//! from.
 
-use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
-use std::panic::AssertUnwindSafe;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use async_trait::async_trait;
+use dynamo_llm::discovery::controller::{
+    ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController,
+};
+use dynamo_llm::discovery::readiness::{
+    ReadinessUnit, evaluate_readiness, normalize_legacy_prefill_topology,
+};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::worker_type::WorkerType;
-use dynamo_runtime::discovery::{
-    DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryStream, ModelCardInstanceId,
-};
+use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryStream, ModelCardInstanceId};
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
-use futures::{FutureExt, StreamExt};
+use dynamo_runtime::protocols::EndpointId;
 use tokio::sync::watch;
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-const INITIAL_RESUBSCRIBE_BACKOFF: Duration = Duration::from_millis(100);
-const MAX_RESUBSCRIBE_BACKOFF: Duration = Duration::from_secs(5);
-/// Delay before restarting a watcher that panicked, and before the first
-/// retry of a failed build; later retries double it up to
-/// `MAX_BUILD_RETRY_DELAY`.
-const RETRY_DELAY: Duration = if cfg!(test) {
-    Duration::from_millis(10)
-} else {
-    Duration::from_secs(5)
-};
-const MAX_BUILD_RETRY_DELAY: Duration = Duration::from_secs(80);
-
-/// Live generations, ordered by namespace.
+/// Live generations, ordered by group.
 pub(crate) type GenerationSet<G> = Arc<[Arc<G>]>;
 
 /// The namespaces whose model cards this EPP follows.
@@ -48,6 +40,8 @@ pub(crate) type GenerationSet<G> = Arc<[Arc<G>]>;
 pub(crate) struct GenerationScope {
     pub(crate) namespace_filter: NamespaceFilter,
     pub(crate) prefix_mode: NamespacePrefixMode,
+    /// The component whose decode or aggregated workers the EPP routes to.
+    pub(crate) component: String,
 }
 
 impl GenerationScope {
@@ -61,532 +55,463 @@ impl GenerationScope {
                 .namespace_filter
                 .matches_with_prefix_mode(namespace, NamespacePrefixMode::WorkerGeneration)
     }
+}
 
-    /// `instance`'s card, if it is an in-scope base-model card of a decode or
-    /// aggregated worker: the workers a generation routes to and is built from.
-    fn admit(
+/// A routing generation, built from one decode or aggregated group.
+pub(crate) trait RoutingGeneration: Send + Sync + 'static {
+    /// Whether the generation's topology is complete, and its namespace's
+    /// prefill endpoint, if any. Called whenever the host settles.
+    fn set_topology(&self, ready: bool, prefill: Option<&EndpointId>);
+}
+
+/// What one build of a decode or aggregated group gets.
+pub(crate) struct BuildRequest {
+    pub(crate) card: ModelDeploymentCard,
+    pub(crate) endpoint: EndpointId,
+    /// Whether no generation is published yet.
+    pub(crate) startup: bool,
+    pub(crate) cancel: CancellationToken,
+}
+
+/// A prepared group: a routing generation for decode and aggregated groups,
+/// nothing for the prefill and encode groups it pairs with.
+enum Prepared<G> {
+    Generation(Arc<G>),
+    Peer,
+}
+
+/// A committed group, as readiness and prefill pairing see it.
+struct CommittedGroup {
+    namespace: String,
+    model: String,
+    role: WorkerType,
+    endpoint: EndpointId,
+    unit: ReadinessUnit,
+}
+
+/// The routing generation of a committed decode or aggregated group.
+struct Entry<G> {
+    generation: Arc<G>,
+    namespace: String,
+    model: String,
+    /// Whether its namespace's topology is complete.
+    ready: bool,
+    published: bool,
+    /// Its workers are gone and no ready generation has replaced it yet.
+    dormant: bool,
+}
+
+struct HostState<G> {
+    /// The namespace of the first worker the EPP routes to.
+    bound: Option<String>,
+    groups: HashMap<GroupKey, CommittedGroup>,
+    generations: BTreeMap<GroupKey, Entry<G>>,
+}
+
+/// The EPP's host for the Frontend's discovery controller.
+struct GenerationHost<G, B, L> {
+    scope: GenerationScope,
+    build: B,
+    list: L,
+    publish: watch::Sender<GenerationSet<G>>,
+    state: Mutex<HostState<G>>,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether a published generation of `model` other than `key` has workers
+/// and a complete topology, so it can take over from `key`.
+fn has_replacement<G>(
+    generations: &BTreeMap<GroupKey, Entry<G>>,
+    key: &GroupKey,
+    model: &str,
+) -> bool {
+    generations.iter().any(|(other, entry)| {
+        other != key && entry.model == model && entry.published && !entry.dormant && entry.ready
+    })
+}
+
+impl<G: RoutingGeneration, B, L> GenerationHost<G, B, L> {
+    fn new(
+        scope: GenerationScope,
+        build: B,
+        list: L,
+        publish: watch::Sender<GenerationSet<G>>,
+    ) -> Self {
+        Self {
+            scope,
+            build,
+            list,
+            publish,
+            state: Mutex::new(HostState {
+                bound: None,
+                groups: HashMap::new(),
+                generations: BTreeMap::new(),
+            }),
+        }
+    }
+
+    /// Whether the EPP follows `namespace`; `None` until it binds.
+    fn follows(&self, namespace: &str) -> Option<bool> {
+        let state = lock(&self.state);
+        let bound = state.bound.as_deref()?;
+        Some(if self.scope.is_generation(bound) {
+            self.scope.is_generation(namespace)
+        } else {
+            bound == namespace
+        })
+    }
+
+    /// Bind to the namespace of the first worker the EPP routes to. When that
+    /// is one of the DGD's generations, follow every generation of the
+    /// prefix; otherwise stay on it.
+    fn bind(&self, namespace: &str) -> bool {
+        lock(&self.state).bound.get_or_insert_with(|| {
+            tracing::info!(
+                namespace,
+                follows_generations = self.scope.is_generation(namespace),
+                "Bound to worker namespace"
+            );
+            namespace.to_string()
+        });
+        self.follows(namespace) == Some(true)
+    }
+
+    /// Record a committed group. Returns whether it replaced a published
+    /// generation.
+    fn commit(
         &self,
-        instance: &DiscoveryInstance,
-    ) -> Option<(ModelCardInstanceId, ModelDeploymentCard)> {
+        state: &mut HostState<G>,
+        spec: &GroupSpec,
+        prepared: Prepared<G>,
+        live_count: usize,
+    ) -> bool {
+        let card = &spec.representative.card;
+        let namespace = &spec.representative.mcid.namespace;
+        let model = &spec.key.model_name;
+        state.groups.insert(
+            spec.key.clone(),
+            CommittedGroup {
+                namespace: namespace.clone(),
+                model: model.clone(),
+                role: card.effective_worker_type(),
+                endpoint: spec.representative.endpoint_id.clone(),
+                unit: ReadinessUnit {
+                    worker_type: card.worker_type,
+                    live_count,
+                    needs: card.needs.clone(),
+                },
+            },
+        );
+        let Prepared::Generation(generation) = prepared else {
+            return false;
+        };
+        // A replacement keeps the place of the generation it replaces.
+        let published = state
+            .generations
+            .get(&spec.key)
+            .is_some_and(|entry| entry.published);
+        state.generations.insert(
+            spec.key.clone(),
+            Entry {
+                generation,
+                namespace: namespace.clone(),
+                model: model.clone(),
+                ready: false,
+                published,
+                dormant: false,
+            },
+        );
+        published
+    }
+
+    /// Bring readiness, prefill pairing, and the published set in line with
+    /// the committed groups.
+    fn settle(&self, state: &mut HostState<G>, mut changed: bool) {
+        let mut units: HashMap<(&str, &str), Vec<ReadinessUnit>> = HashMap::new();
+        for group in state.groups.values() {
+            units
+                .entry((&group.namespace, &group.model))
+                .or_default()
+                .push(group.unit.clone());
+        }
+        for entry in state.generations.values_mut() {
+            let ready = units
+                .get(&(entry.namespace.as_str(), entry.model.as_str()))
+                .is_some_and(|units| evaluate_readiness(units).ready);
+            if entry.ready != ready {
+                tracing::info!(
+                    namespace = entry.namespace,
+                    ready,
+                    "Worker generation topology changed"
+                );
+                entry.ready = ready;
+            }
+            let prefill = state.groups.values().find(|group| {
+                group.role == WorkerType::Prefill
+                    && group.namespace == entry.namespace
+                    && group.model == entry.model
+            });
+            entry
+                .generation
+                .set_topology(ready, prefill.map(|group| &group.endpoint));
+        }
+
+        // A generation is published once its own topology is complete, or at
+        // once while no complete generation serves, as at startup.
+        let mut serving = state
+            .generations
+            .values()
+            .any(|entry| entry.published && !entry.dormant && entry.ready);
+        for entry in state.generations.values_mut() {
+            if entry.published || (serving && !entry.ready) {
+                continue;
+            }
+            tracing::info!(
+                namespace = entry.namespace,
+                topology_complete = entry.ready,
+                "Worker generation ready for routing"
+            );
+            entry.published = true;
+            serving |= entry.ready;
+            changed = true;
+        }
+
+        // A ready generation of the same model replaces one whose workers
+        // are gone.
+        let retired: Vec<GroupKey> = state
+            .generations
+            .iter()
+            .filter(|(key, entry)| {
+                entry.dormant && has_replacement(&state.generations, key, &entry.model)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in retired {
+            if let Some(entry) = state.generations.remove(&key) {
+                tracing::info!(namespace = entry.namespace, "Worker generation retired");
+                changed = true;
+            }
+        }
+
+        if changed {
+            let set: GenerationSet<G> = state
+                .generations
+                .values()
+                .filter(|entry| entry.published)
+                .map(|entry| entry.generation.clone())
+                .collect();
+            self.publish.send_replace(set);
+        }
+    }
+}
+
+#[async_trait]
+impl<G, B, BF, L, LF> ControllerHost for GenerationHost<G, B, L>
+where
+    G: RoutingGeneration,
+    B: Fn(BuildRequest) -> BF + Send + Sync + 'static,
+    BF: Future<Output = anyhow::Result<G>> + Send,
+    L: Fn() -> LF + Send + Sync + 'static,
+    LF: Future<Output = anyhow::Result<Vec<DiscoveryInstance>>> + Send,
+{
+    type Prepared = Prepared<G>;
+
+    fn normalize(
+        &self,
+        instance: DiscoveryInstance,
+        namespace_filter: &NamespaceFilter,
+    ) -> anyhow::Result<Option<DesiredInstance>> {
         let DiscoveryInstance::Model {
             namespace,
+            component,
+            endpoint,
+            instance_id,
             model_suffix,
             ..
-        } = instance
+        } = &instance
         else {
-            return None;
+            return Ok(None);
         };
         // A LoRA adapter's card adds to a worker whose base card already
         // counts, and a generation is identified by its base model.
         if model_suffix.is_some()
-            || !self
-                .namespace_filter
-                .matches_with_prefix_mode(namespace, self.prefix_mode)
+            || !namespace_filter.matches_with_prefix_mode(namespace, self.scope.prefix_mode)
+            || self.follows(namespace) == Some(false)
         {
-            return None;
+            return Ok(None);
         }
-        let card = match instance.deserialize_model::<ModelDeploymentCard>() {
-            Ok(card) => card,
-            Err(error) => {
-                tracing::warn!(%error, namespace, "Failed to deserialize model card, skipping");
-                return None;
-            }
+        let mut card = instance.deserialize_model::<ModelDeploymentCard>()?;
+        normalize_legacy_prefill_topology(&mut card);
+        let role = card.effective_worker_type();
+        // Requests are routed to the configured component's workers; prefill
+        // and encode workers pair from any component.
+        if matches!(role, WorkerType::Decode | WorkerType::Aggregated)
+            && (*component != self.scope.component || !self.bind(namespace))
+        {
+            return Ok(None);
+        }
+        let mcid = ModelCardInstanceId {
+            namespace: namespace.clone(),
+            component: component.clone(),
+            endpoint: endpoint.clone(),
+            instance_id: *instance_id,
+            model_suffix: None,
         };
+        let group_key = GroupKey {
+            model_name: card.name().to_string(),
+            worker_set_key: format!("{namespace}/{component}/{endpoint}/{}", role.as_str()),
+        };
+        Ok(Some(DesiredInstance {
+            key: mcid.to_path(),
+            endpoint_id: EndpointId {
+                namespace: namespace.clone(),
+                component: component.clone(),
+                name: endpoint.clone(),
+            },
+            mcid,
+            mdc_checksum: card.mdcsum().to_string(),
+            card,
+            group_key,
+            projection_fingerprint: String::new(),
+            video_contract: None,
+        }))
+    }
+
+    async fn prepare(
+        &self,
+        spec: GroupSpec,
+        _admitted_ids: watch::Receiver<Vec<u64>>,
+        cancellation: CancellationToken,
+    ) -> anyhow::Result<Prepared<G>> {
+        let card = &spec.representative.card;
         if !matches!(
             card.effective_worker_type(),
             WorkerType::Decode | WorkerType::Aggregated
         ) {
-            return None;
+            return Ok(Prepared::Peer);
         }
-        let DiscoveryInstanceId::Model(id) = instance.id() else {
-            return None;
-        };
-        Some((id, card))
-    }
-}
-
-/// A namespace started or stopped serving.
-#[derive(Debug)]
-pub(crate) enum GenerationChange {
-    Appeared {
-        namespace: String,
-        card: Arc<ModelDeploymentCard>,
-    },
-    Vanished {
-        namespace: String,
-    },
-}
-
-/// In-scope cards per namespace.
-///
-/// The EPP binds to the first namespace seen, as it always has. When that is
-/// one of the DGD's worker generations, it follows every generation: each an
-/// isolated serving unit that serves whatever its own workers registered.
-/// Otherwise it stays on that one namespace.
-pub(crate) struct GenerationTracker {
-    scope: GenerationScope,
-    namespaces: HashMap<String, HashMap<ModelCardInstanceId, Arc<ModelDeploymentCard>>>,
-    /// The first namespace seen.
-    bound: Option<String>,
-    /// Namespaces last reported as `Appeared`.
-    serving: HashSet<String>,
-}
-
-impl GenerationTracker {
-    pub(crate) fn new(scope: GenerationScope) -> Self {
-        Self {
-            scope,
-            namespaces: HashMap::new(),
-            bound: None,
-            serving: HashSet::new(),
-        }
-    }
-
-    pub(crate) fn on_added(&mut self, instance: &DiscoveryInstance) -> Vec<GenerationChange> {
-        let Some((id, card)) = self.scope.admit(instance) else {
-            return Vec::new();
-        };
-        let namespace = id.namespace.clone();
-        let cards = self.namespaces.entry(namespace.clone()).or_default();
-        if cards.contains_key(&id) {
-            return Vec::new();
-        }
-        cards.insert(id, Arc::new(card));
-        self.settle(&namespace)
-    }
-
-    pub(crate) fn on_removed(&mut self, id: &DiscoveryInstanceId) -> Vec<GenerationChange> {
-        let DiscoveryInstanceId::Model(id) = id else {
-            return Vec::new();
-        };
-        let Some(cards) = self.namespaces.get_mut(&id.namespace) else {
-            return Vec::new();
-        };
-        if cards.remove(id).is_none() {
-            return Vec::new();
-        }
-        if cards.is_empty() {
-            self.namespaces.remove(&id.namespace);
-        }
-        self.settle(&id.namespace)
-    }
-
-    /// Replace the tracked cards with a full snapshot; report namespace changes.
-    pub(crate) fn on_resync(&mut self, instances: &[DiscoveryInstance]) -> Vec<GenerationChange> {
-        self.namespaces.clear();
-        for instance in instances {
-            if let Some((id, card)) = self.scope.admit(instance) {
-                self.namespaces
-                    .entry(id.namespace.clone())
-                    .or_default()
-                    .insert(id, Arc::new(card));
-            }
-        }
-        self.bind();
-        self.reconcile_all()
-    }
-
-    /// Whether `namespace` is followed: every generation when the bound
-    /// namespace is one, otherwise the bound namespace alone.
-    fn follows(&self, namespace: &str) -> bool {
-        match &self.bound {
-            Some(bound) if self.scope.is_generation(bound) => self.scope.is_generation(namespace),
-            Some(bound) => bound == namespace,
-            None => false,
-        }
-    }
-
-    /// The card to build `namespace`'s generation from, if it serves.
-    fn card_for(&self, namespace: &str) -> Option<Arc<ModelDeploymentCard>> {
-        if !self.follows(namespace) {
-            return None;
-        }
-        let cards = self.namespaces.get(namespace)?;
-        let (_, card) = cards.iter().min_by_key(|(id, _)| id.instance_id)?;
-        Some(card.clone())
-    }
-
-    /// Re-evaluate `namespace`, or every namespace once one is bound.
-    fn settle(&mut self, namespace: &str) -> Vec<GenerationChange> {
-        if self.bind() {
-            return self.reconcile_all();
-        }
-        let mut changes = Vec::new();
-        self.reconcile(namespace, &mut changes);
-        changes
-    }
-
-    /// Bind to the first namespace seen (the smallest name when a snapshot
-    /// shows several), for good. Returns whether it was just bound.
-    fn bind(&mut self) -> bool {
-        if self.bound.is_some() {
-            return false;
-        }
-        let Some(namespace) = self.namespaces.keys().min().cloned() else {
-            return false;
-        };
+        let startup = !lock(&self.state)
+            .generations
+            .values()
+            .any(|entry| entry.published);
         tracing::info!(
-            namespace,
-            follows_generations = self.scope.is_generation(&namespace),
-            "Bound to worker namespace"
+            namespace = spec.representative.mcid.namespace,
+            model = spec.key.model_name,
+            "Worker generation discovered"
         );
-        self.bound = Some(namespace);
-        true
+        let generation = (self.build)(BuildRequest {
+            card: card.clone(),
+            endpoint: spec.representative.endpoint_id.clone(),
+            startup,
+            cancel: cancellation,
+        })
+        .await?;
+        Ok(Prepared::Generation(Arc::new(generation)))
     }
 
-    fn reconcile_all(&mut self) -> Vec<GenerationChange> {
-        let namespaces: HashSet<String> = self
-            .namespaces
-            .keys()
-            .chain(self.serving.iter())
-            .cloned()
-            .collect();
-        let mut changes = Vec::new();
-        for namespace in namespaces {
-            self.reconcile(&namespace, &mut changes);
-        }
-        changes
-    }
-
-    fn reconcile(&mut self, namespace: &str, changes: &mut Vec<GenerationChange>) {
-        // Only an appearing namespace needs its card, so other card events
-        // stay O(1).
-        let serves = self.follows(namespace) && self.namespaces.contains_key(namespace);
-        match (serves, self.serving.contains(namespace)) {
-            (true, false) => {
-                let Some(card) = self.card_for(namespace) else {
-                    return;
-                };
-                self.serving.insert(namespace.to_string());
-                changes.push(GenerationChange::Appeared {
-                    namespace: namespace.to_string(),
-                    card,
-                });
-            }
-            (false, true) => {
-                self.serving.remove(namespace);
-                changes.push(GenerationChange::Vanished {
-                    namespace: namespace.to_string(),
-                });
-            }
-            _ => {}
-        }
-    }
-}
-
-type BuildResult<G> = (String, u64, std::thread::Result<Option<G>>);
-
-/// A build in flight. `seq` fences a stale result after a vanish/reappear.
-struct PendingBuild {
-    seq: u64,
-    cancel: CancellationToken,
-    /// Consecutive failed builds of this namespace before this one.
-    failures: u32,
-}
-
-/// Delay before retrying a build that has failed `failures` times in a row.
-fn retry_delay(failures: u32) -> Duration {
-    (RETRY_DELAY * 2u32.pow(failures.saturating_sub(1).min(4))).min(MAX_BUILD_RETRY_DELAY)
-}
-
-/// Published generations and in-flight builds; owned by the watcher task only.
-struct GenerationState<'a, G, B> {
-    published: BTreeMap<String, Arc<G>>,
-    /// Published generations whose namespace vanished while no other
-    /// generation was ready. Kept so a restarting worker does not lose its
-    /// generation; retired once a replacement is published.
-    dormant: HashSet<String>,
-    pending: HashMap<String, PendingBuild>,
-    next_seq: u64,
-    builds: JoinSet<BuildResult<G>>,
-    build: &'a B,
-    publish: &'a watch::Sender<GenerationSet<G>>,
-    cancel: &'a CancellationToken,
-}
-
-impl<G, B> Drop for GenerationState<'_, G, B> {
-    fn drop(&mut self) {
-        // Stops abandoned builds too, including when the watcher panics.
-        for pending in self.pending.values() {
-            pending.cancel.cancel();
-        }
-    }
-}
-
-impl<'a, G, B, BF> GenerationState<'a, G, B>
-where
-    G: Send + Sync + 'static,
-    B: Fn(String, ModelDeploymentCard, CancellationToken) -> BF,
-    BF: Future<Output = Option<G>> + Send + 'static,
-{
-    fn new(
-        build: &'a B,
-        publish: &'a watch::Sender<GenerationSet<G>>,
-        cancel: &'a CancellationToken,
-    ) -> Self {
-        Self {
-            published: BTreeMap::new(),
-            dormant: HashSet::new(),
-            pending: HashMap::new(),
-            next_seq: 0,
-            builds: JoinSet::new(),
-            build,
-            publish,
-            cancel,
-        }
-    }
-
-    fn publish(&self) {
-        let set: GenerationSet<G> = self.published.values().cloned().collect();
-        self.publish.send_replace(set);
-    }
-
-    fn apply(&mut self, change: GenerationChange) {
-        match change {
-            GenerationChange::Appeared { namespace, card } => {
-                if self.dormant.remove(&namespace) {
-                    tracing::info!(namespace, "Worker generation is serving again");
-                } else {
-                    tracing::info!(namespace, "Worker generation discovered");
-                    self.spawn_build(namespace, card, Duration::ZERO, 0);
-                }
-            }
-            GenerationChange::Vanished { namespace } => self.vanish(&namespace),
-        }
-    }
-
-    fn spawn_build(
-        &mut self,
-        namespace: String,
-        card: Arc<ModelDeploymentCard>,
-        delay: Duration,
-        failures: u32,
-    ) {
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        let cancel = self.cancel.child_token();
-        let built = (self.build)(namespace.clone(), (*card).clone(), cancel.clone());
-        self.pending.insert(
-            namespace.clone(),
-            PendingBuild {
-                seq,
-                cancel: cancel.clone(),
-                failures,
-            },
-        );
-        self.builds.spawn(async move {
-            if !delay.is_zero() && !sleep_or_cancel(delay, &cancel).await {
-                return (namespace, seq, Ok(None));
-            }
-            (namespace, seq, AssertUnwindSafe(built).catch_unwind().await)
-        });
-    }
-
-    fn vanish(&mut self, namespace: &str) {
-        if let Some(pending) = self.pending.remove(namespace) {
-            pending.cancel.cancel();
-        }
-        if !self.published.contains_key(namespace) {
-            return;
-        }
-        let replaced = self
-            .published
-            .keys()
-            .any(|other| other != namespace && !self.dormant.contains(other));
-        if replaced {
-            self.retire(namespace);
-        } else {
+    fn commit_group(
+        &self,
+        spec: &GroupSpec,
+        prepared: Prepared<G>,
+        members: &[DesiredInstance],
+        _adapters: &[DesiredInstance],
+    ) -> anyhow::Result<()> {
+        let mut state = lock(&self.state);
+        let changed = self.commit(&mut state, spec, prepared, members.len());
+        self.settle(&mut state, changed);
+        if state
+            .generations
+            .get(&spec.key)
+            .is_some_and(|entry| !entry.published)
+        {
             tracing::info!(
-                namespace,
-                "Worker generation has no workers; keeping it until a replacement is ready"
+                namespace = spec.representative.mcid.namespace,
+                "Worker generation waiting for its topology to complete"
             );
-            self.dormant.insert(namespace.to_string());
         }
+        Ok(())
     }
 
-    fn retire(&mut self, namespace: &str) {
-        self.dormant.remove(namespace);
-        // In-flight requests hold their own `Arc`, so the generation drains.
-        if self.published.remove(namespace).is_some() {
-            tracing::info!(namespace, "Worker generation retired");
+    fn replace_group(
+        &self,
+        key: &GroupKey,
+        members: &[DesiredInstance],
+        _adapters: &[DesiredInstance],
+    ) -> anyhow::Result<()> {
+        let mut state = lock(&self.state);
+        if let Some(group) = state.groups.get_mut(key) {
+            group.unit.live_count = members.len();
         }
+        self.settle(&mut state, false);
+        Ok(())
     }
 
-    fn on_built(&mut self, (namespace, seq, built): BuildResult<G>, tracker: &GenerationTracker) {
-        let (namespace, pending) = match self.pending.entry(namespace) {
-            Entry::Occupied(entry) if entry.get().seq == seq => entry.remove_entry(),
-            // Drop results from retired or superseded builds.
-            _ => return,
-        };
-        match built {
-            Ok(Some(generation)) => {
-                tracing::info!(namespace, "Worker generation ready for routing");
-                self.published.insert(namespace, Arc::new(generation));
-                // A live generation replaces every dormant one.
-                for dormant in std::mem::take(&mut self.dormant) {
-                    self.retire(&dormant);
-                }
-                self.publish();
+    fn replace_prepared_group(
+        &self,
+        spec: &GroupSpec,
+        prepared: Prepared<G>,
+        members: &[DesiredInstance],
+        adapters: &[DesiredInstance],
+    ) -> anyhow::Result<()> {
+        self.commit_group(spec, prepared, members, adapters)
+    }
+
+    fn remove_group(&self, key: &GroupKey) {
+        let mut state = lock(&self.state);
+        state.groups.remove(key);
+        let keep = state.generations.get(key).is_some_and(|entry| {
+            entry.published && !has_replacement(&state.generations, key, &entry.model)
+        });
+        let mut changed = false;
+        if keep {
+            if let Some(entry) = state.generations.get_mut(key) {
+                // In-flight requests hold their own `Arc`; new ones fail until
+                // the workers return or a replacement is ready.
+                tracing::info!(
+                    namespace = entry.namespace,
+                    "Worker generation has no workers; keeping it until a replacement is ready"
+                );
+                entry.dormant = true;
             }
-            // The build failed or panicked. Stop what it started and retry
-            // from the namespace's current card, which may come from another
-            // worker than the card that failed.
-            failed => {
-                if failed.is_err() {
-                    tracing::error!(namespace, "Worker generation build panicked");
-                }
-                pending.cancel.cancel();
-                if let Some(card) = tracker.card_for(&namespace) {
-                    let failures = pending.failures + 1;
-                    self.spawn_build(namespace, card, retry_delay(failures), failures);
-                }
-            }
+        } else if let Some(entry) = state.generations.remove(key)
+            && entry.published
+        {
+            tracing::info!(namespace = entry.namespace, "Worker generation retired");
+            changed = true;
         }
+        self.settle(&mut state, changed);
+    }
+
+    fn discard_prepared(&self, _prepared: Prepared<G>) {}
+
+    async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
+        (self.list)().await
     }
 }
 
-/// Publish the live generations until `cancel` fires, restarting the watch if
-/// it panics.
-///
-/// `subscribe` is re-called when the watch fails or ends. `build` runs in its
-/// own task and returns `None` when it fails or is cancelled; a failed build
-/// is retried after a growing delay.
-pub(crate) async fn run_generation_watcher<G, S, SF, B, BF>(
-    mut subscribe: S,
+/// Follow worker generations with the Frontend's discovery controller until
+/// `stream` ends, publishing the live generations to `publish`.
+pub(crate) async fn run_generation_controller<G, B, BF, L, LF>(
+    stream: DiscoveryStream,
     scope: GenerationScope,
     build: B,
+    list: L,
     publish: watch::Sender<GenerationSet<G>>,
-    cancel: CancellationToken,
 ) where
-    G: Send + Sync + 'static,
-    S: FnMut(CancellationToken) -> SF,
-    SF: Future<Output = anyhow::Result<DiscoveryStream>> + Send + 'static,
-    B: Fn(String, ModelDeploymentCard, CancellationToken) -> BF,
-    BF: Future<Output = Option<G>> + Send + 'static,
+    G: RoutingGeneration,
+    B: Fn(BuildRequest) -> BF + Send + Sync + 'static,
+    BF: Future<Output = anyhow::Result<G>> + Send,
+    L: Fn() -> LF + Send + Sync + 'static,
+    LF: Future<Output = anyhow::Result<Vec<DiscoveryInstance>>> + Send,
 {
-    loop {
-        let tracker = GenerationTracker::new(scope.clone());
-        let watched = watch_generations(&mut subscribe, tracker, &build, &publish, &cancel);
-        if AssertUnwindSafe(watched).catch_unwind().await.is_ok() {
-            return;
-        }
-        // The published snapshot keeps serving until the restarted watch
-        // publishes again.
-        tracing::error!("Worker generation watcher panicked; restarting");
-        if !sleep_or_cancel(RETRY_DELAY, &cancel).await {
-            return;
-        }
-    }
-}
-
-type OpenWatch = Pin<Box<dyn Future<Output = anyhow::Result<DiscoveryStream>> + Send>>;
-
-async fn watch_generations<G, S, SF, B, BF>(
-    subscribe: &mut S,
-    mut tracker: GenerationTracker,
-    build: &B,
-    publish: &watch::Sender<GenerationSet<G>>,
-    cancel: &CancellationToken,
-) where
-    G: Send + Sync + 'static,
-    S: FnMut(CancellationToken) -> SF,
-    SF: Future<Output = anyhow::Result<DiscoveryStream>> + Send + 'static,
-    B: Fn(String, ModelDeploymentCard, CancellationToken) -> BF,
-    BF: Future<Output = Option<G>> + Send + 'static,
-{
-    let mut state = GenerationState::new(build, publish, cancel);
-    let mut backoff = INITIAL_RESUBSCRIBE_BACKOFF;
-    let mut watch_cancel = cancel.child_token();
-    let mut opening: Option<OpenWatch> = Some(Box::pin(subscribe(watch_cancel.clone())));
-    let mut events: Option<DiscoveryStream> = None;
-
-    loop {
-        // Builds are joined in every state, including while (re)subscribing.
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => break,
-            Some(joined) = state.builds.join_next(), if !state.builds.is_empty() => {
-                if let Ok(result) = joined {
-                    state.on_built(result, &tracker);
-                }
-            }
-            opened = async { opening.as_mut().expect("guarded").await }, if opening.is_some() => {
-                opening = None;
-                match opened {
-                    Ok(stream) => events = Some(stream),
-                    Err(error) => {
-                        tracing::warn!(%error, "Failed to watch model discovery for worker generations");
-                        opening = Some(resubscribe(subscribe, &mut watch_cancel, cancel, &mut backoff));
-                    }
-                }
-            }
-            event = async { events.as_mut().expect("guarded").next().await }, if events.is_some() => {
-                let changes = match event {
-                    None => {
-                        tracing::warn!("Model discovery watch ended; resubscribing");
-                        events = None;
-                        opening = Some(resubscribe(subscribe, &mut watch_cancel, cancel, &mut backoff));
-                        continue;
-                    }
-                    Some(Err(error)) => {
-                        tracing::warn!(%error, "Model discovery watch error");
-                        continue;
-                    }
-                    Some(Ok(DiscoveryEvent::Added(instance))) => tracker.on_added(&instance),
-                    Some(Ok(DiscoveryEvent::Removed(id))) => tracker.on_removed(&id),
-                    Some(Ok(DiscoveryEvent::Resync(instances))) => {
-                        // A watch that delivered its snapshot is healthy.
-                        backoff = INITIAL_RESUBSCRIBE_BACKOFF;
-                        tracker.on_resync(&instances)
-                    }
-                    Some(Ok(DiscoveryEvent::ModelTaintsUpdated(_))) => Vec::new(),
-                };
-                let published_before = state.published.len();
-                for change in changes {
-                    state.apply(change);
-                }
-                if state.published.len() != published_before {
-                    state.publish();
-                }
-            }
-        }
-    }
-
-    watch_cancel.cancel();
-    state.builds.shutdown().await;
-}
-
-/// Cancel the current watch and open a new one after a jittered backoff.
-fn resubscribe<S, SF>(
-    subscribe: &mut S,
-    watch_cancel: &mut CancellationToken,
-    cancel: &CancellationToken,
-    backoff: &mut Duration,
-) -> OpenWatch
-where
-    S: FnMut(CancellationToken) -> SF,
-    SF: Future<Output = anyhow::Result<DiscoveryStream>> + Send + 'static,
-{
-    watch_cancel.cancel();
-    *watch_cancel = cancel.child_token();
-    let delay = backoff.mul_f64(rand::random_range(0.5..1.0));
-    *backoff = (*backoff * 2).min(MAX_RESUBSCRIBE_BACKOFF);
-    let opened = subscribe(watch_cancel.clone());
-    let watch_cancel = watch_cancel.clone();
-    Box::pin(async move {
-        if !sleep_or_cancel(delay, &watch_cancel).await {
-            return Err(anyhow::anyhow!("watch cancelled"));
-        }
-        opened.await
-    })
-}
-
-/// Sleep for `delay`, returning `false` if `cancel` fired first.
-async fn sleep_or_cancel(delay: Duration, cancel: &CancellationToken) -> bool {
-    tokio::select! {
-        _ = cancel.cancelled() => false,
-        _ = tokio::time::sleep(delay) => true,
-    }
+    let namespace_filter = scope.namespace_filter.clone();
+    let host = Arc::new(GenerationHost::new(scope, build, list, publish));
+    ModelDiscoveryController::new(host)
+        .run(stream, namespace_filter)
+        .await;
 }
 
 /// Choose a generation for a request.
@@ -629,15 +554,6 @@ pub(crate) fn choose_generation<T>(
         .or_else(|| generations.iter().find(|generation| candidate(generation)))
 }
 
-/// Whether a worker with these `needs` (alternatives, any one of which
-/// suffices) can serve only alongside prefill workers.
-pub(crate) fn needs_prefill(needs: &[Vec<WorkerType>]) -> bool {
-    !needs.is_empty()
-        && needs
-            .iter()
-            .all(|alternative| alternative.contains(&WorkerType::Prefill))
-}
-
 /// Pick an item with probability proportional to its weight; `roll(total)`
 /// returns a value in `0..total`. Returns `None` when every weight is zero.
 fn pick_weighted<T>(
@@ -662,23 +578,28 @@ fn pick_weighted<T>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     use super::*;
     use dynamo_llm::model_type::ModelType;
+    use dynamo_runtime::discovery::DiscoveryEvent;
     use tokio::sync::{mpsc, oneshot};
+    use tokio_stream::wrappers::UnboundedReceiverStream;
 
     const MODEL: &str = "tiny";
+    /// Covers the controller's retry backoff without hanging a failing test.
+    const WAIT: Duration = Duration::from_secs(300);
 
     fn card(
-        model: &str,
         worker_type: Option<WorkerType>,
         model_type: ModelType,
+        needs: Vec<Vec<WorkerType>>,
     ) -> ModelDeploymentCard {
-        let mut card = ModelDeploymentCard::with_name_only(model);
+        let mut card = ModelDeploymentCard::with_name_only(MODEL);
         card.worker_type = worker_type;
         card.model_type = model_type;
+        card.needs = needs;
         card
     }
 
@@ -686,15 +607,16 @@ mod tests {
         ModelType::Chat | ModelType::Completions
     }
 
-    /// A worker's card for `model` in `namespace`.
-    fn registration(
+    /// A worker's card, registered by `component` in `namespace`.
+    fn worker(
         namespace: &str,
+        component: &str,
         instance_id: u64,
         card: &ModelDeploymentCard,
     ) -> DiscoveryInstance {
         DiscoveryInstance::Model {
             namespace: namespace.to_string(),
-            component: "backend".to_string(),
+            component: component.to_string(),
             endpoint: "generate".to_string(),
             instance_id,
             card_json: serde_json::to_value(card).unwrap(),
@@ -702,13 +624,41 @@ mod tests {
         }
     }
 
-    /// A decode worker's card for `model` in `namespace`.
-    fn decode(namespace: &str, instance_id: u64, model: &str) -> DiscoveryInstance {
-        registration(
-            namespace,
-            instance_id,
-            &card(model, Some(WorkerType::Decode), chat()),
-        )
+    fn aggregated(namespace: &str, instance_id: u64) -> DiscoveryInstance {
+        serving(namespace, instance_id, MODEL)
+    }
+
+    /// An aggregated worker of `model`.
+    fn serving(namespace: &str, instance_id: u64, model: &str) -> DiscoveryInstance {
+        let mut card = card(Some(WorkerType::Aggregated), chat(), vec![]);
+        card.display_name = model.to_string();
+        worker(namespace, "backend", instance_id, &card)
+    }
+
+    fn decode(namespace: &str, instance_id: u64) -> DiscoveryInstance {
+        let card = card(
+            Some(WorkerType::Decode),
+            chat(),
+            vec![vec![WorkerType::Prefill]],
+        );
+        worker(namespace, "backend", instance_id, &card)
+    }
+
+    /// A prefill worker as the mocker registers it: no legacy
+    /// `ModelType::Prefill` bit.
+    fn prefill(namespace: &str, instance_id: u64) -> DiscoveryInstance {
+        let card = card(
+            Some(WorkerType::Prefill),
+            ModelType::empty(),
+            vec![vec![WorkerType::Decode]],
+        );
+        worker(namespace, "prefill", instance_id, &card)
+    }
+
+    /// A prefill worker from before `worker_type`: the legacy bit only.
+    fn legacy_prefill(namespace: &str, instance_id: u64) -> DiscoveryInstance {
+        let card = card(None, ModelType::Prefill, vec![]);
+        worker(namespace, "prefill", instance_id, &card)
     }
 
     fn scope(
@@ -718,6 +668,7 @@ mod tests {
         GenerationScope {
             namespace_filter,
             prefix_mode,
+            component: "backend".to_string(),
         }
     }
 
@@ -729,161 +680,464 @@ mod tests {
         )
     }
 
-    fn summarize(changes: &[GenerationChange]) -> Vec<String> {
-        let mut out: Vec<String> = changes
-            .iter()
-            .map(|change| match change {
-                GenerationChange::Appeared { namespace, .. } => format!("+{namespace}"),
-                GenerationChange::Vanished { namespace } => format!("-{namespace}"),
-            })
-            .collect();
-        out.sort();
-        out
+    struct FakeGeneration {
+        namespace: String,
+        model: String,
+        ready: AtomicBool,
+        prefill: Mutex<Option<EndpointId>>,
     }
 
-    /// Only decode or aggregated base-model cards start a generation, so it is
-    /// never built from a prefill, encode, or adapter card. In E/P/D the
-    /// encode card registers first.
-    #[test]
-    fn tracker_ignores_prefill_encode_and_adapter_cards() {
-        let ns = "dgd-aaaaaaaa";
-        let mut adapter = decode(ns, 1, MODEL);
+    impl FakeGeneration {
+        fn ready(&self) -> bool {
+            self.ready.load(Ordering::Relaxed)
+        }
+
+        fn prefill_namespace(&self) -> Option<String> {
+            lock(&self.prefill)
+                .as_ref()
+                .map(|endpoint| endpoint.namespace.clone())
+        }
+    }
+
+    impl RoutingGeneration for FakeGeneration {
+        fn set_topology(&self, ready: bool, prefill: Option<&EndpointId>) {
+            self.ready.store(ready, Ordering::Relaxed);
+            if let Some(endpoint) = prefill {
+                lock(&self.prefill).get_or_insert_with(|| endpoint.clone());
+            }
+        }
+    }
+
+    /// A build the test completes.
+    struct Build {
+        namespace: String,
+        startup: bool,
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    }
+
+    impl Build {
+        fn finish(self) {
+            let _ = self.reply.send(Ok(()));
+        }
+
+        fn fail(self) {
+            let _ = self.reply.send(Err(anyhow::anyhow!("router failed")));
+        }
+    }
+
+    /// The Frontend's discovery controller with a [`GenerationHost`], over a
+    /// discovery stream the test drives.
+    struct Epp {
+        events: mpsc::UnboundedSender<anyhow::Result<DiscoveryEvent>>,
+        /// What the controller's periodic reconciliation lists.
+        registered: Arc<Mutex<Vec<DiscoveryInstance>>>,
+        builds: mpsc::UnboundedReceiver<Build>,
+        published: watch::Receiver<GenerationSet<FakeGeneration>>,
+        controller: tokio::task::JoinHandle<()>,
+    }
+
+    impl Epp {
+        fn start(scope: GenerationScope) -> Self {
+            let (events, stream) = mpsc::unbounded_channel();
+            let registered = Arc::new(Mutex::new(Vec::<DiscoveryInstance>::new()));
+            let (build_tx, builds) = mpsc::unbounded_channel();
+            let build = move |request: BuildRequest| {
+                let build_tx = build_tx.clone();
+                async move {
+                    let (reply, outcome) = oneshot::channel();
+                    let namespace = request.endpoint.namespace;
+                    let model = request.card.name().to_string();
+                    let _ = build_tx.send(Build {
+                        namespace: namespace.clone(),
+                        startup: request.startup,
+                        reply,
+                    });
+                    outcome.await??;
+                    Ok::<_, anyhow::Error>(FakeGeneration {
+                        namespace,
+                        model,
+                        ready: AtomicBool::new(false),
+                        prefill: Mutex::new(None),
+                    })
+                }
+            };
+            let list = {
+                let registered = registered.clone();
+                move || {
+                    let instances = lock(&registered).clone();
+                    async move { Ok::<_, anyhow::Error>(instances) }
+                }
+            };
+            let (publish, published) =
+                watch::channel::<GenerationSet<FakeGeneration>>(Arc::from([]));
+            let controller = tokio::spawn(run_generation_controller(
+                Box::pin(UnboundedReceiverStream::new(stream)),
+                scope,
+                build,
+                list,
+                publish,
+            ));
+            Self {
+                events,
+                registered,
+                builds,
+                published,
+                controller,
+            }
+        }
+
+        fn add(&self, instance: &DiscoveryInstance) {
+            lock(&self.registered).push(instance.clone());
+            let added = DiscoveryEvent::Added(instance.clone());
+            self.events.send(Ok(added)).unwrap();
+        }
+
+        fn remove(&self, instance: &DiscoveryInstance) {
+            lock(&self.registered).retain(|registered| registered.id() != instance.id());
+            let removed = DiscoveryEvent::Removed(instance.id());
+            self.events.send(Ok(removed)).unwrap();
+        }
+
+        async fn next_build(&mut self) -> Build {
+            tokio::time::timeout(WAIT, self.builds.recv())
+                .await
+                .expect("no build started")
+                .unwrap()
+        }
+
+        /// Complete the next build, which must be `namespace`'s.
+        async fn build(&mut self, namespace: &str) {
+            let build = self.next_build().await;
+            assert_eq!(build.namespace, namespace);
+            build.finish();
+        }
+
+        /// Let the controller act on everything so far. The clock is paused,
+        /// so it advances only once every task is idle.
+        async fn settle(&self) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        fn published(&self) -> Vec<String> {
+            let published = self.published.borrow();
+            published
+                .iter()
+                .map(|generation| generation.namespace.clone())
+                .collect()
+        }
+
+        /// The published generations as `model@namespace`.
+        fn published_models(&self) -> Vec<String> {
+            let published = self.published.borrow();
+            published
+                .iter()
+                .map(|generation| format!("{}@{}", generation.model, generation.namespace))
+                .collect()
+        }
+
+        fn generation(&self, namespace: &str) -> Arc<FakeGeneration> {
+            let published = self.published.borrow();
+            published
+                .iter()
+                .find(|generation| generation.namespace == namespace)
+                .cloned()
+                .expect("generation is published")
+        }
+
+        /// End the discovery stream, which stops the controller, and check
+        /// that no build was left unseen.
+        async fn stop(self) {
+            let Self {
+                events,
+                mut builds,
+                controller,
+                ..
+            } = self;
+            drop(events);
+            controller.await.unwrap();
+            assert!(builds.try_recv().is_err(), "unexpected build");
+        }
+    }
+
+    /// The rolling update from #16085: generation `a` serves, `b` starts
+    /// beside it and serves once built, then `a` drains and is retired, with
+    /// no EPP restart.
+    #[tokio::test(start_paused = true)]
+    async fn follows_a_rolling_update() {
+        let (a, b) = ("dgd-aaaaaaaa", "dgd-bbbbbbbb");
+        let mut epp = Epp::start(dgd());
+        let old = aggregated(a, 1);
+        epp.add(&old);
+        epp.build(a).await;
+        epp.settle().await;
+        assert_eq!(epp.published(), [a]);
+
+        epp.add(&aggregated(b, 2));
+        epp.build(b).await;
+        epp.settle().await;
+        assert_eq!(epp.published(), [a, b], "generations overlap");
+
+        epp.remove(&old);
+        epp.settle().await;
+        assert_eq!(epp.published(), [b]);
+        epp.stop().await;
+    }
+
+    /// During a rollout a disaggregated generation takes no traffic until its
+    /// own prefill workers register, and each generation's prefill router gets
+    /// its own namespace's prefill workers, legacy or current.
+    #[tokio::test(start_paused = true)]
+    async fn holds_back_a_generation_until_its_topology_is_complete() {
+        let (a, b) = ("dgd-aaaaaaaa", "dgd-bbbbbbbb");
+        let mut epp = Epp::start(dgd());
+        epp.add(&legacy_prefill(a, 1));
+        epp.add(&decode(a, 2));
+        epp.build(a).await;
+        epp.settle().await;
+        let old = epp.generation(a);
+        assert!(old.ready());
+        assert_eq!(old.prefill_namespace().as_deref(), Some(a));
+
+        epp.add(&decode(b, 3));
+        epp.build(b).await;
+        epp.settle().await;
+        assert_eq!(epp.published(), [a], "no prefill workers yet");
+
+        epp.add(&prefill(b, 4));
+        epp.settle().await;
+        assert_eq!(epp.published(), [a, b]);
+        let new = epp.generation(b);
+        assert!(new.ready());
+        assert_eq!(new.prefill_namespace().as_deref(), Some(b));
+        assert_eq!(old.prefill_namespace().as_deref(), Some(a));
+        epp.stop().await;
+    }
+
+    /// At startup the first generation serves at once: a disaggregated one
+    /// serves aggregated until its prefill workers register.
+    #[tokio::test(start_paused = true)]
+    async fn publishes_the_first_generation_at_once() {
+        let a = "dgd-aaaaaaaa";
+        let mut epp = Epp::start(dgd());
+        epp.add(&decode(a, 1));
+        let build = epp.next_build().await;
+        assert!(build.startup);
+        build.finish();
+        epp.settle().await;
+        let first = epp.generation(a);
+        assert!(!first.ready());
+        assert_eq!(first.prefill_namespace(), None);
+
+        epp.add(&prefill(a, 2));
+        epp.settle().await;
+        assert!(first.ready());
+        assert_eq!(first.prefill_namespace().as_deref(), Some(a));
+
+        epp.add(&decode("dgd-bbbbbbbb", 3));
+        let build = epp.next_build().await;
+        assert!(!build.startup);
+        build.finish();
+        epp.stop().await;
+    }
+
+    /// A generation whose workers all leave keeps serving until a ready
+    /// replacement exists, so requests fail there rather than finding no
+    /// generation; workers that return are served by a rebuilt generation.
+    #[tokio::test(start_paused = true)]
+    async fn keeps_the_last_generation_until_a_replacement_is_ready() {
+        let (a, b) = ("dgd-aaaaaaaa", "dgd-bbbbbbbb");
+        let mut epp = Epp::start(dgd());
+        let gone = aggregated(a, 1);
+        epp.add(&gone);
+        epp.build(a).await;
+        epp.settle().await;
+        let first = epp.generation(a);
+
+        epp.remove(&gone);
+        epp.settle().await;
+        assert_eq!(epp.published(), [a]);
+
+        let returned = aggregated(a, 2);
+        epp.add(&returned);
+        epp.build(a).await;
+        epp.settle().await;
+        assert_eq!(epp.published(), [a]);
+        assert!(!Arc::ptr_eq(&first, &epp.generation(a)), "rebuilt in place");
+
+        epp.remove(&returned);
+        epp.settle().await;
+        assert_eq!(epp.published(), [a]);
+        epp.add(&aggregated(b, 3));
+        epp.build(b).await;
+        epp.settle().await;
+        assert_eq!(epp.published(), [b]);
+        epp.stop().await;
+    }
+
+    /// Once no complete generation serves, an incomplete one serves as it
+    /// can, as at startup. The operator rolls each role on its own schedule,
+    /// so the old decode or prefill workers may drain before the new prefill
+    /// workers register.
+    #[tokio::test(start_paused = true)]
+    async fn serves_an_incomplete_generation_once_no_complete_one_serves() {
+        let (a, b) = ("dgd-aaaaaaaa", "dgd-bbbbbbbb");
+        for drained in ["decode", "prefill"] {
+            let mut epp = Epp::start(dgd());
+            let old_prefill = prefill(a, 1);
+            let old_decode = decode(a, 2);
+            epp.add(&old_prefill);
+            epp.add(&old_decode);
+            epp.build(a).await;
+            epp.add(&decode(b, 3));
+            epp.build(b).await;
+            epp.settle().await;
+            assert_eq!(epp.published(), [a]);
+
+            epp.remove(if drained == "decode" {
+                &old_decode
+            } else {
+                &old_prefill
+            });
+            epp.settle().await;
+            assert_eq!(epp.published(), [a, b], "old {drained} drained");
+            assert!(!epp.generation(b).ready());
+
+            epp.add(&prefill(b, 4));
+            if drained == "prefill" {
+                epp.remove(&old_decode);
+            }
+            epp.settle().await;
+            assert_eq!(epp.published(), [b]);
+            assert!(epp.generation(b).ready());
+            epp.stop().await;
+        }
+    }
+
+    /// Only a generation of the same model replaces one whose workers are
+    /// gone, so one model's requests never reach another model's workers.
+    #[tokio::test(start_paused = true)]
+    async fn a_replacement_serves_the_same_model() {
+        let (a, b) = ("dgd-aaaaaaaa", "dgd-bbbbbbbb");
+        let mut epp = Epp::start(dgd());
+        let x = serving(a, 1, "model-x");
+        epp.add(&x);
+        epp.build(a).await;
+        epp.add(&serving(a, 2, "model-y"));
+        epp.build(a).await;
+        epp.settle().await;
+        let both = ["model-x@dgd-aaaaaaaa", "model-y@dgd-aaaaaaaa"];
+        assert_eq!(epp.published_models(), both);
+
+        epp.remove(&x);
+        epp.settle().await;
+        assert_eq!(epp.published_models(), both, "model-y is no replacement");
+
+        epp.add(&serving(b, 3, "model-x"));
+        epp.build(b).await;
+        epp.settle().await;
+        assert_eq!(
+            epp.published_models(),
+            ["model-x@dgd-bbbbbbbb", "model-y@dgd-aaaaaaaa"]
+        );
+        epp.stop().await;
+    }
+
+    /// The EPP follows only its own DGD's generations, and builds them only
+    /// from the configured component's base-model cards.
+    #[tokio::test(start_paused = true)]
+    async fn follows_only_its_own_deployments_workers() {
+        let generation = "default-foo-1a2b3c4d";
+        let mut epp = Epp::start(scope(
+            NamespaceFilter::Prefix("default-foo".into()),
+            NamespacePrefixMode::WorkerGeneration,
+        ));
+        epp.add(&aggregated("default-foo-bar", 1));
+        let mut adapter = aggregated(generation, 2);
         if let DiscoveryInstance::Model { model_suffix, .. } = &mut adapter {
             *model_suffix = Some("adapter".into());
         }
-        let ignored = [
-            adapter,
-            registration(ns, 2, &card(MODEL, None, ModelType::Prefill)),
-            registration(
-                ns,
-                4,
-                &card(MODEL, Some(WorkerType::Prefill), ModelType::empty()),
-            ),
-            registration(
-                ns,
-                5,
-                &card(MODEL, Some(WorkerType::Encode), ModelType::empty()),
-            ),
-        ];
-        let mut tracker = GenerationTracker::new(dgd());
-        for instance in &ignored {
-            assert!(tracker.on_added(instance).is_empty());
-        }
-        assert_eq!(
-            summarize(&tracker.on_added(&decode(ns, 3, MODEL))),
-            [format!("+{ns}")]
-        );
-    }
-
-    /// A sibling DGD sharing the prefix is excluded under worker-generation
-    /// matching, and an exact scope excludes generations.
-    #[test]
-    fn tracker_scopes_generations_to_this_deployment() {
-        let instances = [
-            decode("default-foo-bar", 1, MODEL),
-            decode("default-foo-1a2b3c4d", 2, MODEL),
-        ];
-        let resync = |filter: NamespaceFilter, mode: NamespacePrefixMode| {
-            summarize(&GenerationTracker::new(scope(filter, mode)).on_resync(&instances))
-        };
-        let prefix = || NamespaceFilter::Prefix("default-foo".into());
-        assert_eq!(
-            resync(prefix(), NamespacePrefixMode::WorkerGeneration),
-            ["+default-foo-1a2b3c4d"]
-        );
-        assert_eq!(
-            resync(prefix(), NamespacePrefixMode::Literal),
-            ["+default-foo-1a2b3c4d"],
-            "a scope that does not follow generations binds to one namespace"
-        );
-        assert!(
-            resync(
-                NamespaceFilter::Exact("default-foo".into()),
-                NamespacePrefixMode::WorkerGeneration
-            )
-            .is_empty()
-        );
-    }
-
-    /// The rolling update from #16085: `a` is live, `b` appears beside it,
-    /// then `a` drains. `b` is reported on its first card, `a` on its last.
-    #[test]
-    fn tracker_follows_a_rolling_update() {
-        let (a1, a2, b) = (
-            decode("dgd-aaaaaaaa", 1, MODEL),
-            decode("dgd-aaaaaaaa", 2, MODEL),
-            decode("dgd-bbbbbbbb", 3, MODEL),
-        );
-        let mut tracker = GenerationTracker::new(dgd());
-        assert_eq!(summarize(&tracker.on_added(&a1)), ["+dgd-aaaaaaaa"]);
-        assert!(tracker.on_added(&a2).is_empty(), "one change per namespace");
-        assert_eq!(summarize(&tracker.on_added(&b)), ["+dgd-bbbbbbbb"]);
-
-        assert!(tracker.on_removed(&a1.id()).is_empty());
-        assert!(
-            tracker.on_removed(&a1.id()).is_empty(),
-            "a repeated removal is not a second card leaving"
-        );
-        assert_eq!(summarize(&tracker.on_removed(&a2.id())), ["-dgd-aaaaaaaa"]);
-
-        let all = [a1.clone(), a2.clone(), b.clone()];
-        assert_eq!(summarize(&tracker.on_resync(&all)), ["+dgd-aaaaaaaa"]);
-        assert_eq!(summarize(&tracker.on_resync(&[b])), ["-dgd-aaaaaaaa"]);
-    }
-
-    /// Within one DGD every generation serves its own model, so a rollout
-    /// that renames the model serves both names until the old one drains.
-    #[test]
-    fn tracker_serves_every_generation_of_one_deployment() {
-        let old = decode("dgd-aaaaaaaa", 1, "model-a");
-        let renamed = decode("dgd-bbbbbbbb", 2, "model-b");
-        let mut tracker = GenerationTracker::new(dgd());
-        assert_eq!(summarize(&tracker.on_added(&old)), ["+dgd-aaaaaaaa"]);
-        assert_eq!(summarize(&tracker.on_added(&renamed)), ["+dgd-bbbbbbbb"]);
-        assert_eq!(summarize(&tracker.on_removed(&old.id())), ["-dgd-aaaaaaaa"]);
+        epp.add(&adapter);
+        let processor = card(Some(WorkerType::Aggregated), chat(), vec![]);
+        epp.add(&worker(generation, "processor", 3, &processor));
+        let encoder = card(Some(WorkerType::Encode), ModelType::empty(), vec![]);
+        epp.add(&worker(generation, "encoder", 4, &encoder));
+        epp.add(&aggregated(generation, 5));
+        epp.build(generation).await;
+        epp.settle().await;
+        assert_eq!(epp.published(), [generation]);
+        epp.stop().await;
     }
 
     /// Without `DYN_NAMESPACE_PREFIX_STRICT` (operators before 1.6) the EPP
-    /// still follows the DGD's generations, but never a sibling DGD sharing
-    /// the prefix; bound to a sibling first, it stays there as before.
-    #[test]
-    fn tracker_follows_generations_under_a_literal_prefix() {
+    /// still follows its DGD's generations but not a sibling DGD sharing the
+    /// prefix; bound to the sibling first, it stays there.
+    #[tokio::test(start_paused = true)]
+    async fn follows_generations_under_a_literal_prefix() {
         let literal = || {
-            GenerationTracker::new(scope(
+            scope(
                 NamespaceFilter::Prefix("dgd".into()),
                 NamespacePrefixMode::Literal,
-            ))
+            )
         };
-        let (old, new, sibling) = (
-            decode("dgd-aaaaaaaa", 1, MODEL),
-            decode("dgd-bbbbbbbb", 2, MODEL),
-            decode("dgd-bar", 3, MODEL),
-        );
-        let mut tracker = literal();
-        assert_eq!(summarize(&tracker.on_added(&old)), ["+dgd-aaaaaaaa"]);
-        assert!(tracker.on_added(&sibling).is_empty());
-        assert_eq!(summarize(&tracker.on_added(&new)), ["+dgd-bbbbbbbb"]);
-        assert_eq!(summarize(&tracker.on_removed(&old.id())), ["-dgd-aaaaaaaa"]);
+        let mut epp = Epp::start(literal());
+        epp.add(&aggregated("dgd-aaaaaaaa", 1));
+        epp.build("dgd-aaaaaaaa").await;
+        epp.add(&aggregated("dgd-bar", 2));
+        epp.add(&aggregated("dgd-bbbbbbbb", 3));
+        epp.build("dgd-bbbbbbbb").await;
+        epp.settle().await;
+        assert_eq!(epp.published(), ["dgd-aaaaaaaa", "dgd-bbbbbbbb"]);
+        epp.stop().await;
 
-        let mut tracker = literal();
-        assert_eq!(summarize(&tracker.on_added(&sibling)), ["+dgd-bar"]);
-        assert!(tracker.on_added(&old).is_empty());
+        let mut epp = Epp::start(literal());
+        epp.add(&aggregated("dgd-bar", 1));
+        epp.build("dgd-bar").await;
+        epp.add(&aggregated("dgd-aaaaaaaa", 2));
+        epp.settle().await;
+        assert_eq!(epp.published(), ["dgd-bar"]);
+        epp.stop().await;
     }
 
-    /// An exact or global scope binds to one namespace for good, as before.
-    #[test]
-    fn tracker_binds_one_namespace_outside_one_deployment() {
-        let first = decode("team-a", 1, MODEL);
-        let other = decode("team-b", 2, MODEL);
-        let mut tracker = GenerationTracker::new(scope(
+    /// A global or exact scope binds to one namespace for good, and only a
+    /// worker the EPP routes to binds it.
+    #[tokio::test(start_paused = true)]
+    async fn binds_one_namespace_outside_one_deployment() {
+        let mut epp = Epp::start(scope(
             NamespaceFilter::Global,
             NamespacePrefixMode::WorkerGeneration,
         ));
-        assert_eq!(summarize(&tracker.on_added(&first)), ["+team-a"]);
-        assert!(tracker.on_added(&other).is_empty());
-        assert_eq!(summarize(&tracker.on_removed(&first.id())), ["-team-a"]);
-        assert!(tracker.on_resync(&[other]).is_empty());
-        assert_eq!(summarize(&tracker.on_added(&first)), ["+team-a"]);
+        epp.add(&prefill("team-b", 1));
+        epp.add(&decode("team-a", 2));
+        epp.build("team-a").await;
+        epp.add(&aggregated("team-b", 3));
+        epp.settle().await;
+        assert_eq!(epp.published(), ["team-a"]);
+        assert_eq!(epp.generation("team-a").prefill_namespace(), None);
+        epp.stop().await;
+
+        let mut epp = Epp::start(scope(
+            NamespaceFilter::Exact("default-foo".into()),
+            NamespacePrefixMode::WorkerGeneration,
+        ));
+        epp.add(&aggregated("default-foo-1a2b3c4d", 1));
+        epp.add(&aggregated("default-foo", 2));
+        epp.build("default-foo").await;
+        epp.settle().await;
+        assert_eq!(epp.published(), ["default-foo"]);
+        epp.stop().await;
+    }
+
+    /// The controller retries a failed build.
+    #[tokio::test(start_paused = true)]
+    async fn retries_a_failed_build() {
+        let a = "dgd-aaaaaaaa";
+        let mut epp = Epp::start(dgd());
+        epp.add(&aggregated(a, 1));
+        epp.next_build().await.fail();
+        epp.build(a).await;
+        epp.settle().await;
+        assert_eq!(epp.published(), [a]);
+        epp.stop().await;
     }
 
     /// `(name, workers, ready, serves the requested model)`, chosen with
@@ -982,330 +1236,5 @@ mod tests {
             ),
             Some("model-b")
         );
-    }
-
-    #[test]
-    fn needs_prefill_only_when_every_alternative_does() {
-        use WorkerType::{Encode, Prefill};
-        assert!(!needs_prefill(&[]), "aggregated workers need nothing");
-        assert!(needs_prefill(&[vec![Prefill]]));
-        assert!(needs_prefill(&[vec![Prefill, Encode]]));
-        assert!(!needs_prefill(&[vec![Prefill], vec![Encode]]));
-    }
-
-    type TestBuild = fn(
-        String,
-        ModelDeploymentCard,
-        CancellationToken,
-    ) -> futures::future::Pending<Option<String>>;
-
-    /// A build the state-machine tests finish by hand.
-    fn manual_build(
-        _: String,
-        _: ModelDeploymentCard,
-        _: CancellationToken,
-    ) -> futures::future::Pending<Option<String>> {
-        futures::future::pending()
-    }
-
-    fn appeared(namespace: &str) -> GenerationChange {
-        GenerationChange::Appeared {
-            namespace: namespace.to_string(),
-            card: Arc::new(card(MODEL, Some(WorkerType::Decode), chat())),
-        }
-    }
-
-    fn vanished(namespace: &str) -> GenerationChange {
-        GenerationChange::Vanished {
-            namespace: namespace.to_string(),
-        }
-    }
-
-    /// Finish `namespace`'s pending build as the generation `value`.
-    fn finish(state: &mut GenerationState<'_, String, TestBuild>, namespace: &str, value: &str) {
-        let seq = state.pending[namespace].seq;
-        let result = (namespace.to_string(), seq, Ok(Some(value.to_string())));
-        state.on_built(result, &GenerationTracker::new(dgd()));
-    }
-
-    fn live(state: &GenerationState<'_, String, TestBuild>) -> Vec<String> {
-        state.published.values().map(|g| (**g).clone()).collect()
-    }
-
-    fn channel() -> watch::Sender<GenerationSet<String>> {
-        watch::channel::<GenerationSet<String>>(Arc::from([])).0
-    }
-
-    #[tokio::test]
-    async fn superseded_build_never_publishes() {
-        let (build, publish, cancel): (TestBuild, _, _) =
-            (manual_build, channel(), CancellationToken::new());
-        let mut state = GenerationState::new(&build, &publish, &cancel);
-        state.apply(appeared("dgd-bbbbbbbb"));
-        let stale = state.pending["dgd-bbbbbbbb"].seq;
-        state.apply(vanished("dgd-bbbbbbbb"));
-        state.apply(appeared("dgd-bbbbbbbb"));
-
-        let result = ("dgd-bbbbbbbb".into(), stale, Ok(Some("stale".into())));
-        state.on_built(result, &GenerationTracker::new(dgd()));
-        assert!(live(&state).is_empty());
-        finish(&mut state, "dgd-bbbbbbbb", "current");
-        assert_eq!(live(&state), ["current"]);
-        assert_eq!(publish.borrow().len(), 1);
-    }
-
-    /// The only generation losing its workers (a restart) is kept and reused
-    /// when they return, not rebuilt; a new generation replaces it.
-    #[tokio::test]
-    async fn only_generation_is_kept_until_replaced() {
-        let (build, publish, cancel): (TestBuild, _, _) =
-            (manual_build, channel(), CancellationToken::new());
-        let mut state = GenerationState::new(&build, &publish, &cancel);
-        state.apply(appeared("dgd-aaaaaaaa"));
-        finish(&mut state, "dgd-aaaaaaaa", "a");
-
-        state.apply(vanished("dgd-aaaaaaaa"));
-        assert_eq!(live(&state), ["a"], "the only generation is kept");
-        state.apply(appeared("dgd-aaaaaaaa"));
-        assert!(state.pending.is_empty(), "a returning generation is reused");
-
-        state.apply(vanished("dgd-aaaaaaaa"));
-        state.apply(appeared("dgd-bbbbbbbb"));
-        finish(&mut state, "dgd-bbbbbbbb", "b");
-        assert_eq!(live(&state), ["b"]);
-    }
-
-    #[tokio::test]
-    async fn vanished_generation_is_retired_when_another_serves() {
-        let (build, publish, cancel): (TestBuild, _, _) =
-            (manual_build, channel(), CancellationToken::new());
-        let mut state = GenerationState::new(&build, &publish, &cancel);
-        for (namespace, value) in [("dgd-aaaaaaaa", "a"), ("dgd-bbbbbbbb", "b")] {
-            state.apply(appeared(namespace));
-            finish(&mut state, namespace, value);
-        }
-        state.apply(vanished("dgd-aaaaaaaa"));
-        assert_eq!(live(&state), ["b"]);
-    }
-
-    /// A failed or panicked build is stopped and retried from the namespace's
-    /// current card: the card it failed with may name a replaced worker.
-    #[tokio::test]
-    async fn failed_build_is_retried_from_the_current_card() {
-        let (first, second) = (
-            decode("dgd-aaaaaaaa", 1, "first"),
-            decode("dgd-aaaaaaaa", 2, "second"),
-        );
-        let mut tracker = GenerationTracker::new(dgd());
-        let mut changes = tracker.on_added(&first);
-        tracker.on_added(&second);
-
-        let built_from = Arc::new(Mutex::new(Vec::new()));
-        let build = {
-            let built_from = built_from.clone();
-            move |_: String, card: ModelDeploymentCard, _: CancellationToken| {
-                built_from.lock().unwrap().push(card.display_name);
-                futures::future::pending::<Option<String>>()
-            }
-        };
-        let (publish, cancel) = (channel(), CancellationToken::new());
-        let mut state = GenerationState::new(&build, &publish, &cancel);
-        state.apply(changes.remove(0));
-        tracker.on_removed(&first.id());
-
-        for outcome in [
-            Ok(None),
-            Err(Box::new("boom") as Box<dyn std::any::Any + Send>),
-        ] {
-            let (seq, token) = {
-                let pending = &state.pending["dgd-aaaaaaaa"];
-                (pending.seq, pending.cancel.clone())
-            };
-            state.on_built(("dgd-aaaaaaaa".into(), seq, outcome), &tracker);
-            assert!(token.is_cancelled(), "the failed build's work is stopped");
-            assert_ne!(
-                state.pending["dgd-aaaaaaaa"].seq, seq,
-                "a new build is pending"
-            );
-        }
-        assert_eq!(*built_from.lock().unwrap(), ["first", "second", "second"]);
-        assert_eq!(state.pending["dgd-aaaaaaaa"].failures, 2);
-        assert_eq!(retry_delay(1), RETRY_DELAY);
-        assert_eq!(retry_delay(9), RETRY_DELAY * 16);
-    }
-
-    #[tokio::test]
-    async fn dropping_the_state_cancels_pending_builds() {
-        let (build, publish, cancel): (TestBuild, _, _) =
-            (manual_build, channel(), CancellationToken::new());
-        let mut state = GenerationState::new(&build, &publish, &cancel);
-        state.apply(appeared("dgd-aaaaaaaa"));
-        let token = state.pending["dgd-aaaaaaaa"].cancel.clone();
-        drop(state);
-        assert!(token.is_cancelled());
-    }
-
-    type Events = mpsc::UnboundedSender<anyhow::Result<DiscoveryEvent>>;
-
-    /// What each `subscribe` call does, in order. Calls past the end never
-    /// open.
-    enum Subscription {
-        Open(mpsc::UnboundedReceiver<anyhow::Result<DiscoveryEvent>>),
-        Panic,
-    }
-
-    fn open() -> (Events, Subscription) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (tx, Subscription::Open(rx))
-    }
-
-    /// Runs the watcher over scripted subscriptions. Every build hands the
-    /// test a gate that finishes it, and every `subscribe` call is reported.
-    struct Harness {
-        gates: mpsc::UnboundedReceiver<(String, oneshot::Sender<()>)>,
-        subscribed: mpsc::UnboundedReceiver<()>,
-        published: watch::Receiver<GenerationSet<String>>,
-        cancel: CancellationToken,
-        task: tokio::task::JoinHandle<()>,
-    }
-
-    impl Harness {
-        fn start(subscriptions: Vec<Subscription>) -> Self {
-            let subscriptions = Arc::new(Mutex::new(VecDeque::from(subscriptions)));
-            let (subscribed_tx, subscribed) = mpsc::unbounded_channel();
-            let subscribe = move |_cancel: CancellationToken| {
-                subscribed_tx.send(()).unwrap();
-                let next = subscriptions.lock().unwrap().pop_front();
-                let stream = match next {
-                    Some(Subscription::Panic) => panic!("scripted subscribe panic"),
-                    Some(Subscription::Open(rx)) => Some(Box::pin(
-                        tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
-                    ) as DiscoveryStream),
-                    None => None,
-                };
-                async move {
-                    match stream {
-                        Some(stream) => Ok(stream),
-                        None => futures::future::pending().await,
-                    }
-                }
-            };
-            let (gate_tx, gates) = mpsc::unbounded_channel();
-            let build =
-                move |namespace: String, _card: ModelDeploymentCard, _: CancellationToken| {
-                    let gate_tx = gate_tx.clone();
-                    async move {
-                        let (open, opened) = oneshot::channel();
-                        gate_tx.send((namespace.clone(), open)).ok()?;
-                        opened.await.ok()?;
-                        Some(namespace)
-                    }
-                };
-            let (publish, published) = watch::channel::<GenerationSet<String>>(Arc::from([]));
-            let cancel = CancellationToken::new();
-            let task = tokio::spawn(run_generation_watcher(
-                subscribe,
-                dgd(),
-                build,
-                publish,
-                cancel.clone(),
-            ));
-            Self {
-                gates,
-                subscribed,
-                published,
-                cancel,
-                task,
-            }
-        }
-
-        /// Finish the next build, checking which namespace it builds.
-        async fn finish_build(&mut self, namespace: &str) {
-            let (built, gate) = tokio::time::timeout(Duration::from_secs(5), self.gates.recv())
-                .await
-                .expect("a build must start")
-                .unwrap();
-            assert_eq!(built, namespace);
-            gate.send(()).unwrap();
-        }
-
-        async fn next_subscribe(&mut self) {
-            tokio::time::timeout(Duration::from_secs(5), self.subscribed.recv())
-                .await
-                .expect("the watcher must subscribe")
-                .unwrap();
-        }
-
-        async fn next_published(&mut self) -> Vec<String> {
-            tokio::time::timeout(Duration::from_secs(5), self.published.changed())
-                .await
-                .expect("the watcher must publish")
-                .unwrap();
-            self.published
-                .borrow_and_update()
-                .iter()
-                .map(|g| (**g).clone())
-                .collect()
-        }
-
-        async fn stop(self) {
-            self.cancel.cancel();
-            tokio::time::timeout(Duration::from_secs(5), self.task)
-                .await
-                .expect("the watcher must stop on cancellation")
-                .unwrap();
-        }
-    }
-
-    /// A rollout: `b` joins `a`, then `a` drains and is retired at once.
-    #[tokio::test]
-    async fn watcher_follows_a_rolling_update() {
-        let (a, b) = (
-            decode("dgd-aaaaaaaa", 1, MODEL),
-            decode("dgd-bbbbbbbb", 2, MODEL),
-        );
-        let (events, subscription) = open();
-        let mut h = Harness::start(vec![subscription]);
-
-        events.send(Ok(DiscoveryEvent::Added(a.clone()))).unwrap();
-        h.finish_build("dgd-aaaaaaaa").await;
-        assert_eq!(h.next_published().await, ["dgd-aaaaaaaa"]);
-        events.send(Ok(DiscoveryEvent::Added(b))).unwrap();
-        h.finish_build("dgd-bbbbbbbb").await;
-        assert_eq!(h.next_published().await, ["dgd-aaaaaaaa", "dgd-bbbbbbbb"]);
-        events.send(Ok(DiscoveryEvent::Removed(a.id()))).unwrap();
-        assert_eq!(h.next_published().await, ["dgd-bbbbbbbb"]);
-        h.stop().await;
-    }
-
-    /// A build that finishes while the watch is being reopened still publishes.
-    #[tokio::test]
-    async fn watcher_publishes_builds_while_resubscribing() {
-        let (events, subscription) = open();
-        let mut h = Harness::start(vec![subscription]);
-        h.next_subscribe().await;
-
-        events
-            .send(Ok(DiscoveryEvent::Added(decode("dgd-aaaaaaaa", 1, MODEL))))
-            .unwrap();
-        let (_, gate) = h.gates.recv().await.unwrap();
-        drop(events); // The watch ends; the next subscription never opens.
-        h.next_subscribe().await;
-        gate.send(()).unwrap();
-        assert_eq!(h.next_published().await, ["dgd-aaaaaaaa"]);
-        h.stop().await;
-    }
-
-    #[tokio::test]
-    async fn watcher_restarts_after_a_panic() {
-        let (events, subscription) = open();
-        let mut h = Harness::start(vec![Subscription::Panic, subscription]);
-
-        events
-            .send(Ok(DiscoveryEvent::Added(decode("dgd-aaaaaaaa", 1, MODEL))))
-            .unwrap();
-        h.finish_build("dgd-aaaaaaaa").await;
-        assert_eq!(h.next_published().await, ["dgd-aaaaaaaa"]);
-        h.stop().await;
     }
 }

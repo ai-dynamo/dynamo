@@ -19,7 +19,7 @@ pub(crate) enum WorkerGroupState {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct WorkerGroupObservation {
+pub struct WorkerGroupObservation {
     pub(crate) model: String,
     pub(crate) endpoint: EndpointId,
     pub(crate) worker_type: &'static str,

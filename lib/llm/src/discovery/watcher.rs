@@ -209,7 +209,7 @@ pub struct ModelWatcher {
     plugins: RouterPluginBuilder,
 }
 
-pub(crate) struct PreparedWorkerSet {
+pub struct PreparedWorkerSet {
     worker_set: Option<WorkerSet>,
     card: ModelDeploymentCard,
 }
