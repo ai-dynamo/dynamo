@@ -5,10 +5,12 @@ title: OpenAPI Request-Contract Comparison
 subtitle: Compare declared request and response schemas without treating agreement as support
 ---
 
-Compare NVIDIA Dynamo's declared request and response schemas with an OpenAPI 3.1 or 3.2
-framework contract from local, versioned JSON/YAML files. The `assess` command resolves
-dependency schemas, normalizes equivalent representations, and reports request and response
-differences and coverage gaps: contracts that the tool cannot fully check.
+NVIDIA Dynamo provides a
+[protocol compatibility CLI](https://github.com/ai-dynamo/dynamo/tree/main/scripts/protocol_compatibility)
+to compare its declared request and response schemas with a framework's OpenAPI 3.1 or 3.2
+specification. Its `assess` command reads local JSON/YAML files, fills missing dependency
+schemas, normalizes equivalent representations, and reports differences and coverage gaps:
+parts of the contract it cannot fully check.
 
 Specification generation and acquisition are separate from comparison. A local file may
 come from a source exporter, a published specification, or a previous live-server capture.
@@ -56,18 +58,14 @@ A file captured from that endpoint is a valid input, but its configured scope ma
 variants. Record that scope; comparison cannot recover missing variants or establish that
 the input covers the full contract. Capturing a schema does not test inference.
 
-The native export contains `x-dynamo-schema-import` placeholders because the pinned
-`async-openai` 0.42.1 types lack the annotations needed to generate their schemas.
-The composer fills these placeholders from an OpenAI document with a pinned checksum.
-It applies corrections reviewed against Dynamo's Rust types and guarded by input checks.
+Dynamo's pinned `async-openai` 0.42.1 dependency lacks the annotations needed to generate
+complete schemas. The tool fills missing definitions from a checksum-pinned OpenAI
+specification and applies corrections checked against Dynamo's Rust types.
 See the [composition invariants](https://github.com/ai-dynamo/dynamo/blob/main/scripts/protocol_compatibility/README.md#composition-invariants).
 
-`async-openai` 0.42.2 includes the annotations. Frontend-crates maintainers must wire
-`protocol-schema` to `async-openai/openapi` and replace the placeholder `value_type`
-overrides; enabling the feature alone is insufficient. Track integration in
+Newer upstream annotations are available, but Dynamo still needs the integration tracked in
 [frontend-crates issue #351](https://github.com/ai-dynamo/frontend-crates/issues/351).
-After Dynamo exports those schemas through updated dependencies, remove their import mappings.
-Remove composition only when no placeholders remain for the compared schemas.
+Composition can be removed once native exports provide all definitions needed for comparison.
 
 For each assessment, retain:
 
