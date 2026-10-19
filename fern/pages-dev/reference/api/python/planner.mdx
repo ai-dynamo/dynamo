@@ -81,7 +81,7 @@ BatchDispatcherFeedback(observed_at_s: float, pool_id: str, observation_window_s
 dispatcher did not report an applied Planner cap; ``0.0`` means an
 explicit pause. ``observed_at_s`` is an absolute wall-clock timestamp.
 
-[`components/src/dynamo/planner/core/types.py#L177`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L177)
+[`components/src/dynamo/planner/core/types.py#L178`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L178)
 
 **Public methods**
 
@@ -113,7 +113,7 @@ is an absolute wall-clock lease expiry. The dispatcher must stop using
 the limit after expiry. ``decision_id`` identifies the decision for
 idempotent application and audit correlation.
 
-[`components/src/dynamo/planner/core/types.py#L255`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L255)
+[`components/src/dynamo/planner/core/types.py#L256`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L256)
 
 **Public methods**
 
@@ -148,7 +148,7 @@ The raw counters and status are retained for auditability.
 ``remaining_requests`` is derived so contradictory observations cannot
 enter the planner contract.
 
-[`components/src/dynamo/planner/core/types.py#L92`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L92)
+[`components/src/dynamo/planner/core/types.py#L93`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L93)
 
 **Public methods**
 
@@ -209,7 +209,7 @@ represented explicitly by ``PoolTrafficDemand.online_offered_rps == 0``;
 frontend concurrency is independently unknown when
 ``frontend_active_requests is None`` and explicitly idle when it is zero.
 
-[`components/src/dynamo/planner/core/types.py#L211`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L211)
+[`components/src/dynamo/planner/core/types.py#L212`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L212)
 
 **Public methods**
 
@@ -505,7 +505,7 @@ from dynamo.planner.core import EngineCapabilities
 EngineCapabilities(num_gpu: Optional[int] = None, gpu_cost_per_replica: Optional[int] = None, max_num_batched_tokens: Optional[int] = None, max_num_seqs: Optional[int] = None, context_length: Optional[int] = None, max_kv_tokens: Optional[int] = None, kv_cache_block_size: Optional[int] = None, speculative_nextn: Optional[int] = None, power_watts_per_replica: Optional[int] = None) -> None
 ```
 
-[`components/src/dynamo/planner/core/types.py#L390`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L390)
+[`components/src/dynamo/planner/core/types.py#L396`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L396)
 
 **Public methods**
 
@@ -528,7 +528,7 @@ from dynamo.planner.core import FpmObservations
 ```
 
 ```python
-FpmObservations(prefill: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None, decode: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None) -> None
+FpmObservations(prefill: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None, decode: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None, unavailable_reasons: dict[str, str] = dict()) -> None
 ```
 
 [`components/src/dynamo/planner/core/types.py#L84`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L84)
@@ -538,7 +538,7 @@ FpmObservations(prefill: Optional[dict[tuple[str, int], ForwardPassMetrics]] = N
 <h4 id="api-dynamo-planner-core-types-fpmobservations-init">__init__</h4>
 
 ```python
-__init__(prefill: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None, decode: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None) -> None
+__init__(prefill: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None, decode: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None, unavailable_reasons: dict[str, str] = dict()) -> None
 ```
 
 No summary available.
@@ -1280,7 +1280,7 @@ from dynamo.planner.core import PlannerEffects
 PlannerEffects(scale_to: Optional[ScalingDecision] = None, next_tick: Optional[ScheduledTick] = None, diagnostics: TickDiagnostics = TickDiagnostics(), batch_drain_limits: list[BatchDrainLimitDecision] = list()) -> None
 ```
 
-[`components/src/dynamo/planner/core/types.py#L380`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L380)
+[`components/src/dynamo/planner/core/types.py#L386`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L386)
 
 **Public methods**
 
@@ -1350,7 +1350,7 @@ update_capabilities(capabilities: WorkerCapabilities) -> None
 
 Replace the current worker capabilities.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L139)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L141)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-load-benchmark-fpms">load_benchmark_fpms</h4>
 
@@ -1360,7 +1360,7 @@ load_benchmark_fpms(prefill_fpms: Optional[list[ForwardPassMetrics]] = None, dec
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L160)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L162)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-begin-tick">begin_tick</h4>
 
@@ -1370,7 +1370,7 @@ begin_tick() -> None
 
 Reset per-tick diagnostics before builtin plugins run.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L181)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L183)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-observe-worker-counts">observe_worker_counts</h4>
 
@@ -1380,7 +1380,7 @@ observe_worker_counts(counts: WorkerCounts) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L185)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L187)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-observe-fpm">observe_fpm</h4>
 
@@ -1390,7 +1390,7 @@ observe_fpm(obs: FpmObservations) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L188)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L190)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-observe-runtime-metadata">observe_runtime_metadata</h4>
 
@@ -1400,7 +1400,7 @@ observe_runtime_metadata(*, kv_hit_rate: Optional[float] = None, accept_length: 
 
 Update last-value runtime metadata without touching prediction history.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L193)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L195)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-install-regressions">install_regressions</h4>
 
@@ -1410,7 +1410,7 @@ install_regressions(*, prefill: Optional[PlannerEnginePerfModel] = None, decode:
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L204)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L206)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-advance-load">advance_load</h4>
 
@@ -1420,7 +1420,7 @@ advance_load(obs: FpmObservations, *, predicted_kv_hit_rate: Optional[float] = N
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L218)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L220)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-advance-throughput-from-prediction">advance_throughput_from_prediction</h4>
 
@@ -1434,7 +1434,7 @@ The PREDICT plugin owns load prediction history. This method consumes
 only explicit prediction output so PROPOSE never re-runs prediction or
 depends on hidden predictor state.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L316)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L318)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-diagnostics">diagnostics</h4>
 
@@ -1444,7 +1444,7 @@ diagnostics() -> TickDiagnostics
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L371)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L373)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-core-types-pooltrafficdemand" title="PoolTrafficDemand (class)">
@@ -1462,7 +1462,7 @@ This is intentionally separate from Batch Gateway state. The Planner
 derives safe capacity from its existing worker and capability inputs.
 ``observed_at_s`` is an absolute wall-clock timestamp.
 
-[`components/src/dynamo/planner/core/types.py#L146`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L146)
+[`components/src/dynamo/planner/core/types.py#L147`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L147)
 
 **Public methods**
 
@@ -1593,7 +1593,7 @@ from dynamo.planner.core import ScalingDecision
 ScalingDecision(num_prefill: Optional[int] = None, num_decode: Optional[int] = None) -> None
 ```
 
-[`components/src/dynamo/planner/core/types.py#L245`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L245)
+[`components/src/dynamo/planner/core/types.py#L246`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L246)
 
 **Public methods**
 
@@ -1702,7 +1702,7 @@ TickInput(now_s: float, traffic: Optional[TrafficObservation] = None, worker_cou
 Fields are filled according to the previous ``ScheduledTick``'s
 declared requirements.
 
-[`components/src/dynamo/planner/core/types.py#L230`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L230)
+[`components/src/dynamo/planner/core/types.py#L231`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L231)
 
 **Public methods**
 
@@ -1965,7 +1965,7 @@ they come from the simulated engine args.
 
 For agg mode, only ``decode`` is populated (single engine type).
 
-[`components/src/dynamo/planner/core/types.py#L416`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L416)
+[`components/src/dynamo/planner/core/types.py#L422`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L422)
 
 **Public methods**
 

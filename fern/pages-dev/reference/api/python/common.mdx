@@ -644,6 +644,18 @@ An idle heartbeat (all zeros, wall_time=0) is emitted once when the
 engine transitions from active to idle.
 
 [`components/src/dynamo/common/forward_pass_metrics.py#L153`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L153)
+
+**Public methods**
+
+<h4 id="api-dynamo-common-forward-pass-metrics-forwardpassmetrics-is-idle">is_idle</h4>
+
+```python
+is_idle() -> bool
+```
+
+Whether both scheduled and queued work are empty.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L191)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-generatechunk" title="GenerateChunk (class)">
@@ -2060,7 +2072,7 @@ Raised when a ForwardPassMetrics message has an unrecognised version.
 from dynamo.common.forward_pass_metrics import UnsupportedFpmVersionError
 ```
 
-[`components/src/dynamo/common/forward_pass_metrics.py#L200`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L200)
+[`components/src/dynamo/common/forward_pass_metrics.py#L207`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L207)
 </Accordion>
 
 <Accordion id="api-dynamo-common-protocols-video-protocol-videodata" title="VideoData (class)">
@@ -2313,7 +2325,7 @@ Returns None (and logs a warning) if the message cannot be decoded or
 carries a version this code does not understand, so callers can simply
 skip unsupported messages without crashing.
 
-[`components/src/dynamo/common/forward_pass_metrics.py#L204`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L204)
+[`components/src/dynamo/common/forward_pass_metrics.py#L211`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L211)
 </Accordion>
 
 <Accordion id="api-dynamo-common-config-dump-config-dumper-dump-config" title="dump_config (function)">
@@ -2352,7 +2364,7 @@ from dynamo.common.forward_pass_metrics import encode
 encode(metrics: ForwardPassMetrics) -> bytes
 ```
 
-[`components/src/dynamo/common/forward_pass_metrics.py#L196`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L196)
+[`components/src/dynamo/common/forward_pass_metrics.py#L203`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L203)
 </Accordion>
 
 <Accordion id="api-dynamo-common-rl-admin-env-bool" title="env_bool (function)">
