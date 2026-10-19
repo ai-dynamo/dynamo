@@ -167,6 +167,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .transpose()?;
 
         Ok(NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 messages,
                 model: req.model,

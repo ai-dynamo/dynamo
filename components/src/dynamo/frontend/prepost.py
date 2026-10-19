@@ -14,7 +14,13 @@ from dataclasses import dataclass
 from functools import lru_cache, partial
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
+try:
+    from vllm.entrypoints.chat_utils import make_tool_call_id
+except ImportError:
+    # Newer vLLM moved chat_utils under vllm.renderers (renderers refactor,
+    # upstream main after 2026-10). Remove this fallback once every supported
+    # vLLM pin ships vllm.renderers.chat_utils.
+    from vllm.renderers.chat_utils.tool_call import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,

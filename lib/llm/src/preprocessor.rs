@@ -209,6 +209,14 @@ pub struct PromptReasoningPrefill {
     legacy: bool,
     unified: bool,
     prefix: Option<&'static str>,
+    /// The prompt left the model's final (visible) channel open — an assistant
+    /// prefill with `continue_final_message` on a channel grammar (Beam) — so the
+    /// unified parser starts in `Response` instead of waiting for a channel opener.
+    response: bool,
+    /// Which channel the rendered prompt leaves open on the Beam route, which decides how
+    /// the per-turn grammar opens (`tool_choice`); `None` off the Beam route or without
+    /// prompt text, where the grammar assumes the bare header slot.
+    beam_channel: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
 }
 
 impl From<bool> for PromptReasoningPrefill {
@@ -218,7 +226,30 @@ impl From<bool> for PromptReasoningPrefill {
             legacy: value,
             unified: value,
             prefix: None,
+            response: false,
+            beam_channel: None,
         }
+    }
+}
+
+/// Which Beam channel the rendered prompt leaves open after its last `<|start|>assistant`
+/// header: `None` for the bare header slot (the model opens its own channel), `Reasoning`
+/// for an open analysis message, `Response` for an open final message (assistant prefill).
+fn beam_prompt_open_channel(prompt: &str) -> Option<dynamo_parsers_v2::UnifiedParserStartingState> {
+    use dynamo_parsers_v2::UnifiedParserStartingState as State;
+    let tail = &prompt[prompt.rfind("<|start|>assistant")? + "<|start|>assistant".len()..];
+    let open = |opener: &str, closers: &[&str]| {
+        tail.rfind(opener).is_some_and(|at| {
+            let rest = &tail[at + opener.len()..];
+            !closers.iter().any(|closer| rest.contains(closer))
+        })
+    };
+    if open("<|channel|>final<|message|>", &["<|return|>", "<|end|>"]) {
+        Some(State::Response)
+    } else if open("<|channel|>analysis<|message|>", &["<|end|>"]) {
+        Some(State::Reasoning)
+    } else {
+        Some(State::None)
     }
 }
 
@@ -1609,6 +1640,9 @@ struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
     continue_final_message: bool,
+    /// Beam's render-only view of `tools` / `chat_template_args` (`builtin_tools`
+    /// resolved against the declared tools); the request itself is never modified.
+    rendering: Option<dynamo_renderer::beam::BeamRendering>,
 }
 
 impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> {
@@ -1641,7 +1675,10 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn tools(&self) -> Option<minijinja::value::Value> {
-        self.inner.tools()
+        match &self.rendering {
+            Some(rendering) => rendering.tools.clone(),
+            None => self.inner.tools(),
+        }
     }
 
     fn tool_choice(&self) -> Option<minijinja::value::Value> {
@@ -1661,7 +1698,10 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn chat_template_args(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
-        self.inner.chat_template_args()
+        match &self.rendering {
+            Some(rendering) => Some(&rendering.chat_template_args),
+            None => self.inner.chat_template_args(),
+        }
     }
 
     fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
@@ -1779,6 +1819,10 @@ pub struct OpenAIPreprocessor {
     tool_call_parser: Option<String>,
     // Resolved at model setup so requests do not construct parsers to inspect their grammar.
     parser_requires_special_tokens: bool,
+    /// The model is served by the Beam unified family (`beam` tool-call and reasoning
+    /// parsers). Gates Beam-only request semantics: `preserve_thinking`, the
+    /// `builtin_tools` rendering view and stop-token visibility for the parser.
+    beam_route: bool,
     /// Normalize historical tool-call `function.arguments` from a JSON string
     /// to an object before MiniJinja rendering.  Enabled for GLM-5.2 (glm47
     /// parser) and any model that sets `normalize_tool_call_args: true` in its
@@ -2238,6 +2282,75 @@ impl OpenAIPreprocessor {
         !matches!(reasoning_parser, Some("gpt_oss"))
     }
 
+    /// Beam-route history policy (the partner's serving contract).
+    ///
+    /// `preserve_thinking`: supplied prior assistant reasoning is always rendered back
+    /// into the prompt, also across tool calls; omitted and `true` are the same.
+    /// `false` is accepted for compatibility but has no effect: the template has no
+    /// switch for it, and a client that does not want prior reasoning in the prompt
+    /// simply omits `reasoning_content` from its history. Any other route would
+    /// silently ignore the field, so it is rejected there.
+    ///
+    /// Missing reasoning on a prior assistant turn is a quality guardrail in the Beam
+    /// template, not a parser requirement, so the Beam route defaults
+    /// `allow_missing_thinking=true` (the template then renders an empty analysis
+    /// block) unless the client set it explicitly. Reasoning that is supplied is never
+    /// dropped or filled in.
+    fn apply_preserve_thinking(&self, request: &mut NvCreateChatCompletionRequest) -> Result<()> {
+        if !self.beam_route {
+            if request.preserve_thinking.is_some() {
+                return Err(invalid_argument_error(
+                    "`preserve_thinking` is only supported for models served with the `beam` parser",
+                ));
+            }
+            return Ok(());
+        }
+        let args = request.chat_template_args.get_or_insert_with(HashMap::new);
+        args.entry("allow_missing_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(true));
+        match request.preserve_thinking {
+            Some(true) => {
+                args.insert(
+                    "preserve_thinking".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+            Some(false) => {
+                tracing::debug!(
+                    "preserve_thinking=false has no effect on the Beam route: supplied reasoning is kept; omit reasoning_content to drop it"
+                );
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// Families verified to have no supported non-thinking generation mode.
+    fn reasoning_is_mandatory(family: Option<&str>) -> bool {
+        matches!(family, Some("beam"))
+    }
+
+    /// Validate the client's effective reasoning toggle against the model's policy.
+    fn validate_reasoning_request(&self, request: &NvCreateChatCompletionRequest) -> Result<()> {
+        let family = crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
+        if Self::reasoning_is_mandatory(family)
+            && Self::normalize_thinking_aliases(request.chat_template_args.as_ref(), family)
+                == Some(false)
+        {
+            let message = "The selected model does not support disabling reasoning. Remove the reasoning-off setting (thinking, enable_thinking, thinking_mode, or reasoning_effort=none).";
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(message)
+                .public_message(message)
+                .build()
+                .into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn has_structured_response_format<R: OAIChatLikeRequest>(request: &R) -> bool {
         request.response_format().is_some_and(|format| {
             format
@@ -2658,6 +2771,13 @@ impl OpenAIPreprocessor {
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
             || mdc.runtime_config.tool_call_parser.as_deref() == Some("glm47");
+        let beam_route = mdc.model_type.supports_chat()
+            && crate::protocols::openai::chat_completions::unified_parser::selected_family(
+                tool_call_parser.as_deref(),
+                mdc.runtime_config.reasoning_parser.as_deref(),
+            ) == Some(
+                crate::protocols::openai::chat_completions::unified_parser::BEAM_UNIFIED_FAMILY,
+            );
 
         if let Some(ref lora_name) = lora_name {
             tracing::info!(model = %mdc.display_name, lora_name, "LoRA adapter detected in MDC");
@@ -2983,6 +3103,7 @@ impl OpenAIPreprocessor {
             kv_cache_block_size,
             tool_call_parser,
             parser_requires_special_tokens,
+            beam_route,
             normalize_tool_call_args,
             media_loader,
             token_budget,
@@ -3192,7 +3313,8 @@ impl OpenAIPreprocessor {
             + SamplingOptionsProvider
             + StopConditionsProvider
             + OutputOptionsProvider
-            + NvExtProvider,
+            + NvExtProvider
+            + CommonExtProvider,
     >(
         &self,
         request: &R,
@@ -3207,7 +3329,8 @@ impl OpenAIPreprocessor {
             + SamplingOptionsProvider
             + StopConditionsProvider
             + OutputOptionsProvider
-            + NvExtProvider,
+            + NvExtProvider
+            + CommonExtProvider,
     >(
         &self,
         request: &R,
@@ -3281,6 +3404,15 @@ impl OpenAIPreprocessor {
         // for parsers that need special tokens preserved, unless the caller
         // has explicitly set `skip_special_tokens`.
         let mut output_options = request.extract_output_options()?;
+        // Beam's end-of-turn markers (`<|call|>`, `<|return|>`) are the model's stop
+        // tokens, and its parser completes a tool call only when it sees the marker.
+        // Keep the model's matched stop token text visible to the parser (it is consumed
+        // as control, never shown) while user stop strings and ids keep their normal
+        // trimming; not for a bare `response_format` document the engine's grammar owns
+        // in full (one the turn grammar does not hold inside the final channel).
+        if self.beam_route && !self.beam_output_is_bare_document(request) {
+            output_options.retain_model_stop_token_text = Some(true);
+        }
         if output_options.skip_special_tokens.is_none() && self.parser_requires_special_tokens {
             output_options.skip_special_tokens = Some(false);
         } else if Self::special_tokens_will_be_stripped(
@@ -3502,15 +3634,27 @@ impl OpenAIPreprocessor {
                 "Cannot continue the final message because the prompt formatter moves it before other messages",
             ));
         }
-        let formatted_prompt = if self.normalize_tool_call_args || continue_final {
-            self.apply_template_inner(&NormalizedArgsRequest {
-                inner: request,
-                normalize_tool_call_args: self.normalize_tool_call_args,
-                continue_final_message: continue_final,
-            })?
+        // Beam resolves `builtin_tools` names against `tools` for rendering only.
+        let rendering = if self.beam_route {
+            dynamo_renderer::beam::builtin_tools_view(
+                request,
+                self.runtime_config.exclude_tools_when_tool_choice_none,
+            )
+            .map_err(|error| invalid_argument_error(error.to_string()))?
         } else {
-            self.apply_template_inner(request)?
+            None
         };
+        let formatted_prompt =
+            if self.normalize_tool_call_args || continue_final || rendering.is_some() {
+                self.apply_template_inner(&NormalizedArgsRequest {
+                    inner: request,
+                    normalize_tool_call_args: self.normalize_tool_call_args,
+                    continue_final_message: continue_final,
+                    rendering,
+                })?
+            } else {
+                self.apply_template_inner(request)?
+            };
         let Some(prompt) = formatted_prompt else {
             return Ok(None);
         };
@@ -5341,10 +5485,15 @@ impl OpenAIPreprocessor {
                     tool_definitions,
                     guided_tool_constraint,
                     unified_parser::StreamPrefill {
-                        starting_state: unified_parser::stream_prefill(
-                            family,
-                            prompt_injected_reasoning,
-                        ),
+                        starting_state: if prompt_prefill.response
+                            && *family == unified_parser::BEAM_UNIFIED_FAMILY
+                        {
+                            // Assistant prefill inside Beam's final channel: the reply
+                            // continues visible text and ends on `<|return|>`.
+                            dynamo_parsers_v2::UnifiedParserStartingState::Response
+                        } else {
+                            unified_parser::stream_prefill(family, prompt_injected_reasoning)
+                        },
                         prefix: prompt_prefill.prefix,
                     },
                     family,
@@ -6744,6 +6893,10 @@ impl OpenAIPreprocessor {
                 prompt.ends_with("<|channel>thought") || prompt.ends_with("<|channel>")
             }
             Some("muse" | "muse_glimmer") => prompt.ends_with("assistant to=self<|message|>"),
+            Some("beam") => {
+                beam_prompt_open_channel(prompt)
+                    == Some(dynamo_parsers_v2::UnifiedParserStartingState::Reasoning)
+            }
             _ => prompt.ends_with("<think>"),
         }
     }
@@ -6794,10 +6947,27 @@ impl OpenAIPreprocessor {
             } else {
                 None
             };
+        let beam_channel =
+            (crate::protocols::openai::chat_completions::unified_parser::configured_family(
+                tool_call_parser,
+                reasoning_parser,
+            ) == Some(
+                crate::protocols::openai::chat_completions::unified_parser::BEAM_UNIFIED_FAMILY,
+            ))
+            .then(|| {
+                formatted_prompt
+                    .map(str::trim_end)
+                    .and_then(beam_prompt_open_channel)
+            })
+            .flatten();
+        let response =
+            beam_channel == Some(dynamo_parsers_v2::UnifiedParserStartingState::Response);
         PromptReasoningPrefill {
             legacy,
             unified: unified || prefix.is_some(),
             prefix,
+            response,
+            beam_channel,
         }
     }
 
@@ -6842,6 +7012,9 @@ impl OpenAIPreprocessor {
         default_thinking_mode: Option<&str>,
         unified_family: Option<&str>,
     ) -> bool {
+        if Self::reasoning_is_mandatory(unified_family) {
+            return false;
+        }
         let mut chat_template_args = request.chat_template_args.clone();
         let from_client = Self::request_has_client_thinking_control(request);
         let constrained_generation = !from_client
@@ -7771,10 +7944,12 @@ impl
 
         // Set stream=true for internal processing (after request payload capture)
         request.inner.stream = Some(true);
+        self.apply_preserve_thinking(&mut request)?;
         // Apply the deployment default before parser-specific normalization so
         // it can override an implicit model default (for example Kimi K2.5),
         // while explicit request controls still take precedence.
         let thinking_control_from_client = Self::request_has_client_thinking_control(&request);
+        self.validate_reasoning_request(&request)?;
         self.apply_default_thinking_mode(&mut request);
         Self::normalize_thinking_arg_with_source(
             &mut request,
@@ -7783,6 +7958,16 @@ impl
             thinking_control_from_client,
         );
         Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
+        crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
+            &mut request,
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
+        crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
+            &mut request,
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
@@ -7816,7 +8001,7 @@ impl
         let guided_tool_constraint = self.apply_tool_choice_guided_decoding(
             &request,
             &mut common_request,
-            prompt_injected_reasoning.unified,
+            prompt_injected_reasoning,
         )?;
         let tool_processing_route =
             self.tool_processing_route(&request, &guided_tool_constraint)?;
@@ -8062,6 +8247,25 @@ impl
         if common_request.prompt_embeds.is_none() {
             let isl = common_request.token_ids.len() as u32;
             response_generator.update_isl(isl);
+        }
+
+        // `echo: true` returns the prompt ahead of the completion. The generator
+        // rebuilds it from the tokens the engine saw once the engine reports its prompt
+        // logprobs (or on the choice's final chunk when it reports none).
+        if request.inner.echo == Some(true) && common_request.prompt_embeds.is_none() {
+            let prompt_text = match &request.inner.prompt {
+                dynamo_protocols::types::Prompt::String(text) => Some(text.clone()),
+                _ => None,
+            };
+            response_generator.enable_echo(
+                Arc::clone(&common_request.token_ids),
+                prompt_text,
+                self.tokenizer.clone(),
+                common_request
+                    .output_options
+                    .skip_special_tokens
+                    .unwrap_or(true),
+            );
         }
 
         // repack the common completion request
@@ -8578,7 +8782,7 @@ mod extra_args_media_copy_tests {
     use crate::model_card::ModelDeploymentCard;
     use crate::protocols::common::preprocessor::MultimodalData;
 
-    fn test_preprocessor() -> OpenAIPreprocessor {
+    pub(super) fn test_preprocessor() -> OpenAIPreprocessor {
         let mdc = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
             None,
@@ -9663,6 +9867,7 @@ mod tests {
             chat_template_args: None,
             thinking: None,
             thinking_token_budget: None,
+            preserve_thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -13628,6 +13833,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn beam_reasoning_off_is_rejected_before_backend_dispatch() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.model_type = crate::model_type::ModelType::Chat;
+        mdc.runtime_config.tool_call_parser = Some("beam".to_string());
+        mdc.runtime_config.reasoning_parser = Some("beam".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        for extra in [
+            serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
+            serde_json::json!({"chat_template_kwargs": {"thinking": false}}),
+            serde_json::json!({"chat_template_args": {"thinking": false}}),
+            serde_json::json!({"chat_template_kwargs": {"thinking_mode": "disabled"}}),
+            serde_json::json!({"thinking": {"type": "disabled"}}),
+            serde_json::json!({"reasoning_effort": "none"}),
+            serde_json::json!({"chat_template_kwargs": {"reasoning_effort": "none"}}),
+        ] {
+            for streaming in [false, true] {
+                let mut body = serde_json::json!({
+                    "model": "test-model", "messages": [{"role": "user", "content": "hi"}],
+                    "stream": streaming
+                });
+                body.as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                let mut request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(body).unwrap();
+                request.normalize_reasoning_template_args().unwrap();
+                let error = match Operator::generate(
+                    preprocessor.as_ref(),
+                    PipelineContext::new(request),
+                    Arc::new(UnreachableBackend),
+                )
+                .await
+                {
+                    Ok(_) => panic!("reasoning-off request must fail before dispatch"),
+                    Err(error) => error,
+                };
+                let error = error.downcast_ref::<DynamoError>().unwrap();
+                assert!(matches!(
+                    crate::http::service::error::http_action_for_error(error),
+                    crate::http::service::error::ClientErrorAction::Respond {
+                        status: axum::http::StatusCode::BAD_REQUEST,
+                        ..
+                    }
+                ));
+                let message = error.public_message().unwrap();
+                assert!(
+                    message.contains("The selected model does not support disabling reasoning"),
+                    "{message}"
+                );
+                assert!(message.contains("Remove"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_completion_operator_rejects_token_budget_overflow() {
         let mut mdc = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
@@ -14279,6 +14544,7 @@ mod tests {
             inner: &request,
             normalize_tool_call_args: true,
             continue_final_message: true,
+            rendering: None,
         };
         assert!(request.typed_messages().is_some());
         assert!(normalized.typed_messages().is_none());
@@ -14321,6 +14587,7 @@ mod tests {
                     inner: request,
                     normalize_tool_call_args: false,
                     continue_final_message: true,
+                    rendering: None,
                 })
                 .unwrap()
         } else {
@@ -17260,5 +17527,422 @@ mod tests {
             image,
             video(2)
         ]));
+    }
+}
+
+#[cfg(test)]
+mod beam_route_tests {
+    use super::*;
+    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use std::collections::HashMap;
+
+    fn test_prompt_formatter_with_exclusion(
+        template: &str,
+        exclude_tools_when_tool_choice_none: bool,
+    ) -> Arc<dyn OAIPromptFormatter> {
+        let template: dynamo_renderer::ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": template
+        }))
+        .unwrap();
+        match dynamo_renderer::PromptFormatter::from_parts(
+            template,
+            dynamo_renderer::ContextMixins::default(),
+            exclude_tools_when_tool_choice_none,
+        )
+        .unwrap()
+        {
+            dynamo_renderer::PromptFormatter::OAI(formatter) => formatter,
+        }
+    }
+
+    fn synthetic_preprocessor(beam_route: bool, template: &str) -> OpenAIPreprocessor {
+        let mut preprocessor = extra_args_media_copy_tests::test_preprocessor();
+        preprocessor.formatter = test_prompt_formatter_with_exclusion(template, true);
+        preprocessor
+            .runtime_config
+            .exclude_tools_when_tool_choice_none = true;
+        preprocessor.beam_route = beam_route;
+        preprocessor
+    }
+
+    /// Beam's contract: `builtin_tools` names the tools from `tools` for the system
+    /// section; the rest go to the developer section.
+    const BUILTIN_NAMES_TEMPLATE: &str = "SYS:{% for t in tools %}{% if t.function.name in builtin_tools %}{{ t.function.name }}:{{ t.function.parameters.type }};{% endif %}{% endfor %}DEV:{% for t in tools %}{% if t.function.name not in builtin_tools %}{{ t.function.name }};{% endif %}{% endfor %}";
+
+    fn builtin_request(
+        tools: serde_json::Value,
+        builtin: serde_json::Value,
+    ) -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": tools,
+            "chat_template_kwargs": {"builtin_tools": builtin},
+        }))
+        .unwrap()
+    }
+
+    fn function_tool(name: &str, schema_type: &str) -> serde_json::Value {
+        serde_json::json!({"type": "function", "function": {
+            "name": name, "description": "d", "parameters": {"type": schema_type}
+        }})
+    }
+
+    #[test]
+    fn beam_apply_template_declares_builtin_tools_by_name_from_the_whole_tool_list() {
+        let preprocessor = synthetic_preprocessor(true, BUILTIN_NAMES_TEMPLATE);
+        let request = builtin_request(
+            serde_json::json!([
+                function_tool("bash", "string"),
+                function_tool("weather", "object")
+            ]),
+            serde_json::json!(["bash"]),
+        );
+        let tools_before = serde_json::to_value(&request.inner.tools).unwrap();
+        let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(rendered.as_str(), "SYS:bash:string;DEV:weather;");
+        assert_eq!(
+            serde_json::to_value(&request.inner.tools).unwrap(),
+            tools_before
+        );
+        assert_eq!(
+            request.chat_template_args.as_ref().unwrap()["builtin_tools"],
+            serde_json::json!(["bash"])
+        );
+    }
+
+    #[test]
+    fn beam_apply_template_renders_an_undeclared_builtin_object_as_a_tool() {
+        let preprocessor = synthetic_preprocessor(true, BUILTIN_NAMES_TEMPLATE);
+        let request = builtin_request(
+            serde_json::json!([
+                function_tool("bash", "string"),
+                function_tool("weather", "object")
+            ]),
+            serde_json::json!([{"name": "python", "parameters": {"type": "string"}}, "bash"]),
+        );
+        let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(
+            rendered.as_str(),
+            "SYS:bash:string;python:string;DEV:weather;"
+        );
+    }
+
+    #[test]
+    fn beam_apply_template_rejects_undeclared_builtin_tool() {
+        let preprocessor = synthetic_preprocessor(true, BUILTIN_NAMES_TEMPLATE);
+        let request = builtin_request(
+            serde_json::json!([function_tool("weather", "object")]),
+            serde_json::json!(["bash"]),
+        );
+        let err = preprocessor.apply_template(&request).unwrap_err();
+        assert!(err.to_string().contains("not declared"), "{err}");
+    }
+
+    #[test]
+    fn non_beam_apply_template_leaves_builtin_tools_untouched() {
+        const TEMPLATE: &str = "{% for t in tools %}{{ t.function.name }};{% endfor %}";
+        let preprocessor = synthetic_preprocessor(false, TEMPLATE);
+        let request = builtin_request(
+            serde_json::json!([
+                function_tool("bash", "string"),
+                function_tool("weather", "object")
+            ]),
+            serde_json::json!(["bash"]),
+        );
+        let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(rendered.as_str(), "bash;weather;");
+    }
+
+    const HISTORY_TEMPLATE: &str = "{% for m in messages %}[{{ m.role }}:{{ m.content }}{% if m.reasoning_content %}|R={{ m.reasoning_content }}{% endif %}]{% endfor %}{% if preserve_thinking %}PT{% endif %}";
+
+    fn history_request(preserve_thinking: Option<bool>) -> NvCreateChatCompletionRequest {
+        let mut body = serde_json::json!({
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a", "reasoning_content": "SENTINEL_THOUGHT"},
+                {"role": "user", "content": "q2"},
+            ],
+        });
+        if let Some(value) = preserve_thinking {
+            body["preserve_thinking"] = serde_json::json!(value);
+        }
+        serde_json::from_value(body).unwrap()
+    }
+
+    #[test]
+    fn beam_reasoning_validation_keeps_history_controls_and_other_families() {
+        let mut beam = synthetic_preprocessor(true, HISTORY_TEMPLATE);
+        beam.tool_call_parser = Some("beam".into());
+        beam.runtime_config.reasoning_parser = Some("beam".into());
+        for extra in [
+            serde_json::json!({}),
+            serde_json::json!({"reasoning_effort": null}),
+            serde_json::json!({"chat_template_kwargs": {"reasoning_effort": null}}),
+            serde_json::json!({"reasoning_effort": "low"}),
+            serde_json::json!({"chat_template_kwargs": {"thinking": true}}),
+            serde_json::json!({"chat_template_kwargs": {"enable_thinking": true}}),
+            serde_json::json!({"chat_template_kwargs": {"thinking": true, "enable_thinking": false}}),
+            serde_json::json!({"chat_template_kwargs": {"preserve_thinking": false}}),
+            serde_json::json!({"chat_template_kwargs": {"allow_missing_thinking": false}}),
+        ] {
+            let mut body = serde_json::to_value(history_request(Some(false))).unwrap();
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(body).unwrap();
+            request.normalize_reasoning_template_args().unwrap();
+            beam.apply_preserve_thinking(&mut request).unwrap();
+            beam.validate_reasoning_request(&request).unwrap();
+            let rendered = beam.apply_template(&request).unwrap().unwrap();
+            assert!(rendered.as_str().contains("SENTINEL_THOUGHT"), "{extra}");
+        }
+
+        let other = synthetic_preprocessor(false, HISTORY_TEMPLATE);
+        let mut request = history_request(None);
+        request.chat_template_args = Some(HashMap::from([(
+            "enable_thinking".into(),
+            serde_json::json!(false),
+        )]));
+        request.normalize_reasoning_template_args().unwrap();
+        other.validate_reasoning_request(&request).unwrap();
+        for (family, disabled) in [("beam", false), ("qwen3", true)] {
+            assert_eq!(
+                OpenAIPreprocessor::request_disables_reasoning_with_family(
+                    &request,
+                    Some(family),
+                    Some(family),
+                    None,
+                    Some(family),
+                ),
+                disabled,
+                "{family}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserve_thinking_beam_history_keeps_reasoning_for_none_and_true() {
+        let preprocessor = synthetic_preprocessor(true, HISTORY_TEMPLATE);
+
+        let mut omitted = history_request(None);
+        preprocessor.apply_preserve_thinking(&mut omitted).unwrap();
+        // The Beam route defaults the missing-reasoning guardrail off, nothing else.
+        let args = omitted.chat_template_args.as_ref().unwrap();
+        assert_eq!(args["allow_missing_thinking"], serde_json::json!(true));
+        assert!(!args.contains_key("preserve_thinking"));
+        let rendered = preprocessor.apply_template(&omitted).unwrap().unwrap();
+        assert!(rendered.as_str().contains("|R=SENTINEL_THOUGHT"));
+        assert!(!rendered.as_str().ends_with("PT"));
+
+        let mut requested = history_request(Some(true));
+        requested.chat_template_args = Some(HashMap::from([(
+            "preserve_thinking".to_string(),
+            serde_json::json!(false),
+        )]));
+        preprocessor
+            .apply_preserve_thinking(&mut requested)
+            .unwrap();
+        let rendered = preprocessor.apply_template(&requested).unwrap().unwrap();
+        assert!(rendered.as_str().contains("|R=SENTINEL_THOUGHT"));
+        assert!(rendered.as_str().ends_with("PT"));
+    }
+
+    #[test]
+    fn preserve_thinking_false_is_accepted_and_keeps_supplied_reasoning() {
+        let preprocessor = synthetic_preprocessor(true, HISTORY_TEMPLATE);
+        let mut request = history_request(Some(false));
+        preprocessor.apply_preserve_thinking(&mut request).unwrap();
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert!(!args.contains_key("preserve_thinking"));
+        assert_eq!(args["allow_missing_thinking"], serde_json::json!(true));
+        let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert!(
+            rendered.as_str().contains("|R=SENTINEL_THOUGHT"),
+            "{rendered:?}"
+        );
+        assert!(!rendered.as_str().ends_with("PT"));
+    }
+
+    #[test]
+    fn beam_route_keeps_an_explicit_allow_missing_thinking() {
+        let preprocessor = synthetic_preprocessor(true, HISTORY_TEMPLATE);
+        let mut request = history_request(None);
+        request.chat_template_args = Some(HashMap::from([(
+            "allow_missing_thinking".to_string(),
+            serde_json::json!(false),
+        )]));
+        preprocessor.apply_preserve_thinking(&mut request).unwrap();
+        assert_eq!(
+            request.chat_template_args.as_ref().unwrap()["allow_missing_thinking"],
+            serde_json::json!(false)
+        );
+    }
+
+    fn mock_card(parsers: Option<&str>) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        card.model_type = crate::model_type::ModelType::Chat;
+        card.runtime_config.tool_call_parser = parsers.map(str::to_string);
+        card.runtime_config.reasoning_parser = parsers.map(str::to_string);
+        card
+    }
+
+    fn weather_request() -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+            }}],
+        }))
+        .unwrap()
+    }
+
+    /// Beam's `<|call|>` / `<|return|>` are the model's stop tokens and the parser needs
+    /// to see them, so the route keeps the matched stop token visible (and special
+    /// tokens decoded) unless the output is a bare `response_format` document.
+    #[test]
+    fn beam_route_keeps_stop_tokens_visible_unless_the_output_is_a_bare_document() {
+        let preprocessor = OpenAIPreprocessor::new(mock_card(Some("beam"))).unwrap();
+        assert!(preprocessor.beam_route);
+        let request = weather_request();
+        let output = preprocessor
+            .builder_with_lora(&request, None)
+            .unwrap()
+            .token_ids(vec![])
+            .build()
+            .unwrap();
+        assert_eq!(
+            output.output_options.retain_model_stop_token_text,
+            Some(true)
+        );
+        assert_eq!(output.output_options.no_stop_trim, None);
+        assert_eq!(output.output_options.skip_special_tokens, Some(false));
+
+        // A `response_format` the turn grammar holds in the final channel keeps the
+        // channel structure, and a forced choice ignores `response_format`: both end on
+        // a marker the parser needs.
+        let json_object: dynamo_protocols::types::ResponseFormat =
+            serde_json::from_value(serde_json::json!({"type": "json_object"})).unwrap();
+        for tool_choice in [None, Some(serde_json::json!("required"))] {
+            let mut structured = weather_request();
+            structured.inner.response_format = Some(json_object.clone());
+            structured.inner.tool_choice = tool_choice
+                .clone()
+                .map(|choice| serde_json::from_value(choice).unwrap());
+            let output = preprocessor
+                .builder_with_lora(&structured, None)
+                .unwrap()
+                .token_ids(vec![])
+                .build()
+                .unwrap();
+            assert_eq!(
+                output.output_options.retain_model_stop_token_text,
+                Some(true),
+                "{tool_choice:?}"
+            );
+        }
+
+        // A bare document under an explicit guided-decoding constraint has no channel
+        // structure to keep.
+        let mut bare = weather_request();
+        bare.inner.response_format = Some(json_object);
+        bare.common.guided_json = Some(serde_json::json!({"type": "object"}));
+        let output = preprocessor
+            .builder_with_lora(&bare, None)
+            .unwrap()
+            .token_ids(vec![])
+            .build()
+            .unwrap();
+        assert_eq!(output.output_options.retain_model_stop_token_text, None);
+
+        let plain = OpenAIPreprocessor::new(mock_card(None)).unwrap();
+        assert!(!plain.beam_route);
+        let output = plain
+            .builder_with_lora(&request, None)
+            .unwrap()
+            .token_ids(vec![])
+            .build()
+            .unwrap();
+        assert_eq!(output.output_options.retain_model_stop_token_text, None);
+    }
+
+    #[test]
+    fn beam_prompt_tail_decides_the_parser_starting_state() {
+        use dynamo_parsers_v2::UnifiedParserStartingState as State;
+        const HISTORY: &str = "<|start|>user<|message|>q<|end|><|start|>assistant<|channel|>final<|message|>Hi<|return|><|start|>user<|message|>q2<|end|>";
+        assert_eq!(
+            beam_prompt_open_channel(&format!("{HISTORY}<|start|>assistant")),
+            Some(State::None)
+        );
+        assert_eq!(
+            beam_prompt_open_channel(&format!(
+                "{HISTORY}<|start|>assistant<|channel|>analysis<|message|>Let me"
+            )),
+            Some(State::Reasoning)
+        );
+        assert_eq!(
+            beam_prompt_open_channel(&format!(
+                "{HISTORY}<|start|>assistant<|channel|>final<|message|>The planet is"
+            )),
+            Some(State::Response)
+        );
+        assert_eq!(
+            beam_prompt_open_channel("<|start|>user<|message|>q<|end|>"),
+            None
+        );
+
+        let final_prefill =
+            format!("{HISTORY}<|start|>assistant<|channel|>final<|message|>The planet is");
+        let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            Some("beam"),
+            Some("beam"),
+            Some(&final_prefill),
+        );
+        assert!(prefill.response && !prefill.unified);
+        let thought_prefill =
+            format!("{HISTORY}<|start|>assistant<|channel|>analysis<|message|>Let me");
+        let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            Some("beam"),
+            Some("beam"),
+            Some(&thought_prefill),
+        );
+        assert!(prefill.unified && !prefill.response);
+        let plain = format!("{HISTORY}<|start|>assistant");
+        let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            Some("beam"),
+            Some("beam"),
+            Some(&plain),
+        );
+        assert!(!prefill.unified && !prefill.response);
+        // Another family's prompt never sets the Beam response prefill.
+        let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            Some("qwen3_coder"),
+            Some("qwen3"),
+            Some(&final_prefill),
+        );
+        assert!(!prefill.response);
+    }
+
+    #[test]
+    fn preserve_thinking_is_rejected_off_the_beam_route() {
+        let preprocessor = synthetic_preprocessor(false, HISTORY_TEMPLATE);
+        // Any supplied value is rejected; the value itself is not inspected.
+        let mut request = history_request(Some(true));
+        let err = preprocessor
+            .apply_preserve_thinking(&mut request)
+            .unwrap_err();
+        assert!(err.to_string().contains("preserve_thinking"), "{err}");
+
+        // Omitted is unchanged on a non-Beam route (no Beam defaults either).
+        let mut omitted = history_request(None);
+        preprocessor.apply_preserve_thinking(&mut omitted).unwrap();
+        assert!(omitted.chat_template_args.is_none());
     }
 }

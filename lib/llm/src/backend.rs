@@ -72,6 +72,7 @@ struct DecoderUnfoldState {
     finished_choices: HashSet<u32>,
     validate_engine_decode: bool,
     no_stop_trim: bool,
+    retain_model_stop_token_text: bool,
     /// Set to true when all expected choices are finished locally, causing the stream to end
     finished: bool,
     /// Tokenizer used to decode top-logprob token_ids when the backend omits text
@@ -137,6 +138,7 @@ struct DecoderParams {
     skip_special_tokens: bool,
     include_stop_str_in_output: bool,
     no_stop_trim: bool,
+    retain_model_stop_token_text: bool,
     tracker: Option<Arc<RequestTracker>>,
     n: u32,
     // In-process decoder checkpoint carried from a migrated attempt's last known-good
@@ -161,6 +163,10 @@ impl DecoderParams {
             // mid-output) leak the token's text into `content` / `reasoning_content`.
             skip_special_tokens: request.output_options.skip_special_tokens.unwrap_or(true),
             no_stop_trim: request.output_options.no_stop_trim.unwrap_or(false),
+            retain_model_stop_token_text: request
+                .output_options
+                .retain_model_stop_token_text
+                .unwrap_or(false),
             include_stop_str_in_output: request
                 .sampling_options
                 .include_stop_str_in_output
@@ -218,6 +224,7 @@ impl Backend {
             finished_choices: HashSet::new(),
             validate_engine_decode: self.validate_engine_decode,
             no_stop_trim: params.no_stop_trim,
+            retain_model_stop_token_text: params.retain_model_stop_token_text,
             finished: false,
             tokenizer: tokenizer.clone(),
             skip_special_tokens: params.skip_special_tokens,
@@ -323,11 +330,12 @@ impl
                     }
 
                     // A worker may send already-trimmed text alongside the raw
-                    // IDs. Re-decode those IDs for no_stop_trim instead of using
-                    // the text fast path. Text-only output cannot honor this
-                    // option; don't silently return trimmed or empty content.
-                    // Empty stop trailers are valid after this choice emitted IDs.
-                    if state.no_stop_trim
+                    // IDs. Re-decode those IDs when stop-token text must survive
+                    // (no_stop_trim, or a parser that needs the model's terminator)
+                    // instead of using the text fast path. Text-only output cannot
+                    // honor these options; don't silently return trimmed or empty
+                    // content. Empty stop trailers are valid after this choice emitted IDs.
+                    if (state.no_stop_trim || state.retain_model_stop_token_text)
                         && let Some(data) = &output.data
                         && data.token_ids.is_empty()
                         && (data.text.as_ref().is_some_and(|text| !text.is_empty())
@@ -342,7 +350,7 @@ impl
                         state.finished = true;
                         let error = DynamoError::builder()
                             .class(ErrorClass::BackendProtocol)
-                            .message("no_stop_trim requires backend token IDs through the matched stop; the backend omitted them")
+                            .message("no_stop_trim requires backend token IDs through the matched stop; the backend omitted them (also required when a parser retains the model's stop token text)")
                             .build();
                         return Some((Annotated::from_err(error), state));
                     }
@@ -351,7 +359,7 @@ impl
                     if let Some(data) = &mut output.data
                         && data.text.is_some()
                         && !state.validate_engine_decode
-                        && !state.no_stop_trim
+                        && !(state.no_stop_trim || state.retain_model_stop_token_text)
                     {
                         if data.log_probs.is_some() && data.tokens.is_none() {
                             data.tokens = Some(
@@ -712,6 +720,10 @@ pub struct Decoder {
 
     // Include matched stop token text while preserving its stopping reason.
     no_stop_trim: bool,
+    // Include only the MODEL's hidden stop token text (system/EOS ids); user stop ids and
+    // user stop strings keep their normal trimming. A parser that needs the turn
+    // terminator sets this; `no_stop_trim` is the caller's broader opt-in.
+    retain_model_stop_token_text: bool,
 
     // text sequences that if found in the response will trigger a stop condition after the
     // minimum number of tokens have been generated (excluded from output)
@@ -833,6 +845,7 @@ impl Decoder {
         stop_condition: StopConditions,
         include_stop_str_in_output: bool,
         no_stop_trim: bool,
+        retain_model_stop_token_text: bool,
         tracker: Option<Arc<RequestTracker>>,
         jail_seed: Option<String>,
     ) -> Self {
@@ -843,6 +856,7 @@ impl Decoder {
             stop_condition,
             include_stop_str_in_output,
             no_stop_trim,
+            retain_model_stop_token_text,
             tracker,
             jail_seed.unwrap_or_default(),
             Vec::new(),
@@ -891,6 +905,7 @@ impl Decoder {
             params.stop_conditions.clone(),
             params.include_stop_str_in_output,
             params.no_stop_trim,
+            params.retain_model_stop_token_text,
             params.tracker.clone(),
             jail,
             pending_token_ids,
@@ -906,6 +921,7 @@ impl Decoder {
         stop_condition: StopConditions,
         include_stop_str_in_output: bool,
         no_stop_trim: bool,
+        retain_model_stop_token_text: bool,
         tracker: Option<Arc<RequestTracker>>,
         jail: String,
         pending_token_ids: Vec<TokenIdType>,
@@ -964,6 +980,7 @@ impl Decoder {
             visible_stop_ids,
             user_stop_ids,
             no_stop_trim,
+            retain_model_stop_token_text,
             hidden_stop_sequences,
             visible_stop_sequences,
             min_tokens: stop_condition.min_tokens.unwrap_or(0),
@@ -987,11 +1004,16 @@ impl Decoder {
         // increment the generated tokens
         self.generated_tokens += 1;
 
+        // The model's own stop token text stays visible when the route asked for it
+        // (`retain_model_stop_token_text`); user stop ids keep their normal trimming.
+        let retains_model_stop_text =
+            self.retain_model_stop_token_text && !self.user_stop_ids.contains(&token_id);
         // Finalize older text before dropping a hidden stop token.
         if !below_min_tokens
             && self.hidden_stop_ids.contains(&token_id)
             && !self.visible_stop_ids.contains(&token_id)
             && !self.no_stop_trim
+            && !retains_model_stop_text
         {
             let mut result = self.finish()?;
             result.token = None;
@@ -1078,7 +1100,7 @@ impl Decoder {
                 StopTrigger::HiddenStopTokenDetected(token_id)
             };
             // Release any earlier withheld prefix before this stop token's own text.
-            let token = if self.no_stop_trim {
+            let token = if self.no_stop_trim || retains_model_stop_text {
                 selected_token
             } else {
                 None
@@ -2119,6 +2141,7 @@ mod tests {
                         stops,
                         kind != "string",
                         no_stop_trim,
+                        false,
                         None,
                         None,
                     );
@@ -2164,6 +2187,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_retain_model_stop_token_text_keeps_only_the_models_eos_text() {
+        let (stop_id, marker) = (104, "<|return|>");
+        for kind in ["eos", "user", "string"] {
+            for streaming in [false, true] {
+                let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+                let stops = StopConditions {
+                    stop_token_ids: (kind == "user").then_some(vec![stop_id]),
+                    stop_token_ids_hidden: (kind == "eos").then_some(vec![stop_id]),
+                    stop: (kind == "string").then(|| vec![marker.to_string()]),
+                    ..Default::default()
+                };
+                let mut decoder = Decoder::new(
+                    crate::tokenizers::DecodeStream::new(tokenizer, &[], false),
+                    stops,
+                    false,
+                    false,
+                    true,
+                    None,
+                    None,
+                );
+                let mut text = if streaming {
+                    decoder.process_token_ids(&[101]).unwrap().text.unwrap()
+                } else {
+                    String::new()
+                };
+                let ids = if streaming {
+                    vec![stop_id, 999]
+                } else {
+                    vec![101, stop_id, 999]
+                };
+                let result = decoder.process_token_ids(&ids).unwrap();
+                text.push_str(result.text.as_deref().unwrap_or_default());
+                let expected = if kind == "eos" {
+                    format!("Okay{marker}")
+                } else {
+                    "Okay".to_string()
+                };
+                assert_eq!(text, expected, "{kind} streaming={streaming}");
+                match (kind, result.stop_trigger.unwrap()) {
+                    ("eos", StopTrigger::HiddenStopTokenDetected(id))
+                    | ("user", StopTrigger::UserStopTokenDetected(id)) => assert_eq!(id, stop_id),
+                    ("string", StopTrigger::HiddenStopSequenceDetected(seq)) => {
+                        assert_eq!(seq, marker)
+                    }
+                    other => panic!("unexpected stop: {other:?}"),
+                }
+            }
+        }
+    }
+
     /// When the tokenizer's decode() returns Err, Decoder::process_token_ids()
     /// should propagate the error. In the backend unfold closure, this error
     /// gets caught and converted to FinishReason::Error.
@@ -2173,7 +2247,15 @@ mod tests {
         let decode_stream = crate::tokenizers::DecodeStream::new(tokenizer, &[], false);
         let stop_conditions = StopConditions::default();
 
-        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, false, None, None);
+        let mut decoder = Decoder::new(
+            decode_stream,
+            stop_conditions,
+            false,
+            false,
+            false,
+            None,
+            None,
+        );
 
         let result = decoder.process_token_ids(&[42]);
         assert!(
@@ -2196,7 +2278,15 @@ mod tests {
         let decode_stream = crate::tokenizers::DecodeStream::new(tokenizer, &[], false);
         let stop_conditions = StopConditions::default();
 
-        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, false, None, None);
+        let mut decoder = Decoder::new(
+            decode_stream,
+            stop_conditions,
+            false,
+            false,
+            false,
+            None,
+            None,
+        );
 
         let result = decoder.process_token_ids(&[42]);
         let err = result.err().expect("should be Err");

@@ -71,6 +71,83 @@ pub struct NvCreateCompletionResponse {
     pub inner: dynamo_protocols::types::CreateCompletionResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+    /// The prompt a choice echoes back (`echo: true`), built once the engine reports
+    /// its prompt logprobs. In-process only, never serialized on its own: the unary
+    /// aggregator prepends it to the choice and the SSE path folds it into the chunk
+    /// that carries it (see [`NvCreateCompletionResponse::fold_echo`]).
+    #[serde(skip)]
+    pub echo: Option<CompletionEcho>,
+}
+
+/// The prompt side of a completions choice for `echo: true`: the prompt text and, when
+/// the request asked for `logprobs`, one entry per prompt token in the same layout as
+/// the completion's `logprobs` (position 0 has no logprob, as in the OpenAI API).
+///
+/// The two parts can travel on different chunks: the text goes out on the choice's
+/// first chunk, the prompt logprobs on the chunk that carries the engine's payload
+/// (the final one on vLLM and SGLang). A part that already went out is empty here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletionEcho {
+    pub choice_index: u32,
+    pub text: String,
+    pub logprobs: Option<dynamo_protocols::types::Logprobs>,
+}
+
+impl CompletionEcho {
+    /// Combine the parts of one choice's echo that arrived on different chunks.
+    pub fn merge(&mut self, other: CompletionEcho) {
+        if self.text.is_empty() {
+            self.text = other.text;
+        }
+        if self.logprobs.is_none() {
+            self.logprobs = other.logprobs;
+        }
+    }
+
+    /// Put the echoed prompt ahead of the completion: text first, then the prompt
+    /// positions before the generated ones. Generated `text_offset`s move past the
+    /// echoed text.
+    pub fn prepend_to(self, choice: &mut dynamo_protocols::types::Choice) {
+        let echoed_len = self.text.len() as u32;
+        choice.text.insert_str(0, &self.text);
+        let Some(mut logprobs) = self.logprobs else {
+            return;
+        };
+        if let Some(generated) = choice.logprobs.take() {
+            logprobs.tokens.extend(generated.tokens);
+            logprobs.token_logprobs.extend(generated.token_logprobs);
+            logprobs.top_logprobs.extend(generated.top_logprobs);
+            logprobs.text_offset.extend(
+                generated
+                    .text_offset
+                    .into_iter()
+                    .map(|offset| offset + echoed_len),
+            );
+        }
+        choice.logprobs = Some(logprobs);
+    }
+}
+
+impl NvCreateCompletionResponse {
+    /// Fold a pending echo into its choice. For consumers that serialize this chunk as
+    /// is (SSE); the unary aggregator prepends the echo once the stream has ended.
+    pub fn fold_echo(&mut self) {
+        let Some(echo) = self.echo.take() else {
+            return;
+        };
+        match self
+            .inner
+            .choices
+            .iter_mut()
+            .find(|choice| choice.index == echo.choice_index)
+        {
+            Some(choice) => echo.prepend_to(choice),
+            None => tracing::warn!(
+                choice_index = echo.choice_index,
+                "completions echo dropped: the chunk carrying it has no matching choice"
+            ),
+        }
+    }
 }
 
 /// Schema-only import for the wholly re-exported async-openai response type.
@@ -362,7 +439,11 @@ impl ResponseFactory {
             system_fingerprint: self.system_fingerprint.clone(),
             usage,
         };
-        NvCreateCompletionResponse { inner, nvext: None }
+        NvCreateCompletionResponse {
+            inner,
+            nvext: None,
+            echo: None,
+        }
     }
 }
 
@@ -466,9 +547,12 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 
     fn get_prompt_logprobs(&self) -> Option<u32> {
         self.common.prompt_logprobs.or_else(|| {
+            // `echo` rebuilds the prompt positions from the engine's prompt logprobs,
+            // with as many alternatives per position as `logprobs` asks for.
             self.inner
                 .echo
-                .and_then(|echo| if echo { Some(1) } else { None })
+                .filter(|echo| *echo)
+                .map(|_| self.inner.logprobs.map_or(1, u32::from))
         })
     }
 
