@@ -82,7 +82,7 @@ impl GenerationScope {
         let card = match instance.deserialize_model::<ModelDeploymentCard>() {
             Ok(card) => card,
             Err(error) => {
-                tracing::debug!(%error, namespace, "Failed to deserialize model card, skipping");
+                tracing::warn!(%error, namespace, "Failed to deserialize model card, skipping");
                 return None;
             }
         };

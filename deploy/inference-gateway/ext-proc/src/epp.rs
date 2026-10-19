@@ -135,11 +135,11 @@ struct Generation {
     model_name: String,
     aliases: Vec<String>,
     /// Whether the decode workers need a prefill peer, so the generation is
-    /// ready only once its own prefill workers are found.
+    /// ready only while its own prefill workers are registered.
     requires_prefill: bool,
-    /// Set when the prefill watcher hands this generation's prefill workers
-    /// to its prefill router.
-    prefill_found: Arc<AtomicBool>,
+    /// Whether this generation's prefill workers are registered, once they
+    /// have been handed to its prefill router.
+    prefill_present: watch::Receiver<bool>,
     prefill_router: Arc<PrefillRouter>,
     decode_router: ManagedKvRouter,
     preprocessor: Arc<OpenAIPreprocessor>,
@@ -159,7 +159,7 @@ impl Generation {
     }
 
     fn ready(&self) -> bool {
-        !self.requires_prefill || self.prefill_found.load(Ordering::Acquire)
+        !self.requires_prefill || *self.prefill_present.borrow()
     }
 }
 
@@ -225,6 +225,7 @@ impl Router {
         let build = {
             let drt = drt.clone();
             let component = component.to_string();
+            let published = generations.clone();
             move |namespace: String, card: ModelDeploymentCard, cancel: CancellationToken| {
                 build_generation_until_ready(
                     drt.clone(),
@@ -232,6 +233,7 @@ impl Router {
                     component.clone(),
                     card,
                     kv_router_config.clone(),
+                    published.clone(),
                     cancel,
                 )
             }
@@ -827,6 +829,7 @@ async fn build_generation_until_ready(
     component: String,
     card: ModelDeploymentCard,
     kv_router_config: KvRouterConfig,
+    published: watch::Receiver<GenerationSet<Generation>>,
     cancel: CancellationToken,
 ) -> Option<Generation> {
     loop {
@@ -843,7 +846,14 @@ async fn build_generation_until_ready(
         let error = tokio::select! {
             _ = cancel.cancelled() => return None,
             built = attempt => match built {
-                Ok(generation) => return Some(generation),
+                Ok(generation) => {
+                    let rollout = !published.borrow().is_empty();
+                    let needs_prefill = generation.requires_prefill && rollout;
+                    let present = generation.prefill_present.clone();
+                    return wait_for_topology(needs_prefill, present, &cancel, &namespace)
+                        .await
+                        .then_some(generation);
+                }
                 Err(error) => error,
             },
         };
@@ -857,6 +867,29 @@ async fn build_generation_until_ready(
             _ = cancel.cancelled() => return None,
             _ = tokio::time::sleep(Duration::from_secs(5)) => {}
         }
+    }
+}
+
+/// During a rollout, hold back a generation whose decode workers need prefill
+/// until its own prefill workers are found, so an incomplete generation never
+/// takes traffic. The first generation is published at once and falls back to
+/// aggregated until then, as before. Returns `false` if cancelled first.
+async fn wait_for_topology(
+    needs_prefill: bool,
+    mut prefill_present: watch::Receiver<bool>,
+    cancel: &CancellationToken,
+    namespace: &str,
+) -> bool {
+    if !needs_prefill || *prefill_present.borrow() {
+        return true;
+    }
+    tracing::info!(
+        namespace,
+        "Worker generation waiting for its prefill workers"
+    );
+    tokio::select! {
+        _ = cancel.cancelled() => false,
+        present = prefill_present.wait_for(|present| *present) => present.is_ok(),
     }
 }
 
@@ -944,12 +977,12 @@ async fn build_generation(
         cancel.child_token(),
     );
 
-    let prefill_found = Arc::new(AtomicBool::new(false));
+    let (prefill_present_tx, prefill_present) = watch::channel(false);
     spawn_prefill_discovery_watcher(
         drt.clone(),
         namespace.to_string(),
         prefill_tx,
-        prefill_found.clone(),
+        prefill_present_tx,
         cancel.child_token(),
     );
 
@@ -959,7 +992,7 @@ async fn build_generation(
         model_name,
         aliases: card.aliases,
         requires_prefill,
-        prefill_found,
+        prefill_present,
         prefill_router,
         decode_router,
         preprocessor,
@@ -1347,7 +1380,7 @@ fn spawn_prefill_discovery_watcher(
     drt: DistributedRuntime,
     target_namespace: String,
     tx: tokio::sync::oneshot::Sender<dynamo_runtime::component::Endpoint>,
-    found: Arc<AtomicBool>,
+    present: watch::Sender<bool>,
     cancel: CancellationToken,
 ) {
     tokio::spawn(cancel.run_until_cancelled_owned(async move {
@@ -1357,8 +1390,12 @@ fn spawn_prefill_discovery_watcher(
             "Watching for prefill workers..."
         );
 
+        // Keeps polling after activation so `present` follows the
+        // generation's live prefill workers through a rolling update.
+        let mut tx = Some(tx);
         loop {
             if let Ok(instances) = discovery.list(DiscoveryQuery::AllModels).await {
+                let mut found = false;
                 for instance in instances {
                     if let DiscoveryInstance::Model {
                         namespace,
@@ -1383,6 +1420,11 @@ fn spawn_prefill_discovery_watcher(
                             continue;
                         }
 
+                        let Some(activation) = tx.take() else {
+                            found = true;
+                            break;
+                        };
+
                         tracing::info!(
                             model_name = card.name(),
                             namespace = namespace.as_str(),
@@ -1393,14 +1435,21 @@ fn spawn_prefill_discovery_watcher(
                             && let Ok(comp) = ns.component(component)
                         {
                             let ep = comp.endpoint(endpoint);
-                            if tx.send(ep).is_err() {
+                            if activation.send(ep).is_err() {
                                 tracing::debug!("PrefillRouter activation channel already closed");
-                            } else {
-                                found.store(true, Ordering::Release);
                             }
-                            return;
+                            found = true;
+                            break;
                         }
+                        tx = Some(activation);
                     }
+                }
+                if present.send_if_modified(|present| std::mem::replace(present, found) != found) {
+                    tracing::info!(
+                        namespace = target_namespace,
+                        present = found,
+                        "Worker generation prefill workers changed"
+                    );
                 }
             }
 
@@ -1794,6 +1843,28 @@ mod tests {
 
     use super::*;
     use k8s_openapi::api::core::v1::Pod;
+
+    /// During a rollout a generation that needs prefill is held back until its
+    /// own prefill workers are found; one that does not is ready at once.
+    #[tokio::test]
+    async fn rollout_holds_back_a_generation_until_its_prefill_is_found() {
+        let cancel = CancellationToken::new();
+        let (present_tx, present) = watch::channel(false);
+        assert!(wait_for_topology(false, present.clone(), &cancel, "ns").await);
+
+        let waiting = tokio::spawn({
+            let (cancel, present) = (cancel.clone(), present.clone());
+            async move { wait_for_topology(true, present, &cancel, "ns").await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "incomplete: no prefill workers yet");
+        present_tx.send_replace(true);
+        assert!(waiting.await.unwrap());
+
+        let (_never_tx, never) = watch::channel(false);
+        cancel.cancel();
+        assert!(!wait_for_topology(true, never, &cancel, "ns").await);
+    }
 
     #[test]
     fn global_namespace_discovery_does_not_restrict_worker_pod_labels() {
