@@ -338,7 +338,7 @@ Dynamo supports this field for requests with one choice.
 | [KServe gRPC Frontend](../knowledge-base/modular-components/frontend/frontend-guide.md) | KServe endpoints, backend registration, and flow-control tuning |
 | [Reinforcement Learning Integration](../../use-cases/reinforcement-learning/overview.md) | Token-level rollout data, worker discovery, direct engine routes, and SGLang metadata upload |
 | [Configuration and Tuning](../knowledge-base/modular-components/router/configuration-and-tuning.md) | Full router configuration and CLI arguments |
-| [Session IDs](../../use-cases/agents/session-ids.mdx) | Passive session identity |
+| [Identify Agent Sessions](../../use-cases/agents/session-ids.mdx) | Passive session identity |
 | [Agent Tracing](../../use-cases/agents/agent-tracing.md) | JSONL request traces, inferred tool-call metadata, and harness tool-event ingestion |
-| [Agent Hints](../../use-cases/agents/agent-hints.md) | Per-request serving hints for routing, scheduling, and cache behavior |
+| [Prioritize Requests](../../use-cases/agents/priority-scheduling.md) | Per-request serving hints for routing, scheduling, and cache behavior |
 | [SGLang for Agentic Workloads](../knowledge-base/modular-components/backends/sglang/agents-on-sglang.md) | SGLang engine flags for priority scheduling and KV eviction policies |

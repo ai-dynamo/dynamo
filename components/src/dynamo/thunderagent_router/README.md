@@ -66,7 +66,7 @@ so ThunderAgent can register the native capability for that model.
 
 The control-loop knobs (`--pause-threshold`, `--pause-target`,
 `--resume-hysteresis`, `--scheduler-interval-seconds`, …) and their defaults are
-documented in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md#utilization-driven-control-loop).
+documented in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-python-router.md#utilization-driven-control-loop).
 All `KvRouter` flags from `dynamo.router` (`--router-temperature`,
 `--use-kv-events`, `--router-track-output-blocks`, …) are also accepted and
 forwarded.

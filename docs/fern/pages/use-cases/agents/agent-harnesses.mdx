@@ -2,27 +2,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Agent Harnesses
-subtitle: Point coding-agent CLIs at a Dynamo deployment
+subtitle: Point Claude Code, Codex, OpenCode, and other coding agents at a Dynamo deployment
 ---
 
-Dynamo exposes `v1/chat/completions`, `v1/responses`, and `v1/messages`, so any agent that uses these APIs can talk to a Dynamo endpoint even if it is not listed in this guide. This guide focuses on popular agent harnesses that send stable session IDs. Dynamo normalizes these IDs for tracing and other explicitly configured consumers.
+By the end of this guide, your coding agent is sending its requests to Dynamo, and each request carries the agent's own session ID.
 
-On Chat Completions and Responses requests, function tools with explicit `strict: true` receive schema preflight before inference. Invalid schemas now return HTTP 400 where earlier versions could accept them. Responses validates every submitted function, including namespace members and functions excluded by `allowed_tools` or `tool_choice: "none"`. Omitted, `null`, or `false` strictness and omitted or `null` parameters retain existing behavior.
+Dynamo serves `v1/chat/completions`, `v1/responses`, and `v1/messages`, so any agent that uses one of these APIs can talk to a Dynamo endpoint, even if it is not listed here. The harnesses below also send stable session IDs, which Dynamo normalizes for tracing and other explicitly configured consumers.
 
-Preflight runs independently of structural-tag activation. Passing preflight does not guarantee complete OpenAI compatibility or backend enforcement. See [Request Validation](../tool-calling-and-reasoning/structural-tag.md#request-validation) for object rules, size budgets, and Dynamo's bounded local-reference support.
+## Before You Start
 
-<Steps toc={true}>
-<Step title="Start a local agent endpoint" id="local-setup">
-To locally test these out, we have a small script that runs an SGLang-backed `zai-org/GLM-4.7-Flash` endpoint. This script starts a TP2 instance on port 8000 and enables request tracing for replay and visualization. By default traces are saved in `/tmp/dynamo-request-trace-$(date +%Y%m%d-%H%M%S)`
+You need a running Dynamo endpoint. To start a local one, follow [Run an agent on Dynamo](run-an-agent-on-dynamo.md). The examples use `http://localhost:8000` and `zai-org/GLM-4.7-Flash`; replace them with your endpoint and model.
 
-To start it, run:
+## Configure Your Harness
 
-```bash
-bash examples/backends/sglang/launch/agg_agent.sh
-```
-
-</Step>
-<Step title="Configure a harness" id="configure-a-harness">
 <Tabs>
   <Tab title="Codex">
 
@@ -205,8 +197,9 @@ bash examples/backends/sglang/launch/agg_agent.sh
   </Tab>
 </Tabs>
 
-</Step>
-</Steps>
+## Check That Dynamo Sees the Session
+
+Send a request from the harness, then follow the trace check in [Run an agent on Dynamo](run-an-agent-on-dynamo.md#check-the-trace). Each request should show a session ID. If it does not, the harness is not sending a session header; see [Identify agent sessions](session-ids.mdx#native-agent-headers) for the headers Dynamo recognizes.
 
 ## Drive a Harness from Another Agent
 
@@ -214,20 +207,12 @@ Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent n
 
 The skill pins the Claude Code and Codex ACP adapters. If a harness release changes the model, endpoint, session header, authentication, or mode configuration, update this page and the skill in the same change after running a persistent two-turn tool smoke test.
 
-## Agent Headers
+## Tool Schema Validation
 
-Dynamo carries raw coding-agent HTTP headers in `AgentContext.agent_headers` without interpreting them. Capture includes the open `x-claude-code-*` and `x-codex-*` families alongside supported session and subagent headers. Names within those families are not hardcoded: new headers are captured without a Dynamo schema change. Header names and values can change as coding harnesses evolve. Plugin authors and trace consumers own any parsing or normalization between harnesses.
+On Chat Completions and Responses requests, function tools with explicit `strict: true` receive schema preflight before inference. Invalid schemas now return HTTP 400 where earlier versions could accept them. Responses validates every submitted function, including namespace members and functions excluded by `allowed_tools` or `tool_choice: "none"`. Omitted, `null`, or `false` strictness and omitted or `null` parameters retain existing behavior.
 
-Names are lowercase. Values remain strings, including malformed JSON, percent encoding, whitespace, empty values, and repeated values in their received order. Core code only normalizes session identity and the explicit Dynamo terminal marker.
+Preflight runs independently of structural-tag activation. Passing preflight does not guarantee complete OpenAI compatibility or backend enforcement. See [Request Validation](../tool-calling-and-reasoning/structural-tag.md#request-validation) for object rules, size budgets, and Dynamo's bounded local-reference support.
 
-Capture requires a recognized session identity and is bounded to 64 header values, 16 KiB per value, and 32 KiB total, counting the name once per value. Sensitive-marked and non-text values are skipped. Values exceeding the limits are omitted whole; retained values are never truncated. Missing metadata means no observation was captured, not that an event did not occur. Ordinary authentication, cookie, and unrelated protocol headers are excluded. Do not place credentials in an agent metadata header; these values are exposed to plugins and request traces.
+## Next
 
-The map travels through the frontend and worker request envelope and is available through plugin `SessionContext.agent_headers()`. It contains HTTP headers only; request-body metadata is not captured. The default routing policy does not interpret the map. See [Agent Tracing](agent-tracing.md#dynamo-request_end-record) for the request-trace format and [Custom Worker Selection](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#session-context) for plugin access.
-
-For Claude Code custom endpoints, enable gateway hints with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`. Its [gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol#gateway-hint-headers) defines the header semantics. Preserving observations in `AgentContext` does not implement transparent Anthropic request-body or header forwarding to upstream providers.
-
-## See Also
-
-- [Session IDs](session-ids.mdx)
-- [Agent Tracing](agent-tracing.md)
-- [SGLang for Agentic Workloads](../../developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md)
+[Identify agent sessions](session-ids.mdx) explains how Dynamo reads these headers and how subagents are linked to their parent.

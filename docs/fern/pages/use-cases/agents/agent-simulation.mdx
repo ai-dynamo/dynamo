@@ -1,11 +1,11 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Agent Trace Replay
+title: Agent Simulation
 subtitle: Capture an agent workload once, then replay it on real or simulated infrastructure
 ---
 
-Agent trace replay records the workload that an agent sends to Dynamo and turns it into a reusable benchmark. Capture one real run, then use the same request graph to validate a live endpoint or explore configurations offline. It replays the serving workload rather than the agent itself, so the model does not repeat its decisions and tools are not executed again.
+By the end of this guide, you have captured an agent run once and replayed it, either against a live Dynamo endpoint or in an offline simulation. Agent simulation records the workload that an agent sends to Dynamo and turns it into a reusable benchmark. Capture one real run, then use the same request graph to validate a live endpoint or explore configurations offline. It replays the serving workload rather than the agent itself, so the model does not repeat its decisions and tools are not executed again.
 
 ## What This Captures
 
@@ -143,7 +143,7 @@ traffic:
   source:
     type: trace
     format: dynamo
-    paths: [/tmp/agent-run/request-trace.0000.jsonl.gz]
+    paths: [/tmp/agent-run/request-trace.000000.jsonl.gz]
   load: {type: trace_timestamps, speedup: 1.0}
 engine:
   mode: aggregated

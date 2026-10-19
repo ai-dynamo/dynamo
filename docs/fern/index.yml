@@ -727,21 +727,25 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/agents/overview.md
+          - page: Run an Agent on Dynamo
+            path: pages/use-cases/agents/run-an-agent-on-dynamo.md
           - page: Agent Harnesses
             path: pages/use-cases/agents/agent-harnesses.mdx
-          - page: Session IDs
+          - page: Identify Agent Sessions
             path: pages/use-cases/agents/session-ids.mdx
-          - page: Agent Hints
-            path: pages/use-cases/agents/agent-hints.md
+          - page: Maintain Session Affinity
+            path: pages/use-cases/agents/session-affinity.md
+          - page: Prioritize Requests
+            path: pages/use-cases/agents/priority-scheduling.md
           - page: Agent Tracing
             path: pages/use-cases/agents/agent-tracing.md
-          - page: Agent Trace Replay
+          - page: Agent Simulation
             slug: agent-simulation
             path: pages/use-cases/agents/agent-simulation.mdx
           - page: ThunderAgent Program Scheduler
             path: pages/use-cases/agents/thunderagent-program-scheduler.md
-          - page: Priority Scheduling
-            path: pages/use-cases/agents/priority-scheduling.md
+          - page: ThunderAgent Python Router
+            path: pages/use-cases/agents/thunderagent-python-router.md
 
       # ==================== Image Understanding ====================
       - section: Image Understanding
