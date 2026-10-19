@@ -32,11 +32,9 @@ use crate::{
     utils::zmq::{connect_sub_socket, multipart_message},
 };
 use dynamo_kv_router::{
-    SessionPrefixIndexer, SharedKvCache,
+    SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend, SharedKvCache,
     indexer::KvRouterError,
-    protocols::{
-        ExternalSequenceBlockHash, SharedCacheHits, StorageTier, WorkerId, WorkerWithDpRank,
-    },
+    protocols::{ExternalSequenceBlockHash, SharedCacheHits, StorageTier, WorkerId},
 };
 
 const SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY: &str = "sglang_hicache_mooncake";
@@ -126,15 +124,15 @@ struct MooncakeObjectEvent {
 }
 
 /// Session prefix index owner for Mooncake residency: the store is shared, not a worker rank.
-const MOONCAKE_SESSION_OWNER: WorkerWithDpRank = WorkerWithDpRank {
-    worker_id: u64::MAX,
-    dp_rank: 0,
-};
+const MOONCAKE_SESSION_OWNER: SessionResidencyOwner =
+    SessionResidencyOwner::SharedCache(SharedCacheBackend::Mooncake);
 
+/// Mooncake's `medium` is the store's own medium. The owner already says the copy is
+/// shared, so `cpu` is host memory on the store, not a worker's host tier.
 fn mooncake_session_tier(medium: Option<&str>) -> StorageTier {
     match medium {
         Some("disk") => StorageTier::Disk,
-        _ => StorageTier::External,
+        _ => StorageTier::HostPinned,
     }
 }
 
@@ -316,7 +314,7 @@ impl HicacheSharedKvCache {
             self.present_pages.clear();
             self.group_states.clear();
             if let Some(index) = &session_index {
-                index.clear_worker_frontiers(MOONCAKE_SESSION_OWNER);
+                index.clear_owner_frontiers(MOONCAKE_SESSION_OWNER);
             }
             tracing::warn!(
                 previous,
@@ -335,7 +333,7 @@ impl HicacheSharedKvCache {
             if event.event_type == "cleared"
                 && let Some(index) = &session_index
             {
-                index.clear_worker_frontiers(MOONCAKE_SESSION_OWNER);
+                index.clear_owner_frontiers(MOONCAKE_SESSION_OWNER);
             }
             let Some(object_key) = event.object_key else {
                 continue;
@@ -805,6 +803,7 @@ mod tests {
     use std::{collections::HashMap, ops::Range};
 
     use super::*;
+    use dynamo_kv_router::protocols::WorkerWithDpRank;
     use tokio::sync::watch;
 
     fn mooncake_config() -> SglangHicacheMooncakeConfig {
@@ -954,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mooncake_session_event_after_device_chain_extends_external_frontier() {
+    fn test_mooncake_session_event_after_device_chain_extends_shared_frontier() {
         let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
         let index = Arc::new(SessionPrefixIndexer::new());
         cache.attach_session_prefix_index(Arc::clone(&index));
@@ -980,13 +979,13 @@ mod tests {
         };
         cache.apply_batch(&"default".into(), 1, vec![stored(0x1111), stored(0x3333)]);
 
-        let external: Vec<_> = index
+        let shared: Vec<_> = index
             .get_session_residency("sess-b")
             .into_iter()
             .filter(|(owner, _, _)| *owner == MOONCAKE_SESSION_OWNER)
             .collect();
-        assert_eq!(external.len(), 1);
-        let node = index.get_node(external[0].2).unwrap();
+        assert_eq!(shared.len(), 1);
+        let node = index.get_node(shared[0].2).unwrap();
         assert_eq!(node.block_hash(), ExternalSequenceBlockHash(0x3333));
     }
 
@@ -1016,11 +1015,45 @@ mod tests {
         let (owner, tier, node) = residency[0];
         assert_eq!(
             (owner, tier),
-            (MOONCAKE_SESSION_OWNER, StorageTier::External)
+            (MOONCAKE_SESSION_OWNER, StorageTier::HostPinned)
         );
         assert_eq!(index.get_node(node).unwrap().block_hash(), block_hash);
 
-        cache.apply_batch(&"default".into(), 2, vec![event("removed", None)]);
+        // A disk replica is the same owner in its own tier, and a removal recedes only
+        // the medium it names.
+        let tiers = |index: &SessionPrefixIndexer| {
+            let mut tiers: Vec<_> = index
+                .get_session_residency("sess-a")
+                .into_iter()
+                .map(|(owner, tier, _)| (owner, tier))
+                .collect();
+            tiers.sort_by_key(|(_, tier)| *tier as u8);
+            tiers
+        };
+        let on_disk = |event_type: &str, session_id: Option<&str>| MooncakeObjectEvent {
+            medium: Some("disk".to_string()),
+            ..event(event_type, session_id)
+        };
+        cache.apply_batch(
+            &"default".into(),
+            2,
+            vec![on_disk("stored", Some("sess-a"))],
+        );
+        assert_eq!(
+            tiers(&index),
+            vec![
+                (MOONCAKE_SESSION_OWNER, StorageTier::HostPinned),
+                (MOONCAKE_SESSION_OWNER, StorageTier::Disk),
+            ]
+        );
+
+        cache.apply_batch(&"default".into(), 3, vec![event("removed", None)]);
+        assert_eq!(
+            tiers(&index),
+            vec![(MOONCAKE_SESSION_OWNER, StorageTier::Disk)]
+        );
+
+        cache.apply_batch(&"default".into(), 4, vec![on_disk("removed", None)]);
         assert!(index.get_session_residency("sess-a").is_empty());
     }
 
