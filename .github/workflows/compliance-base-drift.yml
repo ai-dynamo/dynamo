@@ -54,15 +54,10 @@ jobs:
       - name: Verify buildx is available
         run: docker buildx version
 
-      - name: NGC Login
-        env:
-          NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
-          NGC_USERNAME: ${{ secrets.NGC_PUBLISH_USERNAME }}
-        run: |
-          set -euo pipefail
-          if [ -n "${NGC_TOKEN}" ]; then
-            echo "${NGC_TOKEN}" | docker login nvcr.io -u "${NGC_USERNAME}" --password-stdin
-          fi
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_PUBLISH_TOKEN }}
 
       - name: Check base-image digest drift
         run: python3 container/compliance/base_sboms/check_drift.py
