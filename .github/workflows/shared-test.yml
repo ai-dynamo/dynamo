@@ -291,6 +291,7 @@ jobs:
         shell: bash
         env:
           LANE_SUITE: ${{ inputs.test_suite_name }}
+          LANE_FRAMEWORK: ${{ inputs.framework }}
           LANE_TYPE: ${{ inputs.test_type }}
           LANE_CUDA: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
           LANE_PLATFORM: ${{ matrix.platform }}
@@ -306,11 +307,22 @@ jobs:
             printf '%s' "${s%-}"
           }
           lane="$(slug "${LANE_SUITE}-${LANE_TYPE}-${LANE_CUDA}-${LANE_PLATFORM}")"
-          # NOT test_suite: -- ddtrace owns that key and emits it as an object
-          # (test_suite.fingerprint), so a string tag of the same name is
-          # silently dropped on ingest. Measured: zero events carried
-          # @test_suite while @lane and @team came through on all of them.
-          echo "DD_TAGS=team:dynamo,lane:${lane},framework:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
+          # Two separate dimensions, deliberately not one:
+          #   framework: the backend the image was built with, from
+          #     inputs.framework -- the same value conftest.py puts on the
+          #     Allure side as dynamo_framework. One of dynamo, sglang,
+          #     triton, trtllm, vllm, checkpoint.
+          #   suite: inputs.test_suite_name, which is a SUITE label and not a
+          #     framework. It takes planner, triton, vllm-efa, trtllm-efa and
+          #     xpu-* as well, so reading it as a framework mislabels those.
+          #
+          # Neither may be called test_suite: -- ddtrace owns that key and
+          # emits it as an object (test_suite.fingerprint), so a string tag of
+          # the same name is dropped on ingest with no error. Measured: zero
+          # events carried @test_suite while @lane and @team came through on
+          # all 23,574 of them. Same trap conftest.py already hit on the
+          # Allure side, hence its dynamo_ prefix.
+          echo "DD_TAGS=team:dynamo,lane:${lane},framework:$(slug "${LANE_FRAMEWORK}"),suite:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
           echo "Datadog lane tag: ${lane}"
 
       - name: Run Sanity Check on Runtime Image
