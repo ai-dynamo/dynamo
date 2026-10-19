@@ -125,15 +125,20 @@ pub fn anthropic_models_router(
 // Error middleware
 // ---------------------------------------------------------------------------
 
-/// Converts 422 validation errors to Anthropic error format.
+/// Normalize Axum extraction failures without rewriting handler errors.
 async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Response {
     let response = next.run(request).await;
 
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
-        let (_parts, body) = response.into_parts();
+        let (parts, body) = response.into_parts();
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
+        if let Ok(error) = serde_json::from_slice::<AnthropicErrorResponse>(&body_bytes)
+            && error.object_type == "error"
+        {
+            return Response::from_parts(parts, Body::from(body_bytes));
+        }
         let error_message = String::from_utf8_lossy(&body_bytes).to_string();
         return anthropic_error(
             ErrorClass::InvalidRequest,
