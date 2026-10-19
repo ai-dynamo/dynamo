@@ -24,16 +24,16 @@ func (w *Workload) renderCyborgConfigMap(plan *MaterializationPlan) (*corev1.Con
 	// Cyborg runs a selected prop-sync chain as one runtime partition and
 	// addresses it through its first member. XT builds have already collapsed
 	// these chains; HX builds keep each member as a physical partition.
-	chained := make([]bool, len(build.Partitions))
+	chained := make([]bool, len(build.partitions))
 	for _, position := range projection.propSyncEdges {
 		chained[position+1] = true
 	}
 
 	// Cyborg supplies the PCS prefix; startup supplies this workload's Grove index.
 	serverPrefix := plan.ScalingGroupTemplate + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"
-	servers := make([]string, 0, len(build.Partitions))
+	servers := make([]string, 0, len(build.partitions))
 	offset := 0
-	for index, partition := range build.Partitions {
+	for index, partition := range build.partitions {
 		if !chained[index] {
 			servers = append(servers, serverPrefix+strconv.Itoa(offset))
 		}

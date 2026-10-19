@@ -101,8 +101,18 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return ctrl.Result{}, nil
 	}
 
-	// Persist the workload outcome before converting errors into deadline retries.
+	var cleanupErr error
+
+	// Persist the combined outcome before converting errors into bounded retries.
 	defer func(previous *v1alpha1.LPXGraphDeploymentStatus) {
+		if cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+			// A later workload wakeup must not postpone failed release cleanup.
+			if result.RequeueAfter > 0 {
+				result.RequeueAfter = min(result.RequeueAfter, pipelineRequestDeadlineRetryInterval)
+			}
+		}
+
 		if err != nil {
 			setReadyCondition(deployment, v1beta1.DGDStateFailed, err.Error())
 		} else {
@@ -115,9 +125,9 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			return
 		}
 
-		// Workload errors retain a retry delay only while a scheduling deadline is active.
+		// Preserve bounded wakeups after reporting the failure; otherwise use error backoff.
 		if err != nil && result.RequeueAfter > 0 {
-			log.FromContext(ctx).Error(err, "retrying reconciliation under the pipeline request scheduling deadline")
+			log.FromContext(ctx).Error(err, "retrying reconciliation after a bounded delay")
 			err = nil
 		}
 	}(deployment.Status.DeepCopy())
@@ -184,6 +194,11 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			return ctrl.Result{}, err
 		}
 	}
+
+	// Cleanup follows DGD handoff and owned Grove observations, but precedes downloads
+	// and desired workload resolution. Before PCS synchronization, Grove may recreate
+	// Agents from the old template, requiring another release cycle.
+	cleanupErr = r.removeReleasedAgentPods(ctx, pcsgs, requests)
 
 	if result, err := r.reconcileModelDownloads(ctx, deployment, dgd); err != nil || result.RequeueAfter > 0 {
 		return result, err
@@ -303,11 +318,6 @@ func (r *graphReconciler) reconcileWorkloads(
 		setScalingDeferredCondition(deployment, scalingRequired)
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the PodCliqueSet cache observation")
 		return ctrl.Result{}, nil
-	}
-
-	// The LPX scheduler waits for old Agent Pods to disappear before releasing the placement.
-	if err := r.removeReleasedAgentPods(ctx, pcsgs, desiredRequests); err != nil {
-		return ctrl.Result{}, err
 	}
 
 	// Scale owned groups only when the rollout permits replica writes.
