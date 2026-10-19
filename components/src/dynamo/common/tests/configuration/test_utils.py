@@ -211,6 +211,101 @@ class TestAddArgument:
         args = parser.parse_args([])
         assert args.threshold is None
 
+    def test_env_value_outside_choices_is_rejected(self, monkeypatch):
+        """Test an env value that the CLI would reject fails instead of passing through."""
+        monkeypatch.setenv("TEST_PLANE", "nast")
+        parser = argparse.ArgumentParser()
+
+        with pytest.raises(
+            argparse.ArgumentTypeError,
+            match=r"TEST_PLANE \(--plane\): invalid choice: 'nast' "
+            r"\(choose from tcp, nats\)",
+        ):
+            add_argument(
+                parser,
+                flag_name="--plane",
+                env_var="TEST_PLANE",
+                default="tcp",
+                help="Plane",
+                choices=["tcp", "nats"],
+            )
+
+    def test_env_value_inside_choices_is_used(self, monkeypatch):
+        """Test a valid env value still sets the default, and the CLI still overrides it."""
+        monkeypatch.setenv("TEST_PLANE", "nats")
+        parser = argparse.ArgumentParser()
+
+        add_argument(
+            parser,
+            flag_name="--plane",
+            env_var="TEST_PLANE",
+            default="tcp",
+            help="Plane",
+            choices=["tcp", "nats"],
+        )
+
+        assert parser.parse_args([]).plane == "nats"
+        assert parser.parse_args(["--plane", "tcp"]).plane == "tcp"
+
+    def test_env_choices_are_checked_after_type_conversion(self, monkeypatch):
+        """Test typed choices compare against the converted env value, as the CLI does."""
+        monkeypatch.setenv("TEST_LEVEL", "3")
+        parser = argparse.ArgumentParser()
+        add_argument(
+            parser,
+            flag_name="--level",
+            env_var="TEST_LEVEL",
+            default=2,
+            help="Level",
+            arg_type=int,
+            choices=[1, 2, 3],
+        )
+        assert parser.parse_args([]).level == 3
+
+        monkeypatch.setenv("TEST_LEVEL", "5")
+        with pytest.raises(argparse.ArgumentTypeError, match="invalid choice: 5"):
+            add_argument(
+                argparse.ArgumentParser(),
+                flag_name="--level",
+                env_var="TEST_LEVEL",
+                default=2,
+                help="Level",
+                arg_type=int,
+                choices=[1, 2, 3],
+            )
+
+    def test_env_list_values_are_each_checked(self, monkeypatch):
+        """Test every whitespace-separated env value must be a valid choice."""
+        monkeypatch.setenv("TEST_MODES", "a c")
+        parser = argparse.ArgumentParser()
+
+        with pytest.raises(argparse.ArgumentTypeError, match="invalid choice: 'c'"):
+            add_argument(
+                parser,
+                flag_name="--modes",
+                env_var="TEST_MODES",
+                default=[],
+                help="Modes",
+                nargs="*",
+                choices=["a", "b"],
+            )
+
+    def test_default_outside_choices_is_allowed_when_env_unset(self, monkeypatch):
+        """Test a None default, meaning unset, is not checked against choices."""
+        monkeypatch.delenv("TEST_PLANE", raising=False)
+        parser = argparse.ArgumentParser()
+
+        add_argument(
+            parser,
+            flag_name="--plane",
+            env_var="TEST_PLANE",
+            default=None,
+            help="Plane",
+            choices=["tcp", "nats"],
+        )
+
+        assert parser.parse_args([]).plane is None
+
 
 class TestAddNegatableBool:
     """Test add_negatable_bool function."""

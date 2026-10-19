@@ -15,6 +15,8 @@ subtitle: Field reference for the cross-cutting Dynamo runtime CLI flags and env
 
 Unless a field is marked environment-only, it has both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — for example, `--enable-local-indexer` sets it on and `--no-enable-local-indexer` sets it off.
 
+A field with a fixed set of choices accepts the same values from either source. An environment variable set to any other value stops the process at startup, even when the CLI flag is also given.
+
 <Card>
 <Tabs>
   <Tab title="Kubernetes">

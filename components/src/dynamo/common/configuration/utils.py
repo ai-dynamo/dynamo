@@ -143,7 +143,8 @@ def add_argument(
         alias: Optional alias for the flag (must start with '--')
         obsolete_flag: Optional obsolete/legacy flag (for help msg only, must start with '--')
         dest: Optional destination name (defaults to flag_name with dashes replaced by underscores)
-        choices: Optional list of valid values for the argument.
+        choices: Optional list of valid values for the argument. Applies to the
+            environment value as well as the CLI value.
         arg_type: Type for the argument (default: str)
         env_value_type: Optional parser used only for the environment value
         deprecated: Warn on explicit CLI/env use and show the migration in help.
@@ -155,6 +156,8 @@ def add_argument(
     if isinstance(default, list) and (arg_type is None or arg_type is str):
         value_type_for_env = None
     default_with_env = env_or_default(env_var, default, value_type=value_type_for_env)
+    if env_var in os.environ and kwargs.get("choices") is not None:
+        _check_env_choices(env_var, flag_name, default_with_env, kwargs["choices"])
 
     names = [flag_name]
 
@@ -237,6 +240,21 @@ def add_negatable_bool_argument(
         action=argparse.BooleanOptionalAction,
         deprecated=deprecated,
     )
+
+
+def _check_env_choices(env_var: str, flag_name: str, value: Any, choices: Any) -> None:
+    """
+    Reject an environment value that the command line would reject.
+
+    argparse checks ``choices`` only for values given on the command line, and the
+    environment value reaches it as the default.
+    """
+    for item in value if isinstance(value, list) else [value]:
+        if item not in choices:
+            raise argparse.ArgumentTypeError(
+                f"{env_var} ({flag_name}): invalid choice: {item!r} "
+                f"(choose from {', '.join(map(str, choices))})"
+            )
 
 
 def _build_help_message(

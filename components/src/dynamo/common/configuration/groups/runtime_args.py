@@ -330,15 +330,19 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=env_or_default("DYN_ENABLE_STRUCTURAL_TAG", None, value_type=bool),
             help=argparse.SUPPRESS,
         )
-        g.add_argument(
-            "--dyn-structural-tag-scope",
-            default=env_or_default("DYN_STRUCTURAL_TAG_SCOPE", None, value_type=str),
+        add_argument(
+            g,
+            flag_name="--dyn-structural-tag-scope",
+            env_var="DYN_STRUCTURAL_TAG_SCOPE",
+            default=None,
             choices=["auto", "always"],
             help=argparse.SUPPRESS,
         )
-        g.add_argument(
-            "--dyn-structural-tag-schema",
-            default=env_or_default("DYN_STRUCTURAL_TAG_SCHEMA", None, value_type=str),
+        add_argument(
+            g,
+            flag_name="--dyn-structural-tag-schema",
+            env_var="DYN_STRUCTURAL_TAG_SCHEMA",
+            default=None,
             choices=["auto", "strict"],
             help=argparse.SUPPRESS,
         )

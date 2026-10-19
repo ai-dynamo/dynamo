@@ -278,7 +278,7 @@ Use the `SGLANG_TRACE_LEVEL` environment variable to override the default:
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `SGLANG_TRACE_LEVEL` | SGLang internal span verbosity level (1–4); only active when `--enable-trace` is set | `2` | `1` |
+| `SGLANG_TRACE_LEVEL` | SGLang internal span verbosity level (1–4, or 0 to turn these spans off); only active when `--enable-trace` is set | `2` | `1` |
 
 ```bash
 # Keep only the most essential per-request spans

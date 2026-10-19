@@ -205,9 +205,9 @@ class DynamoSGLangArgGroup(ArgGroup):
             env_var="SGLANG_TRACE_LEVEL",
             default=2,
             arg_type=int,
-            choices=[1, 2, 3, 4],
+            choices=[0, 1, 2, 3, 4],
             help="SGLang global trace level when --enable-trace is set "
-            "(1=minimal, 2=per-request [default], 3=+decode_loop, 4=full).",
+            "(0=off, 1=minimal, 2=per-request [default], 3=+decode_loop, 4=full).",
         )
 
 
