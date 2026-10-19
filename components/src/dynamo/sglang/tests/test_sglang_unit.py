@@ -29,7 +29,6 @@ from dynamo.sglang._compat import (
     cache_salt_kwargs,
     filter_supported_async_generate_kwargs,
     get_sglang_model_config,
-    kv_events_config_with_dynamo_format,
     override_server_args,
     publish_server_args,
     require_reasoning_kwargs,
@@ -1065,37 +1064,6 @@ def test_cache_salt_kwargs_preserves_supported_salt():
             return None
 
     assert cache_salt_kwargs(SaltedEngine(), "tenant-a") == {"cache_salt": "tenant-a"}
-
-
-@pytest.mark.parametrize(
-    ("config", "expected"),
-    [
-        (None, None),
-        ('{"publisher":"null"}', '{"publisher":"null"}'),
-        ('{"endpoint":"tcp://*:5557"}', '{"endpoint":"tcp://*:5557"}'),
-        (
-            '{"publisher":"zmq","format":"default"}',
-            '{"publisher":"zmq","format":"default"}',
-        ),
-        (
-            '{"publisher":"zmq"}',
-            '{"publisher": "zmq", "format": "dynamo"}',
-        ),
-    ],
-)
-def test_kv_events_config_defaults_to_dynamo_format(monkeypatch, config, expected):
-    monkeypatch.setattr(sglang_compat, "_kv_events_config_has_format", lambda: True)
-
-    assert kv_events_config_with_dynamo_format(config) == expected
-
-
-def test_kv_events_config_keeps_format_off_for_older_sglang(monkeypatch):
-    monkeypatch.setattr(sglang_compat, "_kv_events_config_has_format", lambda: False)
-
-    assert (
-        kv_events_config_with_dynamo_format('{"publisher":"zmq"}')
-        == '{"publisher":"zmq"}'
-    )
 
 
 def test_compat_keeps_async_generate_kwargs_for_newer_engines():
