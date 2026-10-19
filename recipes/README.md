@@ -333,8 +333,33 @@ args:
 **Container Images:**
 ```yaml
 image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
-# Update version tag as needed
+# Stock release tags only; keep model-specific tags as pinned (see below)
 ```
+
+### Recipes on Model-Specific Images
+
+Some recipes pin a model-specific runtime image, tagged `X.Y.Z-<model>-post.N` or
+`X.Y.Z-<model>-dev.N` (for example, `vllm-runtime:1.4.1-a.x-k2-post.1`). These images
+carry engine patches for one model that the stock `:X.Y.Z` runtime, later stock
+releases, and release candidates do not have.
+
+- **Do not replace a model-specific tag with a stock or release-candidate tag.** The
+  worker can fail at startup. For example, Transformers rejects a checkpoint whose
+  `model_type` the stock engine does not register.
+- **To run such a recipe on a new release,** a matching `<release>-<model>-post.N` image
+  must exist, and the recipe must be repointed to it. Until then, the recipe runs only on
+  its pinned image and is out of scope for that release's testing. A `-dev.N` recipe moves
+  to the stock image only after its build is promoted (see
+  [Model Early Access Builds](https://docs.nvidia.com/dynamo/dev/reference/model-early-access-builds)).
+- **When planning a release candidate,** list the recipe files that pin a model-specific
+  image from the repository root:
+
+  ```bash
+  grep -rlE 'image: *[^ ]*-(post|dev)\.[0-9]' recipes/ --exclude-dir=templates
+  ```
+
+- **Recipe authors** who pin a model-specific image must say so in the recipe's README
+  and its docs page.
 
 ## Troubleshooting
 

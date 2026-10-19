@@ -123,3 +123,4 @@ related_benchmarks: []
 maintainer: Vanshil Shah
 gaps:
 - Published C16 short-trace results predate the published NVCR runtime; no measurements for this image.
+- Requires the model-specific vllm-runtime:1.4.1-a.x-k2-post.1 image; no stock Dynamo vLLM runtime (through 1.6.0) registers the axk2 model type, so the recipe cannot run on a stock or release-candidate image.

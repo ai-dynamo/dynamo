@@ -91,6 +91,17 @@ All use EAGLE3 with three speculative tokens.
 - A ReadWriteMany storage class for model weights.
 - A Hugging Face token with access to `skt/A.X-K2`, `skt/A.X-K2-NVFP4`, and `skt/A.X-K2-EAGLE3`.
 
+<Warning>
+
+These recipes run only on the model-specific image
+`nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1`. Do not replace it with a
+stock Dynamo vLLM runtime or release candidate. Stock runtimes, including 1.6.0, do not
+register the checkpoint's `axk2` model type, so the worker fails while it builds the
+engine config. See
+[Recipes on Model-Specific Images](https://github.com/ai-dynamo/dynamo/blob/main/recipes/README.md#recipes-on-model-specific-images).
+
+</Warning>
+
 <div data-sku="b200">
 
 Each worker needs four B200 GPUs and 400 GiB of host memory: eight GPUs total
