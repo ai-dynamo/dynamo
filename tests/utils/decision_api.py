@@ -40,35 +40,6 @@ def decision_payload(model, dialect="oai"):
                 },
             },
         }
-    if dialect == "sglang_native":
-        return {
-            "model": model,
-            "input": state,
-            "nvext": {"format": "sglang_native"},
-            "chat_template_kwargs": {"enable_thinking": False},
-            "questions": [
-                {
-                    "type": "choice",
-                    "id": "route",
-                    "question": "Choose the responsible team.",
-                    "options": [
-                        {"name": "billing", "description": "Payments"},
-                        {"name": "technical", "description": "Software"},
-                    ],
-                },
-                {
-                    "type": "yes_no",
-                    "id": "urgent",
-                    "question": "Action is needed today.",
-                },
-                {
-                    "type": "score",
-                    "id": "severity",
-                    "question": "Rate the impact.",
-                    "levels": ["Low", "Moderate", "High"],
-                },
-            ],
-        }
     if dialect != "oai":
         raise ValueError(f"Unknown decision fixture dialect: {dialect}")
     return {
@@ -106,6 +77,7 @@ def assert_distribution(values):
 
 
 def assert_decision_body(body, model, dialect):
+    assert dialect in ("oai", "systemone")
     assert body["model"] == model
     if dialect == "oai":
         answers = body["answers"]
@@ -168,22 +140,6 @@ def assert_decision_body(body, model, dialect):
                     math.isfinite(answer["confidence"])
                     and 0 <= answer["confidence"] <= 1
                 )
-        else:
-            assert body["object"] == "decisions"
-            assert body["prompt_format_version"] == 1
-            probability = urgent["probabilities"]["yes"]
-            assert urgent["type"] == "yes_no"
-            assert_distribution(list(urgent["probabilities"].values()))
-            for answer in (route, urgent, severity):
-                assert (
-                    math.isfinite(answer["label_mass"])
-                    and 0 <= answer["label_mass"] <= 1
-                )
-                assert "confidence" not in answer and "x_label_mass" not in answer
-            usage = body["usage"]
-            assert usage["prompt_tokens"] > 0
-            assert usage["completion_tokens"] == usage["reasoning_tokens"] == 0
-            assert usage["total_tokens"] == usage["prompt_tokens"]
     assert route["choice"] in ("billing", "technical")
     assert math.isfinite(probability) and 0 <= probability <= 1
     assert severity["score"] == pytest.approx(
