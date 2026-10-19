@@ -667,7 +667,7 @@ redirects:
   - source: "/dynamo/v1.1.1/user-guides/router-testing.md"
     destination: "/dynamo/dev/knowledge-base/modular-components/router/router-testing"
   - source: "/dynamo/v1.2.0/agents/priority-scheduling.md"
-    destination: "/dynamo/dev/agents/priority-scheduling"
+    destination: "/dynamo/dev/agents/prioritize-requests"
   - source: "/dynamo/v1.2.0/backends/backends/mocker_backend/README.md"
     destination: "https://github.com/ai-dynamo/dynamo/blob/v1.2.0/docs/backends/mocker_backend/README.md"
   - source: "/dynamo/v1.2.0/components/planner/planner-guide.zh-CN.md"
