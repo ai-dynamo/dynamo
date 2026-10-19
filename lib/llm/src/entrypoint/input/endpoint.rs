@@ -272,19 +272,25 @@ mod tests {
 }
 
 #[cfg(test)]
-#[cfg(feature = "integration")]
 mod integration_tests {
     use super::*;
     use dynamo_runtime::protocols::EndpointId;
+    use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+    const TCP_EPHEMERAL_PORTS: &[(&str, &str)] = &[
+        ("DYN_TCP_RPC_HOST", "127.0.0.1"),
+        ("DYN_TCP_RPC_PORT", "0"),
+        ("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1"),
+        ("DYN_TCP_RESPONSE_STREAM_PORT", "0"),
+    ];
 
     async fn create_test_environment() -> anyhow::Result<(DistributedRuntime, EngineConfig)> {
-        // Create a minimal distributed runtime and engine config for testing
-        let runtime = dynamo_runtime::Runtime::from_settings()
-            .map_err(|e| anyhow::anyhow!("Failed to create runtime: {}", e))?;
-
-        let distributed_runtime = dynamo_runtime::DistributedRuntime::from_settings(runtime)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create distributed runtime: {}", e))?;
+        // In-memory discovery, TCP request plane and ZMQ event plane: no etcd or NATS.
+        // Reuse the test's tokio runtime rather than building one that would be dropped
+        // inside it.
+        let runtime = Runtime::from_current()?;
+        let distributed_runtime =
+            DistributedRuntime::new(runtime, DistributedConfig::process_local()).await?;
 
         let engine_config = EngineConfig::InProcessText {
             engine: crate::engines::make_echo_engine(),
@@ -301,17 +307,18 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    #[ignore = "Failing in CI"]
     async fn test_run_function_valid_endpoint() {
-        // Test that run() works correctly with valid endpoints
+        // The TCP server is process-global; isolate it from other test runtimes.
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::test_run_function_valid_endpoint"),
+            TCP_EPHEMERAL_PORTS,
+        ) {
+            return;
+        }
 
-        let (runtime, engine_config) = match create_test_environment().await {
-            Ok(env) => env,
-            Err(e) => {
-                eprintln!("Skipping test: {}", e);
-                return;
-            }
-        };
+        let (runtime, engine_config) = create_test_environment()
+            .await
+            .expect("Failed to create test environment");
 
         // Test with valid endpoint - start the service and then connect to it
         let valid_path = "dyn://valid-endpoint.mocker.generate";
@@ -326,16 +333,15 @@ mod integration_tests {
                 async move { run(runtime_clone, valid_path_clone, engine_config_clone).await },
             );
 
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        let client_result = async {
+        let client_result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let namespace = runtime.namespace(&valid_endpoint.namespace)?;
             let component = namespace.component(&valid_endpoint.component)?;
             let client = component.endpoint(&valid_endpoint.name).client().await?;
             client.wait_for_instances().await?;
             Ok::<_, anyhow::Error>(client)
-        }
-        .await;
+        })
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out waiting for an instance")));
 
         match client_result {
             Ok(_client) => {

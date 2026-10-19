@@ -648,4 +648,123 @@ mod tests {
             "removing the last chat model must disable /v1/responses"
         );
     }
+
+    /// A worker registers through file-backed discovery, and the frontend's watcher must
+    /// export that worker's model card values as model gauges. TCP request plane and ZMQ
+    /// event plane, so no etcd or NATS.
+    #[tokio::test]
+    async fn watcher_exports_mdc_gauges_for_discovered_model() {
+        use crate::local_model::{LocalModelBuilder, runtime_config::ModelRuntimeConfig};
+        use dynamo_runtime::{
+            Runtime,
+            discovery::EventTransportKind,
+            distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
+            storage::kv,
+        };
+        use std::time::Duration;
+
+        // The TCP server is process-global; isolate it from other test runtimes.
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::watcher_exports_mdc_gauges_for_discovered_model"
+            ),
+            &[
+                ("DYN_TCP_RPC_HOST", "127.0.0.1"),
+                ("DYN_TCP_RPC_PORT", "0"),
+                ("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1"),
+                ("DYN_TCP_RESPONSE_STREAM_PORT", "0"),
+            ],
+        ) {
+            return;
+        }
+
+        let store = tempfile::tempdir().unwrap();
+        let config = || DistributedConfig {
+            discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(store.path().into())),
+            nats_config: None,
+            request_plane: RequestPlaneMode::Tcp,
+            response_plane: None,
+            event_transport_kind: EventTransportKind::Zmq,
+        };
+        let runtime = Runtime::from_current().unwrap();
+        let frontend = DistributedRuntime::new(runtime.clone(), config())
+            .await
+            .unwrap();
+        let worker = DistributedRuntime::new(runtime, config()).await.unwrap();
+
+        let service = Arc::new(HttpService::builder().build().unwrap());
+        let metrics = service.state().metrics_clone();
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        run_watcher(
+            frontend.clone(),
+            service.state().manager_clone(),
+            RouterConfig::default(),
+            0,
+            None,
+            NamespaceFilter::Global,
+            service.clone(),
+            metrics,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            RouterPluginBuilder::default(),
+        )
+        .await
+        .unwrap();
+
+        let model = LocalModelBuilder::default()
+            .model_name(Some("mdc-model".to_string()))
+            .kv_cache_block_size(Some(32))
+            .migration_limit(Some(3))
+            .runtime_config(ModelRuntimeConfig {
+                context_length: Some(8192),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let serving = tokio::spawn(crate::entrypoint::input::endpoint::run(
+            worker.clone(),
+            "dyn://mdc-gauges.backend.generate".to_string(),
+            EngineConfig::InProcessText {
+                engine: make_echo_engine(),
+                model: Box::new(model),
+            },
+        ));
+
+        let gauge = |suffix: &str| {
+            registry
+                .gather()
+                .into_iter()
+                .find(|family| family.name().ends_with(suffix))?
+                .get_metric()
+                .iter()
+                .find(|metric| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .any(|label| label.name() == "model" && label.value() == "mdc-model")
+                })
+                .map(|metric| metric.get_gauge().value())
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while gauge("_model_context_length").is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the watcher must export the discovered model's card values");
+        assert_eq!(gauge("_model_context_length"), Some(8192.0));
+        assert_eq!(gauge("_model_kv_cache_block_size"), Some(32.0));
+        assert_eq!(gauge("_model_migration_limit"), Some(3.0));
+
+        serving.abort();
+        worker.shutdown();
+        frontend.shutdown();
+    }
 }
