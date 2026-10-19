@@ -87,6 +87,7 @@ pub(crate) fn aggregated_replay_setup(
         kv_eviction_policy: Default::default(),
         dp_size: components.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&components.args)?,
+        prefill_context_parallel_size: components.args.replay_prefill_context_parallel_size()?,
         // Mocker arguments reach this boundary with a concrete capacity,
         // whether authored directly or supplied by the Dynamo planner.
         num_gpu_blocks_is_explicit: Some(true),
@@ -112,12 +113,14 @@ pub(crate) fn disaggregated_replay_setup(
     let prefill_role = ReplayRoleConfig {
         dp_size: prefill.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&prefill.args)?,
+        prefill_context_parallel_size: prefill.args.replay_prefill_context_parallel_size()?,
         num_gpu_blocks_is_explicit: Some(true),
         rank: prefill.rank,
     };
     let decode_role = ReplayRoleConfig {
         dp_size: decode.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&decode.args)?,
+        prefill_context_parallel_size: decode.args.replay_prefill_context_parallel_size()?,
         num_gpu_blocks_is_explicit: Some(true),
         rank: decode.rank,
     };
@@ -125,6 +128,7 @@ pub(crate) fn disaggregated_replay_setup(
         kv_eviction_policy: Default::default(),
         dp_size: prefill_role.dp_size,
         tensor_parallel_size: prefill_role.tensor_parallel_size,
+        prefill_context_parallel_size: prefill_role.prefill_context_parallel_size,
         num_gpu_blocks_is_explicit: Some(true),
         rank: prefill_role.rank.clone(),
         prefill: Some(prefill_role),
@@ -210,6 +214,53 @@ mod tests {
 
         fn predict_decode(&self, batch_size: usize, _isl: usize, _osl: usize) -> Result<f64> {
             Ok(batch_size as f64)
+        }
+    }
+
+    #[test]
+    fn replay_gpu_accounting_uses_each_roles_canonical_pcp() {
+        let args_for = |role: &str, cp_size: Option<u32>| {
+            let mut args = MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": role,
+                    "timing_model": {
+                        "type": "external", "provider": "ais",
+                        "config": {
+                            "model": "test-model", "system": "h200_sxm",
+                            "backend": "vllm", "worker_type": role,
+                            "tp": 2, "attention_dp": 3, "cp_size": cp_size, "dcp": 2
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+            args.perf_model = Arc::new(PerfModel::from_ais_callback(Arc::new(EchoAis)));
+            args
+        };
+        for cp_size in [None, Some(4)] {
+            let args = args_for("aggregated", cp_size);
+            let (config, factory) = aggregated_replay_setup(&args).unwrap();
+            let role = factory
+                .role_factory(&config, WorkerStage::Aggregated, false)
+                .unwrap();
+            assert_eq!(
+                role.gpus_per_worker().unwrap(),
+                6 * cp_size.unwrap_or(1) as usize
+            );
+        }
+        let (config, factory) =
+            disaggregated_replay_setup(&args_for("prefill", Some(4)), &args_for("decode", Some(2)))
+                .unwrap();
+        assert_eq!(config.prefill_context_parallel_size, 4);
+        for (stage, expected) in [(WorkerStage::Prefill, 24), (WorkerStage::Decode, 12)] {
+            assert_eq!(
+                factory
+                    .role_factory(&config, stage, false)
+                    .unwrap()
+                    .gpus_per_worker()
+                    .unwrap(),
+                expected
+            );
         }
     }
 
