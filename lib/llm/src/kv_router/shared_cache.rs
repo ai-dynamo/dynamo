@@ -458,7 +458,10 @@ impl HicacheSharedKvCache {
         // each pool's maximum and then its minimum is unsafe when there are holes.
         // Only a recoverable contiguous prefix earns credit, never sparse pages.
         match restorable.iter().rposition(|&hit| hit) {
-            Some(last) => SharedCacheHits::from_ranges(vec![0..(last + 1) as u32]),
+            Some(last) => {
+                let prefix = 0..(last + 1) as u32;
+                SharedCacheHits::from_ranges(vec![prefix])
+            }
             None => SharedCacheHits::default(),
         }
     }
@@ -1350,7 +1353,7 @@ mod tests {
                             }
                         }
                         let expected = (1..=5)
-                            .filter(|&prefix: &usize| {
+                            .rfind(|&prefix: &usize| {
                                 [(mask_a, window_a), (mask_b, window_b)].iter().all(
                                     |&(mask, window)| {
                                         (prefix.saturating_sub(window as usize)..prefix)
@@ -1358,7 +1361,6 @@ mod tests {
                                     },
                                 )
                             })
-                            .next_back()
                             .unwrap_or(0);
                         let hits = cache.layout_prefix_hits(
                             &hashes,
