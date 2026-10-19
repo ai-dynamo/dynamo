@@ -421,12 +421,14 @@ def _assert_conversation_bindings(report: dict, topology: str, mode: str):
     records = report["per_request"]
     actual_reused_tokens = sum(row["reused_input_tokens"] for row in records)
     assert actual_reused_tokens > 0
-    # Aggregated records have no P/D-specific prefill_route_overlap_tokens.
+    # Per-worker tokenization runs after placement. Other requests can grow the
+    # physical cache before admission, beyond the router observation at placement.
+    # Without that delay, check the existing fixture's overlap bound.
     assert all(
         row["reused_input_tokens"] <= route["selected_overlap_blocks"] * 64
         for row in records
         for route in row["routing_history"]
-        if route["pool"] in ("agg", "prefill")
+        if route["pool"] in ("agg", "prefill") and "tokenized_ms" not in row
     )
     assert report["first_admission_prefix_cache_reused_ratio"] == pytest.approx(
         actual_reused_tokens / sum(row["input_length"] for row in records)
@@ -452,7 +454,7 @@ def test_conversation_yaml_uses_existing_native_router(
 
 
 @pytest.mark.parametrize("topology", ["aggregated", "disaggregated"])
-def test_conversation_tokenization_precedes_native_routing(tmp_path, topology):
+def test_conversation_tokenization_precedes_engine_admission(tmp_path, topology):
     config = _conversation_prediction(tmp_path, "vllm", topology, "session")
     config["engine"]["tokenization"] = {
         "workers": 1,
