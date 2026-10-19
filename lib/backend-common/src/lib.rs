@@ -30,7 +30,7 @@ mod topology;
 mod validate;
 pub mod worker;
 
-pub use args::{CommonArgs, RouterModeArg};
+pub use args::{CommonArgs, Nullable, RouterModeArg};
 pub use disagg::DisaggregationMode;
 pub use dynamo_llm::model_type::ModelInput;
 pub use engine::{

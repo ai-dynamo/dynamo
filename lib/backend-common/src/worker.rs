@@ -2552,7 +2552,13 @@ mod tests {
 
     #[tokio::test]
     async fn build_local_model_carries_runtime_parser_settings() {
+        let mut advertised = dynamo_llm::entrypoint::RouterConfig::new(
+            dynamo_runtime::pipeline::RouterMode::KV,
+            Default::default(),
+        );
+        advertised.session_affinity_ttl_secs = Some(300);
         let config = WorkerConfig {
+            router_config: Some(advertised),
             tool_call_parser: Some("kimi_k2".to_string()),
             reasoning_parser: Some("kimi_k25".to_string()),
             default_thinking_mode: Some("disabled".to_string()),
@@ -2621,30 +2627,9 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("group-a")
         );
-    }
-
-    #[tokio::test]
-    async fn build_local_model_carries_the_router_advertisement() {
-        let mut advertised = dynamo_llm::entrypoint::RouterConfig::new(
-            dynamo_runtime::pipeline::RouterMode::KV,
-            Default::default(),
-        );
-        advertised.session_affinity_ttl_secs = Some(300);
-        let config = WorkerConfig {
-            router_config: Some(advertised),
-            ..WorkerConfig::default()
-        };
-        let engine_config = EngineConfig {
-            model: "nvidia/Kimi-K2.5-NVFP4".to_string(),
-            ..EngineConfig::default()
-        };
-
-        let local_model = build_local_model(&config, &engine_config, false)
-            .await
-            .unwrap();
-        let card = local_model.card().router_config.as_ref().unwrap();
-        assert!(card.router_mode.is_kv_routing());
-        assert_eq!(card.session_affinity_ttl_secs, Some(300));
+        let advertised = local_model.card().router_config.as_ref().unwrap();
+        assert!(advertised.router_mode.is_kv_routing());
+        assert_eq!(advertised.session_affinity_ttl_secs, Some(300));
     }
 
     #[tokio::test]

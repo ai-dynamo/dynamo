@@ -127,17 +127,42 @@ pub struct CommonArgs {
     )]
     pub router_session_affinity_ttl_secs: Option<u64>,
 
-    /// Skip a decode worker above this KV block utilization (0.0 to 1.0).
+    /// Skip a decode worker above this KV block utilization (0.0 to 1.0);
+    /// `None` disables the check.
     #[arg(long, env = "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD")]
-    pub active_decode_blocks_threshold: Option<f64>,
+    pub active_decode_blocks_threshold: Option<Nullable<f64>>,
 
-    /// Skip a prefill worker above this many active prefill tokens.
+    /// Skip a prefill worker above this many active prefill tokens; `None`
+    /// disables the check.
     #[arg(long, env = "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD")]
-    pub active_prefill_tokens_threshold: Option<u64>,
+    pub active_prefill_tokens_threshold: Option<Nullable<u64>>,
 
-    /// Skip a prefill worker above this fraction of `max_num_batched_tokens`.
+    /// Skip a prefill worker above this fraction of `max_num_batched_tokens`;
+    /// `None` disables the check.
     #[arg(long, env = "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC")]
-    pub active_prefill_tokens_threshold_frac: Option<f64>,
+    pub active_prefill_tokens_threshold_frac: Option<Nullable<f64>>,
+}
+
+/// A numeric flag value that may also be `None` or empty, meaning unset, as
+/// the Python workers' `nullable_float` and `nullable_int` accept.
+#[derive(Clone, Copy, Debug)]
+pub struct Nullable<T>(pub Option<T>);
+
+impl<T: std::str::FromStr> std::str::FromStr for Nullable<T>
+where
+    T::Err: std::fmt::Display,
+{
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, String> {
+        match raw {
+            "" | "None" => Ok(Self(None)),
+            value => value
+                .parse()
+                .map(|value| Self(Some(value)))
+                .map_err(|error: T::Err| error.to_string()),
+        }
+    }
 }
 
 impl CommonArgs {
@@ -156,9 +181,11 @@ impl CommonArgs {
                 .build()
         };
         let load_threshold_config = LoadThresholdConfig {
-            active_decode_blocks_threshold: self.active_decode_blocks_threshold,
-            active_prefill_tokens_threshold: self.active_prefill_tokens_threshold,
-            active_prefill_tokens_threshold_frac: self.active_prefill_tokens_threshold_frac,
+            active_decode_blocks_threshold: self.active_decode_blocks_threshold.and_then(|v| v.0),
+            active_prefill_tokens_threshold: self.active_prefill_tokens_threshold.and_then(|v| v.0),
+            active_prefill_tokens_threshold_frac: self
+                .active_prefill_tokens_threshold_frac
+                .and_then(|v| v.0),
         };
         load_threshold_config.validate().map_err(invalid)?;
         let kv_router_config = if router_mode.is_kv_routing() {
@@ -258,6 +285,25 @@ mod tests {
             assert!(router_config(&[]).is_none());
             assert!(router_config(&["--router-session-affinity-ttl-secs", "300"]).is_none());
 
+            // `None` disables a threshold, as for the Python workers.
+            let config = router_config(&[
+                "--router-mode",
+                "kv",
+                "--active-decode-blocks-threshold",
+                "None",
+                "--active-prefill-tokens-threshold",
+                "8192",
+            ])
+            .expect("advertised");
+            assert_eq!(
+                config.load_threshold_config.active_decode_blocks_threshold,
+                None
+            );
+            assert_eq!(
+                config.load_threshold_config.active_prefill_tokens_threshold,
+                Some(8192)
+            );
+
             let config = router_config(&[
                 "--router-mode",
                 "kv",
@@ -273,11 +319,16 @@ mod tests {
             &[
                 ("DYN_ROUTER_MODE", "kv"),
                 ("DYN_ROUTER_USE_KV_EVENTS", "false"),
+                ("DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD", "None"),
             ],
             || {
                 let config = router_config(&[]).expect("advertised from the environment");
                 assert_eq!(config.router_mode, RouterMode::KV);
                 assert!(!config.kv_router_config.use_kv_events);
+                assert_eq!(
+                    config.load_threshold_config.active_decode_blocks_threshold,
+                    None
+                );
             },
         );
     }
