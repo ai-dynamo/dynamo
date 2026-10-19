@@ -109,6 +109,8 @@ runs:
     - name: Render Dockerfile
       if: ${{ inputs.dockerfile == '' }}
       shell: bash
+      env:
+        RUNTIME_VARIANT: ${{ inputs.runtime_variant }}
       run: |
         RENDER_ARGS="--framework ${{ inputs.framework }} --target ${{ inputs.target }} --platform ${{ inputs.platform }}"
         if [ -n "${{ inputs.cuda_version }}" ]; then
@@ -121,8 +123,8 @@ runs:
         if [ "${{ inputs.make_efa }}" == "true" ]; then
           RENDER_ARGS+=" --make-efa"
         fi
-        if [ -n "${{ inputs.runtime_variant }}" ]; then
-          RENDER_ARGS+=" --variant ${{ inputs.runtime_variant }}"
+        if [ -n "${RUNTIME_VARIANT}" ]; then
+          RENDER_ARGS+=" --variant ${RUNTIME_VARIANT}"
         fi
         # --output-short-filename writes container/rendered.Dockerfile, which
         # the extraction steps use when no explicit Dockerfile was supplied.
