@@ -440,9 +440,8 @@ impl HicacheSharedKvCache {
                 });
                 consecutive = if hit { consecutive + 1 } else { 0 };
                 let prefix_len = page_index + 1;
-                // SGLang batch_exists_v2 tests the window ending at EACH
-                // candidate prefix, not just at the end of the whole request.
-                // A trailing pool can recover after a hole; all-pages cannot.
+                // SGLang's batch_exists_v2 checks the window ending at each candidate prefix;
+                // a trailing pool can recover after a hole, an all-pages pool cannot.
                 let required = match pool.hit_policy {
                     HicacheHitPolicy::AllPages => prefix_len,
                     HicacheHitPolicy::TrailingPages => {
@@ -452,9 +451,8 @@ impl HicacheSharedKvCache {
                 restorable[page_index] &= consecutive >= required;
             }
         }
-        // Intersect stop points BEFORE taking the maximum: independently taking
-        // each pool's maximum and then its minimum is unsafe when there are holes.
-        // Only a recoverable contiguous prefix earns credit, never sparse pages.
+        // Intersect per-prefix results before taking the max (max-then-min breaks on
+        // holes); only a contiguous recoverable prefix earns credit.
         match restorable.iter().rposition(|&hit| hit) {
             Some(last) => {
                 let prefix = 0..(last + 1) as u32;
@@ -615,13 +613,9 @@ impl SharedKvCache for HicacheSharedKvCache {
         }
 
         if let Some(layout) = &config.hicache_object_layout {
-            // A single-page group verification cannot certify a prefix window.
-            // Do not read OR populate group_states.verified for advertised layouts.
             return Ok(self.layout_prefix_hits(&page_hashes, layout, &config));
         }
 
-        // Preserve the legacy sparse-hit behavior and group fast path when no
-        // physical layout is advertised.
         let page_hits = page_hashes
             .iter()
             .map(|page_hash| {
