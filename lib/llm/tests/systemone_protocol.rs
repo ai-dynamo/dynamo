@@ -13,7 +13,7 @@ fn parses_exact_native_candidate_scores_in_requested_order() {
             "completion_tokens": 0,
             "output_token_ids_logprobs": [[
                 [-0.2, 17, null],
-                [-1.3, 4, "token"]
+                [-1.3, 4, null]
             ]]
         }
     });
@@ -30,14 +30,25 @@ fn rejects_decoded_tokens_in_prefill_only_scoring() {
         "output_ids": [42],
         "meta_info": {
             "finish_reason": {"type": "length"},
-            "completion_tokens": 1,
+            "completion_tokens": 0,
             "output_token_ids_logprobs": [[[-0.2, 17, null], [-1.3, 4, null]]]
         }
     });
     assert!(parse_candidate_scores(&response, &[17, 4]).is_err());
     let mut response = response;
     response["output_ids"] = json!([]);
+    response["meta_info"]["completion_tokens"] = json!(1);
     assert!(parse_candidate_scores(&response, &[17, 4]).is_err());
+}
+
+#[test]
+fn rejects_detokenized_candidate_text() {
+    let response = json!({"output_ids": [], "meta_info": {
+        "finish_reason": {"type": "length"},
+        "completion_tokens": 0,
+        "output_token_ids_logprobs": [[[-0.2, 17, "token"]]]
+    }});
+    assert!(parse_candidate_scores(&response, &[17]).is_err());
 }
 
 #[test]
@@ -51,15 +62,30 @@ fn requires_explicit_zero_completion_accounting() {
 
 #[test]
 fn rejects_partial_reordered_or_aborted_native_candidate_scores() {
-    for response in [
-        json!({"meta_info": {"finish_reason": null, "output_token_ids_logprobs": [[[-0.2, 17, null]]]}}),
-        json!({"meta_info": {"finish_reason": {"type": "abort"}, "output_token_ids_logprobs": [[[-0.2, 17, null]]]}}),
-        json!({"meta_info": {"finish_reason": {"type": "length"}, "output_token_ids_logprobs": [[[-0.2, 4, null], [-1.3, 17, null]]]}}),
-        json!({"meta_info": {"finish_reason": {"type": "length"}, "output_token_ids_logprobs": [[[-0.2, 17, null]]]}}),
-        json!({"meta_info": {"finish_reason": {"type": "error"}, "output_token_ids_logprobs": [[[-0.2, 17, null]]]}}),
-        json!({"meta_info": {"finish_reason": {}, "output_token_ids_logprobs": [[[-0.2, 17, null]]]}}),
+    let response = json!({"output_ids": [], "meta_info": {
+        "finish_reason": {"type": "length"}, "completion_tokens": 0,
+        "output_token_ids_logprobs": [[[-0.2, 17, null], [-1.3, 4, null]]]
+    }});
+    for (field, value, expected) in [
+        ("finish_reason", json!(null), "not terminal"),
+        ("finish_reason", json!({"type": "abort"}), "aborted"),
+        (
+            "output_token_ids_logprobs",
+            json!([[[-0.2, 4, null], [-1.3, 17, null]]]),
+            "returned token ID 4, expected 17",
+        ),
+        (
+            "output_token_ids_logprobs",
+            json!([[[-0.2, 17, null]]]),
+            "expected 2 candidate entries",
+        ),
+        ("finish_reason", json!({"type": "error"}), "unsupported"),
+        ("finish_reason", json!({}), "no type"),
     ] {
-        assert!(parse_candidate_scores(&response, &[17, 4]).is_err());
+        let mut invalid = response.clone();
+        invalid["meta_info"][field] = value;
+        let error = parse_candidate_scores(&invalid, &[17, 4]).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
     }
 }
 
