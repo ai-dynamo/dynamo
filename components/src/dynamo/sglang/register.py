@@ -799,9 +799,9 @@ async def get_runtime_config(
                 json.dumps(mooncake_runtime_data),
             )
             logging.info("Published Mooncake HiCache runtime metadata for router use.")
-        except Exception:
+        except Exception as e:
             logging.warning(
-                "Failed to attach Mooncake HiCache runtime metadata to registration"
+                f"Failed to attach Mooncake HiCache runtime metadata to registration: {e}"
             )
 
     if engine is None:
