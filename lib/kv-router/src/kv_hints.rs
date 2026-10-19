@@ -123,18 +123,37 @@ impl KvTransferCandidates {
     where
         F: FnMut(KvTransferCandidateSource) -> bool,
     {
-        let (source, prefix_blocks) = self
+        self.best_ranked_source(prefix_blocks_to_beat, |source| {
+            is_eligible_source(source).then_some(())
+        })
+    }
+
+    /// Like [`Self::best_source`], but a higher `rank` wins before a longer
+    /// prefix. A `None` rank makes the source ineligible.
+    pub fn best_ranked_source<R, F>(
+        &self,
+        prefix_blocks_to_beat: usize,
+        mut rank: F,
+    ) -> Option<(KvTransferCandidateSource, Vec<ExternalSequenceBlockHash>)>
+    where
+        R: Ord,
+        F: FnMut(KvTransferCandidateSource) -> Option<R>,
+    {
+        let (_, source, prefix_blocks) = self
             .owner_prefix_blocks
             .iter()
             .copied()
-            .filter(|(source, blocks)| {
-                *blocks > prefix_blocks_to_beat && is_eligible_source(*source)
-            })
-            .max_by(|(left_source, left_blocks), (right_source, right_blocks)| {
-                left_blocks
-                    .cmp(right_blocks)
-                    .then_with(|| right_source.cmp(left_source))
-            })?;
+            .filter(|(_, blocks)| *blocks > prefix_blocks_to_beat)
+            .filter_map(|(source, blocks)| Some((rank(source)?, source, blocks)))
+            .max_by(
+                |(left_rank, left_source, left_blocks),
+                 (right_rank, right_source, right_blocks)| {
+                    left_rank
+                        .cmp(right_rank)
+                        .then_with(|| left_blocks.cmp(right_blocks))
+                        .then_with(|| right_source.cmp(left_source))
+                },
+            )?;
 
         Some((source, self.block_hashes.get(..prefix_blocks)?.to_vec()))
     }
@@ -232,6 +251,37 @@ mod tests {
                 ],
             ))
         );
+    }
+
+    #[test]
+    fn best_ranked_source_prefers_rank_over_prefix_length() {
+        let near = WorkerWithDpRank::new(7, 0);
+        let far = WorkerWithDpRank::new(8, 0);
+        let farther = WorkerWithDpRank::new(9, 0);
+        // Would win the tie with `farther` if it were eligible.
+        let excluded = WorkerWithDpRank::new(6, 0);
+        let candidates = KvTransferCandidates {
+            block_hashes: (101..=104).map(ExternalSequenceBlockHash).collect(),
+            owner_prefix_blocks: vec![
+                (near.into(), 2),
+                (far.into(), 3),
+                (farther.into(), 4),
+                (excluded.into(), 4),
+            ],
+            routing_snapshot: None,
+        };
+        let rank = |preferred: WorkerWithDpRank| {
+            move |source: KvTransferCandidateSource| {
+                (source != excluded.into()).then_some(source == preferred.into())
+            }
+        };
+
+        // A higher rank wins over a longer prefix.
+        let (source, block_hashes) = candidates.best_ranked_source(0, rank(near)).unwrap();
+        assert_eq!((source, block_hashes.len()), (near.into(), 2));
+        // Within one rank the longest prefix wins, and a `None` rank is skipped.
+        let (source, _) = candidates.best_ranked_source(0, rank(excluded)).unwrap();
+        assert_eq!(source, farther.into());
     }
 
     #[test]
