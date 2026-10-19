@@ -539,11 +539,17 @@ impl PreprocessedRouting {
         &self,
         card: &ModelDeploymentCard,
         migration_limit: u32,
+        migration_max_seq_len: Option<u32>,
         metrics: Arc<Metrics>,
     ) -> anyhow::Result<
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
     > {
-        self.link_preprocessed(Migration::for_generate(card, migration_limit, metrics))
+        self.link_preprocessed(Migration::for_generate(
+            card,
+            migration_limit,
+            migration_max_seq_len,
+            metrics,
+        ))
     }
 
     fn link_preprocessed(

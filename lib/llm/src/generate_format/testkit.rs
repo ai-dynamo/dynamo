@@ -68,10 +68,14 @@ pub struct NativeShape;
 impl ClientShape for NativeShape {
     fn body(&self, spec: &RequestSpec) -> Option<Vec<u8>> {
         let mut sampling = spec.extra_sampling.clone();
-        sampling.extend([
-            ("max_new_tokens".into(), json!(spec.max_new_tokens)),
-            ("min_new_tokens".into(), json!(spec.min_new_tokens)),
-        ]);
+        for (name, value) in [
+            ("max_new_tokens", spec.max_new_tokens),
+            ("min_new_tokens", spec.min_new_tokens),
+        ] {
+            if let Some(value) = value {
+                sampling.insert(name.into(), value.into());
+            }
+        }
         let mut body = spec.extra.clone();
         body.extend([
             ("input_ids".into(), json!(spec.input_ids)),

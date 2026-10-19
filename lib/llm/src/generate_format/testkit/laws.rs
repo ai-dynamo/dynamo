@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Property tests every `/generate` format must pass.
+//! Property tests for SGLang-backed `/generate` formats.
 //!
 //! Each law generates requests, ground truths, chunk boundaries, topologies,
-//! and failure points, runs them through [`driver`](crate::driver), and
+//! and failure points, runs them through [`driver`](super::driver), and
 //! compares what the client receives. Failures shrink to a minimal scenario.
 
 use std::sync::Arc;
@@ -387,20 +387,27 @@ impl Harness {
         if !expressible {
             return;
         }
-        let strategy = (scenarios(), any::<Index>(), any::<Index>());
+        let strategy = (scenarios(), any::<Index>(), any::<Index>(), any::<bool>());
         self.law(
             "blocked requests fail cleanly",
             strategy,
-            |(scenario, field, at)| {
+            |(scenario, field, at, engine_default)| {
                 let fields = blocking_fields();
                 let (sampling, name, value) = fields[field.index(fields.len())].clone();
                 let mut scenario = scenario;
-                let target = if sampling {
-                    &mut scenario.request.extra_sampling
+                if sampling && engine_default {
+                    if !scenario.engine_info.is_object() {
+                        scenario.engine_info = json!({});
+                    }
+                    scenario.engine_info["preferred_sampling_params"] = json!({name: value});
                 } else {
-                    &mut scenario.request.extra
-                };
-                target.insert(name.to_string(), value);
+                    let target = if sampling {
+                        &mut scenario.request.extra_sampling
+                    } else {
+                        &mut scenario.request.extra
+                    };
+                    target.insert(name.to_string(), value);
+                }
                 scenario.failures = vec![at.index(scenario.truth.cuts.len())];
                 scenario.lose_terminal = false;
                 prop_assume!(self.shape.body(&scenario.request).is_some());

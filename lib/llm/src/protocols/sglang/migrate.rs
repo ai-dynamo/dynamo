@@ -42,25 +42,31 @@ fn is_default(value: &Value, default: &Value) -> bool {
     }
 }
 
-/// The engine's budget for a request that omits `max_new_tokens`:
-/// `--preferred-sampling-params`, then SGLang's default. `None` when the
-/// worker does not advertise its engine.
-fn engine_default(engine_info: &Value) -> Option<u32> {
-    let preferred = match engine_info.as_object()?.get("preferred_sampling_params") {
-        Some(Value::String(json)) => serde_json::from_str(json).ok(),
-        other => other.cloned(),
+/// SGLang overlays request sampling fields onto the engine's preferred values.
+fn effective_request(body: &Map<String, Value>, engine_info: &Value) -> Result<Value, String> {
+    let preferred = match engine_info.get("preferred_sampling_params") {
+        Some(Value::String(json)) => serde_json::from_str(json)
+            .map_err(|error| format!("invalid preferred_sampling_params: {error}"))?,
+        other => other.cloned().unwrap_or(Value::Null),
     };
-    let preferred = preferred
-        .and_then(|p: Value| p.get("max_new_tokens")?.as_u64())
-        .and_then(|n| u32::try_from(n).ok());
-    Some(preferred.unwrap_or(DEFAULT_MAX_NEW_TOKENS))
+    let mut sampling = match preferred {
+        Value::Null => Map::new(),
+        Value::Object(sampling) => sampling,
+        _ => return Err("preferred_sampling_params is not an object".into()),
+    };
+    if let Some(overrides) = body.get("sampling_params").and_then(Value::as_object) {
+        sampling.extend(overrides.clone());
+    }
+    let mut request = body.clone();
+    request.insert("sampling_params".into(), Value::Object(sampling));
+    Ok(Value::Object(request))
 }
 
 /// How later attempts continue one request.
 pub(super) struct Continuation {
     original: Map<String, Value>,
     max_new_tokens: u32,
-    min_new_tokens: Option<u32>,
+    min_new_tokens: u32,
 }
 
 impl Continuation {
@@ -68,10 +74,9 @@ impl Continuation {
     pub(super) fn new(
         rules: &RequestRules,
         body: &Map<String, Value>,
-        limits: (Option<u32>, Option<u32>),
         engine_info: &Value,
     ) -> Result<Self, String> {
-        let request = Value::Object(body.clone());
+        let request = effective_request(body, engine_info)?;
         if let Some(pointer) = rules
             .migration
             .block_unless_default
@@ -99,14 +104,30 @@ impl Continuation {
         if engine_info.get("skip_tokenizer_init") == Some(&Value::Bool(false)) {
             return Err("the engine detokenizes, and text cannot continue across workers".into());
         }
-        let max_new_tokens = limits
-            .0
-            .or_else(|| engine_default(engine_info))
-            .ok_or("max_new_tokens is omitted and the worker does not report its default")?;
+        let sampling = &request["sampling_params"];
+        let max_new_tokens = match sampling.get("max_new_tokens") {
+            Some(value) => value
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or("max_new_tokens has no finite migration budget")?,
+            None if engine_info.is_object() => DEFAULT_MAX_NEW_TOKENS,
+            None => {
+                return Err(
+                    "max_new_tokens is omitted and the worker does not report its default".into(),
+                );
+            }
+        };
+        let min_new_tokens = match sampling.get("min_new_tokens") {
+            None | Some(Value::Null) => 0,
+            Some(value) => value
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or("min_new_tokens is not a non-negative integer")?,
+        };
         Ok(Self {
             original: body.clone(),
             max_new_tokens,
-            min_new_tokens: limits.1,
+            min_new_tokens,
         })
     }
 
@@ -136,10 +157,10 @@ impl Continuation {
             .as_object_mut()
             .expect("sampling_params is an object");
         sampling.insert("max_new_tokens".into(), remaining.into());
-        match self.min_new_tokens.map(|min| min.saturating_sub(delivered)) {
-            Some(min) if min > 0 => sampling.insert("min_new_tokens".into(), min.into()),
-            _ => sampling.remove("min_new_tokens"),
-        };
+        sampling.insert(
+            "min_new_tokens".into(),
+            self.min_new_tokens.saturating_sub(delivered).into(),
+        );
         if prompt_delivered {
             body.extend(rules.migration.retry_without_prompt_outputs.clone());
         }
@@ -155,10 +176,7 @@ mod tests {
 
     fn continuation(body: Value, engine_info: Value) -> Result<Continuation, String> {
         let body = body.as_object().unwrap();
-        let sampling = &body["sampling_params"];
-        let limit = |key| sampling.get(key).and_then(Value::as_u64).map(|n| n as u32);
-        let limits = (limit("max_new_tokens"), limit("min_new_tokens"));
-        Continuation::new(&super::super::REQUEST_RULES, body, limits, &engine_info)
+        Continuation::new(&super::super::REQUEST_RULES, body, &engine_info)
     }
 
     #[test]
@@ -190,6 +208,56 @@ mod tests {
     }
 
     #[test]
+    fn preferred_settings_respect_explicit_overrides_and_retry_minimums() {
+        for preferred in [
+            json!({"frequency_penalty": 0.5, "max_new_tokens": 9, "min_new_tokens": 4}),
+            json!(r#"{"frequency_penalty":0.5,"max_new_tokens":9,"min_new_tokens":4}"#),
+        ] {
+            let info = json!({"preferred_sampling_params": preferred});
+            assert!(continuation(json!({}), info.clone()).is_err());
+            let policy = continuation(
+                json!({"sampling_params": {"frequency_penalty": 0}}),
+                info.clone(),
+            )
+            .unwrap();
+            let retry = policy
+                .retry(&super::super::REQUEST_RULES, 6, false)
+                .unwrap();
+            assert_eq!(retry["sampling_params"]["max_new_tokens"], 3);
+            // Zero must override the engine's preferred minimum on the next attempt.
+            assert_eq!(retry["sampling_params"]["min_new_tokens"], 0);
+            let overridden = continuation(
+                json!({"sampling_params": {
+                    "frequency_penalty": null, "max_new_tokens": 6, "min_new_tokens": null,
+                }}),
+                info,
+            )
+            .unwrap();
+            assert_eq!(
+                (overridden.max_new_tokens, overridden.min_new_tokens),
+                (6, 0)
+            );
+        }
+    }
+
+    #[test]
+    fn unbounded_or_unknown_budgets_do_not_invent_a_finish() {
+        for (body, info) in [
+            (
+                json!({"sampling_params": {"max_new_tokens": null}}),
+                json!({}),
+            ),
+            (
+                json!({}),
+                json!({"preferred_sampling_params": {"max_new_tokens": null}}),
+            ),
+            (json!({}), json!({"preferred_sampling_params": "invalid"})),
+        ] {
+            assert!(continuation(body, info).is_err());
+        }
+    }
+
+    #[test]
     fn retries_rebuild_the_budget_from_the_original_body() {
         let body = json!({"logprob_start_len": 0,
             "sampling_params": {"max_new_tokens": 10, "min_new_tokens": 4}});
@@ -202,7 +270,10 @@ mod tests {
         );
         assert_eq!(first["logprob_start_len"], 0);
         let second = continuation.retry(rules, 6, true).unwrap();
-        assert_eq!(second["sampling_params"], json!({"max_new_tokens": 4}));
+        assert_eq!(
+            second["sampling_params"],
+            json!({"max_new_tokens": 4, "min_new_tokens": 0})
+        );
         assert_eq!(second["logprob_start_len"], -1);
         assert!(continuation.retry(rules, 10, true).is_none());
     }

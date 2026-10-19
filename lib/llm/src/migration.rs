@@ -244,11 +244,12 @@ impl Migration {
     pub(crate) fn for_generate(
         mdc: &ModelDeploymentCard,
         migration_limit: u32,
+        max_seq_len: Option<u32>,
         metrics: Arc<Metrics>,
     ) -> Arc<Self> {
         Arc::new(Self {
             migration_limit,
-            max_seq_len: None,
+            max_seq_len,
             model_name: Arc::new(mdc.display_name.clone()),
             metrics,
             continuation_required: true,

@@ -783,7 +783,12 @@ impl ModelWatcher {
                     anyhow::anyhow!("generate pipeline requires preprocessed routing")
                 })?;
                 let generate_engine = routing
-                    .build_generate_pipeline(card, self.migration_limit, self.metrics.clone())
+                    .build_generate_pipeline(
+                        card,
+                        self.migration_limit,
+                        self.migration_max_seq_len,
+                        self.metrics.clone(),
+                    )
                     .context("build generate (preprocessed) pipeline")?;
                 worker_set.generate_engine = Some(generate_engine);
                 tracing::info!("Generate (token-in/token-out) is ready");

@@ -83,6 +83,11 @@ pub trait ClientCodec: Send + Sync + 'static {
     fn error_body(&self, message: &str) -> Value {
         json!({"error": {"message": message}})
     }
+
+    /// Malformed JSON or request fields; defaults to the codec's error shape.
+    fn parse_error_body(&self, message: &str) -> Value {
+        self.error_body(message)
+    }
 }
 
 /// What a [`ClientCodec`] sends for one SGLang response.
@@ -97,7 +102,14 @@ pub enum Encoded {
 /// SGLang's native client shape.
 pub struct Native;
 
-impl ClientCodec for Native {}
+impl ClientCodec for Native {
+    fn parse_error_body(&self, message: &str) -> Value {
+        json!({
+            "object": "error", "message": message, "type": "Bad Request",
+            "param": null, "code": 400,
+        })
+    }
+}
 
 pub struct SglangFormat<C: ClientCodec = Native> {
     name: String,
@@ -119,18 +131,6 @@ impl<C: ClientCodec> SglangFormat<C> {
     }
 }
 
-fn invalid_body(error: serde_json::Error) -> ClientError {
-    let message = format!("Failed to deserialize the JSON body: {error}");
-    ClientError {
-        status: StatusCode::BAD_REQUEST,
-        body: Some(json!({
-            "object": "error", "message": message, "type": "Bad Request",
-            "param": null, "code": 400,
-        })),
-        message,
-    }
-}
-
 impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
     fn name(&self) -> &str {
         &self.name
@@ -145,7 +145,14 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             None => serde_json::from_slice(client.body),
             Some(body) => serde_json::from_value(body),
         }
-        .map_err(invalid_body)?;
+        .map_err(|error| {
+            let message = format!("Failed to deserialize the JSON body: {error}");
+            ClientError {
+                status: StatusCode::BAD_REQUEST,
+                body: Some(self.codec.parse_error_body(&message)),
+                message,
+            }
+        })?;
         request.validate().map_err(ClientError::new)?;
         let header = |name| client.headers.get(name).and_then(|v| v.to_str().ok());
         let request_id = request
@@ -175,12 +182,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             request_id: request_id.clone(),
             stream,
             bind: Box::new(move |worker| {
-                let continuation = Continuation::new(
-                    &REQUEST_RULES,
-                    &body,
-                    (limits.max_tokens, limits.min_tokens),
-                    worker.engine_info,
-                );
+                let continuation = Continuation::new(&REQUEST_RULES, &body, worker.engine_info);
                 let request = PreprocessedRequest::builder()
                     .model(worker.model.to_string())
                     .token_ids(input_ids)

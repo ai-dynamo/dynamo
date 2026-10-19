@@ -202,13 +202,16 @@ impl Drop for AbortGuard<'_> {
                         let response = match next_response(&mut stream, native_http.max_event_bytes).await {
                             Ok(response) => response,
                             Err(error) => {
-                                tracing::debug!(%request_id, %error, "SGLang native decode ended before first output");
-                                return false;
+                                tracing::debug!(%request_id, %error, "SGLang native decode drain failed; aborting");
+                                return true;
                             }
                         };
                         let inspected = match inspect(response, false) {
                             Ok(inspected) => inspected,
-                            Err(_) => return false,
+                            Err(error) => {
+                                tracing::debug!(%request_id, %error, "invalid SGLang native decode response during drain; aborting");
+                                return true;
+                            }
                         };
                         if inspected.has_output && let Some(first_token) = &first_token {
                             first_token.notify();
@@ -1333,55 +1336,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropped_decode_forces_abort_after_drain_deadline() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            // Never answer /generate, like a hung prefill or KV transfer.
-            let (mut generate, _) = listener.accept().await.unwrap();
-            let _ = generate.read(&mut [0_u8; 4096]).await.unwrap();
-            request_seen_tx.send(()).unwrap();
-            let (mut abort, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 4096];
-            let read = abort.read(&mut request).await.unwrap();
-            abort
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    async fn dropped_decode_aborts_after_malformed_output_or_drain_deadline() {
+        for malformed in [None, Some(r#"{"output_ids":[-1]}"#), Some("{")] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                // Keep generation open after malformed output, or send no headers.
+                let (mut generate, _) = listener.accept().await.unwrap();
+                let _ = generate.read(&mut [0_u8; 4096]).await.unwrap();
+                if let Some(event) = malformed {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: {event}\n\n"
+                    );
+                    generate.write_all(response.as_bytes()).await.unwrap();
+                }
+                request_seen_tx.send(()).unwrap();
+                let (mut abort, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 4096];
+                let read = abort.read(&mut request).await.unwrap();
+                abort
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                drop(generate);
+                String::from_utf8_lossy(&request[..read]).into_owned()
+            });
+
+            let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+            let native = NativeHttp {
+                decode_drain_timeout: Duration::from_millis(50),
+                ..native_http(port)
+            };
+            let mut stream = native.generate(
+                NativeRequest {
+                    body: json!({"input_ids": [1], "stream": true}),
+                    is_prefill: false,
+                    is_decode: true,
+                    rid: "rid".to_string(),
+                    prefill_handoff: None,
+                    keep_prefill_output: false,
+                },
+                ctx,
+                CancellationToken::new(),
+            );
+            tokio::select! {
+                biased;
+                result = request_seen_rx => result.unwrap(),
+                output = stream.next() => panic!("decode returned before the backend responded: {output:?}"),
+            }
+            drop(stream);
+
+            let abort = tokio::time::timeout(Duration::from_secs(1), server)
                 .await
+                .expect("abort was not sent after the drain deadline")
                 .unwrap();
-            drop(generate);
-            String::from_utf8_lossy(&request[..read]).into_owned()
-        });
-
-        let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
-        let native = NativeHttp {
-            decode_drain_timeout: Duration::from_millis(50),
-            ..native_http(port)
-        };
-        let mut stream = native.generate(
-            NativeRequest {
-                body: json!({"input_ids": [1], "stream": true}),
-                is_prefill: false,
-                is_decode: true,
-                rid: "rid".to_string(),
-                prefill_handoff: None,
-                keep_prefill_output: false,
-            },
-            ctx,
-            CancellationToken::new(),
-        );
-        tokio::select! {
-            result = request_seen_rx => result.unwrap(),
-            output = stream.next() => panic!("decode returned before the backend responded: {output:?}"),
+            assert!(abort.starts_with("POST /abort_request"), "{abort}");
+            assert!(abort.contains(r#""rid":"rid""#), "{abort}");
         }
-        drop(stream);
-
-        let abort = tokio::time::timeout(Duration::from_secs(1), server)
-            .await
-            .expect("abort was not sent after the drain deadline")
-            .unwrap();
-        assert!(abort.starts_with("POST /abort_request"), "{abort}");
-        assert!(abort.contains(r#""rid":"rid""#), "{abort}");
     }
 
     #[test]
