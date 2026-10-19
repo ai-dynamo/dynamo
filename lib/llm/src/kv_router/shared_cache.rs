@@ -301,11 +301,8 @@ impl HicacheSharedKvCache {
             {
                 return true;
             }
-            // N-2: workers predating hicache_object_layout may coexist with new
-            // workers. Use the validated explicit layout, never a guessed one,
-            // regardless of discovery order. Absence is NOT an explicit empty
-            // (disabled/invalid) layout. Remove this shim once workers without
-            // hicache_object_layout leave the N-2 support window.
+            // N-2: legacy workers without hicache_object_layout may coexist; use the
+            // explicit layout, never a guess. Remove once they leave the N-2 window.
             if first.hicache_object_layout.is_some() && config.hicache_object_layout.is_none() {
                 return config.backend != first.backend
                     || config.page_size != first.page_size
