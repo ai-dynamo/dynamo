@@ -616,6 +616,7 @@ jobs:
           # aws-ofi-nccl via --make-efa, and a mismatch would cold-miss the cache.
           make_efa: ${{ inputs.make_efa }}
           runtime_variant: ${{ inputs.runtime_variant }}
+          extra_build_args: ${{ inputs.extra_build_args }}
           artifact_retention_days: ${{ inputs.artifact_retention_days }}
           # Source archival is opt-in per top-level caller (see the
           # `archive_sources` input above). PR / on-demand leave it false;
