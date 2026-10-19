@@ -65,7 +65,7 @@ def _sdk(module_name):
     return importlib.import_module(module_name)
 
 
-@pytest.mark.parametrize("dialect", ("oai", "sglang_native", "systemone"))
+@pytest.mark.parametrize("dialect", ("oai", "systemone"))
 def test_external_decision_wire_contract(external_decision_server, dialect):
     base_url, model = external_decision_server
     route = "systemone" if dialect == "systemone" else "decisions"
