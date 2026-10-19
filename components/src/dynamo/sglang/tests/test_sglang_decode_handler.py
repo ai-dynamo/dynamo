@@ -2422,7 +2422,6 @@ async def test_generate_limits_prompt_and_completion_logprobs_independently(
     assert engine_chunks == original_chunks
 
 
-
 @pytest.mark.asyncio
 async def test_process_token_stream_accepts_incremental_logprob_arrays():
     handler = _new_decode_handler()
