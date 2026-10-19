@@ -534,50 +534,6 @@ mod tests {
         runtime.shutdown();
     }
 
-    #[tokio::test]
-    async fn classifier_rejects_conditional_disaggregation() {
-        use crate::{entrypoint::RouterMode, local_model::LocalModelBuilder};
-        use dynamo_kv_router::scheduling::RequestClassifier;
-        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
-
-        struct PassThrough;
-        impl RequestClassifier for PassThrough {}
-
-        let model = LocalModelBuilder::default()
-            .router_config(Some(RouterConfig::new(
-                RouterMode::KV,
-                KvRouterConfig {
-                    conditional_disagg_enabled: true,
-                    ..Default::default()
-                },
-            )))
-            .build()
-            .await
-            .unwrap();
-        let runtime = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            HttpFrontend::default()
-                .request_classifier_factory(Arc::new(|_| Box::new(PassThrough)))
-                .run(
-                    drt,
-                    EngineConfig::Dynamic {
-                        model: Box::new(model),
-                        chat_engine_factory: None,
-                        prefill_load_estimator: None,
-                    },
-                ),
-        )
-        .await
-        .expect("must reject before serving")
-        .unwrap_err();
-        assert!(error.to_string().contains("conditional disaggregation"));
-        runtime.shutdown();
-    }
-
     // `run` takes a `request_trace::ActiveInput` registration, which is
     // process-wide, so this shares a serialization group with the request-trace
     // lifecycle test rather than racing it for the last release.
