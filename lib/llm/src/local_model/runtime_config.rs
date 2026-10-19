@@ -571,8 +571,6 @@ fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), Vali
         }
     }
 
-    // Empty is rejected, not skipped: downstream tests `reasoning_parser.is_none()`,
-    // so Some("") resolves to Basic.
     if let Some(parser) = config.reasoning_parser.as_deref() {
         let mut supported = get_available_reasoning_parsers();
         supported.extend_from_slice(unified_family_names());
@@ -1292,13 +1290,11 @@ mod tests {
             .validate_config()
         };
 
-        // muse has no v1 reasoning entry, but vLLM ships `--reasoning-parser muse_glimmer`.
         for parser in get_available_reasoning_parsers()
             .into_iter()
             .chain(unified_family_names().iter().copied())
         {
             assert!(validate(parser).is_ok(), "{parser} must be supported");
-            // Downstream policy checks match the canonical name, so casing is exact.
             assert!(validate(&parser.to_uppercase()).is_err(), "{parser} casing");
         }
         assert!(validate("").is_err());
