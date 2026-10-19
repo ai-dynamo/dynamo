@@ -59,7 +59,6 @@ use std::{
     hash::Hash,
     sync::{Arc, OnceLock},
 };
-use validator::{Validate, ValidationError};
 
 mod client;
 #[allow(clippy::module_inception)]
@@ -174,7 +173,7 @@ impl PartialOrd for Instance {
 /// a [Service] then adding one or more [Endpoint] to the [Service].
 ///
 /// You can also issue a request to a [Component]'s [Endpoint] by creating a [Client].
-#[derive(Educe, Builder, Clone, Validate)]
+#[derive(Educe, Builder, Clone)]
 #[educe(Debug)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct Component {
@@ -184,7 +183,6 @@ pub struct Component {
 
     /// Name of the component
     #[builder(setter(into))]
-    #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
 
     /// Additional labels for metrics
@@ -491,13 +489,12 @@ impl Endpoint {
     }
 }
 
-#[derive(Builder, Clone, Validate)]
+#[derive(Builder, Clone)]
 #[builder(pattern = "owned")]
 pub struct Namespace {
     #[builder(private)]
     runtime: Arc<DistributedRuntime>,
 
-    #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
 
     #[builder(default = "None")]
@@ -610,17 +607,5 @@ impl Namespace {
             Some(parent) => format!("{}.{}", parent.name(), self.name),
             None => self.name.clone(),
         }
-    }
-}
-
-// Custom validator function
-fn validate_allowed_chars(input: &str) -> Result<(), ValidationError> {
-    // Define the allowed character set using a regex
-    let regex = regex::Regex::new(r"^[a-z0-9-_]+$").unwrap();
-
-    if regex.is_match(input) {
-        Ok(())
-    } else {
-        Err(ValidationError::new("invalid_characters"))
     }
 }
