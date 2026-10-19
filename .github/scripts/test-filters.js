@@ -61,6 +61,11 @@ function checkFilter(file, patterns) {
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
   {
+    file: 'scripts/protocol_compatibility/composition/openai.py',
+    expect: { ignore: true, rust: false, core: false, frontend: false },
+    desc: 'protocol tooling is covered without unrelated runtime builds'
+  },
+  {
     file: 'components/src/dynamo/artifacts/storage.py',
     expect: { core: true, frontend: true, vllm: false },
     desc: 'generic artifact transport keeps shared runtime CI'
