@@ -9,13 +9,13 @@
 
 use std::sync::Arc;
 
-use crate::generate_format::{ClientRequest, Opened, Phase, SharedFormat};
+use crate::generate_format::{ClientRequest, Opened, SharedFormat};
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::response_merge::{Assembler, FieldClass, RuleSet};
 use proptest::collection::vec;
 use proptest::prelude::*;
 use proptest::sample::Index;
-use proptest::test_runner::{Config, TestCaseError, TestError, TestRunner};
+use proptest::test_runner::{Config, TestCaseError, TestRunner};
 use serde_json::{Value, json};
 
 use super::driver::{self, Outcome, Scenario, Topology};
@@ -253,13 +253,9 @@ impl Harness {
             failure_persistence: None,
             ..Config::default()
         });
-        match runner.run(&strategy, test) {
-            Ok(()) => {}
-            Err(TestError::Fail(reason, case)) => {
-                panic!("law `{name}` failed: {reason}\nminimal case: {case:#?}")
-            }
-            Err(TestError::Abort(reason)) => panic!("law `{name}` aborted: {reason}"),
-        }
+        runner
+            .run(&strategy, test)
+            .unwrap_or_else(|error| panic!("law `{name}`: {error}"));
     }
 
     fn outcome(&self, scenario: &Scenario) -> Result<Outcome, TestCaseError> {
@@ -280,12 +276,9 @@ impl Harness {
                 headers: &Default::default(),
                 default_request_id: "dynamo-request",
             })
-            .is_ok_and(|mut opened| {
+            .is_ok_and(|opened| {
                 let worker = super::worker(&scenario.engine_info);
-                opened
-                    .exchange
-                    .bind(&worker)
-                    .is_ok_and(|bound| bound.migration.is_ok())
+                (opened.bind)(&worker).is_ok_and(|bound| bound.migration.is_ok())
             })
     }
 
@@ -428,25 +421,26 @@ impl Harness {
             "malformed responses never panic",
             strategy,
             |(scenario, values, prefill)| {
-                for phase in [Phase::Aggregated, Phase::Prefill, Phase::Decode] {
+                for is_prefill in [false, true] {
                     for value in &values {
-                        let _ = self.format.inspect(value.clone(), phase);
+                        let _ = crate::protocols::sglang::inspect(value.clone(), is_prefill);
                     }
                 }
                 let Some(body) = self.shape.body(&scenario.request) else {
                     return Ok(());
                 };
-                let Ok(Opened { mut exchange, .. }) = self.format.open(ClientRequest {
+                let Ok(Opened { bind, .. }) = self.format.open(ClientRequest {
                     body: &body,
                     headers: &Default::default(),
                     default_request_id: "dynamo-request",
                 }) else {
                     return Ok(());
                 };
-                let Ok(bound) = exchange.bind(&super::worker(&scenario.engine_info)) else {
+                let Ok(bound) = bind(&super::worker(&scenario.engine_info)) else {
                     return Ok(());
                 };
                 let mut request = bound.request;
+                let mut exchange = bound.exchange;
                 for value in values {
                     let output = LLMEngineOutput {
                         engine_data: Some(json!({ crate::protocols::sglang::RESPONSE_KEY: value })),

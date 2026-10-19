@@ -14,9 +14,8 @@ use dynamo_backend_common::{
     DisaggregationMode, DynamoError, FirstTokenNotifier, GenerateContext, LLMEngineOutput,
     PreprocessedRequest,
 };
-use dynamo_llm::generate_format::{Inspected, Phase, SharedFormat};
 use dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
-use dynamo_llm::protocols::sglang::{PAYLOAD_KEY, SglangFormat};
+use dynamo_llm::protocols::sglang::{Inspected, PAYLOAD_KEY, inspect};
 use dynamo_sidecar_common::{GrpcEndpoint, HttpEndpoint};
 use futures::{StreamExt, TryStreamExt, future::BoxFuture, stream::BoxStream};
 use reqwest::{Response, StatusCode, header};
@@ -155,7 +154,6 @@ pub(crate) struct NativeHttp {
     client: reqwest::Client,
     endpoint: HttpEndpoint,
     max_event_bytes: usize,
-    format: SharedFormat,
     rids: Arc<Mutex<HashMap<String, String>>>,
     abort_timeout: Duration,
     decode_drain_timeout: Duration,
@@ -208,7 +206,7 @@ impl Drop for AbortGuard<'_> {
                                 return false;
                             }
                         };
-                        let inspected = match native_http.format.inspect(response, Phase::Decode) {
+                        let inspected = match inspect(response, false) {
                             Ok(inspected) => inspected,
                             Err(_) => return false,
                         };
@@ -301,7 +299,6 @@ impl NativeHttp {
             max_event_bytes,
             abort_timeout: connect_timeout,
             decode_drain_timeout: DECODE_DRAIN_TIMEOUT,
-            format: Arc::new(SglangFormat::native()),
             rids: Default::default(),
         }))
     }
@@ -493,8 +490,7 @@ impl NativeHttp {
                 // The router counts decode output from token_ids; clients get the
                 // opaque response. Prefill reports none, as on the gRPC path, and
                 // fails on backend errors before its payload is discarded.
-                let phase = if is_prefill { Phase::Prefill } else { Phase::Decode };
-                let Inspected { mut output, terminal, has_output } = match self.format.inspect(response, phase) {
+                let Inspected { mut output, terminal, has_output } = match inspect(response, is_prefill) {
                     Ok(inspected) => inspected,
                     Err(error) => {
                         yield Err(error);
@@ -658,7 +654,6 @@ mod tests {
             client: reqwest::Client::new(),
             endpoint: HttpEndpoint::from_grpc(&grpc, port).unwrap(),
             max_event_bytes: MAX_EVENT_BYTES,
-            format: std::sync::Arc::new(dynamo_llm::protocols::sglang::SglangFormat::native()),
             rids: Default::default(),
             abort_timeout: Duration::from_secs(1),
             decode_drain_timeout: Duration::from_secs(1),

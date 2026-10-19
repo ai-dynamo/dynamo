@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Testing `/generate` formats without GPUs (feature `generate-testkit`).
+//! Testing SGLang-backed `/generate` formats without GPUs (feature `generate-testkit`).
 //!
 //! - [`sim`] models SGLang's incremental stream and answers the body a format
 //!   builds, including the retry bodies of migrated requests.

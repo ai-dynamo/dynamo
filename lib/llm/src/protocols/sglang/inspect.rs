@@ -9,7 +9,13 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::RESPONSE_KEY;
-use crate::generate_format::{Inspected, Phase};
+/// A native SGLang response and the transport signals derived from it.
+#[derive(Debug)]
+pub struct Inspected {
+    pub output: LLMEngineOutput,
+    pub terminal: bool,
+    pub has_output: bool,
+}
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 
 fn backend(kind: BackendError, message: String) -> DynamoError {
@@ -22,8 +28,8 @@ fn backend(kind: BackendError, message: String) -> DynamoError {
 /// The router counts decode output from `token_ids`; clients get the opaque
 /// response in `engine_data`. Prefill reports no tokens and fails on backend
 /// errors, since decode would never start.
-pub(super) fn inspect(response: Value, phase: Phase) -> Result<Inspected, DynamoError> {
-    let prefill = phase == Phase::Prefill;
+pub fn inspect(response: Value, is_prefill: bool) -> Result<Inspected, DynamoError> {
+    let prefill = is_prefill;
     let token_ids = match response.get("output_ids") {
         Some(ids) if !prefill => Vec::<u32>::deserialize(ids).map_err(|error| {
             backend(
@@ -141,7 +147,7 @@ mod tests {
             let response = json!({"output_ids": [7], "meta_info": {
                 "finish_reason": finish, "prompt_tokens": 3, "completion_tokens": 1,
                 "cached_tokens": 2}});
-            let inspected = inspect(response, Phase::Decode).unwrap();
+            let inspected = inspect(response, false).unwrap();
             assert!(inspected.terminal && inspected.has_output);
             let output = inspected.output;
             assert_eq!(output.finish_reason, Some(expected));
@@ -155,14 +161,14 @@ mod tests {
     #[test]
     fn prefill_reports_no_tokens_and_fails_on_backend_errors() {
         let done = json!({"output_ids": [7], "meta_info": {"finish_reason": {"type": "length"}}});
-        let inspected = inspect(done, Phase::Prefill).unwrap();
+        let inspected = inspect(done, true).unwrap();
         assert!(inspected.output.token_ids.is_empty() && inspected.terminal);
         let failed = json!({"meta_info": {"finish_reason": {"type": "abort", "status_code": 422}}});
-        let error = inspect(failed, Phase::Prefill).unwrap_err();
+        let error = inspect(failed, true).unwrap_err();
         assert_eq!(
             error.error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)
         );
-        assert!(inspect(json!({"output_ids": [-1]}), Phase::Decode).is_err());
+        assert!(inspect(json!({"output_ids": [-1]}), false).is_err());
     }
 }

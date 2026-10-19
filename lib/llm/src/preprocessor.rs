@@ -482,15 +482,7 @@ fn drain_router_routing_data(
     let Some(tracker) = tracker else {
         return;
     };
-    if let Some(timing) = routing_data.timing {
-        tracker.set_external_timing(timing);
-    }
-    if let Some(worker_id) = routing_data.worker_id {
-        tracker.set_external_worker_info(worker_id);
-    }
-    if let Some(token_ids) = routing_data.token_ids {
-        tracker.set_external_query_token_ids(token_ids);
-    }
+    tracker.ingest_routing_data(routing_data);
 }
 
 fn attach_metrics_annotation<Resp>(response: &mut Annotated<Resp>, metrics: &LLMMetricAnnotation) {

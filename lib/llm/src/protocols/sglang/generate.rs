@@ -91,7 +91,7 @@ impl SglangGenerateRequest {
     }
 
     /// Move the native request into its routed input and opaque worker envelope.
-    pub fn into_worker_envelope(self, request_id: &str) -> (Vec<u32>, Value) {
+    pub fn into_worker_envelope(self, request_id: &str) -> (Vec<u32>, Map<String, Value>) {
         let mut envelope = self.passthrough;
         if let Some(salt) = self.cache_salt.filter(|salt| !salt.is_empty()) {
             envelope.insert("cache_salt".to_string(), Value::String(salt));
@@ -104,7 +104,7 @@ impl SglangGenerateRequest {
         );
         envelope.insert("rid".to_string(), Value::String(request_id.to_string()));
         envelope.insert("stream".to_string(), Value::Bool(true));
-        (self.input_ids, Value::Object(envelope))
+        (self.input_ids, envelope)
     }
 }
 

@@ -228,15 +228,7 @@ impl GenerateMetricCollector {
         };
 
         if let Some(routing_data) = output.routing_data.take() {
-            if let Some(timing) = routing_data.timing {
-                self.tracker.set_external_timing(timing);
-            }
-            if let Some(worker_id) = routing_data.worker_id {
-                self.tracker.set_external_worker_info(worker_id);
-            }
-            if let Some(token_ids) = routing_data.token_ids {
-                self.tracker.set_external_query_token_ids(token_ids);
-            }
+            self.tracker.ingest_routing_data(routing_data);
         }
 
         self.observe_worker_info();
@@ -292,7 +284,7 @@ async fn handler(
         request_id,
         stream: streaming,
         model,
-        exchange,
+        bind,
     } = match format.open(ClientRequest {
         body: &body,
         headers: &headers,
@@ -342,7 +334,6 @@ async fn handler(
             return error_response(format, status, &error.to_string());
         }
     };
-    let mut exchange = exchange;
     let worker = Worker {
         model: &model,
         engine_info: &selection.engine_info,
@@ -353,7 +344,8 @@ async fn handler(
     let Bound {
         mut request,
         migration,
-    } = match exchange.bind(&worker) {
+        exchange,
+    } = match bind(&worker) {
         Ok(bound) => bound,
         Err(error) => return client_error(format, error),
     };
@@ -644,13 +636,16 @@ mod tests {
         stream_handle: ConnectionHandle,
     ) -> Dispatch {
         let body = serde_json::json!({"input_ids": [1], "stream": streaming}).to_string();
-        let Opened { exchange, .. } = sglang()
+        let Opened { bind, .. } = sglang()
             .open(ClientRequest {
                 body: body.as_bytes(),
                 headers: &HeaderMap::new(),
                 default_request_id: "request-id",
             })
             .unwrap();
+        let exchange = bind(&crate::generate_format::testkit::worker(&Value::Null))
+            .unwrap()
+            .exchange;
         Dispatch {
             tracker: Arc::new(RequestTracker::new()),
             request_id: "req".to_string(),
@@ -792,12 +787,15 @@ mod tests {
         }
     }
 
-    struct ReplayEngine(Vec<Annotated<LLMEngineOutput>>);
+    struct ReplayEngine(Vec<Annotated<LLMEngineOutput>>, bool);
 
     #[async_trait::async_trait]
     impl AsyncEngine<Input, Output, Error> for ReplayEngine {
         async fn generate(&self, request: Input) -> Result<Output, Error> {
-            let stream = Box::pin(futures::stream::iter(self.0.clone()));
+            let stream = Box::pin(
+                futures::stream::iter(self.0.clone())
+                    .chain(futures::stream::pending().take(usize::from(self.1))),
+            );
             Ok(ResponseStream::new(stream, request.context()))
         }
     }
@@ -813,7 +811,7 @@ mod tests {
     #[async_trait::async_trait]
     impl AsyncEngine<Input, Output, Error> for FlakyWorker {
         async fn generate(&self, request: Input) -> Result<Output, Error> {
-            use crate::generate_format::{GenerateFormat, Phase, testkit::sim};
+            use crate::generate_format::testkit::sim;
             let call = self
                 .calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -826,11 +824,14 @@ mod tests {
                 sim::Role::Aggregated,
                 &Value::Null,
             );
-            let format = crate::protocols::sglang::SglangFormat::native();
             let mut items: Vec<_> = chunks
                 .into_iter()
                 .map(|chunk| {
-                    Annotated::from_data(format.inspect(chunk, Phase::Aggregated).unwrap().output)
+                    Annotated::from_data(
+                        crate::protocols::sglang::inspect(chunk, false)
+                            .unwrap()
+                            .output,
+                    )
                 })
                 .collect();
             if call < self.failures {
@@ -880,7 +881,7 @@ mod tests {
                     "logprob_start_len": 0, "sampling_params": {"max_new_tokens": 5},
                 })
                 .to_string();
-                let Opened { mut exchange, .. } = sglang()
+                let Opened { bind, .. } = sglang()
                     .open(ClientRequest {
                         body: body.as_bytes(),
                         headers: &HeaderMap::new(),
@@ -891,7 +892,8 @@ mod tests {
                 let Bound {
                     mut request,
                     migration,
-                } = exchange.bind(&worker).unwrap();
+                    exchange,
+                } = bind(&worker).unwrap();
                 assert!(migration.is_ok());
                 let exchange: SharedExchange = Arc::new(Mutex::new(exchange));
                 request.continuation = Some(exchange.clone());
@@ -936,11 +938,17 @@ mod tests {
     #[tokio::test]
     async fn vllm_format_preserves_binding_terminal_status_and_wire_shape() {
         use crate::protocols::common::FinishReason;
-        for (finish, status) in [
-            (FinishReason::Length, StatusCode::OK),
-            (FinishReason::Cancelled, CANCELLED),
+        for (finish, missing_logprobs, status) in [
+            (FinishReason::Length, false, StatusCode::OK),
+            (FinishReason::Cancelled, false, CANCELLED),
+            (
+                FinishReason::Length,
+                true,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
             (
                 FinishReason::Error("private engine detail".into()),
+                false,
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
         ] {
@@ -948,15 +956,23 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.insert("x-request-id", "header-id".parse().unwrap());
             headers.insert("x-data-parallel-rank", "3".parse().unwrap());
-            let mut opened = format.open(ClientRequest {
-                body: br#"{"token_ids":[1],"sampling_params":{},"request_id":"body-id","priority":-7}"#,
-                headers: &headers, default_request_id: "default-id",
-            }).unwrap();
-            assert_eq!(opened.request_id, "header-id");
-            let bound = opened
-                .exchange
-                .bind(&crate::generate_format::testkit::worker(&Value::Null))
+            let body = serde_json::json!({
+                "token_ids": [1], "sampling_params": if missing_logprobs {
+                    serde_json::json!({"logprobs": 1})
+                } else { serde_json::json!({}) },
+                "request_id": "body-id", "priority": -7,
+            })
+            .to_string();
+            let opened = format
+                .open(ClientRequest {
+                    body: body.as_bytes(),
+                    headers: &headers,
+                    default_request_id: "default-id",
+                })
                 .unwrap();
+            assert_eq!(opened.request_id, "header-id");
+            let bound =
+                (opened.bind)(&crate::generate_format::testkit::worker(&Value::Null)).unwrap();
             assert!(bound.migration.is_err());
             let hints = bound.request.routing.as_ref().unwrap();
             assert_eq!(hints.dp_rank, Some(3));
@@ -967,19 +983,25 @@ mod tests {
                 .state_clone();
             let (tx, _rx) = tokio::sync::oneshot::channel();
             let mut dispatch = dispatch(state, false, ConnectionHandle::create_disabled(tx));
-            dispatch.exchange = Arc::new(Mutex::new(opened.exchange));
+            dispatch.exchange = Arc::new(Mutex::new(bound.exchange));
             dispatch.format = format;
             let output = LLMEngineOutput {
                 token_ids: vec![2, 3],
-                finish_reason: Some(finish),
+                finish_reason: (!missing_logprobs).then_some(finish),
                 ..Default::default()
             };
-            let response = dispatch
-                .run(
-                    Arc::new(ReplayEngine(vec![Annotated::from_data(output)])),
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                dispatch.run(
+                    Arc::new(ReplayEngine(
+                        vec![Annotated::from_data(output)],
+                        status != StatusCode::OK,
+                    )),
                     Context::new(bound.request),
-                )
-                .await;
+                ),
+            )
+            .await
+            .expect("invalid output must fail before the worker stream ends");
             assert_eq!(response.status(), status);
             let body = json(response).await;
             if status == StatusCode::OK {
@@ -1027,9 +1049,15 @@ mod tests {
                 .unwrap()
                 .state_clone();
             let (tx, _rx) = tokio::sync::oneshot::channel();
-            let response = dispatch(state, false, ConnectionHandle::create_disabled(tx))
-                .run(Arc::new(ReplayEngine(outputs)), dispatch_test_context())
-                .await;
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                dispatch(state, false, ConnectionHandle::create_disabled(tx)).run(
+                    Arc::new(ReplayEngine(outputs, status != StatusCode::OK)),
+                    dispatch_test_context(),
+                ),
+            )
+            .await
+            .expect("stream errors must fail before the worker stream ends");
             assert_eq!(response.status(), status);
             assert_eq!(json(response).await, body);
         }

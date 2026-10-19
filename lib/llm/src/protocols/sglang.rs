@@ -4,6 +4,7 @@
 //! SGLang's native `/generate`, Dynamo's built-in generate format.
 
 pub mod generate;
+pub use inspect::{Inspected, inspect};
 mod inspect;
 pub mod merge;
 mod migrate;

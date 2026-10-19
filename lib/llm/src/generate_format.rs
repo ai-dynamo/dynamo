@@ -5,8 +5,8 @@
 //!
 //! A [`GenerateFormat`] owns one `/generate` wire format end to end: it turns
 //! a client body into the routed request, joins the worker's responses into
-//! client responses, continues migrated requests, and tells workers what each
-//! native response means. The frontend reads no request or response field.
+//! client responses, and continues migrated requests. The frontend reads no
+//! request or response field.
 //!
 //! Formats are statically linked plugins. Dynamo registers its own first; a
 //! binary adds a catalog's with [`install`], and `DYN_GENERATE_FORMAT` selects
@@ -76,22 +76,23 @@ pub struct Opened {
     pub stream: bool,
     /// The model the client names; the frontend's only one when `None`.
     pub model: Option<String>,
-    pub exchange: Box<dyn GenerateExchange>,
+    pub bind: Bind,
 }
+
+/// Build the request and exchange once the worker set is known. Consumed once.
+pub type Bind = Box<dyn FnOnce(&Worker<'_>) -> Result<Bound, ClientError> + Send>;
 
 /// A request ready for dispatch and its migration admission decision.
 pub struct Bound {
     pub request: PreprocessedRequest,
     pub migration: Result<(), String>,
+    pub exchange: Box<dyn GenerateExchange>,
 }
 
 /// One client request across every attempt. Dynamo calls these in stream
 /// order and never concurrently; [`Self::migrate`] runs only after every
 /// delivered output has passed through [`Self::chunk`].
 pub trait GenerateExchange: Send {
-    /// Build the routed request once the serving worker set is known.
-    fn bind(&mut self, worker: &Worker<'_>) -> Result<Bound, ClientError>;
-
     /// One item of the worker stream; `prefill` marks prefill's final output
     /// in P/D. Streaming passes each client chunk to `emit`, which serializes
     /// it before returning; unary buffers.
@@ -126,26 +127,7 @@ impl RequestContinuation for Mutex<Box<dyn GenerateExchange>> {
     }
 }
 
-/// Which worker produced a native response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Phase {
-    Aggregated,
-    Prefill,
-    Decode,
-}
-
-/// A native response as Dynamo's worker stream carries it.
-#[derive(Debug)]
-pub struct Inspected {
-    /// Generated tokens, termination, and usage, with the response itself in
-    /// `engine_data`.
-    pub output: LLMEngineOutput,
-    pub terminal: bool,
-    /// Whether the response carries client-visible output.
-    pub has_output: bool,
-}
-
-/// One `/generate` wire format, linked into the frontend and the worker.
+/// One client-facing `/generate` wire format, linked into the frontend.
 pub trait GenerateFormat: Send + Sync + 'static {
     fn name(&self) -> &str;
 
@@ -154,9 +136,6 @@ pub trait GenerateFormat: Send + Sync + 'static {
 
     /// Frontend: start one client request.
     fn open(&self, request: ClientRequest<'_>) -> Result<Opened, ClientError>;
-
-    /// Worker: interpret one native response.
-    fn inspect(&self, response: Value, phase: Phase) -> Result<Inspected, DynamoError>;
 
     /// The body of a failed response.
     fn error_body(&self, _status: StatusCode, message: &str) -> Value {
@@ -262,33 +241,36 @@ mod tests {
             format.error_body(StatusCode::BAD_REQUEST, "bad"),
             json!({"failure": "bad"})
         );
-        let mut opened = format
+        let opened = format
             .open(ClientRequest {
                 body: br#"{"request":{"input_ids":[1],"sampling_params":{"max_new_tokens":2}}}"#,
                 headers: &HeaderMap::new(),
                 default_request_id: "public",
             })
             .unwrap();
-        let bound = opened.exchange.bind(&testkit::worker(&json!({}))).unwrap();
+        let mut bound = (opened.bind)(&testkit::worker(&json!({}))).unwrap();
         assert_eq!(bound.request.token_ids.as_slice(), &[1]);
         assert!(bound.migration.is_ok());
         for (ids, finish) in [
             (json!([2]), Value::Null),
             (json!([3]), json!({"type":"length"})),
         ] {
-            let output = format
-                .inspect(
-                    json!({"output_ids": ids, "meta_info": {
-                        "id": "private", "finish_reason": finish,
-                    }}),
-                    Phase::Aggregated,
-                )
-                .unwrap()
-                .output;
-            opened.exchange.chunk(output, false, &mut |_| {}).unwrap();
+            let output = crate::protocols::sglang::inspect(
+                json!({"output_ids": ids, "meta_info": {
+                    "id": "private", "finish_reason": finish, "custom_metadata": {"score": 7},
+                }}),
+                false,
+            )
+            .unwrap()
+            .output;
+            bound.exchange.chunk(output, false, &mut |_| {}).unwrap();
         }
-        let response = opened.exchange.finish().unwrap().unwrap();
+        let response = bound.exchange.finish().unwrap().unwrap();
         assert_eq!(response["response"]["output_ids"], json!([2, 3]));
         assert_eq!(response["response"]["meta_info"]["id"], "public");
+        assert_eq!(
+            response["response"]["meta_info"]["custom_metadata"]["score"],
+            7
+        );
     }
 }

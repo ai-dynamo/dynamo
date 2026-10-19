@@ -15,13 +15,11 @@ use std::collections::HashMap;
 use anyhow::Result;
 use base64::Engine as _;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
-use futures::{Stream, StreamExt, pin_mut};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use super::{convert_backend_top_logprobs, token_to_utf8_bytes};
-use crate::protocols::Annotated;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PromptLogprobs};
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::openai::validate;
@@ -647,7 +645,7 @@ fn prompt_logprobs_from_output(output: &LLMEngineOutput) -> Result<Option<Prompt
     Ok(Some(prompt_logprobs))
 }
 
-/// Folds a stream of [`Annotated<LLMEngineOutput>`] deltas into a single
+/// Folds worker output deltas into a single
 /// [`GenerateResponse`]. Each chunk carries a delta of newly generated
 /// `token_ids` keyed by `index` (default 0).
 pub(crate) struct GenerateAggregator {
@@ -721,21 +719,6 @@ impl GenerateAggregator {
         choice.apply(&output, options)
     }
 
-    async fn apply(
-        stream: impl Stream<Item = Annotated<LLMEngineOutput>>,
-        request_id: String,
-        options: GenerateResponseOptions,
-    ) -> Result<GenerateResponse> {
-        let mut aggregator = GenerateAggregator::new(request_id);
-        pin_mut!(stream);
-        while let Some(delta) = stream.next().await {
-            if let Some(output) = delta.into_data().map_err(anyhow::Error::new)? {
-                aggregator.apply_output(output, options)?;
-            }
-        }
-        aggregator.finish(options)
-    }
-
     pub(crate) fn finish(self, options: GenerateResponseOptions) -> Result<GenerateResponse> {
         let aggregator = self;
         let GenerateAggregator {
@@ -771,27 +754,6 @@ impl GenerateAggregator {
 }
 
 impl GenerateResponse {
-    /// Aggregate a raw engine stream for the non-streaming endpoint.
-    pub async fn from_annotated_stream(
-        stream: impl Stream<Item = Annotated<LLMEngineOutput>>,
-        request_id: String,
-    ) -> Result<GenerateResponse> {
-        Self::from_annotated_stream_with_options(
-            stream,
-            request_id,
-            GenerateResponseOptions::default(),
-        )
-        .await
-    }
-
-    pub(crate) async fn from_annotated_stream_with_options(
-        stream: impl Stream<Item = Annotated<LLMEngineOutput>>,
-        request_id: String,
-        options: GenerateResponseOptions,
-    ) -> Result<GenerateResponse> {
-        GenerateAggregator::apply(stream, request_id, options).await
-    }
-
     /// A complete unary response has at least one terminal choice.
     pub fn is_complete_unary(&self) -> bool {
         !self.choices.is_empty()
@@ -806,6 +768,18 @@ impl GenerateResponse {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn aggregate(
+        chunks: impl IntoIterator<Item = LLMEngineOutput>,
+        request_id: String,
+        options: GenerateResponseOptions,
+    ) -> Result<GenerateResponse> {
+        let mut aggregator = GenerateAggregator::new(request_id);
+        for output in chunks {
+            aggregator.apply_output(output, options)?;
+        }
+        aggregator.finish(options)
+    }
 
     #[test]
     fn generate_request_deserializes_from_vllm_json() {
@@ -1178,8 +1152,8 @@ mod tests {
         assert_eq!(content, vec![json!("existing")]);
     }
 
-    #[tokio::test]
-    async fn generate_response_accumulates_engine_deltas() {
+    #[test]
+    fn generate_response_accumulates_engine_deltas() {
         let chunks = vec![
             LLMEngineOutput {
                 token_ids: vec![100],
@@ -1237,17 +1211,14 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let stream = futures::stream::iter(chunks.into_iter().map(Annotated::from_data));
-
-        let response = GenerateResponse::from_annotated_stream_with_options(
-            stream,
+        let response = aggregate(
+            chunks,
             "req-agg".to_string(),
             GenerateResponseOptions {
                 include_logprobs: true,
                 include_prompt_logprobs: true,
             },
         )
-        .await
         .expect("aggregate engine deltas");
 
         assert_eq!(response.choices.len(), 1);
@@ -1300,28 +1271,31 @@ mod tests {
         assert!(response.is_complete_unary());
     }
 
-    #[tokio::test]
-    async fn generate_response_associates_routed_experts_with_choices() {
-        let stream = futures::stream::iter([
-            Annotated::from_data(LLMEngineOutput {
+    #[test]
+    fn generate_response_associates_routed_experts_with_choices() {
+        let chunks = [
+            LLMEngineOutput {
                 token_ids: vec![201],
                 index: Some(1),
                 finish_reason: Some(crate::protocols::common::FinishReason::Stop),
                 engine_data: Some(json!({"routed_experts": "experts-1"})),
                 ..Default::default()
-            }),
-            Annotated::from_data(LLMEngineOutput {
+            },
+            LLMEngineOutput {
                 token_ids: vec![100],
                 index: Some(0),
                 finish_reason: Some(crate::protocols::common::FinishReason::Stop),
                 engine_data: Some(json!({"routed_experts": "experts-0"})),
                 ..Default::default()
-            }),
-        ]);
+            },
+        ];
 
-        let response = GenerateResponse::from_annotated_stream(stream, "req-routed".to_string())
-            .await
-            .expect("aggregate routed experts");
+        let response = aggregate(
+            chunks,
+            "req-routed".to_string(),
+            GenerateResponseOptions::default(),
+        )
+        .expect("aggregate routed experts");
 
         assert_eq!(response.choices[0].index, 0);
         assert_eq!(
@@ -1335,26 +1309,28 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn generate_response_accepts_structured_routed_experts() {
+    #[test]
+    fn generate_response_accepts_structured_routed_experts() {
         let payload = json!({
             "data": "AQI=",
             "shape": [2, 1, 1],
             "start": 3,
             "dtype": "uint8"
         });
-        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+        let chunks = [LLMEngineOutput {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
             engine_data: Some(json!({"routed_experts": payload})),
             ..Default::default()
-        })]);
+        }];
 
-        let response =
-            GenerateResponse::from_annotated_stream(stream, "req-routed-structured".to_string())
-                .await
-                .expect("aggregate structured routed experts");
+        let response = aggregate(
+            chunks,
+            "req-routed-structured".to_string(),
+            GenerateResponseOptions::default(),
+        )
+        .expect("aggregate structured routed experts");
 
         assert_eq!(
             response.choices[0].routed_experts,
@@ -1367,9 +1343,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn generate_response_rejects_structured_routed_expert_byte_mismatch() {
-        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+    #[test]
+    fn generate_response_rejects_structured_routed_expert_byte_mismatch() {
+        let chunks = [LLMEngineOutput {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
@@ -1382,29 +1358,34 @@ mod tests {
                 }
             })),
             ..Default::default()
-        })]);
+        }];
 
-        let error =
-            GenerateResponse::from_annotated_stream(stream, "req-routed-structured".to_string())
-                .await
-                .expect_err("routed expert byte mismatch must fail");
+        let error = aggregate(
+            chunks,
+            "req-routed-structured".to_string(),
+            GenerateResponseOptions::default(),
+        )
+        .expect_err("routed expert byte mismatch must fail");
 
         assert!(error.to_string().contains("decoded byte count"));
     }
 
-    #[tokio::test]
-    async fn generate_response_rejects_malformed_routed_experts() {
-        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+    #[test]
+    fn generate_response_rejects_malformed_routed_experts() {
+        let chunks = [LLMEngineOutput {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
             engine_data: Some(json!({"routed_experts": {"unexpected": "object"}})),
             ..Default::default()
-        })]);
+        }];
 
-        let error = GenerateResponse::from_annotated_stream(stream, "req-routed".to_string())
-            .await
-            .expect_err("malformed routed experts must fail");
+        let error = aggregate(
+            chunks,
+            "req-routed".to_string(),
+            GenerateResponseOptions::default(),
+        )
+        .expect_err("malformed routed experts must fail");
 
         assert!(
             error
@@ -1413,19 +1394,22 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn generate_response_rejects_malformed_sampling_mask() {
-        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+    #[test]
+    fn generate_response_rejects_malformed_sampling_mask() {
+        let chunks = [LLMEngineOutput {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
             engine_data: Some(json!({"sampling_mask": "invalid"})),
             ..Default::default()
-        })]);
+        }];
 
-        let error = GenerateResponse::from_annotated_stream(stream, "req-mask".to_string())
-            .await
-            .expect_err("malformed sampling mask must fail");
+        let error = aggregate(
+            chunks,
+            "req-mask".to_string(),
+            GenerateResponseOptions::default(),
+        )
+        .expect_err("malformed sampling mask must fail");
 
         assert!(
             error
@@ -1434,36 +1418,42 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn generate_response_rejects_sampling_mask_length_mismatch() {
-        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+    #[test]
+    fn generate_response_rejects_sampling_mask_length_mismatch() {
+        let chunks = [LLMEngineOutput {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
             engine_data: Some(json!({"sampling_mask": [[1], [2]]})),
             ..Default::default()
-        })]);
+        }];
 
-        let error = GenerateResponse::from_annotated_stream(stream, "req-mask".to_string())
-            .await
-            .expect_err("misaligned sampling mask must fail");
+        let error = aggregate(
+            chunks,
+            "req-mask".to_string(),
+            GenerateResponseOptions::default(),
+        )
+        .expect_err("misaligned sampling mask must fail");
 
         assert!(error.to_string().contains("sampling-mask positions"));
     }
 
-    #[tokio::test]
-    async fn generate_response_uses_terminal_kv_transfer_fallback() {
-        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+    #[test]
+    fn generate_response_uses_terminal_kv_transfer_fallback() {
+        let chunks = [LLMEngineOutput {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
             disaggregated_params: Some(json!({"source": "terminal-fallback"})),
             ..Default::default()
-        })]);
+        }];
 
-        let response = GenerateResponse::from_annotated_stream(stream, "req-kv".to_string())
-            .await
-            .expect("aggregate terminal KV metadata");
+        let response = aggregate(
+            chunks,
+            "req-kv".to_string(),
+            GenerateResponseOptions::default(),
+        )
+        .expect("aggregate terminal KV metadata");
 
         assert_eq!(
             response.kv_transfer_params,
@@ -1471,28 +1461,31 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn generate_response_prefers_engine_kv_metadata_over_later_fallback() {
-        let stream = futures::stream::iter([
-            Annotated::from_data(LLMEngineOutput {
+    #[test]
+    fn generate_response_prefers_engine_kv_metadata_over_later_fallback() {
+        let chunks = [
+            LLMEngineOutput {
                 token_ids: vec![100],
                 index: Some(0),
                 engine_data: Some(json!({
                     "kv_transfer_params": {"source": "engine-data"}
                 })),
                 ..Default::default()
-            }),
-            Annotated::from_data(LLMEngineOutput {
+            },
+            LLMEngineOutput {
                 index: Some(0),
                 finish_reason: Some(crate::protocols::common::FinishReason::Stop),
                 disaggregated_params: Some(json!({"source": "terminal-fallback"})),
                 ..Default::default()
-            }),
-        ]);
+            },
+        ];
 
-        let response = GenerateResponse::from_annotated_stream(stream, "req-kv".to_string())
-            .await
-            .expect("aggregate KV metadata with precedence");
+        let response = aggregate(
+            chunks,
+            "req-kv".to_string(),
+            GenerateResponseOptions::default(),
+        )
+        .expect("aggregate KV metadata with precedence");
 
         assert_eq!(
             response.kv_transfer_params,
@@ -1500,64 +1493,70 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn incomplete_engine_streams_are_not_complete_unary_responses() {
-        let empty = futures::stream::iter(Vec::<Annotated<LLMEngineOutput>>::new());
-        let empty_response =
-            GenerateResponse::from_annotated_stream(empty, "req-empty".to_string())
-                .await
-                .expect("aggregate empty stream");
+    #[test]
+    fn incomplete_engine_streams_are_not_complete_unary_responses() {
+        let empty = Vec::<LLMEngineOutput>::new();
+        let empty_response = aggregate(
+            empty,
+            "req-empty".to_string(),
+            GenerateResponseOptions::default(),
+        )
+        .expect("aggregate empty stream");
         assert!(!empty_response.is_complete_unary());
 
-        let partial = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+        let partial = [LLMEngineOutput {
             token_ids: vec![100],
             index: Some(0),
             ..Default::default()
-        })]);
-        let partial_response =
-            GenerateResponse::from_annotated_stream(partial, "req-partial".to_string())
-                .await
-                .expect("aggregate partial stream");
+        }];
+        let partial_response = aggregate(
+            partial,
+            "req-partial".to_string(),
+            GenerateResponseOptions::default(),
+        )
+        .expect("aggregate partial stream");
         assert!(!partial_response.is_complete_unary());
     }
 
-    #[tokio::test]
-    async fn generate_response_rejects_error_and_cancelled_finish_reasons() {
+    #[test]
+    fn generate_response_rejects_error_and_cancelled_finish_reasons() {
         for finish_reason in [
             crate::protocols::common::FinishReason::Error("worker failed".to_string()),
             crate::protocols::common::FinishReason::Cancelled,
         ] {
-            let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+            let chunks = [LLMEngineOutput {
                 index: Some(0),
                 finish_reason: Some(finish_reason),
                 ..Default::default()
-            })]);
+            }];
 
-            GenerateResponse::from_annotated_stream(stream, "req-failed".to_string())
-                .await
-                .expect_err("error-like finish reasons must not produce HTTP-success responses");
+            aggregate(
+                chunks,
+                "req-failed".to_string(),
+                GenerateResponseOptions::default(),
+            )
+            .expect_err("error-like finish reasons must not produce HTTP-success responses");
         }
     }
 
-    #[tokio::test]
-    async fn generate_response_rejects_incomplete_completion_logprobs() {
-        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+    #[test]
+    fn generate_response_rejects_incomplete_completion_logprobs() {
+        let chunks = [LLMEngineOutput {
             token_ids: vec![100, 101],
             log_probs: Some(vec![-0.25]),
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Length),
             ..Default::default()
-        })]);
+        }];
 
-        let error = GenerateResponse::from_annotated_stream_with_options(
-            stream,
+        let error = aggregate(
+            chunks,
             "req-logprobs".to_string(),
             GenerateResponseOptions {
                 include_logprobs: true,
                 ..Default::default()
             },
         )
-        .await
         .expect_err("misaligned logprobs must fail");
 
         assert!(
@@ -1567,25 +1566,24 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn generate_response_rejects_malformed_prompt_logprobs() {
-        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+    #[test]
+    fn generate_response_rejects_malformed_prompt_logprobs() {
+        let chunks = [LLMEngineOutput {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Length),
             engine_data: Some(json!({"prompt_logprobs": "invalid"})),
             ..Default::default()
-        })]);
+        }];
 
-        let error = GenerateResponse::from_annotated_stream_with_options(
-            stream,
+        let error = aggregate(
+            chunks,
             "req-prompt".to_string(),
             GenerateResponseOptions {
                 include_prompt_logprobs: true,
                 ..Default::default()
             },
         )
-        .await
         .expect_err("malformed prompt logprobs must fail");
 
         assert!(
@@ -1609,68 +1607,63 @@ mod tests {
         assert!(options.include_prompt_logprobs);
     }
 
-    #[tokio::test]
-    async fn generate_response_rejects_requested_but_missing_metadata() {
-        let output = || {
-            Annotated::from_data(LLMEngineOutput {
-                token_ids: vec![100],
-                index: Some(0),
-                finish_reason: Some(crate::protocols::common::FinishReason::Length),
-                ..Default::default()
-            })
+    #[test]
+    fn generate_response_rejects_requested_but_missing_metadata() {
+        let output = || LLMEngineOutput {
+            token_ids: vec![100],
+            index: Some(0),
+            finish_reason: Some(crate::protocols::common::FinishReason::Length),
+            ..Default::default()
         };
 
-        let completion_error = GenerateResponse::from_annotated_stream_with_options(
-            futures::stream::iter([output()]),
+        let completion_error = aggregate(
+            [output()],
             "req-missing-completion".to_string(),
             GenerateResponseOptions {
                 include_logprobs: true,
                 ..Default::default()
             },
         )
-        .await
         .expect_err("missing requested completion logprobs must fail");
         assert!(completion_error.to_string().contains("returned none"));
 
-        let prompt_error = GenerateResponse::from_annotated_stream_with_options(
-            futures::stream::iter([output()]),
+        let prompt_error = aggregate(
+            [output()],
             "req-missing-prompt".to_string(),
             GenerateResponseOptions {
                 include_prompt_logprobs: true,
                 ..Default::default()
             },
         )
-        .await
         .expect_err("missing requested prompt logprobs must fail");
         assert!(prompt_error.to_string().contains("prompt_logprobs"));
     }
 
-    #[tokio::test]
-    async fn generate_response_does_not_leak_unrequested_metadata() {
-        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+    #[test]
+    fn generate_response_does_not_leak_unrequested_metadata() {
+        let chunks = [LLMEngineOutput {
             token_ids: vec![100],
             log_probs: Some(vec![-0.25, -0.5]),
             engine_data: Some(json!({"prompt_logprobs": "invalid"})),
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Length),
             ..Default::default()
-        })]);
+        }];
 
-        let response = GenerateResponse::from_annotated_stream_with_options(
-            stream,
+        let response = aggregate(
+            chunks,
             "req-no-metadata".to_string(),
             GenerateResponseOptions::default(),
         )
-        .await
         .expect("unrequested metadata must be ignored");
 
         assert!(response.choices[0].logprobs.is_none());
         assert!(response.prompt_logprobs.is_none());
     }
 
-    #[tokio::test]
-    async fn generate_response_clamps_logprobs_to_vllm_floor() {
-        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+    #[test]
+    fn generate_response_clamps_logprobs_to_vllm_floor() {
+        let chunks = [LLMEngineOutput {
             token_ids: vec![100],
             log_probs: Some(vec![-1.0e30]),
             top_logprobs: Some(vec![vec![
@@ -1697,17 +1690,16 @@ mod tests {
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Length),
             ..Default::default()
-        })]);
+        }];
 
-        let response = GenerateResponse::from_annotated_stream_with_options(
-            stream,
+        let response = aggregate(
+            chunks,
             "req-clamped".to_string(),
             GenerateResponseOptions {
                 include_logprobs: true,
                 include_prompt_logprobs: true,
             },
         )
-        .await
         .expect("aggregate clamped logprobs");
         let logprobs = response.choices[0].logprobs.as_ref().unwrap();
 
@@ -1719,57 +1711,6 @@ mod tests {
         assert_eq!(
             response.prompt_logprobs.as_ref().unwrap()[1]["22"]["logprob"],
             json!(-9999.0)
-        );
-    }
-
-    #[tokio::test]
-    async fn generate_response_returns_immediately_on_stream_error() {
-        let stream = futures::stream::iter([Annotated::from_error("worker failed")])
-            .chain(futures::stream::pending::<Annotated<LLMEngineOutput>>());
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            GenerateResponse::from_annotated_stream_with_options(
-                stream,
-                "req-error".to_string(),
-                GenerateResponseOptions::default(),
-            ),
-        )
-        .await
-        .expect("stream error must not wait for later items");
-        let error = result.expect_err("stream error must be returned");
-
-        assert!(error.to_string().contains("worker failed"));
-    }
-
-    #[tokio::test]
-    async fn generate_response_rejects_missing_completion_logprobs_before_stream_stalls() {
-        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
-            token_ids: vec![100],
-            index: Some(0),
-            ..Default::default()
-        })])
-        .chain(futures::stream::pending::<Annotated<LLMEngineOutput>>());
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            GenerateResponse::from_annotated_stream_with_options(
-                stream,
-                "req-missing-logprobs".to_string(),
-                GenerateResponseOptions {
-                    include_logprobs: true,
-                    ..Default::default()
-                },
-            ),
-        )
-        .await
-        .expect("missing delta logprobs must not wait for later items");
-        let error = result.expect_err("missing requested completion logprobs must fail");
-
-        assert!(
-            error
-                .to_string()
-                .contains("token-bearing delta returned none")
         );
     }
 }

@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 
 use super::sim::{self, Role, Truth};
 use super::{ClientShape, RequestSpec};
-use crate::generate_format::{ClientRequest, GenerateFormat, Opened, Phase};
+use crate::generate_format::{ClientRequest, GenerateFormat, Opened};
 use crate::protocols::response_merge::{
     PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION,
 };
@@ -91,7 +91,7 @@ pub fn run(
 
 fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Result<Outcome, String> {
     let truth = &scenario.truth;
-    let Opened { mut exchange, .. } = match format.open(ClientRequest {
+    let Opened { bind, .. } = match format.open(ClientRequest {
         body,
         headers: &Default::default(),
         default_request_id: "dynamo-request",
@@ -99,10 +99,12 @@ fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Resul
         Ok(opened) => opened,
         Err(error) => return Ok(Outcome::Rejected(error.message)),
     };
-    let mut request = match exchange.bind(&super::worker(&scenario.engine_info)) {
-        Ok(bound) => bound.request,
+    let bound = match bind(&super::worker(&scenario.engine_info)) {
+        Ok(bound) => bound,
         Err(error) => return Ok(Outcome::Rejected(error.message)),
     };
+    let mut request = bound.request;
+    let mut exchange = bound.exchange;
     if *request.token_ids != truth.prompt {
         return Err("the routed request does not carry the client's prompt".into());
     }
@@ -112,9 +114,9 @@ fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Resul
         annotated(PREFILL_OUTPUT_FIRST_ANNOTATION),
     );
     let disaggregated = scenario.topology == Topology::Disaggregated;
-    let (role, phase) = match scenario.topology {
-        Topology::Disaggregated => (Role::Decode, Phase::Decode),
-        Topology::Aggregated => (Role::Aggregated, Phase::Aggregated),
+    let role = match scenario.topology {
+        Topology::Disaggregated => Role::Decode,
+        Topology::Aggregated => Role::Aggregated,
     };
     let mut client: Vec<Value> = Vec::new();
     let mut failures = scenario.failures.iter().copied().peekable();
@@ -140,8 +142,7 @@ fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Resul
             )
             .pop()
             .ok_or("prefill sent no response")?;
-            let inspected = format
-                .inspect(response, Phase::Prefill)
+            let inspected = crate::protocols::sglang::inspect(response, true)
                 .map_err(|e| format!("inspect rejected prefill's response: {e}"))?;
             if !inspected.output.token_ids.is_empty() || !inspected.terminal {
                 return Err("prefill's final response must report no tokens and a terminal".into());
@@ -184,8 +185,7 @@ fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Resul
             }
             let ids: Vec<u32> =
                 serde_json::from_value(chunk["output_ids"].clone()).map_err(|e| e.to_string())?;
-            let inspected = format
-                .inspect(chunk, phase)
+            let inspected = crate::protocols::sglang::inspect(chunk, false)
                 .map_err(|e| format!("inspect rejected a response: {e}"))?;
             if inspected.output.token_ids != ids || inspected.terminal != (last && !lost) {
                 return Err(format!(

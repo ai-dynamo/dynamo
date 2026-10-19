@@ -15,8 +15,7 @@ use serde_json::{Value, json};
 
 use super::generate::{GenerateAggregator, GenerateRequest, GenerateResponseOptions};
 use crate::generate_format::{
-    Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Inspected, Opened, Phase,
-    Worker,
+    Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened, Worker,
 };
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
@@ -481,18 +480,26 @@ impl GenerateFormat for VllmFormat {
             model: request.model.clone(),
             request_id: request_id.clone(),
             stream: false,
-            exchange: Box::new(VllmExchange {
-                aggregator: GenerateAggregator::new(request_id.clone()),
-                options: request.response_options(),
-                request: Some(request),
-                request_id,
-                data_parallel_rank,
+            bind: Box::new(move |worker| {
+                let options = request.response_options();
+                let request = preprocessed_from_generate(
+                    request,
+                    worker.model,
+                    data_parallel_rank,
+                    &request_id,
+                    worker,
+                )
+                .map_err(|error| ClientError::new(error.to_string()))?;
+                Ok(Bound {
+                    request,
+                    migration: Err("vLLM generate requests do not migrate yet".to_string()),
+                    exchange: Box::new(VllmExchange {
+                        aggregator: GenerateAggregator::new(request_id),
+                        options,
+                    }),
+                })
             }),
         })
-    }
-
-    fn inspect(&self, _response: Value, _phase: Phase) -> Result<Inspected, DynamoError> {
-        Err(DynamoError::msg("vLLM workers produce typed outputs"))
     }
 
     fn error_body(&self, status: StatusCode, message: &str) -> Value {
@@ -501,34 +508,11 @@ impl GenerateFormat for VllmFormat {
 }
 
 struct VllmExchange {
-    /// The client request, until it is bound to a worker set.
-    request: Option<GenerateRequest>,
-    request_id: String,
-    data_parallel_rank: Option<u32>,
     aggregator: GenerateAggregator,
     options: GenerateResponseOptions,
 }
 
 impl GenerateExchange for VllmExchange {
-    fn bind(&mut self, worker: &Worker<'_>) -> Result<Bound, ClientError> {
-        let generate = self
-            .request
-            .take()
-            .ok_or_else(|| ClientError::new("generate request already bound"))?;
-        let request = preprocessed_from_generate(
-            generate,
-            worker.model,
-            self.data_parallel_rank,
-            &self.request_id,
-            worker,
-        )
-        .map_err(|error| ClientError::new(error.to_string()))?;
-        Ok(Bound {
-            request,
-            migration: Err("vLLM generate requests do not migrate yet".to_string()),
-        })
-    }
-
     fn chunk(
         &mut self,
         output: LLMEngineOutput,

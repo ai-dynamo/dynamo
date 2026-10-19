@@ -429,11 +429,6 @@ impl Assembler {
         }
     }
 
-    /// Whether to keep the first attempt's prompt-side values for migration.
-    pub fn set_capture(&mut self, capture: bool) {
-        self.capture = capture;
-    }
-
     /// A later prefill keeps the first one's prompt values.
     pub fn set_prefill(&mut self, mut prefill: Value) {
         if let Some(mut old) = self.prefill.take() {

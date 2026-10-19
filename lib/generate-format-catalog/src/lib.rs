@@ -21,8 +21,8 @@ use dynamo_llm::generate_format::Registry;
 /// Register the formats linked into this image.
 ///
 /// Custom catalogs replace this crate under the same dependency name in the
-/// frontend extension and in workers that read native responses. Dynamo's own
-/// formats are registered first, so a catalog cannot shadow one.
+/// frontend extension. Worker parsing stays in the backend sidecars. Dynamo's
+/// own formats are registered first, so a catalog cannot shadow one.
 pub fn register(_registry: &mut Registry) -> anyhow::Result<()> {
     Ok(())
 }

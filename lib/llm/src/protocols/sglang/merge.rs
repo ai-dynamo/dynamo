@@ -43,8 +43,7 @@ use super::{CAPABILITY, PAYLOAD_KEY, RESPONSE_KEY};
 use axum::http::StatusCode;
 
 use crate::generate_format::{
-    Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Inspected, Opened, Phase,
-    Worker,
+    Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened,
 };
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use crate::protocols::common::preprocessor::RoutingHints;
@@ -168,52 +167,58 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
         let cache_namespace = request.cache_namespace().map(str::to_owned);
         let stream = request.stream;
         let (input_ids, body) = request.into_worker_envelope(&request_id);
-        let body = body.as_object().expect("the envelope is an object");
-        let prefill_need = RULES.prefill_need(body);
+        let prefill_need = RULES.prefill_need(&body);
         let prompt_tokens = input_ids.len();
-        let routed = PreprocessedRequest::builder()
-            .model(String::new())
-            .token_ids(input_ids)
-            .stop_conditions(limits)
-            .sampling_options(SamplingOptions {
-                n: Some(1),
-                ..Default::default()
-            })
-            .output_options(OutputOptions {
-                return_tokens_as_token_ids: Some(true),
-                ..Default::default()
-            })
-            .routing(Some(RoutingHints {
-                dp_rank,
-                priority_jump: Some(priority.max(0) as f64),
-                priority: Some(priority),
-                cache_namespace,
-                ..Default::default()
-            }))
-            .extra_args(Some(json!({ PAYLOAD_KEY: body })))
-            .annotations(prefill_annotations(prefill_need))
-            .build()
-            .map_err(|error| ClientError::new(error.to_string()))?;
-        let exchange = Box::new(Exchange {
-            assembler: Assembler::new(RULES.clone(), false),
-            unbound: Some(routed),
-            continuation: Err("the request is not bound to a worker".to_string()),
-            codec: self.codec.clone(),
-            delivered: 0,
-            request_id: request_id.clone(),
-            stream,
-            prompt_tokens,
-        });
+        let codec = self.codec.clone();
         Ok(Opened {
             model: None,
-            request_id,
+            request_id: request_id.clone(),
             stream,
-            exchange,
+            bind: Box::new(move |worker| {
+                let continuation = Continuation::new(
+                    &REQUEST_RULES,
+                    &body,
+                    (limits.max_tokens, limits.min_tokens),
+                    worker.engine_info,
+                );
+                let request = PreprocessedRequest::builder()
+                    .model(worker.model.to_string())
+                    .token_ids(input_ids)
+                    .stop_conditions(limits)
+                    .sampling_options(SamplingOptions {
+                        n: Some(1),
+                        ..Default::default()
+                    })
+                    .output_options(OutputOptions {
+                        return_tokens_as_token_ids: Some(true),
+                        ..Default::default()
+                    })
+                    .routing(Some(RoutingHints {
+                        dp_rank,
+                        priority_jump: Some(priority.max(0) as f64),
+                        priority: Some(priority),
+                        cache_namespace,
+                        ..Default::default()
+                    }))
+                    .extra_args(Some(json!({ PAYLOAD_KEY: body })))
+                    .annotations(prefill_annotations(prefill_need))
+                    .build()
+                    .map_err(|error| ClientError::new(error.to_string()))?;
+                Ok(Bound {
+                    request,
+                    migration: continuation.as_ref().map(|_| ()).map_err(Clone::clone),
+                    exchange: Box::new(Exchange {
+                        assembler: Assembler::new(RULES.clone(), continuation.is_ok()),
+                        continuation,
+                        codec,
+                        delivered: 0,
+                        request_id,
+                        stream,
+                        prompt_tokens,
+                    }),
+                })
+            }),
         })
-    }
-
-    fn inspect(&self, response: Value, phase: Phase) -> Result<Inspected, DynamoError> {
-        super::inspect::inspect(response, phase)
     }
 
     fn error_body(&self, _status: StatusCode, message: &str) -> Value {
@@ -224,7 +229,6 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
 struct Exchange<C> {
     codec: Arc<C>,
     assembler: Assembler,
-    unbound: Option<PreprocessedRequest>,
     continuation: Result<Continuation, String>,
     /// Generated tokens seen across attempts.
     delivered: usize,
@@ -234,29 +238,6 @@ struct Exchange<C> {
 }
 
 impl<C: ClientCodec> GenerateExchange for Exchange<C> {
-    fn bind(&mut self, worker: &Worker<'_>) -> Result<Bound, ClientError> {
-        let mut request = self
-            .unbound
-            .take()
-            .ok_or_else(|| ClientError::new("generate request already bound"))?;
-        request.model = worker.model.to_string();
-        let body = request
-            .extra_args
-            .as_ref()
-            .and_then(|args| args[PAYLOAD_KEY].as_object())
-            .ok_or_else(|| ClientError::new("missing SGLang request envelope"))?;
-        let budget = (
-            request.stop_conditions.max_tokens,
-            request.stop_conditions.min_tokens,
-        );
-        self.continuation = Continuation::new(&REQUEST_RULES, body, budget, worker.engine_info);
-        self.assembler.set_capture(self.continuation.is_ok());
-        Ok(Bound {
-            request,
-            migration: self.continuation.as_ref().map(|_| ()).map_err(Clone::clone),
-        })
-    }
-
     fn chunk(
         &mut self,
         output: LLMEngineOutput,
@@ -406,13 +387,16 @@ mod tests {
     fn recorded_streams_join_into_sglangs_unary_response() {
         for fixture in fixtures() {
             let body = Value::Object(fixture["request"].as_object().unwrap().clone());
-            let Opened { mut exchange, .. } = SglangFormat::native()
+            let Opened { bind, .. } = SglangFormat::native()
                 .open(ClientRequest {
                     body: body.to_string().as_bytes(),
                     headers: &Default::default(),
                     default_request_id: "id",
                 })
                 .unwrap();
+            let mut exchange = bind(&crate::generate_format::testkit::worker(&Value::Null))
+                .unwrap()
+                .exchange;
             for chunk in fixture["stream"].as_array().unwrap() {
                 let output = LLMEngineOutput {
                     engine_data: Some(json!({ RESPONSE_KEY: chunk })),
