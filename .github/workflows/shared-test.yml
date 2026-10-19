@@ -306,7 +306,11 @@ jobs:
             printf '%s' "${s%-}"
           }
           lane="$(slug "${LANE_SUITE}-${LANE_TYPE}-${LANE_CUDA}-${LANE_PLATFORM}")"
-          echo "DD_TAGS=team:dynamo,lane:${lane},test_suite:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
+          # NOT test_suite: -- ddtrace owns that key and emits it as an object
+          # (test_suite.fingerprint), so a string tag of the same name is
+          # silently dropped on ingest. Measured: zero events carried
+          # @test_suite while @lane and @team came through on all of them.
+          echo "DD_TAGS=team:dynamo,lane:${lane},framework:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
           echo "Datadog lane tag: ${lane}"
 
       - name: Run Sanity Check on Runtime Image
