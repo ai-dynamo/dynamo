@@ -34,44 +34,56 @@ pub(crate) async fn relay(
         "Telemetry-only sidecars cannot register encoder or RL routes"
     );
     let transport = args.sidecar.grpc.config();
-    let client = TrtllmClient::connect(&args.sidecar.grpc_endpoint, transport).await?;
-    let info = client
-        .server_info()
-        .await?
-        .context("Follower metadata disappeared")?;
-    ensure!(
-        NodeMetadata::from_info(Some(&info))?.as_ref() == Some(&node),
-        "Engine incarnation changed during startup"
-    );
-    let mut sources = client.kv_event_sources().await?;
-    node.select_local_sources(&mut sources)?;
-    sources.sort_by_key(|source| source.data_parallel_rank);
-    let block_size = info
-        .capacity
-        .as_ref()
-        .and_then(|c| c.kv_block_size)
-        .unwrap_or(0);
-    let dp_size = info
-        .parallelism
-        .as_ref()
-        .and_then(|p| p.data_parallel_size)
-        .unwrap_or(1);
-    validate_local_sources(&sources, dp_size)?;
-    ensure!(
-        sources.is_empty() || block_size > 0,
-        "Local publisher has no KV block size"
-    );
-    let common = &args.sidecar.common;
-    let component = if common.disaggregation_mode == DisaggregationMode::Aggregated {
-        common.component.as_str()
-    } else {
-        common.disaggregation_mode.discovery_component()
+    let initialization = async {
+        let client = TrtllmClient::connect(&args.sidecar.grpc_endpoint, transport).await?;
+        let info = client
+            .server_info()
+            .await?
+            .context("Follower metadata disappeared")?;
+        ensure!(
+            NodeMetadata::from_info(Some(&info))?.as_ref() == Some(&node),
+            "Engine incarnation changed during startup"
+        );
+        let mut sources = client.kv_event_sources().await?;
+        node.select_local_sources(&mut sources)?;
+        sources.sort_by_key(|source| source.data_parallel_rank);
+        let block_size = info
+            .capacity
+            .as_ref()
+            .and_then(|c| c.kv_block_size)
+            .unwrap_or(0);
+        let dp_size = info
+            .parallelism
+            .as_ref()
+            .and_then(|p| p.data_parallel_size)
+            .unwrap_or(1);
+        validate_local_sources(&sources, dp_size)?;
+        ensure!(
+            sources.is_empty() || block_size > 0,
+            "Local publisher has no KV block size"
+        );
+        let common = &args.sidecar.common;
+        let component = if common.disaggregation_mode == DisaggregationMode::Aggregated {
+            common.component.as_str()
+        } else {
+            common.disaggregation_mode.discovery_component()
+        };
+        let endpoint = drt
+            .namespace(&common.namespace)?
+            .component(component)?
+            .endpoint(&common.endpoint);
+        let configs = runtime_config_watch(&endpoint, cancel.clone()).await?;
+        Ok::<_, anyhow::Error>((
+            client, info, sources, block_size, dp_size, endpoint, configs,
+        ))
     };
-    let endpoint = drt
-        .namespace(&common.namespace)?
-        .component(component)?
-        .endpoint(&common.endpoint);
-    let mut configs = runtime_config_watch(&endpoint, cancel.clone()).await?;
+    let (client, info, sources, block_size, dp_size, endpoint, mut configs) = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Ok(()),
+        result = tokio::time::timeout(transport.startup_deadline, initialization) => {
+            result.context("Follower initialization exceeded startup deadline")??
+        }
+    };
     let wait = async {
         loop {
             if let Some(leader) = matching_leader(&configs.borrow(), &node)? {
@@ -209,7 +221,7 @@ async fn monitor_leader(
     }
 }
 
-async fn monitor_engine(
+pub(crate) async fn monitor_engine(
     client: &TrtllmClient,
     node: &NodeMetadata,
     sources: &[pb::KvEventSource],

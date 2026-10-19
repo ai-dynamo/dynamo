@@ -141,11 +141,15 @@ pub(crate) fn build_generate_request_with_routing(
         kv,
         extra: Some(disagg::request_extra(
             mode.is_prefill(),
+            // Native conversation affinity requires an identity for targeted
+            // requests. Anonymous calls get request-scoped affinity; explicit
+            // sessions keep their identity across turns.
             request
                 .agent_context
                 .as_ref()
                 .map(|context| context.session_id.trim())
-                .filter(|session_id| !session_id.is_empty()),
+                .filter(|session_id| !session_id.is_empty())
+                .or(Some(request_id)),
         )),
     })
 }
@@ -431,10 +435,10 @@ fn validate_request(
         ));
     }
     if !allow_dp_rank
-        && request
-            .routing
-            .as_ref()
-            .is_some_and(|routing| routing.dp_rank.is_some() || routing.prefill_dp_rank.is_some())
+        && request.routing.as_ref().is_some_and(|routing| {
+            routing.dp_rank.is_some_and(|rank| rank != 0)
+                || routing.prefill_dp_rank.is_some_and(|rank| rank != 0)
+        })
     {
         return Err(client::invalid_argument(
             "data-parallel rank targeting was not advertised by the OpenEngine server",

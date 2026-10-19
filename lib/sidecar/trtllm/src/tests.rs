@@ -69,6 +69,7 @@ struct FakeTrtllm {
     disable_load: Arc<AtomicBool>,
     dp_size: Arc<AtomicU32>,
     hang_load: Arc<AtomicBool>,
+    node_metadata: Arc<Mutex<Option<crate::node::NodeMetadata>>>,
 }
 
 fn prompt_len(request: &pb::GenerateRequest) -> u32 {
@@ -336,6 +337,13 @@ impl pb::control_server::Control for FakeTrtllm {
                 prost_types::Value {
                     kind: Some(prost_types::value::Kind::BoolValue(true)),
                 },
+            );
+        }
+        if let Some(node) = self.node_metadata.lock().await.as_ref() {
+            fields.extend(
+                dynamo_sidecar_common::json_to_struct(json!({"trtllm_node": node}), "test")
+                    .unwrap()
+                    .fields,
             );
         }
         Ok(Response::new(pb::ServerInfo {

@@ -87,6 +87,20 @@ impl TrtllmSidecarEngine {
         }
     }
 
+    /// Fence a restarted native engine before continuing with stale discovery.
+    pub(crate) async fn monitor_routing(&self) -> anyhow::Result<()> {
+        let mut ticks = tokio::time::interval(Duration::from_secs(5));
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticks.tick().await;
+            if let (Some(client), Some(routing)) = (self.client.get(), self.routing.get())
+                && let Some(node) = &routing.node
+            {
+                return crate::headless::monitor_engine(client, node, &routing.sources).await;
+            }
+        }
+    }
+
     pub fn from_env() -> Result<(Self, WorkerConfig), DynamoError> {
         Self::from_parsed(<Args as clap::Parser>::parse())
     }
@@ -350,12 +364,18 @@ impl LLMEngine for TrtllmSidecarEngine {
                     ));
                 }
 
+                if dp_size > 1 && !dp_targeting {
+                    return Err(client::protocol_error(
+                        "Multi-rank OpenEngine requires advertised DP rank targeting",
+                    ));
+                }
                 if events_enabled {
                     validate_kv_sources(&sources, dp_size)?;
                 }
                 if let Some(node) = &node {
                     node.select_local_sources(&mut sources)?;
                 }
+                sources.sort_by_key(|source| source.data_parallel_rank);
                 let initial_snapshots = if load_enabled {
                     load_snapshots(load, dp_size)?
                 } else {
@@ -446,6 +466,13 @@ impl LLMEngine for TrtllmSidecarEngine {
                 )));
             }
         }
+        // Legacy single-rank servers accept logical rank zero, but not the
+        // optional OpenEngine targeting metadata.
+        let target_dp_rank = target_dp_rank.filter(|_| {
+            self.routing
+                .get()
+                .is_some_and(|routing| routing.dp_targeting)
+        });
         let parent_affinity = if self.mode.is_prefill() && self.subagent_affinity_auth_key.is_some()
         {
             request.agent_context.as_ref().and_then(|agent| {
