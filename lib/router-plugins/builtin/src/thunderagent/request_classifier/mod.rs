@@ -13,9 +13,10 @@ use std::time::Instant;
 use async_trait::async_trait;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
-    RequestClassifierContext, RequestClassifierFactory, RequestClassifierParameters,
-    RequestClassifierProviderError, RequestClassifierRegistryError, RequestProgress,
+    ClassifierError, ClassifyEvent, ClassifyFuture, RequestClassificationContext,
+    RequestClassifier, RequestClassifierContext, RequestClassifierFactory,
+    RequestClassifierParameters, RequestClassifierProviderError, RequestClassifierRegistryError,
+    RequestProgress,
 };
 use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use parking_lot::Mutex;
@@ -286,7 +287,7 @@ impl ThunderAgentClassifier {
 impl RequestClassifier for ThunderAgentClassifier {
     fn classify(
         &mut self,
-        request: ClassifyRequest,
+        request: RequestClassificationContext,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         let Some(session) = request.session_context() else {
@@ -299,7 +300,7 @@ impl RequestClassifier for ThunderAgentClassifier {
         };
         let session_id = session.session_id().to_owned();
         let session_final = session.session_final() == Some(true);
-        let input_tokens = request.input_tokens();
+        let input_tokens = request.isl_tokens();
         let progress = request.progress().clone();
         let pinned_worker = request.pinned_worker();
         let notify = match self.inner.register(
@@ -340,7 +341,7 @@ impl RequestClassifier for ThunderAgentClassifier {
 mod tests {
     use std::time::Duration;
 
-    use dynamo_kv_router::plugins::request_classifier::RequestClassifierWorker;
+    use dynamo_kv_router::plugins::worker_selection::{WorkerCapacity, WorkerInfo};
     use dynamo_kv_router::protocols::WorkerWithDpRank;
 
     use super::scheduler::ProgramLifecycle;
@@ -352,8 +353,8 @@ mod tests {
         let worker_without_capacity = WorkerWithDpRank::new(2, 0);
         let context = RequestClassifierContext::new(16, move || {
             vec![
-                RequestClassifierWorker::new(worker_with_capacity, Some(10)),
-                RequestClassifierWorker::new(worker_without_capacity, None),
+                WorkerInfo::new(worker_with_capacity, WorkerCapacity::new(None, Some(10))),
+                WorkerInfo::new(worker_without_capacity, WorkerCapacity::default()),
             ]
         });
 

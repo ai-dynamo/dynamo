@@ -16,7 +16,8 @@ use dynamo_kv_router::{
     config::KvRouterConfig,
     protocols::RoutingConstraints,
     scheduling::{
-        ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+        ClassifierError, ClassifyEvent, ClassifyFuture, RequestClassificationContext,
+        RequestClassifier,
     },
 };
 use dynamo_runtime::{
@@ -1801,7 +1802,7 @@ struct RecordingClassifier {
 impl RequestClassifier for RecordingClassifier {
     fn classify(
         &mut self,
-        request: ClassifyRequest,
+        request: RequestClassificationContext,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
@@ -1838,7 +1839,7 @@ struct RejectingClassifier {
 impl RequestClassifier for RejectingClassifier {
     fn classify(
         &mut self,
-        _request: ClassifyRequest,
+        _request: RequestClassificationContext,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
@@ -1912,7 +1913,7 @@ struct TypedRejectingClassifier {
 impl RequestClassifier for TypedRejectingClassifier {
     fn classify(
         &mut self,
-        _request: ClassifyRequest,
+        _request: RequestClassificationContext,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
@@ -2115,7 +2116,7 @@ struct PausingClassifier {
 impl RequestClassifier for PausingClassifier {
     fn classify(
         &mut self,
-        request: ClassifyRequest,
+        request: RequestClassificationContext,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         let entered = Arc::clone(&self.entered);
@@ -2234,11 +2235,11 @@ struct TokenContractClassifier {
 impl RequestClassifier for TokenContractClassifier {
     fn classify(
         &mut self,
-        request: ClassifyRequest,
+        request: RequestClassificationContext,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         self.classified
-            .send((request.input_tokens(), request.progress().clone()))
+            .send((request.isl_tokens(), request.progress().clone()))
             .unwrap();
         Box::pin(async move { Ok(request) })
     }

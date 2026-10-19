@@ -2202,7 +2202,7 @@ mod tests {
         }
         use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
         use dynamo_kv_router::scheduling::{
-            ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+            ClassifyEvent, ClassifyFuture, RequestClassificationContext, RequestClassifier,
         };
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2215,7 +2215,7 @@ mod tests {
         impl RequestClassifier for RejectingClassifier {
             fn classify(
                 &mut self,
-                _request: ClassifyRequest,
+                _request: RequestClassificationContext,
                 _workers: WorkerCandidates<'_>,
             ) -> ClassifyFuture {
                 self.calls += 1;

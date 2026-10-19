@@ -20,6 +20,7 @@ use dynamo_kv_router::{
         ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
     },
     kv_hints::KvHint,
+    plugins::worker_selection::WorkerInfo,
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, PrefillLoadHint, RouterEvent, RouterRequest,
@@ -29,7 +30,7 @@ use dynamo_kv_router::{
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, PotentialLoad,
         RejectThresholdsProvider, RequestClassifier, RequestClassifierContext,
-        RequestClassifierWorker, WorkerAvailabilityProvider, effective_prefill_tokens,
+        WorkerAvailabilityProvider, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
         queue::{BookingHandle, SchedulerBookingDescriptor},
     },
@@ -957,10 +958,7 @@ impl KvRouter {
                     let start = config.data_parallel_start_rank();
                     let end = start.saturating_add(config.data_parallel_size());
                     (start..end).map(move |rank| {
-                        RequestClassifierWorker::new(
-                            WorkerWithDpRank::new(worker_id, rank),
-                            config.total_kv_blocks(),
-                        )
+                        WorkerInfo::of(WorkerWithDpRank::new(worker_id, rank), config)
                     })
                 })
                 .collect()
@@ -2010,6 +2008,7 @@ impl Drop for KvRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
     use std::collections::{HashMap, HashSet};
 
     use async_trait::async_trait;
@@ -2306,6 +2305,7 @@ mod tests {
                 7,
                 ModelRuntimeConfig {
                     total_kv_blocks: Some(100),
+                    max_num_batched_tokens: Some(8192),
                     data_parallel_start_rank: 2,
                     data_parallel_size: 2,
                     ..Default::default()
@@ -2317,13 +2317,14 @@ mod tests {
         let context = router.request_classifier_context();
         assert_eq!(context.block_size(), 16);
         let mut snapshot = context.workers();
-        snapshot.sort_by_key(RequestClassifierWorker::worker);
+        snapshot.sort_by_key(WorkerInfo::worker);
+        let advertised = WorkerCapacity::new(Some(8192), Some(100));
         assert_eq!(
             snapshot,
             vec![
-                RequestClassifierWorker::new(WorkerWithDpRank::new(7, 2), Some(100)),
-                RequestClassifierWorker::new(WorkerWithDpRank::new(7, 3), Some(100)),
-                RequestClassifierWorker::new(WorkerWithDpRank::new(8, 0), None),
+                WorkerInfo::new(WorkerWithDpRank::new(7, 2), advertised),
+                WorkerInfo::new(WorkerWithDpRank::new(7, 3), advertised),
+                WorkerInfo::new(WorkerWithDpRank::new(8, 0), WorkerCapacity::default()),
             ]
         );
         tx.send(HashMap::from([(
@@ -2336,10 +2337,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             context.workers(),
-            vec![RequestClassifierWorker::new(
+            vec![WorkerInfo::new(
                 WorkerWithDpRank::new(8, 0),
-                Some(200)
-            ),]
+                WorkerCapacity::new(None, Some(200)),
+            )]
         );
         tx.send(HashMap::new()).unwrap();
         assert!(context.workers().is_empty());
