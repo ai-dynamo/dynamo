@@ -143,9 +143,9 @@ pub fn parse_candidate_scores(
                     "candidate {index} returned token ID {token_id}, expected {expected_id}"
                 )));
             }
-            if !tuple[2].is_null() && !tuple[2].is_string() {
+            if !tuple[2].is_null() {
                 return Err(candidate_error(format!(
-                    "candidate {index} token text must be null or a string"
+                    "candidate {index} token text must be null when detokenization is disabled"
                 )));
             }
             Ok(logprob)
