@@ -11,6 +11,72 @@ from pathlib import Path
 
 
 class UpgradeClusterLifecycleTest(unittest.TestCase):
+    def test_shared_setup_isolates_inherited_kubeconfig(self):
+        operator = Path(__file__).resolve().parents[1]
+        text = (operator / "Makefile").read_text()
+        start = text.index(".PHONY: setup-clustertest-kind")
+        end = text.index(".PHONY: setup-clustertest-crds-in-cluster", start)
+        defaults = "\n".join(
+            line for line in text.splitlines() if line.startswith("CLUSTERTEST_")
+        )
+        for reuse, override in ((False, False), (True, False), (True, True)):
+            with self.subTest(reuse=reuse, override=override):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary).resolve()
+                    (root / "Makefile").write_text(
+                        "SHELL := /bin/bash\n.SHELLFLAGS := -ec\n"
+                        "KIND := ./kind\nLOCALBIN := $(CURDIR)\n"
+                        + defaults
+                        + "\nkubectl kind:\n\t@true\n"
+                        + text[start:end]
+                    )
+                    sentinel = root / "user.kubeconfig"
+                    sentinel.write_text("user configuration\n")
+                    (root / "kind").write_text(
+                        """#!/bin/bash
+set -eu
+if [[ "$1 $2" == 'get clusters' ]]; then
+    if [[ "$REUSE" == true ]]; then echo dynamo-clustertest-v136; fi
+    exit 0
+fi
+echo "$1 $2" > operation
+while [[ "$1" != --kubeconfig ]]; do shift; done
+printf '%s\n' "$2" > config-path
+echo 'kind configuration' > "$2"
+"""
+                    )
+                    (root / "kind").chmod(0o755)
+                    command = ["make", "setup-clustertest-kind"]
+                    expected = root / "clustertest.kubeconfig"
+                    if override:
+                        expected = root / "explicit.kubeconfig"
+                        command.append(f"CLUSTERTEST_KUBECONFIG={expected}")
+                    result = subprocess.run(
+                        command,
+                        cwd=root,
+                        env=dict(
+                            os.environ,
+                            KUBECONFIG=str(sentinel),
+                            REUSE=str(reuse).lower(),
+                        ),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=20,
+                    )
+                    self.assertEqual(
+                        result.returncode, 0, result.stdout + result.stderr
+                    )
+                    self.assertEqual(
+                        (root / "operation").read_text().strip(),
+                        "export kubeconfig" if reuse else "create cluster",
+                    )
+                    self.assertEqual(
+                        (root / "config-path").read_text().strip(), str(expected)
+                    )
+                    self.assertEqual(sentinel.read_text(), "user configuration\n")
+                    self.assertEqual(expected.read_text(), "kind configuration\n")
+
     def test_exclusive_cluster_ownership_and_cleanup(self):
         operator = Path(__file__).resolve().parents[1]
         for mode in ("success", "failure", "interrupt", "collision"):
