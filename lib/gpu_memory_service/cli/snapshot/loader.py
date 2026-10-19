@@ -19,7 +19,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from gpu_memory_service.cli.snapshot import requests_help, run_per_device
+from gpu_memory_service.cli.snapshot import run_per_device
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
@@ -174,24 +174,18 @@ def _list_checkpoint_devices(
     return devices
 
 
-def _wait_for_termination() -> None:
-    # Stay alive after a successful load: a restarted container would request a
-    # second RW session that times out on the worker's RO lease or clears the weights.
-    while True:
-        time.sleep(3600)
-
-
 def main(argv: list[str] | None = None) -> None:
     # python -m passes no argv, and run_per_device forwards argv verbatim to
     # the per-device helpers, so substitute the real command line first.
     argv = argv if argv is not None else sys.argv[1:]
     if os.environ.get("DYN_GMS_USE_V1") == "true":
         run_per_device("gpu_memory_service.v1.snapshot.loader", argv)
-        if requests_help(argv):
+        if "-h" in argv or "--help" in argv:
             return
-        logger.info("GMS V1 load complete on all devices; waiting for termination")
-        _wait_for_termination()
-        return
+        # Stay alive like V0: a restarted container would request a second RW
+        # session, which times out on the restored worker's RO lease.
+        while True:
+            time.sleep(3600)
 
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -239,7 +233,8 @@ def main(argv: list[str] | None = None) -> None:
     elapsed = time.monotonic() - t0
     logger.info("All %d devices loaded in %.2fs", len(devices), elapsed)
 
-    _wait_for_termination()
+    while True:
+        time.sleep(3600)
 
 
 if __name__ == "__main__":
