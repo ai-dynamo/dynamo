@@ -15,7 +15,7 @@ use dynamo_runtime::pipeline::network::{
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyString};
+use pyo3::types::{PyDict, PyList, PyString};
 use pythonize::{Depythonizer, Pythonizer, depythonize};
 use serde::de::{DeserializeOwned, Error as _};
 use serde::ser::Error as _;
@@ -568,15 +568,16 @@ fn encode_python_response(
 /// fields, never a second pass over the payload. Called only while the gate
 /// still reads the classification (see [`WaitClassification`]).
 ///
-/// A generated token is a non-empty `token_ids`; an empty one, or none, is not.
-/// The completion response is the one carrying a `finish_reason`, or — a vLLM
-/// prefill's handoff result, which reports no finish reason — the prefill
-/// handoff carrying `disaggregated_params` that reports its `completion_usage`,
-/// which vLLM builds only once the prefill has run. Usage alone completes
-/// nothing. An error, an annotation without data, a payload that is not a
-/// mapping, and every other response is interim: a disaggregation bootstrap
-/// announcement, which SGLang's prefill sends before its prefill runs, carries
-/// neither.
+/// A generated token is a non-empty `token_ids`, or a text-mode chunk's
+/// generated text (see [`choices_output`]); an empty one, or none, is not. The
+/// completion response is the one carrying a `finish_reason`, at its top level
+/// or in a text-mode chunk's choice, or — a vLLM prefill's handoff result,
+/// which reports no finish reason — the prefill handoff carrying
+/// `disaggregated_params` that reports its `completion_usage`, which vLLM
+/// builds only once the prefill has run. Usage alone completes nothing. An
+/// error, an annotation without data, a payload that is not a mapping, and
+/// every other response is interim: a disaggregation bootstrap announcement,
+/// which SGLang's prefill sends before its prefill runs, carries neither.
 pub(crate) fn response_output(
     annotated: &Annotated<PythonPayload>,
     py: Python<'_>,
@@ -596,11 +597,43 @@ pub(crate) fn response_output(
         && response
             .contains(pyo3::intern!(py, "disaggregated_params"))
             .unwrap_or(false);
+    let text = choices_output(response, py);
     ResponseOutput {
-        generated_token,
+        generated_token: generated_token || text.generated_token,
         completion: non_null_item(response, pyo3::intern!(py, "finish_reason")).is_some()
-            || prefill_handoff_usage,
+            || prefill_handoff_usage
+            || text.completion,
     }
+}
+
+/// What a text-mode chunk's `choices` carry, read as an OpenAI chat completion
+/// chunk's: generated text in any choice's non-empty string `delta.content`,
+/// and the completion in any choice's non-null `finish_reason`. A role-only or
+/// empty delta carries no generated text, and a part not of that shape carries
+/// nothing.
+fn choices_output(response: &Bound<'_, PyDict>, py: Python<'_>) -> ResponseOutput {
+    let mut output = ResponseOutput::INTERIM;
+    let Some(choices) = non_null_item(response, pyo3::intern!(py, "choices")) else {
+        return output;
+    };
+    let Ok(choices) = choices.downcast::<PyList>() else {
+        return output;
+    };
+    for choice in choices.iter() {
+        let Ok(choice) = choice.downcast::<PyDict>() else {
+            continue;
+        };
+        output.completion |= non_null_item(choice, pyo3::intern!(py, "finish_reason")).is_some();
+        output.generated_token |= non_null_item(choice, pyo3::intern!(py, "delta"))
+            .and_then(|delta| {
+                let delta = delta.downcast::<PyDict>().ok()?;
+                non_null_item(delta, pyo3::intern!(py, "content"))
+            })
+            .is_some_and(|content| {
+                content.downcast::<PyString>().is_ok() && content.len().is_ok_and(|len| len > 0)
+            });
+    }
+    output
 }
 
 /// The value at `key`, when present and not `None`.

@@ -580,14 +580,67 @@ SCRIPTS = [
         [(1, 1), (1, 0)],
     ),
     (
-        "decode: a payload without token ids is no token",
+        "text: a role-only delta, then its generated text, held open",
         WorkerType.Aggregated,
         [
+            {"choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}]},
             {"choices": [{"index": 0, "delta": {"content": "hi"}}]},
+        ],
+        [(1, 1), (1, 0)],
+    ),
+    (
+        "text: a choice's finish reason completes without a token, held open",
+        WorkerType.Decode,
+        [
+            {"choices": [], "usage": USAGE},
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": "length",
+                    }
+                ]
+            },
+        ],
+        [(1, 1), (1, 0)],
+    ),
+    (
+        "text: a later choice's generated text ends the wait, held open",
+        WorkerType.Aggregated,
+        [
+            {
+                "choices": [
+                    {"index": 0, "delta": {"content": ""}},
+                    {"index": 1, "delta": {"content": "hi"}},
+                ]
+            },
+        ],
+        [(1, 0)],
+    ),
+    (
+        "decode: a payload carrying no generated output is no token",
+        WorkerType.Aggregated,
+        [
+            {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {"choices": [], "usage": USAGE},
+            # A delta that is not a mapping, and content that is not a string.
+            {"choices": [{"index": 0, "delta": "hi"}]},
+            {"choices": [{"index": 0, "delta": {"content": ["hi"]}}]},
+            {},
             "a string",
             ["a", "list"],
         ],
-        [(1, 1), (1, 1), (1, 1)],
+        [(1, 1)] * 8,
     ),
     (
         "prefill: a bootstrap announcement, then a token-less completion, held open",
