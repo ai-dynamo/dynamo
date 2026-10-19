@@ -644,6 +644,7 @@ def test_registration_publishes_physical_mooncake_layout(
         "tp_lcm_size": 16,
         "should_split_heads": False,
         "extra_backend_tag": "tag",
+        "key_prefix": "tag_unused-model",
         "kv_events_endpoint": "ipc:///unused-mooncake-events",
         "hicache_object_layout": hicache_layout_envelope["hicache_object_layout"],
     }
