@@ -6,14 +6,21 @@ package controller
 import (
 	"crypto/sha256"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
+	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/golden"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 const upgradePodCliqueSetKind = "PodCliqueSet"
@@ -165,4 +172,61 @@ func TestUpgradeScenarioNamespaces(t *testing.T) {
 		seen[name] = true
 	}
 	require.Equal(t, "upgrade-history-1-6-0-sglang-aggregated-single-grove", upgradeScenarioNamespace(paths[1]))
+}
+
+// Hash expectations come from the frozen golden spec, never from candidate output.
+func upgradeLatestVariables(t *testing.T, path, version string) golden.Variables {
+	t.Helper()
+	variables := golden.Variables{"operator-version": version, "worker-hash": "pending", "pcs-spec-hash": "pending"}
+	objects, err := golden.ReadManifestsWithVariables(path, variables)
+	require.NoError(t, err)
+
+	// Bind the version-dependent worker identity using the reviewed DGD input.
+	found := false
+	for _, object := range objects {
+		if object.GetKind() != "DynamoGraphDeployment" {
+			continue
+		}
+		dgd := api.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+			Name: object.GetName(), Namespace: object.GetNamespace(),
+			Labels: object.GetLabels(), Annotations: object.GetAnnotations(),
+		}}
+		spec, _, err := unstructured.NestedMap(object.Object, "spec")
+		require.NoError(t, err)
+		require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(spec, &dgd.Spec))
+		variables["worker-hash"], err = dynamo.ComputeDGDWorkersSpecHash(&dgd)
+		require.NoError(t, err)
+		found = true
+	}
+	require.True(t, found, "latest golden must include its DGD")
+
+	// Rebind the golden PCS template before deriving its exact spec digest.
+	objects, err = golden.ReadManifestsWithVariables(path, variables)
+	require.NoError(t, err)
+	for _, object := range objects {
+		if object.GetKind() == upgradePodCliqueSetKind {
+			variables["pcs-spec-hash"], err = common.GetSpecHash(&object)
+			require.NoError(t, err)
+		}
+	}
+	return variables
+}
+
+func TestUpgradeLatestVersionVariables(t *testing.T) {
+	t.Log("Version-dependent identities remain exact bindings derived from the reviewed golden")
+	path := "testdata/upgrade/latest/sglang-1.5/output.yaml"
+	previous := upgradeLatestVariables(t, path, "1.6.0")
+	current := upgradeLatestVariables(t, path, "1.7.0")
+	require.Equal(t, "1.7.0", current["operator-version"])
+	require.NotEqual(t, previous["worker-hash"], current["worker-hash"])
+	require.NotEqual(t, previous["pcs-spec-hash"], current["pcs-spec-hash"])
+
+	t.Log("A reviewed runtime change affects both expected hashes without reading candidate output")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	updated := filepath.Join(t.TempDir(), "output.yaml")
+	require.NoError(t, os.WriteFile(updated, []byte(strings.ReplaceAll(string(data), "sglang-runtime:1.5.0", "sglang-runtime:1.5.1")), 0600))
+	changed := upgradeLatestVariables(t, updated, "1.7.0")
+	require.NotEqual(t, current["worker-hash"], changed["worker-hash"])
+	require.NotEqual(t, current["pcs-spec-hash"], changed["pcs-spec-hash"])
 }

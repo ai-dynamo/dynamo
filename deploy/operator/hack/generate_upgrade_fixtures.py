@@ -126,7 +126,11 @@ def golden_objects(objects, latest=False):
     for obj in objects:
         metadata = obj["metadata"]
         if latest:
-            bind_latest_version(obj)
+            bind_latest_variables(obj)
+            if obj["kind"] == "PodCliqueSet":
+                metadata["annotations"][
+                    "nvidia.com/last-applied-hash"
+                ] = "$var:pcs-spec-hash"
         metadata.pop("managedFields", None)
         for field in ("uid", "resourceVersion", "generation", "creationTimestamp"):
             if field in metadata:
@@ -142,16 +146,23 @@ def golden_objects(objects, latest=False):
     return objects
 
 
-def bind_latest_version(value):
+def bind_latest_variables(value):
     if isinstance(value, dict):
         for key, child in value.items():
             if key == "nvidia.com/dynamo-operator-origin-version":
                 value[key] = "$var:operator-version"
+            elif key in (
+                "nvidia.com/current-worker-hash-v2",
+                "nvidia.com/dynamo-worker-hash",
+            ):
+                value[key] = "$var:worker-hash"
+            elif key == "value" and value.get("name") == "DYN_NAMESPACE_WORKER_SUFFIX":
+                value[key] = "$var:worker-hash"
             else:
-                bind_latest_version(child)
+                bind_latest_variables(child)
     elif isinstance(value, list):
         for child in value:
-            bind_latest_version(child)
+            bind_latest_variables(child)
 
 
 def write_golden(path, objects, latest=False):

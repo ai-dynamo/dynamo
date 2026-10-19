@@ -4,7 +4,7 @@ apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   annotations:
-    nvidia.com/current-worker-hash-v2: 3df79a72
+    nvidia.com/current-worker-hash-v2: $var:worker-hash
     nvidia.com/dynamo-operator-origin-version: $var:operator-version
     nvidia.com/workload-provider: grove
   creationTimestamp: $ignore
@@ -93,7 +93,7 @@ metadata:
   labels:
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
-    nvidia.com/dynamo-worker-hash: 3df79a72
+    nvidia.com/dynamo-worker-hash: $var:worker-hash
   name: workers-sglangdecode
   namespace: upgrade-latest-sglang-1-5-custom
   ownerReferences:
@@ -137,7 +137,7 @@ metadata:
   labels:
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
-    nvidia.com/dynamo-worker-hash: 3df79a72
+    nvidia.com/dynamo-worker-hash: $var:worker-hash
   name: workers-sglangprefill
   namespace: upgrade-latest-sglang-1-5-custom
   ownerReferences:
@@ -199,7 +199,7 @@ kind: PodCliqueSet
 metadata:
   annotations:
     nvidia.com/last-applied-generation: '1'
-    nvidia.com/last-applied-hash: 97f26f940031b0b1d6794035e775be3db352e44b3c8db25a1678083987045e01
+    nvidia.com/last-applied-hash: $var:pcs-spec-hash
   creationTimestamp: $ignore
   generation: $ignore
   labels:
@@ -231,7 +231,7 @@ spec:
         nvidia.com/dynamo-graph-deployment-name: workers
         nvidia.com/dynamo-namespace: upgrade-latest-sglang-1-5-custom-workers
         nvidia.com/dynamo-sub-component-type: prefill
-        nvidia.com/dynamo-worker-hash: 3df79a72
+        nvidia.com/dynamo-worker-hash: $var:worker-hash
         nvidia.com/metrics-enabled: 'true'
         nvidia.com/selector: workers-sglangprefill
       name: sglangprefill
@@ -260,7 +260,7 @@ spec:
             - name: DYN_NAMESPACE
               value: upgrade-latest-sglang-1-5-custom-workers
             - name: DYN_NAMESPACE_WORKER_SUFFIX
-              value: 3df79a72
+              value: $var:worker-hash
             - name: DYN_PARENT_DGD_K8S_NAME
               value: workers
             - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -346,7 +346,7 @@ spec:
         nvidia.com/dynamo-graph-deployment-name: workers
         nvidia.com/dynamo-namespace: upgrade-latest-sglang-1-5-custom-workers
         nvidia.com/dynamo-sub-component-type: decode
-        nvidia.com/dynamo-worker-hash: 3df79a72
+        nvidia.com/dynamo-worker-hash: $var:worker-hash
         nvidia.com/metrics-enabled: 'true'
         nvidia.com/selector: workers-sglangdecode
       name: sglangdecode
@@ -375,7 +375,7 @@ spec:
             - name: DYN_NAMESPACE
               value: upgrade-latest-sglang-1-5-custom-workers
             - name: DYN_NAMESPACE_WORKER_SUFFIX
-              value: 3df79a72
+              value: $var:worker-hash
             - name: DYN_PARENT_DGD_K8S_NAME
               value: workers
             - name: DYN_PARENT_DGD_K8S_NAMESPACE

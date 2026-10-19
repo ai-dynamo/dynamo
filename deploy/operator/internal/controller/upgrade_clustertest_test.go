@@ -240,7 +240,12 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				require.Equal(t, version, dgd.Annotations["nvidia.com/dynamo-operator-origin-version"])
 			}
 			if !item.promote {
-				golden.MatchCapturedManifestsWithVariables(t, after, filepath.Join(filepath.Dir(input), "output.yaml"), golden.Variables{"operator-version": version})
+				path := filepath.Join(filepath.Dir(input), "output.yaml")
+				var variables golden.Variables
+				if !isHistory {
+					variables = upgradeLatestVariables(t, path, version)
+				}
+				golden.MatchCapturedManifestsWithVariables(t, after, path, variables)
 			}
 			if root := os.Getenv("DYNAMO_UPGRADE_CAPTURE_DIR"); root != "" && !t.Failed() {
 				path := filepath.Join(root, relative, "input.yaml")

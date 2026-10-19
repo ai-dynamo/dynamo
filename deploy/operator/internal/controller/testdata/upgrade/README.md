@@ -156,9 +156,11 @@ across releases; namespace collisions across all roles are rejected. Long
 namespace names include a digest to remain within Kubernetes' length limit.
 
 Latest origin annotations use `$var:operator-version`, bound exactly to the
-operator chart's `appVersion` by the golden matcher. The independent CREATE
-origin assertion remains active. All other lowering fields remain exact, and
-historical origins remain concrete. Accepting a golden never bypasses rollout
+operator chart's `appVersion` by the golden matcher. Worker hashes and the PCS
+spec digest also depend on origin: their exact bindings are computed from the
+reviewed golden DGD/PCS specifications with that version, never from candidate
+output. The independent CREATE origin assertion remains active. All other
+lowering fields remain exact, and historical origins and hashes remain concrete. Accepting a golden never bypasses rollout
 safety assertions.
 
 CI detects operator-affecting changes before running the suite. It retains test

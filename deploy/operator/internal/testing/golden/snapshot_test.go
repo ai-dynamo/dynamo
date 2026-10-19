@@ -15,7 +15,7 @@ import (
 func TestReadManifestsPreservesHistoricalScalars(t *testing.T) {
 	t.Log("Keep NIXL's literal n value and integer fields across unstructured snapshot loading")
 	path := filepath.Join(t.TempDir(), "input.yaml")
-	require.NoError(t, os.WriteFile(path, []byte("apiVersion: example.com/v1\nkind: Record\nmetadata:\n  name: old\nspec:\n  telemetry: n\n  replicas: 2\n  historical: 'true'\n"), 0600))
+	require.NoError(t, os.WriteFile(path, []byte("apiVersion: example.com/v1\nkind: Record\nmetadata:\n  name: old\nspec:\n  telemetry: n\n  literal: '$var:literal'\n  replicas: 2\n  historical: 'true'\n"), 0600))
 	objects, err := ReadManifests(path)
 	require.NoError(t, err)
 	require.Len(t, objects, 1)
@@ -23,6 +23,9 @@ func TestReadManifestsPreservesHistoricalScalars(t *testing.T) {
 	value, _, err := unstructured.NestedString(object.Object, "spec", "telemetry")
 	require.NoError(t, err)
 	require.Equal(t, "n", value)
+	literal, _, err := unstructured.NestedString(object.Object, "spec", "literal")
+	require.NoError(t, err)
+	require.Equal(t, "$var:literal", literal, "historical snapshot reads must not interpret golden directives")
 	replicas, _, err := unstructured.NestedInt64(object.Object, "spec", "replicas")
 	require.NoError(t, err)
 	require.EqualValues(t, 2, replicas)

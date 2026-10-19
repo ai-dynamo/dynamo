@@ -87,6 +87,22 @@ func ReadManifests(path string) ([]unstructured.Unstructured, error) {
 	if err != nil {
 		return nil, err
 	}
+	return manifestObjects(documents)
+}
+
+// ReadManifestsWithVariables resolves exact golden bindings while preserving unknown API fields.
+func ReadManifestsWithVariables(path string, variables Variables) ([]unstructured.Unstructured, error) {
+	documents, err := readDocuments(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := resolveVariables(documents, variables); err != nil {
+		return nil, err
+	}
+	return manifestObjects(documents)
+}
+
+func manifestObjects(documents []document) ([]unstructured.Unstructured, error) {
 	objects := make([]unstructured.Unstructured, len(documents))
 	for i := range documents {
 		// Decode once with the golden YAML parser. Re-parsing YAML 1.2 strings
