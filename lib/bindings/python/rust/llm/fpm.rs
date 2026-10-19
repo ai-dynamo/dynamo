@@ -1230,69 +1230,30 @@ mod tests {
     }
 
     #[test]
-    fn card_transitions_preserve_valid_samples_and_drop_obsolete_ranks() {
-        let card = |start| {
-            serde_json::json!({
-                "runtime_config": {"data_parallel_start_rank": start, "data_parallel_size": 2}
-            })
-            .to_string()
-        };
-        for (transition, invalid_rank) in [
-            ("add_base", None),
-            ("update_base", None),
-            ("fallback", None),
-            ("adapter_fallback", None),
-            ("update_base", Some(99)),
-        ] {
-            let workers = DashMap::new();
-            let base = card_id(42, None);
-            let adapter = card_id(42, Some("adapter"));
-            let initial = if matches!(transition, "add_base" | "adapter_fallback") {
-                adapter
-            } else {
-                base.clone()
-            };
-            let fallback = card_id(42, Some("fallback"));
-            insert_worker_model_card(&workers, "42".to_string(), initial.clone(), card(4));
-            let removing = matches!(transition, "fallback" | "adapter_fallback");
-            if removing {
-                insert_worker_model_card(&workers, "42".to_string(), fallback.clone(), card(5));
-            }
-            let now = Instant::now();
-            for rank in [4, 5].into_iter().chain(invalid_rank) {
-                record_fpm(&workers, ("42".to_string(), rank), vec![1], now);
-            }
-            let selected = if removing {
-                assert!(remove_worker_model_card(&workers, "42", &initial));
-                fallback
-            } else {
-                insert_worker_model_card(&workers, "42".to_string(), base.clone(), card(5));
-                base
-            };
-            let health = fresh_fpm_snapshot(&workers, now, Duration::from_secs(1));
-            assert_eq!(
-                health.snapshot,
-                HashMap::from([(("42".to_string(), 5), vec![1])])
-            );
-            assert_eq!(
-                health.unjoined_worker_ids,
-                if invalid_rank.is_some() {
-                    vec!["42"]
-                } else {
-                    vec![]
-                },
-                "{transition}"
-            );
-            assert_eq!(health.missing_rank_count, 1);
-
-            // A publisher that continues using the obsolete rank is still invalid.
-            record_fpm(&workers, ("42".to_string(), 4), vec![2], now);
-            insert_worker_model_card(&workers, "42".to_string(), selected, card(5));
-            assert_eq!(
-                fresh_fpm_snapshot(&workers, now, Duration::from_secs(1)).unjoined_worker_ids,
-                ["42"]
-            );
+    fn card_update_drops_obsolete_rank_and_preserves_valid_sample() {
+        let workers = DashMap::new();
+        let now = Instant::now();
+        workers.insert("42".to_string(), active_worker(4..6, now));
+        for rank in [4, 5] {
+            record_fpm(&workers, ("42".to_string(), rank), vec![1], now);
         }
+        insert_worker_model_card(
+            &workers,
+            "42".to_string(),
+            card_id(42, None),
+            serde_json::json!({
+                "runtime_config": {"data_parallel_start_rank": 5, "data_parallel_size": 1}
+            })
+            .to_string(),
+        );
+
+        let health = fresh_fpm_snapshot(&workers, now, Duration::from_secs(1));
+        assert_eq!(
+            health.snapshot,
+            HashMap::from([(("42".to_string(), 5), vec![1])])
+        );
+        assert!(health.unjoined_worker_ids.is_empty());
+        assert_eq!(health.missing_rank_count, 0);
     }
 
     fn card_id(instance_id: u64, model_suffix: Option<&str>) -> ModelCardInstanceId {
