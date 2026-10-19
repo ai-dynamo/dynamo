@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import warnings
+import sys
 from pathlib import Path
 
 import pytest
@@ -87,89 +87,106 @@ def _write_report(
     output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
 
+def _stderr_line(message: str) -> None:
+    try:
+        print(message.replace("\n", " "), file=sys.stderr)
+    except Exception:
+        pass
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    raw = os.environ.get(SELECTION_ENV)
-    if not raw or os.environ.get(CHILD_ENV) == "1":
-        return
-
-    framework = os.environ.get("DYNAMO_TEST_FRAMEWORK", "")
-    test_type = os.environ.get("TEST_TYPE", "unknown")
-    pytest_marks = os.environ.get("PYTEST_MARKS", "")
     original = list(items)
-    reasons: list[str] = []
-    mode = "selective" if os.environ.get(MODE_ENV) == "selective" else "shadow"
-    selection_decision = "full"
-    feature_markers: list[str] = []
-    changed_test_files: list[str] = []
-    selected_markers: list[str] = []
-    invalid_selection = False
-
     try:
+        raw = os.environ.get(SELECTION_ENV)
+        if not raw or os.environ.get(CHILD_ENV) == "1":
+            return
+
+        framework = os.environ.get("DYNAMO_TEST_FRAMEWORK", "")
+        test_type = os.environ.get("TEST_TYPE", "unknown")
+        pytest_marks = os.environ.get("PYTEST_MARKS", "")
+        mode = "selective" if os.environ.get(MODE_ENV) == "selective" else "shadow"
+        reasons: list[str] = []
+        selection_decision = "full"
+        feature_markers: list[str] = []
+        changed_test_files: list[str] = []
+        selected_markers: list[str] = []
+        diagnostic: str | None = None
+
         if not framework:
             raise ValueError("DYNAMO_TEST_FRAMEWORK is not set")
-        decision, feature_markers, changed_test_files = _framework_selection(framework)
-        selection_decision = decision["decision"]
-        selected_markers = decision["markers"]
-        reasons = decision["reasons"]
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-        reasons = [f"invalid-selection: {exc}"]
-        invalid_selection = True
-        warnings.warn(
-            f"GPU test selection unavailable; keeping all tests: {exc}",
-            pytest.PytestWarning,
-        )
-
-    if selection_decision == "full":
-        if not reasons:
-            reasons = ["full-selection"]
-        if not invalid_selection:
-            warnings.warn(
-                f"GPU test selection is full for {framework or 'unknown framework'}: "
-                + ", ".join(reasons),
-                pytest.PytestWarning,
+        try:
+            decision, feature_markers, changed_test_files = _framework_selection(
+                framework
             )
-        would_run = original
-        would_skip: list[pytest.Item] = []
-    else:
-        changed_files = set(changed_test_files)
-        feature_names = set(feature_markers)
-        selected_names = set(selected_markers)
-        would_run = []
-        would_skip = []
-        for item in original:
-            item_markers = {marker.name for marker in item.iter_markers()}
-            keep = (
-                item.get_closest_marker("smoke") is not None
-                or bool(item_markers.intersection(selected_names))
-                or _relative_test_path(config, item) in changed_files
-                or not item_markers.intersection(feature_names)
-            )
-            (would_run if keep else would_skip).append(item)
+            selection_decision = decision["decision"]
+            selected_markers = decision["markers"]
+            reasons = decision["reasons"]
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            reasons = [f"invalid-selection: {exc}"]
+            diagnostic = f"GPU test selection unavailable; keeping all tests: {exc}"
 
-    _write_report(
-        config,
-        framework,
-        test_type,
-        pytest_marks,
-        selection_decision,
-        reasons,
-        original,
-        would_run,
-        would_skip,
-    )
-    if mode == "shadow":
-        print(
-            f"GPU test selection shadow report ({framework or 'unknown'}, {test_type}): "
-            f"collected={len(original)}, would_run={len(would_run)}, "
-            f"would_skip={len(would_skip)}"
+        if selection_decision == "full":
+            if not reasons:
+                reasons = ["full-selection"]
+            if diagnostic is None:
+                diagnostic = (
+                    f"GPU test selection is full for "
+                    f"{framework or 'unknown framework'}: {', '.join(reasons)}"
+                )
+            would_run = original
+            would_skip: list[pytest.Item] = []
+        else:
+            changed_files = set(changed_test_files)
+            feature_names = set(feature_markers)
+            selected_names = set(selected_markers)
+            would_run = []
+            would_skip = []
+            for item in original:
+                item_markers = {marker.name for marker in item.iter_markers()}
+                keep = (
+                    item.get_closest_marker("smoke") is not None
+                    or bool(item_markers.intersection(selected_names))
+                    or _relative_test_path(config, item) in changed_files
+                    or not item_markers.intersection(feature_names)
+                )
+                (would_run if keep else would_skip).append(item)
+
+        _write_report(
+            config,
+            framework,
+            test_type,
+            pytest_marks,
+            selection_decision,
+            reasons,
+            original,
+            would_run,
+            would_skip,
         )
-        for item in would_skip:
-            print(f"  would skip: {item.nodeid}")
-        return
+        if diagnostic:
+            _stderr_line(diagnostic)
+        if mode == "shadow":
+            print(
+                f"GPU test selection shadow report ({framework or 'unknown'}, "
+                f"{test_type}): collected={len(original)}, "
+                f"would_run={len(would_run)}, would_skip={len(would_skip)}"
+            )
+            for item in would_skip:
+                print(f"  would skip: {item.nodeid}")
+            return
 
-    if selection_decision == "selective" and would_skip:
-        config.hook.pytest_deselected(items=would_skip)
-        items[:] = would_run
+        if selection_decision == "selective" and would_skip:
+            config.hook.pytest_deselected(items=would_skip)
+            items[:] = would_run
+    except Exception as exc:
+        try:
+            items[:] = original
+        except Exception as restore_exc:
+            _stderr_line(
+                "GPU test selection failed open; keeping all tests: "
+                f"{exc}; restoring items also failed: {restore_exc}"
+            )
+        else:
+            _stderr_line(f"GPU test selection failed open; keeping all tests: {exc}")
