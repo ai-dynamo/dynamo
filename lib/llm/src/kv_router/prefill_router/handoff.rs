@@ -6,7 +6,7 @@
 use std::{future::Future, sync::Arc};
 
 use dynamo_runtime::{
-    error::{ErrorType, match_error_chain},
+    error::{DynamoError, ErrorClass},
     pipeline::{AsyncEngineContext, AsyncEngineContextProvider, ManyOut, ResponseStream},
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -40,15 +40,21 @@ fn output_item(output: PrefillOutput) -> Option<Annotated<LLMEngineOutput>> {
 }
 
 impl PrefillTask {
+    /// Observe completion without dropping staged KV on client disconnect.
     pub(super) fn spawn(
         future: impl Future<Output = Result<PrefillOutput, PrefillError>> + Send + 'static,
+        prefill_context: Arc<dyn AsyncEngineContext>,
     ) -> Self {
         Self(tokio::spawn(
             async move {
                 let result = future.await;
                 if let Err(error) = &result {
-                    // Keep evidence even if the client has already disconnected.
-                    tracing::warn!(%error, "Prefill background task failed");
+                    if matches!(error, PrefillError::Cancelled) && prefill_context.is_stopped() {
+                        tracing::debug!(%error, "Prefill background task cancelled");
+                    } else {
+                        // Keep genuine failures visible even after cancellation.
+                        tracing::warn!(%error, "Prefill background task failed");
+                    }
                 }
                 result
             }
@@ -56,6 +62,7 @@ impl PrefillTask {
         ))
     }
 
+    /// Return the prefill result, including failures from the observer task.
     pub(super) async fn wait(self) -> Result<PrefillOutput, PrefillError> {
         self.0.await.map_err(|error| {
             PrefillError::PrefillError(
@@ -65,6 +72,7 @@ impl PrefillTask {
         })?
     }
 
+    /// Reject backend failures and cancellation before accepting handoff completion.
     pub(super) fn check_output(output: &Annotated<LLMEngineOutput>) -> Result<(), PrefillError> {
         if let Some(error) = output.err() {
             return Err(PrefillError::PrefillError(
@@ -81,10 +89,7 @@ impl PrefillTask {
                 format!("Prefill backend failed: {message}"),
                 None,
             )),
-            Some(FinishReason::Cancelled) => Err(PrefillError::PrefillError(
-                "Prefill backend cancelled before completing the handoff".to_string(),
-                None,
-            )),
+            Some(FinishReason::Cancelled) => Err(PrefillError::Cancelled),
             _ => Ok(()),
         }
     }
@@ -130,10 +135,11 @@ impl PrefillTask {
         let stream_context = context.clone();
         let stream = async_stream::stream! {
             if output == PrefillNeed::BeforeFirst {
-                // An admission error may be the first decode stream item. Waiting
-                // only for prefill here would delay rejection until it finishes.
-                // Buffer one ordinary item to preserve prefill-output ordering.
+                // Admission refusals are the first decode stream item on this path.
+                // Observe it while prefill is pending; buffer only one ordinary item
+                // to preserve BeforeFirst ordering and backpressure.
                 let mut first_decode_output = None;
+                let mut decode_ended = false;
                 let prefill_result = tokio::select! {
                     biased;
                     result = &mut completion => result,
@@ -144,6 +150,7 @@ impl PrefillTask {
                             yield item.unwrap();
                             return;
                         }
+                        decode_ended = item.is_none();
                         first_decode_output = item;
                         completion.as_mut().await
                     }
@@ -163,6 +170,11 @@ impl PrefillTask {
                 }
                 if let Some(output) = first_decode_output {
                     yield output;
+                }
+                // Prefill metadata/errors still need handling after decode EOF,
+                // but an ended stream must not be polled again.
+                if decode_ended {
+                    return;
                 }
                 while let Some(output) = response.next().await {
                     yield output;
@@ -240,23 +252,28 @@ fn cancel_prefill_on_decode_rejection(
     error: &(dyn std::error::Error + 'static),
     prefill_context: &dyn AsyncEngineContext,
 ) -> bool {
-    if !match_error_chain(
-        error,
-        &[ErrorType::WorkerOverloaded, ErrorType::ResourceExhausted],
-        &[],
-    ) {
-        return false;
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        if let Some(error) = cause.downcast_ref::<DynamoError>()
+            && error.class() == ErrorClass::CapacityExhausted
+        {
+            tracing::debug!(request_id = %prefill_context.id(), %error,
+                "Cancelling remote prefill after decode admission rejection");
+            prefill_context.stop_generating();
+            return true;
+        }
+        current = cause.source();
     }
-    tracing::debug!(request_id = %prefill_context.id(), %error,
-        "Cancelling remote prefill after decode admission rejection");
-    prefill_context.stop_generating();
-    true
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_runtime::pipeline::context::Controller;
+    use dynamo_runtime::{
+        error::{BackendError, ErrorType},
+        pipeline::context::Controller,
+    };
     use futures::{FutureExt, stream};
     use tokio::sync::oneshot;
 
@@ -265,7 +282,10 @@ mod tests {
         PrefillTask,
     ) {
         let (tx, rx) = oneshot::channel();
-        let task = PrefillTask::spawn(async move { rx.await.unwrap() });
+        let task = PrefillTask::spawn(
+            async move { rx.await.unwrap() },
+            Arc::new(Controller::default()),
+        );
         (tx, task)
     }
 
@@ -459,11 +479,14 @@ mod tests {
     async fn disconnected_client_does_not_drop_prefill_transfer() {
         let (release_tx, release_rx) = oneshot::channel();
         let (finished_tx, finished_rx) = oneshot::channel();
-        let task = PrefillTask::spawn(async move {
-            release_rx.await.unwrap();
-            finished_tx.send(()).unwrap();
-            Ok(None)
-        });
+        let task = PrefillTask::spawn(
+            async move {
+                release_rx.await.unwrap();
+                finished_tx.send(()).unwrap();
+                Ok(None)
+            },
+            Arc::new(Controller::default()),
+        );
         let context = Arc::new(Controller::default());
         let decode: ManyOut<Annotated<LLMEngineOutput>> =
             ResponseStream::new(Box::pin(stream::pending()), context.clone());
@@ -592,25 +615,81 @@ mod tests {
         );
     }
 
-    // Regression: a rejected decode leg must stop its independent prefill leg.
+    /// Preserve prefill metadata and failures without polling an ended decode stream again.
+    #[tokio::test]
+    async fn before_first_does_not_repoll_ended_decode() {
+        for result in [
+            Ok(None),
+            Ok(Some(serde_json::json!({"prefill": true}))),
+            failure(),
+        ] {
+            let expected = result.as_ref().ok().cloned().flatten();
+            let failed = result.is_err();
+            let (tx, task) = pending_prefill();
+            let context = Arc::new(Controller::default());
+            let mut ended = false;
+            let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
+                Box::pin(stream::poll_fn(move |_| {
+                    assert!(!ended, "decode stream polled after returning None");
+                    ended = true;
+                    std::task::Poll::Ready(None)
+                })),
+                context.clone(),
+            );
+            let mut response = task
+                .forward_decode(
+                    async { Ok(decode) },
+                    context.clone(),
+                    PrefillNeed::BeforeFirst,
+                    Arc::new(Controller::default()),
+                )
+                .await
+                .unwrap();
+            assert!(response.next().now_or_never().is_none());
+            tx.send(result).unwrap();
+            let outputs = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                response.collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap();
+            if failed {
+                assert_eq!(outputs.len(), 1);
+                assert!(outputs[0].err().is_some());
+                assert!(context.is_stopped());
+            } else if let Some(expected) = expected {
+                assert_eq!(outputs.len(), 1);
+                let output = outputs.into_iter().next().unwrap();
+                assert_eq!(output.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
+                assert_eq!(output.data.unwrap().engine_data, Some(expected));
+            } else {
+                assert!(outputs.is_empty());
+            }
+        }
+    }
+
     async fn assert_dispatch_rejection_cancels_prefill(output: PrefillNeed, error_type: ErrorType) {
         let case = format!("output={output:?}, error={error_type:?}");
         let prefill_context = Arc::new(Controller::default());
         let task_context = prefill_context.clone();
         let (cleaned_tx, cleaned_rx) = oneshot::channel();
-        let task = PrefillTask::spawn(async move {
-            task_context.stopped().await;
-            let _ = cleaned_tx.send(());
-            Ok(None)
-        });
+        let task = PrefillTask::spawn(
+            async move {
+                task_context.stopped().await;
+                let _ = cleaned_tx.send(());
+                Ok(None)
+            },
+            prefill_context.clone(),
+        );
         let error = dynamo_runtime::error::DynamoError::builder()
             .error_type(error_type)
             .message("decode admission rejected")
             .build();
+        let error = anyhow::Error::new(error).context("decode admission rejected");
         let request_context = Arc::new(Controller::default());
         let result = task
             .forward_decode(
-                async { Err(error.into()) },
+                async { Err(error) },
                 request_context,
                 output,
                 prefill_context.clone(),
@@ -637,11 +716,14 @@ mod tests {
         let prefill_context = Arc::new(Controller::default());
         let task_context = prefill_context.clone();
         let (cleaned_tx, cleaned_rx) = oneshot::channel();
-        let task = PrefillTask::spawn(async move {
-            task_context.stopped().await;
-            let _ = cleaned_tx.send(());
-            Ok(None)
-        });
+        let task = PrefillTask::spawn(
+            async move {
+                task_context.stopped().await;
+                let _ = cleaned_tx.send(());
+                Ok(None)
+            },
+            prefill_context.clone(),
+        );
         let request_context = Arc::new(Controller::default());
         let error = dynamo_runtime::error::DynamoError::builder()
             .error_type(error_type)
@@ -713,7 +795,12 @@ mod tests {
             PrefillNeed::BeforeLast,
             PrefillNeed::BeforeFirst,
         ] {
-            for error_type in [ErrorType::WorkerOverloaded, ErrorType::ResourceExhausted] {
+            for error_type in [
+                ErrorType::WorkerOverloaded,
+                ErrorType::ResourceExhausted,
+                ErrorType::CapacityExhausted,
+                ErrorType::Backend(BackendError::WorkerOverloaded),
+            ] {
                 assert_dispatch_rejection_cancels_prefill(output, error_type).await;
             }
         }
@@ -726,7 +813,12 @@ mod tests {
             PrefillNeed::BeforeLast,
             PrefillNeed::BeforeFirst,
         ] {
-            for error_type in [ErrorType::WorkerOverloaded, ErrorType::ResourceExhausted] {
+            for error_type in [
+                ErrorType::WorkerOverloaded,
+                ErrorType::ResourceExhausted,
+                ErrorType::CapacityExhausted,
+                ErrorType::Backend(BackendError::WorkerOverloaded),
+            ] {
                 assert_stream_rejection_cancels_prefill(output, error_type).await;
             }
         }

@@ -90,6 +90,9 @@ pub enum PrefillError {
         #[source] Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
     ),
 
+    #[error("Prefill execution failed: Prefill backend cancelled before completing the handoff")]
+    Cancelled,
+
     #[error("No disaggregated params in prefill response: {0}")]
     NoDisaggregatedParams(String),
 }
