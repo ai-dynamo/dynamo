@@ -63,7 +63,10 @@ use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 
-use crate::http::service::metrics::generate_log_buckets;
+use crate::http::service::metrics::{
+    generate_log_buckets, input_sequence_buckets, inter_token_latency_buckets,
+    output_sequence_buckets, system_env, time_to_first_token_buckets,
+};
 use crate::protocols::common::timing::RequestPhase;
 
 mod worker_registered;
@@ -1107,7 +1110,7 @@ impl RouterRequestMetrics {
                 &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
                 "Time to first token observed at the router",
                 extra_labels,
-                Some(generate_log_buckets(0.001, 480.0, 18)),
+                Some(time_to_first_token_buckets(&system_env)),
             )
             .expect("failed to create router_time_to_first_token_seconds");
         let inter_token_latency_seconds = metrics
@@ -1115,7 +1118,7 @@ impl RouterRequestMetrics {
                 &router_metric(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
                 "Average inter-token latency observed at the router",
                 extra_labels,
-                Some(generate_log_buckets(0.001, 2.0, 13)),
+                Some(inter_token_latency_buckets(&system_env)),
             )
             .expect("failed to create router_inter_token_latency_seconds");
         let input_sequence_tokens = metrics
@@ -1124,7 +1127,7 @@ impl RouterRequestMetrics {
                 "Input sequence length in tokens observed at the router",
                 &[KV_PHASE_LABEL, labels::MODEL],
                 extra_labels,
-                Some(generate_log_buckets(50.0, 128000.0, 12)),
+                Some(input_sequence_buckets(&system_env)),
             )
             .expect("failed to create router_input_sequence_tokens");
         let output_sequence_tokens = metrics
@@ -1132,7 +1135,7 @@ impl RouterRequestMetrics {
                 &router_metric(frontend_service::OUTPUT_SEQUENCE_TOKENS),
                 "Output sequence length in tokens observed at the router",
                 extra_labels,
-                Some(generate_log_buckets(50.0, 32000.0, 10)),
+                Some(output_sequence_buckets(&system_env)),
             )
             .expect("failed to create router_output_sequence_tokens");
         let kv_hit_rate = metrics
@@ -1585,6 +1588,52 @@ mod tests {
         let mut buffer = Vec::new();
         encoder.encode(&registry.gather(), &mut buffer).unwrap();
         String::from_utf8(buffer).unwrap()
+    }
+
+    #[test]
+    fn router_histograms_use_the_frontend_bucket_settings() {
+        // These four copy frontend histograms. They used to hardcode the frontend
+        // defaults, so the DYN_METRICS_* overrides never reached them and the ITL copy
+        // kept a 2s ceiling after the frontend raised its own.
+        let registry = dynamo_runtime::MetricsRegistry::new();
+        let metrics = RouterRequestMetrics::for_test(&registry);
+        metrics.time_to_first_token_seconds.observe(1.0);
+        metrics.inter_token_latency_seconds.observe(0.01);
+        metrics
+            .input_sequence_tokens
+            .with_label_values(&["prefill", "m"])
+            .observe(100.0);
+        metrics.output_sequence_tokens.observe(100.0);
+
+        let families = registry.get_prometheus_registry().gather();
+        let bounds = |name: &str| -> Vec<f64> {
+            families
+                .iter()
+                .find(|family| family.name() == format!("dynamo_component_router_{name}"))
+                .unwrap()
+                .get_metric()[0]
+                .get_histogram()
+                .get_bucket()
+                .iter()
+                .map(|bucket| bucket.upper_bound())
+                .collect()
+        };
+        assert_eq!(
+            bounds("time_to_first_token_seconds"),
+            time_to_first_token_buckets(&system_env)
+        );
+        assert_eq!(
+            bounds("inter_token_latency_seconds"),
+            inter_token_latency_buckets(&system_env)
+        );
+        assert_eq!(
+            bounds("input_sequence_tokens"),
+            input_sequence_buckets(&system_env)
+        );
+        assert_eq!(
+            bounds("output_sequence_tokens"),
+            output_sequence_buckets(&system_env)
+        );
     }
 
     #[test]
