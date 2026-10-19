@@ -945,6 +945,13 @@ navigation:
               - page: Solar Open2 250B
                 path: pages/recipes/model-recipes/solar-open2-250b.mdx
                 slug: solar-open2-250b
+          - section: Reflection
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Beam-1.0-501B-A23B
+                path: pages/recipes/model-recipes/beam-1-0-501b.mdx
+                slug: beam-1-0-501b
 
       # ==================== Kubernetes Templates ====================
       - section: Kubernetes Templates
