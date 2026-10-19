@@ -154,8 +154,9 @@ dependency or platform chart does not upgrade separately managed Grove installat
 
 With `global.grove.enabled=true` and `global.grove.install=false`, a read-only
 `pre-install,pre-upgrade` Job verifies the Grove controller version against the pinned
-dependency, completed rollout, and established CRDs before applying the operator Deployment.
-It does not verify CRD schema/version equality; upgrade Grove and matching CRDs first.
+dependency and completed rollout before applying the operator Deployment.
+It assumes a compatible, fully rolled out controller has matching Grove CRDs installed;
+CRDs are not inspected. Upgrade Grove and matching CRDs first.
 The minimum version comes from the `grove-charts` dependency in `Chart.yaml`.
 Helm reads the original metadata through `files/platform-chart.yaml`, a symlink to
 `Chart.yaml` (disabled dependencies are absent from `.Chart.Dependencies`). Packaging

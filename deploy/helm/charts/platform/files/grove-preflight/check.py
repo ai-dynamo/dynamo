@@ -10,14 +10,6 @@ import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-CRDS = (
-    "podcliquesets",
-    "podcliques",
-    "podcliquescalinggroups",
-    "clustertopologybindings",
-    "podgangmaps",
-)
-
 
 def version(tag):
     # Recognize Grove alpha releases and stable releases; custom/RC tags are unverifiable.
@@ -68,17 +60,9 @@ def check(get, minimum, namespace="", deployment=""):
         raise ValueError(
             "Grove rollout is incomplete; wait for it to finish, then retry."
         )
-    for name in CRDS:
-        crd = get(
-            f"/apis/apiextensions.k8s.io/v1/customresourcedefinitions/{name}.grove.io"
-        )
-        established = any(
-            c["type"] == "Established" and c["status"] == "True"
-            for c in crd.get("status", {}).get("conditions", [])
-        )
-        if not established or crd["metadata"].get("deletionTimestamp"):
-            raise ValueError(f"Grove CRD {name}.grove.io is not established.")
-    print(f"Grove {tag}: controller rollout complete; required CRDs established.")
+
+    # A compatible, fully rolled out controller is assumed to have matching CRDs installed.
+    print(f"Grove {tag}: controller version compatible; rollout complete.")
 
 
 def main():

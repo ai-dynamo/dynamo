@@ -106,8 +106,12 @@ tests:
     asserts:
       - equal: {path: 'metadata.annotations["helm.sh/hook-weight"]', value: '-20'}
       - equal: {path: 'metadata.annotations["helm.sh/hook-delete-policy"]', value: before-hook-creation}
-      - equal: {path: 'rules[0].verbs', value: [get, list]}
-      - equal: {path: 'rules[1].verbs', value: [get]}
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [apps]
+              resources: [deployments]
+              verbs: [get, list]
   - it: requires a namespace for explicit controller selection
     set: {global.grove.enabled: true, dynamo-operator.grovePreflight.deploymentName: grove-operator}
     asserts:

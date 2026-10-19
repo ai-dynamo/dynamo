@@ -50,17 +50,7 @@ class GrovePreflightTest(unittest.TestCase):
                 observedGeneration=1, replicas=1, updatedReplicas=1, availableReplicas=1
             ),
         }
-        self.crd = {
-            "metadata": {},
-            "status": {"conditions": [{"type": "Established", "status": "True"}]},
-        }
-        self.get = Mock(
-            side_effect=lambda path: (
-                self.crd
-                if "customresourcedefinitions" in path
-                else {"items": [self.controller]}
-            )
-        )
+        self.get = Mock(return_value={"items": [self.controller]})
 
     def test_accepts_release_and_rejects_old_or_unverifiable_images(self):
         for tag in (
@@ -97,20 +87,15 @@ class GrovePreflightTest(unittest.TestCase):
                 preflight.check(self.get, MINIMUM)
             self.controller["status"][field] = 1
 
-    def test_reads_each_crd_and_blocks_unestablished_crds_or_api_errors(self):
+    def test_reads_only_deployments_and_blocks_api_errors(self):
         preflight.check(self.get, MINIMUM)
-        self.assertEqual(len(self.get.call_args_list), 1 + len(preflight.CRDS))
-        self.crd["status"]["conditions"] = []
-        with self.assertRaisesRegex(ValueError, "not established"):
-            preflight.check(self.get, MINIMUM)
+        self.get.assert_called_once_with("/apis/apps/v1/deployments")
         self.get.side_effect = PermissionError("HTTP 403")
         with self.assertRaises(PermissionError):
             preflight.check(self.get, MINIMUM)
 
     def test_explicit_controller_reference(self):
-        self.get.side_effect = lambda path: (
-            self.crd if "customresourcedefinitions" in path else self.controller
-        )
+        self.get.return_value = self.controller
         preflight.check(self.get, MINIMUM, "grove-system", "grove-operator")
         self.assertEqual(
             self.get.call_args_list[0].args,
