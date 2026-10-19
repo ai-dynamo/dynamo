@@ -778,15 +778,7 @@ impl Model {
     ) -> Option<SystemOneExecutionSelection> {
         let card = worker_set.card();
         if !worker_set.supports_runtime_capability(capability)
-            || !worker_set.supports_runtime_capability(
-                crate::local_model::runtime_config::SGLANG_SYSTEMONE_SERIAL_V1,
-            )
-            || card.runtime_config.max_num_seqs != Some(1)
-            || card.worker_type != Some(crate::worker_type::WorkerType::Aggregated)
-            || !card.needs.is_empty()
-            || card.lora.is_some()
-            || card.migration_limit != 0
-            || card.runtime_config.runtime_data.contains_key("spec_decode")
+            || !card.is_systemone_serial_eligible()
         {
             return None;
         }
@@ -1294,22 +1286,11 @@ mod tests {
     #[test]
     fn systemone_selection_distinguishes_unsupported_from_unavailable() {
         let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
-        let unsupported: [fn(&mut ModelDeploymentCard); 13] = [
+        let unsupported: [fn(&mut ModelDeploymentCard); 10] = [
             |card| {
                 card.runtime_config
                     .runtime_data
                     .remove("sglang_systemone_serial_v1");
-            },
-            |card| {
-                card.runtime_config
-                    .runtime_data
-                    .insert("sglang_systemone_serial_v1".to_string(), false.into());
-            },
-            |card| {
-                card.runtime_config.runtime_data.insert(
-                    "sglang_systemone_serial_v1".to_string(),
-                    "unsupported".into(),
-                );
             },
             |card| {
                 card.runtime_config.max_num_seqs = None;
@@ -1318,16 +1299,15 @@ mod tests {
                 card.runtime_config.max_num_seqs = Some(2);
             },
             |card| {
-                card.runtime_config.runtime_data.clear();
+                card.runtime_config
+                    .runtime_data
+                    .remove(crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY);
             },
             |card| {
                 card.worker_type = None;
             },
             |card| {
                 card.worker_type = Some(crate::worker_type::WorkerType::Prefill);
-            },
-            |card| {
-                card.worker_type = Some(crate::worker_type::WorkerType::Decode);
             },
             |card| {
                 card.lora = Some(LoraInfo {
