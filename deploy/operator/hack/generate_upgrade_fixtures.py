@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Validate rolling history or capture the current operator before its minor bump."""
+
 import argparse
 import hashlib
 import json
@@ -38,19 +39,42 @@ def validate_versions(current, reconciled, previous=None):
     old_major, old_number = minor(reconciled)
     if major != old_major or number - old_number not in (0, 1):
         raise ValueError(
-            "Revert the premature appVersion bump, run regen-upgrade-fixtures with the previous operator, commit the history, then reapply the bump"
+            "Revert the premature appVersion bump, run clustertest-upgrade-fixtures-regen with the previous operator, commit the history, then reapply the bump"
         )
-    if previous and minor(previous) != minor(current):
-        if minor(current) != (minor(previous)[0], minor(previous)[1] + 1) or minor(
-            reconciled
-        ) != minor(previous):
-            raise ValueError(
-                "A minor bump requires history captured by the immediately previous operator; skipped-minor and major bumps are unsupported"
-            )
+    if (
+        previous
+        and minor(previous) != minor(current)
+        and (
+            minor(current) != (minor(previous)[0], minor(previous)[1] + 1)
+            or minor(reconciled) != minor(previous)
+        )
+    ):
+        raise ValueError(
+            "A minor bump requires history captured by the immediately previous operator; revert the bump and run clustertest-upgrade-fixtures-regen first. Skipped-minor and major bumps are unsupported"
+        )
 
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def fixture_inputs(role):
+    return sorted((FIXTURES / role).rglob("input.yaml"))
+
+
+def require_complete_matrix():
+    required = set(
+        json.loads((FIXTURES / "required-matrix.json").read_text())["requiredScenarios"]
+    )
+    available = {
+        p.parent.relative_to(FIXTURES / "latest").as_posix()
+        for p in fixture_inputs("latest")
+    }
+    missing = required - available
+    if missing:
+        raise ValueError(
+            "Incomplete release matrix; missing: " + ", ".join(sorted(missing))
+        )
 
 
 def check(base=None):
@@ -64,24 +88,27 @@ def check(base=None):
             )
         )
     validate_versions(current, reconciled, previous)
+    if previous and minor(previous) != minor(current):
+        require_complete_matrix()
     lock = json.loads((FIXTURES / "history.lock.json").read_text())
     if lock["reconciledVersion"] != reconciled:
         raise ValueError("History provenance and RECONCILED_VERSION disagree")
     inputs = {
-        str(p.relative_to(FIXTURES)): digest(p)
-        for p in FIXTURES.glob("history/*/*/input.yaml")
+        str(p.relative_to(FIXTURES)): digest(p) for p in fixture_inputs("history")
     }
     if not inputs or inputs != lock["inputs"]:
         raise ValueError(
             "Historical input inventory or bytes changed; regenerate through production controllers, not by editing inputs"
         )
-    for path in FIXTURES.glob("history/*/*/input.yaml"):
+    for path in fixture_inputs("history"):
         if not path.with_name("output.yaml").exists():
             raise ValueError(f"Missing golden: {path.parent}")
-    latest = {p.parent.name for p in FIXTURES.glob("latest/*/input.yaml")}
-    required = {"sglang-1.4", "sglang-1.5", "sglang-1.5-custom"}
-    if latest != required:
-        raise ValueError("The initial three Grove scenarios must all be present")
+    latest = fixture_inputs("latest")
+    if not latest:
+        raise ValueError("No latest scenarios")
+    for path in latest:
+        if not path.with_name("output.yaml").is_file():
+            raise ValueError(f"Missing golden: {path.parent}")
     for origin in (FIXTURES / "history").iterdir():
         if not origin.is_dir():
             continue
@@ -93,11 +120,13 @@ def check(base=None):
     return current, reconciled
 
 
-def golden_objects(objects):
+def golden_objects(objects, latest=False):
     """Only server-assigned metadata, allocated Service IPs and condition times vary."""
     objects = json.loads(json.dumps(objects))
     for obj in objects:
         metadata = obj["metadata"]
+        if latest:
+            bind_latest_version(obj)
         metadata.pop("managedFields", None)
         for field in ("uid", "resourceVersion", "generation", "creationTimestamp"):
             if field in metadata:
@@ -113,12 +142,24 @@ def golden_objects(objects):
     return objects
 
 
-def write_golden(path, objects):
+def bind_latest_version(value):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == "nvidia.com/dynamo-operator-origin-version":
+                value[key] = "$var:operator-version"
+            else:
+                bind_latest_version(child)
+    elif isinstance(value, list):
+        for child in value:
+            bind_latest_version(child)
+
+
+def write_golden(path, objects, latest=False):
     import yaml
 
     header = "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n"
     path.write_text(
-        header + yaml.safe_dump_all(golden_objects(objects), sort_keys=True)
+        header + yaml.safe_dump_all(golden_objects(objects, latest), sort_keys=True)
     )
 
 
@@ -126,6 +167,7 @@ def regenerate():
     import yaml
 
     current, reconciled = check()
+    require_complete_matrix()
     if minor(current) == minor(reconciled):
         raise ValueError(
             "History is already reconciled by this minor; do not advance it twice"
@@ -149,17 +191,25 @@ def regenerate():
             env=env,
             check=True,
         )
-        expected = list(FIXTURES.glob("history/*/*/input.yaml")) + list(
-            FIXTURES.glob("latest/*/input.yaml")
-        )
+        expected = list(fixture_inputs("history")) + list(fixture_inputs("latest"))
+        captures = {}
         for original in expected:
-            if not (capture / original.relative_to(FIXTURES)).is_file():
-                raise ValueError(f"Capture incomplete: {original}")
+            relative = original.relative_to(FIXTURES)
+            if relative.parts[0] == "latest":
+                relative = (
+                    Path("history")
+                    / f"{minor(current)[0]}.{minor(current)[1]}.0"
+                    / Path(*relative.parts[1:])
+                )
+            captured = capture / relative
+            if not captured.is_file():
+                raise ValueError(f"Capture incomplete: {relative}")
+            captures[relative] = captured
         # Publish only after every scenario, golden and independent safety check passed.
-        stage = Path(tempfile.mkdtemp(prefix=".upgrade-staged-", dir=FIXTURES.parent))
         backup = FIXTURES.with_name(".upgrade-backup")
         if backup.exists():
             raise ValueError(f"Previous backup exists: {backup}")
+        stage = Path(tempfile.mkdtemp(prefix=".upgrade-staged-", dir=FIXTURES.parent))
         try:
             shutil.copytree(
                 FIXTURES,
@@ -167,33 +217,38 @@ def regenerate():
                 dirs_exist_ok=True,
                 ignore=shutil.ignore_patterns("*.new"),
             )
-            for original in expected:
-                relative = original.relative_to(FIXTURES)
-                if relative.parts[0] == "latest":
-                    relative = (
-                        Path("history")
-                        / f"{minor(current)[0]}.{minor(current)[1]}.0"
-                        / relative.parts[1]
-                        / "input.yaml"
-                    )
+            for relative, captured in captures.items():
                 destination = stage / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                captured = capture / original.relative_to(FIXTURES)
                 shutil.copyfile(captured, destination)
                 write_golden(
                     destination.with_name("output.yaml"),
                     list(yaml.safe_load_all(captured.read_text())),
                 )
+            for original in fixture_inputs("latest"):
+                write_golden(
+                    stage / original.relative_to(FIXTURES).with_name("output.yaml"),
+                    list(
+                        yaml.safe_load_all(
+                            (capture / original.relative_to(FIXTURES)).read_text()
+                        )
+                    ),
+                    latest=True,
+                )
             namespaces = set()
-            for historical in stage.glob("history/*/*/input.yaml"):
+            for historical in list((stage / "history").rglob("input.yaml")) + list(
+                (stage / "latest").rglob("input.yaml")
+            ):
                 objects = list(yaml.safe_load_all(historical.read_text()))
                 names = {obj["metadata"]["namespace"] for obj in objects}
                 if len(names) != 1 or names & namespaces:
                     raise ValueError(
-                        "Historical namespace collision: give latest scenarios fresh namespaces before promoting a new origin"
+                        "Fixture namespace collision: history and latest must use distinct namespaces"
                     )
                 namespaces.update(names)
-                if any(not obj["metadata"].get("uid") for obj in objects):
+                if "history" in historical.relative_to(stage).parts[:1] and any(
+                    not obj["metadata"].get("uid") for obj in objects
+                ):
                     raise ValueError(f"Non-concrete capture: {historical}")
             lock = {
                 "reconciledVersion": current,
@@ -202,7 +257,7 @@ def regenerate():
                 ).strip(),
                 "inputs": {
                     str(p.relative_to(stage)): digest(p)
-                    for p in stage.glob("history/*/*/input.yaml")
+                    for p in (stage / "history").rglob("input.yaml")
                 },
             }
             (stage / "history.lock.json").write_text(
@@ -225,11 +280,18 @@ if __name__ == "__main__":
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--check", action="store_true")
     group.add_argument("--regenerate", action="store_true")
+    group.add_argument("--check-release-matrix", action="store_true")
     parser.add_argument(
         "--base", help="Base git revision for the minor-bump smoke check"
     )
     args = parser.parse_args()
     try:
-        regenerate() if args.regenerate else check(args.base)
+        if args.regenerate:
+            regenerate()
+        elif args.check_release_matrix:
+            check(args.base)
+            require_complete_matrix()
+        else:
+            check(args.base)
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         raise SystemExit(str(error)) from error
