@@ -66,7 +66,6 @@ struct FakeTrtllm {
     /// TensorRT-LLM's finer-grained modality advertisement.
     advertises_image: Arc<AtomicBool>,
     advertises_video: Arc<AtomicBool>,
-    advertises_audio: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
 }
 
@@ -263,7 +262,6 @@ impl pb::control_server::Control for FakeTrtllm {
         let modalities = [
             (self.advertises_image.load(Ordering::SeqCst), "image"),
             (self.advertises_video.load(Ordering::SeqCst), "video"),
-            (self.advertises_audio.load(Ordering::SeqCst), "audio"),
         ]
         .into_iter()
         .filter(|(advertised, _)| *advertised)
@@ -476,7 +474,7 @@ fn limits(context_length: u32) -> Option<ModelMetadata> {
     Some(ModelMetadata {
         context_length: Some(context_length),
         max_output_tokens: None,
-        supported_media: SupportedMedia::default(),
+        supported_media: Some(SupportedMedia::default()),
     })
 }
 
@@ -484,10 +482,10 @@ fn image_limits(context_length: u32) -> Option<ModelMetadata> {
     Some(ModelMetadata {
         context_length: Some(context_length),
         max_output_tokens: None,
-        supported_media: SupportedMedia {
+        supported_media: Some(SupportedMedia {
             image: true,
             ..Default::default()
-        },
+        }),
     })
 }
 
@@ -495,23 +493,10 @@ fn image_video_limits(context_length: u32) -> Option<ModelMetadata> {
     Some(ModelMetadata {
         context_length: Some(context_length),
         max_output_tokens: None,
-        supported_media: SupportedMedia {
+        supported_media: Some(SupportedMedia {
             image: true,
             video: true,
-            ..Default::default()
-        },
-    })
-}
-
-fn all_media_limits(context_length: u32) -> Option<ModelMetadata> {
-    Some(ModelMetadata {
-        context_length: Some(context_length),
-        max_output_tokens: None,
-        supported_media: SupportedMedia {
-            image: true,
-            video: true,
-            audio: true,
-        },
+        }),
     })
 }
 
@@ -576,7 +561,7 @@ async fn collect(
 fn assert_rejected(mutate: impl FnOnce(&mut PreprocessedRequest), expect: &str) {
     let mut req = request();
     mutate(&mut req);
-    let error = build_generate_request(&req, "req", "model", None, AGG)
+    let error = build_generate_request(req, "req", "model", None, AGG)
         .expect_err("request must be rejected");
     assert!(
         error.to_string().contains(expect),

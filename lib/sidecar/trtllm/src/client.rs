@@ -28,11 +28,10 @@ use crate::proto::inference_client::InferenceClient;
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Media modalities confirmed by both OpenEngine capability signals.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SupportedMedia {
     pub(crate) image: bool,
     pub(crate) video: bool,
-    pub(crate) audio: bool,
 }
 
 impl SupportedMedia {
@@ -40,7 +39,6 @@ impl SupportedMedia {
         match modality {
             "image" => self.image,
             "video" => self.video,
-            "audio" => self.audio,
             _ => false,
         }
     }
@@ -57,7 +55,13 @@ pub(crate) struct ModelMetadata {
     /// alone can imply a larger budget than the engine will accept.
     pub(crate) max_output_tokens: Option<u32>,
     /// Modalities advertised by both the portable and engine-specific capabilities.
-    pub(crate) supported_media: SupportedMedia,
+    /// `None` means startup discovery failed transiently and may be retried.
+    pub(crate) supported_media: Option<SupportedMedia>,
+}
+
+pub(crate) enum ModelInfoResponse {
+    Available(ModelMetadata),
+    Unsupported(tonic::Status),
 }
 
 pub(crate) struct TrtllmClient {
@@ -138,7 +142,6 @@ impl TrtllmClient {
                 match modality.as_str() {
                     "image" => supported_media.image = true,
                     "video" => supported_media.video = true,
-                    "audio" => supported_media.audio = true,
                     _ => {}
                 }
             }
@@ -146,22 +149,24 @@ impl TrtllmClient {
         Ok(ModelMetadata {
             context_length: info.max_context_length.filter(|len| *len > 0),
             max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
-            supported_media,
+            supported_media: Some(supported_media),
         })
     }
 
     /// One `GetModelInfo` call, for when `--context-length` already supplies the
     /// window and the engine is consulted only to cross-check it and to learn
     /// its output cap.
-    pub(crate) async fn model_limits(&self, model: &str) -> Result<ModelMetadata, DynamoError> {
-        tokio::time::timeout(RPC_TIMEOUT, self.get_model_info(model))
-            .await
-            .map_err(|_| {
-                connection_timeout(format!(
-                    "GetModelInfo did not respond within {RPC_TIMEOUT:?}"
-                ))
-            })?
-            .map_err(|status| status_to_dynamo("GetModelInfo", status))
+    pub(crate) async fn model_limits(&self, model: &str) -> Result<ModelInfoResponse, DynamoError> {
+        match tokio::time::timeout(RPC_TIMEOUT, self.get_model_info(model)).await {
+            Ok(Ok(metadata)) => Ok(ModelInfoResponse::Available(metadata)),
+            Ok(Err(status)) if is_request_itself_wrong(&status) => {
+                Ok(ModelInfoResponse::Unsupported(status))
+            }
+            Ok(Err(status)) => Err(status_to_dynamo("GetModelInfo", status)),
+            Err(_) => Err(connection_timeout(format!(
+                "GetModelInfo did not respond within {RPC_TIMEOUT:?}"
+            ))),
+        }
     }
 
     /// Polls `GetModelInfo` until the engine reports a usable context length or

@@ -106,34 +106,6 @@ async fn advertised_video_media_reaches_openengine() {
 }
 
 #[tokio::test]
-async fn advertised_audio_media_reaches_openengine() {
-    let service = FakeTrtllm::default();
-    service.supports_multimodal.store(true, Ordering::SeqCst);
-    service.advertises_audio.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine(&server.endpoint, 1);
-    engine.start(0).await.expect("start");
-
-    let mut req = request();
-    req.multi_modal_data = Some(HashMap::from([(
-        "audio_url".to_string(),
-        vec![MultimodalData::RawUrl(
-            "data:audio/wav;base64,YXVkaW8=".to_string(),
-        )],
-    )]));
-    collect(&engine, req).await;
-
-    let requests = server.service.requests.lock().await;
-    let sent = requests.first().expect("recorded request");
-    assert_eq!(sent.media.len(), 1);
-    assert_eq!(sent.media[0].modality, pb::Modality::Audio as i32);
-    assert!(matches!(
-        sent.media[0].source.as_ref(),
-        Some(pb::media_item::Source::DataUri(value)) if value.starts_with("data:audio/wav")
-    ));
-}
-
-#[tokio::test]
 async fn both_multimodal_capability_signals_are_required() {
     for (coarse, image) in [(true, false), (false, true)] {
         let service = FakeTrtllm::default();
@@ -499,6 +471,76 @@ async fn a_configured_context_length_survives_a_server_without_control() {
         config.llm.expect("llm registration").context_length,
         Some(8192)
     );
+
+    let mut image_request = request();
+    add_images(&mut image_request, ["https://example.com/image.png"]);
+    let error = match engine
+        .generate(
+            image_request,
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+        )
+        .await
+    {
+        Ok(_) => panic!("a server without capability discovery must reject images"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise image support")
+    );
+    assert_eq!(
+        server.service.model_info_calls.load(Ordering::SeqCst),
+        1,
+        "a definitive UNIMPLEMENTED response must not be retried"
+    );
+}
+
+#[tokio::test]
+async fn media_requests_retry_transient_capability_discovery() {
+    for (key, url, image, video) in [
+        ("image_url", "https://example.com/image.png", true, false),
+        ("video_url", "https://example.com/video.mp4", false, true),
+    ] {
+        let service = FakeTrtllm::default();
+        service.unavailable_model_info.store(true, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let engine = engine_with(&server.endpoint, transport(1), Some(8192), AGG);
+        engine.start(0).await.expect("start with configured window");
+
+        server
+            .service
+            .unavailable_model_info
+            .store(false, Ordering::SeqCst);
+        server
+            .service
+            .supports_multimodal
+            .store(true, Ordering::SeqCst);
+        server
+            .service
+            .advertises_image
+            .store(image, Ordering::SeqCst);
+        server
+            .service
+            .advertises_video
+            .store(video, Ordering::SeqCst);
+        let mut media_request = request();
+        media_request.multi_modal_data = Some(HashMap::from([(
+            key.to_string(),
+            vec![MultimodalData::RawUrl(url.to_string())],
+        )]));
+
+        let output = collect(&engine, media_request).await;
+        assert_eq!(
+            output.last().unwrap().finish_reason,
+            Some(FinishReason::Stop)
+        );
+        assert_eq!(
+            server.service.model_info_calls.load(Ordering::SeqCst),
+            2,
+            "the {key} request must retry the transient startup failure once"
+        );
+    }
 }
 
 /// Shutdown has to terminate in-flight requests: the worker cannot drain if a

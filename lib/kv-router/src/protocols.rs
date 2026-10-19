@@ -648,6 +648,10 @@ impl ResidencyProjection {
 pub struct RouterHintSourceMetadata {
     pub source_control_endpoint: String,
     pub worker_type: String,
+    /// Topology labels of the cache, like a worker's `topology_domains`. Hint
+    /// targets with a `kv_transfer_domain` only fetch from the same island.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub topology_domains: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1099,6 +1103,37 @@ pub struct WorkerSelectionResult {
     /// Selected worker's projected decode load after adding this request's
     /// prompt blocks, in scheduler-tracked block units.
     pub potential_decode_blocks: usize,
+}
+
+/// How many candidates a selection trace retains: the `top_k` lowest-cost rows
+/// plus the selected worker, or every candidate when `top_k` is zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionTraceSpec {
+    pub top_k: usize,
+}
+
+/// A scored candidate: the worker and its total cost after every scorer ran, in
+/// the policy's cost units (scheduler-tracked KV blocks for the builtin policy).
+/// Lower is better.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelectionTraceRow {
+    pub worker: WorkerWithDpRank,
+    pub cost: f64,
+}
+
+/// Per-candidate costs captured for one worker selection.
+///
+/// Rows are unordered. When `rows.len() < candidate_count`, the selection was
+/// truncated to the `top_k` lowest-cost candidates plus the selected worker,
+/// which is always present.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectionTrace {
+    /// Eligible candidates the policy scored, before truncation.
+    pub candidate_count: usize,
+    /// Whether the host pinned the selection to one worker and rank.
+    pub pinned: bool,
+    /// Retained candidates, unordered.
+    pub rows: Vec<SelectionTraceRow>,
 }
 
 /// Active load metrics for a worker, used for overload detection.
@@ -2522,6 +2557,18 @@ mod tests {
             KvTransferEnforcement::Preferred
         );
         assert!(serde_json::from_str::<KvTransferEnforcement>(r#""fallback""#).is_err());
+    }
+
+    #[test]
+    fn router_hint_source_topology_is_optional_on_the_wire() {
+        let without_topology = serde_json::json!({
+            "source_control_endpoint": "tcp://owner:23280",
+            "worker_type": "prefill",
+        });
+        let metadata: RouterHintSourceMetadata =
+            serde_json::from_value(without_topology.clone()).unwrap();
+        assert!(metadata.topology_domains.is_empty());
+        assert_eq!(serde_json::to_value(&metadata).unwrap(), without_topology);
     }
 
     #[test]

@@ -8,8 +8,8 @@ use super::*;
 #[test]
 fn request_maps_sampling_stop_and_output_fields() {
     let request = request();
-    let proto = build_generate_request(&request, "req-1", "served-model", None, AGG)
-        .expect("build request");
+    let proto =
+        build_generate_request(request, "req-1", "served-model", None, AGG).expect("build request");
     assert_eq!(proto.request_id, "req-1");
     assert_eq!(proto.model, "served-model");
     match proto.input.as_ref().expect("input") {
@@ -89,7 +89,7 @@ fn image_urls_data_uris_and_uuids_are_mapped_in_order() {
         "image_url".to_string(),
         vec![Some("first-image".to_string()), None],
     )]));
-    let proto = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let proto = build_generate_request(req, "req", "model", image_limits(4096), AGG)
         .expect("image request");
     assert_eq!(proto.media.len(), 2);
     assert_eq!(proto.media[0].modality, pb::Modality::Image as i32);
@@ -110,7 +110,7 @@ fn image_urls_data_uris_and_uuids_are_mapped_in_order() {
 }
 
 #[test]
-fn mixed_media_follow_prompt_order() {
+fn mixed_image_and_video_media_follow_prompt_order() {
     let mut req = request();
     req.multi_modal_data = Some(HashMap::from([
         (
@@ -127,12 +127,6 @@ fn mixed_media_follow_prompt_order() {
                 MultimodalData::RawUrl("data:video/mp4;base64,dmlkZW8=".to_string()),
             ],
         ),
-        (
-            "audio_url".to_string(),
-            vec![MultimodalData::RawUrl(
-                "data:audio/wav;base64,YXVkaW8=".to_string(),
-            )],
-        ),
     ]));
     req.multi_modal_uuids = Some(HashMap::from([
         (
@@ -143,7 +137,6 @@ fn mixed_media_follow_prompt_order() {
             "video_url".to_string(),
             vec![Some("video-0".to_string()), Some("video-1".to_string())],
         ),
-        ("audio_url".to_string(), vec![Some("audio-0".to_string())]),
     ]));
     req.multi_modal_order = Some(vec![
         MultimodalItemRef {
@@ -152,10 +145,6 @@ fn mixed_media_follow_prompt_order() {
         },
         MultimodalItemRef {
             modality: "image_url".to_string(),
-            index: 0,
-        },
-        MultimodalItemRef {
-            modality: "audio_url".to_string(),
             index: 0,
         },
         MultimodalItemRef {
@@ -168,7 +157,7 @@ fn mixed_media_follow_prompt_order() {
         },
     ]);
 
-    let proto = build_generate_request(&req, "req", "model", all_media_limits(4096), AGG)
+    let proto = build_generate_request(req, "req", "model", image_video_limits(4096), AGG)
         .expect("mixed media request");
 
     assert_eq!(
@@ -180,7 +169,6 @@ fn mixed_media_follow_prompt_order() {
         [
             pb::Modality::Video as i32,
             pb::Modality::Image as i32,
-            pb::Modality::Audio as i32,
             pb::Modality::Video as i32,
             pb::Modality::Image as i32,
         ]
@@ -191,7 +179,7 @@ fn mixed_media_follow_prompt_order() {
             .iter()
             .map(|item| item.uuid.as_str())
             .collect::<Vec<_>>(),
-        ["video-0", "image-0", "audio-0", "video-1", ""]
+        ["video-0", "image-0", "video-1", ""]
     );
 }
 
@@ -216,7 +204,7 @@ fn mixed_media_without_a_complete_unique_order_is_rejected() {
 
     let mut req = request();
     req.multi_modal_data = Some(mixed_media());
-    let error = build_generate_request(&req, "req", "model", image_video_limits(4096), AGG)
+    let error = build_generate_request(req.clone(), "req", "model", image_video_limits(4096), AGG)
         .expect_err("mixed legacy request has lost its order");
     assert!(error.to_string().contains("requires multi_modal_order"));
 
@@ -230,7 +218,7 @@ fn mixed_media_without_a_complete_unique_order_is_rejected() {
             index: 0,
         },
     ]);
-    let error = build_generate_request(&req, "req", "model", image_video_limits(4096), AGG)
+    let error = build_generate_request(req, "req", "model", image_video_limits(4096), AGG)
         .expect_err("duplicate order entry must fail");
     assert!(error.to_string().contains("repeats `image_url` item 0"));
 }
@@ -249,18 +237,18 @@ fn mm_routing_hashes_are_not_used_as_engine_cache_uuids() {
         "mm_hashes": ["0123456789abcdef", "fedcba9876543210"]
     }));
 
-    let proto = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let proto = build_generate_request(req, "req", "model", image_limits(4096), AGG)
         .expect("image request");
     assert!(proto.media.iter().all(|item| item.uuid.is_empty()));
 }
 
 #[test]
-fn media_requires_the_loaded_models_advertised_capability() {
+fn image_media_requires_the_loaded_models_advertised_capability() {
     let mut req = request();
     add_images(&mut req, ["https://example.com/image.png"]);
 
     for model_limits in [None, limits(4096)] {
-        let error = build_generate_request(&req, "req", "model", model_limits, AGG)
+        let error = build_generate_request(req.clone(), "req", "model", model_limits, AGG)
             .expect_err("a text-only or unknown model must reject images");
         assert!(
             error
@@ -269,42 +257,27 @@ fn media_requires_the_loaded_models_advertised_capability() {
             "unexpected error: {error}"
         );
     }
-
-    req.multi_modal_data = Some(HashMap::from([(
-        "audio_url".to_string(),
-        vec![MultimodalData::RawUrl(
-            "https://example.com/audio.wav".to_string(),
-        )],
-    )]));
-    let error = build_generate_request(&req, "req", "model", image_video_limits(4096), AGG)
-        .expect_err("a model without audio support must reject audio");
-    assert!(
-        error
-            .to_string()
-            .contains("does not advertise audio support"),
-        "unexpected error: {error}"
-    );
 }
 
 #[test]
 fn unsupported_media_modalities_and_sources_are_rejected() {
     let mut req = request();
     req.multi_modal_data = Some(HashMap::from([(
-        "future_media".to_string(),
+        "audio_url".to_string(),
         vec![MultimodalData::RawUrl(
             "https://example.com/media".to_string(),
         )],
     )]));
-    let error = build_generate_request(&req, "req", "model", all_media_limits(4096), AGG)
-        .expect_err("unsupported modalities must be rejected");
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
+        .expect_err("audio is not supported yet");
     assert!(
-        error.to_string().contains("future_media"),
+        error.to_string().contains("audio_url"),
         "unexpected error: {error}"
     );
 
     let mut req = request();
     add_images(&mut req, ["file:///tmp/image.png"]);
-    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
         .expect_err("the engine cannot fetch a local Dynamo path");
     assert!(error.to_string().contains("http, https, or data URI"));
 
@@ -313,7 +286,7 @@ fn unsupported_media_modalities_and_sources_are_rejected() {
         "image_url".to_string(),
         vec![MultimodalData::UuidOnly("cached-image".to_string())],
     )]));
-    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
         .expect_err("OpenEngine cannot resolve a source-less UUID");
     assert!(
         error
@@ -326,18 +299,9 @@ fn unsupported_media_modalities_and_sources_are_rejected() {
         "video_url".to_string(),
         vec![MultimodalData::RawUrl("file:///tmp/video.mp4".to_string())],
     )]));
-    let error = build_generate_request(&req, "req", "model", image_video_limits(4096), AGG)
+    let error = build_generate_request(req, "req", "model", image_video_limits(4096), AGG)
         .expect_err("the engine cannot fetch a local Dynamo path");
     assert!(error.to_string().contains("`video_url` item 0"));
-
-    let mut req = request();
-    req.multi_modal_data = Some(HashMap::from([(
-        "audio_url".to_string(),
-        vec![MultimodalData::RawUrl("file:///tmp/audio.wav".to_string())],
-    )]));
-    let error = build_generate_request(&req, "req", "model", all_media_limits(4096), AGG)
-        .expect_err("the engine cannot fetch a local Dynamo path");
-    assert!(error.to_string().contains("`audio_url` item 0"));
 }
 
 #[test]
@@ -348,38 +312,28 @@ fn image_metadata_that_cannot_be_honored_is_rejected() {
         "image_url".to_string(),
         vec![Some("one".to_string()), Some("two".to_string())],
     )]));
-    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let error = build_generate_request(req.clone(), "req", "model", image_limits(4096), AGG)
         .expect_err("UUIDs must align positionally");
     assert!(error.to_string().contains("UUID count"));
 
     req.multi_modal_uuids = None;
     req.mm_processor_kwargs = Some(serde_json::json!({"do_resize": false}));
-    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let error = build_generate_request(req.clone(), "req", "model", image_limits(4096), AGG)
         .expect_err("processor overrides cannot be dropped");
     assert!(error.to_string().contains("mm_processor_kwargs"));
 
     req.mm_processor_kwargs = Some(serde_json::json!({}));
     req.media_io_kwargs = Some(serde_json::json!({"image": {"mode": "RGB"}}));
-    let error = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
         .expect_err("media I/O overrides cannot be dropped");
     assert!(error.to_string().contains("media_io_kwargs"));
-}
-
-#[test]
-fn image_request_without_max_tokens_is_left_for_engine_derivation() {
-    let mut req = request();
-    add_images(&mut req, ["https://example.com/image.png"]);
-    req.stop_conditions.max_tokens = None;
-    let proto = build_generate_request(&req, "req", "model", image_limits(4096), AGG)
-        .expect("the engine derives against the expanded prompt");
-    assert_eq!(proto.stopping.expect("stopping").max_tokens, None);
 }
 
 #[test]
 fn omitted_max_tokens_without_context_length_is_rejected() {
     let mut req = request();
     req.stop_conditions.max_tokens = None;
-    let error = build_generate_request(&req, "req", "model", None, AGG)
+    let error = build_generate_request(req, "req", "model", None, AGG)
         .expect_err("must require max_tokens");
     assert!(error.to_string().contains("max_tokens"));
 }
@@ -390,8 +344,8 @@ fn omitted_max_tokens_defaults_to_remaining_context() {
     req.stop_conditions.max_tokens = None;
     // request() carries three prompt tokens ([11, 22, 33]); the default fills the
     // remaining context: max(1, context_length - prompt_len).
-    let proto = build_generate_request(&req, "req", "model", limits(100), AGG)
-        .expect("build with fallback");
+    let proto =
+        build_generate_request(req, "req", "model", limits(100), AGG).expect("build with fallback");
     assert_eq!(proto.stopping.unwrap().max_tokens, Some(97));
 }
 
@@ -401,7 +355,7 @@ fn omitted_max_tokens_default_is_floored_at_one() {
     req.stop_conditions.max_tokens = None;
     // Prompt already fills (or exceeds) the context: default must not underflow to 0.
     let proto =
-        build_generate_request(&req, "req", "model", limits(2), AGG).expect("build with fallback");
+        build_generate_request(req, "req", "model", limits(2), AGG).expect("build with fallback");
     assert_eq!(proto.stopping.unwrap().max_tokens, Some(1));
 }
 
@@ -409,7 +363,7 @@ fn omitted_max_tokens_default_is_floored_at_one() {
 fn top_k_all_tokens_is_left_unset() {
     let mut req = request();
     req.sampling_options.top_k = Some(-1);
-    let proto = build_generate_request(&req, "req", "model", None, AGG).expect("build");
+    let proto = build_generate_request(req, "req", "model", None, AGG).expect("build");
     assert_eq!(proto.sampling.unwrap().top_k, None);
 }
 
@@ -458,7 +412,7 @@ fn logprobs_zero_keeps_selected_without_alternatives() {
     req.output_options.logprobs = Some(0);
     // The wire request must still ask TRT-LLM for one candidate so the selected
     // token's logprob is computed.
-    let proto = build_generate_request(&req, "req", "model", None, AGG).expect("build");
+    let proto = build_generate_request(req.clone(), "req", "model", None, AGG).expect("build");
     match proto
         .response
         .unwrap()
@@ -488,13 +442,13 @@ fn the_derived_max_tokens_respects_the_engines_output_cap() {
     let mut req = request();
     req.stop_conditions.max_tokens = None;
     let proto = build_generate_request(
-        &req,
+        req,
         "req",
         "model",
         Some(ModelMetadata {
             context_length: Some(4096),
             max_output_tokens: Some(256),
-            supported_media: SupportedMedia::default(),
+            supported_media: Some(SupportedMedia::default()),
         }),
         AGG,
     )
@@ -520,7 +474,7 @@ fn a_derived_budget_below_min_tokens_is_rejected() {
     let prompt_len = req.token_ids.len() as u32;
     let window = prompt_len + 8;
 
-    let error = build_generate_request(&req, "req", "model", limits(window), AGG)
+    let error = build_generate_request(req, "req", "model", limits(window), AGG)
         .expect_err("a minimum above the remaining budget cannot be served");
     let message = error.to_string();
     assert!(
@@ -540,7 +494,7 @@ fn a_prefill_request_does_not_judge_a_minimum_against_its_own_window() {
     req.stop_conditions.min_tokens = Some(64);
     let window = req.token_ids.len() as u32 + 8;
 
-    build_generate_request(&req, "req", "model", limits(window), PREFILL)
+    build_generate_request(req, "req", "model", limits(window), PREFILL)
         .expect("only the decode worker's window governs the minimum");
 }
 
@@ -553,7 +507,7 @@ fn a_minimum_within_the_derived_budget_is_served() {
     req.stop_conditions.min_tokens = Some(8);
     let window = req.token_ids.len() as u32 + 64;
 
-    let proto = build_generate_request(&req, "req", "model", limits(window), AGG)
+    let proto = build_generate_request(req, "req", "model", limits(window), AGG)
         .expect("a minimum that fits is not a conflict");
     let stopping = proto.stopping.expect("stopping options");
     assert_eq!(stopping.min_tokens, Some(8));

@@ -10,17 +10,17 @@ use super::*;
 /// transceiver. Ignored by default; run explicitly with both endpoints:
 ///
 /// ```text
-/// TRTLLM_E2E_PREFILL_ENDPOINT=http://127.0.0.1:50051 \
-/// TRTLLM_E2E_DECODE_ENDPOINT=http://127.0.0.1:50052 \
+/// TRTLLM_E2E_PREFILL_ENDPOINT=http://127.0.0.1:30001 \
+/// TRTLLM_E2E_DECODE_ENDPOINT=http://127.0.0.1:30011 \
 ///   cargo test -p dynamo-trtllm-sidecar e2e_real_disagg -- --ignored --nocapture
 /// ```
 #[tokio::test]
 #[ignore = "requires two live TensorRT-LLM OpenEngine servers with a KV transceiver"]
 async fn e2e_real_disagg_handoff() {
     let prefill_endpoint = std::env::var("TRTLLM_E2E_PREFILL_ENDPOINT")
-        .expect("set TRTLLM_E2E_PREFILL_ENDPOINT, e.g. http://127.0.0.1:50051");
+        .expect("set TRTLLM_E2E_PREFILL_ENDPOINT, e.g. http://127.0.0.1:30001");
     let decode_endpoint = std::env::var("TRTLLM_E2E_DECODE_ENDPOINT")
-        .expect("set TRTLLM_E2E_DECODE_ENDPOINT, e.g. http://127.0.0.1:50052");
+        .expect("set TRTLLM_E2E_DECODE_ENDPOINT, e.g. http://127.0.0.1:30011");
     let model = std::env::var("TRTLLM_E2E_MODEL")
         .unwrap_or_else(|_| "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string());
 
@@ -111,8 +111,7 @@ async fn e2e_real_disagg_handoff() {
     );
 }
 
-/// Exercises the same real prefill/decode handoff with an image request. Both
-/// servers may share one sufficiently large GPU for local validation.
+/// Both servers may share one sufficiently large GPU for local validation.
 ///
 /// ```text
 /// TRTLLM_E2E_PREFILL_ENDPOINT=http://127.0.0.1:50051 \
@@ -217,14 +216,14 @@ async fn e2e_real_openengine_image_disagg() {
 /// a reachable endpoint:
 ///
 /// ```text
-/// TRTLLM_E2E_ENDPOINT=http://127.0.0.1:50051 \
+/// TRTLLM_E2E_ENDPOINT=http://127.0.0.1:30001 \
 ///   cargo test -p dynamo-trtllm-sidecar e2e_real_openengine -- --ignored --nocapture
 /// ```
 #[tokio::test]
 #[ignore = "requires a live TensorRT-LLM OpenEngine server; set TRTLLM_E2E_ENDPOINT"]
 async fn e2e_real_openengine_server() {
     let endpoint = std::env::var("TRTLLM_E2E_ENDPOINT")
-        .expect("set TRTLLM_E2E_ENDPOINT, e.g. http://127.0.0.1:50051");
+        .expect("set TRTLLM_E2E_ENDPOINT, e.g. http://127.0.0.1:30001");
     let model = std::env::var("TRTLLM_E2E_MODEL")
         .unwrap_or_else(|_| "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string());
 
@@ -304,10 +303,9 @@ async fn e2e_real_openengine_server() {
     );
 }
 
-/// Drives an image request through the real Rust sidecar conversion layer and
-/// a live TensorRT-LLM OpenEngine server. The fixed token IDs are Qwen3-VL's
-/// chat-template rendering of one image marker and a short question; the tiny
-/// PNG is split red/blue so a manual run also produces an obvious answer.
+/// The fixed token IDs are Qwen3-VL's chat-template rendering of one image
+/// marker and a short question. The tiny PNG is split red/blue so a manual run
+/// produces an obvious answer.
 ///
 /// ```text
 /// TRTLLM_E2E_ENDPOINT=http://127.0.0.1:50051 \
@@ -455,66 +453,4 @@ async fn e2e_real_openengine_video() {
         usage.prompt_tokens > token_ids.len() as u32,
         "the engine must report the expanded video prompt"
     );
-}
-
-/// Drives an audio data URI through the real sidecar and OpenEngine server.
-/// `TRTLLM_E2E_AUDIO_DATA_URI` must contain a complete `data:audio/...` URI.
-#[tokio::test]
-#[ignore = "requires a live audio-capable TensorRT-LLM OpenEngine server"]
-async fn e2e_real_openengine_audio() {
-    let endpoint = std::env::var("TRTLLM_E2E_ENDPOINT")
-        .expect("set TRTLLM_E2E_ENDPOINT, e.g. http://127.0.0.1:50051");
-    let model =
-        std::env::var("TRTLLM_E2E_MODEL").unwrap_or_else(|_| "openai/whisper-tiny".to_string());
-    let audio = std::env::var("TRTLLM_E2E_AUDIO_DATA_URI")
-        .expect("set TRTLLM_E2E_AUDIO_DATA_URI to an audio data URI");
-    let engine = TrtllmSidecarEngine::new(
-        GrpcEndpoint::parse(&endpoint, "--grpc-endpoint").expect("valid endpoint"),
-        transport(1),
-        ConfiguredModel {
-            source: model.clone(),
-            context_length: None,
-        },
-        AGG,
-    );
-    engine
-        .start(0)
-        .await
-        .expect("start against the live audio-capable server");
-
-    let mut request = PreprocessedRequest::builder()
-        .model(model)
-        .token_ids(vec![50258, 50259, 50359, 50363])
-        .stop_conditions(StopConditions {
-            max_tokens: Some(96),
-            ..Default::default()
-        })
-        .sampling_options(SamplingOptions {
-            temperature: Some(0.0),
-            ..Default::default()
-        })
-        .output_options(OutputOptions::default())
-        .build()
-        .expect("request");
-    request.multi_modal_data = Some(HashMap::from([(
-        "audio_url".to_string(),
-        vec![MultimodalData::RawUrl(audio)],
-    )]));
-
-    let outputs = collect(&engine, request).await;
-    let generated = outputs
-        .iter()
-        .flat_map(|output| output.token_ids.iter().copied())
-        .collect::<Vec<_>>();
-    let terminal = outputs
-        .iter()
-        .find(|output| output.finish_reason.is_some())
-        .expect("terminal output");
-    let usage = terminal.completion_usage.as_ref().expect("terminal usage");
-    eprintln!(
-        "[e2e-audio] generated={generated:?}; usage: prompt={}, completion={}",
-        usage.prompt_tokens, usage.completion_tokens
-    );
-
-    assert!(!generated.is_empty(), "expected audio-conditioned output");
 }

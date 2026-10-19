@@ -44,7 +44,10 @@ ARG NIXL_REF
 ARG TRTLLM_SOURCE_REPOSITORY
 ARG TRTLLM_SOURCE_COMMIT
 
-# Optional exact-source overlay for cross-repository CI.
+# Optional source overlay for cross-repository CI. Keep the base image's server
+# lifecycle entry points, which are coupled to that release's frontend runtime.
+# capabilities imports model_config; install that helper with the media loader.
+# Keep the base image's other input modules to avoid a partial framework upgrade.
 RUN if [ -n "${TRTLLM_SOURCE_COMMIT}" ]; then \
         test -n "${TRTLLM_SOURCE_REPOSITORY}" && \
         source_dir=$(mktemp -d) && \
@@ -55,10 +58,24 @@ RUN if [ -n "${TRTLLM_SOURCE_COMMIT}" ]; then \
             --strip-components=1 && \
         package_dir=$(/usr/bin/python3 -c \
             'import importlib.util; print(next(iter(importlib.util.find_spec("tensorrt_llm").submodule_search_locations)))') && \
-        cp -a "${source_dir}/tensorrt_llm/grpc/openengine/." \
-            "${package_dir}/grpc/openengine/" && \
-        install -m 0644 "${source_dir}/tensorrt_llm/inputs/media_io.py" \
-            "${package_dir}/inputs/media_io.py" && \
+        for entry in "${source_dir}/tensorrt_llm/grpc/openengine/"*; do \
+            case "$(basename "${entry}")" in \
+                __init__.py|server.py) continue ;; \
+            esac; \
+            cp -a "${entry}" "${package_dir}/grpc/openengine/"; \
+        done && \
+        sed -i \
+            's/from openengine\.v1 import openengine_pb2_grpc/from .bindings import openengine_pb2_grpc/' \
+            "${package_dir}/grpc/openengine/server.py" && \
+        grep -Fxq 'from .bindings import openengine_pb2_grpc' \
+            "${package_dir}/grpc/openengine/server.py" && \
+        for module in media_io.py model_config.py; do \
+            install -m 0644 "${source_dir}/tensorrt_llm/inputs/${module}" \
+                "${package_dir}/inputs/${module}"; \
+        done && \
+        test -f "${package_dir}/inputs/model_config.py" && \
+        grep -Fq 'from tensorrt_llm.inputs.model_config import resolve_top_level_model_type' \
+            "${package_dir}/grpc/openengine/capabilities.py" && \
         rm -rf "${source_dir}"; \
     fi
 

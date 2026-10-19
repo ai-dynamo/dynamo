@@ -62,6 +62,7 @@ _LOAD_ADDITIONS = [
     "rejected_by_plugin",
     "gpu_budget_guard_hold",
     "gpu_budget_reconcile",
+    "missing_engine_metadata",
 ]
 
 _PLUGIN_THROUGHPUT_ADDITIONS = [
@@ -72,6 +73,7 @@ _PLUGIN_THROUGHPUT_ADDITIONS = [
     "gpu_budget_guard_hold",
     "no_change",
     "gpu_budget_reconcile",
+    "missing_engine_metadata",
 ]
 
 

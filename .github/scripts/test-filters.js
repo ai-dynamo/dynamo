@@ -61,6 +61,11 @@ function checkFilter(file, patterns) {
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
   {
+    file: 'scripts/protocol_compatibility/composition/openai.py',
+    expect: { ignore: true, rust: false, core: false, frontend: false },
+    desc: 'protocol tooling is covered without unrelated runtime builds'
+  },
+  {
     file: 'components/src/dynamo/artifacts/storage.py',
     expect: { core: true, frontend: true, vllm: false },
     desc: 'generic artifact transport keeps shared runtime CI'
@@ -175,7 +180,6 @@ const testCases = [
     desc: 'AISimulate Dynamo adapter triggers planner validation'
   },
 
-  // Sidecar Rust and proto files trigger Rust checks and their native E2E only.
   {
     file: 'lib/sidecar/common/src/lib.rs',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
@@ -195,6 +199,11 @@ const testCases = [
     file: 'lib/sidecar/trtllm/src/lib.rs',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: true },
     desc: 'trtllm sidecar source triggers Rust checks and trtllm E2E'
+  },
+  {
+    file: 'tests/serve/test_sidecar.py',
+    expect: { sidecar: true, trtllm: true },
+    desc: 'shared sidecar test changes trigger the TensorRT-LLM sidecar E2E'
   },
   {
     file: 'lib/sidecar/vllm/deploy/agg.yaml',
