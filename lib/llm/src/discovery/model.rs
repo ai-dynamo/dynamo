@@ -760,8 +760,8 @@ impl Model {
     ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
         self.select_worker_set_with(|ws| self.systemone_execution_inputs(ws, capability))
             .ok_or_else(|| {
-                if self.worker_sets.iter().any(|entry| {
-                    self.systemone_execution_inputs(entry.value(), capability)
+                if self.worker_sets.load().values().any(|worker_set| {
+                    self.systemone_execution_inputs(worker_set, capability)
                         .is_some()
                 }) {
                     SystemOneSelectionError::Unavailable
