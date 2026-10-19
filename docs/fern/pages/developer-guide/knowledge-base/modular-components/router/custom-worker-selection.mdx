@@ -58,6 +58,46 @@ Dynamo owns scheduler queues, eligibility checks, reservations, lifecycle synchr
 
 Existing plugin imports and the `WorkerSelectionPolicyRegistry` name remain available through compatibility re-exports until version 1.7. They refer to the same types and traits, so existing policies can register into `RouterPluginRegistry` without adapters. Migrate imports to `plugins::worker_selection`, rename the registry to `RouterPluginRegistry`, and use `register_worker_selection` for worker policies. The compatibility exports, registry alias, worker-only `register` method, and frontend `worker_selection_policy_factory` setter are scheduled for removal in 1.7.
 
+## Opt-In Frontend Decoder Progress
+
+An aggregated frontend can collect active-attempt output observations with
+`DYN_ROUTER_DECODE_PROGRESS=1`. The value is read once per process and defaults to
+disabled. Collection does not require TRACE logging. It currently supports a single
+choice, an explicit positive output limit, ignored EOS, and no declared stop strings
+or stop-token lists. Disaggregated stages and unsupported requests are unobserved.
+
+A picker that declares `WorkerInputs::DECODE_PROGRESS` can read
+`context.decode_progress()`. Filters and scorers do not receive this snapshot. It
+contains only the current eligible worker/rank identities. Each entry also names its
+canonical logical model and routing group; consumers must match their factory's
+`RoutingPartitionRef` rather than inferring a model from worker identity. Each entry exposes the
+declared output limit, original output-token count observed by the frontend, EOS
+setting, and observation age at capture. The optional remaining budget uses checked
+subtraction; it is an upper budget, not predicted GPU work or completion time.
+
+The borrowed snapshot is captured under one progress-table lock just before the
+picker callback. It must not be retained. Missing, disabled, poisoned, or inconsistent
+state returns `None`. Updates are fenced by routing partition, request, and scheduler attempt ID. Completion,
+abort, retry release, and guard destruction retire observations. The process-local
+table admits at most 4096 entries; rejected admissions are absent from the snapshot.
+
+This group adds a bounded table scan, candidate filtering, and snapshot allocation
+only for pickers that request it. Existing CACHE and LOAD consumers do not acquire
+this work. Collection adds lifecycle updates only when explicitly enabled.
+
+The progress and load snapshots are not one atomic scheduler snapshot. A count
+match alone does not prove absence of concurrent membership changes. Policies must
+handle missing or stale state conservatively and validate their intended workload.
+
+The [progress-group configuration](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/progress-group.yaml)
+is an explicitly enabled two-worker experiment using the existing advisory group
+target. Only its aggregated policy factory enables this rule; prefill/decode roles
+retain ordinary two-tier selection. Its token thresholds are supplied calibration parameters. It leaves normal
+two-tier selection in charge outside the supported cache/load/progress pattern;
+explicit pins, allowlists, and final row validation remain host-owned. The example
+does not establish a universal migration boundary, short-load safety, or throughput
+benefit on other models and hardware.
+
 ## Build the Policy
 
 ### Create the Policy and Catalog Crates

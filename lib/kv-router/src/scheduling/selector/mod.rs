@@ -162,6 +162,7 @@ impl<'a> MaterializedSelectionInput<'a> {
                     || !request.overlap.tier_overlap_blocks.disk.is_empty(),
             },
             context: WorkerSelectionContext {
+                decode_progress: None,
                 request,
                 request_blocks: request.request_blocks(block_size),
                 block_size,
@@ -522,7 +523,15 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
                 };
-                let row = picker.pick(&input.context, picker_input)?;
+                let decode_progress = picker_inputs
+                    .contains(WorkerInputs::DECODE_PROGRESS)
+                    .then(|| super::decode_progress::snapshot_now(candidates))
+                    .flatten();
+                let picker_context = WorkerSelectionContext {
+                    decode_progress: decode_progress.as_ref(),
+                    ..input.context
+                };
+                let row = picker.pick(&picker_context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                         row,

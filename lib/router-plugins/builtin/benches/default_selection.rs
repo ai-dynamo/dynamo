@@ -280,5 +280,127 @@ fn shared_cache(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench, stacked, shared_cache);
+fn progress_group(c: &mut Criterion) {
+    use dynamo_custom_policy_builtin::{default_registry, register};
+    use dynamo_kv_router::protocols::{WorkerAffinityTarget, WorkerConfigLike, WorkerWithDpRank};
+    use dynamo_kv_router::scheduling::{
+        AttemptId, OverlapSignals, SessionContext, decode_progress::DecodeProgressGuard,
+    };
+    use dynamo_kv_router::{
+        RoutingPartitionRef, WorkerLoadProjection, WorkerSelectionInput, WorkerType,
+    };
+    use std::collections::HashMap;
+
+    struct SingleRankWorker;
+    impl WorkerConfigLike for SingleRankWorker {
+        fn data_parallel_start_rank(&self) -> u32 {
+            0
+        }
+        fn data_parallel_size(&self) -> u32 {
+            1
+        }
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            None
+        }
+        fn total_kv_blocks(&self) -> Option<u64> {
+            Some(16384)
+        }
+    }
+    let (_, mut request) = support::fixture(2, 16_385);
+    let source = WorkerWithDpRank::from_worker_id(101);
+    let other = WorkerWithDpRank::from_worker_id(103);
+    request.overlap = OverlapSignals::default();
+    request.worker_loads.clear();
+    request.affinity_target = Some(WorkerAffinityTarget::from(source));
+    request.session_context = Some(SessionContext::new(
+        "child".into(),
+        Some("parent".into()),
+        None,
+        None,
+    ));
+    request
+        .overlap
+        .tier_overlap_blocks
+        .device
+        .insert(source, 256);
+    request.overlap.tier_overlap_blocks.device.insert(other, 0);
+    request.worker_loads.insert(
+        source,
+        WorkerLoadProjection {
+            active_requests: 8,
+            ..Default::default()
+        },
+    );
+    request
+        .worker_loads
+        .insert(other, WorkerLoadProjection::default());
+    let workers = HashMap::from([(101, SingleRankWorker), (103, SingleRankWorker)]);
+    let _guards: Vec<_> = (0..8)
+        .map(|i| {
+            let guard = DecodeProgressGuard::start(
+                dynamo_kv_router::RoutingPartitionRef::new("bench", "default"),
+                &format!("progress-bench-{i}"),
+                AttemptId::for_benchmark(i + 1),
+                source,
+                Some(128),
+                true,
+            )
+            .unwrap();
+            guard.advance(8);
+            guard
+        })
+        .collect();
+    let mut group = c.benchmark_group("progress_group_selection");
+    group
+        .warm_up_time(Duration::from_millis(200))
+        .measurement_time(Duration::from_millis(500))
+        .sample_size(30)
+        .nresamples(1_000);
+    for enabled in [false, true] {
+        let mut yaml = String::from(
+            "worker_selection:\n  aggregated: progress-bench\n  instances:\n    - name: progress-bench\n      type: dynamo-two-tier-cost-fn\n",
+        );
+        // 60s keeps these unchanged CPU-only observations fresh while measuring selection.
+        if enabled {
+            yaml.push_str("      parameters:\n        progress_group:\n          source_active_requests: 8\n          min_prefix_tokens: 16384\n          min_remaining_tokens: 256\n          max_progress_age_ms: 60000\n");
+        }
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), yaml).unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(file.path().display().to_string()),
+            ..Default::default()
+        };
+        let mut registry = default_registry();
+        register(&mut registry).unwrap();
+        let factory = registry.resolve(&config).unwrap().unwrap();
+        let policy = factory(
+            &config,
+            WorkerType::Aggregated,
+            RoutingPartitionRef::new("bench", "default"),
+        );
+        let select = || {
+            policy
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    64,
+                ))
+                .unwrap()
+        };
+        assert_eq!(select().worker, if enabled { other } else { source });
+        let allocations = allocations(|| {
+            black_box(select());
+        });
+        eprintln!(
+            "progress-group allocations per 100 selections: enabled={enabled} allocations={allocations}"
+        );
+        group.bench_function(if enabled { "on" } else { "off" }, |b| {
+            b.iter(|| black_box(select()))
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench, stacked, shared_cache, progress_group);
 criterion_main!(benches);

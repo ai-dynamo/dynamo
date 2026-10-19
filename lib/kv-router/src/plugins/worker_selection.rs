@@ -7,6 +7,7 @@ mod config;
 mod context;
 mod inputs;
 
+pub use crate::scheduling::decode_progress::{DecodeProgressEntry, DecodeProgressSnapshot};
 pub use context::WorkerSelectionContext;
 pub(crate) use inputs::{CacheSnapshot, CandidateData, WorkerCacheData};
 pub use inputs::{

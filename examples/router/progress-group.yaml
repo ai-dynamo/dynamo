@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Experimental calibration profile, not a generally calibrated routing policy.
+# Enable collection on the aggregated frontend with DYN_ROUTER_DECODE_PROGRESS=1.
+worker_selection:
+  aggregated: progress-group
+  instances:
+    - name: progress-group
+      type: dynamo-two-tier-cost-fn
+      parameters:
+        progress_group:
+          source_active_requests: 8
+          min_prefix_tokens: 16384
+          min_remaining_tokens: 256
+          max_progress_age_ms: 100

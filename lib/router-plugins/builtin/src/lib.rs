@@ -9,6 +9,7 @@
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
 mod default;
+mod progress_group;
 mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{DefaultWorkerSelector, default_factory, default_policy};
@@ -88,6 +89,34 @@ worker_selection:
         ] {
             factory(&config, worker_type, partition);
         }
+    }
+
+    #[test]
+    fn progress_group_resolves_canonical_yaml_and_rejects_missing_fields() {
+        let (config, resolved) = resolve(include_str!(
+            "../../../../examples/router/progress-group.yaml"
+        ));
+        let factory = resolved.unwrap().unwrap();
+        factory(
+            &config,
+            WorkerType::Aggregated,
+            RoutingPartitionRef::new("model", "default"),
+        );
+        let (_, missing) = resolve(
+            r#"
+worker_selection:
+  aggregated: progress-group
+  instances:
+    - name: progress-group
+      type: dynamo-two-tier-cost-fn
+      parameters:
+        progress_group:
+          source_active_requests: 8
+          min_prefix_tokens: 16384
+          min_remaining_tokens: 256
+"#,
+        );
+        assert!(missing.is_err());
     }
 
     /// An unknown parameter key is a mistake, most often a misremembered threshold name. It must

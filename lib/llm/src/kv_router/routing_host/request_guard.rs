@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use prometheus::IntCounter;
 
@@ -24,7 +27,9 @@ use dynamo_kv_router::{
         BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
         compute_next_seq_hash,
     },
-    scheduling::{AbortCause, RequestLifecycle, queue::BookingHandle},
+    scheduling::{
+        AbortCause, RequestLifecycle, decode_progress::DecodeProgressGuard, queue::BookingHandle,
+    },
 };
 use dynamo_runtime::{
     error::DynamoError,
@@ -32,6 +37,45 @@ use dynamo_runtime::{
     pipeline::OccupancyReservation,
     protocols::annotated::Annotated,
 };
+
+fn decode_progress_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var(dynamo_runtime::config::environment_names::router::DYN_ROUTER_DECODE_PROGRESS)
+            .is_ok_and(|value| value == "1")
+    })
+}
+
+fn decode_progress_request_supported(request: &PreprocessedRequest) -> bool {
+    request.phase() == RequestPhase::Aggregated
+        && request.sampling_options.n.unwrap_or(1) == 1
+        && request.sampling_options.best_of.unwrap_or(1) == 1
+        && request
+            .stop_conditions
+            .max_tokens
+            .is_some_and(|limit| limit > 0)
+        && request.stop_conditions.ignore_eos == Some(true)
+        && request
+            .stop_conditions
+            .stop
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+        && request
+            .stop_conditions
+            .stop_token_ids
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+        && request
+            .stop_conditions
+            .stop_token_ids_visible
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+        && request
+            .stop_conditions
+            .stop_token_ids_hidden
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+}
 
 pub(super) struct LoraLoadGuard {
     estimator: Arc<LoadEstimator>,
@@ -599,6 +643,7 @@ impl OutputBlockTracker {
 /// Session-affinity lifetime is separate: the affinity `Hold` and
 /// `AffinityLease` own binding commit, release, and invalidation.
 pub(super) struct RequestGuard {
+    decode_progress: Option<DecodeProgressGuard>,
     cleanup: RequestCleanup,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
@@ -651,7 +696,29 @@ impl RequestGuard {
         let output_hashes = approximate_lru
             .as_ref()
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
+        let decode_progress =
+            if decode_progress_enabled() && decode_progress_request_supported(request) {
+                cleanup
+                    .lifecycle()
+                    .filter(|lifecycle| lifecycle.is_active())
+                    .and_then(|lifecycle| {
+                        DecodeProgressGuard::start(
+                            dynamo_kv_router::RoutingPartitionRef::new(
+                                &cleanup.chooser.tracking_model_name,
+                                dynamo_kv_router::DEFAULT_ROUTING_GROUP,
+                            ),
+                            &cleanup.context_id,
+                            lifecycle.booking().attempt_id,
+                            cleanup.worker,
+                            request.stop_conditions.max_tokens,
+                            request.stop_conditions.ignore_eos.unwrap_or(false),
+                        )
+                    })
+            } else {
+                None
+            };
         Self {
+            decode_progress,
             cleanup: RequestCleanup::Kv(cleanup),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
@@ -679,6 +746,7 @@ impl RequestGuard {
     ) -> Self {
         request_metrics.requests_started_total.inc();
         Self {
+            decode_progress: None,
             cleanup: match occupancy_reservation {
                 Some(reservation) => RequestCleanup::Occupancy {
                     worker_id,
@@ -761,6 +829,21 @@ impl RequestGuard {
 
     pub(super) async fn on_item(&mut self, item: &Annotated<LLMEngineOutput>) {
         self.observability.observe_response();
+        if self
+            .cleanup
+            .lifecycle()
+            .is_some_and(|lease| !lease.is_active())
+        {
+            self.decode_progress.take();
+        }
+        if item
+            .data
+            .as_ref()
+            .is_some_and(|data| data.index.is_some_and(|index| index != 0))
+        {
+            // A backend violating the single-choice support condition invalidates observation.
+            self.decode_progress.take();
+        }
 
         let new_tokens = item.data.as_ref().map_or(0, |data| data.token_ids.len());
         if new_tokens > 0
@@ -831,6 +914,18 @@ impl RequestGuard {
         self.observability.observe_tokens(new_tokens);
         self.capture_kv_worker_hit(item);
         let cumulative_osl = self.observability.cumulative_osl();
+        if new_tokens > 0
+            && let Some(progress) = self.decode_progress.as_ref()
+        {
+            progress.advance(cumulative_osl);
+        }
+        if item
+            .data
+            .as_ref()
+            .is_some_and(|data| data.finish_reason.is_some())
+        {
+            self.decode_progress.take();
+        }
         let Some(update) = self.output_blocks.observe(cumulative_osl) else {
             return;
         };
@@ -858,6 +953,7 @@ impl RequestGuard {
     }
 
     pub(super) async fn finish(&mut self) {
+        self.decode_progress.take();
         if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
             lifecycle.complete();
         }
@@ -878,6 +974,7 @@ impl RequestGuard {
         let Some(mut lifecycle) = self.cleanup.take_request_lifecycle() else {
             return false;
         };
+        self.decode_progress.take();
         lifecycle.prepare_retry();
         migration_state.store_request_lifecycle(lifecycle);
         self.cleanup.finish().await;
@@ -885,6 +982,7 @@ impl RequestGuard {
     }
 
     pub(super) async fn abort_with_error(&mut self, error: Option<&AbortCause>) {
+        self.decode_progress.take();
         if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
             lifecycle.abort(error.map(crate::protocols::common::preprocessor::owned_abort_error));
         }
@@ -916,9 +1014,140 @@ impl RequestGuard {
 
 impl Drop for RequestGuard {
     fn drop(&mut self) {
+        self.decode_progress.take();
         self.observability
             .record_metrics(self.record_itl_at_completion);
         // RequestCleanup drops immediately afterward and performs resource cleanup.
+    }
+}
+
+#[cfg(test)]
+mod decode_progress_tests {
+    use super::*;
+    use crate::protocols::common::FinishReason;
+    use dynamo_kv_router::scheduling::AttemptId;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn request() -> PreprocessedRequest {
+        let mut request = PreprocessedRequest::builder()
+            .model("progress-test".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .annotations(Vec::new())
+            .build()
+            .unwrap();
+        request.stop_conditions.max_tokens = Some(128);
+        request.stop_conditions.ignore_eos = Some(true);
+        request
+    }
+
+    // Inject only the observation lease. The real RequestGuard stream and terminal methods run.
+    fn observed_guard() -> RequestGuard {
+        let metrics = RouterRequestMetrics::for_test(&dynamo_runtime::MetricsRegistry::new());
+        let mut guard = RequestGuard::new_builtin(metrics, 7, None, None, &request());
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        guard.decode_progress = Some(
+            DecodeProgressGuard::start(
+                dynamo_kv_router::RoutingPartitionRef::new("model", "default"),
+                &format!("frontend-progress-{id}"),
+                AttemptId::for_benchmark(id),
+                WorkerWithDpRank::new((1 << 62) + id, 0),
+                Some(128),
+                true,
+            )
+            .unwrap(),
+        );
+        guard
+    }
+
+    #[tokio::test]
+    async fn decode_progress_stream_counts_original_ids_and_retires_on_terminal() {
+        let mut guard = observed_guard();
+        guard
+            .on_item(&Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![10, 11, 12],
+                index: Some(0),
+                ..Default::default()
+            }))
+            .await;
+        assert_eq!(guard.observability.cumulative_osl(), 3);
+        assert!(guard.decode_progress.is_some());
+        guard
+            .on_item(&Annotated::from_data(LLMEngineOutput {
+                finish_reason: Some(FinishReason::Length),
+                ..Default::default()
+            }))
+            .await;
+        assert!(guard.decode_progress.is_none());
+    }
+
+    #[tokio::test]
+    async fn decode_progress_empty_metadata_is_not_an_output_token() {
+        let mut guard = observed_guard();
+        guard
+            .on_item(&Annotated::from_data(LLMEngineOutput::default()))
+            .await;
+        assert_eq!(guard.observability.cumulative_osl(), 0);
+        assert!(guard.decode_progress.is_some());
+    }
+
+    #[tokio::test]
+    async fn decode_progress_unexpected_choice_invalidates_observation() {
+        let mut guard = observed_guard();
+        guard
+            .on_item(&Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![10],
+                index: Some(1),
+                ..Default::default()
+            }))
+            .await;
+        assert!(guard.decode_progress.is_none());
+    }
+
+    #[tokio::test]
+    async fn decode_progress_finish_and_abort_release_before_return() {
+        let mut guard = observed_guard();
+        guard.finish().await;
+        assert!(guard.decode_progress.is_none());
+        let mut guard = observed_guard();
+        guard.abort().await;
+        assert!(guard.decode_progress.is_none());
+    }
+
+    #[tokio::test]
+    async fn decode_progress_declined_retry_keeps_the_live_observation() {
+        let mut guard = observed_guard();
+        assert!(!guard.release_for_retry().await);
+        assert!(guard.decode_progress.is_some());
+    }
+
+    #[tokio::test]
+    async fn decode_progress_support_rejects_other_phases_choices_and_stops() {
+        let mut request = request();
+        assert!(decode_progress_request_supported(&request));
+        request.sampling_options.n = Some(2);
+        assert!(!decode_progress_request_supported(&request));
+        request.sampling_options.n = None;
+        request.sampling_options.best_of = Some(2);
+        assert!(!decode_progress_request_supported(&request));
+        request.sampling_options.best_of = None;
+        request.stop_conditions.stop = Some(vec!["stop".into()]);
+        assert!(!decode_progress_request_supported(&request));
+        request.stop_conditions.stop = None;
+        request.stop_conditions.max_tokens = None;
+        assert!(!decode_progress_request_supported(&request));
+        request.stop_conditions.max_tokens = Some(128);
+        request.stop_conditions.ignore_eos = Some(false);
+        assert!(!decode_progress_request_supported(&request));
+        request.stop_conditions.ignore_eos = Some(true);
+        let tracker = Arc::new(RequestTracker::new());
+        request.tracker = Some(Arc::clone(&tracker));
+        let _phase = tracker.set_phase(RequestPhase::Decode).await;
+        assert!(!decode_progress_request_supported(&request));
     }
 }
 
