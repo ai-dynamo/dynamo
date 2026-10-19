@@ -151,21 +151,21 @@
     },
     {
       "baseline_digest": "sha256:862210586c5d0029195be06758c5797aa4f63e237d2308049c00eab94f779b63",
-      "baseline_image": "nvcr.io/nvstaging/nim-internal/vllm-enterprise-base",
+      "baseline_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
       "baseline_sbom": "vllm-enterprise-base@86221058-amd64.cdx.json",
       "baseline_tag": "1.7.0-cuda13",
       "from_digest": "sha256:862210586c5d0029195be06758c5797aa4f63e237d2308049c00eab94f779b63",
-      "from_image": "nvcr.io/nvstaging/nim-internal/vllm-enterprise-base",
+      "from_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
       "from_tag": "1.7.0-cuda13",
       "platform": "linux/amd64"
     },
     {
       "baseline_digest": "sha256:862210586c5d0029195be06758c5797aa4f63e237d2308049c00eab94f779b63",
-      "baseline_image": "nvcr.io/nvstaging/nim-internal/vllm-enterprise-base",
+      "baseline_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
       "baseline_sbom": "vllm-enterprise-base@86221058-arm64.cdx.json",
       "baseline_tag": "1.7.0-cuda13",
       "from_digest": "sha256:862210586c5d0029195be06758c5797aa4f63e237d2308049c00eab94f779b63",
-      "from_image": "nvcr.io/nvstaging/nim-internal/vllm-enterprise-base",
+      "from_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
       "from_tag": "1.7.0-cuda13",
       "platform": "linux/arm64"
     }
