@@ -50,8 +50,8 @@ impl BlockHashValue {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum KvTokenIds {
-    Single(Vec<u32>),
-    Bigram(Vec<(u32, u32)>),
+    Single(Vec<u64>),
+    Bigram(Vec<(u64, u64)>),
 }
 
 /// Per-event storage locality emitted by vLLM alongside `medium`. Absent on

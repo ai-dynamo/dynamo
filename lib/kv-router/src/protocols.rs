@@ -79,6 +79,16 @@ pub fn pad_value_for_mm_hash(mm_hash: u64) -> u32 {
     (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as u32
 }
 
+/// Fold an engine token id into Dynamo's u32 `Token` space.
+///
+/// SGLang image pads use token ids of up to 62 bits, which can overflow u32.
+/// A wide id folds into the pad range of [`pad_value_for_mm_hash`]. An id
+/// that fits passes through unchanged, so block hashes for all other engines
+/// keep their exact bytes.
+pub fn fold_token_id(token_id: u64) -> u32 {
+    u32::try_from(token_id).unwrap_or_else(|_| pad_value_for_mm_hash(token_id))
+}
+
 /// Map a non-empty multimodal identifier to Dynamo's routing hash.
 ///
 /// Preserve vLLM's canonical 64-character hex-digest mapping for compatibility,

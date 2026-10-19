@@ -96,6 +96,63 @@ fn test_deserialize_bigram_block_stored_sequence() {
     }
 }
 
+/// Encode SGLang's wire shape: an array-like batch of tagged map events.
+fn decode_token_ids(token_ids: &[serde_json::Value]) -> Vec<Vec<u32>> {
+    let events: Vec<_> = token_ids
+        .iter()
+        .map(|ids| {
+            serde_json::json!({
+                "type": "BlockStored",
+                "block_hashes": [11],
+                "parent_block_hash": null,
+                "token_ids": ids,
+                "block_size": 2,
+                "lora_id": null,
+            })
+        })
+        .collect();
+    decode_event_batch(&to_vec(&(0.0, events, Some(0))).unwrap())
+        .expect("decode KV event batch")
+        .events
+        .into_iter()
+        .map(|event| match event {
+            RawKvEvent::BlockStored { token_ids, .. } => token_ids,
+            other => panic!("expected BlockStored, got {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn test_decode_batch_folds_sglang_wide_pad_token_ids() {
+    // Image pad ids from a live SGLang KV event.
+    let (pad_a, pad_b) = (3_333_667_899_836_943_641_u64, 4_249_392_028_400_306_878_u64);
+    let decoded = decode_token_ids(&[
+        serde_json::json!([10, 11]),
+        serde_json::json!([u32::MAX, 1_u64 << 32, pad_a, pad_b]),
+        serde_json::json!([[10, pad_a], [pad_a, pad_b]]),
+    ]);
+    assert_eq!(
+        decoded,
+        vec![
+            vec![10, 11],
+            vec![u32::MAX, 1_000_000, 418_811_737, 473_730_302],
+            vec![10, 418_811_737, 473_730_302],
+        ]
+    );
+}
+
+#[test]
+fn test_decode_batch_keeps_u32_token_ids() {
+    let decoded = decode_token_ids(&[
+        serde_json::json!([0, 151_655, u32::MAX]),
+        serde_json::json!([[1, 2], [2, u32::MAX]]),
+    ]);
+    assert_eq!(
+        decoded,
+        vec![vec![0, 151_655, u32::MAX], vec![1, 2, u32::MAX]]
+    );
+}
+
 #[test]
 fn decodes_ownership_on_positional_events() {
     let stored = (
