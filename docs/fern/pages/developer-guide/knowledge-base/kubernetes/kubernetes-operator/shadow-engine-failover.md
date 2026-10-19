@@ -83,8 +83,8 @@ The following diagram illustrates same-node process-level recovery:
   as a complete failover workflow.
 - Do not use it for hardware failure, GPU loss, node loss, cross-node recovery,
   in-flight request recovery, or KV-cache recovery.
-- Do not combine it with Snapshot restore. Snapshot plus GMS is not yet
-  available.
+- Do not combine it with Snapshot. The operator rejects a component that sets
+  both `checkpoint.enabled: true` and `failover`.
 
 ## GPU Memory Service
 
@@ -114,8 +114,10 @@ The backend integrations rely on inference-engine changes that are still being u
 | Backend | Single Node | Multinode | KV-Cache Reuse | Hardware Fault Tolerance |
 | :--- | :---: | :---: | :---: | :---: |
 | **vLLM** | Supported | Supported | Not supported | Not supported |
-| **SGLang** | Experimental | Experimental | Not supported | Not supported |
-| **TensorRT-LLM** | Experimental | Experimental | Not supported | Not supported |
+| **SGLang** | Not supported | Not supported | Not supported | Not supported |
+| **TensorRT-LLM** | Not supported | Not supported | Not supported | Not supported |
+
+The operator supports failover only for vLLM workers. It reports a reconcile error for other backends.
 
 KV-cache reuse means remapping the existing cache into the standby engine so in-flight requests can
 continue after failover. Hardware fault tolerance requires placing the active and standby engines on
@@ -128,7 +130,7 @@ For the cross-feature backend overview, see [Compatibility](../../../../referenc
 - Kubernetes 1.34 or newer with DRA v1 (`resource.k8s.io/v1`) enabled.
 - NVIDIA GPU DRA driver installed.
 - A matching DRA `DeviceClass`, defaulting to `gpu.nvidia.com`.
-- A supported backend image. The current failover examples are vLLM-focused.
+- A vLLM runtime image. Failover supports only the vLLM backend.
 - Backend command-line support for GMS loading, such as `--load-format gms`.
 - Enough GPU memory for the GMS processes and active or standby engines sharing
   the device.
@@ -140,8 +142,8 @@ For the cross-feature backend overview, see [Compatibility](../../../../referenc
 - It does not diagnose or fix the backend failure.
 - It does not preserve in-flight requests, network sockets, or KV cache state.
 - It does not make Snapshot restore supported for GPU memory workloads.
-- Snapshot plus GMS is temporarily blocked by admission because of known GPU
-  driver restore issues.
+- Admission rejects Snapshot (`checkpoint.enabled: true`) combined with
+  `failover`, or with `gpuMemoryService` in `InterPod` mode.
 - It is not covered by the normal v1beta1 compatibility guarantees while it
   lives under `experimental`.
 
@@ -199,6 +201,11 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
           args:
             - --model
             - Qwen/Qwen3-0.6B
