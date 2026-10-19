@@ -476,6 +476,7 @@ impl
                 session_affinity.as_ref().clone(),
             );
         }
+        let prefill_engine_ctx = prefill_context.context();
         let Some(binding) = self.binding.load_full() else {
             return next.generate(context.map(|_| req)).await;
         };
@@ -626,7 +627,11 @@ impl
         };
         let decode = next.generate(context.map(|_| decode_req));
         match prefill_completion {
-            Some(completion) => completion.forward_decode(decode, engine_ctx, output).await,
+            Some(completion) => {
+                completion
+                    .forward_decode(decode, engine_ctx, output, prefill_engine_ctx)
+                    .await
+            }
             None => decode.await,
         }
     }
@@ -914,6 +919,7 @@ mod tests {
                     std::future::pending(),
                     Context::new(()).context(),
                     PrefillNeed::None,
+                    Context::new(()).context(),
                 )
                 .await
                 .unwrap_err();

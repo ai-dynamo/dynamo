@@ -234,7 +234,12 @@ mod tests {
             let decode: ManyOut<Annotated<LLMEngineOutput>> =
                 ResponseStream::new(Box::pin(stream::pending()), context.clone());
             match completion
-                .forward_decode(async { Ok(decode) }, context, PrefillNeed::None)
+                .forward_decode(
+                    async { Ok(decode) },
+                    context,
+                    PrefillNeed::None,
+                    Arc::new(Controller::default()),
+                )
                 .await
             {
                 Err(error) => assert!(error.to_string().contains("Prefill")),
