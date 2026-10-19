@@ -23,6 +23,7 @@ import (
 
 	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,8 +34,9 @@ import (
 )
 
 const (
-	dgdrDefaultingWebhookName = "dynamographdeploymentrequest-defaulting-webhook"
-	dgdrDefaultingWebhookPath = "/mutate-nvidia-com-v1beta1-dynamographdeploymentrequest"
+	dgdrDefaultingWebhookName        = "dynamographdeploymentrequest-defaulting-webhook"
+	dgdrDefaultingWebhookPath        = "/mutate-nvidia-com-v1beta1-dynamographdeploymentrequest"
+	dgdrV1Beta2DefaultingWebhookPath = "/mutate-nvidia-com-v1beta2-dynamographdeploymentrequest"
 
 	// defaultImage is the default profiler image used when spec.image is not set.
 	// Default image derivation is only supported for public release versions (1.0.0+).
@@ -48,7 +50,7 @@ const (
 )
 
 // DGDRDefaulter is a mutating webhook handler that fills in default values for
-// DynamoGraphDeploymentRequest resources on CREATE.
+// native v1beta1 DynamoGraphDeploymentRequest resources.
 //
 // If spec.image is not set, it is derived as:
 //
@@ -72,9 +74,8 @@ func NewDGDRDefaulter(operatorVersion, defaultImage string) *DGDRDefaulter {
 }
 
 // Default implements admission.CustomDefaulter.
-// If spec.image is not set, derives a default image from the backend and operator version.
-// UPDATE requests are admitted unchanged so an omitted image is not rewritten after
-// creation.
+// Native API defaults apply on CREATE and UPDATE. If spec.image is not set on
+// CREATE, derives a default image from the operator version.
 func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dgdrDefaultingWebhookName)
 
@@ -93,10 +94,12 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		return nil
 	}
 
-	if req.Operation != admissionv1.Create || dgdr.Spec.V1Beta2 != nil {
+	if dgdr.Spec.V1Beta2 != nil {
 		return nil
 	}
 
+	// Preserve the API defaults that moved out of the structural schema so
+	// envelope-backed storage objects remain free of native siblings.
 	if dgdr.Spec.Backend == "" {
 		dgdr.Spec.Backend = nvidiacomv1beta1.BackendTypeAuto
 	}
@@ -107,7 +110,9 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		dgdr.Spec.AutoApply = ptr.To(true)
 	}
 
-	if dgdr.Spec.Image == "" {
+	// Image derivation remains create-only so updates do not rewrite an
+	// intentionally cleared image.
+	if req.Operation == admissionv1.Create && dgdr.Spec.Image == "" {
 		if img := d.defaultImageFor(); img != "" {
 			dgdr.Spec.Image = img
 			logger.Info("defaulted spec.image from operator version",
@@ -119,6 +124,64 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	}
 
 	return nil
+}
+
+// DGDRV1Beta2Defaulter applies native v1beta2 defaults without changing a
+// foreign v1beta1 envelope representation.
+type DGDRV1Beta2Defaulter struct{}
+
+// Default implements admission.CustomDefaulter.
+func (d *DGDRV1Beta2Defaulter) Default(ctx context.Context, obj runtime.Object) error {
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta2.DynamoGraphDeploymentRequestGVK); err != nil {
+		return err
+	}
+
+	dgdr, ok := obj.(*nvidiacomv1beta2.DynamoGraphDeploymentRequest)
+	if !ok {
+		return fmt.Errorf("expected v1beta2 DynamoGraphDeploymentRequest but got %T", obj)
+	}
+	if dgdr.Spec.V1Beta1 != nil {
+		return nil
+	}
+
+	defaultNativeV1Beta2Spec(&dgdr.Spec)
+	return nil
+}
+
+func defaultNativeV1Beta2Spec(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) {
+	if spec.Backends == nil {
+		spec.Backends = []nvidiacomv1beta2.Backend{
+			nvidiacomv1beta2.BackendVLLM,
+			nvidiacomv1beta2.BackendSGLang,
+			nvidiacomv1beta2.BackendTRTLLM,
+		}
+	}
+	if spec.Workload == nil {
+		spec.Workload = &nvidiacomv1beta2.WorkloadSpec{
+			Static: &nvidiacomv1beta2.StaticWorkloadSpec{
+				ISL:         ptr.To[int32](4000),
+				OSL:         ptr.To[int32](1000),
+				KVLoadRatio: nvidiacomv1beta2.KVLoadRatio{0, 1},
+			},
+		}
+	}
+	if spec.Objective == nil {
+		metric := nvidiacomv1beta2.ObjectiveMetric("ThroughputPerGPU")
+		spec.Objective = &nvidiacomv1beta2.ObjectiveSpec{
+			Mode:   nvidiacomv1beta2.ObjectiveModeOptimize,
+			Metric: &metric,
+			SLA: &nvidiacomv1beta2.ObjectiveSLASpec{
+				TTFTMs: ptr.To(2000.0),
+				ITLMs:  ptr.To(30.0),
+			},
+		}
+	} else if spec.Objective.Mode == nvidiacomv1beta2.ObjectiveModeOptimize && spec.Objective.Metric == nil {
+		metric := nvidiacomv1beta2.ObjectiveMetric("ThroughputPerGPU")
+		spec.Objective.Metric = &metric
+	}
+	if spec.Recommendation == nil {
+		spec.Recommendation = &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 1}
+	}
 }
 
 // defaultImageFor returns the profiler image for spec.image: DefaultImage when
@@ -142,5 +205,14 @@ func (d *DGDRDefaulter) RegisterWithManager(mgr manager.Manager) error {
 		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}, defaulter).
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dgdrDefaultingWebhookPath, webhook)
+
+	v1beta2Defaulter := internalwebhook.NewLeaseAwareDefaulter(
+		&DGDRV1Beta2Defaulter{},
+		internalwebhook.GetExcludedNamespaces(),
+	)
+	v1beta2Webhook := admission.
+		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}, v1beta2Defaulter).
+		WithRecoverPanic(true)
+	mgr.GetWebhookServer().Register(dgdrV1Beta2DefaultingWebhookPath, v1beta2Webhook)
 	return nil
 }

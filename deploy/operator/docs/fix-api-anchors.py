@@ -190,12 +190,6 @@ for t in duplicate_types:
 content = alpha_part + beta_part + remaining_packages
 content = project_standalone_dcd_schema(content)
 
-# RunSpec aliases RequestSpec, so crd-ref-docs generates a link for the alias
-# but no corresponding type section. Point the link at the emitted shared schema.
-content = content.replace(
-    "[DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec)",
-    "[DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)",
-)
 content = prefix_duplicate_type_anchors(content, "nvidia.com/v1beta2", "v1beta2")
 
 external_types_without_sections = [

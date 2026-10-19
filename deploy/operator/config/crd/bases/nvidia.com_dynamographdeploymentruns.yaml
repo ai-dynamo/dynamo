@@ -57,8 +57,8 @@ spec:
               type: object
             spec:
               description: |-
-                DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
-                Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
+                DynamoGraphDeploymentRunSpec is an immutable, resolved copy of an accepted DGDR spec.
+                Run creators resolve optional Request inputs before persisting the Run.
               properties:
                 aisimulate:
                   description: AISimulate selects the execution artifact and supplies native AISimulate input.
@@ -83,10 +83,6 @@ spec:
                       type: string
                   type: object
                 backends:
-                  default:
-                    - vllm
-                    - sglang
-                    - trtllm
                   description: Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
                   items:
                     description: Backend identifies an inference backend searched by AISimulate and used by generated candidates.
@@ -133,7 +129,6 @@ spec:
                     - name
                   type: object
                 objective:
-                  default: {}
                   description: |-
                     Objective defines scalar optimization or a multi-objective Pareto search.
                     When omitted, the schema supplies the default Optimize mode and SLA;
@@ -210,7 +205,6 @@ spec:
                     - message: Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound
                       rule: '!(has(self.metrics) && self.metrics.exists(m, m in [''Goodput'', ''GoodputPerGPU''])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
                 recommendation:
-                  default: {}
                   description: Recommendation controls bounded projection into DGDC resources.
                   properties:
                     maxCandidates:
@@ -224,14 +218,7 @@ spec:
                       minimum: 1
                       type: integer
                   type: object
-                v1beta1:
-                  description: |-
-                    V1Beta1 losslessly preserves a native v1beta1 spec while this object is
-                    represented through v1beta2. It is mutually exclusive with native fields.
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
                 workload:
-                  default: {}
                   description: Workload defines the synthetic traffic model used for every candidate evaluation.
                   properties:
                     static:
@@ -289,10 +276,8 @@ spec:
                   type: object
               type: object
               x-kubernetes-validations:
-                - message: exactly one of native v1beta2 fields or v1beta1 must be specified
-                  rule: has(self.v1beta1) != has(self.model)
-                - message: v1beta1 is mutually exclusive with native v1beta2 fields
-                  rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))'
+                - message: model is required
+                  rule: has(self.model)
             status:
               description: DynamoGraphDeploymentRunStatus represents one search execution's observed state.
               properties:

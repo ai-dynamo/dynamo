@@ -32,6 +32,27 @@ import (
 
 const testDGDName = "my-dgd"
 
+func TestV1Beta2EnvelopeSerializesWithoutNativeFields(t *testing.T) {
+	spec := DynamoGraphDeploymentRequestSpec{
+		V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"model":{"name":"test"}}`)},
+	}
+
+	data, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if len(fields) != 1 {
+		t.Fatalf("serialized fields = %v, want only v1beta2", fields)
+	}
+	if _, ok := fields["v1beta2"]; !ok {
+		t.Fatalf("serialized fields = %v, want v1beta2", fields)
+	}
+}
+
 // newV1alpha1DGDR builds a fully-populated v1alpha1 DGDR for use in tests.
 func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 	profilingBlob := map[string]interface{}{
@@ -68,7 +89,7 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 			RuntimeVersionOverride: "1.2.3",
 			AutoApply:              true,
 			UseMocker:              true,
-			ProfilingConfig: ProfilingConfigSpec{
+			ProfilingConfig: &ProfilingConfigSpec{
 				ProfilerImage: "nvcr.io/nvidia/dynamo:latest",
 				OutputPVC:     "output-pvc",
 				Config:        &apiextensionsv1.JSON{Raw: blobRaw},

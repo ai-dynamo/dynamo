@@ -17,6 +17,7 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -83,6 +84,13 @@ func main() {
 	}
 
 	ctx := context.Background()
+	if !*dgdrV1Beta2Enabled {
+		if err := requireDGDRV1Beta2StandaloneCRDsAbsent(ctx, client); err != nil {
+			log.Error(err, "refusing to disable experimental DGDR v1beta2 APIs")
+			os.Exit(1)
+		}
+	}
+
 	var applied int
 
 	for _, entry := range entries {
@@ -159,8 +167,8 @@ func main() {
 	log.Info("CRD apply complete", "applied", applied)
 }
 
-// configureDGDRV1Beta2CRD removes experimental API discovery when the flag is disabled.
-// Existing standalone CRDs are skipped, not deleted, to avoid destructive upgrades.
+// configureDGDRV1Beta2CRD projects the generated CRDs to the complete disabled
+// API shape. Existing standalone CRDs are rejected before this function runs.
 func configureDGDRV1Beta2CRD(crd *apiextensionsv1.CustomResourceDefinition) bool {
 	switch crd.Name {
 	case dgdrRunCRDName, dgdrCandidateCRD:
@@ -172,8 +180,79 @@ func configureDGDRV1Beta2CRD(crd *apiextensionsv1.CustomResourceDefinition) bool
 				return version.Name == dgdrV1Beta2Version
 			},
 		)
+		for i := range crd.Spec.Versions {
+			removeDGDRV1Beta2Envelope(&crd.Spec.Versions[i])
+		}
 	}
 	return true
+}
+
+func requireDGDRV1Beta2StandaloneCRDsAbsent(
+	ctx context.Context,
+	client *apiextensionsclient.Clientset,
+) error {
+	for _, name := range []string{dgdrRunCRDName, dgdrCandidateCRD} {
+		_, err := client.ApiextensionsV1().CustomResourceDefinitions().Get(
+			ctx,
+			name,
+			metav1.GetOptions{},
+		)
+		switch {
+		case apierrors.IsNotFound(err):
+			continue
+		case err != nil:
+			return fmt.Errorf("check %s: %w", name, err)
+		default:
+			return fmt.Errorf(
+				"%s is still installed; delete its objects and CRD before disabling %s",
+				name,
+				dgdrV1Beta2Flag,
+			)
+		}
+	}
+	return nil
+}
+
+func removeDGDRV1Beta2Envelope(version *apiextensionsv1.CustomResourceDefinitionVersion) {
+	if version.Schema == nil || version.Schema.OpenAPIV3Schema == nil {
+		return
+	}
+
+	root := version.Schema.OpenAPIV3Schema
+	spec := root.Properties["spec"]
+	delete(spec.Properties, dgdrV1Beta2Version)
+	spec.XValidations = slices.DeleteFunc(
+		spec.XValidations,
+		func(rule apiextensionsv1.ValidationRule) bool {
+			return strings.Contains(rule.Rule, dgdrV1Beta2Version)
+		},
+	)
+	switch version.Name {
+	case "v1alpha1":
+		spec.Required = appendRequired(spec.Required, "model", "backend", "profilingConfig")
+	case "v1beta1":
+		spec.Required = appendRequired(spec.Required, "model")
+	}
+	root.Properties["spec"] = spec
+
+	status := root.Properties["status"]
+	delete(status.Properties, dgdrV1Beta2Version)
+	status.XValidations = slices.DeleteFunc(
+		status.XValidations,
+		func(rule apiextensionsv1.ValidationRule) bool {
+			return strings.Contains(rule.Rule, dgdrV1Beta2Version)
+		},
+	)
+	root.Properties["status"] = status
+}
+
+func appendRequired(required []string, fields ...string) []string {
+	for _, field := range fields {
+		if !slices.Contains(required, field) {
+			required = append(required, field)
+		}
+	}
+	return required
 }
 
 func configureConversionWebhookService(

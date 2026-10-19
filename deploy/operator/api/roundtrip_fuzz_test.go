@@ -224,11 +224,16 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 
 func fuzzAlphaDGDRSpec(s *v1alpha1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
 	c.FillNoCustom(s)
+	s.V1Beta2 = nil
+	if s.ProfilingConfig == nil {
+		s.ProfilingConfig = &v1alpha1.ProfilingConfigSpec{}
+	}
 
 	s.Backend = oneOf(c, "auto", "vllm", "sglang", "trtllm")
 
 	// Empty resources do not survive the alpha resources to beta profiling job projection.
-	if s.ProfilingConfig.Resources != nil &&
+	if s.ProfilingConfig != nil &&
+		s.ProfilingConfig.Resources != nil &&
 		len(s.ProfilingConfig.Resources.Requests) == 0 &&
 		len(s.ProfilingConfig.Resources.Limits) == 0 &&
 		len(s.ProfilingConfig.Resources.Claims) == 0 {
@@ -256,6 +261,7 @@ func fuzzAlphaDGDRSpec(s *v1alpha1.DynamoGraphDeploymentRequestSpec, c randfill.
 
 func fuzzAlphaDGDRStatus(s *v1alpha1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
 	c.FillNoCustom(s)
+	s.V1Beta2 = nil
 
 	s.State = oneOf(c,
 		v1alpha1.DGDRStateInitializing,

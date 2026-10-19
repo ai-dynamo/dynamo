@@ -451,6 +451,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 		return ctrl.Result{}, err
 	}
 
+	// A v1beta2 request is stored as a v1beta1 envelope carrier. Until its
+	// reconciler exists, leave that carrier and its children untouched.
+	if dgdr.Spec.V1Beta2 != nil {
+		return ctrl.Result{}, nil
+	}
+
 	// Handle finalizer using common function
 	finalized, err := commonController.HandleFinalizer(ctx, dgdr, r.Client, r)
 	if err != nil {
@@ -2055,7 +2061,10 @@ func restoredAlphaProfilingConfig(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRe
 	if err := alpha.ConvertFrom(dgdr); err != nil {
 		return dgdv1alpha1.ProfilingConfigSpec{}, err
 	}
-	return alpha.Spec.ProfilingConfig, nil
+	if alpha.Spec.ProfilingConfig == nil {
+		return dgdv1alpha1.ProfilingConfigSpec{}, nil
+	}
+	return *alpha.Spec.ProfilingConfig, nil
 }
 
 // checkProfilingJobStatus checks if the profiling job has completed

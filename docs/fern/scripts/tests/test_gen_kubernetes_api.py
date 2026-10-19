@@ -51,7 +51,7 @@ EXPECTED_TYPE_COUNTS = {
     # owned by github.com/ai-dynamo/snapshot.
     "nvidia.com/v1alpha1": 69,
     "nvidia.com/v1beta1": 74,
-    "nvidia.com/v1beta2": 28,
+    "nvidia.com/v1beta2": 30,
     "operator.config.dynamo.nvidia.com/v1alpha1": 29,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
@@ -243,10 +243,7 @@ def test_v1beta2_shared_type_names_use_deduplicated_anchors(
 
     run = next(t for t in v1beta2_pkg.types if t.name == "DynamoGraphDeploymentRun")
     run_spec = next(field for field in run.fields if field.name == "spec")
-    assert (
-        run_spec.type == "[DynamoGraphDeploymentRequestSpec]"
-        "(#v1beta2-dynamographdeploymentrequestspec)"
-    )
+    assert run_spec.type == "[DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec)"
 
 
 def test_removed_dynamocheckpoint_types_are_absent(

@@ -179,9 +179,11 @@ explicit, complete foreign-version payload under `spec.v1beta1` or
 - Conversion unwraps the matching envelope when returning to its native version.
 - Otherwise conversion moves the complete native spec and status into the
   target version's envelope without mutating the source.
-- The still-served `v1alpha1` spoke carries a `v1beta2` envelope opaquely through
-  its existing sparse preservation annotations; it must not project that payload
-  into profiler fields.
+- The still-served `v1alpha1` spoke exposes the same public `v1beta2` spec and
+  status envelopes. It carries those envelopes structurally and must not project
+  their payloads into profiler fields. Annotation-backed envelopes written by
+  earlier development revisions are accepted only as migration input and become
+  structural on the next conversion.
 - Controllers may branch on these public envelope fields to select the native
   runtime path. The private sparse annotations remain conversion-only.
 

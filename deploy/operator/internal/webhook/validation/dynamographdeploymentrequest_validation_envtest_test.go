@@ -588,7 +588,7 @@ func alphaDGDRForAdmission(
 			Model:                  "Qwen/Qwen3-0.6B",
 			Backend:                "vllm",
 			RuntimeVersionOverride: "1.1.0",
-			ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+			ProfilingConfig: &nvidiacomv1alpha1.ProfilingConfigSpec{
 				ProfilerImage: "profiler:latest",
 			},
 		},

@@ -30,6 +30,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	dgdv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -38,6 +39,7 @@ import (
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -113,6 +115,119 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			OperatorImagePullPolicy: corev1.PullAlways,
 			RBACManager:             &MockRBACManager{},
 		}
+	})
+
+	Context("When the storage object carries a v1beta2 request", func() {
+		It("Should admit an unchanged v1beta1 object written back through v1beta2", func() {
+			ctx := context.Background()
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "v1beta2-unchanged-write",
+					Namespace: envtestNamespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "Qwen/Qwen3-32B",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "test-profiler:1.1.0",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](8),
+					},
+				},
+			}
+
+			By("Creating a native v1beta1 request through admission")
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+			storedBefore := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), storedBefore)).Should(Succeed())
+
+			By("Reading the stored request through the served v1beta2 API")
+			spoke := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), spoke)).Should(Succeed())
+			Expect(spoke.Spec.V1Beta1).NotTo(BeNil())
+			Expect(spoke.Spec.NativeSearchInput).To(Equal(nvidiacomv1beta2.NativeSearchInput{}))
+
+			By("Writing the returned envelope carrier back unchanged")
+			Expect(k8sClient.Update(ctx, spoke)).Should(Succeed())
+
+			By("Verifying the native v1beta1 storage payload did not change")
+			storedAfter := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), storedAfter)).Should(Succeed())
+			Expect(storedAfter.Spec).To(Equal(storedBefore.Spec))
+		})
+
+		It("Should carry a native v1beta2 request through the v1alpha1 API", func() {
+			ctx := context.Background()
+			dgdr := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "v1alpha1-structural-carrier",
+					Namespace: envtestNamespace,
+				},
+				Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
+					NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
+						Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-32B"},
+					},
+				},
+			}
+
+			By("Creating a native v1beta2 request through admission")
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+			nativeSpec := dgdr.Spec.DeepCopy()
+
+			By("Reading the request through the served v1alpha1 API")
+			alpha := &dgdv1alpha1.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), alpha)).Should(Succeed())
+			Expect(alpha.Spec.V1Beta2).NotTo(BeNil())
+			Expect(alpha.Spec.ProfilingConfig).To(BeNil())
+
+			By("Writing the v1alpha1 structural carrier back unchanged")
+			Expect(k8sClient.Update(ctx, alpha)).Should(Succeed())
+
+			By("Verifying the native v1beta2 payload did not change")
+			restored := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), restored)).Should(Succeed())
+			Expect(&restored.Spec).To(Equal(nativeSpec))
+		})
+
+		It("Should leave the carrier and child resources untouched", func() {
+			ctx := context.Background()
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "v1beta2-storage-carrier",
+					Namespace: envtestNamespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					V1Beta2: &apiextensionsv1.JSON{
+						Raw: []byte(`{"model":{"name":"Qwen/Qwen3-32B"}}`),
+					},
+				},
+			}
+
+			By("Creating the v1beta1 storage representation of a native v1beta2 request")
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			By("Reconciling before the v1beta2 runtime controller exists")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: client.ObjectKeyFromObject(dgdr),
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Verifying the legacy controller added no finalizer or status")
+			stored := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), stored)).Should(Succeed())
+			Expect(stored.Finalizers).To(BeEmpty())
+			Expect(stored.Status).To(Equal(nvidiacomv1beta1.DynamoGraphDeploymentRequestStatus{}))
+
+			By("Verifying the legacy controller created no profiling job")
+			jobs := &batchv1.JobList{}
+			Expect(k8sClient.List(ctx, jobs, client.InNamespace(envtestNamespace))).Should(Succeed())
+			Expect(jobs.Items).To(BeEmpty())
+		})
 	})
 
 	Context("When reconciling initial DGDR", func() {
@@ -255,7 +370,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 
 			alphaCompatibility := &dgdv1alpha1.DynamoGraphDeploymentRequest{
 				Spec: dgdv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ProfilingConfig: dgdv1alpha1.ProfilingConfigSpec{
+					ProfilingConfig: &dgdv1alpha1.ProfilingConfigSpec{
 						ConfigMapRef: &dgdv1alpha1.ConfigMapKeySelector{Name: "test-config", Key: "disagg.yaml"},
 						OutputPVC:    "test-output-pvc",
 					},

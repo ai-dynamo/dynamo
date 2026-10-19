@@ -216,18 +216,15 @@ type RecommendationSpec struct {
 	MaxCandidates int32 `json:"maxCandidates,omitempty"`
 }
 
-// DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
-// Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
-// +kubebuilder:validation:XValidation:rule="has(self.v1beta1) != has(self.model)",message="exactly one of native v1beta2 fields or v1beta1 must be specified"
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
-type DynamoGraphDeploymentRequestSpec struct {
+// NativeSearchInput defines the v1beta2 search input shared by Requests and
+// immutable Runs.
+type NativeSearchInput struct {
 	// Model identifies the model whose deployment configurations are evaluated.
 	// +optional
 	Model *ModelSpec `json:"model,omitempty"`
 
 	// Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
 	// +optional
-	// +kubebuilder:default={vllm,sglang,trtllm}
 	// +kubebuilder:validation:MinItems=1
 	Backends []Backend `json:"backends,omitempty"`
 
@@ -238,14 +235,12 @@ type DynamoGraphDeploymentRequestSpec struct {
 
 	// Workload defines the synthetic traffic model used for every candidate evaluation.
 	// +optional
-	// +kubebuilder:default={}
 	Workload *WorkloadSpec `json:"workload,omitempty"`
 
 	// Objective defines scalar optimization or a multi-objective Pareto search.
 	// When omitted, the schema supplies the default Optimize mode and SLA;
 	// admission supplies the conditional scalar metric.
 	// +optional
-	// +kubebuilder:default={}
 	Objective *ObjectiveSpec `json:"objective,omitempty"`
 
 	// AISimulate selects the execution artifact and supplies native AISimulate input.
@@ -254,8 +249,15 @@ type DynamoGraphDeploymentRequestSpec struct {
 
 	// Recommendation controls bounded projection into DGDC resources.
 	// +optional
-	// +kubebuilder:default={}
 	Recommendation *RecommendationSpec `json:"recommendation,omitempty"`
+}
+
+// DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+// Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta1) != has(self.model)",message="exactly one of native v1beta2 fields or v1beta1 must be specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
+type DynamoGraphDeploymentRequestSpec struct {
+	NativeSearchInput `json:",inline"`
 
 	// V1Beta1 losslessly preserves a native v1beta1 spec while this object is
 	// represented through v1beta2. It is mutually exclusive with native fields.
@@ -296,7 +298,6 @@ type DynamoGraphDeploymentRequestStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:unservedversion
 // +kubebuilder:resource:shortName=dgdr
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model.name`
 // +kubebuilder:printcolumn:name="Active Run",type=string,JSONPath=`.status.activeRunRef.name`

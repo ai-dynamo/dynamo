@@ -82,7 +82,6 @@ spec:
               description: Spec defines the desired state for this deployment request.
               properties:
                 autoApply:
-                  default: false
                   description: |-
                     AutoApply indicates whether to automatically create a DynamoGraphDeployment
                     after profiling completes. If false, only the spec is generated and stored in status.
@@ -135,7 +134,6 @@ spec:
                       type: string
                   type: object
                 enableGpuDiscovery:
-                  default: true
                   description: |-
                     EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.
                     DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always
@@ -323,7 +321,6 @@ spec:
                   pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
                   type: string
                 useMocker:
-                  default: false
                   description: |-
                     UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of
                     a real backend deployment. When true, the deployment uses simulated engines that
@@ -331,11 +328,20 @@ spec:
                     Mocker is available in all backend images and useful for large-scale experiments.
                     Profiling still runs against the real backend (specified above) to collect performance data.
                   type: boolean
-              required:
-                - backend
-                - model
-                - profilingConfig
+                v1beta2:
+                  description: |-
+                    V1Beta2 losslessly preserves a native v1beta2 spec while this object is
+                    represented through v1alpha1. It is mutually exclusive with native fields.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
               type: object
+              x-kubernetes-validations:
+                - message: exactly one of native v1alpha1 fields or v1beta2 must be specified
+                  rule: has(self.v1beta2) != has(self.model)
+                - message: native v1alpha1 requests require backend and profilingConfig
+                  rule: has(self.v1beta2) || (has(self.backend) && has(self.profilingConfig))
+                - message: v1beta2 is mutually exclusive with native v1alpha1 fields
+                  rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.useMocker) || has(self.profilingConfig) || has(self.runtimeVersionOverride) || has(self.enableGpuDiscovery) || has(self.autoApply) || has(self.deploymentOverrides))'
             status:
               description: Status reflects the current observed state of this deployment request.
               properties:
@@ -455,7 +461,6 @@ spec:
                     Format: "configmap/\<name\>"
                   type: string
                 state:
-                  default: Initializing
                   description: State is a high-level textual status of the deployment request lifecycle.
                   enum:
                     - Initializing
@@ -466,9 +471,16 @@ spec:
                     - DeploymentDeleted
                     - Failed
                   type: string
-              required:
-                - state
+                v1beta2:
+                  description: |-
+                    V1Beta2 losslessly preserves a native v1beta2 status while this object is
+                    represented through v1alpha1.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
               type: object
+              x-kubernetes-validations:
+                - message: v1beta2 is mutually exclusive with native v1alpha1 status fields
+                  rule: '!has(self.v1beta2) || !(has(self.state) || has(self.backend) || has(self.observedGeneration) || has(self.conditions) || has(self.profilingResults) || has(self.generatedDeployment) || has(self.deployment))'
           type: object
       served: true
       storage: false
@@ -9585,10 +9597,6 @@ spec:
                       type: string
                   type: object
                 backends:
-                  default:
-                    - vllm
-                    - sglang
-                    - trtllm
                   description: Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
                   items:
                     description: Backend identifies an inference backend searched by AISimulate and used by generated candidates.
@@ -9635,7 +9643,6 @@ spec:
                     - name
                   type: object
                 objective:
-                  default: {}
                   description: |-
                     Objective defines scalar optimization or a multi-objective Pareto search.
                     When omitted, the schema supplies the default Optimize mode and SLA;
@@ -9712,7 +9719,6 @@ spec:
                     - message: Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound
                       rule: '!(has(self.metrics) && self.metrics.exists(m, m in [''Goodput'', ''GoodputPerGPU''])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
                 recommendation:
-                  default: {}
                   description: Recommendation controls bounded projection into DGDC resources.
                   properties:
                     maxCandidates:
@@ -9733,7 +9739,6 @@ spec:
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
                 workload:
-                  default: {}
                   description: Workload defines the synthetic traffic model used for every candidate evaluation.
                   properties:
                     static:
@@ -9907,7 +9912,7 @@ spec:
           required:
             - spec
           type: object
-      served: false
+      served: true
       storage: false
       subresources:
         status: {}

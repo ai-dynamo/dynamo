@@ -89,33 +89,35 @@ func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 	src := &DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "replay-search", Namespace: "default"},
 		Spec: DynamoGraphDeploymentRequestSpec{
-			Model:    &ModelSpec{Name: "Qwen/Qwen3-32B"},
-			Backends: []Backend{BackendVLLM, BackendSGLang},
-			Hardware: &HardwareSpec{
-				GPU: &GPUHardwareSpec{
-					SKU:    ptr.To("H100-SXM5-80GB"),
-					Budget: ptr.To(int32(8)),
+			NativeSearchInput: NativeSearchInput{
+				Model:    &ModelSpec{Name: "Qwen/Qwen3-32B"},
+				Backends: []Backend{BackendVLLM, BackendSGLang},
+				Hardware: &HardwareSpec{
+					GPU: &GPUHardwareSpec{
+						SKU:    ptr.To("H100-SXM5-80GB"),
+						Budget: ptr.To(int32(8)),
+					},
 				},
-			},
-			Workload: &WorkloadSpec{
-				Static: &StaticWorkloadSpec{
-					ISL:             ptr.To(int32(4096)),
-					OSL:             ptr.To(int32(1024)),
-					NumRequestRatio: ptr.To(2.0),
-					RequestRate:     ptr.To(12.5),
+				Workload: &WorkloadSpec{
+					Static: &StaticWorkloadSpec{
+						ISL:             ptr.To(int32(4096)),
+						OSL:             ptr.To(int32(1024)),
+						NumRequestRatio: ptr.To(2.0),
+						RequestRate:     ptr.To(12.5),
+					},
 				},
+				Objective: &ObjectiveSpec{
+					Mode:    ObjectiveModePareto,
+					Metrics: []ObjectiveMetric{"ThroughputPerGPU", "TTFT"},
+					SLA:     &ObjectiveSLASpec{TTFTMs: ptr.To(2000.0), ITLMs: ptr.To(30.0)},
+				},
+				AISimulate: &AISimulateSpec{
+					Image:           "nvcr.io/nvidia/aisimulate:latest",
+					VersionOverride: "1.0.0",
+					Parameters:      &runtime.RawExtension{Raw: []byte(`{"search_method":"grid"}`)},
+				},
+				Recommendation: &RecommendationSpec{MaxCandidates: 3},
 			},
-			Objective: &ObjectiveSpec{
-				Mode:    ObjectiveModePareto,
-				Metrics: []ObjectiveMetric{"ThroughputPerGPU", "TTFT"},
-				SLA:     &ObjectiveSLASpec{TTFTMs: ptr.To(2000.0), ITLMs: ptr.To(30.0)},
-			},
-			AISimulate: &AISimulateSpec{
-				Image:           "nvcr.io/nvidia/aisimulate:latest",
-				VersionOverride: "1.0.0",
-				Parameters:      &runtime.RawExtension{Raw: []byte(`{"search_method":"grid"}`)},
-			},
-			Recommendation: &RecommendationSpec{MaxCandidates: 3},
 		},
 		Status: DynamoGraphDeploymentRequestStatus{
 			ObservedGeneration: 3,
@@ -195,7 +197,9 @@ func TestConversionRejectsMixedRepresentations(t *testing.T) {
 			name: "v1beta2 spec",
 			spoke: &DynamoGraphDeploymentRequest{
 				Spec: DynamoGraphDeploymentRequestSpec{
-					Model:   &ModelSpec{Name: "Qwen/Qwen3-32B"},
+					NativeSearchInput: NativeSearchInput{
+						Model: &ModelSpec{Name: "Qwen/Qwen3-32B"},
+					},
 					V1Beta1: &apiextensionsv1.JSON{Raw: []byte(`{"model":"legacy"}`)},
 				},
 			},
@@ -248,13 +252,13 @@ func TestConversionRejectsMixedRepresentations(t *testing.T) {
 func TestNativeV1Beta2SpecFields(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Verify the request spec contains exactly the AISimulate-native fields plus the conversion envelope.")
-	specType := reflect.TypeOf(DynamoGraphDeploymentRequestSpec{})
-	got := make([]string, specType.NumField())
-	for i := range specType.NumField() {
-		got[i] = specType.Field(i).Name
+	t.Log("Verify the shared input contains exactly the AISimulate-native fields.")
+	nativeType := reflect.TypeOf(NativeSearchInput{})
+	gotNative := make([]string, nativeType.NumField())
+	for i := range nativeType.NumField() {
+		gotNative[i] = nativeType.Field(i).Name
 	}
-	want := []string{
+	wantNative := []string{
 		"Model",
 		"Backends",
 		"Hardware",
@@ -262,21 +266,38 @@ func TestNativeV1Beta2SpecFields(t *testing.T) {
 		"Objective",
 		"AISimulate",
 		"Recommendation",
+	}
+	if !reflect.DeepEqual(gotNative, wantNative) {
+		t.Fatalf("native search input fields = %v, want %v", gotNative, wantNative)
+	}
+
+	t.Log("Verify only Request wraps native input with conversion state.")
+	requestType := reflect.TypeOf(DynamoGraphDeploymentRequestSpec{})
+	gotRequest := make([]string, requestType.NumField())
+	for i := range requestType.NumField() {
+		gotRequest[i] = requestType.Field(i).Name
+	}
+	wantRequest := []string{
+		"NativeSearchInput",
 		"V1Beta1",
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("request spec fields = %v, want %v", got, want)
+	if !reflect.DeepEqual(gotRequest, wantRequest) {
+		t.Fatalf("request spec fields = %v, want %v", gotRequest, wantRequest)
+	}
+	runType := reflect.TypeOf(DynamoGraphDeploymentRunSpec{})
+	if runType.NumField() != 1 || runType.Field(0).Name != "NativeSearchInput" {
+		t.Fatalf("run spec exposes request-only fields: %v", runType)
 	}
 
 	t.Log("Verify every native field is recognized and the envelope itself is not.")
 	tests := map[string]DynamoGraphDeploymentRequestSpec{
-		"model":          {Model: &ModelSpec{}},
-		"backends":       {Backends: []Backend{BackendVLLM}},
-		"hardware":       {Hardware: &HardwareSpec{}},
-		"workload":       {Workload: &WorkloadSpec{}},
-		"objective":      {Objective: &ObjectiveSpec{}},
-		"aisimulate":     {AISimulate: &AISimulateSpec{}},
-		"recommendation": {Recommendation: &RecommendationSpec{}},
+		"model":          {NativeSearchInput: NativeSearchInput{Model: &ModelSpec{}}},
+		"backends":       {NativeSearchInput: NativeSearchInput{Backends: []Backend{BackendVLLM}}},
+		"hardware":       {NativeSearchInput: NativeSearchInput{Hardware: &HardwareSpec{}}},
+		"workload":       {NativeSearchInput: NativeSearchInput{Workload: &WorkloadSpec{}}},
+		"objective":      {NativeSearchInput: NativeSearchInput{Objective: &ObjectiveSpec{}}},
+		"aisimulate":     {NativeSearchInput: NativeSearchInput{AISimulate: &AISimulateSpec{}}},
+		"recommendation": {NativeSearchInput: NativeSearchInput{Recommendation: &RecommendationSpec{}}},
 	}
 	for name, spec := range tests {
 		t.Run(name, func(t *testing.T) {

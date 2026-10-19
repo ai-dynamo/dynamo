@@ -220,7 +220,7 @@ func TestBugDGDRProfilingConfigPreservesUnprojectableTypedKeys(t *testing.T) {
 	}`)
 	src := &DynamoGraphDeploymentRequest{
 		Spec: DynamoGraphDeploymentRequestSpec{
-			ProfilingConfig: ProfilingConfigSpec{
+			ProfilingConfig: &ProfilingConfigSpec{
 				Config: &apiextensionsv1.JSON{Raw: config},
 			},
 		},
@@ -410,7 +410,7 @@ func TestBugDGDRAlphaResourcesRoundTripOmitsPrivateAnnotation(t *testing.T) {
 	t.Log("Start from alpha-only profilingConfig.resources")
 	spoke := &DynamoGraphDeploymentRequest{
 		Spec: DynamoGraphDeploymentRequestSpec{
-			ProfilingConfig: ProfilingConfigSpec{
+			ProfilingConfig: &ProfilingConfigSpec{
 				Resources: &resources,
 			},
 		},
@@ -513,7 +513,7 @@ func TestBugDGDRLegacyUnnamedAnnotationMigratesInPlace(t *testing.T) {
 			},
 		},
 		Spec: DynamoGraphDeploymentRequestSpec{
-			ProfilingConfig: ProfilingConfigSpec{
+			ProfilingConfig: &ProfilingConfigSpec{
 				Resources: &resources,
 			},
 		},
