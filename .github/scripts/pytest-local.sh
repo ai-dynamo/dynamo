@@ -81,6 +81,7 @@ echo "Datadog flaky retries enabled: ${DD_CIVISIBILITY_FLAKY_RETRY_ENABLED:-unse
 TEST_RESULTS_DIR="${GITHUB_WORKSPACE}/test-results"
 mkdir -p "${TEST_RESULTS_DIR}/status"
 chmod 777 "${TEST_RESULTS_DIR}"
+export DYNAMO_CI_TEST_SELECTION_DIR="${TEST_RESULTS_DIR}"
 echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
 # Emptied up front so the file read at the end of the job can only have

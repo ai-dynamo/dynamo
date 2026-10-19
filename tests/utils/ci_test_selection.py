@@ -69,11 +69,11 @@ def _write_report(
     intentional_empty: bool,
 ) -> None:
     safe_test_type = re.sub(r"[^A-Za-z0-9_.-]", "_", test_type or "unknown")
-    output = (
-        Path(str(config.rootpath))
-        / "test-results"
-        / f"ci_test_selection_{safe_test_type}.json"
+    report_dir = os.environ.get("DYNAMO_CI_TEST_SELECTION_DIR")
+    output_dir = (
+        Path(report_dir) if report_dir else Path(str(config.rootpath)) / "test-results"
     )
+    output = output_dir / f"ci_test_selection_{safe_test_type}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     report = {
         "framework": framework,
