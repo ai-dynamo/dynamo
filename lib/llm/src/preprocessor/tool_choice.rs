@@ -410,6 +410,9 @@ fn install_structural_tag(
 /// explicit guided-decoding field constrains the answer itself; a `response_format` on
 /// an unforced choice is framed inside the final channel. (A forced choice with
 /// explicit guided decoding is rejected at request time.)
+/// Plain `ignore_eos` requests also opt out: a completed turn grammar would otherwise
+/// stop the engine before its token budget. Tools and output constraints keep their
+/// existing enforcement even when EOS is ignored.
 fn beam_turn_grammar_constraint<R: OAIChatLikeRequest + CommonExtProvider>(
     request: &R,
 ) -> GuidedToolConstraint {
@@ -423,6 +426,13 @@ fn beam_turn_grammar_constraint<R: OAIChatLikeRequest + CommonExtProvider>(
             frames_answer: false,
         },
         (false, _) if explicit || !beam_turn_grammar_enabled() => GuidedToolConstraint::None,
+        (false, _)
+            if request.common_ext().and_then(|common| common.ignore_eos) == Some(true)
+                && !OpenAIPreprocessor::has_structured_response_format(request)
+                && !OpenAIPreprocessor::request_has_effective_tools(request) =>
+        {
+            GuidedToolConstraint::None
+        }
         (false, _) => GuidedToolConstraint::BeamTurnGrammar {
             frames_answer: OpenAIPreprocessor::has_structured_response_format(request),
         },
@@ -1159,6 +1169,82 @@ mod tests {
             .guided_decoding
             .as_ref()
             .and_then(|guided| guided.structural_tag.as_ref())
+    }
+
+    #[test]
+    fn beam_ignore_eos_skips_only_the_plain_chat_turn_grammar() {
+        for mode in [StructuralTagMode::Off, StructuralTagMode::On] {
+            let preprocessor = preprocessor("beam", mode);
+            for extra in [
+                json!({}),
+                json!({"tool_choice": "none"}),
+                json!({"tool_choice": "auto", "response_format": {"type": "text"}}),
+            ] {
+                for ignore_eos in [None, Some(false), Some(true)] {
+                    let mut request = request(extra.clone());
+                    request.common.ignore_eos = ignore_eos;
+                    let mut common_request = preprocessed_request();
+                    let applied = preprocessor
+                        .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+                        .unwrap();
+                    let expected = if ignore_eos == Some(true) {
+                        GuidedToolConstraint::None
+                    } else {
+                        GuidedToolConstraint::BeamTurnGrammar {
+                            frames_answer: false,
+                        }
+                    };
+                    assert_eq!(applied, expected, "{mode:?} {extra} {ignore_eos:?}");
+                    assert_eq!(
+                        installed_structural_tag(&common_request).is_some(),
+                        ignore_eos != Some(true)
+                    );
+                    // A frontend reconstructing the response policy must agree with
+                    // the preprocessor, including when only one parser slot is set.
+                    for parsers in [(Some("beam"), None), (None, Some("beam"))] {
+                        assert_eq!(
+                            guided_tool_constraint(&request, parsers.0, parsers.1, false).unwrap(),
+                            expected,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn beam_ignore_eos_preserves_tool_and_output_constraints() {
+        let preprocessor = preprocessor_for("beam");
+        for extra in [
+            json!({"tools": tools()}),
+            json!({"tools": tools(), "tool_choice": "none"}),
+            json!({"tools": tools(), "tool_choice": "required"}),
+            json!({"tools": tools(), "tool_choice": {"type": "function", "function": {"name": "get_weather"}}}),
+            json!({"messages": [
+                {"role": "system", "content": "", "tools": [{"name": "lookup", "parameters": {"type": "object"}}]},
+                {"role": "user", "content": "hi"}
+            ]}),
+            json!({"response_format": {"type": "json_object"}}),
+            json!({"response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object"}}}}),
+        ] {
+            let mut request = request(extra.clone());
+            let mut normal = preprocessed_request();
+            let expected = preprocessor
+                .apply_tool_choice_guided_decoding(&request, &mut normal, false)
+                .unwrap();
+            assert!(installed_structural_tag(&normal).is_some(), "{extra}");
+            request.common.ignore_eos = Some(true);
+            let mut ignored = preprocessed_request();
+            let applied = preprocessor
+                .apply_tool_choice_guided_decoding(&request, &mut ignored, false)
+                .unwrap();
+            assert_eq!(applied, expected, "{extra}");
+            assert_eq!(
+                installed_structural_tag(&ignored),
+                installed_structural_tag(&normal),
+                "{extra}"
+            );
+        }
     }
 
     #[test]
