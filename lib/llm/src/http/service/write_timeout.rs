@@ -540,4 +540,29 @@ mod tests {
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         TlsAcceptor::from(Arc::new(config))
     }
+
+    // A client that connects and never sends a ClientHello is closed once the TLS
+    // handshake timeout passes, instead of holding its connection task open.
+    #[tokio::test(start_paused = true)]
+    async fn silent_tls_client_is_closed_after_handshake_timeout() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve(
+            listener,
+            Some(tls_acceptor(&cert)),
+            Router::new(),
+            Duration::from_secs(30),
+            std::future::pending(),
+        );
+        let _server = AbortOnDropHandle::new(tokio::spawn(server));
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let mut buf = [0; 1];
+        let read = tokio::time::timeout(Duration::from_secs(60), client.read(&mut buf))
+            .await
+            .expect("silent TLS client was not closed");
+        assert_eq!(read.unwrap(), 0);
+        assert!(started.elapsed() >= Duration::from_secs(10));
+    }
 }

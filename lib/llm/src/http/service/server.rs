@@ -31,7 +31,8 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// Then it stops accepting connections and lets open ones finish their requests; any still
 /// open after the grace period are closed, dropping their response bodies. Returning, or
-/// being dropped, closes every connection.
+/// being dropped, closes every connection that was not upgraded. An upgraded connection,
+/// such as a WebSocket session, runs on its own task and stays open after `serve` returns.
 ///
 /// Every connection is wrapped in [`WriteTimeoutIo`], and every request on it carries the
 /// connection's [`ConnectionDeadline`].
