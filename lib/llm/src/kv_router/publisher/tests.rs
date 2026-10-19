@@ -2238,6 +2238,31 @@ mod worker_metrics_tests {
             "same-rank updates should be coalesced"
         );
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn publish_skips_unchanged_metrics() {
+        let publisher = WorkerMetricsPublisher::new().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        publisher.start_metrics_publishing_with(ChannelSink(tx), 42);
+
+        publisher.publish(None, None, Some(900)).unwrap();
+        let published = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timed out waiting for metrics")
+            .expect("metrics publishing task stopped");
+        assert_eq!(published.kv_used_blocks, Some(900));
+
+        for _ in 0..10 {
+            publisher.publish(None, None, Some(900)).unwrap();
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .is_err(),
+            "unchanged metrics should not be republished"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "integration"))]

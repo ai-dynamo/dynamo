@@ -2718,6 +2718,37 @@ mod tests {
     }
 
     #[test]
+    fn update_metrics_from_mdc_exports_model_gauges() {
+        let metrics = Metrics::new_with_prefix(None);
+        let registry = Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let mut card = ModelDeploymentCard::default();
+        card.display_name = "mdc-model".to_string();
+        card.runtime_config.context_length = Some(8192);
+        card.kv_cache_block_size = 32;
+        card.migration_limit = 3;
+        metrics.update_metrics_from_mdc(&card).unwrap();
+
+        for (metric, expected) in [
+            (frontend_service::MODEL_CONTEXT_LENGTH, 8192.0),
+            (frontend_service::MODEL_KV_CACHE_BLOCK_SIZE, 32.0),
+            (frontend_service::MODEL_MIGRATION_LIMIT, 3.0),
+        ] {
+            let name = format!(
+                "{}_{}",
+                sanitize_frontend_prometheus_prefix(name_prefix::FRONTEND),
+                metric
+            );
+            assert_eq!(
+                model_ready_value_with_name(&registry, &name, "mdc-model"),
+                Some(expected),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn test_round_to_sig_figs() {
         // Test rounding to 2 significant figures
         assert_eq!(round_to_sig_figs(0.0026, 2), 0.0026);
