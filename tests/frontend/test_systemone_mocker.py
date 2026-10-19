@@ -9,7 +9,6 @@ from types import SimpleNamespace
 import pytest
 import requests
 
-from dynamo import prometheus_names
 from tests.frontend.conftest import MockerWorkerProcess, wait_for_http_completions_ready
 from tests.utils.constants import QWEN
 from tests.utils.decision_api import (
@@ -75,6 +74,10 @@ def _assert_distribution(probabilities):
 
 
 def test_systemone_mixed_results_and_existing_apis(systemone_server):
+    ready = requests.get(f"{systemone_server}/v1/models/{QWEN}/ready", timeout=30)
+    assert ready.status_code == 200, ready.text
+    native = requests.post(f"{systemone_server}/generate", json={}, timeout=30)
+    assert native.status_code == 404, native.text
     response = requests.post(
         f"{systemone_server}/v1/systemone", json=_payload(), timeout=30
     )

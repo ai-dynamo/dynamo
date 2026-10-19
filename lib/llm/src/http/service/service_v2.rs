@@ -141,6 +141,7 @@ pub struct State {
     // Frontend API behavior read by request handlers after the service is built.
     frontend_api_config: FrontendApiConfig,
     responses_api_enabled: bool,
+    generate_api_enabled: bool,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
@@ -195,6 +196,7 @@ struct StateConfig {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     responses_api_enabled: bool,
+    generate_api_enabled: bool,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
@@ -607,6 +609,7 @@ impl State {
             cancel_token,
             frontend_api_config: config.frontend_api_config,
             responses_api_enabled: config.responses_api_enabled,
+            generate_api_enabled: config.generate_api_enabled,
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
             systemone_admission: Arc::new(Semaphore::new(systemone_max_inflight_branches)),
@@ -701,7 +704,11 @@ impl State {
             (model.has_videos_engine(), EndpointType::Videos),
             (model.has_audios_engine(), EndpointType::Audios),
             (model.has_realtime_engine(), EndpointType::Realtime),
-            (model.has_generate_engine(), EndpointType::Generate),
+            (
+                model.has_generate_engine()
+                    && (self.generate_api_enabled || !self.systemone_enabled()),
+                EndpointType::Generate,
+            ),
         ];
         routes.iter().any(|(has_engine, _)| *has_engine)
             && routes
@@ -1475,6 +1482,7 @@ impl HttpServiceConfigBuilder {
                 metrics_config,
                 frontend_api_config,
                 responses_api_enabled: config.enable_responses_endpoints,
+                generate_api_enabled: vllm_generate_enabled || sglang_generate_enabled,
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
                 streaming_backend_error_check: config.streaming_backend_error_check,
@@ -3793,6 +3801,7 @@ mod tests {
                 api.set_systemone_enabled(true);
                 let service = HttpService::builder()
                     .frontend_api_config(api)
+                    .enable_chat_endpoints(true)
                     .build()
                     .unwrap();
 
@@ -3810,6 +3819,29 @@ mod tests {
                 assert!(routes.contains(&"POST /v1/systemone".to_string()));
                 assert!(routes.contains(&"POST /v1/decisions".to_string()));
                 assert!(!routes.contains(&"POST /generate".to_string()));
+                let state = service.state_clone();
+                state
+                    .manager()
+                    .add_chat_completions_model(
+                        "decision-model",
+                        "chat-worker",
+                        Arc::new(crate::engines::StreamingEngineAdapter::new(
+                            crate::engines::make_echo_engine(),
+                        )),
+                    )
+                    .unwrap();
+                state
+                    .manager()
+                    .add_generate_model(
+                        "decision-model",
+                        "scoring-worker",
+                        Arc::new(ReadinessOnlyEngine),
+                    )
+                    .unwrap();
+                let model = state.manager().get_model("decision-model").unwrap();
+                assert!(model.has_chat_engine());
+                assert!(model.has_generate_engine());
+                assert!(state.model_http_routes_ready(&model));
                 assert!(
                     service
                         .enable_model_endpoint(EndpointType::SystemOne, false)
@@ -3828,6 +3860,29 @@ mod tests {
             let result = HttpService::builder().frontend_api_config(api).build();
             assert!(result.is_err());
         });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn systemone_does_not_bypass_disabled_public_generate_route() {
+        let mut api = FrontendApiConfig::default();
+        api.set_systemone_enabled(true);
+        let service = HttpService::builder()
+            .frontend_api_config(api)
+            .enable_engine_apis(true)
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        state
+            .manager()
+            .add_generate_model("generate-model", "worker", Arc::new(ReadinessOnlyEngine))
+            .unwrap();
+        let model = state.manager().get_model("generate-model").unwrap();
+        assert!(state.model_http_routes_ready(&model));
+        service
+            .enable_model_endpoint(EndpointType::Generate, false)
+            .unwrap();
+        assert!(!state.model_http_routes_ready(&model));
     }
 
     #[test]
