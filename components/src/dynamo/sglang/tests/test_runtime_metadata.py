@@ -664,6 +664,16 @@ def test_registration_retains_legacy_mooncake_metadata(
     assert metadata["is_mla_model"] is True
 
 
+def test_registration_ignores_non_finite_tp_lcm_size(mooncake_registration):
+    for info in mooncake_registration.engine._scheduler_init_result.scheduler_infos:
+        info.pop("hicache_object_layout")
+    extra = mooncake_registration.server_args.hicache_storage_backend_extra_config
+    extra["tp_lcm_size"] = float("inf")
+    config = mooncake_registration.run()
+    metadata = json.loads(config.runtime_data["sglang_hicache_mooncake"])
+    assert metadata["tp_lcm_size"] is None
+
+
 def test_registration_accepts_uint32_trailing_pages_limit(
     mooncake_registration, hicache_layout_envelope
 ):
