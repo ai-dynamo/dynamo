@@ -217,21 +217,62 @@ async def test_attachment_owner_preserves_global_rank_and_resolved_endpoint(
         {
             "source_control_endpoint": "tcp://cache-owner.example:23284",
             "worker_type": "prefill",
+            "topology_domains": {},
         },
         {
             "source_control_endpoint": "tcp://cache-owner.example:23285",
             "worker_type": "prefill",
+            "topology_domains": {},
         },
         {
             "source_control_endpoint": "tcp://cache-owner.example:23286",
             "worker_type": "prefill",
+            "topology_domains": {},
         },
         {
             "source_control_endpoint": "tcp://cache-owner.example:23287",
             "worker_type": "prefill",
+            "topology_domains": {},
         },
     ]
     assert captured["started"] is True
+
+
+@pytest.mark.asyncio
+async def test_attachment_owner_publishes_the_worker_island(monkeypatch):
+    captured = {}
+
+    class FakeOwner:
+        def __init__(self, endpoint, worker_id, descriptors):
+            captured["descriptors"] = descriptors
+
+        async def start(self):
+            pass
+
+    monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", FakeOwner)
+    config = _config({"0": _owner("a")})
+    config.disaggregation_mode = state_agent.DisaggregationMode.PREFILL
+    config.engine_args.kv_transfer_config.kv_connector_extra_config[
+        "secondary_tiers"
+    ] = [
+        {
+            "router_capabilities": ["router_hint"],
+            "control_advertise_host": "cache-owner.example",
+            "control_ports": ["23280"],
+        }
+    ]
+    await state_agent.start_attachment_owner(
+        config,
+        SimpleNamespace(connection_id=lambda: 17),
+        _vllm_config(0, 1),
+        image_token_id=None,
+        topology_domains={"rdma-island": "island-1"},
+    )
+
+    assert [
+        item["router_hint_source"]["topology_domains"]
+        for item in captured["descriptors"]
+    ] == [{"rdma-island": "island-1"}]
 
 
 @pytest.mark.asyncio
