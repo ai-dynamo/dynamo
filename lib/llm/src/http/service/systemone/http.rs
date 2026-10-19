@@ -10,7 +10,7 @@ use axum::{
     http::HeaderMap,
     routing::post,
 };
-use dynamo_decisions::{ParseOptions, Route, parse_request_with_options};
+use dynamo_decisions::{Route, parse_request};
 
 const BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
@@ -18,7 +18,7 @@ pub fn router(state: Arc<service_v2::State>, path: Option<String>) -> (Vec<Route
     let path = path.unwrap_or_else(|| DEFAULT_PATH.to_string());
     (
         vec![
-            RouteDoc::new(axum::http::Method::POST, &path).with_documentation_path(DEFAULT_PATH),
+            RouteDoc::new(axum::http::Method::POST, &path),
             RouteDoc::new(axum::http::Method::POST, DECISIONS_PATH),
         ],
         Router::new()
@@ -57,16 +57,26 @@ async fn handle_http(
     } else {
         Dialect::OpenAi
     };
+    if headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(|value| {
+            !value
+                .split(';')
+                .next()
+                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+        })
+    {
+        let mut response = error(
+            default_dialect,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "content-type must be application/json",
+        );
+        attach_request_ids(&mut response, &request_id);
+        return response;
+    }
     let parsed = match body {
-        Ok(body) => parse_request_with_options(
-            &body,
-            route,
-            ParseOptions {
-                extensions_enabled: state.nvext_enabled(),
-                ..Default::default()
-            },
-        )
-        .map_err(decision_error),
+        Ok(body) => parse_request(&body, route).map_err(decision_error),
         Err(rejection) => Err(error(
             default_dialect,
             rejection.status(),
@@ -80,24 +90,6 @@ async fn handle_http(
             return response;
         }
     };
-    if headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_none_or(|value| {
-            !value
-                .split(';')
-                .next()
-                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
-        })
-    {
-        let mut response = error(
-            request.dialect,
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "content-type must be application/json",
-        );
-        attach_request_ids(&mut response, &request_id);
-        return response;
-    }
     let requested_model = request.model.as_str();
     let endpoint = metric_endpoint(request.dialect);
     let metric_model = state
