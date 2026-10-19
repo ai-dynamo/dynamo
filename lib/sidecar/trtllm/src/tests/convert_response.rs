@@ -303,3 +303,117 @@ fn a_response_without_an_output_index_is_rejected() {
     };
     assert!(state.convert(response).is_err());
 }
+
+// Regression: missing or misaligned prompt events must not become successful,
+// incorrectly attributed API logprobs, including on a prefill handoff.
+#[test]
+fn prompt_logprobs_reach_both_terminal_paths_and_reject_protocol_drift() {
+    let mut req = request();
+    req.output_options.prompt_logprobs = Some(2);
+    let prompt = pb::GenerateResponse {
+        event: Some(pb::generate_response::Event::Prompt(pb::PromptOutput {
+            tokens: vec![
+                pb::TokenInfo {
+                    token_id: 11,
+                    ..Default::default()
+                },
+                logprob_token(22, -0.2),
+                logprob_token(33, -0.3),
+            ],
+        })),
+        ..Default::default()
+    };
+    for mode in [AGG, PREFILL] {
+        let terminal = pb::GenerateResponse {
+            event: Some(if mode == PREFILL {
+                pb::generate_response::Event::PrefillReady(pb::PrefillReady {
+                    kv_session: Some(fake_session()),
+                })
+            } else {
+                pb::generate_response::Event::Finished(pb::GenerationFinished {
+                    output_index: Some(0),
+                    reason: pb::FinishReason::Length as i32,
+                    ..Default::default()
+                })
+            }),
+            ..Default::default()
+        };
+        let mut state = ResponseState::new(&req, mode);
+        assert!(
+            state.convert(terminal.clone()).is_err(),
+            "missing prompt event"
+        );
+        assert!(state.convert(prompt.clone()).unwrap().is_none());
+        assert!(
+            state.convert(prompt.clone()).is_err(),
+            "duplicate prompt event"
+        );
+        let output = state.convert(terminal).unwrap().unwrap();
+        let data = if mode == PREFILL {
+            let mut decode_req = req.clone();
+            decode_req.prefill_result = Some(dynamo_backend_common::PrefillResult {
+                disaggregated_params: output.disaggregated_params.unwrap(),
+                prompt_tokens_details: None,
+            });
+            let wire = build_generate_request(
+                &decode_req,
+                "req",
+                "model",
+                None,
+                DisaggregationMode::Decode,
+            )
+            .unwrap();
+            assert_eq!(wire.response.unwrap().return_prompt_logprobs, Some(false));
+            let mut decode = ResponseState::new(&decode_req, DisaggregationMode::Decode);
+            decode
+                .convert(pb::GenerateResponse {
+                    event: Some(pb::generate_response::Event::Finished(
+                        pb::GenerationFinished {
+                            output_index: Some(0),
+                            reason: pb::FinishReason::Length as i32,
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                })
+                .unwrap()
+                .unwrap()
+                .engine_data
+                .unwrap()
+        } else {
+            output.engine_data.unwrap()
+        };
+        assert_eq!(data["prompt_logprobs"][0], json!(null));
+        assert_eq!(data["prompt_logprobs"][1]["22"]["logprob"], json!(-0.2));
+        assert_eq!(data["prompt_logprobs"].as_array().unwrap().len(), 3);
+    }
+    for tokens in [
+        vec![logprob_token(11, -0.1)],
+        vec![
+            logprob_token(11, -0.1),
+            logprob_token(99, -0.2),
+            logprob_token(33, -0.3),
+        ],
+        vec![
+            logprob_token(11, -0.1),
+            pb::TokenInfo {
+                token_id: 22,
+                ..Default::default()
+            },
+            logprob_token(33, -0.3),
+        ],
+    ] {
+        let mut state = ResponseState::new(&req, AGG);
+        assert!(
+            state
+                .convert(pb::GenerateResponse {
+                    event: Some(pb::generate_response::Event::Prompt(pb::PromptOutput {
+                        tokens
+                    })),
+                    ..Default::default()
+                })
+                .is_err()
+        );
+    }
+    assert!(ResponseState::new(&request(), AGG).convert(prompt).is_err());
+}

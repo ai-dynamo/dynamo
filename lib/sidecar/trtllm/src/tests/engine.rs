@@ -222,13 +222,10 @@ async fn unsupported_features_fail_before_rpc_submission() {
     let mut embeds = request();
     embeds.prompt_embeds = Some("encoded".to_string());
 
-    let mut prompt_logprobs = request();
-    prompt_logprobs.output_options.prompt_logprobs = Some(1);
-
     let mut visible_stops = request();
     visible_stops.stop_conditions.stop_token_ids_visible = Some(vec![7]);
 
-    for unsupported in [multiple, beam, embeds, prompt_logprobs, visible_stops] {
+    for unsupported in [multiple, beam, embeds, visible_stops] {
         let context = dynamo_backend_common::testing::mock_context();
         let result = engine
             .generate(unsupported, GenerateContext::new(context, None))

@@ -7,7 +7,8 @@ use super::*;
 
 #[test]
 fn request_maps_sampling_stop_and_output_fields() {
-    let request = request();
+    let mut request = request();
+    request.output_options.prompt_logprobs = Some(2);
     let proto = build_generate_request(&request, "req-1", "served-model", None, AGG)
         .expect("build request");
     assert_eq!(proto.request_id, "req-1");
@@ -54,6 +55,11 @@ fn request_maps_sampling_stop_and_output_fields() {
 
     let response = proto.response.as_ref().unwrap();
     assert_eq!(response.return_output_logprobs, Some(true));
+    assert_eq!(response.return_prompt_logprobs, Some(true));
+    assert_eq!(
+        response.prompt_candidates.as_ref().unwrap().selection,
+        Some(pb::candidate_token_selection::Selection::TopN(2))
+    );
     match response
         .output_candidates
         .as_ref()
