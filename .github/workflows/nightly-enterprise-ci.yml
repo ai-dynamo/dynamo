@@ -46,6 +46,9 @@ jobs:
       diff_event_context: nightly
       image_tag_suffix: '-enterprise'
       archive_sources: false
+      extra_build_args: |
+        RUNTIME_IMAGE=${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}
+        RUNTIME_IMAGE_TAG=nim-vllm-enterprise-base-1.7.0-cuda13
     secrets: inherit
 
   # ============================================================================

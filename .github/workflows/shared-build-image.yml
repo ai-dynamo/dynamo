@@ -246,7 +246,7 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          ngc_ci_access_token: ${{ inputs.runtime_variant == 'enterprise' && secrets.NGC_CI_ACCESS_TOKEN || '' }}
+          ngc_ci_access_token: ''
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
