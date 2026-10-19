@@ -29,7 +29,9 @@ use tokio::time::Instant;
 
 use crate::plugins::worker_selection::{WorkerCandidates, WorkerInputs};
 use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
-use crate::scheduling::{SessionContext, policy_queue::QueueSnapshot};
+use crate::scheduling::{
+    BusyThresholds, PolicyProfile, SessionContext, policy_queue::QueueSnapshot,
+};
 
 #[derive(Debug)]
 pub struct ClassifyRequest {
@@ -44,6 +46,15 @@ pub struct ClassifyRequest {
     pub(crate) progress: RequestProgress,
     session_context: Option<SessionContext>,
     pinned_worker: Option<WorkerWithDpRank>,
+    busy_thresholds: Option<ClassifyBusyThresholds>,
+}
+
+/// The router's policy classes and live router-wide thresholds, as seen by one
+/// classification.
+#[derive(Debug)]
+struct ClassifyBusyThresholds {
+    profile: Arc<PolicyProfile>,
+    reject: BusyThresholds,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -77,6 +88,7 @@ impl ClassifyRequest {
             progress: RequestProgress::new(input_tokens).0,
             session_context: None,
             pinned_worker: None,
+            busy_thresholds: None,
         }
     }
 
@@ -104,6 +116,53 @@ impl ClassifyRequest {
     pub(crate) fn with_sequence_hashes(mut self, hashes: Option<&[SequenceHash]>) -> Self {
         self.sequence_hashes = hashes.map(<[SequenceHash]>::to_vec);
         self
+    }
+
+    pub(crate) fn with_busy_thresholds(
+        mut self,
+        profile: Arc<PolicyProfile>,
+        reject: BusyThresholds,
+    ) -> Self {
+        self.busy_thresholds = Some(ClassifyBusyThresholds { profile, reject });
+        self
+    }
+
+    fn uncached_tokens(&self) -> usize {
+        QueueSnapshot::new(self.input_tokens, self.initial_cached_tokens).uncached_tokens
+    }
+
+    /// Busy thresholds of the policy class this request resolves to now, including a class
+    /// set with [`set_policy_class`](Self::set_policy_class). The queue holds the request
+    /// while every eligible worker is past them.
+    pub fn queue_thresholds(&self) -> BusyThresholds {
+        self.busy_thresholds
+            .as_ref()
+            .map(|thresholds| {
+                let profile = &thresholds.profile;
+                profile
+                    .class(profile.resolve_class_index(self.policy_class(), self.uncached_tokens()))
+                    .busy_thresholds
+            })
+            .unwrap_or_default()
+    }
+
+    /// Busy thresholds `policy_class` would apply to this request, or `None` when the router
+    /// does not know the class. A policy family resolves to its class for this request's
+    /// uncached tokens, as [`set_policy_class`](Self::set_policy_class) would.
+    pub fn queue_thresholds_for(&self, policy_class: &str) -> Option<BusyThresholds> {
+        let profile = &self.busy_thresholds.as_ref()?.profile;
+        profile
+            .resolve_class_index_strict(policy_class, self.uncached_tokens())
+            .map(|index| profile.class(index).busy_thresholds)
+    }
+
+    /// Router-wide busy thresholds, read when classification started. Selection skips a
+    /// worker past them and rejects the request when none remains.
+    pub fn reject_thresholds(&self) -> BusyThresholds {
+        self.busy_thresholds
+            .as_ref()
+            .map(|thresholds| thresholds.reject)
+            .unwrap_or_default()
     }
 
     pub fn request_id(&self) -> Option<&str> {

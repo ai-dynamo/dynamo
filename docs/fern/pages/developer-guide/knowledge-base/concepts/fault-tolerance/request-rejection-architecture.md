@@ -88,6 +88,10 @@ A `POST /busy_threshold` update changes the stored threshold configuration. It d
 recompute every worker. The next worker-load or runtime-configuration update triggers reevaluation, so
 a new threshold can take a short time to change routing decisions.
 
+With `--router-mode kv`, the KV router applies the thresholds itself. While it projects each rank's
+booked load for a request, it judges that load against the current thresholds and the capacity the
+rank reports, and selection skips workers whose ranks are all busy. In this mode `KvWorkerMonitor` keeps only the decode threshold and applies it to the worker-reported `kv_used_blocks`, the signal the router's bookings cannot see: generated tokens, requests from other frontends, and prefill workers that track no active blocks. Selection skips a worker that either check marks busy. A `POST /busy_threshold` update takes effect at the next selection and at the monitor's next load event.
+
 ## Rejection Path
 
 When a request arrives:

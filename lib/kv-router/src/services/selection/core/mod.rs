@@ -33,9 +33,10 @@ use crate::scheduling::queue::SchedulerBookingDescriptor;
 use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, LoraWorkerFilter, OverlapAnalysis, OverlapSignals,
-    OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, ScheduleMode, ScheduleRequest,
-    SessionContext, TieredOverlapRefresher, WorkerAvailabilityProvider, effective_prefill_tokens,
-    narrow_allowed_worker_ids_by_lora, prefill_load_hint_from_effective_tokens,
+    OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, RejectThresholdsProvider,
+    ScheduleMode, ScheduleRequest, SessionContext, TieredOverlapRefresher,
+    WorkerAvailabilityProvider, effective_prefill_tokens, narrow_allowed_worker_ids_by_lora,
+    prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, ReplicaRequestLeaseObserver,
@@ -181,6 +182,8 @@ pub struct HostLoad {
     pub overloaded_workers: Option<OverloadedWorkerProvider>,
     /// Workers the host can currently reach; others are never selected.
     pub available_workers: Option<WorkerAvailabilityProvider>,
+    /// Live per-rank limits past which workers are shed from selection.
+    pub reject_thresholds: Option<RejectThresholdsProvider>,
 }
 
 /// Where a partition's KV knowledge comes from.
@@ -323,11 +326,51 @@ impl SelectionCore {
 
     /// Create a local selector and report invalid tracking configuration.
     pub fn try_new_local(
+        kv_router_config: crate::config::KvRouterConfig,
+        indexer_threads: usize,
+        cancel_token: CancellationToken,
+        cache_config: SelectionCacheConfig,
+        policy_factory: WorkerSelectionPolicyFactory,
+    ) -> anyhow::Result<Self> {
+        Self::try_new_local_with_host(
+            kv_router_config,
+            indexer_threads,
+            cancel_token,
+            cache_config,
+            policy_factory,
+            SelectionHost::default(),
+        )
+    }
+
+    /// A standalone core with host-supplied load signals, for benchmarks that measure a
+    /// host-only path such as the reject thresholds.
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn bench_try_new_local_with_host(
+        kv_router_config: crate::config::KvRouterConfig,
+        indexer_threads: usize,
+        cancel_token: CancellationToken,
+        cache_config: SelectionCacheConfig,
+        policy_factory: WorkerSelectionPolicyFactory,
+        host: SelectionHost,
+    ) -> anyhow::Result<Self> {
+        Self::try_new_local_with_host(
+            kv_router_config,
+            indexer_threads,
+            cancel_token,
+            cache_config,
+            policy_factory,
+            host,
+        )
+    }
+
+    fn try_new_local_with_host(
         mut kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,
         cache_config: SelectionCacheConfig,
         policy_factory: WorkerSelectionPolicyFactory,
+        host: SelectionHost,
     ) -> anyhow::Result<Self> {
         kv_router_config
             .apply_policy_config()
@@ -343,7 +386,7 @@ impl SelectionCore {
             cancel_token,
             None,
             policy_factory,
-            SelectionHost::default(),
+            host,
             WorkerType::Aggregated,
             true,
             cache_config,

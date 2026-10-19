@@ -5,6 +5,7 @@
 //! release, swept over catalog size and router-hint capability.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -16,9 +17,11 @@ use dynamo_kv_router::protocols::{
     KvCacheStoredBlockData, RouterEvent, RoutingConstraints, StorageTier, WorkerWithDpRank,
     compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
+use dynamo_kv_router::scheduling::{BusyThresholds, RejectThresholdsProvider};
 use dynamo_kv_router::services::indexer::backend::Indexer;
 use dynamo_kv_router::services::selection::{
-    PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore, WorkerRequest,
+    HostLoad, PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore,
+    SelectionHost, WorkerRequest, WorkerSelectionPolicyFactory,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -30,6 +33,15 @@ fn prompt_tokens() -> Vec<u32> {
 
 /// `hints` makes worker 1 hold the whole prompt so every booking on another
 /// worker computes a fetch hint from it.
+fn reference_policy_factory() -> WorkerSelectionPolicyFactory {
+    Arc::new(|config, role, _| {
+        dynamo_kv_router::WorkerSelectionPolicy::reference(
+            config.clone(),
+            role.default_selector_label(),
+        )
+    })
+}
+
 fn core_with_workers(
     runtime: &tokio::runtime::Runtime,
     workers: u64,
@@ -49,20 +61,67 @@ fn core_with_workers(
         1,
         CancellationToken::new(),
         SelectionCacheConfig::default(),
-        std::sync::Arc::new(|config, role, _| {
-            dynamo_kv_router::WorkerSelectionPolicy::reference(
-                config.clone(),
-                role.default_selector_label(),
-            )
-        }),
+        reference_policy_factory(),
     )
     .expect("core");
+    upsert_workers(runtime, &core, workers, hints, true);
+    core
+}
+
+/// A core whose host supplies reject thresholds that never shed anything, so the bench
+/// measures the reject check itself on the selection path. It runs without KV events and
+/// its workers register no event endpoint: the check never reads the cache, and in
+/// `cargo test` mode every 4096-worker core that listens holds thousands of sockets until
+/// the process exits.
+fn core_with_reject_thresholds(
+    runtime: &tokio::runtime::Runtime,
+    workers: u64,
+    reject: bool,
+) -> SelectionCore {
+    let config = KvRouterConfig {
+        use_kv_events: false,
+        router_queue_threshold: None,
+        ..Default::default()
+    };
+    let reject_thresholds = reject.then(|| {
+        Arc::new(|| BusyThresholds {
+            prefill_busy_threshold_frac: Some(1.0),
+            ..Default::default()
+        }) as RejectThresholdsProvider
+    });
+    let core = SelectionCore::bench_try_new_local_with_host(
+        config,
+        1,
+        CancellationToken::new(),
+        SelectionCacheConfig::default(),
+        reference_policy_factory(),
+        SelectionHost {
+            load: HostLoad {
+                reject_thresholds,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .expect("core");
+    upsert_workers(runtime, &core, workers, false, false);
+    core
+}
+
+fn upsert_workers(
+    runtime: &tokio::runtime::Runtime,
+    core: &SelectionCore,
+    workers: u64,
+    hints: bool,
+    listen_for_kv_events: bool,
+) {
     runtime.block_on(async {
         for worker_id in 1..=workers {
             let mut request = WorkerRequest {
                 worker_id,
                 endpoint: Some(format!("http://worker-{worker_id}:8000")),
-                kv_events_endpoint: Some(format!("tcp://127.0.0.1:{}", 40_000 + worker_id)),
+                kv_events_endpoint: listen_for_kv_events
+                    .then(|| format!("tcp://127.0.0.1:{}", 40_000 + worker_id)),
                 block_size: Some(BLOCK_SIZE),
                 max_num_batched_tokens: Some(8192),
                 ..WorkerRequest::default()
@@ -75,10 +134,9 @@ fn core_with_workers(
             core.upsert_worker(request).await.expect("upsert");
         }
         if hints {
-            seed_prefix_on_worker_one(&core).await;
+            seed_prefix_on_worker_one(core).await;
         }
     });
-    core
 }
 
 async fn seed_prefix_on_worker_one(core: &SelectionCore) {
@@ -213,5 +271,51 @@ fn bench_queue_gate(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_select_and_reserve, bench_queue_gate);
+/// The host's reject thresholds on the selection path: with `reject_on` the queue judges
+/// every eligible worker's ranks before selecting; nothing is ever shed.
+fn bench_reject_thresholds(c: &mut Criterion) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let mut group = c.benchmark_group("selection_core/select_and_reserve_then_free");
+    group.measurement_time(Duration::from_secs(5));
+    group.throughput(Throughput::Elements(1));
+    for &workers in &[64u64, 512, 4096] {
+        for reject in [false, true] {
+            let core = core_with_reject_thresholds(&runtime, workers, reject);
+            let mut sequence = 0u64;
+            group.bench_with_input(
+                BenchmarkId::new(
+                    if reject {
+                        "no_hints_reject_on"
+                    } else {
+                        "no_hints_reject_off"
+                    },
+                    workers,
+                ),
+                &core,
+                |b, core| {
+                    b.iter(|| {
+                        sequence += 1;
+                        let id = format!("reject-{sequence}");
+                        let request = reserve_request(id.clone());
+                        runtime.block_on(async {
+                            core.select_and_reserve(request).await.expect("reserve");
+                            core.free_reservation(&id).await.expect("free");
+                        });
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_select_and_reserve,
+    bench_queue_gate,
+    bench_reject_thresholds
+);
 criterion_main!(benches);

@@ -862,8 +862,9 @@ for a reference-image-plus-prompt example.
 `POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
 `active_prefill_tokens_threshold`, and `active_prefill_tokens_threshold_frac`. A numeric field enables
 only that check. The router reevaluates workers on the next worker-load or runtime-configuration
-update; the call does not synchronously recompute the busy set and does not change startup-only router
-options such as `--router-mode kv` or `--router-track-output-blocks`.
+update, or with `--router-mode kv` at the next worker selection; the call does not synchronously
+recompute the busy set and does not change startup-only router options such as `--router-mode kv` or
+`--router-track-output-blocks`.
 
 ### Frontend feature switches
 
