@@ -19,12 +19,9 @@ use dynamo_kv_router::config::{
     KvRouterConfig, RouterConfigOverride, try_kv_router_config_from_dynamo_env,
 };
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
-use dynamo_llm::discovery::{LoadThresholdHandle, ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
-use dynamo_llm::kv_router::{
-    FindBestMatchOutcome, ManagedKvRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext,
-    SelectionPolicySource,
-};
+use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
@@ -46,8 +43,7 @@ use crate::picker::{
     ResponseUsage, resolve_cache_namespace,
 };
 use crate::worker_generations::{
-    GENERATE_ENDPOINT, GenerationScope, GenerationSet, choose_generation, needs_prefill,
-    run_generation_watcher,
+    GenerationScope, GenerationSet, choose_generation, needs_prefill, run_generation_watcher,
 };
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
@@ -147,7 +143,7 @@ struct Generation {
     prefill_router: Arc<PrefillRouter>,
     decode_router: ManagedKvRouter,
     preprocessor: Arc<OpenAIPreprocessor>,
-    /// Cancelled on drop: stops the client, prefill watcher, and prefill router.
+    /// Cancelled on drop: stops the prefill watcher and prefill router.
     cancel: CancellationToken,
 }
 
@@ -243,7 +239,6 @@ impl Router {
         let scope = GenerationScope {
             namespace_filter: namespace_filter.clone(),
             prefix_mode: namespace_prefix_mode,
-            component: component.to_string(),
         };
         tokio::spawn(run_generation_watcher(
             subscribe,
@@ -270,10 +265,9 @@ impl Router {
                 Err(_) => tracing::warn!(
                     ?namespace_filter,
                     ?namespace_prefix_mode,
-                    component,
                     "No worker generation is ready yet. If this persists, set \
-                     DYN_NAMESPACE_PREFIX (or DYN_NAMESPACE) and DYN_COMPONENT_NAME to \
-                     match where your decode workers register."
+                     DYN_NAMESPACE_PREFIX (or DYN_NAMESPACE) to match your workers' \
+                     registration namespace."
                 ),
             }
         };
@@ -891,43 +885,22 @@ async fn build_generation(
     let endpoint = drt
         .namespace(namespace)?
         .component(component)?
-        .endpoint(GENERATE_ENDPOINT);
+        .endpoint("generate");
 
     let model_manager = Arc::new(ModelManager::new());
 
-    // Built as `ModelManager::managed_kv_router_for_with_worker_role` builds
-    // it, but over a client whose background task stops with this generation
-    // instead of running until the process exits.
-    let client = endpoint
-        .client_with_cancellation(cancel.child_token())
-        .await?;
-    let load_context = RoutingLoadContext::start(
-        client.clone(),
-        card.worker_type.map_or(
-            RouterLoadSource::Aggregated,
-            RouterLoadSource::from_worker_type,
-        ),
-        LoadThresholdHandle::new(Default::default()),
-        &cancel,
-        None,
-    )
-    .await?;
-    let kv_router = model_manager
-        .kv_chooser_for_with_policy_and_client(
-            client,
+    let decode_router = model_manager
+        .managed_kv_router_for_with_worker_role(
+            &endpoint,
             block_size,
-            SelectionPolicySource::Registry,
             Some(kv_router_config.clone()),
             None,
             card.worker_type,
             WORKER_TYPE_DECODE,
             Some(model_name.clone()),
             card.runtime_config.enable_eagle,
-            load_context.scheduler_load_sender(),
-            load_context.cancellation_token(),
         )
         .await?;
-    let decode_router = ManagedKvRouter::new(load_context, kv_router);
 
     // Wait for runtime config watch to populate
     {

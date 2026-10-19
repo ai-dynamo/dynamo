@@ -28,9 +28,6 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-/// Endpoint the EPP routes to on its worker component.
-pub(crate) const GENERATE_ENDPOINT: &str = "generate";
-
 const INITIAL_RESUBSCRIBE_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_RESUBSCRIBE_BACKOFF: Duration = Duration::from_secs(5);
 /// Delay before rebuilding a generation whose build panicked, or restarting
@@ -44,42 +41,38 @@ const PANIC_RETRY_DELAY: Duration = if cfg!(test) {
 /// Live generations, ordered by namespace.
 pub(crate) type GenerationSet<G> = Arc<[Arc<G>]>;
 
-/// The worker cards this EPP routes to: its component's `generate` endpoint,
-/// in namespaces the filter matches.
+/// The namespaces whose model cards this EPP follows.
 #[derive(Clone, Debug)]
 pub(crate) struct GenerationScope {
     pub(crate) namespace_filter: NamespaceFilter,
     pub(crate) prefix_mode: NamespacePrefixMode,
-    pub(crate) component: String,
 }
 
 impl GenerationScope {
-    /// Whether the scope holds only one DGD's generations. A broad scope can
-    /// also hold unrelated deployments.
-    fn single_deployment(&self) -> bool {
+    /// Whether the scope is one DGD's worker generations: the operator's
+    /// strict namespace prefix. Any other scope binds to one namespace, as
+    /// the EPP did before it followed rolling updates.
+    fn follows_generations(&self) -> bool {
         matches!(self.namespace_filter, NamespaceFilter::Prefix(_))
             && self.prefix_mode == NamespacePrefixMode::WorkerGeneration
     }
 
-    /// `instance`'s card, if it is a base-model card the EPP can route to:
-    /// a decode or aggregated worker serving chat or completions.
+    /// `instance`'s card, if it is an in-scope card that is not prefill-only.
     fn admit(
         &self,
         instance: &DiscoveryInstance,
     ) -> Option<(ModelCardInstanceId, ModelDeploymentCard)> {
         let DiscoveryInstance::Model {
             namespace,
-            component,
-            endpoint,
             model_suffix,
             ..
         } = instance
         else {
             return None;
         };
-        if *component != self.component
-            || endpoint != GENERATE_ENDPOINT
-            || model_suffix.is_some()
+        // A LoRA adapter's card adds to a worker whose base card already
+        // counts, and a generation is identified by its base model.
+        if model_suffix.is_some()
             || !self
                 .namespace_filter
                 .matches_with_prefix_mode(namespace, self.prefix_mode)
@@ -93,12 +86,10 @@ impl GenerationScope {
                 return None;
             }
         };
-        let routable = matches!(
-            card.effective_worker_type(),
-            WorkerType::Decode | WorkerType::Aggregated
-        ) && (card.model_type.supports_chat()
-            || card.model_type.supports_completions());
-        if !routable {
+        if card.model_type.supports_prefill()
+            && !card.model_type.supports_chat()
+            && !card.model_type.supports_completions()
+        {
             return None;
         }
         let DiscoveryInstanceId::Model(id) = instance.id() else {
@@ -120,56 +111,16 @@ pub(crate) enum GenerationChange {
     },
 }
 
-/// One namespace's in-scope cards.
-#[derive(Default)]
-struct TrackedNamespace {
-    /// Model served by each card.
-    cards: HashMap<ModelCardInstanceId, String>,
-    /// Card count per model, with one card to build from.
-    models: HashMap<String, (usize, Arc<ModelDeploymentCard>)>,
-}
-
-impl TrackedNamespace {
-    /// Returns whether the card is new.
-    fn insert(&mut self, id: ModelCardInstanceId, card: ModelDeploymentCard) -> bool {
-        if self.cards.contains_key(&id) {
-            return false;
-        }
-        let model = card.display_name.clone();
-        self.cards.insert(id, model.clone());
-        self.models
-            .entry(model)
-            .or_insert_with(|| (0, Arc::new(card)))
-            .0 += 1;
-        true
-    }
-
-    /// Returns whether the card was tracked.
-    fn remove(&mut self, id: &ModelCardInstanceId) -> bool {
-        let Some(model) = self.cards.remove(id) else {
-            return false;
-        };
-        if let Some((count, _)) = self.models.get_mut(&model) {
-            *count -= 1;
-            if *count == 0 {
-                self.models.remove(&model);
-            }
-        }
-        true
-    }
-}
-
-/// Routable cards per matching namespace.
+/// In-scope cards per namespace.
 ///
-/// In one DGD's scope each generation is an isolated serving unit that serves
-/// whatever its own workers registered, including a different model during a
-/// rollout that renames it. A broad scope can hold unrelated deployments, so
-/// it serves only the first model seen.
+/// Within one DGD's scope every namespace is a worker generation: an isolated
+/// serving unit that serves whatever its own workers registered. Any other
+/// scope binds to the first namespace seen.
 pub(crate) struct GenerationTracker {
     scope: GenerationScope,
-    namespaces: HashMap<String, TrackedNamespace>,
-    /// The model a broad scope serves; unset in one DGD's scope.
-    model: Option<String>,
+    namespaces: HashMap<String, HashMap<ModelCardInstanceId, Arc<ModelDeploymentCard>>>,
+    /// The namespace a scope that does not follow generations is bound to.
+    bound: Option<String>,
     /// Namespaces last reported as `Appeared`.
     serving: HashSet<String>,
 }
@@ -179,7 +130,7 @@ impl GenerationTracker {
         Self {
             scope,
             namespaces: HashMap::new(),
-            model: None,
+            bound: None,
             serving: HashSet::new(),
         }
     }
@@ -189,14 +140,11 @@ impl GenerationTracker {
             return Vec::new();
         };
         let namespace = id.namespace.clone();
-        if !self
-            .namespaces
-            .entry(namespace.clone())
-            .or_default()
-            .insert(id, card)
-        {
+        let cards = self.namespaces.entry(namespace.clone()).or_default();
+        if cards.contains_key(&id) {
             return Vec::new();
         }
+        cards.insert(id, Arc::new(card));
         self.settle(&namespace)
     }
 
@@ -204,13 +152,13 @@ impl GenerationTracker {
         let DiscoveryInstanceId::Model(id) = id else {
             return Vec::new();
         };
-        let Some(tracked) = self.namespaces.get_mut(&id.namespace) else {
+        let Some(cards) = self.namespaces.get_mut(&id.namespace) else {
             return Vec::new();
         };
-        if !tracked.remove(id) {
+        if cards.remove(id).is_none() {
             return Vec::new();
         }
-        if tracked.cards.is_empty() {
+        if cards.is_empty() {
             self.namespaces.remove(&id.namespace);
         }
         self.settle(&id.namespace)
@@ -224,31 +172,26 @@ impl GenerationTracker {
                 self.namespaces
                     .entry(id.namespace.clone())
                     .or_default()
-                    .insert(id, card);
+                    .insert(id, Arc::new(card));
             }
         }
-        self.pin();
+        self.bind();
         self.reconcile_all()
     }
 
-    /// The card to build `namespace`'s generation from: its own model in one
-    /// DGD's scope, the pinned model in a broad one.
+    /// The card to build `namespace`'s generation from, if it serves.
     fn card_for(&self, namespace: &str) -> Option<Arc<ModelDeploymentCard>> {
-        let models = &self.namespaces.get(namespace)?.models;
-        let entry = match &self.model {
-            Some(model) => models.get(model),
-            None if self.scope.single_deployment() => models
-                .iter()
-                .min_by_key(|(model, _)| *model)
-                .map(|(_, entry)| entry),
-            None => None,
-        };
-        entry.map(|(_, card)| card.clone())
+        if !self.scope.follows_generations() && self.bound.as_deref() != Some(namespace) {
+            return None;
+        }
+        let cards = self.namespaces.get(namespace)?;
+        let (_, card) = cards.iter().min_by_key(|(id, _)| id.instance_id)?;
+        Some(card.clone())
     }
 
-    /// Re-evaluate `namespace`, or every namespace once a model is pinned.
+    /// Re-evaluate `namespace`, or every namespace once one is bound.
     fn settle(&mut self, namespace: &str) -> Vec<GenerationChange> {
-        if self.pin() {
+        if self.bind() {
             return self.reconcile_all();
         }
         let mut changes = Vec::new();
@@ -256,24 +199,18 @@ impl GenerationTracker {
         changes
     }
 
-    /// In a broad scope, pin the first model seen (the smallest name when a
-    /// snapshot shows several) for good. Returns whether it was just pinned.
-    fn pin(&mut self) -> bool {
-        if self.model.is_some() || self.scope.single_deployment() {
+    /// Outside one DGD's scope, bind to the first namespace seen (the smallest
+    /// name when a snapshot shows several), for good. Returns whether it was
+    /// just bound.
+    fn bind(&mut self) -> bool {
+        if self.bound.is_some() || self.scope.follows_generations() {
             return false;
         }
-        let mut models: Vec<&String> = self
-            .namespaces
-            .values()
-            .flat_map(|tracked| tracked.models.keys())
-            .collect();
-        models.sort_unstable();
-        models.dedup();
-        let Some((model, ignored)) = models.split_first() else {
+        let Some(namespace) = self.namespaces.keys().min().cloned() else {
             return false;
         };
-        tracing::info!(%model, ?ignored, "Serving model pinned");
-        self.model = Some((*model).clone());
+        tracing::info!(namespace, "Bound to worker namespace");
+        self.bound = Some(namespace);
         true
     }
 
@@ -703,28 +640,29 @@ mod tests {
         ModelType::Chat | ModelType::Completions
     }
 
-    /// A card registered on `namespace/component/endpoint`.
+    /// A worker's card for `model` in `namespace`.
     fn registration(
         namespace: &str,
-        component: &str,
-        endpoint: &str,
         instance_id: u64,
         card: &ModelDeploymentCard,
     ) -> DiscoveryInstance {
         DiscoveryInstance::Model {
             namespace: namespace.to_string(),
-            component: component.to_string(),
-            endpoint: endpoint.to_string(),
+            component: "backend".to_string(),
+            endpoint: "generate".to_string(),
             instance_id,
             card_json: serde_json::to_value(card).unwrap(),
             model_suffix: None,
         }
     }
 
-    /// A decode worker's card for `model` on the EPP's `backend/generate`.
+    /// A decode worker's card for `model` in `namespace`.
     fn decode(namespace: &str, instance_id: u64, model: &str) -> DiscoveryInstance {
-        let card = card(model, Some(WorkerType::Decode), chat());
-        registration(namespace, "backend", GENERATE_ENDPOINT, instance_id, &card)
+        registration(
+            namespace,
+            instance_id,
+            &card(model, Some(WorkerType::Decode), chat()),
+        )
     }
 
     fn scope(
@@ -734,7 +672,6 @@ mod tests {
         GenerationScope {
             namespace_filter,
             prefix_mode,
-            component: "backend".to_string(),
         }
     }
 
@@ -758,92 +695,22 @@ mod tests {
         out
     }
 
-    /// Only the decode or aggregated cards on the EPP's own endpoint start a
-    /// generation; anything else could hand a generation the wrong worker role,
-    /// tokenizer, or liveness.
+    /// Prefill-only and LoRA adapter cards never start a generation.
     #[test]
-    fn tracker_admits_only_cards_the_epp_routes_to() {
+    fn tracker_ignores_prefill_only_and_adapter_cards() {
         let ns = "dgd-aaaaaaaa";
-        let decode_card = card(MODEL, Some(WorkerType::Decode), chat());
-        let mut lora = decode(ns, 1, MODEL);
-        if let DiscoveryInstance::Model { model_suffix, .. } = &mut lora {
+        let mut adapter = decode(ns, 1, MODEL);
+        if let DiscoveryInstance::Model { model_suffix, .. } = &mut adapter {
             *model_suffix = Some("adapter".into());
         }
-        let ignored = [
-            (
-                "another component",
-                registration(ns, "prefill", GENERATE_ENDPOINT, 2, &decode_card),
-            ),
-            (
-                "another endpoint",
-                registration(ns, "backend", "clear_kv_blocks", 3, &decode_card),
-            ),
-            (
-                "legacy prefill",
-                registration(
-                    ns,
-                    "backend",
-                    GENERATE_ENDPOINT,
-                    4,
-                    &card(MODEL, None, ModelType::Prefill),
-                ),
-            ),
-            (
-                "prefill",
-                registration(
-                    ns,
-                    "backend",
-                    GENERATE_ENDPOINT,
-                    5,
-                    &card(MODEL, Some(WorkerType::Prefill), ModelType::empty()),
-                ),
-            ),
-            (
-                "encode",
-                registration(
-                    ns,
-                    "backend",
-                    GENERATE_ENDPOINT,
-                    6,
-                    &card(MODEL, Some(WorkerType::Encode), chat()),
-                ),
-            ),
-            (
-                "embedding",
-                registration(
-                    ns,
-                    "backend",
-                    GENERATE_ENDPOINT,
-                    7,
-                    &card(MODEL, Some(WorkerType::Aggregated), ModelType::Embedding),
-                ),
-            ),
-            ("LoRA", lora),
-        ];
+        let prefill = registration(ns, 2, &card(MODEL, None, ModelType::Prefill));
         let mut tracker = GenerationTracker::new(dgd());
-        for (what, instance) in &ignored {
-            assert!(
-                tracker.on_added(instance).is_empty(),
-                "{what} must be ignored"
-            );
-        }
-
-        let changes = tracker.on_added(&decode(ns, 8, MODEL));
-        let [GenerationChange::Appeared { card, .. }] = changes.as_slice() else {
-            panic!("the decode card must start the generation: {changes:?}");
-        };
-        assert_eq!(card.worker_type, Some(WorkerType::Decode));
-        let aggregated = card_on_backend("dgd-bbbbbbbb", 9, WorkerType::Aggregated);
-        assert_eq!(summarize(&tracker.on_added(&aggregated)), ["+dgd-bbbbbbbb"]);
-    }
-
-    fn card_on_backend(
-        namespace: &str,
-        instance_id: u64,
-        worker_type: WorkerType,
-    ) -> DiscoveryInstance {
-        let card = card(MODEL, Some(worker_type), ModelType::Chat);
-        registration(namespace, "backend", GENERATE_ENDPOINT, instance_id, &card)
+        assert!(tracker.on_added(&adapter).is_empty());
+        assert!(tracker.on_added(&prefill).is_empty());
+        assert_eq!(
+            summarize(&tracker.on_added(&decode(ns, 3, MODEL))),
+            [format!("+{ns}")]
+        );
     }
 
     /// A sibling DGD sharing the prefix is excluded under worker-generation
@@ -864,7 +731,8 @@ mod tests {
         );
         assert_eq!(
             resync(prefix(), NamespacePrefixMode::Literal),
-            ["+default-foo-1a2b3c4d", "+default-foo-bar"]
+            ["+default-foo-1a2b3c4d"],
+            "a scope that does not follow generations binds to one namespace"
         );
         assert!(
             resync(
@@ -913,12 +781,12 @@ mod tests {
         assert_eq!(summarize(&tracker.on_removed(&old.id())), ["-dgd-aaaaaaaa"]);
     }
 
-    /// A broad scope can hold unrelated deployments, so it serves the first
-    /// model for good, even while that model has no workers.
+    /// Outside one DGD's scope the EPP binds to one namespace for good, as it
+    /// did before it followed rolling updates.
     #[test]
-    fn tracker_pins_one_model_in_a_broad_scope() {
-        let first = decode("team-a", 1, "model-a");
-        let other = decode("team-b", 2, "model-b");
+    fn tracker_binds_one_namespace_outside_one_deployment() {
+        let first = decode("team-a", 1, MODEL);
+        let other = decode("team-b", 2, MODEL);
         let mut tracker = GenerationTracker::new(scope(
             NamespaceFilter::Global,
             NamespacePrefixMode::WorkerGeneration,
