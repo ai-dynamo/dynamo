@@ -75,6 +75,8 @@ pub(crate) enum DispatchWaitError {
     not(test),
     expect(dead_code, reason = "Consumed by decision execution integration")
 )]
+/// The task must observe `parent.kill()` and finish after cancellation.
+/// Shutdown is drained to retain owned permits; non-cancellable work has no hard deadline.
 pub(crate) async fn dispatch_with_deadline<T>(
     mut task: tokio::task::JoinHandle<T>,
     deadline: tokio::time::Instant,
