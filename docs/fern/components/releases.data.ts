@@ -577,8 +577,8 @@ export const FEATURES: Feature[] = [
   },
   {
     name: "Shadow Engine Failover",
-    sglang: { status: "wip", note: "No KV-cache reuse or hardware fault tolerance" },
-    trtllm: { status: "wip", note: "No KV-cache reuse or hardware fault tolerance" },
+    sglang: { status: "no" },
+    trtllm: { status: "no" },
     vllm: { status: "caveat", note: "Software-process failover only; no KV-cache reuse or hardware fault tolerance" },
   },
   {
