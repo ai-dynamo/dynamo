@@ -27,13 +27,20 @@ async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 prost = { workspace = true }
+prost-reflect = { version = "0.16", features = ["serde"] }
+reqwest = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }
 validator = { workspace = true }
+
+[build-dependencies]
+protox = "0.9"
 
 [dev-dependencies]
 tempfile = { workspace = true }

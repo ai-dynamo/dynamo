@@ -37,7 +37,13 @@ async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> anyho
     )
     .await?;
     let transport = args.grpc.config();
-    let client = TritonClient::connect(&args.grpc_endpoint, transport).await?;
+    let client = TritonClient::connect(
+        args.grpc_endpoint.as_ref(),
+        args.http_endpoint.as_ref(),
+        transport,
+    )
+    .await?;
+    tracing::info!(protocols = ?client.protocols(), "Connected to Triton");
     let models = discover_models(&args, &client).await?;
     ensure!(!models.is_empty(), "Triton has no ready models to register");
 
@@ -119,7 +125,7 @@ async fn discover_models(args: &Args, client: &TritonClient) -> anyhow::Result<V
     client
         .ready_models()
         .await
-        .context("query Triton repository index over gRPC")
+        .context("query Triton repository index")
 }
 
 fn endpoint_slug(model: &str) -> String {

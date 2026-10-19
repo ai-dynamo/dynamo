@@ -3228,6 +3228,10 @@ dependencies = [
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
+ "prost-reflect",
+ "protox",
+ "reqwest 0.12.28",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -3235,6 +3239,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tracing",
+ "url",
  "validator",
 ]
 
@@ -7859,10 +7864,13 @@ version = "0.16.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01b80ea363c31af2de2b92e3c07ed1156628f7838c4afb4df75ee78a37fedbd1"
 dependencies = [
+ "base64 0.22.1",
  "logos 0.16.1",
  "miette",
  "prost 0.14.3",
  "prost-types 0.14.3",
+ "serde",
+ "serde-value",
 ]
 
 [[package]]
