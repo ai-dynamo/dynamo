@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 fn custom() -> SharedFormat {
     let mut registry = Registry::default();
     custom_generate_format_catalog::register(&mut registry).unwrap();
-    registry.get("sglang-base85").unwrap()
+    registry.get("sglang-zstd").unwrap()
 }
 
 #[test]
@@ -28,7 +28,7 @@ fn backend_property_laws_apply_to_the_external_codec() {
 #[test]
 fn catalog_installs_builtins_and_selects_external_format() {
     // A premature lookup must not poison installation with an empty registry.
-    assert!(dynamo_llm::generate_format::named("sglang-base85").is_err());
+    assert!(dynamo_llm::generate_format::named("sglang-zstd").is_err());
     let mut registry = Registry::default();
     custom_generate_format_catalog::register(&mut registry).unwrap();
     assert_eq!(registry.get("sglang").unwrap().name(), "sglang");
@@ -42,10 +42,10 @@ fn catalog_installs_builtins_and_selects_external_format() {
         selected
     );
     assert_eq!(
-        dynamo_llm::generate_format::named("sglang-base85")
+        dynamo_llm::generate_format::named("sglang-zstd")
             .unwrap()
             .name(),
-        "sglang-base85"
+        "sglang-zstd"
     );
 }
 
@@ -107,16 +107,16 @@ async fn serve(value: Value) -> (String, tokio::task::JoinHandle<()>) {
 
 #[tokio::test]
 async fn real_http_unary_and_sse_encode_exact_bytes() {
-    // Independent golden vectors generated with Python base64.b85encode,
-    // covering empty data, all partial-block lengths, and high bytes.
-    for (bytes, expected) in [
-        (vec![], ""),
-        (vec![0], "00"),
-        (vec![0, 1], "009"),
-        (vec![0, 1, 2], "009C"),
-        (vec![0, 1, 2, 3], "009C6"),
-        (vec![255; 4], "|NsC0"),
-        (b"hello".to_vec(), "Xk~0{Zv"),
+    // Empty, partial Base64 groups, high bytes, and compressible expert data.
+    for bytes in [
+        vec![],
+        vec![0],
+        vec![0, 1],
+        vec![0, 1, 2],
+        vec![0, 1, 2, 3],
+        vec![255; 4],
+        b"hello".to_vec(),
+        vec![42; 4096],
     ] {
         let (url, task) = serve(json!(STANDARD.encode(&bytes))).await;
         let client = reqwest::Client::builder()
@@ -145,10 +145,14 @@ async fn real_http_unary_and_sse_encode_exact_bytes() {
             } else {
                 serde_json::from_str(&text).unwrap()
             };
-            assert_eq!(
-                body["meta_info"]["routed_experts"], expected,
-                "bytes={bytes:?}, stream={stream}"
-            );
+            let compressed = STANDARD
+                .decode(body["meta_info"]["routed_experts"].as_str().unwrap())
+                .unwrap();
+            let decoded = zstd::stream::decode_all(compressed.as_slice()).unwrap();
+            assert_eq!(decoded, bytes, "stream={stream}");
+            if bytes.len() == 4096 {
+                assert!(compressed.len() < bytes.len());
+            }
             assert_eq!(body["output_ids"], json!([3]));
             assert_eq!(body["meta_info"]["id"], "client-id");
         }
