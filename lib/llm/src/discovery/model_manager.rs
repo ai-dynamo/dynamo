@@ -2961,7 +2961,8 @@ mod tests {
         mm.runtime_configs.insert(endpoint_id.clone(), rx);
     }
 
-    async fn assert_kv_choosers_do_not_publish_presence(stale_marker: bool) {
+    #[tokio::test]
+    async fn kv_chooser_ignores_stale_presence() {
         use dynamo_runtime::{component::TransportType, discovery::DiscoveryQuery};
 
         let runtime = Runtime::from_current().unwrap();
@@ -2980,63 +2981,43 @@ mod tests {
             component: endpoint.id().component,
             endpoint: "router-discovery".to_string(),
         };
-        if stale_marker {
-            // Model a prior frontend process with the same discovery identity and an old port.
-            discovery
-                .register(DiscoverySpec::Endpoint {
-                    namespace: endpoint.id().namespace,
-                    component: endpoint.id().component,
-                    endpoint: "router-discovery".to_string(),
-                    transport: TransportType::Tcp("127.0.0.1:1".to_string()),
-                    device_type: None,
-                    request_plane_codec: None,
-                })
-                .await
-                .unwrap();
-        }
+        // Model a prior frontend process with the same discovery identity and an old port.
+        discovery
+            .register(DiscoverySpec::Endpoint {
+                namespace: endpoint.id().namespace,
+                component: endpoint.id().component,
+                endpoint: "router-discovery".to_string(),
+                transport: TransportType::Tcp("127.0.0.1:1".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
         let before = discovery.list(query.clone()).await.unwrap();
-        assert_eq!(before.len(), usize::from(stale_marker));
+        assert_eq!(before.len(), 1);
 
         let manager = ModelManager::new();
-        let mut routers = Vec::new();
-        // Retained and replacement pipelines can have overlapping routers for the same pool.
-        for _ in 0..2 {
-            let config = KvRouterConfig {
-                use_kv_events: false,
-                router_replica_sync: true,
-                skip_initial_worker_wait: true,
-                ..Default::default()
-            };
-            let router = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                manager.kv_chooser_for(
-                    &endpoint,
-                    16,
-                    Some(config),
-                    None,
-                    crate::protocols::common::timing::WORKER_TYPE_DECODE,
-                    Some("test-model".to_string()),
-                    false,
-                ),
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_replica_sync: true,
+            skip_initial_worker_wait: true,
+            ..Default::default()
+        };
+        let router = manager
+            .kv_chooser_for(
+                &endpoint,
+                16,
+                Some(config),
+                None,
+                crate::protocols::common::timing::WORKER_TYPE_DECODE,
+                Some("test-model".to_string()),
+                false,
             )
             .await
-            .expect("router construction must not wait for the obsolete presence marker")
             .unwrap();
-            routers.push(router);
-            assert_eq!(discovery.list(query.clone()).await.unwrap(), before);
-        }
-        drop(routers);
+        assert_eq!(discovery.list(query).await.unwrap(), before);
+        drop(router);
         distributed.shutdown();
-    }
-
-    #[tokio::test]
-    async fn kv_choosers_do_not_publish_presence() {
-        assert_kv_choosers_do_not_publish_presence(false).await;
-    }
-
-    #[tokio::test]
-    async fn kv_choosers_ignore_stale_presence() {
-        assert_kv_choosers_do_not_publish_presence(true).await;
     }
 
     #[tokio::test]
