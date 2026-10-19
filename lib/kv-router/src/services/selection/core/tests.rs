@@ -1311,9 +1311,9 @@ async fn shutdown_reports_not_ready_and_rejects_new_work() {
 
     assert_eq!(core.list_workers(None, None).len(), 1);
     assert_eq!(core.loads(None, None).len(), 1);
-    let deleted = core
-        .delete_worker(1)
+    let deleted = tokio::time::timeout(Duration::from_secs(5), core.delete_worker(1))
         .await
+        .expect("delete must not wait for a stopped config monitor")
         .expect("delete should remain available after shutdown");
     assert_eq!(deleted.lifecycle, WorkerLifecycle::Unschedulable);
 }
@@ -3558,6 +3558,7 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
             RouterHintSourceMetadata {
                 source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
                 worker_type: "prefill".to_string(),
+                topology_domains: Default::default(),
             },
             None,
         )],
@@ -3566,6 +3567,303 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
         transfer_hint_for_selection(&configs, WorkerWithDpRank::new(7, 0), 0, Some(&candidates))
             .expect("hint");
     assert_eq!(hint.source_control_endpoint, "tcp://persistent-owner:23280");
+}
+
+const ISLAND_DOMAIN: &str = "rdma-island";
+
+fn island_config(endpoint: &str, island: &str) -> SelectionWorkerConfig {
+    let mut config = hint_config("prefill", &[(0, endpoint)]);
+    config.topology_domains = HashMap::from([(ISLAND_DOMAIN.to_string(), island.to_string())]);
+    config.kv_transfer_domain = Some(ISLAND_DOMAIN.to_string());
+    config.kv_transfer_enforcement = Some(crate::protocols::KvTransferEnforcement::Required);
+    config
+}
+
+fn hint_endpoint(
+    configs: &HashMap<WorkerId, SelectionWorkerConfig>,
+    candidates: &KvTransferCandidates,
+) -> Option<String> {
+    transfer_hint_for_selection(configs, WorkerWithDpRank::new(7, 0), 0, Some(candidates))
+        .map(|hint| hint.source_control_endpoint)
+}
+
+#[test]
+fn hint_source_must_share_the_target_island() {
+    let mut configs = HashMap::from([
+        (7, island_config("tcp://target:23280", "a")),
+        (8, island_config("tcp://same-island:23280", "a")),
+        (9, island_config("tcp://other-island:23280", "b")),
+        (10, hint_config("prefill", &[(0, "tcp://unlabeled:23280")])),
+    ]);
+    let cross_island: Vec<(KvTransferCandidateSource, usize)> = vec![
+        (WorkerWithDpRank::new(9, 0).into(), 3),
+        (WorkerWithDpRank::new(10, 0).into(), 3),
+    ];
+    let mut all = cross_island.clone();
+    all.push((WorkerWithDpRank::new(8, 0).into(), 2));
+    let all = hint_candidates(&[101, 102, 103], all);
+    let cross_island = hint_candidates(&[101, 102, 103], cross_island);
+
+    // Longer prefixes in another island, or in none, are skipped.
+    assert_eq!(
+        hint_endpoint(&configs, &all).as_deref(),
+        Some("tcp://same-island:23280")
+    );
+    // Without a same-island source there is no hint, and the target recomputes.
+    assert_eq!(hint_endpoint(&configs, &cross_island), None);
+    // A target without a transfer domain is not filtered.
+    configs.get_mut(&7).unwrap().kv_transfer_domain = None;
+    assert_eq!(
+        hint_endpoint(&configs, &cross_island).as_deref(),
+        Some("tcp://other-island:23280")
+    );
+}
+
+#[test]
+fn preferred_island_falls_back_to_a_cross_island_source() {
+    let mut target = island_config("tcp://target:23280", "a");
+    target.kv_transfer_enforcement = Some(crate::protocols::KvTransferEnforcement::Preferred);
+    let configs = HashMap::from([
+        (7, target),
+        (8, island_config("tcp://same-island:23280", "a")),
+        (9, island_config("tcp://other-island:23280", "b")),
+    ]);
+    let both = hint_candidates(
+        &[101, 102, 103],
+        vec![
+            (WorkerWithDpRank::new(8, 0).into(), 2),
+            (WorkerWithDpRank::new(9, 0).into(), 3),
+        ],
+    );
+    let cross_island = hint_candidates(
+        &[101, 102, 103],
+        vec![(WorkerWithDpRank::new(9, 0).into(), 3)],
+    );
+
+    assert_eq!(
+        hint_endpoint(&configs, &both).as_deref(),
+        Some("tcp://same-island:23280")
+    );
+    assert_eq!(
+        hint_endpoint(&configs, &cross_island).as_deref(),
+        Some("tcp://other-island:23280")
+    );
+}
+
+#[test]
+fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
+    use crate::identity::{
+        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
+    use crate::protocols::{
+        ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
+    let owner = |slot: u8| {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(3),
+            ),
+            StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
+        )
+    };
+    let source = |owner| {
+        KvTransferCandidateSource::CacheOwner(ResidencyOwner::cache_owner(owner).compact_key())
+    };
+    let metadata = |endpoint: &str, island: Option<&str>| RouterHintSourceMetadata {
+        source_control_endpoint: endpoint.to_string(),
+        worker_type: "prefill".to_string(),
+        topology_domains: island
+            .map(|island| (ISLAND_DOMAIN.to_string(), island.to_string()))
+            .into_iter()
+            .collect(),
+    };
+    let configs = HashMap::from([
+        (7, island_config("tcp://target:23280", "a")),
+        (8, island_config("tcp://attached-worker:23280", "a")),
+    ]);
+    let (other_island, unlabeled, published, inherited, partial) =
+        (owner(4), owner(5), owner(6), owner(7), owner(8));
+    let mut partial_metadata = metadata("tcp://partial:23280", None);
+    partial_metadata
+        .topology_domains
+        .insert("zone".to_string(), "z1".to_string());
+    let snapshot = Arc::new(ResidencyRoutingSnapshot::new(
+        ResidencyProjection::default(),
+        [
+            (
+                other_island,
+                metadata("tcp://other-island:23280", Some("b")),
+                None,
+            ),
+            (unlabeled, metadata("tcp://unlabeled:23280", None), None),
+            (
+                published,
+                metadata("tcp://published:23280", Some("a")),
+                None,
+            ),
+            (
+                inherited,
+                metadata("tcp://inherited:23280", None),
+                Some(WorkerWithDpRank::new(8, 0)),
+            ),
+            (partial, partial_metadata, Some(WorkerWithDpRank::new(8, 0))),
+        ],
+    ));
+    let hint = |owners: &[(CacheOwnerId, usize)]| {
+        let mut candidates = hint_candidates(
+            &[101, 102, 103, 104],
+            owners
+                .iter()
+                .map(|(owner, blocks)| (source(*owner), *blocks))
+                .collect(),
+        );
+        candidates.routing_snapshot = Some(snapshot.clone());
+        hint_endpoint(&configs, &candidates)
+    };
+
+    // Owners in another island, or in none, are skipped despite longer prefixes.
+    // An owner that publishes topology without the domain is in none, even
+    // when attached to a same-island worker.
+    assert_eq!(
+        hint(&[
+            (other_island, 4),
+            (unlabeled, 4),
+            (partial, 4),
+            (published, 2),
+            (inherited, 3)
+        ])
+        .as_deref(),
+        Some("tcp://inherited:23280")
+    );
+    assert_eq!(
+        hint(&[(other_island, 4), (unlabeled, 4), (published, 2)]).as_deref(),
+        Some("tcp://published:23280")
+    );
+    assert_eq!(hint(&[(other_island, 4), (unlabeled, 4)]), None);
+}
+
+#[tokio::test]
+async fn deleting_worker_releases_booking_before_same_id_returns() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let core = local_core(test_config(false));
+        core.upsert_worker(worker(1)).await.unwrap();
+        core.select_and_reserve(reserve_request("old"))
+            .await
+            .unwrap();
+        let entry = core.entry(&default_key()).unwrap();
+        let old = core.indexed_booking("old").unwrap().1;
+        assert!(entry.scheduler.has_booking(&old));
+
+        // With no event ingress, both catalog operations can finish without
+        // yielding. A watch-only consumer can miss the intervening removal.
+        core.delete_worker(1).await.unwrap();
+        core.upsert_worker(worker(1)).await.unwrap();
+        assert!(
+            !entry.scheduler.has_booking(&old),
+            "completed deletion left a booking on the replacement worker"
+        );
+        assert!(core.prefill_complete("old").await.is_err());
+        core.select_and_reserve(reserve_request("old"))
+            .await
+            .unwrap();
+        let fresh = core.indexed_booking("old").unwrap().1;
+        assert_ne!(old.attempt_id, fresh.attempt_id);
+        assert!(!entry.scheduler.has_booking(&old));
+        assert_eq!(
+            entry.scheduler.free_if_booking(&old).await.unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        assert!(entry.scheduler.has_booking(&fresh));
+        core.free_reservation("old").await.unwrap();
+        assert!(core.loads(None, None).iter().all(|p| p.pending_count == 0
+            && p.loads.iter().all(|w| w.active_requests == 0
+                && w.potential_prefill_tokens == 0
+                && w.potential_decode_blocks == 0)));
+        core.shutdown();
+    })
+    .await
+    .expect("worker deletion deadline");
+}
+
+#[tokio::test]
+async fn cancelled_worker_delete_is_finished_before_re_registration() {
+    struct PausedDetach {
+        calls: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl KvEventIngress for PausedDetach {
+        fn open(
+            &self,
+            registry: &WorkerRegistry,
+            key: &RoutingPartitionId,
+            block_size: u32,
+        ) -> Indexer {
+            registry.get_or_create_indexer(key.clone(), block_size)
+        }
+        async fn detach(&self, _: &WorkerRegistry, _: &WorkerCatalogRecord) {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let ingress = Arc::new(PausedDetach {
+            calls: AtomicUsize::new(0),
+        });
+        let core = core_with_host(SelectionHost {
+            cache: HostCache {
+                index: KvIndexSource::Owned(ingress.clone()),
+                shared: None,
+            },
+            ..SelectionHost::default()
+        });
+        core.upsert_worker(worker(1)).await.unwrap();
+        core.select_and_reserve(reserve_request("old"))
+            .await
+            .unwrap();
+        let entry = core.entry(&default_key()).unwrap();
+        let old = core.indexed_booking("old").unwrap().1;
+        {
+            let deletion = core.delete_worker(1);
+            tokio::pin!(deletion);
+            let pending = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(
+                    std::future::Future::poll(deletion.as_mut(), cx).is_pending(),
+                )
+            })
+            .await;
+            assert!(pending, "deletion must wait for the paused indexer detach");
+            assert_eq!(ingress.calls.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(
+            core.catalog.get(1).unwrap().lifecycle,
+            WorkerLifecycle::Draining
+        );
+        core.upsert_worker(worker(1)).await.unwrap();
+        assert!(
+            !entry.scheduler.has_booking(&old),
+            "cancelled deletion left a booking on the replacement worker"
+        );
+        assert_eq!(ingress.calls.load(Ordering::SeqCst), 2);
+        core.select(select_request()).await.unwrap();
+        assert!(core.free_reservation("old").await.is_err());
+        core.select_and_reserve(reserve_request("old"))
+            .await
+            .unwrap();
+        core.free_reservation("old").await.unwrap();
+        assert!(core.loads(None, None).iter().all(|p| p.pending_count == 0
+            && p.loads.iter().all(|w| w.active_requests == 0
+                && w.potential_prefill_tokens == 0
+                && w.potential_decode_blocks == 0)));
+        core.shutdown();
+    })
+    .await
+    .expect("cancelled worker deletion deadline");
 }
 
 #[tokio::test]
