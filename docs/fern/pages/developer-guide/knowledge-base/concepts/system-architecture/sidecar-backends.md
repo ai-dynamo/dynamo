@@ -112,7 +112,7 @@ multinode deployments are not yet supported.
 
 A sidecar inherits the frontend's routing unless it advertises its own with
 `--router-mode`, `--router-session-affinity-ttl-secs`, and the busy-worker
-thresholds, the same flags the Python workers accept. Prefill and decode
+thresholds, as the Python workers do. Prefill and decode
 sidecars are separate worker sets, so a prefill sidecar can advertise a
 session-affinity TTL while the decode sidecar advertises `--router-mode kv`
 alone and stays load balanced. See

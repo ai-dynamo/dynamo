@@ -765,7 +765,7 @@ impl Worker {
 
         if !self.config.enable_kv_routing {
             tracing::debug!("enable_kv_routing=false; skipping kv/snapshot publishers");
-            self.warn_if_advertised_kv_events_never_come();
+            self.warn_if_kv_events_missing();
             self.lifecycle = Some(lifecycle);
             return Ok(());
         }
@@ -777,7 +777,7 @@ impl Worker {
         };
         let kv_sources = self.engine.kv_event_sources().await?;
         if kv_sources.is_empty() {
-            self.warn_if_advertised_kv_events_never_come();
+            self.warn_if_kv_events_missing();
         }
         if kv_sources.is_empty() && bindings.dp_ranks.is_empty() {
             tracing::debug!(
@@ -828,9 +828,7 @@ impl Worker {
         Ok(())
     }
 
-    /// The frontend would wait for KV events that never arrive and route the
-    /// set by load alone, so say so where the flag was set.
-    fn warn_if_advertised_kv_events_never_come(&self) {
+    fn warn_if_kv_events_missing(&self) {
         let expects_events = self.config.router_config.as_ref().is_some_and(|config| {
             config.router_mode.is_kv_routing() && config.kv_router_config.use_kv_events
         });

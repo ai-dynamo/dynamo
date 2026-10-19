@@ -112,13 +112,12 @@ pub struct CommonArgs {
     #[arg(long, default_value_t = false, env = "DYN_ENABLE_RL")]
     pub enable_rl: bool,
 
-    /// Advertise a routing mode for this worker set (`round-robin`, `random`,
-    /// `power-of-two`, `kv`, `direct`, `least-loaded`, `device-aware-weighted`).
-    /// The frontend then routes the set by this worker's configuration instead
-    /// of its own, same as for the Python workers; omit it to inherit the
-    /// frontend's routing. The flags below qualify it and are ignored without it.
-    #[arg(long, env = "DYN_ROUTER_MODE", value_parser = parse_router_mode)]
-    pub router_mode: Option<RouterMode>,
+    /// Advertise a routing mode for this worker set. The frontend then routes
+    /// the set by this worker's configuration instead of its own, same as for
+    /// the Python workers; omit it to inherit the frontend's routing. The
+    /// flags below qualify it and are ignored without it.
+    #[arg(long, env = "DYN_ROUTER_MODE", value_enum)]
+    pub router_mode: Option<RouterModeArg>,
 
     /// Session-affinity idle TTL in seconds for the advertised worker set.
     #[arg(
@@ -147,7 +146,7 @@ impl CommonArgs {
     /// tuning from the `DYN_ROUTER_*` environment, the variables the Python
     /// worker flags default from; there are no per-setting flags here.
     pub fn router_config(&self) -> Result<Option<RouterConfig>, DynamoError> {
-        let Some(router_mode) = self.router_mode else {
+        let Some(router_mode) = self.router_mode.map(RouterMode::from) else {
             return Ok(None);
         };
         let invalid = |message: String| {
@@ -174,23 +173,31 @@ impl CommonArgs {
     }
 }
 
-/// The spellings the Python workers' `--router-mode` accepts.
-fn parse_router_mode(raw: &str) -> Result<RouterMode, String> {
-    Ok(match raw {
-        "round-robin" => RouterMode::RoundRobin,
-        "random" => RouterMode::Random,
-        "power-of-two" => RouterMode::PowerOfTwoChoices,
-        "kv" => RouterMode::KV,
-        "direct" => RouterMode::Direct,
-        "least-loaded" => RouterMode::LeastLoaded,
-        "device-aware-weighted" => RouterMode::DeviceAwareWeighted,
-        other => {
-            return Err(format!(
-                "unknown router mode {other:?}; expected one of round-robin, random, \
-                 power-of-two, kv, direct, least-loaded, device-aware-weighted"
-            ));
+/// `--router-mode` values, spelled as the Python workers spell them.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum RouterModeArg {
+    RoundRobin,
+    Random,
+    #[value(name = "power-of-two")]
+    PowerOfTwoChoices,
+    Kv,
+    Direct,
+    LeastLoaded,
+    DeviceAwareWeighted,
+}
+
+impl From<RouterModeArg> for RouterMode {
+    fn from(mode: RouterModeArg) -> Self {
+        match mode {
+            RouterModeArg::RoundRobin => Self::RoundRobin,
+            RouterModeArg::Random => Self::Random,
+            RouterModeArg::PowerOfTwoChoices => Self::PowerOfTwoChoices,
+            RouterModeArg::Kv => Self::KV,
+            RouterModeArg::Direct => Self::Direct,
+            RouterModeArg::LeastLoaded => Self::LeastLoaded,
+            RouterModeArg::DeviceAwareWeighted => Self::DeviceAwareWeighted,
         }
-    })
+    }
 }
 
 fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infallible> {
