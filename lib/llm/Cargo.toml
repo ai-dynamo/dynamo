@@ -35,6 +35,7 @@ ckf-diagnostics = []
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 mm-routing = ["dep:llm-multimodal", "dep:llm-tokenizer"]
 request-trace-bench = []
+reasoning-flush-bench = []
 # S3 destination for the request-trace sink, reusing the existing object_store client.
 request-trace-s3 = []
 
@@ -60,6 +61,11 @@ required-features = ["kv-router-stress"]
 name = "request_trace_finish_metadata"
 harness = false
 required-features = ["request-trace-bench"]
+
+[[bench]]
+name = "reasoning_flush_envelope"
+harness = false
+required-features = ["reasoning-flush-bench"]
 
 [[bench]]
 name = "image_decode"
