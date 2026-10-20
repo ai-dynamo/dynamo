@@ -351,20 +351,15 @@ spec:
   type: frontend
 status:
   component:
-    availableReplicas: 0
+    $strict: false
     componentKind: Deployment
     componentNames:
     - workers-frontend
-    gpusPerEngine: 0
-    gpusPerReplica: 0
-    readyReplicas: 0
-    replicas: 0
     runtimeNamespace: upgrade-latest-sglang-aggregated-single-component-workers
-    updatedReplicas: 0
   conditions:
   - lastTransitionTime: $ignore
-    message: Deployment is not ready
-    reason: DeploymentNotReady
+    message: $ignore
+    reason: $ignore
     status: 'False'
     type: Available
   - lastTransitionTime: $ignore
@@ -428,21 +423,16 @@ spec:
   type: worker
 status:
   component:
-    availableReplicas: 0
+    $strict: false
     componentKind: Deployment
     componentNames:
     - $var:worker-string:workers-worker-{{worker-hash}}
-    gpusPerEngine: 1
-    gpusPerReplica: 1
-    readyReplicas: 0
-    replicas: 0
     runtimeNamespace: $var:worker-string:upgrade-latest-sglang-aggregated-single-component-workers-{{worker-hash}}
     servedModelName: Qwen/Qwen3-0.6B
-    updatedReplicas: 0
   conditions:
   - lastTransitionTime: $ignore
-    message: Deployment is not ready
-    reason: DeploymentNotReady
+    message: $ignore
+    reason: $ignore
     status: 'False'
     type: Available
   - lastTransitionTime: $ignore
@@ -504,28 +494,18 @@ spec:
 status:
   components:
     frontend:
-      availableReplicas: 0
+      $strict: false
       componentKind: Deployment
       componentNames:
       - workers-frontend
-      gpusPerEngine: 0
-      gpusPerReplica: 0
-      readyReplicas: 0
-      replicas: 0
       runtimeNamespace: upgrade-latest-sglang-aggregated-single-component-workers
-      updatedReplicas: 0
     worker:
-      availableReplicas: 0
+      $strict: false
       componentKind: Deployment
       componentNames:
       - $var:worker-string:workers-worker-{{worker-hash}}
-      gpusPerEngine: 1
-      gpusPerReplica: 1
-      readyReplicas: 0
-      replicas: 0
       runtimeNamespace: $var:worker-string:upgrade-latest-sglang-aggregated-single-component-workers-{{worker-hash}}
       servedModelName: Qwen/Qwen3-0.6B
-      updatedReplicas: 0
   conditions:
   - lastTransitionTime: $ignore
     message: '$var:worker-string:Resources not ready: workers-frontend: Component

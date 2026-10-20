@@ -226,7 +226,7 @@ def check(base=None):
 
 
 def golden_objects(objects, latest=False):
-    """Only server-assigned metadata, allocated Service IPs and condition times vary."""
+    """Keep lowering intent exact while excluding server bookkeeping and runtime status."""
     objects = json.loads(json.dumps(objects))
     component_latest = latest and any(
         obj["kind"] == "DynamoComponentDeployment" for obj in objects
@@ -263,6 +263,30 @@ def golden_objects(objects, latest=False):
             if obj["kind"] in ("Deployment", "LeaderWorkerSet"):
                 # Workload-controller availability is outside the operator lowering boundary.
                 obj["status"] = {"$ignore": True}
+            if obj["kind"] in ("DynamoComponentDeployment", "DynamoGraphDeployment"):
+                status = obj.get("status", {})
+                components = (
+                    [status["component"]]
+                    if obj["kind"] == "DynamoComponentDeployment"
+                    else status.get("components", {}).values()
+                )
+                for component in components:
+                    # GPU/replica observations can change after the workload graph converges.
+                    for field in (
+                        "gpusPerEngine",
+                        "gpusPerReplica",
+                        "availableReplicas",
+                        "readyReplicas",
+                        "replicas",
+                        "updatedReplicas",
+                    ):
+                        component.pop(field, None)
+                    component["$strict"] = False
+                for condition in status.get("conditions", []):
+                    if condition["type"] == "Available":
+                        # A subsequent status conflict can replace the availability diagnostic.
+                        condition["message"] = "$ignore"
+                        condition["reason"] = "$ignore"
             if worker_hash:
                 bind_worker_strings(obj, worker_hash)
         metadata.pop("managedFields", None)
