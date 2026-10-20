@@ -596,7 +596,7 @@ class MultimodalRequestProcessor:
                         # Dual decode path: H.264/H.265 via NVDEC (hardware); other
                         # codecs via the vendor cv2 loader. NVDEC failure falls back.
                         nvdec_video = None
-                        codec = probe_video_codec(content)
+                        codec = await asyncio.to_thread(probe_video_codec, content)
                         if should_use_nvdec(codec):
                             try:
                                 nvdec_video = await asyncio.to_thread(

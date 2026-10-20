@@ -202,6 +202,28 @@ def test_probe_matroska_video_track(codec, expected):
     assert nd.probe_video_codec(data) == expected
 
 
+@pytest.mark.parametrize(
+    "codec_id,expected",
+    [
+        (b"V_MPEG4/ISO/AVC" + bytes(18), "h264"),
+        (b"V_MPEGH/ISO/HEVC" + bytes(1024), "hevc"),
+    ],
+)
+def test_probe_matroska_null_padded_codec_id(codec_id, expected):
+    assert nd.probe_video_codec(_matroska(_matroska_track(codec_id))) == expected
+
+
+@pytest.mark.parametrize(
+    "codec_id,expected",
+    [
+        (b"V_AV1\0ignored", "av1"),
+        (b"V_MPEGH/ISO/HEVC" + b"X" * 1024, None),
+    ],
+)
+def test_probe_matroska_codec_id_termination(codec_id, expected):
+    assert nd.probe_video_codec(_matroska(_matroska_track(codec_id))) == expected
+
+
 @pytest.mark.parametrize("size_bytes", [b"\xff", b"\x01" + b"\xff" * 7])
 def test_probe_matroska_unknown_segment_size(size_bytes):
     tracks = _ebml_element(0x1654AE6B, _matroska_track(b"V_MPEG4/ISO/AVC"))

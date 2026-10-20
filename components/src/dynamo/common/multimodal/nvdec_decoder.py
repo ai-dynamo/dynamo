@@ -78,6 +78,9 @@ _MATROSKA_CODEC_IDS = {
     b"V_VP8": "vp8",
 }
 
+# Include one byte beyond the longest known ID to reject longer non-null IDs.
+_MATROSKA_CODEC_ID_PREFIX_SIZE = max(map(len, _MATROSKA_CODEC_IDS)) + 1
+
 
 # Direct Cluster children, plus the global Void and CRC-32 elements. Their
 # payloads must be skipped even when the Cluster itself has no declared size.
@@ -265,8 +268,12 @@ def _probe_matroska_codecs(data: bytes) -> set[str]:
         for kind, payload_start, element_end in _iter_ebml_elements(data, start, end):
             if kind == 0x83 and 0 < element_end - payload_start <= 8:
                 track_type = int.from_bytes(data[payload_start:element_end], "big")
-            elif kind == 0x86 and element_end - payload_start <= 32:
-                codec_id = data[payload_start:element_end].rstrip(b"\0")
+            elif kind == 0x86:
+                # EBML strings end at the first null and may have arbitrary padding.
+                prefix_end = min(
+                    element_end, payload_start + _MATROSKA_CODEC_ID_PREFIX_SIZE
+                )
+                codec_id = data[payload_start:prefix_end].split(b"\0", 1)[0]
         if track_type == 1 and codec_id is not None:
             codec = _MATROSKA_CODEC_IDS.get(codec_id)
             if codec is not None:
@@ -282,6 +289,7 @@ def probe_video_codec(data: bytes) -> str | None:
     Return None for unrecognized or incomplete track metadata;
     never fall back to searching arbitrary bytes for codec markers. This is a
     routing hint; the selected decoder still selects and parses the stream.
+    Container traversal is synchronous; async callers must offload it.
     """
     try:
         if data.startswith(b"\x1a\x45\xdf\xa3"):
