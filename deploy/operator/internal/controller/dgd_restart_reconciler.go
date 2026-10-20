@@ -23,6 +23,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -76,13 +77,14 @@ func isNewRestartRequest(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
 	return dgd.Spec.Restart.ID != dgd.Status.Restart.ObservedID
 }
 
-// computeParallelRestartStatus handles parallel restart where all components restart together.
-func (r *dgdRestartReconciler) computeParallelRestartStatus(
+// computeParallelRestartStatus handles parallel restart where all components restart
+// together. Each workload program supplies its own progress resolver and logger.
+func computeParallelRestartStatus(
 	ctx context.Context,
+	logger logr.Logger,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	resolveProgress restartProgressResolver,
 ) *nvidiacomv1beta1.RestartStatus {
-	logger := log.FromContext(ctx)
 	specID := dgd.Spec.Restart.ID
 
 	var componentsToCheck []string
@@ -250,7 +252,7 @@ func (r *dgdRestartReconciler) computeRestartStatusWithProgressResolver(
 	}
 
 	if dynamo.IsParallelRestart(dgd) {
-		return r.computeParallelRestartStatus(ctx, dgd, resolveProgress)
+		return computeParallelRestartStatus(ctx, log.FromContext(ctx), dgd, resolveProgress)
 	}
 	return r.computeSequentialRestartStatus(ctx, dgd, dynamo.GetRestartOrder(dgd), resolveProgress)
 }

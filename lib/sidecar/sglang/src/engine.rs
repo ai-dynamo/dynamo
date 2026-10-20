@@ -14,6 +14,9 @@ use dynamo_backend_common::{
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
     PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
+use dynamo_llm::local_model::runtime_config::{
+    TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
+};
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
 };
@@ -173,6 +176,7 @@ impl SglangSidecarEngine {
 
         let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
         let common = args.sidecar.common;
+        let structural_tag = common.structural_tag(true);
         let config = WorkerConfig {
             runtime: common.runtime,
             namespace: common.namespace,
@@ -194,6 +198,7 @@ impl SglangSidecarEngine {
             tool_call_parser: common
                 .dyn_tool_call_parser
                 .or_else(|| discovery_string(&discovery.server_info, "tool_call_parser")),
+            structural_tag,
             exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
             route_to_encoder: false,
             enable_rl: common.enable_rl,
@@ -974,6 +979,28 @@ fn combined_token_limit(discovery: &Discovery) -> Option<u32> {
     discovery.max_model_len?.checked_sub(reserved)
 }
 
+/// SGLang holds a request's grammar until its reasoning parser sees the end of thinking.
+fn sglang_gates_reasoning(server_info: &Value) -> bool {
+    discovery_string(server_info, "reasoning_parser").is_some()
+        && !server_info
+            .get("skip_tokenizer_init")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+/// SGLang rejects token overflow unless `allow_auto_truncate` is set.
+fn sglang_token_budget(discovery: &Discovery) -> Option<TokenBudget> {
+    let truncates = discovery
+        .server_info
+        .get("allow_auto_truncate")?
+        .as_bool()?;
+    Some(TokenBudget {
+        combined_limit: combined_token_limit(discovery)?,
+        reject_prompt_overflow: !truncates,
+        reject_total_overflow: !truncates,
+    })
+}
+
 /// SGLang's gRPC bridge turns an unset `max_new_tokens` into its 128-token
 /// default, so ask for the room left in the context. Leave it unset when that
 /// room cannot hold `min_tokens`, and SGLang clamps the request itself.
@@ -1145,6 +1172,18 @@ fn build_engine_config(
         runtime_data.insert(
             "native_offloading_capacity".to_string(),
             serde_json::json!({"total_tokens": total_tokens}),
+        );
+    }
+    if sglang_gates_reasoning(&discovery.server_info) {
+        runtime_data.insert(
+            TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY.to_string(),
+            Value::Bool(true),
+        );
+    }
+    if let Some(token_budget) = sglang_token_budget(discovery) {
+        runtime_data.insert(
+            TOKEN_BUDGET_RUNTIME_KEY.to_string(),
+            serde_json::to_value(token_budget).expect("token budget is serializable"),
         );
     }
 
@@ -1711,6 +1750,76 @@ mod tests {
             .unwrap()
             .remove("speculative_num_steps");
         assert_eq!(limit(incomplete), None);
+    }
+
+    #[test]
+    fn reasoning_gate_follows_the_engine_reasoning_parser() {
+        let gate = |server_info| {
+            build_engine_config(
+                &discovery(server_info),
+                DisaggregationMode::Aggregated,
+                None,
+                None,
+            )
+            .unwrap()
+            .runtime_data
+            .remove("tool_call_structural_tag_reasoning_gate")
+        };
+        assert_eq!(
+            gate(json!({"reasoning_parser": "kimi_k2"})),
+            Some(json!(true))
+        );
+        for server_info in [
+            json!({}),
+            json!({"reasoning_parser": ""}),
+            json!({"reasoning_parser": null}),
+            json!({"reasoning_parser": "kimi_k2", "skip_tokenizer_init": true}),
+        ] {
+            assert_eq!(gate(server_info.clone()), None, "{server_info}");
+        }
+    }
+
+    #[test]
+    fn token_budget_follows_sglang_auto_truncation() {
+        let budget = |server_info| {
+            let mut discovery = discovery(server_info);
+            discovery.max_model_len = Some(4096);
+            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None)
+                .unwrap()
+                .runtime_data
+                .remove("token_budget")
+        };
+        assert_eq!(
+            budget(json!({"allow_auto_truncate": false})),
+            Some(json!({
+                "combined_limit": 4096,
+                "reject_prompt_overflow": true,
+                "reject_total_overflow": true,
+            }))
+        );
+        assert_eq!(
+            budget(json!({
+                "allow_auto_truncate": true,
+                "speculative_algorithm": "EAGLE",
+                "speculative_eagle_topk": 1,
+                "speculative_num_steps": 3,
+                "speculative_num_draft_tokens": 4,
+            })),
+            Some(json!({
+                "combined_limit": 4092,
+                "reject_prompt_overflow": false,
+                "reject_total_overflow": false,
+            }))
+        );
+        assert_eq!(budget(json!({})), None);
+        assert_eq!(
+            budget(json!({
+                "allow_auto_truncate": false,
+                "speculative_algorithm": "EAGLE",
+                "speculative_adaptive": true,
+            })),
+            None
+        );
     }
 
     #[test]

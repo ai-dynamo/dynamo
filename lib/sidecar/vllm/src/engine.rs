@@ -241,6 +241,8 @@ impl VllmSidecarEngine {
         let mut engine = Self::new(endpoint, model.clone(), mode, transport);
         engine.engine_gates_reasoning =
             model.reports_proto_0_6() && model.reasoning_parser().is_some();
+        // Off by default until vLLM's gRPC server uses xgrammar (vllm-project/vllm#61892).
+        let structural_tag = args.sidecar.common.structural_tag(false);
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -258,6 +260,7 @@ impl VllmSidecarEngine {
             served_model_name: Some(model.served_name.clone()),
             tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
             reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
+            structural_tag,
             exclude_tools_when_tool_choice_none: args
                 .sidecar
                 .common

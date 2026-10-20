@@ -3254,6 +3254,15 @@ class WorkerOverloaded(DynamoException):
 
     ...
 
+class WorkerUnavailable(DynamoException):
+    """No worker on the request's route can serve it yet (HTTP 503).
+
+    Raised by `RoutedEngine.generate`, for example while prefill routing is
+    still activating. Re-raise it unchanged to keep the 503.
+    """
+
+    ...
+
 class SelectionServiceError(DynamoException):
     """
     Raised by `SelectionService` for selector failures that are not malformed
