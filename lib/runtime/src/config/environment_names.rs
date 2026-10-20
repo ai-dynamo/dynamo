@@ -133,6 +133,16 @@ pub mod logging {
         pub const OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY: &str =
             "OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY";
 
+        /// Max time in millis for an OTLP export (traces & logs) before giving up.
+        /// Per-signal `OTEL_EXPORTER_OTLP_{TRACES,LOGS}_TIMEOUT` override this.
+        pub const OTEL_EXPORTER_OTLP_TIMEOUT: &str = "OTEL_EXPORTER_OTLP_TIMEOUT";
+
+        /// Export timeout for traces. Falls back to OTEL_EXPORTER_OTLP_TIMEOUT.
+        pub const OTEL_EXPORTER_OTLP_TRACES_TIMEOUT: &str = "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT";
+
+        /// Export timeout for logs. Falls back to OTEL_EXPORTER_OTLP_TIMEOUT.
+        pub const OTEL_EXPORTER_OTLP_LOGS_TIMEOUT: &str = "OTEL_EXPORTER_OTLP_LOGS_TIMEOUT";
+
         /// Client private key for log export. Falls back to OTEL_EXPORTER_OTLP_CLIENT_KEY.
         pub const OTEL_EXPORTER_OTLP_LOGS_CLIENT_KEY: &str = "OTEL_EXPORTER_OTLP_LOGS_CLIENT_KEY";
 

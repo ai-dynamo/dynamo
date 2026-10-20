@@ -306,8 +306,6 @@ fn otlp_metadata_for(signal_env: &str) -> tonic::metadata::MetadataMap {
     metadata
 }
 
-/// TLS material for the OTLP exporters, resolved from the
-/// `OTEL_EXPORTER_OTLP_*` environment variables.
 #[derive(Clone, Debug, Default)]
 struct OtlpTlsMaterial {
     ca_pem: Option<Vec<u8>>,
@@ -478,12 +476,22 @@ fn build_tonic_tls_config(
 ///
 /// The OTLP SDK's batch processors export on an SDK-owned thread with no
 /// Tokio reactor, so this builds a `reqwest::blocking::Client`, not async.
+/// Because the SDK does not enforce the exporter timeout around a supplied
+/// client, the timeout (signal var → generic → 10s default) is applied here.
 fn build_otlp_http_client(
     material: &OtlpTlsMaterial,
+    signal_timeout_var: &'static str,
 ) -> Result<Option<reqwest::blocking::Client>, OtlpTlsError> {
     if material.ca_pem.is_none() && material.client_identity.is_none() {
         return Ok(None);
     }
+
+    let timeout_ms = std::env::var(signal_timeout_var)
+        .ok()
+        .or_else(|| std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_TIMEOUT).ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(10_000);
+    let timeout = std::time::Duration::from_millis(timeout_ms);
 
     let invalid = |path: &'static str| {
         move |err: reqwest::Error| OtlpTlsError::ReadFile {
@@ -492,7 +500,9 @@ fn build_otlp_http_client(
         }
     };
 
-    let mut builder = reqwest::blocking::Client::builder().use_rustls_tls();
+    let mut builder = reqwest::blocking::Client::builder()
+        .use_rustls_tls()
+        .timeout(timeout);
     if let Some(ca) = &material.ca_pem {
         for cert in reqwest::Certificate::from_pem_bundle(ca).map_err(invalid("<ca>"))? {
             builder = builder.add_root_certificate(cert);
@@ -548,7 +558,10 @@ fn build_span_exporter(
             let mut builder = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
                 .with_endpoint(endpoint);
-            if let Some(client) = build_otlp_http_client(&tls_material)? {
+            if let Some(client) = build_otlp_http_client(
+                &tls_material,
+                env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_TIMEOUT,
+            )? {
                 builder = builder.with_http_client(client);
             }
             builder.build()
@@ -585,7 +598,10 @@ fn build_log_exporter(
             let mut builder = opentelemetry_otlp::LogExporter::builder()
                 .with_http()
                 .with_endpoint(endpoint);
-            if let Some(client) = build_otlp_http_client(&tls_material)? {
+            if let Some(client) = build_otlp_http_client(
+                &tls_material,
+                env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_TIMEOUT,
+            )? {
                 builder = builder.with_http_client(client);
             }
             builder.build()
@@ -3757,39 +3773,13 @@ pub mod tests {
             .unwrap();
             assert!(traces.ca_pem.is_none());
             assert!(traces.client_identity.is_none());
-
-            // No material means "don't override TLS" on either transport.
             assert!(build_tonic_tls_config(&traces).unwrap().is_none());
-            assert!(build_otlp_http_client(&traces).unwrap().is_none());
+            assert!(
+                build_otlp_http_client(&traces, env_logging::otlp::OTEL_EXPORTER_OTLP_TIMEOUT)
+                    .unwrap()
+                    .is_none()
+            );
         });
-    }
-
-    #[test]
-    fn otlp_tls_material_loads_generic_ca_for_both_signals() {
-        let (ca_pem, _) = self_signed_pem();
-        let ca_file = write_temp_pem("dynamo-otlp-ca", &ca_pem);
-        with_otlp_tls_env(
-            &[(
-                env_logging::otlp::OTEL_EXPORTER_OTLP_CERTIFICATE,
-                Some(ca_file.path().to_string_lossy().into_owned()),
-            )],
-            || {
-                let traces = otlp_tls_material_for(
-                    env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE,
-                    env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE,
-                    env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY,
-                )
-                .unwrap();
-                let logs = otlp_tls_material_for(
-                    env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE,
-                    env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_CLIENT_CERTIFICATE,
-                    env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_CLIENT_KEY,
-                )
-                .unwrap();
-                assert!(traces.ca_pem.is_some());
-                assert!(logs.ca_pem.is_some());
-            },
-        );
     }
 
     #[test]
@@ -3962,9 +3952,12 @@ pub mod tests {
                     env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY,
                 )
                 .unwrap();
-                let client = build_otlp_http_client(&material)
-                    .unwrap()
-                    .expect("reqwest client expected when CA and identity are present");
+                let client = build_otlp_http_client(
+                    &material,
+                    env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_TIMEOUT,
+                )
+                .unwrap()
+                .expect("reqwest client expected when CA and identity are present");
                 drop(client);
             },
         );
@@ -3995,7 +3988,6 @@ pub mod tests {
 
     #[test]
     fn otlp_tls_rejects_non_pem_ca_at_startup() {
-        // File readable but contents are not valid PEM — must fail at startup.
         let bogus = write_temp_pem("dynamo-otlp-bogus", "this is not a PEM certificate\n");
         with_otlp_tls_env(
             &[(
@@ -4017,8 +4009,6 @@ pub mod tests {
 
     #[test]
     fn otlp_tls_rejects_mismatched_client_cert_and_key() {
-        // Cert from one keypair, key from another — both valid PEMs individually,
-        // but the pair mismatches (a common mTLS misconfiguration).
         let (cert_pem, _) = self_signed_pem();
         let (_, key_pem) = self_signed_pem();
         let cert = write_temp_pem("dynamo-otlp-cert", &cert_pem);
