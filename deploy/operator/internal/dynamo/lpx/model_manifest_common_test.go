@@ -37,6 +37,11 @@ func TestBuildPartitionFromManifestV2SelectsFamily(t *testing.T) {
 		{name: "metadata HX opaque topology", topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 16, family: " " + hxTopologyFamily + " ", extent: []uint32{16, 1, 1, 1}, wantExtent: []uint32{16, 1, 1, 1}},
 		{name: "metadata HX with XT fixture name", topology: registryTestTopology, numChips: 8, devicesPerNode: 8, family: hxTopologyFamily, extent: []uint32{8, 1, 1, 1}, wantExtent: []uint32{8, 1, 1, 1}},
 		{name: "full HX geometry", topology: v3OpaqueTopology, numChips: 512, devicesPerNode: 16, family: hxTopologyFamily, extent: []uint32{16, 8, 2, 2}, wantExtent: []uint32{16, 8, 2, 2}},
+		{name: "unsupported numeric HX family", topology: v3OpaqueTopology, numChips: 32, devicesPerNode: 16, family: "16x8x2x3", extent: []uint32{16, 1, 2, 1}, wantErr: "topologyMetadata.topologyFamily"},
+		{name: "padded unsupported numeric HX family", topology: v3OpaqueTopology, numChips: 8, devicesPerNode: 16, family: " 16x8x2x3 ", extent: []uint32{8, 1, 1, 1}, wantErr: "topologyMetadata.topologyFamily"},
+		{name: "empty HX family", topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 16, family: " ", extent: []uint32{16, 1, 1, 1}, wantErr: "topologyMetadata.topologyFamily"},
+		{name: "case-altered HX family", topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 16, family: "hx16x8x2", extent: []uint32{16, 1, 1, 1}, wantErr: "topologyMetadata.topologyFamily"},
+		{name: "similar HX family", topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 16, family: "HX16x8x2x3", extent: []uint32{16, 1, 1, 1}, wantErr: "topologyMetadata.topologyFamily"},
 		{name: "unknown HX family", topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 16, family: "unknown", extent: []uint32{16, 1, 1, 1}, wantErr: "topologyMetadata.topologyFamily"},
 		{name: "missing HX extent", topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 16, family: hxTopologyFamily, wantErr: "unsupported HX extent"},
 		{name: "unsupported HX extent", topology: v3OpaqueTopology, numChips: 64, devicesPerNode: 16, family: hxTopologyFamily, extent: []uint32{16, 1, 2, 2}, wantErr: "unsupported HX extent"},
@@ -100,6 +105,42 @@ func TestBuildPartitionFromManifestV2SelectsFamily(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildFromGbuildManifestV2RejectsUnsupportedTopologyFamily(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Build a revision-2 HX manifest with an unsupported topology family")
+	manifest := newManifestV2ContractFixture(t)
+	artifacts, err := manifest.Artifacts()
+	require.NoError(t, err)
+	partitions, err := artifacts.Partitions()
+	require.NoError(t, err)
+	detail, err := partitions.At(0).Detail().Lpu()
+	require.NoError(t, err)
+	require.NoError(t, detail.SetTopology(v3OpaqueTopology))
+	detail.SetNumChips(32)
+	detail.SetDevicesPerNode(16)
+	setManifestChipArchitectures(t, detail, []string{chipArchHX})
+	metadata, err := detail.NewTopologyMetadata()
+	require.NoError(t, err)
+	require.NoError(t, metadata.SetTopologyFamily("16x8x2x3"))
+	shape, err := metadata.NewPartitionShape(4)
+	require.NoError(t, err)
+	for index, value := range []uint32{16, 1, 2, 1} {
+		shape.Set(index, value)
+	}
+
+	t.Log("Serialize and decode the complete manifest through the V2 artifact reader")
+	data, err := manifest.Message().Marshal()
+	require.NoError(t, err)
+	decoded, err := decodeGbuildManifestV2(data)
+	require.NoError(t, err)
+
+	t.Log("Propagate the topology-family rejection without returning a build")
+	build, err := buildFromGbuildManifestV2("gs://models/build", decoded)
+	require.ErrorContains(t, err, "topologyMetadata.topologyFamily")
+	require.Nil(t, build)
 }
 
 func TestManifestPartitionsRequireUniformDeviceCounts(t *testing.T) {
