@@ -47,4 +47,4 @@ The smoke test waits up to `READY_TIMEOUT` seconds (default `300`) for `/health`
 
 The displayed decision values depend on the model. `noul` is the normalized probability of the affirmative label; `score` is the expected zero-based level index. `x_label_mass` records the unnormalized probability mass of the candidate labels, and the reported values do not imply calibration.
 
-See the [System One API Reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/api/systemone.md) for request fields, limits, model compatibility, and errors. The route returns HTTP `404` when the frontend flag is absent.
+See the [System One API Reference](https://github.com/ai-dynamo/dynamo/blob/4ac5738046760747a23e27797490c7b33bdf8a22/docs/fern/pages/reference/api/systemone.md) for request fields, limits, model compatibility, and errors. The route returns HTTP `404` when the frontend flag is absent.

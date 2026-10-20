@@ -146,5 +146,5 @@ System One errors use `{"error":{"message":"..."}}`. The HTTP status carries the
 
 - [System One Metrics](../observability/metrics-catalog.mdx#system-one-experimental)
 - [SGLang Local Deployment Examples](../../recipes/cli-templates/sglang.mdx#system-one-typed-decisions-experimental)
-- [System One Shell Example](https://github.com/ai-dynamo/dynamo/blob/main/examples/systemone/README.md)
-- [System One Protocol Source](https://github.com/ai-dynamo/dynamo/tree/main/lib/llm/src/protocols/systemone)
+- [System One Shell Example](https://github.com/ai-dynamo/dynamo/blob/4ac5738046760747a23e27797490c7b33bdf8a22/examples/systemone/README.md)
+- [System One Protocol Source](https://github.com/ai-dynamo/dynamo/tree/4ac5738046760747a23e27797490c7b33bdf8a22/lib/llm/src/protocols/systemone)
