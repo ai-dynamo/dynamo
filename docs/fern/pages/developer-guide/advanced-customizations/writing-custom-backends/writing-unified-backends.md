@@ -13,6 +13,11 @@ drain, and graceful shutdown.
 Use this path for new token-in-token-out engines unless you need a feature that
 is still outside the unified contract.
 
+For a CPU-only end-to-end example, run the
+[DeepInfer mock backend](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/deepinfer).
+It follows the TokenSpeed backend's shared Worker interface and exercises frontend
+DeepSeek V4.1 reasoning and tool-call parsing with synthetic engine output.
+
 ## Choose an Implementation Language
 
 | Path | Use when |
