@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # SGLang sidecar
 
 > [!WARNING]
@@ -33,6 +38,66 @@ Start SGLang with `--incremental-streaming-output`. The sidecar's gRPC streaming
 Native Dynamo `/generate` requests are forwarded opaquely to SGLang's HTTP endpoint using the gRPC host and the HTTP port returned by `GetServerInfo`. The sidecar advertises this capability only after HTTP discovery and its health probe succeed; otherwise it continues serving the native gRPC path without advertising `/generate`.
 
 The sidecar discovers the model and tokenizer paths, served model name, parser defaults, worker role, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through SGLang's native discovery RPCs. Explicit Dynamo parser options override parser names discovered from SGLang.
+
+The sidecar also subscribes to SGLang's engine-state stream. A new SGLang
+process gets a new instance ID. When that ID changes, the sidecar removes and
+restores its discovery record so Dynamo clears stale KV-routing state. By
+default, the sidecar also removes the worker from discovery while generation
+is paused. Set `--unregister-on-pause=false` or
+`DYN_SGLANG_UNREGISTER_ON_PAUSE=false` to keep a paused worker in discovery.
+SGLang's computed health controls discovery. The engine-state stream requires
+`WatchEngineState` support; the older versions listed in the deployment examples
+below are not sufficient unless they include that RPC.
+
+## Controller-managed admission (opt-in)
+
+Ordinary inference auto-registers a healthy, unpaused engine. To start outside
+discovery until a controller approves the worker:
+
+```bash
+DYN_SYSTEM_PORT=8081 dynamo-sglang-sidecar \
+    --grpc-endpoint http://127.0.0.1:30001 \
+    --namespace training-run-a \
+    --controller-managed
+```
+
+The equivalent environment variable is `DYN_SGLANG_CONTROLLER_MANAGED=true`.
+This mode requires `--unregister-on-pause=true`. Healthy/resumed state alone
+does not grant membership. Use the individual sidecar's system listener for
+the [admission API](../../backend-common/ADMISSION.md), not the frontend or
+SGLang HTTP port. That reference covers status/admit/withdraw, retries, restart
+fencing, update ordering, and security.
+
+Admission brackets a fresh `GetModelInfo` with state snapshots checking the
+expected healthy, unpaused engine instance, and compares the live weight version
+with the controller's expected version. The shared worker checks observations
+before/after verification and is the only discovery writer. State observations
+do not replace controller approval.
+
+For Miles, pin a compatible SGLang build from `sglang-miles`, including
+`WatchEngineState` and the required weight-update transport. Use the
+pause/update/commit/resume boundary and wait for a matching observation:
+version-only metadata changes may not emit state notifications.
+
+### Optional policy-version taints
+
+`--policy-version-taints` / `DYN_SGLANG_POLICY_VERSION_TAINTS=true`
+independently enables version labels; it is not required for controller admission.
+It also requires `--unregister-on-pause=true`. For namespace `training-run-a`
+and version `17`, the label is `dynamo.policy/version=training-run-a:17`;
+both components are form-URL-encoded. Use a unique namespace per training run.
+
+The worker withdraws membership, updates labels via `update_model_taints`,
+then registers when eligible. It preserves unrelated labels, clears policy
+labels while withdrawn, and stays withdrawn on missing versions or update
+failures. Manual full-set `/engine/update/model_taints` is disabled only
+in this opt-in mode to prevent competing writers.
+
+Admission is not a per-request fence or proof of tensor/TP-rank consistency.
+Discovery does not drain requests or stop cached/direct callers. Taint-aware
+routing can require labels through `nvext.routing_constraints.required_taints`,
+but native `/generate` constraint projection and round-robin enforcement are
+not implemented here.
 
 SGLang remains the source of truth for the worker's aggregated, prefill, or decode role. The inherited `--disaggregation-mode` option and `DYN_DISAGGREGATION_MODE` environment variable have no effect in this sidecar. The SGLang sidecar rejects `--route-to-encoder` because its native protocol does not support encoder workers. Disaggregated workers continue to register under their fixed role components; aggregated workers honor `--component` or `DYN_COMPONENT`.
 

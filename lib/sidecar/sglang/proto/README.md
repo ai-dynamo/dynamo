@@ -16,6 +16,11 @@ The contract was copied from SGLang commit
 The upstream file's SHA-256 is
 `a2e14952ddb2b34b6e22cbbc4e76d76d70c44f2dbf087cb9918aed3399d9ef42`.
 The local file adds SPDX and temporary-copy comments and applies Dynamo's
-`clang-format` style; these changes do not alter the protobuf descriptor. The
+`clang-format` style. The engine-state work from
+[Dynamo #14985](https://github.com/ai-dynamo/dynamo/pull/14985) additionally
+introduces `WatchEngineState` and its snapshot messages, following
+[SGLang #39915](https://github.com/sgl-project/sglang/pull/39915). These are
+additive protocol changes; the hash above identifies the original base, not
+the extended contract. Existing generation wire tags remain unchanged. The
 SGLang sidecar generates both client and server types and temporarily exposes
 them to the Mocker server.
