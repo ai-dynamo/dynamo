@@ -39,10 +39,6 @@ pub(crate) fn build_generate_request(
     let request_has_media = has_media(&request);
     let media = media(&mut request, limits)?;
 
-    let sampling = &request.sampling_options;
-    let stop = &request.stop_conditions;
-    let output = &request.output_options;
-
     // A prefill worker only needs the context phase; TensorRT-LLM still requires
     // a positive budget, and one token is what the context phase produces.
     // No minimum check here: the minimum applies to the decode worker's budget,
@@ -81,16 +77,17 @@ pub(crate) fn build_generate_request(
         .map(|context| context.session_id.trim())
         .filter(|session_id| !session_id.is_empty())
         .map(str::to_string);
-    let token_ids = Arc::unwrap_or_clone(request.token_ids);
+    let input = request_input(&mut request, limits)?;
+    let sampling = &request.sampling_options;
+    let stop = &request.stop_conditions;
+    let output = &request.output_options;
 
     Ok(pb::GenerateRequest {
         request_id: request_id.to_string(),
         // The OpenEngine server rejects an empty model; any non-empty name is
         // served by the loaded model (single-model server).
         model: model.to_string(),
-        input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
-            ids: token_ids,
-        })),
+        input: Some(input),
         sampling: Some(pb::SamplingParams {
             temperature: sampling.temperature.map(f64::from),
             top_p: sampling.top_p.map(f64::from),
@@ -142,6 +139,44 @@ pub(crate) fn build_generate_request(
             session_id.as_deref(),
         )),
     })
+}
+
+fn request_input(
+    request: &mut PreprocessedRequest,
+    limits: Option<ModelLimits>,
+) -> Result<pb::generate_request::Input, DynamoError> {
+    match limits.and_then(|limits| limits.supported_inputs) {
+        Some(inputs) if inputs.token_ids => token_ids_input(request),
+        Some(inputs) if inputs.text => {
+            let prompt = request
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra.get("formatted_prompt"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    client::invalid_argument(
+                        "the loaded TensorRT-LLM model requires text input, but the request has no string extra_args.formatted_prompt",
+                    )
+                })?;
+            Ok(pb::generate_request::Input::Prompt(prompt.to_string()))
+        }
+        Some(_) => Err(client::invalid_argument(
+            "the loaded TensorRT-LLM model advertises neither text nor token-ID input support",
+        )),
+        // Older OpenEngine servers leave both optional capability fields unset.
+        None => token_ids_input(request),
+    }
+}
+
+fn token_ids_input(
+    request: &mut PreprocessedRequest,
+) -> Result<pb::generate_request::Input, DynamoError> {
+    if request.token_ids.is_empty() {
+        return Err(client::invalid_argument("token_ids must not be empty"));
+    }
+    Ok(pb::generate_request::Input::TokenIds(pb::TokenIds {
+        ids: Arc::unwrap_or_clone(std::mem::take(&mut request.token_ids)),
+    }))
 }
 
 // Derive omitted text max_tokens from the context window. For media, only
@@ -578,9 +613,6 @@ fn validate_request(
     request: &PreprocessedRequest,
     mode: DisaggregationMode,
 ) -> Result<(), DynamoError> {
-    if request.token_ids.is_empty() {
-        return Err(client::invalid_argument("token_ids must not be empty"));
-    }
     if request.prompt_embeds.is_some() {
         return Err(client::invalid_argument(
             "prompt embeddings are not supported by the TensorRT-LLM sidecar",

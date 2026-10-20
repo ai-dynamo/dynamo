@@ -56,6 +56,9 @@ struct FakeTrtllm {
     advertises_image: Arc<AtomicBool>,
     advertises_video: Arc<AtomicBool>,
     advertises_audio: Arc<AtomicBool>,
+    advertises_input_capabilities: Arc<AtomicBool>,
+    supports_text_input: Arc<AtomicBool>,
+    supports_token_ids_input: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
 }
 
@@ -191,6 +194,8 @@ impl pb::control_server::Control for FakeTrtllm {
             return Err(Status::unavailable("not serving yet"));
         }
         let supports_multimodal = self.supports_multimodal.load(Ordering::SeqCst);
+        let advertises_input_capabilities =
+            self.advertises_input_capabilities.load(Ordering::SeqCst);
         let modalities = [
             (self.advertises_image.load(Ordering::SeqCst), "image"),
             (self.advertises_video.load(Ordering::SeqCst), "video"),
@@ -209,6 +214,10 @@ impl pb::control_server::Control for FakeTrtllm {
             } else {
                 Some(4096)
             },
+            supports_text_input: advertises_input_capabilities
+                .then(|| self.supports_text_input.load(Ordering::SeqCst)),
+            supports_token_ids_input: advertises_input_capabilities
+                .then(|| self.supports_token_ids_input.load(Ordering::SeqCst)),
             supports_multimodal: Some(supports_multimodal),
             extra: Some(prost_types::Struct {
                 fields: [(
@@ -611,11 +620,18 @@ async fn advertised_audio_media_reaches_openengine() {
     let service = FakeTrtllm::default();
     service.supports_multimodal.store(true, Ordering::SeqCst);
     service.advertises_audio.store(true, Ordering::SeqCst);
+    service
+        .advertises_input_capabilities
+        .store(true, Ordering::SeqCst);
+    service.supports_text_input.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
     let engine = engine(&server.endpoint, 1);
     engine.start(0).await.expect("start");
 
     let mut req = request();
+    req.token_ids = Arc::new(Vec::new());
+    let task_prompt = "<|startoftranscript|><|fr|><|translate|><|notimestamps|>";
+    req.extra_args = Some(json!({"formatted_prompt": task_prompt}));
     req.multi_modal_data = Some(HashMap::from([(
         "audio_url".to_string(),
         vec![MultimodalData::RawUrl(
@@ -626,6 +642,10 @@ async fn advertised_audio_media_reaches_openengine() {
 
     let requests = server.service.requests.lock().await;
     let sent = requests.first().expect("recorded request");
+    assert_eq!(
+        sent.input,
+        Some(pb::generate_request::Input::Prompt(task_prompt.to_string()))
+    );
     assert_eq!(sent.media.len(), 1);
     assert_eq!(sent.media[0].modality, pb::Modality::Audio as i32);
     assert!(matches!(

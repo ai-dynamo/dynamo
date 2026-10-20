@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::client::SupportedMedia;
+use crate::client::{SupportedInputs, SupportedMedia};
 use crate::test_fixtures::*;
 use dynamo_backend_common::MultimodalItemRef;
 use serde_json::json;
@@ -76,6 +76,65 @@ fn request_maps_sampling_stop_and_output_fields() {
         pb::guided_decoding::Guide::JsonSchema(guide) => assert!(guide.contains("object")),
         other => panic!("expected JSON schema guide, got {other:?}"),
     }
+}
+
+#[test]
+fn text_input_model_receives_the_formatted_audio_prompt() {
+    let mut req = request();
+    req.token_ids = Arc::new(Vec::new());
+    req.multi_modal_data = Some(HashMap::from([(
+        "audio_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "https://example.com/audio.wav".to_string(),
+        )],
+    )]));
+    let task_prompt = "<|startoftranscript|><|fr|><|translate|><|notimestamps|>";
+    req.extra_args = Some(json!({"formatted_prompt": task_prompt}));
+    let mut model_limits = all_media_limits(4096).expect("limits");
+    model_limits.supported_inputs = Some(SupportedInputs {
+        text: true,
+        token_ids: false,
+    });
+
+    let proto = build_generate_request(req, "req", "model", Some(model_limits), AGG)
+        .expect("text-input audio request");
+    assert_eq!(
+        proto.input,
+        Some(pb::generate_request::Input::Prompt(task_prompt.to_string()))
+    );
+}
+
+#[test]
+fn text_input_model_accepts_an_empty_formatted_prompt() {
+    let mut req = request();
+    req.token_ids = Arc::new(Vec::new());
+    req.extra_args = Some(json!({"formatted_prompt": ""}));
+    let mut model_limits = limits(4096).expect("limits");
+    model_limits.supported_inputs = Some(SupportedInputs {
+        text: true,
+        token_ids: false,
+    });
+
+    let proto = build_generate_request(req, "req", "model", Some(model_limits), AGG)
+        .expect("an empty prompt lets the engine select its model default");
+    assert_eq!(
+        proto.input,
+        Some(pb::generate_request::Input::Prompt(String::new()))
+    );
+}
+
+#[test]
+fn text_input_model_requires_a_formatted_prompt() {
+    let req = request();
+    let mut model_limits = limits(4096).expect("limits");
+    model_limits.supported_inputs = Some(SupportedInputs {
+        text: true,
+        token_ids: false,
+    });
+
+    let error = build_generate_request(req, "req", "model", Some(model_limits), AGG)
+        .expect_err("a token-only preprocessed request cannot serve a text-input model");
+    assert!(error.to_string().contains("extra_args.formatted_prompt"));
 }
 
 #[test]
@@ -472,6 +531,7 @@ fn the_derived_max_tokens_respects_the_engines_output_cap() {
         Some(ModelLimits {
             context_length: Some(4096),
             max_output_tokens: Some(256),
+            supported_inputs: None,
             supported_media: Some(SupportedMedia::default()),
         }),
         AGG,
