@@ -40,8 +40,12 @@ def deployment(tmp_path):
     return result, value
 
 
-def test_manifest_enforces_fixed_capacity_without_changing_discovery(tmp_path):
+def test_manifest_enforces_fixed_capacity_with_kubernetes_discovery(tmp_path):
     _, value = deployment(tmp_path)
+    assert (
+        value["metadata"]["annotations"]["nvidia.com/dynamo-discovery-backend"]
+        == "kubernetes"
+    )
     components = value["spec"]["components"]
     assert [c["replicas"] for c in components] == [2, 2]
     for component in components:

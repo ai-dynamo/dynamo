@@ -174,7 +174,7 @@ def manifest(name, old, scenario, model, client_image):
             "name": name,
             "annotations": {
                 "nvidia.com/enable-grove": "false",
-                "nvidia.com/dynamo-discovery-backend": "etcd",
+                "nvidia.com/dynamo-discovery-backend": "kubernetes",
             },
         },
         "spec": {"components": components},
@@ -396,6 +396,7 @@ print(json.dumps(result))
             namespace=namespace,
             skip_service_restart=True,
             readiness_timeout=1800,
+            fail_fast_startup=True,
         )
         async with managed as deployment:
             pods = await observe()

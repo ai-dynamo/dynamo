@@ -89,7 +89,7 @@ jobs:
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.worker_tag }}
           test_name: n2-rolling-upgrade
           test_file: tests/deploy/test_n2_rolling_upgrade.py
-          extra_pytest_args: --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.frontend_tag }} -m k8s -n 0
+          extra_pytest_args: --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.frontend_tag }} -m k8s -n 0 --maxfail=1
           # Each parameter owns a DGD, client Pod and quota; the outer vCluster
           # cleanup also runs on a job timeout or interrupted pytest process.
           cleanup_deployment: 'false'
