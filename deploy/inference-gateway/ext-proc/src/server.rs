@@ -47,6 +47,7 @@ enum StreamState {
 struct RequestContext {
     state: StreamState,
     target_endpoint: String,
+    worker_id: Option<String>,
     incoming_model_name: String,
     target_model_name: String,
     request_id: String,
@@ -90,6 +91,7 @@ impl RequestContext {
         Self {
             state: StreamState::RequestReceived,
             target_endpoint: String::new(),
+            worker_id: None,
             incoming_model_name: String::new(),
             target_model_name: String::new(),
             request_id: String::new(),
@@ -302,6 +304,11 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             .await
             .map_err(ExtProcError::from_pick_error)?;
 
+        ctx.worker_id = result
+            .headers
+            .iter()
+            .find(|(name, _)| name == "x-dynamo-worker-instance-id")
+            .map(|(_, value)| value.clone());
         ctx.body_routed = true;
         ctx.booking_id = result.reservation_id.clone();
         ctx.target_endpoint = result.endpoint.clone();
@@ -757,6 +764,20 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                 if let Some(cached_tokens) = usage.as_ref().and_then(|u| u.cached_tokens) {
                     crate::metrics::observe_cached_tokens(cached_tokens);
                 }
+                let prompt_tokens = usage.as_ref().and_then(|u| u.prompt_tokens);
+                let cached_tokens = usage.as_ref().and_then(|u| u.cached_tokens);
+                let actual_hit_rate =
+                    crate::metrics::observe_actual_reuse(cached_tokens, prompt_tokens);
+                tracing::info!(
+                    request_id = %ctx.request_id,
+                    session_id = ctx.request_headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("x-switchyard-session-id")).map(|(_, v)| v.as_str()),
+                    model = crate::metrics::served_model_label(),
+                    actual_worker_id = ?ctx.worker_id,
+                    endpoint = %ctx.target_endpoint,
+                    prompt_tokens, cached_tokens, actual_hit_rate = ?actual_hit_rate,
+                    response_complete = ctx.response_complete,
+                    "observed cache reuse"
+                );
                 picker
                     .on_request_complete_with_usage(&booking_id, usage)
                     .await;

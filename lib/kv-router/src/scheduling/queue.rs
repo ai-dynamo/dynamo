@@ -1701,6 +1701,14 @@ impl<
                     let worker_load = request.worker_load_for(selection.worker);
                     let selected_worker_load = AdvisoryWorkerLoad {
                         active_prefill_tokens: worker_load.active_prefill_tokens,
+                        active_decode_blocks: request
+                            .worker_loads
+                            .get(&selection.worker)
+                            .map(|load| load.active_decode_blocks),
+                        active_requests: request
+                            .worker_loads
+                            .get(&selection.worker)
+                            .map(|load| load.active_requests),
                         prefill_token_capacity: config
                             .max_num_batched_tokens()
                             .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS)

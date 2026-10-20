@@ -18,7 +18,9 @@ use axum::{
     routing::get,
 };
 use dynamo_llm::http::service::metrics::generate_log_buckets;
-use prometheus::{Encoder, HistogramOpts, HistogramVec, Registry, TEXT_FORMAT, TextEncoder};
+use prometheus::{
+    Encoder, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, TEXT_FORMAT, TextEncoder,
+};
 
 /// Port the `/metrics` endpoint binds to unless `DYN_EPP_METRICS_PORT` says
 /// otherwise. Distinct from the ext_proc gRPC port (9002) and the health port
@@ -54,7 +56,7 @@ pub fn set_served_model(model: impl Into<String>) {
     }
 }
 
-fn served_model_label() -> &'static str {
+pub(crate) fn served_model_label() -> &'static str {
     SERVED_MODEL.get().map_or(UNKNOWN_MODEL, String::as_str)
 }
 
@@ -87,6 +89,59 @@ pub fn observe_cached_tokens(cached_tokens: u64) {
     CACHED_TOKENS
         .with_label_values(&[served_model_label()])
         .observe(cached_tokens as f64);
+}
+
+// Both counters include exactly the same requests, so their ratio is token weighted.
+static OBSERVED_REUSE: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let metric = IntCounterVec::new(
+        Opts::new(
+            "dynamo_epp_observed_reuse_tokens_total",
+            "Matched response-usage token totals for actual cache hit rate",
+        ),
+        &["model", "kind"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(metric.clone())).unwrap();
+    metric
+});
+
+static PREDICTED_REUSE: LazyLock<HistogramVec> = LazyLock::new(|| {
+    let metric = HistogramVec::new(
+        HistogramOpts::new(
+            "dynamo_epp_predicted_cache_hit_rate",
+            "Advisory prefix reuse estimate, separate from response usage",
+        )
+        .buckets(vec![0.0, 0.25, 0.5, 0.75, 0.9, 1.0]),
+        &["model", "tier"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(metric.clone())).unwrap();
+    metric
+});
+
+pub(crate) fn observe_predicted_reuse(gpu: Option<f64>, cpu: Option<f64>, disk: Option<f64>) {
+    for (tier, rate) in [
+        ("gpu", gpu),
+        ("cpu_inclusive", cpu),
+        ("disk_inclusive", disk),
+    ] {
+        if let Some(rate) = rate {
+            PREDICTED_REUSE
+                .with_label_values(&[served_model_label(), tier])
+                .observe(rate);
+        }
+    }
+}
+
+pub(crate) fn observe_actual_reuse(cached: Option<u64>, prompt: Option<u64>) -> Option<f64> {
+    let rate = crate::probe::hit_rate(cached, prompt)?;
+    OBSERVED_REUSE
+        .with_label_values(&[served_model_label(), "cached"])
+        .inc_by(cached?);
+    OBSERVED_REUSE
+        .with_label_values(&[served_model_label(), "prompt"])
+        .inc_by(prompt?);
+    Some(rate)
 }
 
 /// Serve `/metrics` until the process exits.
@@ -134,6 +189,29 @@ mod tests {
     fn recorded() -> (u64, f64) {
         let histogram = CACHED_TOKENS.with_label_values(&[TEST_MODEL]);
         (histogram.get_sample_count(), histogram.get_sample_sum())
+    }
+
+    #[test]
+    fn actual_reuse_uses_only_matched_token_pairs() {
+        let _guard = bind_test_model();
+        let cached = OBSERVED_REUSE.with_label_values(&[served_model_label(), "cached"]);
+        let prompt = OBSERVED_REUSE.with_label_values(&[served_model_label(), "prompt"]);
+        let before = (cached.get(), prompt.get());
+        for (c, p) in [
+            (None, Some(10)),
+            (Some(1), None),
+            (Some(0), Some(0)),
+            (Some(11), Some(10)),
+        ] {
+            assert_eq!(observe_actual_reuse(c, p), None);
+        }
+        assert_eq!((cached.get(), prompt.get()), before);
+        assert_eq!(observe_actual_reuse(Some(0), Some(10)), Some(0.0));
+        assert_eq!(observe_actual_reuse(Some(80), Some(100)), Some(0.8));
+        assert_eq!(
+            (cached.get() - before.0, prompt.get() - before.1),
+            (80, 110)
+        );
     }
 
     #[test]

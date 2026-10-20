@@ -199,6 +199,7 @@ impl BackgroundTasks {
 async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry) -> Result<()> {
     let standalone = matches!(mode, EppMode::Standalone);
 
+    let probe_config = crate::probe::Config::from_env(standalone)?;
     let config = Config::from_env();
 
     tracing::info!(
@@ -325,14 +326,21 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
             }
             metrics::set_served_model(router.served_model());
             let ready = router.pod_store_ready();
-            serve(
-                Arc::new(router),
+            let router = Arc::new(router);
+            let probe_task = crate::probe::start(probe_config, router.clone(), shutdown.clone()).await?;
+            let result = serve(
+                router,
                 move || ready.load(std::sync::atomic::Ordering::Acquire),
                 health_reporter,
                 draining,
                 shutdown,
             )
-            .await
+            .await;
+            if let Some(task) = probe_task {
+                task.abort();
+                let _ = task.await;
+            }
+            result
         }
     }
     .await;
