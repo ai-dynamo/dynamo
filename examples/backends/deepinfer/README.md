@@ -129,6 +129,8 @@ routing. Idle ranks still enter DeepInfer's global work vote and engine steps.
 All ranks must initialize before registration. A rank failure stops the entire
 group; shutdown escalates to process-group termination if native collectives block.
 Per-rank initialization is limited to one hour. Multi-node launch is not supported.
+The text-only adapter disables DeepInfer's unused shared image pool by default,
+avoiding its 8 GiB shared-memory allocation per rank.
 
 Native mode requires `CUDA_VISIBLE_DEVICES` before importing DeepInfer. Provide at
 least `DP * CP` distinct devices for DP launch; EP must divide `DP * CP`. Engram

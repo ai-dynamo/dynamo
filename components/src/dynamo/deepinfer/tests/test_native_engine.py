@@ -4,6 +4,7 @@
 """CPU contract checks at the optional DeepInfer dependency boundary."""
 
 import asyncio
+import os
 import sys
 import threading
 from pathlib import Path
@@ -123,11 +124,15 @@ def native_api(monkeypatch):
     # module cache along with the external dependency modules after each test.
     monkeypatch.delitem(sys.modules, "dynamo.deepinfer.native_engine", raising=False)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("DEEPINFER_USE_MULTIMODAL_POOL", "0")
     yield SimpleNamespace(arena=arena, calls=calls)
     sys.modules.pop("dynamo.deepinfer.native_engine", None)
 
 
-def test_native_is_default_and_copies_pooled_outputs(checkpoint, native_api):
+def test_native_is_default_and_copies_pooled_outputs(
+    checkpoint, native_api, monkeypatch
+):
+    monkeypatch.delenv("DEEPINFER_USE_MULTIMODAL_POOL")
     config = parse_args(
         [
             "--model",
@@ -138,6 +143,7 @@ def test_native_is_default_and_copies_pooled_outputs(checkpoint, native_api):
     )
     assert config.mock is False and config.served_model_name == "deepinfer"
     engine = create_engine(config)
+    assert os.environ["DEEPINFER_USE_MULTIMODAL_POOL"] == "0"
     assert engine.engine.args.data_parallel_size == 1
     assert engine.engine.args.context_parallel_size == 2
     assert engine.engine.args.model == checkpoint

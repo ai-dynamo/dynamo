@@ -205,6 +205,8 @@ def create_engine(config: Config):
         return MockDeepInfer(config.model)
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         raise ValueError("Set CUDA_VISIBLE_DEVICES before starting native DeepInfer")
+    # Text-only serving does not need DeepInfer's 8 GiB shared image pool per rank.
+    os.environ.setdefault("DEEPINFER_USE_MULTIMODAL_POOL", "0")
     # Keep the optional CUDA engine and its dependencies out of mock mode.
     module = importlib.import_module("dynamo.deepinfer.native_engine")
     return module.NativeDeepInfer(config)
