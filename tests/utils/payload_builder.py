@@ -824,6 +824,7 @@ def streaming_chat_payload_with_logprobs(
     if prompt_logprobs is not None:
         body["prompt_logprobs"] = prompt_logprobs
         fields.extend(["prompt_token_ids", "prompt_logprobs"])
+    nvext["extra_fields"] = list(dict.fromkeys(fields))
     return StreamingChatPayload(
         body=body,
         repeat_count=repeat_count,
@@ -850,7 +851,9 @@ def disaggregated_chat_payload() -> DisaggregatedChatPayload:
     )
 
 
-def disaggregated_token_count_payload() -> DisaggregatedChatPayload:
+def disaggregated_token_count_payload(
+    *, logprobs: bool = False
+) -> DisaggregatedChatPayload:
     return DisaggregatedChatPayload(
         body={
             "messages": [{"role": "user", "content": LONG_PROMPT_FOR_CACHING}],
@@ -859,6 +862,7 @@ def disaggregated_token_count_payload() -> DisaggregatedChatPayload:
             "temperature": 0,
             "stream": False,
             "ignore_eos": True,
+            **({"logprobs": True, "top_logprobs": 0} if logprobs else {}),
             "chat_template_kwargs": {"enable_thinking": False},
             "nvext": {
                 "extra_fields": [
@@ -876,14 +880,17 @@ def disaggregated_token_count_payload() -> DisaggregatedChatPayload:
     )
 
 
-def chat_logprobs_and_structured_output_payloads() -> list[BasePayload]:
+def chat_logprobs_and_structured_output_payloads(
+    *, prompt_logprobs: int | None = 2
+) -> list[BasePayload]:
     logprobs = streaming_chat_payload_with_logprobs(
         content="Count from one to ten.",
         expected_response=[],
         max_tokens=8,
         top_logprobs=2,
-        prompt_logprobs=2,
+        prompt_logprobs=prompt_logprobs,
         extra_body={
+            "nvext": {"extra_fields": ["prompt_token_ids"]},
             "ignore_eos": True,
             "chat_template_kwargs": {"enable_thinking": False},
         },
@@ -934,7 +941,7 @@ def chat_logprobs_and_structured_output_payloads() -> list[BasePayload]:
 
 
 def http_cancellation_payloads(
-    metrics: EngineMetrics, *, max_tokens: int
+    metrics: EngineMetrics | None, *, max_tokens: int
 ) -> list[BasePayload]:
     body = {
         "messages": [{"role": "user", "content": "Count from one to a thousand."}],
