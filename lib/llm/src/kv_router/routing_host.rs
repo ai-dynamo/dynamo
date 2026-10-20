@@ -592,25 +592,30 @@ impl RoutingHost {
     }
 
     /// The group key for a subagent: a request that carries a parent session id binds under the
-    /// parent's group instead of its own session, so siblings share a worker while the parent
-    /// keeps its own binding. An explicit per-request target stays on the request's own session so
+    /// parent's group for decode, while prefill uses the parent's own binding to reuse its cache.
+    /// An explicit per-request target stays on the request's own session so
     /// it cannot be rejected against, or rebind, the group.
     fn group_binding_id(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         explicit: Option<AffinityTarget>,
+        phase: RequestPhase,
     ) -> Option<Arc<SessionAffinityId>> {
         if explicit.is_some() {
             return None;
         }
-        let parent_session_id = request
-            .content()
-            .agent_context
-            .as_ref()
-            .and_then(|context| context.parent_session_id.as_deref())?;
-        Some(Arc::new(SessionAffinityId::new(
-            subagent_group_affinity_id(parent_session_id),
-        )))
+        let agent = request.content().agent_context.as_ref()?;
+        let parent_session_id = agent.parent_session_id.as_deref()?;
+        let binding_id = if phase == RequestPhase::Prefill {
+            let parent = parent_session_id.trim();
+            if parent.is_empty() || parent == agent.session_id.trim() {
+                return None;
+            }
+            parent.to_owned()
+        } else {
+            subagent_group_affinity_id(parent_session_id)
+        };
+        Some(Arc::new(SessionAffinityId::new(binding_id)))
     }
 
     /// Commit a held session to the dispatched worker; a request without a
@@ -740,7 +745,7 @@ impl RoutingHost {
         };
         let explicit = explicit_target(request.content(), phase)?;
         let session_id = self
-            .group_binding_id(request, explicit)
+            .group_binding_id(request, explicit, phase)
             .unwrap_or(session_id);
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;

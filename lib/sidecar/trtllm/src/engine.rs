@@ -29,6 +29,7 @@ use crate::model::ConfiguredModel;
 use crate::proto as pb;
 
 const ALREADY_STARTED: &str = "TensorRT-LLM sidecar has already started";
+const LOAD_STALENESS_LIMIT: Duration = Duration::from_secs(30);
 const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_INITIAL_LOAD_AGE: Duration = Duration::from_secs(5);
 const METRICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -64,6 +65,7 @@ pub struct TrtllmSidecarEngine {
     routing: OnceCell<RoutingState>,
     metrics_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     cancel: CancellationToken,
+    load_failed: CancellationToken,
 }
 
 impl TrtllmSidecarEngine {
@@ -84,20 +86,28 @@ impl TrtllmSidecarEngine {
             routing: OnceCell::new(),
             metrics_task: Arc::new(Mutex::new(None)),
             cancel: CancellationToken::new(),
+            load_failed: CancellationToken::new(),
         }
     }
 
     /// Fence a restarted native engine before continuing with stale discovery.
     pub(crate) async fn monitor_routing(&self) -> anyhow::Result<()> {
-        let mut ticks = tokio::time::interval(Duration::from_secs(5));
-        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            ticks.tick().await;
-            if let (Some(client), Some(routing)) = (self.client.get(), self.routing.get())
-                && let Some(node) = &routing.node
-            {
-                return crate::headless::monitor_engine(client, node, &routing.sources).await;
+        tokio::select! {
+            _ = self.load_failed.cancelled() => {
+                anyhow::bail!("Routing load remained unavailable for 30 seconds; withdrawing worker")
             }
+            result = async {
+                let mut ticks = tokio::time::interval(Duration::from_secs(5));
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticks.tick().await;
+                    if let (Some(client), Some(routing)) = (self.client.get(), self.routing.get())
+                        && let Some(node) = &routing.node
+                    {
+                        return crate::headless::monitor_engine(client, node, &routing.sources).await;
+                    }
+                }
+            } => result,
         }
     }
 
@@ -644,6 +654,7 @@ impl LLMEngine for TrtllmSidecarEngine {
         let initial = routing.initial_snapshots.clone();
         let cancel = self.cancel.clone();
         let task_slot = Arc::clone(&self.metrics_task);
+        let load_failed = self.load_failed.clone();
 
         let bindings = MetricsBindings {
             dp_ranks: (0..dp_size).collect(),
@@ -655,14 +666,23 @@ impl LLMEngine for TrtllmSidecarEngine {
                     let mut interval = tokio::time::interval(LOAD_POLL_INTERVAL);
                     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     let mut warned = false;
+                    let mut deadline = tokio::time::Instant::now() + LOAD_STALENESS_LIMIT;
                     loop {
                         tokio::select! {
                             biased;
                             _ = cancel.cancelled() => break,
+                            _ = tokio::time::sleep_until(deadline) => {
+                                load_failed.cancel();
+                                break;
+                            }
                             _ = interval.tick() => {
                                 let load = tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => break,
+                                    _ = tokio::time::sleep_until(deadline) => {
+                                        load_failed.cancel();
+                                        break;
+                                    }
                                     load = client.get_load(true) => load,
                                 };
                                 match load.and_then(|load| {
@@ -670,6 +690,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                                 }) {
                                     Ok(snapshots) => {
                                         warned = false;
+                                        deadline = tokio::time::Instant::now() + LOAD_STALENESS_LIMIT;
                                         for snapshot in snapshots {
                                             publisher.publish(snapshot.dp_rank, snapshot);
                                         }

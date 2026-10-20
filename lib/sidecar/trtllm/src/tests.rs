@@ -64,6 +64,7 @@ struct FakeTrtllm {
     unavailable_model_info: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
     kv_routing: Arc<AtomicBool>,
+    unavailable_server_info: Arc<AtomicBool>,
     subagent_affinity: Arc<AtomicBool>,
     disable_events: Arc<AtomicBool>,
     disable_load: Arc<AtomicBool>,
@@ -312,6 +313,9 @@ impl pb::control_server::Control for FakeTrtllm {
         &self,
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
+        if self.unavailable_server_info.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("temporary metadata outage"));
+        }
         if !self.kv_routing.load(Ordering::SeqCst) {
             return Err(Status::unimplemented("GetServerInfo is not used"));
         }

@@ -4381,7 +4381,7 @@ async fn parent_group_binding_resolves_siblings_to_one_key() {
     let (runtime, host) = affinity_mode_host("subagent-group-binding").await;
 
     let key = |request: &SingleIn<PreprocessedRequest>| {
-        host.group_binding_id(request, None)
+        host.group_binding_id(request, None, RequestPhase::Decode)
             .unwrap_or_else(|| {
                 crate::session_affinity::affinity_id(request)
                     .unwrap()
@@ -4455,6 +4455,72 @@ async fn parent_group_binding_offers_siblings_the_committed_worker() {
         "a different parent is a different group"
     );
 
+    runtime.shutdown();
+}
+
+// A child must reuse its parent's prefill placement without changing decode's sibling group.
+#[tokio::test]
+#[serial_test::serial]
+async fn child_prefill_uses_parent_worker_while_decode_keeps_group_binding() {
+    let workers = [7u64, 9]
+        .into_iter()
+        .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
+        .collect();
+    let (router, runtime) =
+        router_with_worker_configs(Some(Duration::from_secs(60)), workers).await;
+    let parent = subagent_request("parent-1", None);
+    let (_, hold) = router
+        .select_with_session_affinity(
+            &parent,
+            RequestPhase::Prefill,
+            false,
+            &CleanupBudget::default(),
+            |target| std::future::ready(Ok(target)),
+        )
+        .await
+        .unwrap();
+    let mut stream = router
+        .bind_affinity(
+            hold,
+            AffinityTarget::new(7, Some(0)),
+            ResponseStream::new(
+                Box::pin(stream::iter([Annotated::from_data(
+                    LLMEngineOutput::default(),
+                )])),
+                parent.context(),
+            ),
+        )
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    let child = subagent_request("child-1", Some("parent-1"));
+    let (selected, hold) = router
+        .select_with_session_affinity(
+            &child,
+            RequestPhase::Prefill,
+            false,
+            &CleanupBudget::default(),
+            |target| std::future::ready(Ok(target)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected, Some(AffinityTarget::new(7, Some(0))));
+    drop(hold);
+    let (decode, hold) = router
+        .select_with_session_affinity(
+            &child,
+            RequestPhase::Decode,
+            false,
+            &CleanupBudget::default(),
+            |target| std::future::ready(Ok(target)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        decode, None,
+        "decode's sibling group must not inherit the parent binding"
+    );
+    drop(hold);
     runtime.shutdown();
 }
 

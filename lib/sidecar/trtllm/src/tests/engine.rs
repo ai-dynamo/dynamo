@@ -332,6 +332,54 @@ async fn cleanup_cancels_a_hung_load_poll() {
 }
 
 #[tokio::test]
+async fn stale_load_withdraws_worker_without_node_metadata() {
+    use std::collections::HashMap;
+
+    use dynamo_backend_common::metrics::{ComponentGauges, EngineMetrics, TestHierarchy};
+    use dynamo_backend_common::{MetricsCtx, SnapshotPublisher};
+
+    let service = FakeTrtllm::default();
+    service.kv_routing.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service.clone()).await;
+    let engine = engine_with_kv_routing(&server.endpoint);
+    engine.start(0).await.expect("start with KV routing");
+
+    let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
+    let mut bindings = engine
+        .setup_metrics(MetricsCtx {
+            model: "test-model",
+            component: "test-component",
+            model_load_time_seconds: 0.0,
+            metrics: &metrics,
+        })
+        .await
+        .expect("set up metrics");
+    let gauges = Arc::new(ComponentGauges::new(&metrics, &[0]).expect("component gauges"));
+    let publisher = Arc::new(SnapshotPublisher::new(gauges, HashMap::new()));
+    service.hang_load.store(true, Ordering::SeqCst);
+    bindings
+        .on_publisher_ready
+        .take()
+        .expect("metrics publisher callback")(publisher)
+    .expect("start metrics publisher");
+    // This legacy server has no node metadata: load health must still be supervised.
+    let error = tokio::time::timeout(Duration::from_secs(35), engine.monitor_routing())
+        .await
+        .expect("bounded load staleness")
+        .expect_err("stale routing load must withdraw the worker");
+    assert!(
+        error
+            .to_string()
+            .contains("Routing load remained unavailable")
+    );
+
+    tokio::time::timeout(Duration::from_millis(500), engine.cleanup())
+        .await
+        .expect("cleanup must cancel the in-flight GetLoad")
+        .expect("cleanup succeeds");
+}
+
+#[tokio::test]
 async fn discovery_keeps_events_load_and_dp_targeting_independent() {
     use dynamo_backend_common::MetricsCtx;
     use dynamo_backend_common::metrics::{EngineMetrics, TestHierarchy};
@@ -805,6 +853,25 @@ async fn leader_monitor_rejects_restarted_native_engine() {
     let server = FakeServer::start(service.clone()).await;
     let engine = engine_with_kv_routing(&server.endpoint);
     engine.start(0).await.expect("start original engine");
+    // A short RPC outage must not withdraw an otherwise unchanged engine.
+    service
+        .unavailable_server_info
+        .store(true, Ordering::SeqCst);
+    let monitor = engine.monitor_routing();
+    tokio::pin!(monitor);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut monitor)
+            .await
+            .is_err()
+    );
+    service
+        .unavailable_server_info
+        .store(false, Ordering::SeqCst);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(6), &mut monitor)
+            .await
+            .is_err()
+    );
     service
         .node_metadata
         .lock()
@@ -812,7 +879,7 @@ async fn leader_monitor_rejects_restarted_native_engine() {
         .as_mut()
         .unwrap()
         .engine_id = "restarted".into();
-    let error = tokio::time::timeout(Duration::from_secs(1), engine.monitor_routing())
+    let error = tokio::time::timeout(Duration::from_secs(6), &mut monitor)
         .await
         .expect("detect changed incarnation")
         .expect_err("must withdraw stale discovery");
@@ -868,4 +935,36 @@ async fn follower_shutdown_cancels_initial_reconnect() {
     })
     .await
     .expect("follower must stop promptly");
+}
+
+// Regression: bounded retries must eventually withdraw an unreachable native engine.
+#[tokio::test]
+async fn sustained_metadata_outage_withdraws_worker() {
+    let service = FakeTrtllm::default();
+    service.kv_routing.store(true, Ordering::SeqCst);
+    *service.node_metadata.lock().await = Some(crate::node::NodeMetadata {
+        version: 1,
+        engine_id: "original".into(),
+        node_id: "leader".into(),
+        leader: true,
+        node_count: 1,
+        kv_block_size: 32,
+        local_dp_ranks: vec![0],
+        source_owners: [(0, "leader".into())].into(),
+    });
+    let server = FakeServer::start(service.clone()).await;
+    let engine = engine_with_kv_routing(&server.endpoint);
+    engine.start(0).await.expect("start original engine");
+    service
+        .unavailable_server_info
+        .store(true, Ordering::SeqCst);
+    let error = tokio::time::timeout(Duration::from_secs(35), engine.monitor_routing())
+        .await
+        .expect("bounded metadata recovery")
+        .expect_err("sustained outage must withdraw worker");
+    assert!(
+        error
+            .to_string()
+            .contains("Native metadata remained unavailable")
+    );
 }
