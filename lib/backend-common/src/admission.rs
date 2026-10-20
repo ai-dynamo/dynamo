@@ -327,6 +327,7 @@ mod tests {
             ready: true,
             observation_epoch: 1,
             weight_version: Some("17".into()),
+            taints: Default::default(),
         }
     }
 
@@ -414,6 +415,7 @@ mod tests {
             shutdown.clone(),
             ReadinessHold::take(endpoint.drt().system_health(), endpoint.name()),
             Some(gate.clone()),
+            None,
         ));
 
         // A healthy, unpaused engine must NOT auto-join. A withdrawn barrier lets

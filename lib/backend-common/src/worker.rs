@@ -297,6 +297,13 @@ impl EngineKind {
             Self::Raw(_) => None,
         }
     }
+
+    fn managed_taint_prefix(&self) -> Option<&'static str> {
+        match self {
+            Self::Llm(engine) => engine.managed_taint_prefix(),
+            Self::Raw(_) => None,
+        }
+    }
     async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.start(worker_id).await,
@@ -404,6 +411,12 @@ impl EngineKind {
             EngineKind::Llm(e) => e.on_endpoint_ready(endpoint).await,
             // Raw media engines publish no discovery records of their own.
             EngineKind::Raw(_) => Ok(()),
+        }
+    }
+
+    async fn begin_shutdown(&self) {
+        if let EngineKind::Llm(engine) = self {
+            engine.begin_shutdown().await;
         }
     }
 
@@ -863,6 +876,8 @@ impl Worker {
         let _mutation = self.engine_route_mutation.lock().await;
         let mut lifecycle = self.engine_route_lifecycle.write().await;
         *lifecycle = EngineRouteLifecycle::ShuttingDown;
+        drop(lifecycle);
+        self.engine.begin_shutdown().await;
     }
 
     /// Register the Dynamo-owned model taint update on the runtime system server.
@@ -876,6 +891,7 @@ impl Worker {
                 endpoint.clone(),
                 self.engine_route_lifecycle.clone(),
                 self.engine_route_shutdown.clone(),
+                self.engine.managed_taint_prefix().is_some(),
             ),
         );
     }
@@ -986,10 +1002,12 @@ impl Worker {
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
         let serving_states = self.engine.serving_states();
-        if self.config.controller_managed && serving_states.is_none() {
+        if (self.config.controller_managed || self.engine.managed_taint_prefix().is_some())
+            && serving_states.is_none()
+        {
             return Err(err(
                 ErrorType::Backend(BackendError::InvalidArgument),
-                "controller-managed admission requires an engine observation source",
+                "controller admission and engine-owned taints require an observation source",
             ));
         }
         if serving_states.is_some() && self.config.enable_rl {
@@ -1286,6 +1304,7 @@ impl Worker {
                 self.engine_route_shutdown.clone(),
                 readiness_hold,
                 admission,
+                self.engine.managed_taint_prefix(),
             )))
         } else {
             drop(readiness_hold);
@@ -1791,12 +1810,18 @@ fn model_taint_update_callback(
     endpoint: dynamo_runtime::component::Endpoint,
     route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
     route_shutdown: CancellationToken,
+    engine_owned: bool,
 ) -> EngineRouteCallback {
     Arc::new(move |body| {
         let endpoint = endpoint.clone();
         let route_lifecycle = route_lifecycle.clone();
         let route_shutdown = route_shutdown.clone();
         Box::pin(async move {
+            if engine_owned {
+                return Ok(control_error_response(
+                    "model taints are engine-owned; manual full-set replacement is disabled",
+                ));
+            }
             let taints = parse_model_taint_update_request(body)?;
             let _lifecycle =
                 match acquire_engine_route_guard(route_lifecycle, &route_shutdown).await {
@@ -3645,6 +3670,40 @@ mod handoff_and_lifecycle_tests {
     use futures::stream::BoxStream;
     use std::sync::Mutex as StdMutex;
     use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn manual_taint_update_cannot_overwrite_engine_owned_metadata() {
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let drt = dynamo_runtime::DistributedRuntime::new(
+            runtime.clone(),
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let endpoint = drt
+            .namespace("owned_taints")
+            .unwrap()
+            .component("backend")
+            .unwrap()
+            .endpoint("generate");
+        let callback = model_taint_update_callback(
+            endpoint,
+            Arc::new(tokio::sync::RwLock::new(EngineRouteLifecycle::Running)),
+            CancellationToken::new(),
+            true,
+        );
+        let response = callback(serde_json::json!({"taints": ["dynamo.policy/version=forged"]}))
+            .await
+            .unwrap();
+        assert_eq!(response["status"], "error");
+        assert!(
+            response["message"]
+                .as_str()
+                .unwrap()
+                .contains("engine-owned")
+        );
+        runtime.shutdown();
+    }
 
     /// Build a real serving `Endpoint` from a test DRT, mirroring how
     /// `run_inner` resolves namespace → component → endpoint.

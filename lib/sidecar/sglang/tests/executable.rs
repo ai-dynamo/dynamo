@@ -4,6 +4,21 @@
 use std::process::Command;
 
 #[test]
+fn managed_admission_rejects_unsafe_pause_config_before_connecting() {
+    let result = dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(vec![
+        "dynamo-sglang-sidecar".into(),
+        "--grpc-endpoint".into(),
+        "http://127.0.0.1:1".into(),
+        "--controller-managed".into(),
+        "--unregister-on-pause=false".into(),
+    ]));
+    let Err(error) = result else {
+        panic!("unsafe config must fail")
+    };
+    assert!(error.to_string().contains("--unregister-on-pause=true"));
+}
+
+#[test]
 fn executable_exposes_sglang_and_shared_sidecar_contracts() {
     let output = Command::new(env!("CARGO_BIN_EXE_dynamo-sglang-sidecar"))
         .arg("--help")
@@ -27,6 +42,12 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
         "DYN_SIDECAR_GRPC_RETRY_INTERVAL_SECS",
         "--grpc-startup-deadline-secs",
         "DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS",
+        "--unregister-on-pause",
+        "DYN_SGLANG_UNREGISTER_ON_PAUSE",
+        "--controller-managed",
+        "DYN_SGLANG_CONTROLLER_MANAGED",
+        "--policy-version-taints",
+        "DYN_SGLANG_POLICY_VERSION_TAINTS",
     ] {
         assert!(stdout.contains(expected), "help omits {expected}");
     }

@@ -17,6 +17,38 @@ fn engine_args() -> MockEngineArgs {
         .unwrap()
 }
 
+#[tokio::test]
+async fn state_stream_keeps_a_stable_incarnation_and_full_snapshot() {
+    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
+    let mut first = service
+        .watch_engine_state(Request::new(pb::WatchEngineStateRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let snapshot = first.next().await.unwrap().unwrap();
+    assert!(snapshot.instance_id > 0);
+    assert_eq!(snapshot.revision, 1);
+    assert!(snapshot.healthy);
+    assert!(!snapshot.is_pause);
+    assert_eq!(snapshot.model_info.unwrap(), service.model_info());
+    assert_eq!(snapshot.server_info.unwrap(), service.server_info());
+    let mut second = service
+        .clone()
+        .watch_engine_state(Request::new(pb::WatchEngineStateRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        second.next().await.unwrap().unwrap().instance_id,
+        snapshot.instance_id
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), first.next())
+            .await
+            .is_err()
+    );
+}
+
 fn request(request_id: &str) -> pb::GenerateRequest {
     pb::GenerateRequest {
         input_ids: vec![1, 2, 3],

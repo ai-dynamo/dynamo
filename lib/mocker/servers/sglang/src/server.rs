@@ -92,6 +92,7 @@ struct DiscoveryMetadata {
 /// SGLang-compatible service driven by one shared Mocker scheduler.
 #[derive(Clone)]
 pub struct SglangMockerService {
+    instance_id: u64,
     config: Arc<MockerServerConfig>,
     discovery: Arc<DiscoveryMetadata>,
     engine: LiveEngine,
@@ -150,6 +151,7 @@ impl SglangMockerService {
         let engine = LiveEngine::start(engine_args, DP_RANK)?;
         let max_concurrent_requests = config.max_concurrent_requests;
         Ok(Self {
+            instance_id: uuid::Uuid::new_v4().as_u64_pair().0.max(1),
             config: Arc::new(config),
             discovery: Arc::new(discovery),
             engine,
@@ -195,6 +197,8 @@ impl SglangMockerService {
             json_info: json!({
                 "model_path": self.config.model,
                 "tokenizer_path": self.config.model,
+                // The mock has immutable weights; updates remain unsupported.
+                "weight_version": "mock-0",
             })
             .to_string(),
         }
@@ -229,6 +233,27 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
     type GenerateStream = BoxStream<pb::GenerateResponse>;
     type ChatCompleteStream = BoxStream<pb::OpenAiStreamChunk>;
     type CompleteStream = BoxStream<pb::OpenAiStreamChunk>;
+    type WatchEngineStateStream = BoxStream<pb::EngineStateSnapshot>;
+
+    async fn watch_engine_state(
+        &self,
+        _request: Request<pb::WatchEngineStateRequest>,
+    ) -> Result<Response<Self::WatchEngineStateStream>, Status> {
+        // This mock does not implement pause or weight updates. Advertise its
+        // actual immutable ready state, then keep the subscription alive.
+        let snapshot = pb::EngineStateSnapshot {
+            instance_id: self.instance_id,
+            revision: 1,
+            healthy: true,
+            is_pause: false,
+            model_info: Some(self.model_info()),
+            server_info: Some(self.server_info()),
+        };
+        Ok(Response::new(Box::pin(async_stream::stream! {
+            yield Ok(snapshot);
+            std::future::pending::<()>().await;
+        })))
+    }
 
     async fn text_generate(
         &self,
