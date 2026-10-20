@@ -29,7 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
-from vllm.v1.kv_offload.base import OffloadingSpec
+from vllm.v1.kv_offload.base import OffloadingEvent, OffloadingSpec
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.tiering.base import JobResult, SecondaryTierManager
@@ -72,6 +72,7 @@ class GPUPrimaryManager(CPUOffloadingManager):
             enable_events=spec.kv_events_config.enable_kv_cache_events,
         )
         self.region = region
+        self._published_keys = set()
         self.complete_read = self.complete_load
         self.prepare_write = self.prepare_store
         self.complete_write = self.complete_store
@@ -89,6 +90,32 @@ class GPUPrimaryManager(CPUOffloadingManager):
 
     def prepare_read(self, keys, req_context):
         return self._prepare_load(keys, req_context, record_access=False)
+
+    def take_events(self):
+        for event in super().take_events():
+            if event.removed:
+                self._published_keys.difference_update(event.keys)
+            else:
+                self._published_keys.update(event.keys)
+            yield event
+
+    def reset_cache(self):
+        super().reset_cache()
+        if self.events is not None:
+            # Native Device clears have an independent lifetime. Revoke this
+            # retained tier explicitly, and never publish a pending pre-reset
+            # store after its physical slots have been invalidated.
+            self.events.clear()
+            if self._published_keys:
+                self.events.append(
+                    OffloadingEvent(
+                        keys=sorted(self._published_keys),
+                        medium=self.medium,
+                        removed=True,
+                    )
+                )
+            # Keep the set until take_events consumes the removal, so a
+            # repeated reset cannot discard a still-unpublished revocation.
 
     def get_stats(self):
         stats = super().get_stats()
@@ -381,6 +408,24 @@ class GPUOffloadingSpec(OffloadingSpec):
 
 class GPUOffloadingConnector(OffloadingConnector):
     """Publish retained-cache residency as GPU memory, never CPU inventory."""
+
+    def reset_cache(self):
+        assert self.connector_scheduler is not None
+        scheduler = self.connector_scheduler
+        tracker = scheduler._events_tracker
+        published = scheduler.manager.primary_tier._published_keys
+        removal_metadata = {
+            key: tracker._pending_event_metadata[key]
+            for key in published
+            if key in tracker._pending_event_metadata
+        }
+        result = super().reset_cache()
+        # The pinned scheduler clears its tracker after manager.reset_cache.
+        # Preserve only metadata needed for queued published-key removals, so
+        # multi-block chunks revoke every constituent hash, without reviving
+        # pending stores or any physical cache state.
+        tracker._pending_event_metadata.update(removal_metadata)
+        return result
 
     def take_events(self):
         for event in super().take_events():

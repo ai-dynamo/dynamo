@@ -55,6 +55,8 @@ pub struct ZmqEventNormalizer {
     warning_count: Arc<AtomicU32>,
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
     cache_namespaces: FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
+    // A native Device clear does not revoke independent retained GPU memory.
+    gpu_direct_cache_namespaces: FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +111,7 @@ impl ZmqEventNormalizer {
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
+            gpu_direct_cache_namespaces: FxHashMap::default(),
         }
     }
 
@@ -120,6 +123,7 @@ impl ZmqEventNormalizer {
             warning_count,
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
+            gpu_direct_cache_namespaces: FxHashMap::default(),
         }
     }
 
@@ -258,6 +262,24 @@ impl ZmqEventNormalizer {
         raw: &mut RawKvEvent,
         worker: WorkerWithDpRank,
     ) -> Result<(), ZmqEventFilterReason> {
+        if raw.medium().and_then(StorageTier::from_kv_medium) == Some(StorageTier::GpuDirect) {
+            Self::propagate_cache_namespace_in(
+                &mut self.gpu_direct_cache_namespaces,
+                Some(&self.cache_namespaces),
+                raw,
+                worker,
+            )
+        } else {
+            Self::propagate_cache_namespace_in(&mut self.cache_namespaces, None, raw, worker)
+        }
+    }
+
+    fn propagate_cache_namespace_in(
+        cache_namespaces: &mut FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
+        inherited_namespaces: Option<&FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>>,
+        raw: &mut RawKvEvent,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), ZmqEventFilterReason> {
         match raw {
             RawKvEvent::BlockStored {
                 block_hashes,
@@ -272,7 +294,13 @@ impl ZmqEventNormalizer {
                     parent_block_hash
                         .as_ref()
                         .and_then(|parent| {
-                            self.cache_namespaces.get(&(worker, (*parent).into_u64()))
+                            cache_namespaces
+                                .get(&(worker, (*parent).into_u64()))
+                                .or_else(|| {
+                                    inherited_namespaces.and_then(|inherited| {
+                                        inherited.get(&(worker, (*parent).into_u64()))
+                                    })
+                                })
                         })
                         .and_then(|state| match state {
                             CacheNamespaceState::Namespaced(parent_namespace)
@@ -284,7 +312,13 @@ impl ZmqEventNormalizer {
                         })
                         .or_else(|| Some(Arc::from(namespace)))
                 } else if let Some(parent) = parent_block_hash.as_ref() {
-                    match self.cache_namespaces.get(&(worker, (*parent).into_u64())) {
+                    match cache_namespaces
+                        .get(&(worker, (*parent).into_u64()))
+                        .or_else(|| {
+                            inherited_namespaces.and_then(|inherited| {
+                                inherited.get(&(worker, (*parent).into_u64()))
+                            })
+                        }) {
                         Some(CacheNamespaceState::Namespaced(namespace)) => {
                             *cache_namespace = Some(namespace.to_string());
                             Some(Arc::clone(namespace))
@@ -310,7 +344,7 @@ impl ZmqEventNormalizer {
                 if let Some(namespace) = namespace {
                     let state = CacheNamespaceState::Namespaced(namespace);
                     for block_hash in block_hashes.iter() {
-                        self.cache_namespaces
+                        cache_namespaces
                             .entry((worker, (*block_hash).into_u64()))
                             .and_modify(|existing| {
                                 if *existing != state {
@@ -324,9 +358,8 @@ impl ZmqEventNormalizer {
                     // belongs to a namespace, however, fail closed on future
                     // propagation because the external hash is now ambiguous.
                     for block_hash in block_hashes.iter() {
-                        if let Some(existing) = self
-                            .cache_namespaces
-                            .get_mut(&(worker, (*block_hash).into_u64()))
+                        if let Some(existing) =
+                            cache_namespaces.get_mut(&(worker, (*block_hash).into_u64()))
                         {
                             *existing = CacheNamespaceState::Ambiguous;
                         }
@@ -337,16 +370,15 @@ impl ZmqEventNormalizer {
                 for block_hash in block_hashes.iter() {
                     let key = (worker, (*block_hash).into_u64());
                     if !matches!(
-                        self.cache_namespaces.get(&key),
+                        cache_namespaces.get(&key),
                         Some(CacheNamespaceState::Ambiguous)
                     ) {
-                        self.cache_namespaces.remove(&key);
+                        cache_namespaces.remove(&key);
                     }
                 }
             }
             RawKvEvent::AllBlocksCleared { .. } => {
-                self.cache_namespaces
-                    .retain(|(known_worker, _), _| *known_worker != worker);
+                cache_namespaces.retain(|(known_worker, _), _| *known_worker != worker);
             }
             RawKvEvent::Ignored => {}
         }

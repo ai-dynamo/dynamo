@@ -8,7 +8,9 @@ use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
-use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
+use crate::protocols::{
+    ActiveSequenceEvent, ActiveSequenceEventData, BlockHashOptions, compute_block_hash_for_seq,
+};
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;
 use crate::services::indexer::backend::{RemotePrimary, test_util::store_event};

@@ -20,14 +20,26 @@ from kvbm.vllm_integration.gpu_memory import GPUCacheRegion, GPUCacheWorker, imp
 from kvbm.vllm_integration.gpu_offloading import (
     GPUOffloadingConnector,
     GPUOffloadingSpec,
+    GPUPrimaryManager,
     GPURetainedLoadStoreSpec,
     GPUTieringManager,
 )
 from vllm.distributed.kv_events import BlockRemoved
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
+    OffloadingEventGroupSpec,
+    OffloadingEventsTracker,
+    _OffloadEventMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
-from vllm.v1.kv_offload.base import GPULoadStoreSpec
+from vllm.v1.kv_offload.base import (
+    GPULoadStoreSpec,
+    LookupResult,
+    Medium,
+    ReqContext,
+    make_offload_key,
+)
 
 pytestmark = [
     pytest.mark.post_merge,
@@ -110,6 +122,89 @@ def test_gpu_reset_does_not_release_native_owned_slots():
     manager.secondary_tiers = [SimpleNamespace(_hazard_ops=set())]
     with pytest.raises(RuntimeError, match="own its slots"):
         manager.reset_cache()
+
+
+@pytest.mark.gpu_0
+def test_gpu_reset_revokes_published_keys_and_drops_unpublished_stores():
+    spec = SimpleNamespace(
+        num_chunks=4,
+        extra_config={},
+        kv_events_config=SimpleNamespace(enable_kv_cache_events=True),
+    )
+    manager = GPUPrimaryManager(spec, SimpleNamespace())
+    published = make_offload_key(b"published", 0)
+    pending = make_offload_key(b"pending", 0)
+    request = ReqContext("gpu-reset")
+    manager.prepare_store([published], request)
+    manager.complete_store([published], request)
+    stored = list(manager.take_events())
+    assert len(stored) == 1 and stored[0].keys == [published]
+    assert not stored[0].removed
+    manager.prepare_store([pending], request)
+    manager.complete_store([pending], request)
+    # Both are physically ready, but only one was published to the router.
+    assert manager.lookup(pending, request) == LookupResult.HIT
+    manager.reset_cache()
+    manager.reset_cache()  # Must not drop the first queued revocation.
+    events = list(manager.take_events())
+    assert len(events) == 1
+    assert events[0].removed and events[0].keys == [published]
+    assert manager.lookup(published, ReqContext("after-reset")) == LookupResult.MISS
+    assert manager.lookup(pending, ReqContext("after-reset")) == LookupResult.MISS
+    manager.reset_cache()
+    assert list(manager.take_events()) == []
+
+
+@pytest.mark.gpu_0
+def test_gpu_connector_reset_revokes_every_hash_in_a_published_chunk():
+    events_config = SimpleNamespace(
+        enable_kv_cache_events=True, self_describing_kv_events=True
+    )
+    spec = SimpleNamespace(
+        num_chunks=4, extra_config={}, kv_events_config=events_config
+    )
+    manager = GPUPrimaryManager(spec, SimpleNamespace())
+    tracker = OffloadingEventsTracker(events_config)
+    hashes = tuple(value.to_bytes(8, "big") for value in (11, 12))
+    key = make_offload_key(hashes[-1], 0)
+    pending_key = make_offload_key(b"unpublished", 0)
+    metadata = _OffloadEventMetadata(
+        block_hashes=hashes,
+        parent_block_hash=None,
+        token_ids=tuple(range(32)),
+        block_size=16,
+        lora_id=None,
+        lora_name=None,
+        extra_keys=None,
+        group_idx=0,
+        kv_cache_spec=OffloadingEventGroupSpec("full_attention", None),
+        active_residencies={(Medium.CPU, None)},
+    )
+    tracker._pending_event_metadata.update({key: metadata, pending_key: metadata})
+    request = ReqContext("chunk-reset")
+    manager.prepare_store([key], request)
+    manager.complete_store([key], request)
+
+    def reset_scheduler():
+        manager.reset_cache()
+        tracker.reset()
+
+    connector = GPUOffloadingConnector.__new__(GPUOffloadingConnector)
+    connector.connector_scheduler = SimpleNamespace(
+        manager=SimpleNamespace(primary_tier=manager),
+        _events_tracker=tracker,
+        reset_cache=reset_scheduler,
+        take_events=lambda: tracker.take_events(manager.take_events()),
+    )
+    stored = list(connector.take_events())
+    assert len(stored) == 1 and len(stored[0].block_hashes) == 2
+    assert connector.reset_cache() is True
+    assert pending_key not in tracker._pending_event_metadata
+    removed = list(connector.take_events())
+    assert len(removed) == 1 and isinstance(removed[0], BlockRemoved)
+    assert removed[0].medium == "gpu_direct"
+    assert removed[0].block_hashes == stored[0].block_hashes
+    assert tracker._pending_event_metadata == {}
 
 
 @pytest.mark.gpu_0

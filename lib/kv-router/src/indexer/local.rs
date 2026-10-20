@@ -675,7 +675,21 @@ impl LocalKvIndexer {
             if targets_primary {
                 self.indexer.apply_event_and_wait(event.clone()).await?;
             }
-            for indexer in self.all_lower_tier_indexers() {
+            // Retained GPU memory has an independent lifetime from the engine's
+            // native Device cache. Its connector explicitly revokes published
+            // residency when that retained cache is reset.
+            let lower_tiers: Vec<_> = {
+                let indexers = self.lower_tier_indexers.lock().unwrap();
+                indexers
+                    .iter()
+                    .filter(|(tier, _)| {
+                        (**tier == StorageTier::GpuDirect)
+                            == (event.storage_tier == StorageTier::GpuDirect)
+                    })
+                    .map(|(_, indexer)| indexer.clone())
+                    .collect()
+            };
+            for indexer in lower_tiers {
                 indexer.apply_event_and_wait(event.clone()).await?;
             }
             Ok(())
@@ -1186,6 +1200,132 @@ mod tests {
         );
         assert_eq!(
             lower_tier_hits(&indexer, StorageTier::HostPinned, 11, 1, 2000, 22),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn native_clear_preserves_retained_gpu_and_gpu_clear_is_tier_scoped() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            16,
+        );
+        let worker = WorkerWithDpRank::new(11, 0);
+        let native_store = |event_id| {
+            let mut event =
+                lower_tier_store_event(11, 0, event_id, 1000, 31, 301, StorageTier::Device);
+            if let KvCacheEventData::Stored(data) = &mut event.event.data {
+                data.parent_hash = None;
+            }
+            event
+        };
+        for event in [
+            lower_tier_store_event(11, 0, 1, 1000, 21, 201, StorageTier::HostPinned),
+            lower_tier_store_event(11, 0, 2, 1000, 21, 201, StorageTier::GpuDirect),
+            lower_tier_store_event(11, 1, 3, 2000, 22, 202, StorageTier::GpuDirect),
+            native_store(4),
+        ] {
+            indexer.apply_event_with_buffer(event).await.unwrap();
+        }
+        let _ = indexer.flush().await;
+        assert_eq!(
+            indexer
+                .find_matches(vec![LocalBlockHash(31)])
+                .await
+                .unwrap()
+                .scores
+                .get(&worker),
+            Some(&1)
+        );
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::GpuDirect, 11, 0, 1000, 21),
+            1
+        );
+
+        indexer
+            .apply_event_with_buffer(RouterEvent::with_storage_tier(
+                11,
+                KvCacheEvent {
+                    event_id: 5,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+                StorageTier::Device,
+            ))
+            .await
+            .unwrap();
+        let _ = indexer.flush().await;
+        assert!(
+            indexer
+                .find_matches(vec![LocalBlockHash(31)])
+                .await
+                .unwrap()
+                .scores
+                .is_empty()
+        );
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::HostPinned, 11, 0, 1000, 21),
+            0
+        );
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::GpuDirect, 11, 0, 1000, 21),
+            1
+        );
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::GpuDirect, 11, 1, 2000, 22),
+            1
+        );
+
+        indexer
+            .apply_event_with_buffer(lower_tier_store_event(
+                11,
+                0,
+                6,
+                1000,
+                21,
+                201,
+                StorageTier::HostPinned,
+            ))
+            .await
+            .unwrap();
+        indexer
+            .apply_event_with_buffer(native_store(7))
+            .await
+            .unwrap();
+        indexer
+            .apply_event_with_buffer(RouterEvent::with_storage_tier(
+                11,
+                KvCacheEvent {
+                    event_id: 8,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+                StorageTier::GpuDirect,
+            ))
+            .await
+            .unwrap();
+        let _ = indexer.flush().await;
+        assert_eq!(
+            indexer
+                .find_matches(vec![LocalBlockHash(31)])
+                .await
+                .unwrap()
+                .scores
+                .get(&worker),
+            Some(&1)
+        );
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::HostPinned, 11, 0, 1000, 21),
+            1
+        );
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::GpuDirect, 11, 0, 1000, 21),
+            0
+        );
+        assert_eq!(
+            lower_tier_hits(&indexer, StorageTier::GpuDirect, 11, 1, 2000, 22),
             1
         );
     }
