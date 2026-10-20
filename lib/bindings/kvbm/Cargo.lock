@@ -34,15 +34,16 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.2"
+version = "0.13.0-dev.202610160000000073"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0879b3cfd9847c74cafe0dfdac8109e1afb326f15e2bfd468d45b07c7e4d0ea0"
+checksum = "ede3ff2e2fd29e1c53dc1656ef5e43d4c77c0841483fe37685d3d517566016b2"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
  "blake3",
  "ddsketchy",
  "derive_builder",
+ "fixedbitset",
  "flate2",
  "indicatif 0.18.4",
  "log",
@@ -8034,9 +8035,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.52.4"
+version = "1.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "317fafbbe3f02fc663dad00ea6186197de963cd4190e86a26d8d0fae095539af"
+checksum = "a0c168a474b95bfecfe908a65d4bdffc523144b649a74c09c286afb35d53e0bc"
 dependencies = [
  "bytes",
  "libc",

@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   changed-files:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
       examples: ${{ steps.changes.outputs.examples }}
@@ -62,7 +62,7 @@ jobs:
     name: Docs Lint
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -72,7 +72,7 @@ jobs:
       run: python3 docs/fern/scripts/docs_lint.py --scan docs --github
 
   pre-merge-status-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [changed-files, pre-commit, planner-gym, recipe-check, api-docs, fern-check, fern-broken-links, docs-lint, operator, rust-tests, rust-clippy, docs-website-composition]
     if: always()
     steps:
@@ -81,7 +81,7 @@ jobs:
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   pre-commit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -94,7 +94,7 @@ jobs:
     name: Planner Gym CPU, adapters excluded (Python ${{ matrix.python }})
     needs: changed-files
     if: needs.changed-files.outputs.planner_gym == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -123,7 +123,7 @@ jobs:
     name: Recipe Check
     needs: changed-files
     if: needs.changed-files.outputs.examples == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -159,7 +159,7 @@ jobs:
     name: Generated API References
     needs: changed-files
     if: needs.changed-files.outputs.api_docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -235,7 +235,7 @@ jobs:
     name: Fern Configuration Check
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -319,7 +319,7 @@ jobs:
     name: Docs Website Composition Check
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -365,7 +365,7 @@ jobs:
     name: Fern Broken Links Check
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -393,7 +393,7 @@ jobs:
   operator:
     needs: changed-files
     if: needs.changed-files.outputs.operator == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
