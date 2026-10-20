@@ -68,7 +68,7 @@ ignored = ["prost"]
 tonic-build = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-dynamo-llm = { path = "../../../lib/llm" }
+dynamo-llm = { workspace = true, default-features = true }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-dynamo-llm = { path = "../../../lib/llm", default-features = false }
+dynamo-llm = { workspace = true }
