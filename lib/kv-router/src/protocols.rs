@@ -3025,7 +3025,18 @@ mod tests {
                 tier,
             );
             assert_eq!(event.targets_primary(), Ok(tier != StorageTier::GpuDirect));
-            assert_eq!(event.reset_scope(), Ok(Some(ResetScope::All)));
+            assert_eq!(
+                event.reset_scope(),
+                Ok(Some(ResetScope::Domain(ResidencyDomain::Worker)))
+            );
+            // Domainless legacy wire clears retain their all-domain scope,
+            // independently of the physical GPU cache's separate lifetime.
+            let legacy = RouterEvent {
+                residency_domain: WireResidencyDomain::default(),
+                ..event
+            };
+            assert_eq!(legacy.reset_scope(), Ok(Some(ResetScope::All)));
+            assert_eq!(legacy.targets_primary(), Ok(tier != StorageTier::GpuDirect));
 
         }
     }
