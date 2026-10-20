@@ -1657,38 +1657,85 @@ def test_build_sampling_params_accepts_productive_recursive_guided_json():
     assert sampling_params.structured_outputs.json == schema
 
 
-def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
+def _sampling_request(stop_conditions):
+    return {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": stop_conditions,
+        "output_options": {},
+    }
+
+
+@pytest.mark.parametrize(
+    "stop_conditions", [{}, {"max_tokens": None}], ids=["omitted", "null"]
+)
+@pytest.mark.parametrize(
+    "defaults",
+    [
+        {},
+        {"max_tokens": 8},
+        {"max_tokens": 32},
+        {"max_tokens": 64},
+        {"max_tokens": None},
+    ],
+    ids=["engine", "model-8", "model-32", "model-64", "unlimited"],
+)
+@pytest.mark.parametrize("model_max_len", [None, 100, 10])
+def test_build_sampling_params_preserves_resolved_max_tokens_default(
+    stop_conditions, defaults, model_max_len
+):
+    from vllm import SamplingParams
+
     from dynamo.vllm.handlers import build_sampling_params
 
-    model_max_len = 100
-    defaults = {"max_tokens": 32}
+    expected = SamplingParams(**defaults).max_tokens
+    if expected is not None and model_max_len is not None:
+        expected = min(expected, model_max_len - 3)
 
-    def make(stop_conditions):
-        return {
-            "token_ids": [1, 2, 3],
-            "sampling_options": {},
-            "stop_conditions": stop_conditions,
-            "output_options": {},
-        }
+    sp = build_sampling_params(
+        _sampling_request(stop_conditions), defaults, model_max_len
+    )
 
-    remaining = model_max_len - 3
+    assert sp.max_tokens == expected
 
-    # omitted max_tokens → capped to configured default
-    sp = build_sampling_params(make({}), defaults, model_max_len)
-    assert sp.max_tokens == 32
 
-    # explicit max_tokens == remaining context → treated as explicit, not capped
-    sp = build_sampling_params(make({"max_tokens": remaining}), defaults, model_max_len)
-    assert sp.max_tokens == remaining
+@pytest.mark.parametrize("max_tokens", [10, 64, 97, 98, 100])
+def test_build_sampling_params_preserves_explicit_max_tokens(max_tokens):
+    from dynamo.vllm.handlers import build_sampling_params
 
-    sp = build_sampling_params(make({"max_tokens": 10}), defaults, model_max_len)
-    assert sp.max_tokens == 10
+    sp = build_sampling_params(
+        _sampling_request({"max_tokens": max_tokens}),
+        {"max_tokens": 32},
+        model_max_len=100,
+    )
 
-    sp = build_sampling_params(make({"max_tokens": 64}), defaults, model_max_len)
-    assert sp.max_tokens == 64
+    assert sp.max_tokens == min(max_tokens, 97)
 
-    sp = build_sampling_params(make({}), {}, model_max_len)
-    assert sp.max_tokens == remaining
+
+@pytest.mark.parametrize(
+    "stop_conditions", [{}, {"max_tokens": None}], ids=["omitted", "null"]
+)
+@pytest.mark.parametrize("model_max_len", [None, 100, 10])
+def test_build_sampling_params_rl_max_tokens_uses_engine_default(
+    stop_conditions, model_max_len
+):
+    from vllm import SamplingParams
+
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
+        **_sampling_request(stop_conditions),
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+    expected = SamplingParams().max_tokens
+    if expected is not None and model_max_len is not None:
+        expected = min(expected, model_max_len - 3)
+
+    sp = build_sampling_params(
+        request, {"max_tokens": 64}, model_max_len, enable_rl=True
+    )
+
+    assert sp.max_tokens == expected
 
 
 def _make_dynamo_config(**overrides):
