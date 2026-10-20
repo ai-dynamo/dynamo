@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import requests
 import yaml
 from kubernetes_asyncio.client import exceptions
 
@@ -39,6 +40,63 @@ pytestmark = [
     pytest.mark.framework_agnostic,
 ]
 ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("scenario", ["embedding", "chat"])
+@pytest.mark.parametrize("recover", [True, False])
+async def test_api_checks_rebuild_failed_port_forward(
+    monkeypatch, tmp_path, unused_tcp_port_factory, scenario, recover
+):
+    deployment = ManagedDeployment(
+        str(tmp_path), SimpleNamespace(name="test", api_version="v1beta1"), "test"
+    )
+    pod = MagicMock()
+    initial, replacement = MagicMock(), MagicMock()
+    initial.local_port = unused_tcp_port_factory()
+    replacement.local_port = unused_tcp_port_factory()
+    deployment.get_pods = MagicMock(return_value={"Frontend": [pod]})
+    deployment.port_forward = MagicMock(side_effect=[initial, replacement])
+    response = MagicMock()
+    failure = requests.ReadTimeout("port-forward stalled")
+    sender = MagicMock(
+        side_effect=[failure, response, response] if recover else [failure, failure]
+    )
+    monkeypatch.setattr(suite, "send_request", sender, raising=False)
+    monkeypatch.setattr(suite, "wait_for_model_availability", lambda *a, **kw: True)
+    monkeypatch.setattr("tests.deploy.dgd_utils.time.sleep", lambda _: None)
+
+    def check_api(url, model, output, *, request_sender):
+        for stream in (False, True):
+            assert (
+                request_sender(
+                    url, {"model": model}, timeout=120, method="POST", stream=stream
+                )
+                is response
+            )
+
+    monkeypatch.setattr(suite, f"check_{scenario}_api", check_api)
+    if recover:
+        await suite.test_n2_compatibility((deployment, tmp_path), scenario)
+        assert [call.kwargs["stream"] for call in sender.call_args_list] == [
+            False,
+            False,
+            True,
+        ]
+        assert sender.call_args_list[1].args[0] == sender.call_args_list[2].args[0]
+    else:
+        with pytest.raises(requests.ReadTimeout, match="port-forward stalled"):
+            await suite.test_n2_compatibility((deployment, tmp_path), scenario)
+        assert sender.call_count == 2
+    initial.stop.assert_called_once()
+    assert deployment.port_forward.call_count == 2
+    endpoint = "/v1/embeddings" if scenario == "embedding" else "/v1/chat/completions"
+    assert sender.call_args_list[0].args[0] == (
+        f"http://localhost:{initial.local_port}{endpoint}"
+    )
+    assert sender.call_args_list[1].args[0] == (
+        f"http://localhost:{replacement.local_port}{endpoint}"
+    )
+    assert all(call.kwargs["method"] == "POST" for call in sender.call_args_list)
 
 
 def test_matrix_uses_both_age_directions_without_candidate_controls():
