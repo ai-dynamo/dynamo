@@ -213,13 +213,14 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 					t.Error("operator-only takeover requests a new worker generation")
 				}
 			}
+			completed := &upgradeComponentReconciles{}
 			baseline := completedUpgradeReconciles(t)
 			env.StartManager(func(mgr ctrl.Manager) error {
 				opts := SetupOptions{Config: clusterTestRestrictedConfig(namespace), RuntimeConfig: &common.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}}
 				if err := SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{SetupOptions: opts}); err != nil {
 					return err
 				}
-				return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: opts})
+				return setupUpgradeComponentController(mgr, opts, completed)
 			})
 			t.Log("Wait for a completed production reconcile, then compare the full owned resource graph")
 			require.Eventually(t, func() bool { return completedUpgradeReconciles(t) >= baseline+1 }, 90*time.Second, 200*time.Millisecond, "candidate did not complete a successful reconciliation")
@@ -234,7 +235,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 			if dgd.Annotations[consts.KubeAnnotationEnableGrove] == "false" {
 				t.Log("Wait for each DCD and its immediate workload without requiring serving Pods")
 				require.Eventually(t, func() bool {
-					return upgradeComponentGraphReady(captureUpgrade(t, env), len(dgd.Spec.Components)) == nil
+					return completed.graphReady(captureUpgrade(t, env), len(dgd.Spec.Components)) == nil
 				}, 90*time.Second, 200*time.Millisecond, "component workload graph did not converge")
 			}
 			after := captureUpgrade(t, env)
@@ -337,6 +338,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 			}
 		})
 	}
+	t.Run("component-history-barrier", testUpgradeComponentHistoryBarrier)
 }
 
 // Upgrade capture and replay use the same version source as production admission.
