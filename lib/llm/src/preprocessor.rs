@@ -2499,6 +2499,16 @@ impl OpenAIPreprocessor {
 
     /// A structured `response_format`, top-level `guided_*`, and a forced tool
     /// choice each constrain output from the first token.
+    ///
+    /// With no client thinking control, a request this returns true for
+    /// renders thinking disabled (see `normalize_minimax_m3_thinking_mode`),
+    /// even when the grammar itself contains `<mm:think>...</mm:think>`. The
+    /// reasoning parser is then skipped, and a generated think block stays
+    /// verbatim in `content`. A client that wants that block split into
+    /// `reasoning_content` must send a thinking control that does not disable
+    /// thinking, preferably an adaptive one (`thinking_mode: "adaptive"` or
+    /// `thinking: {type: "adaptive"}`): its prompt prefills no marker for the
+    /// grammar to repeat.
     fn has_minimax_m3_constrained_generation(request: &NvCreateChatCompletionRequest) -> bool {
         Self::has_structured_response_format(request)
             || Self::has_guided_tool_choice(request)
@@ -15476,6 +15486,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_minimax_m3_think_markers_in_grammar_need_adaptive() {
+        // The parser version is process-global; run with the default (no DYN_PARSER_VERSION).
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_minimax_m3_think_markers_in_grammar_need_adaptive"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        // A grammar that itself contains `<mm:think>...</mm:think>` gets the
+        // constrained default too: with no thinking control it renders thinking
+        // disabled, so the generated block stays verbatim in content. Sending
+        // `thinking_mode: "adaptive"` keeps the reasoning split.
+        let body = serde_json::json!({"guided_regex": "<mm:think>[^<]+</mm:think>(Paris|London)"});
+        let model_output = "<mm:think>It's France.</mm:think>Paris";
+        let rows = vec![
+            (
+                "no thinking control".to_string(),
+                body.clone(),
+                model_output,
+                (model_output, ""),
+            ),
+            (
+                "thinking_mode=adaptive".to_string(),
+                minimax_m3_merge_body(
+                    body.clone(),
+                    &serde_json::json!({"chat_template_kwargs": {"thinking_mode": "adaptive"}}),
+                ),
+                model_output,
+                ("Paris", "It's France."),
+            ),
+            (
+                "thinking={type:adaptive}".to_string(),
+                minimax_m3_merge_body(body, &serde_json::json!({"thinking": {"type": "adaptive"}})),
+                model_output,
+                ("Paris", "It's France."),
+            ),
+        ];
+        assert_eq!(
+            minimax_m3_mismatched_rows(rows, MiniMaxM3StreamEnd::Stop).await,
+            Vec::<(String, (String, String))>::new(),
+            "rows whose (content, reasoning_content) differed"
+        );
+    }
+
+    #[tokio::test]
     async fn test_minimax_m3_adaptive_turn_without_markers_is_content() {
         // The parser version is process-global; run with the default (no DYN_PARSER_VERSION).
         if crate::test_utils::run_isolated(
@@ -15555,6 +15613,27 @@ mod tests {
                 ("Paris".to_string(), String::new(), true),
             ],
             "guided_regex + adaptive: placement per chunk"
+        );
+
+        // With no thinking control the constrained default renders thinking
+        // disabled, so the same answer streams as content as it arrives.
+        let placed = minimax_m3_chunk_placement(
+            &minimax_m3_round_trip(
+                serde_json::json!({"guided_regex": "Paris|London"}),
+                &["Par", "is"],
+                MiniMaxM3StreamEnd::Stop,
+            )
+            .await
+            .chunks,
+        );
+        assert_eq!(
+            placed,
+            vec![
+                ("Par".to_string(), String::new(), false),
+                ("is".to_string(), String::new(), false),
+                (String::new(), String::new(), true),
+            ],
+            "guided_regex + no thinking control: placement per chunk"
         );
 
         // With thinking enabled, bare guided JSON bypasses the parser and
