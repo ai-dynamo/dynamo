@@ -50,6 +50,9 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 	t.Run("shapes one captured source into two engine destinations", func(t *testing.T) {
 		t.Log("Given a native restore candidate pinned to a Ready compatible PodSnapshot")
 		pod := nativeRestoreCandidatePod(snapshot)
+		// The pinned path ignores these, but they must still be stripped.
+		pod.Annotations[consts.SnapshotJobCandidateUIDAnnotation] = "stale-job-uid"
+		pod.Annotations[consts.CheckpointStartupPolicyAnnotation] = string(nvidiacomv1alpha1.CheckpointStartupPolicyImmediate)
 		original := mustMarshalPod(t, pod)
 		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
 			Operation: admissionv1.Create,
