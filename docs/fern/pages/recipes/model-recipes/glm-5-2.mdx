@@ -63,6 +63,8 @@ Each target below is a Dynamo + SGLang deployment of Z.AI's GLM-5.3/5.2 tuned fo
 
 ## Prerequisites
 
+Run these commands from a checkout of historical revision `4ac5738046760747a23e27797490c7b33bdf8a22`, whose recipe assets are preserved by the source links below. The `recipes/glm-5.2/` paths are not available on current `main`.
+
 <div data-sku="b200">
 
 - A Kubernetes cluster with the Dynamo platform installed and B200 GPUs available — 4x for aggregated, 12x for disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
@@ -211,7 +213,7 @@ kubectl apply -f recipes/glm-5.2/perf/perf.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/glm52-bench -n ${NAMESPACE} --timeout=7200s
 ```
 
-For trace staging, concurrency sweeps, and fetching artifacts, see the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/perf/README.md).
+For trace staging, concurrency sweeps, and fetching artifacts, see the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/4ac5738046760747a23e27797490c7b33bdf8a22/recipes/glm-5.2/perf/README.md).
 
 ## Expected Performance (run on GLM-5.2)
 
@@ -248,11 +250,11 @@ All four targets serve GLM-5.3/5.2 on SGLang with KV-aware routing and EAGLE-sty
 
 ## Source
 
-- Source README: [recipes/glm-5.2/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/README.md)
-- Benchmark README: [recipes/glm-5.2/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/perf/README.md)
-- Aggregated B200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/sglang/agg-b200-agentic/deploy.yaml)
-- Disaggregated B200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/sglang/disagg-b200-agentic/deploy.yaml)
-- Aggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/sglang/agg-h200-agentic/deploy.yaml)
-- Disaggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/sglang/disagg-h200-agentic/deploy.yaml)
-- Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/model-cache/model-download.yaml)
-- Benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/perf/perf.yaml)
+- Source README: [recipes/glm-5.2/README.md](https://github.com/ai-dynamo/dynamo/blob/4ac5738046760747a23e27797490c7b33bdf8a22/recipes/glm-5.2/README.md)
+- Benchmark README: [recipes/glm-5.2/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/4ac5738046760747a23e27797490c7b33bdf8a22/recipes/glm-5.2/perf/README.md)
+- Aggregated B200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/4ac5738046760747a23e27797490c7b33bdf8a22/recipes/glm-5.2/sglang/agg-b200-agentic/deploy.yaml)
+- Disaggregated B200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/4ac5738046760747a23e27797490c7b33bdf8a22/recipes/glm-5.2/sglang/disagg-b200-agentic/deploy.yaml)
+- Aggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/4ac5738046760747a23e27797490c7b33bdf8a22/recipes/glm-5.2/sglang/agg-h200-agentic/deploy.yaml)
+- Disaggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/4ac5738046760747a23e27797490c7b33bdf8a22/recipes/glm-5.2/sglang/disagg-h200-agentic/deploy.yaml)
+- Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/4ac5738046760747a23e27797490c7b33bdf8a22/recipes/glm-5.2/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/4ac5738046760747a23e27797490c7b33bdf8a22/recipes/glm-5.2/model-cache/model-download.yaml)
+- Benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/4ac5738046760747a23e27797490c7b33bdf8a22/recipes/glm-5.2/perf/perf.yaml)
