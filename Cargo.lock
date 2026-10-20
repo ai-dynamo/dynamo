@@ -2560,7 +2560,8 @@ dependencies = [
 [[package]]
 name = "dynamo-decisions"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=ff8d4988d91e1907d57747e7b52b16ca7db30c21#ff8d4988d91e1907d57747e7b52b16ca7db30c21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a45fccc7c4e78332eca3b9d1580bed699db2dea71d0b67a6ae1232472dd6b71f"
 dependencies = [
  "dynamo-protocols",
  "serde",
@@ -7780,7 +7781,7 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.14.0",
  "log",
  "multimap",
@@ -7800,7 +7801,7 @@ version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.14.0",
  "log",
  "multimap",

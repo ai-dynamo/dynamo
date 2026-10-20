@@ -2139,7 +2139,8 @@ dependencies = [
 [[package]]
 name = "dynamo-decisions"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=ff8d4988d91e1907d57747e7b52b16ca7db30c21#ff8d4988d91e1907d57747e7b52b16ca7db30c21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a45fccc7c4e78332eca3b9d1580bed699db2dea71d0b67a6ae1232472dd6b71f"
 dependencies = [
  "dynamo-protocols",
  "serde",
