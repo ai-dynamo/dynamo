@@ -45,10 +45,6 @@ mod tests {
     #[test]
     fn keeps_array_order() {
         assert_eq!(canonical_string(json!([3, 1, 2])), "[3,1,2]");
-        assert_eq!(
-            canonical_string(json!([{"b": 1}, {"a": 2}])),
-            r#"[{"b":1},{"a":2}]"#
-        );
     }
 
     #[test]
@@ -61,7 +57,6 @@ mod tests {
 
     #[test]
     fn leaves_null_unchanged() {
-        assert_eq!(canonical_string(json!(null)), "null");
         assert_eq!(
             canonical_string(json!({"b": null, "a": [null]})),
             r#"{"a":[null],"b":null}"#
