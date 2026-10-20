@@ -231,7 +231,3 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
-
-# Post-codefreeze AISimulate source pin for release/1.6.0.
-[patch.crates-io]
-aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "6b12a7dfbac64a985e32d03039187cf751197e0f" }
