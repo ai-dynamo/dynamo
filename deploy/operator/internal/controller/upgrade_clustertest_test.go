@@ -231,6 +231,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				}, 90*time.Second, 200*time.Millisecond)
 			}
 			after := captureUpgrade(t, env)
+			checkUpgradeGroveMatrix(t, relative, getOnlyClusterDGD(t, ctx, env.Client(), namespace), after)
 			if isHistory {
 				if err := upgradeSafetyError(transition.hashChanged, before, after); err != nil {
 					t.Error(err)
