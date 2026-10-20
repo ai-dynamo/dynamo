@@ -161,9 +161,8 @@ func (r *dgdEPPReconciler) Reconcile(
 // generated for this DGD is ever removed; a same-named but foreign ConfigMap
 // is left untouched.
 //
-// See deleteIfControlledBy for the shared ownership-safe delete protocol:
-// an absent ConfigMap is success, and the delete is pinned to the UID the
-// ownership check read.
+// See deleteIfControlledBy: an absent ConfigMap is success, and the delete is
+// pinned to the UID the ownership check read.
 func (r *dgdEPPReconciler) deleteOwnedLegacyEPPConfigMap(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,

@@ -44,15 +44,8 @@ func (s *dgdResourceSyncer) GetRecorder() events.EventRecorder {
 	return s.recorder
 }
 
-// deleteIfControlledBy deletes the object at key, but only the exact object it
-// verified owner controls. It reads into obj, so obj must be a non-nil, empty
-// object of the target type; owner must be non-nil. kind labels error messages.
-//
-// The UID precondition is what makes the check and the delete one decision: if
-// the object is replaced by an unowned object of the same name in between, the
-// delete fails with a conflict and the reconcile retries against the
-// replacement instead of removing an object owner does not control. An absent
-// object, or one owner does not control, is success, not an error.
+// deleteIfControlledBy deletes the object at key only if owner controls it, with a UID
+// precondition against same-name replacement. Absent is success; obj must be empty.
 func (s *dgdResourceSyncer) deleteIfControlledBy(
 	ctx context.Context,
 	owner metav1.Object,
