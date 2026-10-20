@@ -33,7 +33,7 @@ from dynamo.frontend.prepost import (
     _prepare_request,
     build_tool_call_guided_decoding,
 )
-from dynamo.llm.exceptions import HttpError, InvalidArgument
+from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
 # need it (and via the vllm_processor_module fixture). Importing it at module
@@ -1834,6 +1834,22 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 
 
 class TestRoutedEnginePath:
+    @pytest.mark.asyncio
+    async def test_worker_unavailable_is_raised_not_enveloped(
+        self, vllm_processor_module
+    ):
+        rejection = WorkerUnavailable("prefill routing is still activating")
+
+        class _RejectingRoutedEngine(_FakeRoutedEngine):
+            async def generate(self, preprocessed, **kwargs):
+                raise rejection
+
+        processor = _make_processor(vllm_processor_module, _RejectingRoutedEngine([]))
+
+        with pytest.raises(WorkerUnavailable) as caught:
+            await _run_generate(processor, _base_preproc())
+        assert caught.value is rejection
+
     @pytest.mark.asyncio
     async def test_backend_rejection_keeps_the_backend_status(
         self, vllm_processor_module

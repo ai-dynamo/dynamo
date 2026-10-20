@@ -25,7 +25,7 @@ from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uu
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import InvalidArgument, Unknown
+from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 
 from .sglang_prepost import (
     ReasoningParser,
@@ -1000,7 +1000,7 @@ class SglangProcessor:
                     yield envelope
                     if post.locally_finished:
                         break
-        except (InvalidArgument, Unknown):
+        except (InvalidArgument, Unknown, WorkerUnavailable):
             raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)
