@@ -48,7 +48,9 @@ print(json.dumps({"name": agent.name}))
 """
 
 
-@pytest.mark.parametrize("enable", ["y", "n", None], ids=["file-sink", "off", "default"])
+@pytest.mark.parametrize(
+    "enable", ["y", "n", None], ids=["file-sink", "off", "default"]
+)
 def test_colocated_agents_start_with_occupied_telemetry_port(tmp_path, enable):
     telemetry_dir = tmp_path / "telemetry"
     # BUFFER needs an existing directory; a missing directory can silently lose
@@ -82,9 +84,9 @@ def test_colocated_agents_start_with_occupied_telemetry_port(tmp_path, enable):
             ]
             for name, future in zip(names, futures):
                 result = future.result()
-                assert result.returncode == 0, (
-                    f"{name} failed to initialize:\n{result.stdout}\n{result.stderr}"
-                )
+                assert (
+                    result.returncode == 0
+                ), f"{name} failed to initialize:\n{result.stdout}\n{result.stderr}"
                 report = json.loads(result.stdout.splitlines()[-1])
                 assert report["name"] == name
 
