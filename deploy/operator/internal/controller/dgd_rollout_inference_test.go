@@ -1,0 +1,233 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"sync/atomic"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+)
+
+// rolloutProbeServer implements the released frontend's worker-attribution response shape.
+type rolloutProbeServer struct {
+	mode        atomic.Int32
+	chat        atomic.Int32
+	completions atomic.Int32
+}
+
+func (s *rolloutProbeServer) ServeHTTP(w http.ResponseWriter, request *http.Request) {
+	var body struct {
+		Model     string `json:"model"`
+		MaxTokens int    `json:"max_tokens"`
+		Stream    bool   `json:"stream"`
+		Nvext     struct {
+			InstanceID uint64   `json:"backend_instance_id"`
+			PrefillID  uint64   `json:"prefill_worker_id"`
+			Fields     []string `json:"extra_fields"`
+		} `json:"nvext"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&body); err != nil || request.Method != http.MethodPost ||
+		body.Model != "test-model" || body.MaxTokens != 1 || body.Stream || (body.Nvext.InstanceID != 42 && body.Nvext.PrefillID != 42) ||
+		len(body.Nvext.Fields) != 1 || body.Nvext.Fields[0] != "worker_id" {
+		http.Error(w, "invalid inference probe", http.StatusBadRequest)
+		return
+	}
+	if request.URL.Path == "/v1/chat/completions" {
+		s.chat.Add(1)
+	} else if request.URL.Path == "/v1/completions" {
+		s.completions.Add(1)
+	} else {
+		http.NotFound(w, request)
+		return
+	}
+
+	// Simulate admission delay, absent attribution, and an ignored targeting hint.
+	switch s.mode.Load() {
+	case 1:
+		w.WriteHeader(http.StatusNotFound)
+	case 2:
+		_, _ = fmt.Fprint(w, `{"choices":[{"finish_reason":"length"}],"usage":{"completion_tokens":1}}`)
+	case 3:
+		_, _ = fmt.Fprint(w, `{"choices":[{"finish_reason":"length"}],"usage":{"completion_tokens":1},"nvext":{"worker_id":{"decode_worker_id":41}}}`)
+	default:
+		phase := "decode_worker_id"
+		if body.Nvext.PrefillID == 42 {
+			phase = "prefill_worker_id"
+		}
+		_, _ = fmt.Fprintf(w, `{"choices":[{"finish_reason":"length"}],"usage":{"completion_tokens":1},"nvext":{"worker_id":{"%s":42}}}`, phase)
+	}
+}
+
+func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
+	t.Log("Build a constrained two-replica rollout with one old and one Ready replacement")
+	dgd := createTestDGD("inference-gate", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker":   {ComponentType: consts.ComponentTypeWorker, Replicas: ptr.To(int32(2))},
+		"frontend": {ComponentType: consts.ComponentTypeFrontend},
+	})
+	dgd.UID = "graph-uid"
+	dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes"}
+	dgd.Spec.Annotations = map[string]string{
+		KubeAnnotationDeploymentRollingUpdateMaxSurge:       "0",
+		KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "1",
+	}
+	hashes, err := desiredWorkerHashes(dgd)
+	require.NoError(t, err)
+	newName := dynamo.GetDCDResourceName(dgd, "worker", hashes.v2)
+	oldDCD := &nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "inference-gate-worker-old", Namespace: dgd.Namespace,
+			Labels: map[string]string{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name, consts.KubeLabelDynamoWorkerHash: "old"}},
+		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: "worker", ComponentType: consts.ComponentTypeWorker, Replicas: ptr.To(int32(1)),
+		}},
+		Status: nvidiacomv1beta1.DynamoComponentDeploymentStatus{Component: &nvidiacomv1beta1.ComponentReplicaStatus{
+			Replicas: 1, ReadyReplicas: ptr.To(int32(1)), AvailableReplicas: ptr.To(int32(1)),
+		}},
+	}
+	require.NoError(t, ctrl.SetControllerReference(dgd, oldDCD, testScheme))
+	newDCD := oldDCD.DeepCopy()
+	newDCD.Name = newName
+	newDCD.Labels[consts.KubeLabelDynamoWorkerHash] = hashes.v2
+	worker := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "new-worker", Namespace: dgd.Namespace, UID: "new-pod-uid",
+		Labels: map[string]string{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name, consts.KubeLabelDynamoComponent: "worker",
+			consts.KubeLabelDynamoSelector: newName}},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+	metadata := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "nvidia.com/v1alpha1", "kind": "DynamoWorkerMetadata",
+		"metadata": map[string]any{"name": "worker-container", "namespace": dgd.Namespace},
+		"spec": map[string]any{"data": map[string]any{"model_cards": map[string]any{
+			"new/backend/generate/42": map[string]any{"instance_id": int64(42), "card_json": map[string]any{
+				"display_name": "test-model", "model_type": "Chat | Completions", "worker_type": "aggregated",
+			}},
+		}}},
+	}}
+	metadata.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: worker.Name, UID: worker.UID, Controller: ptr.To(true)}})
+
+	t.Log("Serve two independent frontend endpoints so a single successful replica cannot release the gate")
+	first, second := &rolloutProbeServer{}, &rolloutProbeServer{}
+	server1, server2 := httptest.NewServer(first), httptest.NewServer(second)
+	defer server1.Close()
+	defer server2.Close()
+	frontend1 := rolloutTestFrontendPod(t, dgd, "frontend-1", server1.URL)
+	frontend2 := rolloutTestFrontendPod(t, dgd, "frontend-2", server2.URL)
+	r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD, newDCD, worker, metadata, frontend1, frontend2))
+
+	t.Log("Withhold final old-worker deletion for 404, missing attribution, and old-worker responses")
+	for _, mode := range []int32{1, 2, 3} {
+		second.mode.Store(mode)
+		rollout, err := r.buildRollingUpdateContext(context.Background(), dgd)
+		require.NoError(t, err)
+		require.Equal(t, int32(1), rollout.OldWorkerReplicaTargetsByDCD[oldDCD.Name], "mode %d", mode)
+		require.Equal(t, int32(1), rollout.NewWorkerReplicaTargetsByComponent["worker"], "must respect maxSurge=0")
+	}
+
+	t.Log("Release the last old replica only when both frontends execute on the replacement")
+	second.mode.Store(0)
+	rollout, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	require.Equal(t, int32(0), rollout.OldWorkerReplicaTargetsByDCD[oldDCD.Name])
+	require.Positive(t, first.chat.Load())
+	require.Positive(t, first.completions.Load())
+	require.Positive(t, second.chat.Load())
+	require.Positive(t, second.completions.Load())
+
+	t.Log("A recreated worker cannot reuse metadata belonging to the previous Pod UID")
+	worker.UID = "recreated-pod-uid"
+	require.NoError(t, r.Update(context.Background(), worker))
+	rollout, err = r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), rollout.OldWorkerReplicaTargetsByDCD[oldDCD.Name])
+
+	t.Log("Route metadata changes back to the owning graph, rejecting stale Pod ownership")
+	owner := createTestDGDReconcilerWithStatus(dgd, withObjects(worker))
+	require.Empty(t, owner.mapRolloutMetadataToDGDRequests(context.Background(), metadata))
+	metadata.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: worker.Name, UID: worker.UID, Controller: ptr.To(true)}})
+	worker.Labels[consts.KubeLabelDynamoComponentType] = consts.ComponentTypeWorker
+	require.NoError(t, owner.Update(context.Background(), worker))
+	require.Equal(t, []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(dgd)}}, owner.mapRolloutMetadataToDGDRequests(context.Background(), metadata))
+	require.Equal(t, []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(dgd)}}, mapDGDServingPodToRequests(context.Background(), frontend1))
+}
+
+func rolloutTestFrontendPod(t *testing.T, dgd *nvidiacomv1beta1.DynamoGraphDeployment, name, address string) *corev1.Pod {
+	t.Helper()
+	parsed, err := url.Parse(address)
+	require.NoError(t, err)
+	port, err := strconv.ParseInt(parsed.Port(), 10, 32)
+	require.NoError(t, err)
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: dgd.Namespace, UID: types.UID(name),
+		Labels: map[string]string{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name, consts.KubeLabelDynamoComponent: "frontend",
+			consts.KubeLabelDynamoComponentType: consts.ComponentTypeFrontend}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName,
+			Ports: []corev1.ContainerPort{{Name: consts.DynamoContainerPortName, ContainerPort: int32(port)}},
+		}}},
+		Status: corev1.PodStatus{PodIP: parsed.Hostname(), Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+}
+
+func TestReplacementInferenceTargets_ModelRoles(t *testing.T) {
+	tests := []struct {
+		name        string
+		modelType   string
+		prefill     bool
+		wantTargets int
+		wantError   bool
+	}{
+		{name: "prefill uses phase attribution", modelType: "Prefill", prefill: true, wantTargets: 1},
+		{name: "embedding retains legacy rollout", modelType: "Embedding"},
+		{name: "incomplete model card cannot bypass gate", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Read replacement metadata with an exact Pod owner")
+			metadata := unstructured.Unstructured{Object: map[string]any{
+				"spec": map[string]any{"data": map[string]any{"model_cards": map[string]any{
+					"new/backend/generate/42": map[string]any{"instance_id": int64(42), "card_json": map[string]any{
+						"display_name": "test-model", "model_type": tt.modelType,
+					}},
+				}}},
+			}}
+			metadata.SetOwnerReferences([]metav1.OwnerReference{{Kind: "Pod", UID: "new", Controller: ptr.To(true)}})
+			targets, found, err := replacementInferenceTargets([]unstructured.Unstructured{metadata}, map[types.UID]bool{"new": true})
+			if tt.wantError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Len(t, targets, tt.wantTargets)
+			if tt.wantTargets == 0 {
+				return
+			}
+			require.Equal(t, tt.prefill, targets[0].Prefill)
+
+			t.Log("Verify that a real HTTP probe sends and checks prefill attribution")
+			server := httptest.NewServer(&rolloutProbeServer{})
+			defer server.Close()
+			r := createTestReconcilerWithStatus(createTestDGD("probe", nil))
+			require.NoError(t, r.probeReplacementInference(context.Background(), server.URL, targets[0].Paths[0], targets[0]))
+		})
+	}
+}

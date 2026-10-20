@@ -73,6 +73,7 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Build the program composition root")
 			reconciler := &DynamoGraphDeploymentReconciler{
+				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &commonController.RuntimeConfig{},
 			}
 

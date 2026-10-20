@@ -20,8 +20,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"slices"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -64,6 +67,8 @@ func (t unsupportedWorkerHashTransition) needsCommit() bool {
 // controller.
 type dgdWorkerRolloutReconciler struct {
 	dgdResourceSyncer
+	discoveryBackend configv1alpha1.DiscoveryBackend
+	inferenceClient  *http.Client
 }
 
 func newDGDWorkerRolloutReconciler(
@@ -72,6 +77,10 @@ func newDGDWorkerRolloutReconciler(
 ) *dgdWorkerRolloutReconciler {
 	return &dgdWorkerRolloutReconciler{
 		dgdResourceSyncer: newDGDResourceSyncer(kubeClient, recorder),
+		inferenceClient: &http.Client{
+			Timeout:       5 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}
 }
 
@@ -1528,6 +1537,17 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
 			availableSurplus := max(int32(0), (oldState.Available+newState.Available)-minAvailable)
 			oldTarget = max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
+
+			// Pod readiness does not prove frontend-local admission of a new WorkerSet.
+			// Preserve the final old replica until replacement inference succeeds on every serving frontend.
+			if oldTarget == 0 && oldState.Spec > 0 && desired > 0 && newState.Available > 0 {
+				admitted, probeErr := r.replacementInferenceReady(ctx, dgd, componentName, newDCDName)
+				if !admitted || probeErr != nil {
+					oldTarget = 1
+					logger.Info("Retaining final old worker while replacement inference is pending",
+						"component", componentName, "newWorkerHash", newWorkerHash, "reason", probeErr)
+				}
+			}
 
 			// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
 			scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)

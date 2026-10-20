@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/rest"
@@ -85,6 +86,7 @@ type DynamoGraphDeploymentReconciler struct {
 	RBACManager           rbacManager
 }
 
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamoworkermetadatas,verbs=get;list;watch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
@@ -295,6 +297,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		}
 	}
 
+	// Metadata publication and frontend membership can independently unblock rollout inference.
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
 			dgdPrimaryPredicate(),
@@ -302,8 +305,8 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Named(consts.ResourceTypeDynamoGraphDeployment).
 		Watches(
 			&corev1.Pod{},
-			handler.EnqueueRequestsFromMapFunc(mapDGDWorkerPodToRequests),
-			builder.WithPredicates(dgdWorkerPodEventPredicate()),
+			handler.EnqueueRequestsFromMapFunc(mapDGDServingPodToRequests),
+			builder.WithPredicates(predicate.Or(dgdWorkerPodEventPredicate(), predicate.NewPredicateFuncs(isDGDFrontendPod))),
 		).
 		Owns(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return true },
@@ -346,6 +349,16 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		ctrlBuilder = ctrlBuilder.Owns(&gaiev1.InferencePool{}, builder.WithPredicates(
 			predicate.GenerationChangedPredicate{},
 		))
+	}
+
+	// Kubernetes discovery is optional; do not block controller startup where its CRD is absent.
+	// The inference gate fails closed on missing metadata and retries even without this watch.
+	if _, err := mgr.GetRESTMapper().RESTMapping(rolloutWorkerMetadataGVK.GroupKind(), rolloutWorkerMetadataGVK.Version); err == nil {
+		workerMetadata := &unstructured.Unstructured{}
+		workerMetadata.SetGroupVersionKind(rolloutWorkerMetadataGVK)
+		ctrlBuilder = ctrlBuilder.Watches(workerMetadata, handler.EnqueueRequestsFromMapFunc(r.mapRolloutMetadataToDGDRequests))
+	} else if !meta.IsNoMatchError(err) {
+		return fmt.Errorf("resolve rollout worker metadata API: %w", err)
 	}
 
 	// Watch standalone Snapshot resources only when their external APIs were detected.

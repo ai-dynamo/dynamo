@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -41,6 +42,7 @@ type componentProgram struct {
 // newComponentProgram wires the DCD pathway at the DGD composition root.
 func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgram {
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
+	rollout.discoveryBackend = r.Config.Discovery.Backend
 	return &componentProgram{
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,
@@ -159,6 +161,11 @@ func (p *componentProgram) Reconcile(
 		}
 	}
 	programResult.applyReconcileResult(req.DGD.Generation, result)
+
+	// Frontend-local inference readiness can change without another Kubernetes event.
+	if isRollingUpdateInProgress(&programResult.Status) {
+		programResult.RequeueAfter = 2 * time.Second
+	}
 	return programResult, nil
 }
 

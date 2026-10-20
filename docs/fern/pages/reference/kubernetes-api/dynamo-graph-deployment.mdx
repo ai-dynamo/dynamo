@@ -48,6 +48,28 @@ spec:
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
 ```
 
+## Managed worker inference gate
+
+For single-node DCD-backed rolling updates using Kubernetes discovery, once replacement
+capacity is available, the operator retains the last old replica of each text-generation
+worker component until every Ready frontend Pod completes a one-token inference on a
+replacement worker. It probes each advertised Chat and Completions endpoint directly and
+checks the response's actual worker ID against replacement metadata owned by a Ready Pod.
+Prefill workers use the phase-specific prefill worker ID. A successful HTTP status without
+matching worker attribution does not release the old replica.
+
+The gate reuses the existing nvext API, including the API in frontend 1.5.0. The operator
+must be able to reach each frontend Pod's named `http` port, and frontend nvext must remain
+enabled. Failed requests, timeouts, disabled nvext, missing metadata, or missing attribution
+retain the last old replica and log the pending reason. Reconciliation retries the gate;
+it does not change worker Pod readiness or reuse success from a previous reconciliation.
+
+Embedding and other non-text models, external frontends, non-Kubernetes discovery,
+`Recreate`, and provider-native Grove updates retain their existing behavior. Replica
+budgets still apply: a single-replica deployment with zero surge must stop its old worker
+before a replacement can start. This gate does not provide an in-flight request drain or
+an end-to-end zero-downtime guarantee for such configurations.
+
 ## Grove update strategy
 
 Set `metadata.annotations["nvidia.com/grove-update-strategy"]` on the DGD to select the generated Grove `PodCliqueSet` update strategy. Accepted values are `Coherent`, `RollingRecreate`, and `OnDelete`. DGDs with LPX components accept only `Coherent` and `RollingRecreate`. Under `OnDelete`, running LPX Pods keep their old templates after an update; the LPX scheduler treats that drift as a lost dependency and releases the pipeline, which cannot recover until Grove replaces the Pods. Admission rejects other updates to an existing LPX DGD that still uses `OnDelete`, so remove the annotation first. Removing it changes only the strategy and does not replace Pods that already run an old template; then set a new `spec.restart.id` with `restart.strategy.type: Parallel`, or delete those Pods. This annotation belongs to the DGD's metadata; `spec.annotations` propagates annotations to child resources instead.
