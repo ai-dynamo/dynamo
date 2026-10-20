@@ -31,11 +31,11 @@ from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import reserved_ports
 
 pytestmark = [
+    pytest.mark.manual,
     pytest.mark.skipif(
         os.environ.get("DYNAMO_DECISION_RUN_PINNED_SGLANG") != "1",
         reason="Set DYNAMO_DECISION_RUN_PINNED_SGLANG=1 for pinned SGLang qualification",
     ),
-    pytest.mark.post_merge,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.sglang,
