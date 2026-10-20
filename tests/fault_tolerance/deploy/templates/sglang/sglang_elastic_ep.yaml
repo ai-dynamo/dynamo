@@ -39,12 +39,21 @@
 #   * The BF16 DeepGEMM expert path, forced by the three settings below
 #     (SGLANG_DEEPEP_BF16_DISPATCH, SGLANG_NIXL_EP_BF16_DISPATCH,
 #     --moe-runner-backend deep_gemm). DeepSeek-V2-Lite is unquantized, and in
-#     SGLang 0.5.21 the unquantized BF16 MoE gate in ep_moe/layer.py only covers
-#     the deepep and pplx a2a backends, not nixl. Without these, the first MoE
-#     forward lands on `assert False, "forward_deepgemm_masked is deprecated"`
-#     and the worker crash-loops (NVBug 6912358 / DYN-4850). SGLang's own
-#     elastic-EP tests never hit this because they use an FP8 model.
+#     SGLang 0.5.21 and 0.5.22 (still unfixed upstream as of 2026-10-19) the
+#     unquantized BF16 MoE gate in ep_moe/layer.py only covers the deepep and
+#     pplx a2a backends, not nixl. Without these, the first MoE forward lands on
+#     `assert False, "forward_deepgemm_masked is deprecated"` and the worker
+#     crash-loops (NVBug 6912358 / DYN-4850). SGLang's own elastic-EP tests never
+#     hit this: they use a different checkpoint (lmsys/sglang-ci-dsv3-test) and
+#     pass none of these knobs.
 #     The joiner in run_sglang_elastic_ep_scale_up_test.sh passes the same three.
+#   * The NIXL-EP low-latency dispatch budget raised to 1024 tokens per rank
+#     (SGLANG_NIXL_EP_NUM_MAX_DISPATCH_TOKENS_PER_RANK, default 128, 1024 is the
+#     maximum) together with --chunked-prefill-size 1024, as SGLang's own scale
+#     test does. With --deepep-mode low_latency every prefill chunk goes through
+#     that dispatcher; SGLang divides the chunk across the DP ranks (1024 / 4 =
+#     256 tokens per rank) and nixl_ep aborts the process on any batch above the
+#     budget, so the default 8192-token chunk fails on the first real prompt.
 #
 # The joining group is NOT launched by the operator yet (that orchestration is
 # tracked separately). The accompanying run_sglang_elastic_ep_scale_up_test.sh
@@ -97,6 +106,10 @@ spec:
           value: "1"
         - name: SGLANG_NIXL_EP_BF16_DISPATCH
           value: "1"
+        # NIXL-EP low-latency dispatch budget per rank (default 128, maximum
+        # 1024); paired with --chunked-prefill-size 1024 below. See the header.
+        - name: SGLANG_NIXL_EP_NUM_MAX_DISPATCH_TOKENS_PER_RANK
+          value: "1024"
       extraPodSpec:
         imagePullSecrets:
         - name: nvcr-imagepullsecret
@@ -124,6 +137,11 @@ spec:
             - --skip-tokenizer-init
             - --page-size
             - "16"
+            # Keeps every per-rank prefill chunk (1024 / dp 4 = 256 tokens) under
+            # the NIXL-EP dispatch budget set by
+            # SGLANG_NIXL_EP_NUM_MAX_DISPATCH_TOKENS_PER_RANK above.
+            - --chunked-prefill-size
+            - "1024"
             # DP-attention MoE: the primary group runs EP size 4 (4 GPUs).
             - --tp
             - "4"

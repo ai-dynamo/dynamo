@@ -151,28 +151,39 @@ launch_joiner() {
   local pod
   pod=$(worker_pod)
   local gpu_end=$((rank_offset + join_gpus))
-  local visible
-  visible=$(seq -s, "$rank_offset" $((gpu_end - 1)))
+  # Built by hand: BSD/macOS `seq -s,` leaves a trailing comma.
+  local visible="" g
+  for g in $(seq "$rank_offset" $((gpu_end - 1))); do
+    visible="${visible:+$visible,}$g"
+  done
   echo ""
   echo "--- launching joining group: rank_offset=$rank_offset gpus=$visible ---"
   # Detached joiner: shares --dist-init-addr with the primary. Its own HTTP port
   # is never used for serving; the primary keeps serving throughout.
-  # The two SGLANG_*_BF16_DISPATCH envs and --moe-runner-backend deep_gemm must
-  # match the primary (see sglang_elastic_ep.yaml): unquantized experts over
-  # nixl only work on the BF16 DeepGEMM path.
+  # The joiner must match the primary (sglang_elastic_ep.yaml): the two
+  # SGLANG_*_BF16_DISPATCH envs and --moe-runner-backend deep_gemm (unquantized
+  # experts over nixl only work on the BF16 DeepGEMM path), the NIXL-EP dispatch
+  # budget with --chunked-prefill-size, --page-size, and --skip-tokenizer-init
+  # (Dynamo detokenizes on the primary; a joiner without it makes the primary's
+  # detokenizer crash on the first request routed to a new rank). SGLang asserts
+  # --node-rank 1 for --elastic-ep-join-mode scale, so the joiner runs as node 1
+  # of a 2-node world, like SGLang's own test/manual/ep/test_elastic_scale.py.
   kubectl exec "$pod" -n "$NS" -- bash -lc "
     SGLANG_DEEPEP_BF16_DISPATCH=1 SGLANG_NIXL_EP_BF16_DISPATCH=1 \
+    SGLANG_NIXL_EP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=1024 \
     CUDA_VISIBLE_DEVICES=$visible nohup sglang serve \
       --model-path $MODEL_PATH \
-      --trust-remote-code \
+      --trust-remote-code --skip-tokenizer-init --page-size 16 \
       --tp $join_gpus --dp $join_gpus \
       --enable-dp-attention --enable-dp-lm-head \
       --moe-a2a-backend nixl --deepep-mode low_latency \
       --moe-runner-backend deep_gemm \
+      --chunked-prefill-size 1024 \
       --elastic-ep-backend mooncake --mooncake-ib-device $IB_DEVICE \
       --enable-eplb --ep-num-redundant-experts 24 \
       --elastic-ep-initial-size 4 --max-ep-size 8 \
       --cuda-graph-backend-decode disabled --cuda-graph-backend-prefill disabled \
+      --nnodes 2 --node-rank 1 \
       --elastic-ep-join-mode scale --elastic-ep-join-rank-offset $rank_offset \
       --dist-init-addr $DIST_INIT_ADDR \
       --host 127.0.0.1 --port $((30000 + rank_offset)) \
