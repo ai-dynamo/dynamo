@@ -46,6 +46,40 @@ up to your target version. Each entry describes changes introduced in that relea
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
+### v1.7.0
+
+#### Operator behavior breaking changes
+
+##### Native sidecar backend inference
+
+**Change:** Backend inference recognizes a direct `vllm-rs` engine command in `main`,
+including a literal absolute path. It continues to inspect the engine for backend
+validation and compilation-cache defaults, independently of the runtime sidecar launch.
+The inferred framework participates in the graph-wide worker-generation hash.
+
+**Affected:** Deployments with this engine command and no explicit `backendFramework`
+previously resolved to an undetected backend. The vLLM reference manifests already set
+`backendFramework: vllm` and are unaffected by this inference change.
+
+**Action:** Plan for a one-time worker rollout when upgrading to v1.7.0. To perform the
+migration before the operator upgrade, set `spec.backendFramework: vllm` on affected
+DGDs and complete that manifest-driven rollout first. This moves the migration earlier;
+it does not eliminate it. Explicit frameworks must match the engine launch. Opaque
+engine commands, including shell wrappers and image entrypoints, still require an
+explicit framework.
+
+**Existing deployments:** Reconciliation can roll all workers in an affected DGD without
+an authored manifest change. With `compilationCache.mountPath` set, the engine also gains
+`VLLM_CACHE_ROOT` pointing to that path. Standalone DCDs can roll when newly inferred cache
+defaults change their pod template. Runtime registration used by Planner does not affect
+the desired worker hash or engine configuration.
+
+**Planner permissions:** Registration-based native identity requires `list` on `pods`
+in addition to worker metadata access. If an older Planner service account receives
+HTTP 403 when listing Pods, Planner warns and uses existing status/default fallbacks.
+Grant Pod-list access to enable registered native names, models, and capabilities;
+other API errors still propagate.
+
 ### v1.6.0
 
 #### Runtime Compatibility
@@ -395,7 +429,7 @@ Kubernetes: `>=1.30.0-0`
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.15 |
-| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0-rc.3 |
+| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
 ## Values

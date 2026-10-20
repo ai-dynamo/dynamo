@@ -122,14 +122,18 @@ artifact directory. With sharded roots, files are distributed across the
 per-device roots using the existing V0 directory convention and the manifest
 records their absolute paths.
 
-On restore, the checkpoint loader with `DYN_GMS_USE_V1=true` connects RW to a fresh
-`weights` socket, recreates the exact IDs and sizes, and builds generic
-`FileTransferSource` and `GMSTransferTarget` records. Backend selection goes
-through `snapshot.transfer.create_transfer_backend`; `nixl`, `nixl-gds`, and
+On restore, the checkpoint loader with `DYN_GMS_USE_V1=true` connects `RW_OR_RO`
+to the `weights` socket. If the server already has committed weights, it is
+granted RO and returns without loading. Otherwise it is granted RW, recreates
+the exact IDs and sizes, and builds generic `FileTransferSource` and
+`GMSTransferTarget` records. Backend selection goes through
+`snapshot.transfer.create_transfer_backend`; `nixl`, `nixl-gds`, and
 `sharded-ssd` use the same implementations and configuration as V0. The loader
 synchronizes, releases its temporary mappings, commits the same socket RW to
-RO, closes its lease, and exits. The server retains the committed backing while
-the restored worker acquires a new RO lease and remaps its preserved VAs.
+RO, closes its lease, and exits. The `gpu_memory_service.cli.snapshot.loader`
+entry point then stays running, so Kubernetes does not restart the container.
+The server retains the committed backing while the restored worker acquires a
+new RO lease and remaps its preserved VAs.
 
 ## Weight construction
 

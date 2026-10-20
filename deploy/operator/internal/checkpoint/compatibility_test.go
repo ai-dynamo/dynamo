@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -299,7 +299,7 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 		{
 			name: "CUDA shared-memory support",
 			mutate: func(template *corev1.PodTemplateSpec) {
-				template.Annotations = map[string]string{consts.CUDASharedMemorySupportAnnotation: "enabled"}
+				template.Annotations = map[string]string{podcontract.CuInterposeAnnotation: "enabled"}
 			},
 			backend: "vllm",
 			gmsMode: "disabled",
