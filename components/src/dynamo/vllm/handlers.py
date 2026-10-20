@@ -978,7 +978,7 @@ def build_sampling_params(
     # bridge pressure before chunks cross into Dynamo.
     sampling_params.detokenize = False
     sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
-    # Decode regulation (DYN_DECODE_REGULATION_MODE): the request's class and task.
+    # Decode regulation (DYN_DECODE_REGULATION_MODE): whether the request is interactive.
     attach_regulation_class(sampling_params, request, _decode_regulation_config())
 
     # setattr skips __post_init__ (temperature clamp, _verify_args, greedy reset),
