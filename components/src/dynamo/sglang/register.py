@@ -383,10 +383,10 @@ def _mooncake_key_prefix(
 
 
 def _mooncake_tenant_id(extra_config: dict[str, Any]) -> str:
-    # The separately pinned XPU SGLang 0.5.11 has no Mooncake tenant support.
+    # Older SGLang releases, such as 0.5.11, have no Mooncake tenant support.
     if not hasattr(envs, "MOONCAKE_TENANT_ID"):
         return "default"
-    # Match MooncakeBaseStore._load_config in supported SGLang 0.5.20/0.5.21.
+    # Match the tenant precedence of SGLang's MooncakeBaseStore._load_config.
     if (
         extra_config.get("master_server_address") is not None
         or extra_config.get("client_server_address") is not None
