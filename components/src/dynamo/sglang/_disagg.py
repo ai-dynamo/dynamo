@@ -28,6 +28,7 @@ import sglang as sgl
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.capacity import sglang_dp_layout
 from dynamo.sglang.engine_generate import native_generate_payload
+from dynamo.sglang.request_utils import routed_experts_start_len
 
 # Matches the prior in-tree value. Long enough for the slowest cold-start
 # we've seen (TP8 70B with FlashInfer JIT).
@@ -61,6 +62,32 @@ def validate_disagg_parallel_sampling(request: Mapping[str, Any]) -> None:
                 "SGLang disaggregated serving supports only n=1. "
                 "Use aggregated serving or send separate n=1 requests.",
             )
+
+
+def validate_disagg_routed_experts(
+    request: Mapping[str, Any], input_param: Mapping[str, Any]
+) -> None:
+    """Reject a routed-experts opt-in that would include stale prompt rows.
+
+    Decode never runs the prompt and this path does not merge prefill's rows,
+    so only rows from the prompt length onward are valid. SGLang expands
+    multimodal placeholders, so the frontend token count is not the prompt
+    length for those requests.
+    """
+    input_ids = input_param.get("input_ids")
+    start_len = routed_experts_start_len(request)
+    if (
+        not request.get("multi_modal_data")
+        and isinstance(input_ids, list)
+        and start_len is not None
+        and start_len >= len(input_ids)
+    ):
+        return
+    raise InvalidArgument(
+        "SGLang disaggregated serving cannot return routed experts for prompt "
+        "tokens. Set routed_experts_start_len to the prompt token count, or use "
+        "aggregated serving. Multimodal requests need aggregated serving."
+    )
 
 
 def _network_address_cls():

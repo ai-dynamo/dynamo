@@ -121,6 +121,15 @@ class TestOverrideSamplingParams:
         assert result.temperature == original_temperature
         assert result.top_p == original_top_p
 
+    def test_routed_experts_start_len_rejected(self):
+        request = {
+            "sampling_options": {},
+            "extra_args": {"sampling_options": {"routed_experts_start_len": 1}},
+        }
+
+        with pytest.raises(InvalidArgument, match="routed_experts_start_len"):
+            HandlerBase._override_sampling_params(MockSamplingParams(), request)
+
     def test_disabled_top_k_sentinel_is_converted(self):
         sampling_params = MockSamplingParams()
         request = {"sampling_options": {"top_k": -1}}
