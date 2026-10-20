@@ -825,7 +825,7 @@ pub enum Endpoint {
 
     /// System One typed decisions
     SystemOne,
-    /// OpenAI and SGLang-native decisions
+    /// OpenAI decisions
     Decisions,
 }
 
