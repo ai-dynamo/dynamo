@@ -17,7 +17,8 @@ except ImportError:
 from dynamo.planner.config.planner_config import AISPerfModelSpec, PlannerConfig
 from dynamo.planner.core.perf_model import ais_adapter
 from dynamo.planner.core.perf_model.ais_adapter import PlannerEnginePerfModel
-from dynamo.planner.core.types import EngineCapabilities
+from dynamo.planner.core.state_machine import PlannerScalingState
+from dynamo.planner.core.types import EngineCapabilities, WorkerCapabilities
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -197,6 +198,53 @@ def test_ais_diagnostics_gate_sufficient_data(fake_engine_factory):
 
     fake._diagnostics["readiness"] = "ready"
     assert model.has_sufficient_data()
+
+
+def test_idle_fpms_release_long_prefill_consolidation_veto(fake_engine_factory):
+    class TokenCostModel(_FakeEngineModel):
+        def get_queued_prefill_time(self, metrics_by_rank):
+            return (
+                max(fpm.queued_requests.sum_prefill_tokens for fpm in metrics_by_rank)
+                * 0.00001
+            )
+
+    fake = TokenCostModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 3,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        }
+    )
+    _install_fake_engine(fake_engine_factory, fake)
+    config = _config(min_observations=1).model_copy(
+        update={
+            "mode": "prefill",
+            "optimization_target": "sla",
+            "ttft_ms": 200.0,
+            "max_num_fpm_samples": 3,
+        }
+    )
+    state = PlannerScalingState(config, WorkerCapabilities(prefill=_caps()))
+    model = state._prefill_regression
+    for _ in range(config.max_num_fpm_samples):
+        model.add_observations({("w0", 0): _prefill_fpm(scheduled_tokens=25_000)})
+    idle = {("w0", 0): _prefill_fpm(wall_time=0.0)}
+
+    assert model.avg_isl == 25_000
+    assert (
+        state._prefill_load_decision(
+            {("w0", 0): _prefill_fpm(queued_tokens=1)}, num_workers=2
+        )
+        == 3
+    )
+
+    for _ in range(config.max_num_fpm_samples):
+        model.add_observations(idle)
+
+    assert model.avg_isl == 0
+    assert state._prefill_load_decision(idle, num_workers=2) == 1
 
 
 def test_missing_capability_fields_use_engine_query_defaults(fake_engine_factory):

@@ -66,7 +66,7 @@ dynamo:
   etcd_version: v3.5.34
 
   nixl_ref: v1.3.2
-  nixl_ucx_ref: v1.21.0
+  nixl_ucx_ref: v1.22.0
   nixl_gdrcopy_ref: v2.5.2
   nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
   # >= v2.5 for NIXL 1.5.0 (fi_mr_attr.device.rocr). <= the libfabric of
@@ -108,16 +108,16 @@ vllm:
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
-    base_image_tag: v0.30.0
-    runtime_image_tag: v0.30.0
-    baseline_sbom: vllm-openai-xpu@fc0e112a
+    base_image_tag: v0.31.0
+    runtime_image_tag: v0.31.0
+    baseline_sbom: vllm-openai-xpu@95ac8150
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
-    runtime_image_tag: v0.30.0
+    runtime_image_tag: v0.31.0
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
-  vllm_omni_ref: "v0.30.0rc1"
+  vllm_omni_ref: "v0.31.0rc1"
   # Omni requires Transformers <5.15, which requires tokenizers <=0.23.0.
   transformers_version: "5.14.1"
   tokenizers_version: "0.22.2"
@@ -136,7 +136,7 @@ sglang:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.21-cu130-runtime
+    runtime_image_tag: v0.5.22-cu130-runtime
     # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
     # nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.3,
     # ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
@@ -149,13 +149,17 @@ sglang:
     # codec-limited build for frontend video decoding; XPU remains codec-free.
     baseline_sbom: cuda@0230b7f2
   xpu:
+    # oneAPI 2026.0 is required by the SGLang XPU pins below: torch 2.13.0+xpu
+    # links intel-sycl-rt 2026.0.0 (libsycl.so.9), and sgl-kernel-xpu's SYCL
+    # kernels must be compiled by the matching icpx. The 2025.3 base ships
+    # libsycl.so.8, so its icpx produces a kernel .so that torch cannot load.
     base_image: intel/deep-learning-essentials
-    base_image_tag: 2025.3.2-0-devel-ubuntu24.04
+    base_image_tag: 2026.0.0-devel-ubuntu24.04
     runtime_image: intel/deep-learning-essentials
-    runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
-    sglang_ref: v0.5.11
+    runtime_image_tag: 2026.0.0-devel-ubuntu24.04
+    sglang_ref: v0.5.19
     sglang_git_url: https://github.com/sgl-project/sglang.git
-    sglang_kernel_ref: 3fbd4d33721ce3cf818b1cec3978043951406f10
+    sglang_kernel_ref: v0.2.0
     sglang_kernel_git_url: https://github.com/sgl-project/sgl-kernel-xpu.git
     # XPU SGLang requires a newer NIXL than the framework default; scoped here
     # to avoid affecting sglang-cuda or other frameworks (e.g. dynamo KVBM link).

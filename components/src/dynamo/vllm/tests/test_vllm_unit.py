@@ -73,6 +73,20 @@ def _load_vllm_main() -> ModuleType:
 
 
 @pytest.mark.parametrize(
+    "configured", ["not-json", "{}", "[[1, 0, 1]]", "[[1, 8, 2], [1, 8, 2]]"]
+)
+def test_invalid_artifact_router_profile_fails_startup(configured):
+    handlers = importlib.import_module("dynamo.vllm.handlers")
+    with pytest.raises(ValueError, match="DYNAMO_ARTIFACT_ROUTER_PROFILE"):
+        handlers._configured_artifact_router_profile(configured)
+
+
+def test_artifact_router_profile_is_validated_once():
+    handlers = importlib.import_module("dynamo.vllm.handlers")
+    assert handlers._configured_artifact_router_profile("[[3, 8, 2]]") == ((3, 8, 2),)
+
+
+@pytest.mark.parametrize(
     "enable_lora, model_type, expected",
     [
         (True, dynamo_llm.ModelType.Prefill, 3),
@@ -359,6 +373,19 @@ def test_uses_nixl_connector_direct_and_nested():
     assert _uses_nixl_connector(_make_engine_cfg("LMCacheMPConnector")) is False
     assert _uses_nixl_connector(_make_engine_cfg("FlexKVConnectorV1")) is False
     assert _uses_nixl_connector(_make_engine_cfg()) is False
+
+
+@pytest.mark.parametrize(
+    "connector_names, expected",
+    [
+        (("NixlConnector", "OffloadingConnector"), True),
+        (("OffloadingConnector", "NixlConnector"), True),
+        (("OffloadingConnector",), False),
+    ],
+)
+def test_uses_nixl_connector_multi(connector_names, expected):
+    extra = {"connectors": [{"kv_connector": name} for name in connector_names]}
+    assert _uses_nixl_connector(_make_engine_cfg("MultiConnector", extra)) is expected
 
 
 def test_uses_dynamo_connector_direct_and_nested():

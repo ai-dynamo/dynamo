@@ -30,6 +30,16 @@ lpx:
   # -- Configure the LPU model registry used by the LPX integration.
   modelRegistryURL: ""
 
+dgdrV1Beta2:
+  # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2
+  # API schemas. DynamoGraphDeploymentRun and DynamoGraphDeploymentCandidate objects
+  # created through these schemas are persisted in etcd. Incompatible schema changes
+  # may make stored objects unreadable or block future CRD upgrades. When false, the
+  # CRD init container omits those resources and removes v1beta2 from
+  # DynamoGraphDeploymentRequest before installation. The operator does not reconcile
+  # v1beta2 resources.
+  enabled: false
+
 # Environment variables to pass to operator Deployment.
 env: []
 

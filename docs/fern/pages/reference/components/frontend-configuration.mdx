@@ -816,9 +816,29 @@ The frontend exposes the following HTTP endpoints.
 | `POST` | `/v1/responses` | Responses API |
 | `POST` | `/v1/responses/input_tokens` | Estimated input token count for the Responses API |
 | `POST` | `/v1/images/generations` | Image generation |
+| `POST` | `/v1/images/edits` | Image editing; see [Image API Compatibility](#image-api-compatibility) |
 | `POST` | `/v1/videos/generations` | Video generation |
 | `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
 | `GET` | `/v1/models` | List available models |
+
+### Image API Compatibility
+
+The built-in image routes use JSON requests. Route availability does not imply that every
+backend or model supports reference-image conditioning.
+
+| Endpoint | Request contract | Support |
+|---|---|---|
+| `POST /v1/images/generations` | JSON with a text `prompt`; optional `input_reference` for a reference-capable backend/model | Supported |
+| `POST /v1/images/edits` | JSON with a `prompt` and required `input_reference` | Requires a reference-capable backend/model; see the version requirements in the image-edit example |
+| `POST /v1/images/variations` | Legacy image-variation API | Unsupported (HTTP 404) and [deprecated by OpenAI](https://developers.openai.com/api/reference/resources/images/methods/create_variation); use `/v1/images/edits` instead. |
+
+With vLLM-Omni, `input_reference` is a single HTTP(S) image URL or a base64 data URL such as
+`data:image/png;base64,...`. It is not an uploaded file or a local filesystem path. The
+frontend rejects multipart image edits with HTTP 415; direct uploads are tracked in
+[#15818](https://github.com/ai-dynamo/dynamo/issues/15818).
+
+See [Create a Variation with Image Edits](../../use-cases/diffusion/workflows/text-to-image.md#create-a-variation-with-image-edits)
+for a reference-image-plus-prompt example.
 
 ### Anthropic (Experimental)
 

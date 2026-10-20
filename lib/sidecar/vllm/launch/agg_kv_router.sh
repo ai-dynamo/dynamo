@@ -42,10 +42,10 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_SYSTEM_PORT1            First sidecar system port override (default: DYN_SYSTEM_PORT)"
             echo "  DYN_SYSTEM_PORT2            Second sidecar system port (default: 8082)"
             echo "  VLLM_WORKER1_HTTP_PORT      First vLLM HTTP port (default: 8100)"
-            echo "  VLLM_WORKER1_GRPC_PORT      First vLLM gRPC port (default: 50051)"
+            echo "  VLLM_WORKER1_GRPC_PORT      First vLLM gRPC port (default: 30001)"
             echo "  VLLM_WORKER1_KV_EVENT_PORT  First vLLM KV-event port (default: 20080)"
             echo "  VLLM_WORKER2_HTTP_PORT      Second vLLM HTTP port (default: 8110)"
-            echo "  VLLM_WORKER2_GRPC_PORT      Second vLLM gRPC port (default: 50052)"
+            echo "  VLLM_WORKER2_GRPC_PORT      Second vLLM gRPC port (default: 30011)"
             echo "  VLLM_WORKER2_KV_EVENT_PORT  Second vLLM KV-event port (default: 20081)"
             echo "  VLLM_BLOCK_SIZE             KV-event block size (default: 64)"
             echo "  MAX_MODEL_LEN               Maximum model length (default: 4096)"
@@ -69,12 +69,12 @@ export PYTHONHASHSEED=0
 VLLM_HOST="127.0.0.1"
 VLLM_WORKER1_GPU="${VLLM_WORKER1_GPU:-0}"
 VLLM_WORKER2_GPU="${VLLM_WORKER2_GPU:-1}"
-VLLM_WORKER1_HTTP_PORT="${VLLM_WORKER1_HTTP_PORT:-8100}"
-VLLM_WORKER1_GRPC_PORT="${VLLM_WORKER1_GRPC_PORT:-50051}"
-VLLM_WORKER1_KV_EVENT_PORT="${VLLM_WORKER1_KV_EVENT_PORT:-20080}"
-VLLM_WORKER2_HTTP_PORT="${VLLM_WORKER2_HTTP_PORT:-8110}"
-VLLM_WORKER2_GRPC_PORT="${VLLM_WORKER2_GRPC_PORT:-50052}"
-VLLM_WORKER2_KV_EVENT_PORT="${VLLM_WORKER2_KV_EVENT_PORT:-20081}"
+VLLM_WORKER1_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${VLLM_WORKER1_HTTP_PORT:-8100}")
+VLLM_WORKER1_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${VLLM_WORKER1_GRPC_PORT:-30001}")
+VLLM_WORKER1_KV_EVENT_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${VLLM_WORKER1_KV_EVENT_PORT:-20080}")
+VLLM_WORKER2_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 2 "${VLLM_WORKER2_HTTP_PORT:-8110}")
+VLLM_WORKER2_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${VLLM_WORKER2_GRPC_PORT:-30011}")
+VLLM_WORKER2_KV_EVENT_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_WORKER2_KV_EVENT_PORT:-20081}")
 VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-64}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"

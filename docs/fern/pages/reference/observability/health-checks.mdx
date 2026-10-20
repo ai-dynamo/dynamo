@@ -15,6 +15,7 @@ optional canary requests that actively exercise idle worker endpoints. For a loc
 | --- | --- | --- | --- |
 | Frontend | `DYN_HTTP_PORT`, default `8000` | `/live` | Reports whether the HTTP service is running or shutting down |
 | Frontend | `DYN_HTTP_PORT`, default `8000` | `/health` | Reports frontend health plus discovered endpoints and instances |
+| Frontend | `DYN_HTTP_PORT`, default `8000` | `/v1/models/<model>/ready` | Reports whether the selected model has ready topology, a usable serving engine, and enabled HTTP routes |
 | Worker or standalone router | `DYN_SYSTEM_PORT`, disabled by default | `/live` | Reports system status |
 | Worker or standalone router | `DYN_SYSTEM_PORT`, disabled by default | `/health` | Reports system status |
 
@@ -61,6 +62,40 @@ does not change the frontend response status by itself. As soon as graceful drai
 returns `503 Service Unavailable` with status `not_ready` and a `stage` value that identifies the
 current lifecycle stage. This removes the Frontend from readiness routing before admitted responses
 finish.
+
+## Model-Specific Serving Readiness
+
+`GET /v1/models/<model>/ready` checks the selected model's declared worker topology,
+usable serving engine, and enabled HTTP inference routes. It does not send a canary inference
+request or wait for every worker replica or KV-cache event to arrive. For disaggregated deployments,
+the required worker roles must be available before the topology is ready.
+
+| HTTP status | Meaning |
+| --- | --- |
+| `200 OK` | The selected model is ready to serve through its registered HTTP routes |
+| `503 Service Unavailable` | The model is known, but topology, engine initialization, route activation, or frontend lifecycle state prevents serving |
+| `404 Not Found` | The model is not registered in the frontend's local catalog |
+
+The response retains diagnostic fields such as `model`, `ready`, `reason`, and `namespaces`.
+Namespace details describe worker topology; top-level readiness also accounts for the frontend's
+local serving state. A diagnostic client can therefore inspect a registered prefill or decode role
+in a `503` response even while its required peer is absent. Registration of one role does not mean
+the model is ready to serve.
+
+`/health` and `/live` remain independent of model readiness. Operators opt in to model-specific
+Kubernetes readiness by selecting this endpoint as the frontend readiness probe; see
+[Configure Kubernetes Health Probes](../../kubernetes/operations/observability.mdx#check-and-customize-health-probes).
+Changing a probe does not add inference request gating or prevent requests over existing connections.
+
+<Warning>
+Previously, this endpoint returned `200 OK` with `ready: false` for known but unready models.
+It now returns `503 Service Unavailable` with the diagnostic JSON body preserved. This response
+change affects diagnostic clients even if operators keep probing `/health`.
+
+Clients that need discovery or topology details must parse JSON on both `200` and `503`, rather
+than discarding non-success responses or raising an error before reading the body. Clients checking
+serving readiness should treat `503` as unready and retry; `404` means the model is not yet known.
+</Warning>
 
 ## System-Status Responses
 

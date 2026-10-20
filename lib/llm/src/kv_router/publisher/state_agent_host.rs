@@ -790,6 +790,7 @@ mod tests {
         upgraded.router_hint_source = Some(RouterHintSourceMetadata {
             source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
             worker_type: "prefill".to_string(),
+            topology_domains: Default::default(),
         });
 
         assert!(slot.matches(&original));

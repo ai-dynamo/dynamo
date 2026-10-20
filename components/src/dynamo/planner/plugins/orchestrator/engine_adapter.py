@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from dynamo.common.forward_pass_metrics import encode as _encode_fpm_record
 from dynamo.planner.config.planner_config import resolve_min_endpoint
+from dynamo.planner.monitoring.signal_health import PlannerSignalHealth
 
 if TYPE_CHECKING:
     import grpc.aio
@@ -219,6 +220,10 @@ class OrchestratorEngineAdapter:
             # init in one process) — metrics emission disabled, but
             # the adapter still runs normally.
             self._plugin_framework_metrics = None
+
+        self._signal_health = PlannerSignalHealth(
+            config, self._plugin_framework_metrics
+        )
 
         # Build orchestrator + scheduler + circuit_breaker + registry.
         # All transport-shaped knobs (timeouts + wire security) live under
@@ -648,6 +653,10 @@ class OrchestratorEngineAdapter:
         diagnostics.execute_action = outcome.execute_action
         diagnostics.short_circuit_reason = outcome.short_circuit_reason
         diagnostics.audit_events = list(outcome.audit_events)
+
+        self._signal_health.observe(
+            scheduled_tick, tick_input, self._capabilities, diagnostics
+        )
 
         return PlannerEffects(
             scale_to=scale_to,

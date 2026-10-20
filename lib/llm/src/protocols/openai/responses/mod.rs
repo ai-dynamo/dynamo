@@ -14,9 +14,9 @@ use dynamo_protocols::types::responses::{
     InputTokenDetails, Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem,
     OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
     PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent, ReasoningTextContent,
-    Response, ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTierResponses, Status,
-    SummaryPart, TextResponseFormatConfiguration, Tool, ToolChoiceAllowed, ToolChoiceAllowedMode,
-    ToolChoiceOptions, ToolChoiceParam, Truncation,
+    RefusalContent, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole,
+    ServiceTierResponses, Status, SummaryPart, TextResponseFormatConfiguration, Tool,
+    ToolChoiceAllowed, ToolChoiceAllowedMode, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -1270,10 +1270,25 @@ pub fn chat_completion_to_response(
             }
             None => None,
         };
-        if let Some(content_text) = content_text
-            && !content_text.is_empty()
-        {
-            output.push(make_text_message(message_id.clone(), content_text));
+        let mut content = Vec::new();
+        if let Some(text) = content_text.filter(|text| !text.is_empty()) {
+            content.push(OutputMessageContent::OutputText(OutputTextContent {
+                text,
+                annotations: vec![],
+                logprobs: Some(vec![]),
+            }));
+        }
+        if let Some(refusal) = choice.message.refusal.filter(|refusal| !refusal.is_empty()) {
+            content.push(OutputMessageContent::Refusal(RefusalContent { refusal }));
+        }
+        if !content.is_empty() {
+            output.push(OutputItem::Message(OutputMessage {
+                id: message_id.clone(),
+                role: AssistantRole::Assistant,
+                status: OutputStatus::Completed,
+                phase: None,
+                content,
+            }));
         }
 
         if output.is_empty() {

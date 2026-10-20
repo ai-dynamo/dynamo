@@ -26,16 +26,15 @@ use super::{
 };
 
 use dynamo_runtime::{
-    component::{Client, Endpoint, build_transport_type},
-    discovery::{Discovery, DiscoverySpec, ModelCardInstanceId},
-    pipeline::network::RequestPlanePayloadCodec,
+    component::{Client, Endpoint},
+    discovery::{Discovery, ModelCardInstanceId},
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
 };
 
 use crate::{
     kv_router::{
-        KvEventSourceRequirement, KvRouter, SelectionPolicySource, router_endpoint_id,
+        KvEventSourceRequirement, KvRouter, SelectionPolicySource,
         shared_cache::HicacheSharedKvCache,
     },
     local_model::runtime_config::{
@@ -2327,27 +2326,6 @@ impl ModelManager {
         let endpoint = client.endpoint.clone();
         let lora_domain = self.lora_domain(&endpoint.id());
 
-        // Register router via discovery mechanism.
-        let drt = endpoint.component().drt();
-        let instance_id = drt.discovery().instance_id();
-
-        // Build transport for router endpoint based on request plane mode
-        // Use the worker's component name so each target pool gets its own router discovery group
-        let router_endpoint_id =
-            router_endpoint_id(endpoint.id().namespace, endpoint.id().component);
-        let transport = build_transport_type(&endpoint, &router_endpoint_id, instance_id).await?;
-
-        let discovery_spec = DiscoverySpec::Endpoint {
-            namespace: router_endpoint_id.namespace.clone(),
-            component: router_endpoint_id.component.clone(),
-            endpoint: router_endpoint_id.name.clone(),
-            transport,
-            device_type: None,
-            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
-        };
-
-        let registration = drt.register_endpoint_lease(discovery_spec).await?;
-
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(&endpoint).await?;
 
@@ -2400,7 +2378,7 @@ impl ModelManager {
             None
         };
 
-        let mut chooser = KvRouter::new_with_worker_role_and_scheduler_load(
+        let chooser = KvRouter::new_with_worker_role_and_scheduler_load(
             endpoint.clone(),
             client,
             workers_with_configs,
@@ -2419,7 +2397,6 @@ impl ModelManager {
             cancellation_token,
         )
         .await?;
-        chooser.set_endpoint_registration(registration);
 
         // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
         // subscription per decode endpoint. WORKER_TYPE_DECODE is the routing path for BOTH
@@ -2873,7 +2850,7 @@ mod tests {
     use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
-        discovery::{Discovery, MockDiscovery, SharedMockRegistry},
+        discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
         distributed::DistributedConfig,
         pipeline::RouterMode,
         transports::event_plane::EventScope,
@@ -2982,6 +2959,65 @@ mod tests {
     ) {
         let (_tx, rx) = tokio::sync::watch::channel(configs);
         mm.runtime_configs.insert(endpoint_id.clone(), rx);
+    }
+
+    #[tokio::test]
+    async fn kv_chooser_ignores_stale_presence() {
+        use dynamo_runtime::{component::TransportType, discovery::DiscoveryQuery};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = distributed
+            .namespace("router-presence".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate");
+        let discovery = distributed.discovery();
+        let query = DiscoveryQuery::Endpoint {
+            namespace: endpoint.id().namespace,
+            component: endpoint.id().component,
+            endpoint: "router-discovery".to_string(),
+        };
+        // Model a prior frontend process with the same discovery identity and an old port.
+        discovery
+            .register(DiscoverySpec::Endpoint {
+                namespace: endpoint.id().namespace,
+                component: endpoint.id().component,
+                endpoint: "router-discovery".to_string(),
+                transport: TransportType::Tcp("127.0.0.1:1".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+        let before = discovery.list(query.clone()).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        let manager = ModelManager::new();
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_replica_sync: true,
+            skip_initial_worker_wait: true,
+            ..Default::default()
+        };
+        let router = manager
+            .kv_chooser_for(
+                &endpoint,
+                16,
+                Some(config),
+                None,
+                crate::protocols::common::timing::WORKER_TYPE_DECODE,
+                Some("test-model".to_string()),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(discovery.list(query).await.unwrap(), before);
+        drop(router);
+        distributed.shutdown();
     }
 
     #[tokio::test]

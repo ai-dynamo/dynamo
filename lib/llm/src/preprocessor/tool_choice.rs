@@ -203,7 +203,9 @@ impl OpenAIPreprocessor {
     }
 }
 
-fn has_explicit_guided_decoding(request: &NvCreateChatCompletionRequest) -> bool {
+/// Whether top-level `guided_*` fields install a grammar; mirrors
+/// `GuidedDecodingOptions::from_optional`.
+pub(super) fn has_explicit_guided_decoding(request: &NvCreateChatCompletionRequest) -> bool {
     request.common.guided_json.is_some()
         || request.common.guided_regex.is_some()
         || request

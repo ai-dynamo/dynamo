@@ -1,0 +1,220 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Nemotron 3.5 Super VL on B200: four aggregated workers, TP1 / EP1 each.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: super-3-5-trtllm-b200-agg-swebenchpro-config
+data:
+  agg.yaml: |
+    tensor_parallel_size: 1
+    moe_expert_parallel_size: 1
+    max_batch_size: 64
+    max_num_tokens: 16384
+    encoder_max_num_tokens: 16384
+    max_seq_len: 1048576
+    enable_chunked_prefill: true
+    trust_remote_code: true
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 64
+    kv_cache_config:
+      dtype: fp8
+      tokens_per_block: 64
+      # Reserve headroom for MTP replay buffers as the Mamba snapshot pool grows.
+      free_gpu_memory_fraction: 0.80
+      enable_block_reuse: true
+      use_kv_cache_manager_v2: true
+      # Allocate more of the cache to Mamba snapshots for idle-session retention.
+      avg_seq_len: 20480
+      host_cache_size: 214748364800
+      mamba_state_config:
+        # Forks resume near the fork; long prefills advance 8192 tokens per step.
+        periodic_snapshot_interval: 8192
+        additional_snapshot_offsets_from_end:
+        - 64
+        enable_branch_snapshot: true
+      mamba_ssm_cache_dtype: float16
+      mamba_ssm_stochastic_rounding: true
+      mamba_ssm_philox_rounds: 5
+    moe_config:
+      backend: TRTLLM
+    speculative_config:
+      decoding_type: MTP
+      max_draft_len: 3
+    # Guided decoding's in-graph host callbacks stall the stream on the default interrupt wake.
+    enable_low_latency_host_dispatch: true
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: super-3-5-trtllm-b200-agg-swebenchpro
+spec:
+  backendFramework: trtllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
+          imagePullPolicy: IfNotPresent
+          command: [python3]
+          args:
+          - -m
+          - dynamo.frontend
+          - --http-port
+          - '8000'
+          # KV router mode places new sessions by load only: workers publish no KV events, so the
+          # router's prefix index stays empty. Session affinity provides prefix-cache reuse.
+          - --kv-cache-block-size
+          - '64'
+          - --router-session-affinity-mode
+          - hard
+          - --router-session-affinity-ttl-secs
+          - '7200'
+          - --tokenizer
+          - fastokens
+          - --no-tokenizer-fallback
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          - name: FASTOKENS_BPE_THREADS
+            value: "16"
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          resources:
+            requests:
+              cpu: "16"
+              memory: 128Gi
+  - name: Worker
+    type: worker
+    replicas: 4
+    sharedMemorySize: 64Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0-nemotron-3.5-super-vl-dev.1
+          imagePullPolicy: IfNotPresent
+          # TensorRT-LLM uses mpi4py dynamic spawn even at TP1. This image's Open MPI 5.0.10rc2
+          # truncates singleton identities for long pod hostnames (ompi_pmix_print_id has a 50-byte
+          # buffer), breaking spawn.
+          # `mpirun` avoids that singleton bootstrap; `-np 1` starts one parent.
+          # `--allow-run-as-root` matches `runAsUser: 0` below. No PRTE env vars or `--bind-to none`
+          # are needed.
+          # Revisit when the image fixes MPI: https://github.com/open-mpi/ompi/blob/v5.0.10/ompi/runtime/ompi_rte.c
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 30
+            timeoutSeconds: 30
+            failureThreshold: 480
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 30
+            timeoutSeconds: 30
+            failureThreshold: 30
+            successThreshold: 1
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 30
+            timeoutSeconds: 30
+            failureThreshold: 30
+            successThreshold: 1
+          command: [mpirun, --allow-run-as-root, -np, "1", python3]
+          args:
+          - -m
+          - dynamo.trtllm
+          - --enable-multimodal
+          - --model
+          - $(MODEL_NAME)
+          - --served-model-name
+          - $(SERVED_MODEL_NAME)
+          - --extra-engine-args
+          - /config/agg.yaml
+          - --disaggregation-mode
+          - agg
+          - --dyn-reasoning-parser
+          - nemotron_v3
+          - --dyn-tool-call-parser
+          - qwen3_coder
+          env:
+          - name: MODEL_NAME
+            value: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+          - name: SERVED_MODEL_NAME
+            value: nvidia/nemotron-3.5-super-vl-120b-a12b
+          - name: HF_HOME
+            value: /shared-model-cache
+          # HF_HOME is the shared NFS PVC and trust_remote_code writes dynamic
+          # modules + hf_remote_code.lock there. With more than one worker they
+          # race on that single lock file and crashloop (EROFS). Keep it local.
+          - name: HF_MODULES_CACHE
+            value: /tmp/hf_modules
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          # The below is needed to allow the model to exceed its config's maximum length.
+          - name: TLLM_ALLOW_LONG_MAX_MODEL_LEN
+            value: "1"
+          # Use 4 KiB pages to avoid memory compaction during host-cache allocation.
+          - name: TLLM_KV_CACHE_MANAGER_V2_THP
+            value: "0"
+          # Without a backend, response_format is parsed then silently dropped.
+          - name: DYN_TRTLLM_GUIDED_DECODING_BACKEND
+            value: xgrammar
+          # For synthetic throughput tests only. Do not use for accuracy tests.
+          # Temperature 1, DL 3: AL 3.2418 includes one target token.
+          # Force 2.2418 accepted draft tokens (AL minus one).
+          # - name: TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS
+          #   value: "2.2418"
+          resources:
+            requests:
+              cpu: "16"
+              memory: 328Gi
+              ephemeral-storage: 64Gi
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+          - name: trtllm-config
+            mountPath: /config
+            readOnly: true
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: trtllm-config
+          configMap:
+            name: super-3-5-trtllm-b200-agg-swebenchpro-config

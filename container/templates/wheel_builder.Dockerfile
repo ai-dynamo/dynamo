@@ -326,12 +326,14 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # the media formats we actually build and use, not ffmpeg's full default decoder
 # set. A blanket --disable-decoders/--disable-demuxers/--disable-parsers plus a
 # narrow allowlist keeps the shipped libav*.so limited to that set. The allowlist
-# covers exactly two paths: (1) the encode CLI ingesting rawvideo frames from
+# covers three paths: (1) the encode CLI ingesting rawvideo frames from
 # imageio over a pipe and encoding with libvpx_vp9, and (2) the Rust media-ffmpeg
 # VideoDecoder decoding VP8/VP9 in mp4/webm/mkv (test fixtures are VP9-in-mp4).
 # No H.264 parser/decoder/encoder is enabled — H.264 is not built at all. Image
 # decode does not use ffmpeg (it goes through the Rust `image` crate), so no
 # still-image decoders are enabled here.
+# (3) vLLM's `vllm-rs` video decode runs `ffprobe`, then image2pipe/ppm (or
+# rawvideo) output: uncompressed, no royalty-bearing codec. Do not add --disable-ffprobe.
 # The `fd` protocol is enabled alongside `pipe`: `ffmpeg -i -` reads stdin via
 # the `fd:` protocol on ffmpeg 8.x and 9.x (not `pipe:`), so omitting it breaks
 # the imageio encode path with "Protocol not found. Did you mean file:fd:?".
@@ -398,11 +400,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --enable-shared \
         --enable-libvpx \
         --disable-encoders \
-        --enable-encoder=libvpx_vp9 \
+        --enable-encoder=libvpx_vp9,ppm,rawvideo \
         --disable-decoders \
         --enable-decoder=vp8,vp9,rawvideo \
         --disable-muxers \
-        --enable-muxer=mov,mp4,matroska,webm \
+        --enable-muxer=mov,mp4,matroska,webm,image2pipe,rawvideo \
         --disable-demuxers \
         --enable-demuxer=mov,matroska,rawvideo \
         --disable-parsers \
@@ -432,6 +434,14 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
       || { echo "ERROR: the in-tree ffmpeg does not list its VP9 encoder; it is" >&2; \
            echo "       either broken or unable to start, and the codec guard" >&2; \
            echo "       below would then pass without checking anything." >&2; \
+           exit 1; }; } && \
+    # The vllm-rs video decode path needs ffprobe, the image2pipe muxer and the
+    # ppm encoder; without them every sidecar video request fails with HTTP 500.
+    { /usr/local/bin/ffmpeg -hide_banner -muxers 2>/dev/null | grep -qE '^ *E +image2pipe ' \
+      && /usr/local/bin/ffmpeg -hide_banner -encoders 2>/dev/null | grep -qE '^ *V[^ ]* +ppm ' \
+      && /usr/local/bin/ffprobe -hide_banner -version >/dev/null 2>&1 \
+      || { echo "ERROR: the in-tree ffmpeg lacks the image2pipe muxer, the ppm" >&2; \
+           echo "       encoder or the ffprobe CLI that vLLM's video decode needs." >&2; \
            exit 1; }; } && \
     # Compliance guard: fail the build if any royalty-bearing / HW codec surface
     # leaked into the in-tree ffmpeg. By construction this build is VP9-only, so a
