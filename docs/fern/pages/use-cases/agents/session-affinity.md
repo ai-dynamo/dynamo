@@ -50,13 +50,16 @@ python -m dynamo.frontend \
 
 ## Check That It Works
 
-Enable [tracing](agent-tracing.md) and list the worker for each request in a session:
+Enable [tracing](agent-tracing.md) and list the worker for each request in a session. The default trace sink writes gzip segments:
 
 ```bash
-jq -c 'select(.event_type=="request_end")
-       | {session: .agent_context.session_id, worker: .request.worker,
-          cached_tokens: .request.cached_tokens}' /tmp/dynamo-request-trace-*.jsonl
+gzip -cd "${DYN_REQUEST_TRACE_FILE_PATH:-/tmp/dynamo-request-trace}".*.jsonl.gz \
+  | jq -c 'select(.event_type=="request_end")
+           | {session: .agent_context.session_id, worker: .request.worker,
+              cached_tokens: .request.cached_tokens}'
 ```
+
+If you started the endpoint with `agg_agent.sh`, it writes plain JSONL instead; use the path it prints at startup with `jq` directly.
 
 With `hard` affinity, every row for one session shows the same worker, and `cached_tokens` grows as the conversation grows.
 

@@ -356,6 +356,8 @@ To run your own vision tower, see [Custom Vision Encoders](custom-vision-encoder
   operation failures remain available at debug level. Dynamo does not currently
   use a bounded asynchronous write queue.
 
+  <a id="cache-service-deployment"></a>
+
   **Cache Service Deployment**
 
   Dynamo uses the Redis Cluster protocol for both backends. The client uses
