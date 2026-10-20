@@ -6,7 +6,6 @@ import base64
 import functools
 import importlib
 import inspect
-import json
 import logging
 import math
 import os
@@ -160,9 +159,6 @@ def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
 
 
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
-# Runtime capability advertising that build_sampling_params honors `vllm_xargs`.
-# The frontend routes requests carrying the field only to WorkerSets publishing it.
-VLLM_XARGS_CAPABILITY: Final = "vllm_xargs"
 # vLLM fills these extra_args keys from dedicated request fields; never from
 # client-supplied `vllm_xargs`.
 _RESERVED_VLLM_XARGS_KEYS: Final = frozenset(
@@ -2638,7 +2634,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lora_needs_set.append(WorkerType.Encode)
 
         apply_data_parallel_runtime_config(runtime_config, self.dp_range)
-        runtime_config.set_engine_specific(VLLM_XARGS_CAPABILITY, json.dumps(True))
         publish_kv_hint_capabilities(
             runtime_config,
             self.config.engine_args,

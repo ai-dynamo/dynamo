@@ -90,7 +90,6 @@ use crate::protocols::openai::{
         NvCreateResponse, NvResponse, ResponseParams, ResponsesConversionError,
         chat_completion_to_response,
     },
-    validate,
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::protocols::unified::UnifiedRequest;
@@ -510,17 +509,6 @@ impl ErrorMessage {
         match e {
             crate::discovery::ModelManagerError::ModelUnavailable(model) => {
                 Self::service_unavailable_with_body(model_not_ready_message(model))
-            }
-            crate::discovery::ModelManagerError::CapabilityUnsupported { capabilities, .. } => {
-                let verb = if capabilities.len() == 1 { "is" } else { "are" };
-                let capabilities = capabilities
-                    .iter()
-                    .map(|capability| format!("`{capability}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                Self::unsupported_content_error(format!(
-                    "{capabilities} {verb} not supported by the workers serving this model"
-                ))
             }
             _ => Self::model_not_found(),
         }
@@ -1310,10 +1298,7 @@ async fn completions_single(
     // todo - error handling should be more robust
     let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine_with_parsing(
-            &model,
-            &validate::required_worker_capabilities(&request.unsupported_fields),
-        )
+        .get_completions_engine_with_parsing(&model)
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1607,10 +1592,7 @@ async fn completions_batch(
 
     let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine_with_parsing(
-            &model,
-            &validate::required_worker_capabilities(&request.unsupported_fields),
-        )
+        .get_completions_engine_with_parsing(&model)
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -3568,10 +3550,7 @@ async fn chat_completions(
 
     let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(
-            &model,
-            &validate::required_worker_capabilities(&request.unsupported_fields),
-        )
+        .get_chat_completions_engine_with_parsing(&model)
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -4282,7 +4261,7 @@ async fn responses(
 
     let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model, &[])
+        .get_chat_completions_engine_with_parsing(&model)
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -4605,6 +4584,8 @@ pub fn validate_response_unsupported_fields(
 
 /// Validates sampling and output parameters on the Responses API request.
 pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), ErrorResponse> {
+    use crate::protocols::openai::validate;
+
     let map_err = |e: anyhow::Error| {
         ErrorMessage::from_http_error(
             ErrorClass::InvalidRequest,
@@ -9730,17 +9711,6 @@ mod tests {
         assert_eq!(
             ErrorMessage::from_model_error(&unavailable).0,
             StatusCode::SERVICE_UNAVAILABLE
-        );
-
-        let unsupported = ModelManagerError::CapabilityUnsupported {
-            model: "x".to_string(),
-            capabilities: vec!["vllm_xargs".to_string()],
-        };
-        let (status, body) = ErrorMessage::from_model_error(&unsupported);
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            body.message,
-            "`vllm_xargs` is not supported by the workers serving this model"
         );
     }
 
