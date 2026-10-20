@@ -12,7 +12,12 @@ from kubernetes_asyncio.client.exceptions import ApiException
 
 from tests.deploy import test_n2_rolling_upgrade as suite
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
-from tests.deploy.n2.rolling_contract import Cleanup, require_executed_cases
+from tests.deploy.n2.rolling_contract import (
+    Cleanup,
+    PodTracker,
+    check_requests,
+    require_executed_cases,
+)
 from tests.deploy.n2.rolling_http import ContractError
 from tests.deploy.test_n2_rolling_upgrade import manifest
 
@@ -194,3 +199,51 @@ async def test_watch_resumes_from_last_resource_version_and_fails_on_expired_his
             await suite.watch_pods(AsyncMock(), "ns", "dgd", "100", None, tmp_path)
     assert error.value.status == 410
     assert versions == ["100", "102"]
+
+
+@pytest.mark.parametrize("covered_at_convergence", [False, True])
+async def test_rollout_coverage_cannot_be_filled_after_convergence(
+    covered_at_convergence,
+):
+    phase = "upgrade-frontend"
+    old = {"uid": "old", "component": "Frontend", "ready": True}
+    tracker = PodTracker([old], {"old"}, "Frontend", "candidate")
+    complete = {"unary": 2, "stream": 2, "limited": 2}
+    during = {
+        "failures": 0,
+        "phases": {phase: complete if covered_at_convergence else {"unary": 1}},
+    }
+    # The later snapshot can fill missing SSE coverage after the outstanding unary completes.
+    after = {"failures": 0, "phases": {phase: complete}}
+    summaries = AsyncMock(side_effect=[during, after])
+
+    async def observe():
+        tracker.apply("DELETED", old)
+        for uid in ("new-1", "new-2"):
+            tracker.apply(
+                "ADDED",
+                {
+                    "uid": uid,
+                    "component": "Frontend",
+                    "active": True,
+                    "ready": True,
+                    "terminating": False,
+                    "image": "candidate",
+                    "image_id": "sha256:candidate",
+                    "gpus": 0,
+                    "restarts": 0,
+                },
+            )
+
+    watching = MagicMock()
+    watching.done.return_value = False
+    if covered_at_convergence:
+        assert (
+            await suite.wait_for_rollout(tracker, observe, summaries, phase, watching)
+            == {}
+        )
+    else:
+        with pytest.raises(ContractError, match="Insufficient request coverage"):
+            await suite.wait_for_rollout(tracker, observe, summaries, phase, watching)
+        check_requests(after, [phase])
+    assert summaries.await_count == 1

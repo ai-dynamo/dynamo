@@ -79,6 +79,28 @@ async def watch_pods(api, namespace, name, resource_version, tracker, output):
                     tracker.apply(event["type"], pod_record(pod))
 
 
+async def wait_for_rollout(tracker, observe, summary, phase, watching, counters=None):
+    observed_counts = {}
+    deadline = time.monotonic() + 1200
+    while time.monotonic() < deadline:
+        if watching.done():
+            await watching
+        await observe()
+        pods = list(tracker.pods.values())
+        if counters is not None:
+            observed_counts.update(await counters(pods))
+        current = await summary()
+        check(
+            current.get("failures", 0) == 0,
+            "Request failed during image rollout",
+        )
+        if converged(pods, tracker.component, tracker.image, tracker.old_uids):
+            check_requests(current, [phase])
+            return observed_counts
+        await asyncio.sleep(2)
+    raise TimeoutError(f"{tracker.component} did not converge to candidate in 1200s")
+
+
 def manifest(name, old, scenario, model, client_image):
     # One immutable model snapshot per Pod; no code from the checkout is
     # installed in either inference component. Init containers use no GPU.
@@ -487,26 +509,17 @@ print(json.dumps(result))
                         await deployment.update_component_images(
                             {role: candidates[role]}, version
                         )
-                        deadline = time.monotonic() + 1200
-                        while time.monotonic() < deadline:
-                            if watching.done():
-                                await watching
-                            await observe()
-                            pods = list(tracker.pods.values())
-                            if role == "decode":
-                                observed_counts.update(await counters(pods))
-                            current = await summary()
-                            check(
-                                current.get("failures", 0) == 0,
-                                "Request failed during image rollout",
+                        observed_counts.update(
+                            await wait_for_rollout(
+                                tracker,
+                                observe,
+                                summary,
+                                phase,
+                                watching,
+                                counters if role == "decode" else None,
                             )
-                            if converged(pods, role, candidates[role], old_uids):
-                                break
-                            await asyncio.sleep(2)
-                        else:
-                            raise TimeoutError(
-                                f"{role} did not converge to candidate in 1200s"
-                            )
+                        )
+                        pods = list(tracker.pods.values())
                         watching.cancel()
                     overlap = tracker.ready_overlap_seen
                     report["stages"].append(
@@ -539,9 +552,10 @@ print(json.dumps(result))
                         overlap,
                         f"No old/new Ready overlap observed for {role}; cannot claim rolling coverage",
                     )
-                    # Keep phase traffic going after convergence to cover requests
-                    # that were already in flight when the final old Pod exited.
-                    await hold(phase)
+                    # Keep draining in-flight requests without extending rollout coverage.
+                    drain = phase + "-drain"
+                    phases.append(drain)
+                    await hold(drain)
                     stable = "after-" + role.lower()
                     phases.append(stable)
                     await hold(stable)
