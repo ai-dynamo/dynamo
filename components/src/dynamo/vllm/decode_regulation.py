@@ -67,6 +67,7 @@ Environment (prefix DYN_DECODE_REGULATION_):
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -406,6 +407,29 @@ def cand_from_request(
     at ``max_tokens`` (``now``: wall-clock seconds, as ``req.arrival_time``)."""
     now_ms = (time.time() if now is None else now) * 1e3
     return _cand(req, _static_from_request(req, cfg), cfg, now_ms)
+
+
+def vllm_skip_unsupported(scheduler_cls: Any, request_cls: Any) -> str:
+    """Why vLLM's scheduler cannot carry the skip, or "" if it can.
+
+    The skip relies on vLLM internals that are not a public API: ``Request`` sets
+    ``next_decode_eligible_step``, and ``Scheduler.schedule()`` increments
+    ``current_step`` before its running loop compares the two. A vLLM upgrade that
+    changes either disables regulation (stock scheduling) instead of failing."""
+    try:
+        req_src = inspect.getsource(request_cls.__init__)
+        sched_src = inspect.getsource(scheduler_cls.schedule)
+    except (OSError, TypeError, AttributeError) as e:
+        return f"cannot read the vLLM scheduler source to verify the skip ({e})"
+    if "self.next_decode_eligible_step" not in req_src:
+        return "vLLM Request has no next_decode_eligible_step"
+    inc = sched_src.find("self.current_step += 1")
+    cmp = sched_src.find("self.current_step < request.next_decode_eligible_step")
+    if inc < 0 or cmp < 0:
+        return "vLLM Scheduler.schedule() no longer checks next_decode_eligible_step"
+    if inc > cmp:
+        return "vLLM Scheduler.schedule() increments current_step after the skip check"
+    return ""
 
 
 class DecodeRegulationMixin:

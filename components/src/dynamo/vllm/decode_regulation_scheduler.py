@@ -17,7 +17,14 @@ from __future__ import annotations
 
 import logging
 
-from dynamo.vllm.decode_regulation import DecodeRegulationConfig, DecodeRegulationMixin
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.request import Request
+
+from dynamo.vllm.decode_regulation import (
+    DecodeRegulationConfig,
+    DecodeRegulationMixin,
+    vllm_skip_unsupported,
+)
 from dynamo.vllm.instrumented_scheduler import InstrumentedScheduler
 
 logger = logging.getLogger(__name__)
@@ -27,6 +34,9 @@ class DecodeRegulationScheduler(DecodeRegulationMixin, InstrumentedScheduler):
     def __init__(self, vllm_config, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)
         unsupported = []
+        skip_unsupported = vllm_skip_unsupported(Scheduler, Request)
+        if skip_unsupported:
+            unsupported.append(skip_unsupported)
         if getattr(self, "use_pp", False):
             unsupported.append(
                 "pipeline parallelism (placeholders may be non-zero on rejoin)"

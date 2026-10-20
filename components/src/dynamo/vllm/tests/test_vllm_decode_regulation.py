@@ -18,6 +18,7 @@ from dynamo.vllm.decode_regulation import (
     attach_identity,
     cand_from_request,
     identity_from_request,
+    vllm_skip_unsupported,
 )
 
 pytestmark = [
@@ -467,3 +468,61 @@ def test_no_regulation_without_an_interactive_request():
     assert step(s) == {r.request_id for r in reqs}
     d = DecodeRegulationPolicy(cfg()).decide(cands(n_subs=16)[1:])
     assert not d.engaged and not d.skip
+
+
+# --- vLLM internals the skip relies on --------------------------------------
+
+
+class _Req:
+    def __init__(self):
+        self.next_decode_eligible_step = 0
+
+
+class _ReqWithoutField:
+    def __init__(self):
+        self.num_computed_tokens = 0
+
+
+class _Sched:
+    def schedule(self):
+        self.current_step += 1
+        for request in self.running:
+            if self.current_step < request.next_decode_eligible_step:
+                continue
+
+
+class _SchedWithoutCheck:
+    def schedule(self):
+        self.current_step += 1
+
+
+class _SchedIncrementsLate:
+    def schedule(self):
+        for request in self.running:
+            if self.current_step < request.next_decode_eligible_step:
+                continue
+        self.current_step += 1
+
+
+def test_skip_support_check_accepts_v031_shape():
+    assert vllm_skip_unsupported(_Sched, _Req) == ""
+
+
+@pytest.mark.parametrize(
+    "sched,req,reason",
+    [
+        (_Sched, _ReqWithoutField, "no next_decode_eligible_step"),
+        (_SchedWithoutCheck, _Req, "no longer checks"),
+        (_SchedIncrementsLate, _Req, "after the skip check"),
+        (_Sched, dict, "cannot read"),
+    ],
+)
+def test_skip_support_check_disables_on_changed_vllm(sched, req, reason):
+    assert reason in vllm_skip_unsupported(sched, req)
+
+
+def test_installed_vllm_supports_the_skip():
+    """Fails on a vLLM upgrade that changes the internals the skip relies on."""
+    scheduler = pytest.importorskip("vllm.v1.core.sched.scheduler")
+    request = pytest.importorskip("vllm.v1.request")
+    assert vllm_skip_unsupported(scheduler.Scheduler, request.Request) == ""
