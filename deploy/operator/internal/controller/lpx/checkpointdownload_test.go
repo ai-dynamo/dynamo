@@ -268,6 +268,45 @@ func TestBuildCheckpointAdoptionSurvivesPendingBuildDownload(t *testing.T) {
 	require.Nil(t, upgraded.Status.CheckpointDownload)
 }
 
+func TestReadyCheckpointRefreshGatesAChangedCheckpoint(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		recorded    string
+		wantRequeue time.Duration
+		wantSets    int
+	}{
+		{name: "same checkpoint tolerates a pending refresh", recorded: checkpointTestKey, wantSets: 1},
+		{name: "changed checkpoint stays gated", recorded: checkpointTestOtherKey, wantRequeue: modelDownloadRequeueAfter},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Observe a Ready deployment whose stale record confirms one checkpoint")
+			child, dgd, baseRegistry := newLPXCheckpointTestDGD(t, deploymentcapnpv1.CompilationMode_lpx)
+			registry := &fakeModelDownloadRegistry{ModelRegistry: baseRegistry}
+			reconciler := newLPXCheckpointTestReconciler(t, registry, child, dgd)
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+			require.NoError(t, reconciler.Get(t.Context(), request.NamespacedName, child))
+			child.Status.ObservedGeneration = child.Generation
+			child.Status.Conditions = []metav1.Condition{{
+				Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, Reason: "Ready", LastTransitionTime: metav1.Now(),
+			}}
+			child.Status.CheckpointDownload = &v1alpha1.CheckpointDownloadStatus{
+				Checkpoints:   []string{test.recorded},
+				LastCheckedAt: &metav1.Time{Time: time.Now().Add(-modelDownloadRefreshInterval)},
+			}
+			require.NoError(t, reconciler.Status().Update(t.Context(), child))
+
+			t.Log("Check the build's checkpoint while its download is pending")
+			result, err := reconciler.Reconcile(t.Context(), request)
+			require.NoError(t, err)
+			require.Equal(t, []string{checkpointTestKey}, registry.checkpointCalls)
+			require.Equal(t, test.wantRequeue, result.RequeueAfter)
+			sets := &grovev1alpha1.PodCliqueSetList{}
+			require.NoError(t, reconciler.List(t.Context(), sets))
+			require.Len(t, sets.Items, test.wantSets)
+		})
+	}
+}
+
 func TestPendingCheckpointKeepsReleasingAgentPods(t *testing.T) {
 	for _, test := range []struct {
 		name        string
@@ -419,8 +458,6 @@ func newLPXCheckpointTestDGD(
 	return newLPXTestDeployment(t, dgd), dgd, registry
 }
 
-// writeLPXCheckpointTestBuild writes a deployment.v1 build under root that
-// names the checkpoint model at revision.
 func writeLPXCheckpointTestBuild(
 	t *testing.T,
 	root, buildID string,
@@ -493,7 +530,6 @@ func writeLPXCheckpointTestBuild(
 	require.NoError(t, os.WriteFile(filepath.Join(root, buildID, "deployment.v1.capnp.bin"), payload, 0o600))
 }
 
-// newLPXCheckpointTestReconciler returns a reconciler with Model Express configured.
 func newLPXCheckpointTestReconciler(
 	t *testing.T,
 	registry lpx.ModelRegistry,
@@ -506,7 +542,6 @@ func newLPXCheckpointTestReconciler(
 	return reconciler
 }
 
-// renderedWeightsPaths returns every CYBORG_WEIGHTS_PATH value in the set's containers.
 func renderedWeightsPaths(set grovev1alpha1.PodCliqueSet) []string {
 	var paths []string
 	for _, clique := range set.Spec.Template.Cliques {

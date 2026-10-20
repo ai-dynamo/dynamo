@@ -41,17 +41,22 @@ func (r *graphReconciler) reconcileCheckpointDownloads(
 		recheck       bool
 	)
 
+	checkpoints := workloadCheckpoints(workloads)
 	if checkpointDownload := deployment.Status.CheckpointDownload; checkpointDownload != nil {
 		ready := meta.IsStatusConditionTrue(deployment.Status.Conditions, v1alpha1.LPXReadyCondition)
 		lastCheckedAt = checkpointDownload.LastCheckedAt
-		recheck = ready && deployment.Status.ObservedGeneration == deployment.Generation && lastCheckedAt != nil
+
+		// Only a refresh of the confirmed set may tolerate a failed check; a
+		// changed set, such as a rebuilt build reference, stays gated.
+		recheck = ready && deployment.Status.ObservedGeneration == deployment.Generation && lastCheckedAt != nil &&
+			slices.Equal(checkpointKeys(checkpoints), checkpointDownload.Checkpoints)
 
 		if lastCheckedAt != nil && time.Since(lastCheckedAt.Time) < modelDownloadRefreshInterval {
 			existing = checkpointDownload.Checkpoints
 		}
 	}
 
-	downloaded, pending, err := ensureCheckpointsDownloaded(ctx, workloadCheckpoints(workloads), r.modelRegistry, existing)
+	downloaded, pending, err := ensureCheckpointsDownloaded(ctx, checkpoints, r.modelRegistry, existing)
 
 	// Date confirmed checkpoints by their oldest confirmation so that pending
 	// passes reuse them without extending their freshness.
@@ -159,4 +164,13 @@ func workloadCheckpoints(workloads map[string]*lpx.Workload) []*lpx.Checkpoint {
 		checkpoints[index] = checkpointsByKey[key]
 	}
 	return checkpoints
+}
+
+// checkpointKeys returns the keys of checkpoints, which workloadCheckpoints sorts.
+func checkpointKeys(checkpoints []*lpx.Checkpoint) []string {
+	keys := make([]string, 0, len(checkpoints))
+	for _, checkpoint := range checkpoints {
+		keys = append(keys, lpx.CheckpointKey(checkpoint))
+	}
+	return keys
 }

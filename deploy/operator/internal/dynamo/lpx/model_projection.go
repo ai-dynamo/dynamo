@@ -79,7 +79,6 @@ type ModelProjection struct {
 	checkpoint *Checkpoint
 }
 
-// Checkpoint returns the checkpoint projected into the Cyborg conductor, or nil.
 func (p *ModelProjection) Checkpoint() *Checkpoint {
 	return p.checkpoint
 }
