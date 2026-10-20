@@ -25,6 +25,7 @@ fn transfer_timing(delay_ms: Option<f64>) -> HandoffTransferTiming {
         mode: KvTransferTimingMode::FullPrompt,
         full_prompt_tokens: 1,
         kv_bytes_per_token: delay_ms.map(|delay_ms| (delay_ms * 1_000_000.0) as usize),
+        state_bytes: 0,
         bandwidth_gb_s: delay_ms.map(|_| 1.0),
     }
 }
@@ -132,6 +133,7 @@ fn timing_mode_selects_full_or_destination_missing_footprint() {
                     mode,
                     full_prompt_tokens: 8,
                     kv_bytes_per_token: Some(1_000_000),
+                    state_bytes: 0,
                     bandwidth_gb_s: Some(1.0),
                 },
             })
@@ -164,6 +166,7 @@ fn full_destination_hit_keeps_zero_delay_transfer_transition() {
                 mode: KvTransferTimingMode::DestinationMissing,
                 full_prompt_tokens: 8,
                 kv_bytes_per_token: Some(1_000_000),
+                state_bytes: 0,
                 bandwidth_gb_s: Some(1.0),
             },
         })
@@ -547,4 +550,17 @@ fn duplicates_are_idempotent_but_conflicts_are_rejected() {
             })
             .is_err()
     );
+}
+
+#[test]
+fn request_state_bytes_survive_the_replay_timing_adapter() {
+    let timing = HandoffTransferTiming {
+        mode: KvTransferTimingMode::DestinationMissing,
+        full_prompt_tokens: 8,
+        kv_bytes_per_token: Some(1_000_000),
+        state_bytes: 2_000_000,
+        bandwidth_gb_s: Some(1.0),
+    };
+    assert_eq!(timing.delay_ms(0), Some(2.0));
+    assert_eq!(timing.delay_ms(3), Some(5.0));
 }

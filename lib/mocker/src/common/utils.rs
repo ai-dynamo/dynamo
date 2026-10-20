@@ -21,6 +21,7 @@ pub fn prefill_handoff_transfer_timing(
         mode,
         full_prompt_tokens: num_input_tokens,
         kv_bytes_per_token,
+        state_bytes: 0,
         bandwidth_gb_s: kv_transfer_bandwidth,
     }
 }
