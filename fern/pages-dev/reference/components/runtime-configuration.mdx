@@ -297,7 +297,7 @@ address.
 </ParamField>
 
 <ParamField path="--dyn-structural-tag" type="boolean or JSON object" default="enabled">
-  Structural tags default to enabled with scope `always` and schema mode `auto` for regular workers. Pass `false` to disable optional guidance, or provide a JSON object for advanced options. Rust retains native tags for Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang respect the opt-out. Native Rust sidecars retain their conservative default. See [Structural Tag](../../use-cases/tool-calling-and-reasoning/structural-tag.md) for configuration and backend compatibility limitations.
+  Structural tags default to enabled with scope `always` and schema mode `auto` for regular workers. Pass `false` to disable optional guidance, or provide a JSON object for advanced options. Rust retains native tags for Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang respect the opt-out. Of the native Rust sidecars, only SGLang shares this default; the vLLM and TensorRT-LLM sidecars default to `false` until their engines compile these tags. See [Structural Tag](../../use-cases/tool-calling-and-reasoning/structural-tag.md) for configuration and backend compatibility limitations.
 
   Environment variable: `DYN_STRUCTURAL_TAG`
 </ParamField>
