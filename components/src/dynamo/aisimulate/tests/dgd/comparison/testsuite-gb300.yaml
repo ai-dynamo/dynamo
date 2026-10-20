@@ -5,10 +5,6 @@ tests:
   - case: qwen3-32b-vllm-agg
     hardware: gb300-4gpu
     exceptions:
-      render:
-        profiler-v1beta1:
-          status: skipped
-          reason: DGDR v1beta1 does not define gb300 in its gpuSku enum.
       deploy:
         sweeper-aic:
           status: skipped

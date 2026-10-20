@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 hardware:
-  gpuSku: gb300
+  gpuSku: b300_sxm
   totalGpus: 4
   numGpusPerNode: 4
   interconnect: nvlink

@@ -149,9 +149,9 @@ GPU SKU and GPU budget.
 Hardware patches apply only to profiler inputs. They never repair a generated DGD. Provider
 specialization, when needed, is a subsequent Kustomize composition rather than part of profiling.
 
-Hardware support may differ between profilers. For example, AI Simulate recognizes `gb300`, while
-the DGDR v1beta1 `gpuSku` enum does not. A suite using that profile skips only the unsupported v1
-render phase and still exercises Sweeper; it does not rename GB300 to a different supported SKU.
+Hardware identifiers may differ between profilers. For GB300 systems, DGDR v1beta1 uses the GPU SKU
+`b300_sxm`, while AISimulate uses the system name `gb300`. The comparison runner normalizes this
+known pair when it verifies that both inputs describe the same hardware.
 
 ## Suites and individual runs
 

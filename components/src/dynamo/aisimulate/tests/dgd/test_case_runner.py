@@ -366,21 +366,16 @@ def test_repository_suite_resolves_every_ashna_case() -> None:
         assert case.recipe is not None
 
 
-def test_repository_gb300_suite_composes_sweeper_and_skips_v1() -> None:
+def test_repository_gb300_suite_composes_both_profiler_inputs() -> None:
     suite_path = run_cases._ROOT / "testsuite-gb300.yaml"
     [entry] = run_cases.load_suite(suite_path)
 
     assert entry.case == "qwen3-32b-vllm-agg"
     assert entry.hardware == "gb300-4gpu"
-    assert entry.exception_for("render", "profiler-v1beta1") == (
-        run_cases.SuiteException(
-            status="skipped",
-            reason="DGDR v1beta1 does not define gb300 in its gpuSku enum.",
-        )
-    )
+    assert entry.exception_for("render", "profiler-v1beta1") is None
     case = run_cases.load_case(entry.case, run_cases.load_hardware(entry.hardware))
     assert case.dgdr_input["hardware"] == {
-        "gpuSku": "gb300",
+        "gpuSku": "b300_sxm",
         "totalGpus": 4,
         "numGpusPerNode": 4,
         "interconnect": "nvlink",
