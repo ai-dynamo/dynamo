@@ -84,7 +84,7 @@ struct HicacheObjectLayout {
     #[serde(default)]
     key_prefix: Option<String>,
     /// None for legacy layouts. Some(false) means per-rank keys that one suffix list
-    /// cannot describe, so `is_valid` rejects it (as it does `pp_size > 1`).
+    /// cannot describe, so `is_valid` rejects it.
     #[serde(default)]
     is_mla_backend: Option<bool>,
     #[serde(default)]
@@ -97,9 +97,12 @@ impl HicacheObjectLayout {
     fn is_valid(&self, config: &SglangHicacheMooncakeConfig) -> bool {
         !self.pools.is_empty()
             && self.pools.iter().all(HicacheObjectPool::is_valid)
-            && config.pp_size == 1
-            && self.pp_size.is_none_or(|size| size == 1)
-            && self.pp_rank.is_none_or(|rank| rank == 0)
+            && self
+                .pp_size
+                .map_or(config.pp_size == 1, |size| size == config.pp_size)
+            && self
+                .pp_rank
+                .is_none_or(|rank| config.pp_size == 1 && rank == 0)
             && self.is_mla_backend != Some(false)
     }
 }
@@ -1515,6 +1518,30 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_pp_layout_needs_the_objects_of_every_stage() {
+        let tokens = (0..4).collect::<Vec<_>>();
+        let hashes = logical_page_hashes(&tokens, 4, false);
+        let config = SglangHicacheMooncakeConfig {
+            pp_size: 2,
+            hicache_object_layout: Some(HicacheObjectLayout {
+                pools: vec![all_pages_pool("_0_data"), all_pages_pool("_1_data")],
+                is_mla_backend: Some(true),
+                pp_rank: None,
+                pp_size: Some(2),
+                ..Default::default()
+            }),
+            ..mooncake_config()
+        };
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
+        store_pool_pages(&cache, &hashes, "_0_data", &[0]);
+        let hits = cache.check_blocks(&tokens, 4, None).await.unwrap();
+        assert_eq!(hits.total_hits, 0);
+        store_pool_pages(&cache, &hashes, "_1_data", &[0]);
+        let hits = cache.check_blocks(&tokens, 4, None).await.unwrap();
+        assert_eq!(hits.total_hits, 1);
+    }
+
     #[test]
     fn test_layout_rejects_advertised_rank_local_pp_and_mha() {
         for (pp_size, mla, rank, layout_pp) in [
@@ -1523,6 +1550,8 @@ mod tests {
             (1, Some(true), Some(1), Some(1)),
             (1, Some(true), Some(0), Some(2)),
             (1, None, None, Some(0)),
+            // A single stage's layout cannot stand for the other stages.
+            (2, Some(true), Some(0), Some(2)),
         ] {
             let config = SglangHicacheMooncakeConfig {
                 pp_size,

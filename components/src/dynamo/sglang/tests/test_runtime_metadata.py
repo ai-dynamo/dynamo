@@ -674,6 +674,23 @@ def test_registration_ignores_non_finite_tp_lcm_size(mooncake_registration):
     assert metadata["tp_lcm_size"] is None
 
 
+@pytest.mark.parametrize("pp_rank, published", [(None, True), (0, False), (1, False)])
+def test_registration_publishes_layout_covering_all_pp_stages(
+    mooncake_registration, hicache_layout_envelope, pp_rank, published
+):
+    # Only a layout merged across stages (pp_rank null) can cover them all.
+    mooncake_registration.server_args.pp_size = 2
+    layout = hicache_layout_envelope["hicache_object_layout"]
+    layout["pp_size"], layout["pp_rank"] = 2, pp_rank
+    config = mooncake_registration.run()
+    if not published:
+        assert "sglang_hicache_mooncake" not in config.runtime_data
+        return
+    metadata = json.loads(config.runtime_data["sglang_hicache_mooncake"])
+    assert metadata["pp_size"] == 2
+    assert metadata["hicache_object_layout"] == layout
+
+
 def test_registration_accepts_uint32_trailing_pages_limit(
     mooncake_registration, hicache_layout_envelope
 ):

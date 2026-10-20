@@ -1107,14 +1107,21 @@ fn mooncake_runtime_data(server_info: &Value) -> Option<Value> {
             .ok_or("hicache_object_layout.pp_size")?;
         let pp_rank = layout
             .get("pp_rank")
-            .and_then(Value::as_u64)
             .ok_or("hicache_object_layout.pp_rank")?;
         let is_mla_backend = layout
             .get("is_mla_backend")
             .and_then(Value::as_bool)
             .ok_or("hicache_object_layout.is_mla_backend")?;
-        if pp_size != 1 || pp_rank != 0 || !is_mla_backend {
-            return Err("hicache_object_layout requires single-PP rank-replicated pools");
+        // One stage reports its own rank; a layout merged across PP stages reports null.
+        let pp_rank_ok = if pp_size == 1 {
+            pp_rank.as_u64() == Some(0)
+        } else {
+            pp_rank.is_null()
+        };
+        if !pp_rank_ok || !is_mla_backend {
+            return Err(
+                "hicache_object_layout requires rank-replicated pools and a merged pp_rank",
+            );
         }
         let pools = layout
             .get("pools")
@@ -1502,6 +1509,27 @@ mod tests {
                 assert_eq!(llm.data_parallel_size, Some(2));
             }
         }
+    }
+
+    #[test]
+    fn registration_publishes_pp_layout_only_when_server_info_agrees() {
+        let mut info = mooncake_server_info();
+        info["pp_size"] = json!(2);
+        info["hicache_object_layout"]["hicache_object_layout"]["pp_size"] = json!(2);
+        info["hicache_object_layout"]["hicache_object_layout"]["pp_rank"] = json!(null);
+        let config = build_engine_config(
+            &discovery(info.clone()),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.runtime_data["sglang_hicache_mooncake"]["pp_size"], 2);
+        info["pp_size"] = json!(3);
+        let config =
+            build_engine_config(&discovery(info), DisaggregationMode::Aggregated, None, None)
+                .unwrap();
+        assert!(!config.runtime_data.contains_key("sglang_hicache_mooncake"));
     }
 
     #[test]

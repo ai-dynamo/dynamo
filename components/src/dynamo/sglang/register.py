@@ -471,20 +471,22 @@ def _validate_hicache_layout(envelope: Any, server_args: ServerArgs) -> dict[str
         layout["key_prefix"] is None or isinstance(layout["key_prefix"], str)
     ):
         raise ValueError("hicache_object_layout.key_prefix must be a string or null")
-    pp_size, pp_rank = layout.get("pp_size"), layout.get("pp_rank")
+    pp_size, pp_rank = layout.get("pp_size"), layout.get("pp_rank", "missing")
+    # One stage reports its own rank; a layout merged across PP stages reports null.
+    pp_rank_ok = (
+        (type(pp_rank) is int and pp_rank == 0) if pp_size == 1 else (pp_rank is None)
+    )
     if (
         type(pp_size) is not int
-        or type(pp_rank) is not int
-        or not 0 <= pp_rank < pp_size <= 2**32 - 1
+        or not 0 < pp_size <= 2**32 - 1
+        or not pp_rank_ok
         or pp_size != (getattr(server_args, "pp_size", 1) or 1)
     ):
         raise ValueError(
             "hicache_object_layout.pp_rank/pp_size is invalid or inconsistent"
         )
-    if layout.get("is_mla_backend") is not True or pp_size != 1:
-        raise ValueError(
-            "hicache_object_layout requires single-PP rank-replicated pools"
-        )
+    if layout.get("is_mla_backend") is not True:
+        raise ValueError("hicache_object_layout requires rank-replicated pools")
     pools = layout.get("pools")
     if not isinstance(pools, list) or not pools:
         raise ValueError("hicache_object_layout.pools must be a non-empty list")
