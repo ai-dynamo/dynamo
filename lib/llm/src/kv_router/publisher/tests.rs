@@ -54,6 +54,53 @@ mod test_event_processing {
     }
 
     #[tokio::test]
+    async fn test_publish_batch_preserves_optional_session_ids() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let publisher = KvEventPublisher {
+            kv_block_size: 1,
+            source: None,
+            cancellation_token: CancellationToken::new(),
+            worker_id: 7,
+            tx,
+            next_event_id: Arc::new(AtomicU64::new(0)),
+            startup: None,
+            processor_task: tokio::spawn(async {}),
+        };
+        publisher
+            .publish_batch_with_session_ids(
+                [Some("a"), Some("b"), None]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, session)| {
+                        (
+                            KvCacheEvent {
+                                event_id: i as u64,
+                                dp_rank: 2,
+                                data: KvCacheEventData::Stored(KvCacheStoreData {
+                                    parent_hash: None,
+                                    start_position: Some(0),
+                                    blocks: Vec::new(),
+                                }),
+                            },
+                            StorageTier::Device,
+                            session.map(str::to_owned),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let batch = rx.try_recv().unwrap();
+        assert_eq!(batch.len(), 3);
+        for (event, session) in batch.into_iter().zip([Some("a"), Some("b"), None]) {
+            let event = event.into_router_event().unwrap();
+            assert_eq!(event.session_id.as_deref(), session);
+            assert_eq!(event.worker_id, 7);
+            assert_eq!(event.event.dp_rank, 2);
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn test_publish_batch_ignores_empty_and_preserves_order() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
         let publisher = KvEventPublisher {
