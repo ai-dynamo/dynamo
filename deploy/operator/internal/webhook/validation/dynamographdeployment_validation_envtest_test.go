@@ -76,6 +76,23 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	}{
 		// Baseline create-path rules.
 		{
+			name: "engineGroup creation config is explicit but its workload pathway remains gated",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{InitialSize: 2}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: DGD-driven Engine Group creation is not implemented; use a standalone DynamoGraphDeploymentEngineGroup for the gated proof of concept"},
+		},
+		{
+			name: "initialSize must satisfy the template policy independently of world count",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{
+					InitialSize: 2,
+					Policy:      &nvidiacomv1beta1.ComponentEngineGroupPolicy{MinSize: k8sptr.To[int32](3)},
+				}
+			}),
+			wantCELErr: "spec.components[1].engineGroup: Invalid value: initialSize must be greater than or equal to policy.minSize",
+		},
+		{
 			name:       "valid deployment with components",
 			deployment: betaDGDForAdmission(nil),
 		},
