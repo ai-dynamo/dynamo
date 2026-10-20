@@ -228,6 +228,19 @@ def check(base=None):
 def golden_objects(objects, latest=False):
     """Only server-assigned metadata, allocated Service IPs and condition times vary."""
     objects = json.loads(json.dumps(objects))
+    component_latest = latest and any(
+        obj["kind"] == "DynamoComponentDeployment" for obj in objects
+    )
+    worker_hash = next(
+        (
+            obj["metadata"]
+            .get("annotations", {})
+            .get("nvidia.com/current-worker-hash-v2")
+            for obj in objects
+            if obj["kind"] == "DynamoGraphDeployment"
+        ),
+        None,
+    )
     for obj in objects:
         metadata = obj["metadata"]
         if latest:
@@ -236,6 +249,22 @@ def golden_objects(objects, latest=False):
                 metadata["annotations"][
                     "nvidia.com/last-applied-hash"
                 ] = "$var:pcs-spec-hash"
+        if component_latest:
+            if obj["kind"] in (
+                "Deployment",
+                "LeaderWorkerSet",
+                "DynamoComponentDeployment",
+                "Service",
+            ):
+                # Desired-spec hashes predate API defaulting; the complete defaulted spec is compared below.
+                annotations = metadata.get("annotations", {})
+                if "nvidia.com/last-applied-hash" in annotations:
+                    annotations["nvidia.com/last-applied-hash"] = "$ignore"
+            if obj["kind"] in ("Deployment", "LeaderWorkerSet"):
+                # Workload-controller availability is outside the operator lowering boundary.
+                obj["status"] = {"$ignore": True}
+            if worker_hash:
+                bind_worker_strings(obj, worker_hash)
         metadata.pop("managedFields", None)
         for field in ("uid", "resourceVersion", "generation", "creationTimestamp"):
             if field in metadata:
@@ -249,6 +278,25 @@ def golden_objects(objects, latest=False):
             obj["spec"]["clusterIP"] = "$ignore"
             obj["spec"]["clusterIPs"] = ["$ignore" for _ in obj["spec"]["clusterIPs"]]
     return objects
+
+
+def bind_worker_strings(value, worker_hash):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if isinstance(child, str) and worker_hash in child:
+                value[key] = "$var:worker-string:" + child.replace(
+                    worker_hash, "{{worker-hash}}"
+                )
+            else:
+                bind_worker_strings(child, worker_hash)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            if isinstance(child, str) and worker_hash in child:
+                value[index] = "$var:worker-string:" + child.replace(
+                    worker_hash, "{{worker-hash}}"
+                )
+            else:
+                bind_worker_strings(child, worker_hash)
 
 
 def bind_latest_variables(value):
