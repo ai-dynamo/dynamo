@@ -128,7 +128,7 @@ Set these on the vLLM worker.
 | `DYN_DECODE_REGULATION_TRACE` | unset | Path for a per-step JSONL trace. |
 | `DYN_DECODE_REGULATION_LOG_S` | `10` | Seconds between summary log lines. |
 
-Regulation turns itself off, with a warning, when the worker uses pipeline parallelism or speculative decoding.
+Regulation turns itself off, with a warning, when the worker uses pipeline parallelism or speculative decoding, or when the installed vLLM no longer has the scheduler internals it relies on. The worker then serves with stock vLLM scheduling.
 
 ## Observability
 
