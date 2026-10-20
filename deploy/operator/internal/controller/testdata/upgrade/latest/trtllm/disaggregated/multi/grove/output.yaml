@@ -249,7 +249,7 @@ spec:
               timeoutSeconds: 5
             volumeMounts:
             - mountPath: /ssh-pk
-              name: ''
+              name: upgrade-mpi-ssh
               readOnly: true
             - mountPath: /dev/shm
               name: shared-memory
@@ -259,13 +259,14 @@ spec:
           serviceAccountName: workers-k8s-service-discovery
           terminationGracePeriodSeconds: 60
           volumes:
+          - name: upgrade-mpi-ssh
+            secret:
+              defaultMode: 420
+              secretName: upgrade-mpi-ssh
           - emptyDir:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - name: ''
-            secret:
-              defaultMode: 420
         replicas: 1
         roleName: prefill-ldr
         startsAfter:
@@ -374,7 +375,7 @@ spec:
                 nvidia.com/gpu: '1'
             volumeMounts:
             - mountPath: /ssh-pk
-              name: ''
+              name: upgrade-mpi-ssh
               readOnly: true
             - mountPath: /dev/shm
               name: shared-memory
@@ -384,13 +385,14 @@ spec:
           serviceAccountName: workers-k8s-service-discovery
           terminationGracePeriodSeconds: 60
           volumes:
+          - name: upgrade-mpi-ssh
+            secret:
+              defaultMode: 420
+              secretName: upgrade-mpi-ssh
           - emptyDir:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - name: ''
-            secret:
-              defaultMode: 420
         replicas: 1
         roleName: prefill-wkr
     - annotations:
@@ -519,7 +521,7 @@ spec:
               timeoutSeconds: 5
             volumeMounts:
             - mountPath: /ssh-pk
-              name: ''
+              name: upgrade-mpi-ssh
               readOnly: true
             - mountPath: /dev/shm
               name: shared-memory
@@ -529,13 +531,14 @@ spec:
           serviceAccountName: workers-k8s-service-discovery
           terminationGracePeriodSeconds: 60
           volumes:
+          - name: upgrade-mpi-ssh
+            secret:
+              defaultMode: 420
+              secretName: upgrade-mpi-ssh
           - emptyDir:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - name: ''
-            secret:
-              defaultMode: 420
         replicas: 1
         roleName: decode-ldr
         startsAfter:
@@ -644,7 +647,7 @@ spec:
                 nvidia.com/gpu: '1'
             volumeMounts:
             - mountPath: /ssh-pk
-              name: ''
+              name: upgrade-mpi-ssh
               readOnly: true
             - mountPath: /dev/shm
               name: shared-memory
@@ -654,13 +657,14 @@ spec:
           serviceAccountName: workers-k8s-service-discovery
           terminationGracePeriodSeconds: 60
           volumes:
+          - name: upgrade-mpi-ssh
+            secret:
+              defaultMode: 420
+              secretName: upgrade-mpi-ssh
           - emptyDir:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - name: ''
-            secret:
-              defaultMode: 420
         replicas: 1
         roleName: decode-wkr
     headlessServiceConfig:
