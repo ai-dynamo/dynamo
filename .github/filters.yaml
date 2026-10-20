@@ -122,6 +122,8 @@ ignore:
   # pipeline (it is excluded from the `deploy` filter below).
   - 'deploy/utils/convert_api_version.py'
   - 'deploy/utils/tests/**'
+  # The path-triggered protocol tooling workflow owns these CPU tooling tests.
+  - 'scripts/protocol_compatibility/**'
   - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
@@ -158,6 +160,7 @@ ci: &ci
   - '.github/filters.yaml'
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
+  - '.github/scripts/pytest-local.sh'
   - '.github/scripts/route_buildkit.sh'
   - 'container/Dockerfile.test'
 
@@ -184,6 +187,7 @@ core:
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/artifacts/**'
   - 'components/src/dynamo/experimental/**'
   - 'components/src/dynamo/gpu_memory_service/**'
   # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
@@ -202,6 +206,7 @@ core:
   # Rust sidecars have their own classification and do not use the framework
   # container or E2E pipelines triggered by `core`.
   - '!lib/sidecar/**'
+  - '!components/src/dynamo/artifacts/vllm/**'
   - '!tests/test_generate_kustomize_openapi.py'
   - '!tests/test_kustomize_matrix.py'
   - '!**/*.md'
@@ -384,6 +389,7 @@ vllm:
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
+  - 'components/src/dynamo/artifacts/vllm/**'
   - 'container/templates/vllm_*'
   - '!**/*.md'
   - '!**/*.rst'
@@ -437,6 +443,7 @@ frontend:
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/artifacts/**'
   - 'tests/frontend/router_ais_image_smoke.py'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
@@ -450,6 +457,7 @@ frontend:
   # Sidecars are standalone Rust binaries and are not part of the frontend
   # image or its E2E test pipeline.
   - '!lib/sidecar/**'
+  - '!components/src/dynamo/artifacts/vllm/**'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -459,6 +467,8 @@ rust:
   - '**/Cargo.toml'
   - '**/Cargo.lock'
   - 'deny.toml'
+  # Compiled into the native OpenAPI serializer/deserializer tests.
+  - 'lib/llm/tests/fixtures/openapi/*.json'
   # Sidecar protobuf contracts are compiled by crate build scripts and need the
   # same workspace checks as sidecar Rust sources.
   - 'lib/sidecar/**/*.proto'

@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: beam-model-download
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: download
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - bash
+            - -c
+          args:
+            - |
+              set -euo pipefail
+              : "${MODEL_REPO:?Set the target repository}" "${MODEL_REVISION:?Set the target revision}"
+              if [[ -n "$DRAFT_REPO" ]]; then
+                : "${DRAFT_REVISION:?Set the drafter revision}"
+              fi
+              pip install --no-cache-dir huggingface_hub==1.16.4
+              hf download "$MODEL_REPO" --revision "$MODEL_REVISION"
+              if [[ -n "$DRAFT_REPO" ]]; then
+                hf download "$DRAFT_REPO" --revision "$DRAFT_REVISION"
+              fi
+          env:
+            - name: MODEL_REPO
+              value: reflection/Beam-1.0-501B-A23B-FP8
+            - name: MODEL_REVISION
+              value: main
+            - name: DRAFT_REPO
+              value: reflection/Beam-1.0-501B-A23B-DFlash2
+            - name: DRAFT_REVISION
+              value: main
+            - name: HF_HOME
+              value: /shared-model-cache
+          resources:
+            requests:
+              cpu: '4'
+              memory: 8Gi
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /shared-model-cache
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

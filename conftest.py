@@ -150,6 +150,57 @@ def _is_unmanaged(item) -> bool:
     return bool(parts) and parts[0] in _UNMANAGED_ROOTS
 
 
+def _tag_xfail_for_datadog(item) -> None:
+    """Expose ``@pytest.mark.xfail`` to Datadog Test Optimization.
+
+    Datadog's test status is three-valued — pass / fail / skip. pytest reports
+    an xfailed test as ``skipped`` and an xpassed one as ``passed``, and
+    ddtrace forwards that raw outcome without looking at ``wasxfail``, so both
+    are indistinguishable from an ordinary skip or pass once uploaded. Allure
+    reads ``wasxfail`` and keeps first-class ``xfailed`` / ``xpassed``, which is
+    why the OpenSearch-backed reports can show an xfail rate and Datadog cannot.
+
+    The outcome is not knowable at collection time, but the *marker* is, and
+    that is enough: combined with the status Datadog already records,
+
+        @test.is_xfail:true AND @test.status:skip  -> xfailed
+        @test.is_xfail:true AND @test.status:pass  -> xpassed
+
+    ``dd_tags`` is ddtrace's supported per-test tag marker. It is read during
+    test discovery (``_get_test_custom_tags`` in ddtrace's pytest plugin), so
+    it has to be applied at collection — tagging from a report hook is too
+    late.
+
+    No-ops when ddtrace is absent: ``dd_tags`` is only registered by its
+    plugin, so applying it without would fail collection as an unknown marker.
+    """
+    marker = item.get_closest_marker("xfail")
+    if marker is None or not item.config.pluginmanager.hasplugin("ddtrace"):
+        return
+    # Conditions are positional args or ``condition=``; no condition means
+    # unconditional. When every condition is falsy pytest runs the test as a
+    # normal one, so tagging it would make a plain pass look like an xpass.
+    conditions = marker.args or (
+        (marker.kwargs["condition"],) if "condition" in marker.kwargs else ()
+    )
+    if conditions and not any(conditions):
+        return
+    item.add_marker(
+        pytest.mark.dd_tags(
+            **{
+                "test.is_xfail": "true",
+                # A strict xfail that passes is reported as a failure, so the
+                # two cannot be collapsed downstream.
+                "test.xfail_strict": str(
+                    bool(
+                        marker.kwargs.get("strict", item.config.getini("xfail_strict"))
+                    )
+                ).lower(),
+            }
+        )
+    )
+
+
 def pytest_itemcollected(item):
     """Apply CI defaults to tests missing lifecycle or hardware markers.
 
@@ -169,6 +220,7 @@ def pytest_itemcollected(item):
     ``DYNAMO_PYTEST_NO_DEFAULT_MARKERS=1`` disables the defaults so the marker
     report can inspect authored markers only.
     """
+    _tag_xfail_for_datadog(item)
     if os.environ.get(_NO_DEFAULT_MARKERS_ENV) == "1":
         return
     if _is_unmanaged(item):

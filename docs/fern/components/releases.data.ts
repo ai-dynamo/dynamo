@@ -63,6 +63,9 @@ export interface Release {
    *  composed from the release page's Highlights themes. */
   notesSummary?: string;
   partial?: boolean;
+  /** NGC publish date of the release's -enterprise artifacts. The newest
+   *  release carrying it is the enterprise-supported set. */
+  enterprise?: string;
 }
 
 export const CURRENT_VERSION = "v1.5.1";
@@ -71,7 +74,7 @@ export const CURRENT_TAG = "1.5.1";
 export const CURRENT_WHEEL = "1.5.1";
 
 export const MAIN_TOT: BackendPins = {
-  sglang: "0.5.21",
+  sglang: "0.5.22",
   trtllm: "1.3.0rc29",
   vllm: "0.31.0",
   nixlSglang: "1.5.0",
@@ -88,6 +91,7 @@ export const RELEASES: Release[] = [
     date: "Oct 6, 2026",
     kind: "patch",
     github: `${GH}v1.5.1`,
+    enterprise: "Oct 6, 2026",
     docs: "https://docs.nvidia.com/dynamo",
     pins: { sglang: "0.5.18", trtllm: "1.3.0rc25", vllm: "0.28.0", nixlSglang: "1.4.0", nixlTrtllm: "1.3.1", nixlVllm: "1.3.2" },
     ucx: "1.21.x",
@@ -100,11 +104,12 @@ export const RELEASES: Release[] = [
     date: "Sep 18, 2026",
     kind: "stable",
     github: `${GH}v1.5.0`,
+    enterprise: "Sep 28, 2026",
     docs: "https://docs.nvidia.com/dynamo",
     pins: { sglang: "0.5.18", trtllm: "1.3.0rc25", vllm: "0.28.0", nixlSglang: "1.4.0", nixlTrtllm: "1.3.1", nixlVllm: "1.3.2" },
     ucx: "1.21.x",
     delta:
-      "KVBM deprecated with removal targeted for v1.6.0; CRD storage version promoted to v1beta1 and the v1alpha1 admission webhook endpoints removed; Go EPP removed in favor of the Rust EPP shipped inside the Frontend image; Dynamo Snapshot moved to a standalone operator and chart, dropping the bundled snapshot chart, snapshot-agent image and DynamoCheckpoint CRD; AIConfigurator renamed to AISimulate; unified-backend entry point removed from the vLLM and SGLang workers; UCX 1.21.x.",
+      "KVBM deprecated with removal targeted for v1.7.0; CRD storage version promoted to v1beta1 and the v1alpha1 admission webhook endpoints removed; Go EPP removed in favor of the Rust EPP shipped inside the Frontend image; Dynamo Snapshot moved to a standalone operator and chart, dropping the bundled snapshot chart, snapshot-agent image and DynamoCheckpoint CRD; AIConfigurator renamed to AISimulate; unified-backend entry point removed from the vLLM and SGLang workers; UCX 1.21.x.",
     notesSummary:
       "Pluggable worker selection policies and tiered KV indexing in the Router, guided tool-call streaming and request validation in the Frontend, image decoding at the Frontend for encode-prefill-decode deployments, v1beta1 CRD storage with the Rust EPP as the default Endpoint Picker, GPU Memory Service V1, and a standalone Snapshot operator.",
   },
@@ -114,6 +119,7 @@ export const RELEASES: Release[] = [
     date: "Aug 28, 2026",
     kind: "patch",
     github: `${GH}v1.4.2`,
+    enterprise: "Aug 28, 2026",
     docs: "https://docs.nvidia.com/dynamo",
     pins: { sglang: "0.5.16", trtllm: "1.3.0rc22", vllm: "0.26.0", nixlSglang: "1.3.0", nixlTrtllm: "1.3.1", nixlVllm: "1.3.2" },
     ucx: "1.21.x",
@@ -630,6 +636,22 @@ export const BACKEND_BLURBS = {
 };
 
 export type ArtifactCategory = "container" | "wheel" | "helm" | "crate";
+
+export interface EnterpriseArtifact {
+  component: string;
+  /** Pull reference or chart URL; `{tag}` takes the enterprise release tag. */
+  ref: string;
+}
+
+/** The curated -enterprise publication set on NGC. */
+export const ENTERPRISE_ARTIFACTS: EnterpriseArtifact[] = [
+  { component: "SGLang runtime", ref: "nvcr.io/nvidia/ai-dynamo/sglang-runtime-enterprise:{tag}" },
+  { component: "TensorRT-LLM runtime", ref: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-enterprise:{tag}" },
+  { component: "vLLM runtime", ref: "nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:{tag}" },
+  { component: "Dynamo Frontend", ref: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend-enterprise:{tag}" },
+  { component: "Dynamo Kubernetes Operator", ref: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator-enterprise:{tag}" },
+  { component: "Dynamo Platform Helm chart", ref: "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-enterprise-{tag}.tgz" },
+];
 
 export interface Artifact {
   category: ArtifactCategory;
@@ -1213,7 +1235,7 @@ export const FEATURE_INTERACTIONS: BackendInteractions[] = [
       // KV Block Manager
       [{ status: "wip" }, { status: "wip" }, { status: "wip" }, { status: "na" }],
       // Multimodal
-      [{ status: "yes", label: "Supported serving patterns", note: "Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal" }, { status: "yes", label: "Image-aware routing on Dynamo's SGLang image", note: "Hash forwarding is upstream in SGLang 0.5.13+ and Dynamo pins 0.5.21, so the shipped image routes on image overlap. A custom build without that patch still serves the request but degrades to text-prefix routing.", source: "/dynamo/dev/multimodal/multimodal-kv-routing" }, { status: "na" }, { status: "wip" }, { status: "na" }],
+      [{ status: "yes", label: "Supported serving patterns", note: "Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal" }, { status: "yes", label: "Image-aware routing on Dynamo's SGLang image", note: "Hash forwarding is upstream in SGLang 0.5.13+ and Dynamo pins 0.5.22, so the shipped image routes on image overlap. A custom build without that patch still serves the request but degrades to text-prefix routing.", source: "/dynamo/dev/multimodal/multimodal-kv-routing" }, { status: "na" }, { status: "wip" }, { status: "na" }],
       // Request Migration
       [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "yes" }, { status: "na" }],
       // Request Cancellation
@@ -1223,7 +1245,7 @@ export const FEATURE_INTERACTIONS: BackendInteractions[] = [
       // Tool Calling
       [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip", label: "Experimental combination", note: "Tool calling with SGLang LoRA is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }],
       // Speculative Decoding
-      [{ status: "yes" }, { status: "yes" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "Speculative decoding with SGLang LoRA is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "wip" }, { status: "na" }],
+      [{ status: "yes" }, { status: "yes" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "Speculative decoding with SGLang LoRA is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "yes" }, { status: "na" }],
     ],
   },
   {
