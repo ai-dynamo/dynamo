@@ -193,7 +193,7 @@ sidecar_configs = {
             "TLLM_ALLOW_N_GREEDY_DECODING": "1",
             "PYTHONUNBUFFERED": "1",
         },
-        # OpenEngine exposes output logprobs, but not prompt logprobs.
+        # The Dynamo TensorRT-LLM sidecar does not support prompt logprobs yet.
         request_payloads=[
             *chat_logprobs_and_structured_output_payloads(prompt_logprobs=None),
             # Public disconnect/recovery only: no native scheduler observations.

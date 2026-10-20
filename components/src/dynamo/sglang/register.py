@@ -10,6 +10,7 @@ from typing import Any, List, Optional
 
 import sglang as sgl
 import yaml
+from sglang.srt.environ import envs
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
@@ -381,6 +382,26 @@ def _mooncake_key_prefix(
     return "_".join(parts) if parts else None
 
 
+def _mooncake_tenant_id(extra_config: dict[str, Any]) -> str:
+    # Older SGLang releases, such as 0.5.11, have no Mooncake tenant support.
+    if not hasattr(envs, "MOONCAKE_TENANT_ID"):
+        return "default"
+    # Match the tenant precedence of SGLang's MooncakeBaseStore._load_config.
+    if (
+        extra_config.get("master_server_address") is not None
+        or extra_config.get("client_server_address") is not None
+    ):
+        tenant = extra_config.get("tenant_id", "default")
+    elif (config_path := os.getenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH")) is not None:
+        with open(config_path, encoding="utf-8") as config_file:
+            tenant = json.load(config_file).get("tenant_id", "default")
+    else:
+        tenant = os.getenv("MOONCAKE_TENANT_ID", "default")
+    if tenant is None:
+        return "default"
+    return str(tenant).strip() or "default"
+
+
 def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
     if getattr(server_args, "hicache_storage_backend", None) != "mooncake":
         return None
@@ -428,6 +449,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
 
     return {
         "backend": "mooncake",
+        "tenant_id": _mooncake_tenant_id(extra_config),
         "page_size": int(getattr(server_args, "page_size", 1) or 1),
         "tp_size": tp_size,
         "pp_size": pp_size,

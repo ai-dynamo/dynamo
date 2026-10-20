@@ -20,6 +20,7 @@ package controller
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -115,6 +116,48 @@ func TestWithPodIdentityFillsSharedModelSliceMetadata(t *testing.T) {
 	}
 	if candidate.WorkloadName != "" || candidate.GraphDeploymentName != "" {
 		t.Fatal("pod identity fallback must not mutate the input candidate")
+	}
+}
+
+// TestWithPodIdentityClassifiesNativeSidecarLoRAFallback uses the engine
+// launch independently of the runtime to decide whether prefill fallback is supported.
+func TestWithPodIdentityClassifiesNativeSidecarLoRAFallback(t *testing.T) {
+	cases := []struct {
+		name    string
+		command []string
+		engine  []string
+		allow   bool
+	}{
+		{name: "native vLLM prefill", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, allow: true},
+		{name: "wrapped runtime", engine: []string{"vllm-rs"}, command: []string{"sh", "-c", "exec dynamo-vllm-sidecar"}, allow: true},
+		{name: "runtime image entrypoint", engine: []string{"vllm-rs"}, allow: true},
+		{name: "SGLang engine", engine: []string{"python3", "-m", "dynamo.sglang"}, command: []string{"dynamo-vllm-sidecar"}},
+		{name: "opaque engine", command: []string{"dynamo-vllm-sidecar"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Configure a prefill Pod with separate engine and runtime launches")
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					consts.KubeLabelDynamoComponentType: consts.ComponentTypePrefill, consts.KubeLabelDynamoGraphDeploymentName: "graph",
+				}},
+				Spec: corev1.PodSpec{
+					Containers:     []corev1.Container{{Name: consts.MainContainerName, Command: tc.engine}},
+					InitContainers: []corev1.Container{{Name: "runtime", Command: tc.command}},
+				},
+			}
+			original := pod.DeepCopy()
+
+			t.Log("Classify LoRA fallback from the engine without mutating the Pod")
+			identified := withPodIdentity(modelendpoint.Candidate{}, pod)
+			require.Equal(t, tc.allow, identified.AllowLoRAManagementUnavailable)
+			if tc.allow {
+				require.Equal(t, "graph:graph", identified.LoRAFallbackGroup)
+			} else {
+				require.Empty(t, identified.LoRAFallbackGroup)
+			}
+			require.Equal(t, original, pod)
+		})
 	}
 }
 
