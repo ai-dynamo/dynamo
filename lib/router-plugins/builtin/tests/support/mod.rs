@@ -75,6 +75,7 @@ pub fn fixture(
                     active_requests: id as usize % 5,
                     active_prefill_tokens: (id as usize % 7) * 19,
                     active_decode_blocks: id as usize % 11,
+                    active_sequence_blocks: id as usize % 11,
                     additional_active_blocks: 3,
                 },
             );

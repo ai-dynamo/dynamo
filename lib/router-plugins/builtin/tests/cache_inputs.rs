@@ -50,6 +50,10 @@ impl InputProbe {
         }
         if let Some(load) = candidate.load() {
             assert!(load.is_available());
+            assert_eq!(
+                load.active_sequence_blocks(),
+                candidate.worker().worker_id as usize % 11
+            );
         }
     }
 

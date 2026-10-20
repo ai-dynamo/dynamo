@@ -229,6 +229,7 @@ pub struct WorkerLoadInput {
     pub(crate) available: bool,
     pub(crate) active_prefill_tokens: usize,
     pub(crate) decode_cost_blocks: f64,
+    pub(crate) active_sequence_blocks: usize,
     pub(crate) active_requests: usize,
 }
 
@@ -346,6 +347,19 @@ impl WorkerLoadInput {
     /// Return the projected active decode footprint in KV blocks.
     pub fn decode_cost_blocks(&self) -> f64 {
         self.decode_cost_blocks
+    }
+
+    /// Return the sum over this worker's active requests of their own KV blocks (prompt plus
+    /// tracked output blocks).
+    ///
+    /// Unlike [`Self::decode_cost_blocks`], a prompt block shared by N active requests counts
+    /// N times, so this tracks the per-request context the attention kernels read rather than
+    /// the deduplicated KV-memory footprint. It is router bookkeeping sampled for the current
+    /// selection, excludes the incoming request (add [`WorkerSelectionContext::request_blocks`]
+    /// for its projected context), grows only with output tracking enabled, may lag engine
+    /// state, and stays zero when [`Self::is_available`] is false.
+    pub fn active_sequence_blocks(&self) -> usize {
+        self.active_sequence_blocks
     }
 
     /// Return this worker's active request count.

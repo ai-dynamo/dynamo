@@ -99,6 +99,8 @@ pub(in crate::replay) struct KvReplayComposition {
     determinism: ReplayDeterminism,
     /// Captured from [`crate::replay::with_kv_event_lag_ms`] at construction.
     kv_event_lag_ms: f64,
+    /// Captured from [`crate::replay::with_session_affinity`] at construction.
+    session_affinity: crate::replay::ReplaySessionAffinity,
 }
 
 impl KvReplayComposition {
@@ -121,6 +123,7 @@ impl KvReplayComposition {
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
             kv_event_lag_ms: crate::replay::kv_event_lag_ms(),
+            session_affinity: crate::replay::session_affinity(),
         }
     }
 
@@ -147,6 +150,7 @@ impl KvReplayComposition {
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
             kv_event_lag_ms: crate::replay::kv_event_lag_ms(),
+            session_affinity: crate::replay::session_affinity(),
         }
     }
 }
@@ -185,6 +189,9 @@ impl ReplayComposition for KvReplayComposition {
             self.determinism.selector_seed(),
         )?
         .with_kv_event_lag_ms(self.kv_event_lag_ms)
+        .map(|placement| {
+            placement.with_session_affinity(self.session_affinity.enabled_for(args.worker_type))
+        })
     }
 
     fn create_disaggregated_placements(
@@ -229,7 +236,8 @@ impl ReplayComposition for KvReplayComposition {
             self.determinism.selector_seed(),
         )
         .context("constructing prefill KV Router placement")?
-        .with_kv_event_lag_ms(self.kv_event_lag_ms)?;
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)?
+        .with_session_affinity(self.session_affinity.enabled_for(prefill_args.worker_type));
         let decode = KvRouterPlacement::new_with_selector_seed(
             decode_args,
             Some(derive_decode_router_config(decode_args, router_config)),
@@ -238,7 +246,8 @@ impl ReplayComposition for KvReplayComposition {
             self.determinism.selector_seed(),
         )
         .context("constructing decode KV Router placement")?
-        .with_kv_event_lag_ms(self.kv_event_lag_ms)?;
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)?
+        .with_session_affinity(self.session_affinity.enabled_for(decode_args.worker_type));
         Ok((prefill, decode))
     }
 

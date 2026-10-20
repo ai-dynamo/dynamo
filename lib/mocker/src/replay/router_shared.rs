@@ -5,7 +5,7 @@ use dynamo_custom_policy_builtin::DefaultWorkerSelector;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::common::protocols::MockerConfig;
+use crate::common::protocols::{MockerConfig, WorkerType};
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{
     ActiveSequenceEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -107,22 +107,51 @@ pub(super) fn replay_slots(
     ))
 }
 
-pub(super) fn replay_selector(config: &KvRouterConfig) -> anyhow::Result<DefaultWorkerSelector> {
-    replay_selector_with_seed(config, None)
+/// Map the engine's role onto the router's worker type so per-role `prefill:` / `decode:`
+/// policy selections apply to the matching replay pool.
+pub(super) fn replay_role(worker_type: WorkerType) -> dynamo_kv_router::WorkerType {
+    match worker_type {
+        WorkerType::Prefill => dynamo_kv_router::WorkerType::Prefill,
+        WorkerType::Decode => dynamo_kv_router::WorkerType::Decode,
+        _ => dynamo_kv_router::WorkerType::Aggregated,
+    }
+}
+
+pub(super) fn replay_selector(
+    config: &KvRouterConfig,
+    role: dynamo_kv_router::WorkerType,
+) -> anyhow::Result<DefaultWorkerSelector> {
+    replay_selector_with_seed(config, None, role)
 }
 
 pub(super) fn replay_selector_with_seed(
     config: &KvRouterConfig,
     selector_seed: Option<u64>,
+    role: dynamo_kv_router::WorkerType,
 ) -> anyhow::Result<DefaultWorkerSelector> {
     if config.request_classifier_config()?.is_some() {
         anyhow::bail!("offline replay does not support request_classifier plugins");
     }
     if let Some(instance) = config
-        .selected_worker_selection_policy_instance()
+        .selected_worker_selection_policy_instance_for(role)
         .map_err(anyhow::Error::from)?
     {
-        anyhow::bail!("custom worker-selection policy {instance:?} is not supported by replay");
+        let mut registry = dynamo_custom_policy_builtin::default_registry();
+        dynamo_custom_policy_builtin::register(&mut registry)?;
+        let factory = registry
+            .resolve_for_worker_type(config, role)
+            .map_err(anyhow::Error::from)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "custom worker-selection policy {instance:?} is not supported by replay"
+                )
+            })?;
+        return Ok(DefaultWorkerSelector::from_custom_factory(
+            config.clone(),
+            "replay",
+            role,
+            factory,
+        ));
     }
 
     Ok(match selector_seed {
@@ -157,7 +186,7 @@ mod tests {
             router_policy_config: Some(policy.path().display().to_string()),
             ..Default::default()
         };
-        let Err(error) = replay_selector(&config) else {
+        let Err(error) = replay_selector(&config, dynamo_kv_router::WorkerType::Aggregated) else {
             panic!("classifier ignored")
         };
         assert!(
@@ -187,14 +216,34 @@ worker_selection:
             ..Default::default()
         };
 
-        let error = match replay_selector(&config) {
+        let error = match replay_selector(&config, dynamo_kv_router::WorkerType::Aggregated) {
             Err(error) => error,
             Ok(_) => panic!("replay must reject a custom worker selector it cannot execute"),
         };
         assert!(
-            error
-                .to_string()
-                .contains("custom worker-selection policy \"custom\" is not supported by replay")
+            format!("{error:#}").contains("unknown worker-selection policy type \"test\""),
+            "{error:#}"
         );
+    }
+
+    #[test]
+    fn replay_selector_accepts_shipped_custom_worker_selection() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: ep
+  instances:
+    - name: ep
+      type: dynamo-sglang-ep-balance
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        replay_selector(&config, dynamo_kv_router::WorkerType::Aggregated).unwrap();
     }
 }

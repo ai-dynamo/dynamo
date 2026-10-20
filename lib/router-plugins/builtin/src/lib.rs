@@ -9,6 +9,7 @@
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
 mod default;
+mod sglang_ep_balance;
 mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{DefaultWorkerSelector, default_factory, default_policy};
@@ -27,6 +28,7 @@ use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError}
 /// than overriding it.
 pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginRegistryError> {
     default::register(registry)?;
+    sglang_ep_balance::register(registry)?;
     two_tier_cost_fn::register(registry)?;
     thunderagent::register(registry)?;
     Ok(())

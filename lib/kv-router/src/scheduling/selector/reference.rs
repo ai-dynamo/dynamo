@@ -1730,6 +1730,7 @@ mod tests {
             crate::sequences::WorkerLoadProjection {
                 active_prefill_tokens: 16,
                 active_decode_blocks: 2,
+                active_sequence_blocks: 2,
                 active_requests: 0,
                 additional_active_blocks: 3,
             },

@@ -62,8 +62,10 @@ impl<'a> RoutingEligibility<'a> {
         }
     }
 
+    /// Restrict selection to `target` (worker id, and DP rank when set). Hosts apply this for
+    /// selectors with exclusive affinity after checking [`Self::affinity_target_is_eligible`].
     #[inline]
-    pub(crate) fn with_affinity_target(mut self, target: WorkerAffinityTarget) -> Self {
+    pub fn with_affinity_target(mut self, target: WorkerAffinityTarget) -> Self {
         self.affinity_target = Some(target);
         self
     }
@@ -295,7 +297,8 @@ impl<'a> RoutingEligibility<'a> {
         false
     }
 
-    pub(crate) fn affinity_target_is_eligible<C: WorkerConfigLike>(
+    /// Whether `target` names a registered worker (and DP rank) that this eligibility still allows.
+    pub fn affinity_target_is_eligible<C: WorkerConfigLike>(
         &self,
         workers: &HashMap<WorkerId, C>,
         target: WorkerAffinityTarget,
