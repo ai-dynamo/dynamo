@@ -261,6 +261,12 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.roles.items.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations."x-kubernetes-validations" = [{"rule": "!(\"nvidia.com/vllm-distributed-executor-backend\" in self) || self[\"nvidia.com/vllm-distributed-executor-backend\"].lowerAscii() in [\"mp\", \"ray\"]", "message": "podTemplate backend annotation must be mp or ray, case-insensitively"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.components.items.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations."x-kubernetes-validations" = [{"rule": "!(\"nvidia.com/vllm-distributed-executor-backend\" in self) || self[\"nvidia.com/vllm-distributed-executor-backend\"].lowerAscii() in [\"mp\", \"ray\"]", "message": "podTemplate backend annotation must be mp or ray, case-insensitively"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamographdeployments.yaml
 	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.components.items.properties.roles.items.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations."x-kubernetes-validations" = [{"rule": "!(\"nvidia.com/vllm-distributed-executor-backend\" in self) || self[\"nvidia.com/vllm-distributed-executor-backend\"].lowerAscii() in [\"mp\", \"ray\"]", "message": "podTemplate backend annotation must be mp or ray, case-insensitively"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamographdeployments.yaml
+	echo "Adding probe handler validation to DGD and DCD schemas"
+	for file in config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml config/crd/bases/nvidia.com_dynamographdeployments.yaml; do \
+		for probe in startupProbe livenessProbe readinessProbe; do \
+			PROBE=$$probe $(YQ) eval 'strenv(PROBE) as $$probe | (.. | select(has("properties")) | select(.properties | has($$probe)))."x-kubernetes-validations" += [{"rule": "!has(self." + $$probe + ") || (has(self." + $$probe + ".exec) ? 1 : 0) + (has(self." + $$probe + ".httpGet) ? 1 : 0) + (has(self." + $$probe + ".tcpSocket) ? 1 : 0) + (has(self." + $$probe + ".grpc) ? 1 : 0) == 1", "message": $$probe + " must define exactly one handler", "fieldPath": "." + $$probe}]' -i --indent 2 $$file || exit 1; \
+		done; \
+	done
 	echo "Fixing PluginSpec parameters field: json.RawMessage needs x-kubernetes-preserve-unknown-fields instead of type: string"
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
@@ -550,7 +556,7 @@ HELM_VERSION ?= v3.17.3
 YQ_VERSION ?= v4.45.4
 CONTROLLER_TOOLS_VERSION ?= v0.17.3
 ENVTEST_VERSION ?= release-0.19
-GOLANGCI_LINT_VERSION ?= v1.64.8
+GOLANGCI_LINT_VERSION ?= v2.15.0
 
 ## Tool Binaries
 KUBECTL ?= $(LOCALBIN)/kubectl-$(KUBECTL_VERSION)
@@ -621,7 +627,7 @@ $(ENVTEST): $(LOCALBIN)
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint,${GOLANGCI_LINT_VERSION})
+	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,${GOLANGCI_LINT_VERSION})
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary (ideally with version)

@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 
@@ -40,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -48,6 +50,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -92,6 +95,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=clustertopologybindings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=disaggregatedset.x-k8s.io,resources=disaggregatedsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
@@ -255,6 +259,19 @@ func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, 
 	).deleteAutoCheckpointsForDGD(ctx, dynamoDeployment)
 }
 
+func workloadRoutingAnnotationsChanged(update event.UpdateEvent) bool {
+	oldDGD, oldOK := update.ObjectOld.(*nvidiacomv1beta1.DynamoGraphDeployment)
+	newDGD, newOK := update.ObjectNew.(*nvidiacomv1beta1.DynamoGraphDeployment)
+	if !oldOK || !newOK {
+		return false
+	}
+	annotationValue := func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, key string) string {
+		return strings.ToLower(dgd.GetAnnotations()[key])
+	}
+	return annotationValue(oldDGD, consts.KubeAnnotationEnableDisaggregatedSet) != annotationValue(newDGD, consts.KubeAnnotationEnableDisaggregatedSet) ||
+		annotationValue(oldDGD, consts.KubeAnnotationEnableGrove) != annotationValue(newDGD, consts.KubeAnnotationEnableGrove)
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(
@@ -320,6 +337,17 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
 
+	// Restore owned pools after deletion or spec drift without requiring GAIE on every cluster.
+	_, poolMappingErr := mgr.GetRESTMapper().RESTMapping(epp.InferencePoolGVK.GroupKind(), epp.InferencePoolGVK.Version)
+	if poolMappingErr != nil && !meta.IsNoMatchError(poolMappingErr) {
+		return fmt.Errorf("discover InferencePool API for DGD watch: %w", poolMappingErr)
+	}
+	if poolMappingErr == nil {
+		ctrlBuilder = ctrlBuilder.Owns(&gaiev1.InferencePool{}, builder.WithPredicates(
+			predicate.GenerationChangedPredicate{},
+		))
+	}
+
 	// Watch standalone Snapshot resources only when their external APIs were detected.
 	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
 		ctrlBuilder = ctrlBuilder.
@@ -362,6 +390,9 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
 		}))
 	}
+	if r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
+		ctrlBuilder = newDisaggregatedSetWatchSetup(mgr.GetClient()).addTo(ctrlBuilder)
+	}
 
 	// LPX child status can wake the DGD only when its controller is enabled.
 	if r.RuntimeConfig.Gate.Enabled(features.LPX) {
@@ -385,10 +416,12 @@ func isDGDManagedWorkerPod(obj client.Object) bool {
 	if !ok || pod == nil {
 		return false
 	}
+
+	// Native LWS pods carry a worker hash instead of the DCD selector.
 	labels := pod.GetLabels()
 	return labels[consts.KubeLabelDynamoGraphDeploymentName] != "" &&
 		labels[consts.KubeLabelDynamoComponent] != "" &&
-		labels[consts.KubeLabelDynamoSelector] != "" &&
+		(labels[consts.KubeLabelDynamoSelector] != "" || labels[consts.KubeLabelDynamoWorkerHash] != "") &&
 		dynamo.IsWorkerComponent(labels[consts.KubeLabelDynamoComponentType])
 }
 
@@ -413,7 +446,7 @@ func dgdComponentPodIndexValue(dgdName, componentName string) string {
 }
 
 // dgdWorkerPodEventPredicate admits only events that can change whether a
-// Recreate rollout is blocked by an old pod. Creation and deletion change pod
+// worker rollout is blocked by an old pod. Creation and deletion change pod
 // membership; updates matter only when membership or terminality changes. A
 // deletion timestamp alone leaves the pod non-terminal and does not enqueue.
 func dgdWorkerPodEventPredicate() predicate.Predicate {
@@ -437,7 +470,8 @@ func dgdWorkerPodEventPredicate() predicate.Predicate {
 			newPod := e.ObjectNew.(*corev1.Pod)
 			if oldPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] != newPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] ||
 				oldPod.Labels[consts.KubeLabelDynamoComponent] != newPod.Labels[consts.KubeLabelDynamoComponent] ||
-				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] {
+				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] ||
+				oldPod.Labels[consts.KubeLabelDynamoWorkerHash] != newPod.Labels[consts.KubeLabelDynamoWorkerHash] {
 				return true
 			}
 			return isTerminalPhase(oldPod.Status.Phase) != isTerminalPhase(newPod.Status.Phase)

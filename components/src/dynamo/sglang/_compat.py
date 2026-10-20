@@ -60,6 +60,22 @@ except ImportError:
     sglang_use_mla_backend = None
 
 try:
+    from sglang.srt.arg_groups.model_override_base import (
+        get_default_attn_backend as sglang_get_default_attn_backend,
+    )
+except ImportError:
+    # The separately pinned XPU SGLang 0.5.11 keeps the default-backend choice
+    # inside ServerArgs. Remove when the XPU pin is upgraded to 0.5.19+.
+    sglang_get_default_attn_backend = None
+
+try:
+    from sglang.srt.configs.model_config import is_deepseek_dsa as sglang_is_dsa_model
+except ImportError:
+    # The separately pinned XPU SGLang 0.5.11 predates the DSA rename.
+    # Remove when the XPU pin is upgraded to 0.5.19+.
+    sglang_is_dsa_model = None
+
+try:
     from sglang.srt.runtime_context import publish as _sglang_publish
 except ImportError:
     # Fallback for the XPU SGLang 0.5.11 pin.
@@ -113,6 +129,41 @@ def sglang_uses_mla_backend(server_args: Any) -> bool:
     if sglang_use_mla_backend is None:
         raise AttributeError("SGLang does not expose an MLA backend accessor")
     return bool(sglang_use_mla_backend(server_args))
+
+
+def sglang_default_mla_attention_backend(server_args: Any) -> str | None:
+    """Predict the attention backend SGLang picks for an MLA model by itself.
+
+    SGLang only makes that choice inside ``sgl.Engine``, after Dynamo hands the
+    arguments over. Return ``None`` when the prediction is unavailable: an
+    unknown backend must not be treated as an unsupported one.
+    """
+    if sglang_get_default_attn_backend is None:
+        return None
+    try:
+        model_config = get_sglang_model_config(server_args)
+        hf_config = getattr(model_config, "hf_config", None)
+        if "KimiK3ForConditionalGeneration" in (
+            getattr(hf_config, "architectures", None) or []
+        ):
+            # Kimi-K3 resolves separate prefill/decode backends for DCP. The
+            # platform default (fa3 on Hopper) is not its decode backend.
+            # Defer to the engine's resolved configuration instead of guessing
+            # or running SGLang's kernel capability checks during CLI parsing.
+            return None
+        # SGLang's DeepSeek-family override picks dsa for DSA models before
+        # it falls back to the platform default.
+        if sglang_is_dsa_model is not None and sglang_is_dsa_model(hf_config):
+            return "dsa"
+        backend = sglang_get_default_attn_backend(server_args, True, model_config)
+    except Exception as exc:
+        logger.warning(
+            "Could not predict SGLang's default MLA attention backend; skipping "
+            "the decode context parallel backend check: %s",
+            exc,
+        )
+        return None
+    return backend if isinstance(backend, str) else None
 
 
 def publish_server_args(server_args: Any, *, role: str) -> None:
@@ -261,7 +312,7 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
 def resolved_server_args(server_args: Any) -> Any:
     """Return SGLang's effective configuration for one initialized engine.
 
-    SGLang 0.5.20 and 0.5.21 keep ``ServerArgs`` raw and expose the effective
+    Supported CUDA releases keep ``ServerArgs`` raw and expose the effective
     projection through ``resolved_view()``. The separately pinned XPU release
     and Dynamo's non-LLM argument stubs retain effective values on the object
     itself.
@@ -425,6 +476,16 @@ def require_reasoning_kwargs(
     return kwargs
 
 
+def supports_require_reasoning(engine: Any) -> bool:
+    """Return whether this SGLang engine supports the reasoning-gate argument."""
+    if not hasattr(engine, "async_generate"):
+        return False
+    return "require_reasoning" in filter_supported_async_generate_kwargs(
+        engine,
+        {"require_reasoning": False},
+    )
+
+
 __all__ = [
     "ConfigArgumentMerger",
     "add_sglang_cli_compat",
@@ -438,6 +499,8 @@ __all__ = [
     "publish_server_args",
     "require_reasoning_kwargs",
     "resolved_server_args",
+    "sglang_default_mla_attention_backend",
     "sglang_uses_mla_backend",
+    "supports_require_reasoning",
     "supports_external_mm_hashes",
 ]

@@ -15,12 +15,16 @@
 
 import os
 import shlex
+from copy import deepcopy
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
+from kubernetes import client
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
@@ -52,15 +56,44 @@ pytestmark = [
 def mock_kube_api():
     mock_api = Mock()
     mock_api.get_graph_deployment = Mock()
+    mock_api.custom_api.list_namespaced_custom_object.return_value = {"items": []}
+    mock_api.fetch_authoritative_replica_targets = Mock(
+        side_effect=lambda deployment: deployment
+    )
     mock_api.update_graph_replicas = AsyncMock()
+    mock_api.update_dgd_replicas_directly = Mock()
+    mock_api.get_service_scaling_adapter = Mock()
+    mock_api.get_service_replica_target = Mock()
+    mock_api.scaling_adapter_name = Mock(side_effect=KubernetesAPI.scaling_adapter_name)
+    mock_api.scaling_adapter_identity_rejection = Mock(
+        side_effect=lambda deployment, component_name, adapter, **kwargs: (
+            KubernetesAPI.scaling_adapter_identity_rejection(
+                mock_api,
+                deployment,
+                component_name,
+                adapter,
+                **kwargs,
+            )
+        )
+    )
+    mock_api.get_scaling_adapter_desired_replicas = Mock(
+        side_effect=KubernetesAPI.get_scaling_adapter_desired_replicas
+    )
+    mock_api.update_scaling_adapter_replicas = Mock()
+    mock_api.patch_scaling_adapter_writer_fence = Mock()
     mock_api.wait_for_graph_deployment_ready = AsyncMock()
     mock_api.is_deployment_ready = Mock()
     mock_api.pending_startup_replicas = Mock(return_value={})
+    mock_api.is_spec_generation_observed = Mock(return_value=False)
     mock_api.non_planner_components_stable = Mock(return_value=(True, []))
+    mock_api.pcsg_pods_within_desired_replicas = Mock(return_value=True)
     # Default: no terminating pods; tests that want to simulate terminating pods
     # override this per-test.
     mock_api.has_terminating_pods = Mock(return_value=False)
     mock_api.list_pods_for_graph = Mock(return_value=[])
+    mock_api.exclude_checkpoint_capture_pods = Mock(
+        side_effect=KubernetesAPI.exclude_checkpoint_capture_pods
+    )
     mock_api.partition_pods_by_component = Mock(return_value={})
     # Default: no blocking rollout; tests that want InProgress/Pending override.
     mock_api.is_rolling_update_blocking_settlement = Mock(return_value=(False, ""))
@@ -107,6 +140,14 @@ def _component(name, component_type=None, replicas=None, args=None, gpu=None):
     return component
 
 
+def _adapter_component(name, component_type=None, replicas=None):
+    component = _component(name, component_type, replicas=replicas)
+    # v1beta1 uses key presence as the opt-in marker; the canonical value is
+    # intentionally the otherwise-falsy empty object.
+    component["scalingAdapter"] = {}
+    return component
+
+
 def _deployment(*components):
     component_statuses = {}
     for component in components:
@@ -148,26 +189,129 @@ def _deployment(*components):
         component_statuses[component["name"]] = status
 
     return {
-        "metadata": {"name": "test-graph", "generation": 1},
+        "metadata": {
+            "name": "test-graph",
+            "uid": "test-graph-uid",
+            "generation": 1,
+        },
         "spec": {"components": list(components)},
         "status": {"observedGeneration": 1, "components": component_statuses},
     }
 
 
-def _model_card_cr(name, worker_type="decode"):
+def _unready_recovery_deployment(*components):
+    component_statuses = {
+        component["name"]: {
+            "replicas": component.get("replicas", 0),
+            "updatedReplicas": component.get("replicas", 0),
+            "readyReplicas": component.get("replicas", 0),
+            "availableReplicas": component.get("replicas", 0),
+        }
+        for component in components
+    }
     return {
-        "metadata": {"name": name},
+        "metadata": {
+            "name": "test-graph",
+            "uid": "test-graph-uid",
+            "generation": 7,
+        },
+        "spec": {"components": list(components)},
+        "status": {
+            "observedGeneration": 7,
+            "conditions": [{"type": "Ready", "status": "False"}],
+            "components": component_statuses,
+        },
+    }
+
+
+def _scaling_adapter(component_name, replicas=0):
+    return {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeploymentScalingAdapter",
+        "metadata": {
+            "name": f"test-graph-{component_name.lower()}",
+            "uid": f"adapter-{component_name.lower()}-uid",
+            "resourceVersion": "101",
+            "labels": {
+                "nvidia.com/dynamo-graph-deployment-name": "test-graph",
+                "nvidia.com/dynamo-component": component_name,
+            },
+            "ownerReferences": [
+                {
+                    "apiVersion": "nvidia.com/v1beta1",
+                    "kind": "DynamoGraphDeployment",
+                    "name": "test-graph",
+                    "uid": "test-graph-uid",
+                    "controller": True,
+                }
+            ],
+        },
+        "spec": {
+            "replicas": replicas,
+            "dgdRef": {
+                "name": "test-graph",
+                "componentName": component_name,
+            },
+        },
+    }
+
+
+def _registered_worker(
+    name="worker-pod",
+    uid="pod-uid",
+    *,
+    graph="test-graph",
+    service="decode",
+    component="backend",
+    role="decode",
+    revision="active",
+    namespace="test-active",
+    model="registered-model",
+):
+    """A real Pod/registration relationship, independent of launch arguments."""
+    pod = client.V1Pod(
+        metadata=client.V1ObjectMeta(
+            name=name,
+            uid=uid,
+            labels={
+                "nvidia.com/dynamo-graph-deployment-name": graph,
+                "nvidia.com/dynamo-component": service,
+                "nvidia.com/dynamo-worker-hash": revision,
+            },
+        ),
+        status=client.V1PodStatus(
+            phase="Running",
+            conditions=[client.V1PodCondition(type="Ready", status="True")],
+        ),
+    )
+    cr = {
+        "metadata": {
+            "name": name,
+            "ownerReferences": [
+                {
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "name": name,
+                    "uid": uid,
+                }
+            ],
+        },
         "spec": {
             "data": {
                 "model_cards": {
                     "model": {
                         "type": "Model",
-                        "card_json": {"worker_type": worker_type},
+                        "namespace": namespace,
+                        "component": component,
+                        "endpoint": "custom-generate",
+                        "instance_id": "12345",
+                        "card_json": {"worker_type": role, "display_name": model},
                     }
                 }
             }
         },
     }
+    return pod, cr
 
 
 def _deployment_with_worker_status(
@@ -544,7 +688,7 @@ async def test_add_component_increases_replicas(kubernetes_connector, mock_kube_
 
     # Assert
     mock_kube_api.get_graph_deployment.assert_called_once()
-    mock_kube_api.update_graph_replicas.assert_called_once_with(
+    mock_kube_api.update_dgd_replicas_directly.assert_called_once_with(
         "test-graph", component_name, 2
     )
     mock_kube_api.wait_for_graph_deployment_ready.assert_called_once_with("test-graph")
@@ -564,10 +708,57 @@ async def test_add_component_with_no_replicas_specified(
     await kubernetes_connector.add_component(sub_component_type)
 
     # Assert
-    mock_kube_api.update_graph_replicas.assert_called_once_with(
+    mock_kube_api.update_dgd_replicas_directly.assert_called_once_with(
         "test-graph", component_name, 1
     )
     mock_kube_api.wait_for_graph_deployment_ready.assert_called_once_with("test-graph")
+
+
+@pytest.mark.asyncio
+async def test_add_component_uses_declared_adapter_desired_not_stale_dgd_seed(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_adapter_component("worker", "decode", replicas=1))
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=0
+    )
+
+    await kubernetes_connector.add_component(SubComponentType.DECODE, blocking=False)
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
+        "test-graph", "worker", 1, resource_version="101"
+    )
+    mock_kube_api.update_dgd_replicas_directly.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scale_rejects_lost_batch_writer_fence(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_adapter_component("worker", "decode", replicas=0))
+    adapter = _scaling_adapter("worker", replicas=0)
+    adapter["metadata"]["annotations"] = {
+        "dynamo.nvidia.com/planner-writer-fence": "replacement-writer"
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = adapter
+    kubernetes_connector._batch_writer_id = "this-writer"
+
+    with pytest.raises(ValueError, match="owned by another writer"):
+        await kubernetes_connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="worker",
+                    desired_replicas=1,
+                )
+            ],
+            blocking=False,
+        )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -617,7 +808,7 @@ async def test_remove_component_decreases_replicas(kubernetes_connector, mock_ku
     await kubernetes_connector.remove_component(sub_component_type)
 
     # Assert
-    mock_kube_api.update_graph_replicas.assert_called_once_with(
+    mock_kube_api.update_dgd_replicas_directly.assert_called_once_with(
         "test-graph", component_name, 1
     )
     mock_kube_api.wait_for_graph_deployment_ready.assert_called_once_with("test-graph")
@@ -695,7 +886,9 @@ async def test_set_component_replicas(kubernetes_connector, mock_kube_api):
         call("test-graph", "component1", 3),  # prefill component with 3 replicas
         call("test-graph", "component2", 2),  # decode component with 2 replicas
     ]
-    mock_kube_api.update_graph_replicas.assert_has_calls(expected_calls, any_order=True)
+    mock_kube_api.update_dgd_replicas_directly.assert_has_calls(
+        expected_calls, any_order=True
+    )
     mock_kube_api.wait_for_graph_deployment_ready.assert_called_once_with("test-graph")
 
 
@@ -726,6 +919,71 @@ async def test_set_component_replicas_component_not_found(
 
 
 @pytest.mark.asyncio
+async def test_set_component_replicas_undeclared_adapter_ignores_stray_dgdsa(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_component("worker", "decode", replicas=0))
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                desired_replicas=1,
+            )
+        ],
+        blocking=False,
+    )
+
+    mock_kube_api.get_service_scaling_adapter.assert_not_called()
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+    mock_kube_api.update_dgd_replicas_directly.assert_called_once_with(
+        "test-graph", "worker", 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_writer_fence_retries_conflict_then_refreshes_authority(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "worker", replicas=1),
+    )
+    initial_adapter = _scaling_adapter("worker", replicas=0)
+    newer_adapter = deepcopy(initial_adapter)
+    newer_adapter["metadata"]["resourceVersion"] = "102"
+    fenced_adapter = deepcopy(newer_adapter)
+    fenced_adapter["metadata"]["resourceVersion"] = "103"
+    fenced_adapter["metadata"]["annotations"] = {
+        "dynamo.nvidia.com/planner-writer-fence": "writer-new"
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        initial_adapter,
+        newer_adapter,
+        fenced_adapter,
+    ]
+    mock_kube_api.patch_scaling_adapter_writer_fence.side_effect = [
+        client.ApiException(status=409),
+        None,
+    ]
+    mock_kube_api.get_service_replica_status.return_value = (0, True)
+
+    await kubernetes_connector.acquire_batch_writer_fence("writer-new")
+
+    assert mock_kube_api.patch_scaling_adapter_writer_fence.call_args_list == [
+        call("test-graph", "worker", "writer-new", adapter=initial_adapter),
+        call("test-graph", "worker", "writer-new", adapter=newer_adapter),
+    ]
+    mock_kube_api.fetch_authoritative_replica_targets.assert_called_once_with(
+        deployment
+    )
+
+
+@pytest.mark.asyncio
 async def test_set_component_replicas_component_already_at_desired_replicas(
     kubernetes_connector, mock_kube_api
 ):
@@ -751,7 +1009,7 @@ async def test_set_component_replicas_component_already_at_desired_replicas(
     mock_kube_api.is_deployment_ready.assert_called_once_with(mock_deployment)
 
     # Should be called once, for the prefill component (decode component is already at desired replicas)
-    mock_kube_api.update_graph_replicas.assert_called_once_with(
+    mock_kube_api.update_dgd_replicas_directly.assert_called_once_with(
         "test-graph", "component1", 3
     )
     mock_kube_api.wait_for_graph_deployment_ready.assert_called_once_with("test-graph")
@@ -843,6 +1101,844 @@ async def test_set_component_replicas_deployment_not_ready_can_raise_for_global_
     mock_kube_api.is_deployment_ready.assert_called_once_with(mock_deployment)
     mock_kube_api.update_graph_replicas.assert_not_called()
     mock_kube_api.wait_for_graph_deployment_ready.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_unready_allows_strict_dgdsa_zero_to_one(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0)
+    )
+    adapter = _scaling_adapter("worker", replicas=0)
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = adapter
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
+        "test-graph", "worker", 1, resource_version="101"
+    )
+    mock_kube_api.update_graph_replicas.assert_not_called()
+    mock_kube_api.wait_for_graph_deployment_ready.assert_awaited_once_with("test-graph")
+    assert mock_kube_api.non_planner_components_stable.call_count == 2
+    assert kubernetes_connector._startup_scale_down_targets == {}
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_unready_requires_pod_snapshot(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0)
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=0
+    )
+    mock_kube_api.list_pods_for_graph.side_effect = client.ApiException(status=403)
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.wait_for_graph_deployment_ready.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("check_stage", ["initial", "refreshed"])
+@pytest.mark.parametrize("hazard", ["nonterminal", "terminating", "pcsg-range"])
+async def test_set_component_replicas_unready_rechecks_pod_lifecycle_before_write(
+    kubernetes_connector, mock_kube_api, check_stage, hazard
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0)
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=0
+    )
+    mock_kube_api.partition_pods_by_component.side_effect = (
+        KubernetesAPI.partition_pods_by_component
+    )
+
+    unsafe_pods = []
+    if hazard != "pcsg-range":
+        unsafe_pods = [
+            client.V1Pod(
+                metadata=client.V1ObjectMeta(
+                    name="stale-worker-0",
+                    labels={"nvidia.com/dynamo-component": "worker"},
+                    owner_references=[],
+                    deletion_timestamp=(
+                        datetime.now(timezone.utc) if hazard == "terminating" else None
+                    ),
+                ),
+                status=client.V1PodStatus(
+                    phase="Succeeded" if hazard == "terminating" else "Pending"
+                ),
+            )
+        ]
+
+    if check_stage == "initial":
+        mock_kube_api.list_pods_for_graph.return_value = unsafe_pods
+        if hazard == "pcsg-range":
+            mock_kube_api.pcsg_pods_within_desired_replicas.return_value = False
+    else:
+        mock_kube_api.list_pods_for_graph.side_effect = [[], unsafe_pods]
+        if hazard == "pcsg-range":
+            mock_kube_api.pcsg_pods_within_desired_replicas.side_effect = [True, False]
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    expected_snapshots = 1 if check_stage == "initial" else 2
+    assert mock_kube_api.list_pods_for_graph.call_count == expected_snapshots
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.wait_for_graph_deployment_ready.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_startup_downscale_uses_strict_dgdsa_and_records_latch(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=2)
+    )
+    deployment["status"]["components"]["worker"] = {
+        "replicas": 2,
+        "updatedReplicas": 2,
+        "readyReplicas": 1,
+        "availableReplicas": 1,
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.pending_startup_replicas.return_value = {"worker": 1}
+    mock_kube_api.get_service_replica_status.return_value = (1, False)
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=2
+    )
+    mock_kube_api.get_service_replica_target.return_value = 2
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ],
+        blocking=False,
+    )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
+        "test-graph", "worker", 1, resource_version="101"
+    )
+    assert kubernetes_connector._startup_scale_down_targets == {"worker": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_state", ["replicas", "ready", "missing"])
+async def test_set_component_replicas_unready_requires_settled_zero_target(
+    kubernetes_connector, mock_kube_api, target_state
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0)
+    )
+    if target_state == "replicas":
+        deployment["status"]["components"]["worker"]["replicas"] = 1
+    elif target_state == "ready":
+        deployment["status"]["components"]["worker"]["readyReplicas"] = 1
+    else:
+        del deployment["status"]["components"]["worker"]
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=0
+    )
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_unready_accepts_available_only_zero_signal(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0)
+    )
+    del deployment["status"]["components"]["worker"]["readyReplicas"]
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=0
+    )
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
+        "test-graph", "worker", 1, resource_version="101"
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_unready_rechecks_peer_stability_before_write(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0),
+        _component("peer", "prefill", replicas=1),
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=0
+    )
+    mock_kube_api.non_planner_components_stable.side_effect = [
+        (True, []),
+        (False, ["peer"]),
+    ]
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    assert mock_kube_api.non_planner_components_stable.call_count == 2
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("peer_ready, expect_write", [(2, True), (1, False)])
+async def test_set_component_replicas_unready_uses_peer_dgdsa_desired_state(
+    kubernetes_connector, mock_kube_api, peer_ready, expect_write
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0),
+        # The DGD seed remains zero while the peer DGDSA authoritatively wants
+        # two replicas.
+        _adapter_component("peer", "prefill", replicas=0),
+    )
+    deployment["status"]["components"]["peer"] = {
+        "replicas": peer_ready,
+        "updatedReplicas": peer_ready,
+        "readyReplicas": peer_ready,
+        "availableReplicas": peer_ready,
+    }
+    target_adapter = _scaling_adapter("worker", replicas=0)
+    peer_adapter = _scaling_adapter("peer", replicas=2)
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        target_adapter,
+        peer_adapter,
+        target_adapter,
+        peer_adapter,
+    ]
+
+    def evaluate_settlement(snapshot):
+        unstable = []
+        for component in snapshot["spec"]["components"]:
+            if component.get("type") == "planner":
+                continue
+            name = component["name"]
+            desired = component.get("replicas", 1)
+            status = snapshot["status"]["components"][name]
+            if not (
+                desired == status["updatedReplicas"] == status["availableReplicas"]
+            ):
+                unstable.append(name)
+        return not unstable, unstable
+
+    mock_kube_api.non_planner_components_stable.side_effect = evaluate_settlement
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    if expect_write:
+        mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
+            "test-graph", "worker", 1, resource_version="101"
+        )
+    else:
+        mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_ready_uses_authoritative_dgdsa_desired_state(
+    kubernetes_connector, mock_kube_api
+):
+    # DGD propagation is stale at one, while the declared adapter still owns a
+    # desired value of zero. Targeting one must patch the DGDSA, not skip.
+    deployment = _deployment(_adapter_component("worker", "decode", replicas=1))
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=0
+    )
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_called_once_with(
+        "test-graph", "worker", 1, resource_version="101"
+    )
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_ready_rejects_adapter_owned_by_replaced_dgd(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_adapter_component("worker", "decode", replicas=0))
+    adapter = _scaling_adapter("worker", replicas=0)
+    adapter["metadata"]["ownerReferences"][0]["uid"] = "replacement-uid"
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = adapter
+
+    with pytest.raises(ValueError, match="not controller-owned"):
+        await kubernetes_connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="worker",
+                    desired_replicas=1,
+                )
+            ]
+        )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_ready_rejects_missing_dgd_uid(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_adapter_component("worker", "decode", replicas=0))
+    del deployment["metadata"]["uid"]
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=0
+    )
+
+    with pytest.raises(ValueError, match="metadata.uid is unavailable"):
+        await kubernetes_connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="worker",
+                    desired_replicas=1,
+                )
+            ]
+        )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_ready_propagates_adapter_conflict(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_adapter_component("worker", "decode", replicas=0))
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=0
+    )
+    mock_kube_api.update_scaling_adapter_replicas.side_effect = client.ApiException(
+        status=409
+    )
+
+    with pytest.raises(client.ApiException) as exc_info:
+        await kubernetes_connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="worker",
+                    desired_replicas=1,
+                )
+            ]
+        )
+
+    assert exc_info.value.status == 409
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_ready_declared_adapter_404_never_falls_back(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_adapter_component("worker", "decode", replicas=0))
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+    mock_kube_api.get_service_scaling_adapter.side_effect = client.ApiException(
+        status=404
+    )
+
+    with pytest.raises(client.ApiException) as exc_info:
+        await kubernetes_connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="worker",
+                    desired_replicas=1,
+                )
+            ]
+        )
+
+    assert exc_info.value.status == 404
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_unready_nonadapter_is_blocked(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _component("worker", "decode", replicas=0)
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    mock_kube_api.get_service_scaling_adapter.assert_not_called()
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+    mock_kube_api.wait_for_graph_deployment_ready.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_unready_missing_adapter_is_blocked_atomically(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0)
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.side_effect = client.ApiException(
+        status=404
+    )
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+    mock_kube_api.wait_for_graph_deployment_ready.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_unready_missing_adapter_uses_raise_contract(
+    mock_kube_api_class, mock_kube_api, monkeypatch
+):
+    monkeypatch.setattr(
+        "dynamo.planner.connectors.kubernetes.KubernetesAPI", mock_kube_api_class
+    )
+    with patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}):
+        connector = KubernetesConnector("test-dynamo-namespace", raise_not_ready=True)
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0)
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.side_effect = client.ApiException(
+        status=404
+    )
+
+    with pytest.raises(DynamoGraphDeploymentNotReadyError):
+        await connector.set_component_replicas(
+            [
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    component_name="worker",
+                    desired_replicas=1,
+                )
+            ]
+        )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("current", "target"),
+    [(1, 0), (1, 2)],
+    ids=["downscale", "nonzero-scale-up"],
+)
+async def test_set_component_replicas_unready_blocks_nonbootstrap_mutations(
+    kubernetes_connector, mock_kube_api, current, target
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=current)
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=current
+    )
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=target,
+            )
+        ]
+    )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_unready_rejects_parent_replacement_before_write(
+    kubernetes_connector, mock_kube_api
+):
+    initial_deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0)
+    )
+    replacement_deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0)
+    )
+    replacement_deployment["metadata"]["uid"] = "replacement-uid"
+    mock_kube_api.get_graph_deployment.side_effect = [
+        initial_deployment,
+        replacement_deployment,
+    ]
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=0
+    )
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    assert mock_kube_api.get_graph_deployment.call_count == 2
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_unready_allows_adapter_same_target_noop(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=1)
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = _scaling_adapter(
+        "worker", replicas=1
+    )
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+    mock_kube_api.wait_for_graph_deployment_ready.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_unready_generation_lag_blocks_before_adapter_read(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0)
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = False
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    mock_kube_api.get_service_scaling_adapter.assert_not_called()
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsafe_state", ["dgd-deleting", "rolling", "failed"])
+async def test_set_component_replicas_unready_rejects_unsafe_dgd_snapshot(
+    kubernetes_connector, mock_kube_api, unsafe_state
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0)
+    )
+    if unsafe_state == "dgd-deleting":
+        deployment["metadata"]["deletionTimestamp"] = "2026-08-28T21:00:00Z"
+    elif unsafe_state == "rolling":
+        deployment["status"]["rollingUpdate"] = {"phase": "InProgress"}
+    else:
+        deployment["status"]["state"] = "FAILED"
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    mock_kube_api.get_service_scaling_adapter.assert_not_called()
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unsafe_adapter",
+    [
+        "deleting",
+        "missing-resource-version",
+        "wrong-owner-uid",
+        "missing-owner-api-version",
+        "wrong-dgd-ref",
+        "wrong-component-ref",
+        "wrong-label",
+        "malformed-owner-references",
+        "malformed-dgd-ref",
+    ],
+)
+async def test_set_component_replicas_unready_rejects_untrusted_adapter(
+    kubernetes_connector, mock_kube_api, unsafe_adapter
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("worker", "decode", replicas=0)
+    )
+    adapter = _scaling_adapter("worker", replicas=0)
+    if unsafe_adapter == "deleting":
+        adapter["metadata"]["deletionTimestamp"] = "2026-08-28T21:00:00Z"
+    elif unsafe_adapter == "missing-resource-version":
+        del adapter["metadata"]["resourceVersion"]
+    elif unsafe_adapter == "wrong-owner-uid":
+        adapter["metadata"]["ownerReferences"][0]["uid"] = "other-uid"
+    elif unsafe_adapter == "missing-owner-api-version":
+        del adapter["metadata"]["ownerReferences"][0]["apiVersion"]
+    elif unsafe_adapter == "wrong-dgd-ref":
+        adapter["spec"]["dgdRef"]["name"] = "other-graph"
+    elif unsafe_adapter == "wrong-component-ref":
+        adapter["spec"]["dgdRef"]["componentName"] = "other-worker"
+    elif unsafe_adapter == "wrong-label":
+        adapter["metadata"]["labels"]["nvidia.com/dynamo-component"] = "other-worker"
+    elif unsafe_adapter == "malformed-owner-references":
+        adapter["metadata"]["ownerReferences"] = {"controller": True}
+    else:
+        adapter["spec"]["dgdRef"] = ["test-graph", "worker"]
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.return_value = adapter
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker",
+                desired_replicas=1,
+            )
+        ]
+    )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_unready_preflights_all_before_first_write(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("prefill-worker", "prefill", replicas=0),
+        _adapter_component("decode-worker", "decode", replicas=0),
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        _scaling_adapter("prefill-worker", replicas=0),
+        client.ApiException(status=404),
+    ]
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.PREFILL,
+                component_name="prefill-worker",
+                desired_replicas=1,
+            ),
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="decode-worker",
+                desired_replicas=1,
+            ),
+        ]
+    )
+
+    assert mock_kube_api.get_service_scaling_adapter.call_count == 2
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_unready_rejects_multiple_bootstrap_writes(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _unready_recovery_deployment(
+        _adapter_component("prefill-worker", "prefill", replicas=0),
+        _adapter_component("decode-worker", "decode", replicas=0),
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+    mock_kube_api.is_spec_generation_observed.return_value = True
+    mock_kube_api.get_service_scaling_adapter.side_effect = [
+        _scaling_adapter("prefill-worker", replicas=0),
+        _scaling_adapter("decode-worker", replicas=0),
+    ]
+
+    await kubernetes_connector.set_component_replicas(
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.PREFILL,
+                component_name="prefill-worker",
+                desired_replicas=1,
+            ),
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="decode-worker",
+                desired_replicas=1,
+            ),
+        ]
+    )
+
+    mock_kube_api.update_scaling_adapter_replicas.assert_not_called()
+    mock_kube_api.update_graph_replicas.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1362,6 +2458,42 @@ async def test_get_actual_worker_counts_stable(kubernetes_connector, mock_kube_a
 
 
 @pytest.mark.asyncio
+async def test_worker_inventory_uses_authoritative_dgdsa_target(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(
+        _adapter_component("worker", "decode", replicas=1),
+    )
+    deployment["status"]["components"]["worker"].update(
+        {
+            "replicas": 0,
+            "updatedReplicas": 0,
+            "readyReplicas": 0,
+            "availableReplicas": 0,
+        }
+    )
+    authoritative = deepcopy(deployment)
+    authoritative["spec"]["components"][0]["replicas"] = 0
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.fetch_authoritative_replica_targets.return_value = authoritative
+    mock_kube_api.get_service_replica_status.return_value = (0, True)
+    mock_kube_api.is_spec_generation_observed.return_value = True
+
+    inventory = await kubernetes_connector.get_worker_inventory(
+        prefill_component_name=None,
+        decode_component_name="worker",
+    )
+
+    assert inventory is not None
+    assert inventory.ready_num_decode == 0
+    assert inventory.expected_num_decode == 0
+    assert inventory.decode_scaling_in_progress is False
+    mock_kube_api.fetch_authoritative_replica_targets.assert_called_once_with(
+        deployment
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_actual_worker_counts_prefill_rollout_in_progress(
     kubernetes_connector, mock_kube_api
 ):
@@ -1653,18 +2785,19 @@ def test_extract_mdc_entries_uses_truncated_grove_component_name(
     }
     kubernetes_connector.graph_deployment_name = dgd_name
     mock_kube_api.get_graph_deployment.return_value = deployment
-    kubernetes_connector._list_worker_metadata_crs = Mock(
-        return_value=[_model_card_cr(cr_name)]
-    )
+    pod, cr = _registered_worker(component_name, graph=dgd_name)
+    cr["metadata"]["name"] = cr_name
+    mock_kube_api.list_pods_for_graph.return_value = [pod]
+    kubernetes_connector._list_worker_metadata_crs = Mock(return_value=[cr])
 
     assert not cr_name.startswith(f"{dgd_name}-")
-    entries = kubernetes_connector._extract_mdc_entries()
+    entries = kubernetes_connector._extract_mdc_entries(deployment)["decode"]
 
     assert len(entries) == 1
     assert entries[0].card_json["worker_type"] == "decode"
 
 
-def test_extract_mdc_entries_uses_dgd_prefix_with_partial_component_names(
+def test_extract_mdc_entries_does_not_require_generated_component_names(
     kubernetes_connector, mock_kube_api
 ):
     deployment = _deployment(_component("decode", "decode", replicas=1))
@@ -1674,11 +2807,11 @@ def test_extract_mdc_entries_uses_dgd_prefix_with_partial_component_names(
         }
     }
     mock_kube_api.get_graph_deployment.return_value = deployment
-    kubernetes_connector._list_worker_metadata_crs = Mock(
-        return_value=[_model_card_cr("test-graph-0-decode-f4k85")]
-    )
+    pod, cr = _registered_worker("unrelated-to-dgd-name")
+    mock_kube_api.list_pods_for_graph.return_value = [pod]
+    kubernetes_connector._list_worker_metadata_crs = Mock(return_value=[cr])
 
-    entries = kubernetes_connector._extract_mdc_entries()
+    entries = kubernetes_connector._extract_mdc_entries(deployment)["decode"]
 
     assert len(entries) == 1
     assert entries[0].card_json["worker_type"] == "decode"
@@ -1896,3 +3029,298 @@ async def test_wait_for_settled_graph_deployment_requires_backing(kubernetes_con
         prefill_component_name=None,
         decode_component_name="CustomDecode",
     )
+
+
+@pytest.mark.parametrize(
+    "service_type,runtime_component,role",
+    [
+        ("worker", "custom-aggregated", "aggregated"),
+        ("worker", "worker", "aggregated"),
+        ("decode", "backend", "decode"),
+        ("prefill", "custom-prefill", "prefill"),
+    ],
+)
+def test_worker_info_uses_registration_not_projected_identity(
+    kubernetes_connector,
+    mock_kube_api,
+    service_type,
+    runtime_component,
+    role,
+):
+    deployment = _deployment(_component("Pool", service_type, replicas=2))
+    deployment["metadata"]["annotations"] = {"nvidia.com/current-worker-hash": "active"}
+    deployment["status"] = {
+        "observedGeneration": deployment["metadata"]["generation"],
+        "components": {
+            "Pool": {
+                "runtimeComponentName": "$WORKER_NAME",
+                "servedModelName": "predicted-model",
+                "runtimeNamespace": "test-active",
+            }
+        },
+    }
+    first, first_cr = _registered_worker(
+        "worker-a", "uid-a", service="Pool", component=runtime_component, role=role
+    )
+    second, second_cr = _registered_worker(
+        "worker-b", "uid-b", service="Pool", component=runtime_component, role=role
+    )
+    # Adapter and encoder records must not override the primary serving model.
+    cards = first_cr["spec"]["data"]["model_cards"]
+    cards["adapter"] = {"type": "LoRA", "card_json": {"display_name": "adapter"}}
+    # Runtime adapters are also Model variants, identified by model_suffix/lora.
+    adapter = deepcopy(cards["model"])
+    adapter["model_suffix"] = "adapter"
+    adapter["card_json"]["display_name"] = "adapter"
+    cards["runtime-adapter"] = adapter
+    legacy_adapter = deepcopy(adapter)
+    legacy_adapter.pop("model_suffix")
+    legacy_adapter["card_json"]["lora"] = {"name": "adapter"}
+    cards["legacy-adapter"] = legacy_adapter
+    cards["encoder"] = {
+        "type": "Model",
+        "namespace": "test-active",
+        "card_json": {"worker_type": "encode", "display_name": "encoder"},
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.list_pods_for_graph.return_value = [second, first]
+    kubernetes_connector._list_worker_metadata_crs = Mock(
+        return_value=[second_cr, first_cr]
+    )
+
+    sub_type = (
+        SubComponentType.PREFILL if role == "prefill" else SubComponentType.DECODE
+    )
+    info = kubernetes_connector.get_worker_info(sub_type)
+
+    assert (info.k8s_name, info.component_name, info.endpoint, info.model_name) == (
+        "Pool",
+        runtime_component,
+        "custom-generate",
+        "registered-model",
+    )
+    mock_kube_api.get_graph_deployment.assert_called_once()
+    # Model refresh is a separate Planner path; it must use the same identity.
+    assert (
+        kubernetes_connector.get_model_name(
+            require_prefill=role == "prefill", require_decode=role != "prefill"
+        )
+        == "registered-model"
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "recreated-pod",
+        "owner-name",
+        "owner-kind",
+        "no-owner",
+        "sibling-component",
+        "sibling-graph",
+        "unready",
+        "terminal",
+        "terminating",
+        "deleted-registration",
+        "wrong-namespace",
+        "candidate-revision",
+        "missing-revision",
+    ],
+)
+def test_registration_requires_current_serving_pod(
+    kubernetes_connector,
+    mock_kube_api,
+    invalid,
+):
+    deployment = _deployment(_component("decode", "decode", replicas=1))
+    deployment["metadata"]["annotations"] = {"nvidia.com/current-worker-hash": "active"}
+    deployment["status"] = {
+        "components": {"decode": {"runtimeNamespace": "test-active"}}
+    }
+    pod, cr = _registered_worker()
+    if invalid == "recreated-pod":
+        pod.metadata.uid = "replacement-uid"  # Same name must not match an old UID.
+    elif invalid == "owner-name":
+        cr["metadata"]["ownerReferences"][0]["name"] = "other-pod"
+    elif invalid == "owner-kind":
+        cr["metadata"]["ownerReferences"][0]["kind"] = "Deployment"
+    elif invalid == "no-owner":
+        cr["metadata"]["ownerReferences"] = []
+    elif invalid == "sibling-component":
+        pod.metadata.labels["nvidia.com/dynamo-component"] = "other"
+    elif invalid == "sibling-graph":
+        pod.metadata.labels["nvidia.com/dynamo-graph-deployment-name"] = "other"
+    elif invalid == "unready":
+        pod.status.conditions[0].status = "False"
+    elif invalid == "terminal":
+        pod.status.phase = "Succeeded"
+    elif invalid == "terminating":
+        pod.metadata.deletion_timestamp = datetime.now(timezone.utc)
+    elif invalid == "deleted-registration":
+        cr["metadata"]["deletionTimestamp"] = "2026-01-01T00:00:00Z"
+    elif invalid == "wrong-namespace":
+        cr["spec"]["data"]["model_cards"]["model"]["namespace"] = "candidate"
+    elif invalid == "candidate-revision":
+        pod.metadata.labels["nvidia.com/dynamo-worker-hash"] = "candidate"
+    elif invalid == "missing-revision":
+        del pod.metadata.labels["nvidia.com/dynamo-worker-hash"]
+    mock_kube_api.list_pods_for_graph.return_value = [pod]
+    kubernetes_connector._list_worker_metadata_crs = Mock(return_value=[cr])
+
+    assert kubernetes_connector._extract_mdc_entries(deployment) == {}
+    if invalid == "recreated-pod":
+        cr["metadata"]["ownerReferences"][0]["uid"] = pod.metadata.uid
+        assert len(kubernetes_connector._extract_mdc_entries(deployment)["decode"]) == 1
+
+
+@pytest.mark.parametrize("namespace_changes", [False, True])
+def test_registration_follows_rollout_cutover(
+    kubernetes_connector, mock_kube_api, namespace_changes
+):
+    new_namespace = "test-new" if namespace_changes else "test-old"
+    deployment = _deployment(_component("decode", "decode", replicas=2))
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/current-worker-hash": "old-v1",
+        "nvidia.com/current-worker-hash-v2": "old-v2",
+    }
+    deployment["status"] = {
+        "rollingUpdate": {"phase": "InProgress"},
+        "components": {"decode": {"runtimeNamespace": "test-old"}},
+    }
+    old, old_cr = _registered_worker(
+        "old-pod",
+        "old-uid",
+        revision="old-v2",
+        namespace="test-old",
+        component="old-worker",
+        model="old-model",
+    )
+    new, new_cr = _registered_worker(
+        "new-pod",
+        "new-uid",
+        revision="new",
+        namespace=new_namespace,
+        component="new-worker",
+        model="new-model",
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.list_pods_for_graph.return_value = [new, old]
+    kubernetes_connector._list_worker_metadata_crs = Mock(return_value=[new_cr, old_cr])
+
+    info = kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+    assert (info.component_name, info.model_name) == ("old-worker", "old-model")
+
+    # Old Pods/registrations still exist after cutover; only the active revision wins.
+    deployment["metadata"]["annotations"] = {"nvidia.com/current-worker-hash": "new"}
+    deployment["status"]["components"]["decode"]["runtimeNamespace"] = new_namespace
+    info = kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+    assert (info.component_name, info.model_name) == ("new-worker", "new-model")
+
+
+@pytest.mark.parametrize("active_hash", [None, "active"])
+@pytest.mark.parametrize("conflicting_field", ["component", "endpoint", "model"])
+def test_registration_rejects_conflicting_replica_identity(
+    kubernetes_connector, mock_kube_api, active_hash, conflicting_field
+):
+    deployment = _deployment(_component("decode", "decode", replicas=2))
+    if active_hash:
+        deployment["metadata"]["annotations"] = {
+            "nvidia.com/current-worker-hash": active_hash
+        }
+    first, first_cr = _registered_worker("first", "first-uid", component="one")
+    second, second_cr = _registered_worker("second", "second-uid", component="one")
+    second_card = second_cr["spec"]["data"]["model_cards"]["model"]
+    if conflicting_field == "model":
+        second_card["card_json"]["display_name"] = "other-model"
+    else:
+        second_card[conflicting_field] = "other"
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.list_pods_for_graph.return_value = [first, second]
+    kubernetes_connector._list_worker_metadata_crs = Mock(
+        return_value=[first_cr, second_cr]
+    )
+
+    with pytest.raises(PlannerError, match="Conflicting runtime registrations"):
+        kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+
+
+@pytest.mark.parametrize("status", [401, 500])
+def test_registration_does_not_hide_other_pod_list_failures(
+    kubernetes_connector, mock_kube_api, status
+):
+    deployment = _deployment(_component("decode", "decode", replicas=1))
+    _, cr = _registered_worker()
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.list_pods_for_graph.side_effect = client.ApiException(status=status)
+    kubernetes_connector._list_worker_metadata_crs = Mock(return_value=[cr])
+
+    with pytest.raises(client.ApiException):
+        kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+
+    # No registrations (including an absent CRD) retains the existing fallback.
+    kubernetes_connector._list_worker_metadata_crs.return_value = []
+    info = kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+    assert info.component_name == "backend"
+    mock_kube_api.list_pods_for_graph.assert_called_once()
+
+
+def test_registration_preserves_old_rbac_fallback_and_recovers(
+    kubernetes_connector, mock_kube_api, caplog
+):
+    deployment = _deployment(_component("decode", "decode", replicas=1))
+    deployment["status"] = {
+        "observedGeneration": deployment["metadata"]["generation"],
+        "components": {
+            "decode": {
+                "servedModelName": "projected-model",
+                "runtimeComponentName": "projected-worker",
+            }
+        },
+    }
+    pod, cr = _registered_worker()
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.list_pods_for_graph.side_effect = client.ApiException(status=403)
+    kubernetes_connector._list_worker_metadata_crs = Mock(return_value=[cr])
+
+    info = kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+    assert (info.component_name, info.model_name) == (
+        "projected-worker",
+        "projected-model",
+    )
+    assert (
+        kubernetes_connector.get_model_name(require_prefill=False) == "projected-model"
+    )
+    assert "registered identity is unavailable" in caplog.text
+    assert caplog.text.count("registered identity is unavailable") == 1
+
+    # Permissions can be granted without restarting Planner.
+    mock_kube_api.list_pods_for_graph.side_effect = None
+    mock_kube_api.list_pods_for_graph.return_value = [pod]
+    info = kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+    assert (info.component_name, info.model_name) == ("backend", "registered-model")
+
+
+def test_model_refresh_reads_registrations_and_pods_once(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(
+        _component("prefill", "prefill", replicas=1),
+        _component("decode", "decode", replicas=1),
+    )
+    prefill, prefill_cr = _registered_worker(
+        "prefill-pod",
+        "prefill-uid",
+        service="prefill",
+        component="prefill",
+        role="prefill",
+    )
+    decode, decode_cr = _registered_worker()
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.list_pods_for_graph.return_value = [prefill, decode]
+    kubernetes_connector._list_worker_metadata_crs = Mock(
+        return_value=[prefill_cr, decode_cr]
+    )
+
+    assert kubernetes_connector.get_model_name() == "registered-model"
+    kubernetes_connector._list_worker_metadata_crs.assert_called_once()
+    mock_kube_api.list_pods_for_graph.assert_called_once()

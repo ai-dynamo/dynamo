@@ -44,12 +44,14 @@ const (
 
 	KubeLabelDynamoSelector = "nvidia.com/selector"
 
-	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
+	KubeAnnotationEnableGrove            = "nvidia.com/enable-grove"
+	KubeAnnotationEnableDisaggregatedSet = "nvidia.com/enable-disaggregatedset"
 
 	// KubeAnnotationWorkloadProvider records the controller-owned immutable graph-level workload provider.
-	KubeAnnotationWorkloadProvider = "nvidia.com/workload-provider"
-	WorkloadProviderComponent      = "component"
-	WorkloadProviderGrove          = "grove"
+	KubeAnnotationWorkloadProvider   = "nvidia.com/workload-provider"
+	WorkloadProviderComponent        = "component"
+	WorkloadProviderGrove            = "grove"
+	WorkloadProviderDisaggregatedSet = "disaggregatedset"
 
 	// KubeAnnotationGroveUpdateStrategy temporarily exposes the Grove
 	// PodCliqueSet update strategy while the long-term DGD API is settled.
@@ -68,6 +70,7 @@ const (
 	KubeAnnotationGPUPowerLimit                   = "dynamo.nvidia.com/gpu-power-limit"
 
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
+	KubeLabelDynamoGraphDeploymentUID  = "nvidia.com/dynamo-graph-deployment-uid"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
 	KubeLabelDynamoNamespace           = "nvidia.com/dynamo-namespace"
 	// KubeLabelDynamoComponentType is the workload selector contract stamped on
@@ -129,11 +132,6 @@ const (
 	SnapshotGMSModeAnnotation              = "nvidia.com/dynamo-snapshot-gms-mode"
 	SnapshotCompatibilityVersion           = "v2"
 	SnapshotGMSModeDisabled                = "disabled"
-
-	// CUDASharedMemorySupportAnnotation mirrors Snapshot's
-	// podcontract.CuInterposeAnnotation. SnapshotJob delivers and preloads the
-	// cuInterpose shim when it is "enabled".
-	CUDASharedMemorySupportAnnotation = "nvidia.com/cuda-shared-memory-support"
 
 	// Native restore candidate metadata pins the PodSnapshot observation used
 	// by workload reconciliation so admission can detect intervening changes.
