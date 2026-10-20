@@ -65,8 +65,21 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 		shaped := applyAdmissionPatches(t, original, resp)
 		assert.Equal(t, snapshot.Name, shaped.Annotations[podcontract.RestoreFromAnnotation])
 		assert.Equal(t, "main=engine-0,main=engine-1", shaped.Annotations[podcontract.RestoreContainerMapAnnotation])
-		assert.NotContains(t, shaped.Annotations, consts.CheckpointRestoreCandidateAnnotation)
-		assert.NotContains(t, shaped.Annotations, consts.RestoreCandidateTargetContainersAnnotation)
+		for _, key := range []string{
+			consts.CheckpointRestoreCandidateAnnotation,
+			consts.CheckpointNameAnnotation,
+			consts.RestoreCandidateSourceKindAnnotation,
+			consts.SnapshotJobCandidateUIDAnnotation,
+			consts.CheckpointStartupPolicyAnnotation,
+			consts.SnapshotCandidateUIDAnnotation,
+			consts.SnapshotCandidateContentAnnotation,
+			consts.SnapshotCandidateGMSModeAnnotation,
+			consts.SnapshotCandidateVersionAnnotation,
+			consts.SnapshotCandidateCompatibilityHashAnnotation,
+			consts.RestoreCandidateTargetContainersAnnotation,
+		} {
+			assert.NotContains(t, shaped.Annotations, key)
+		}
 		require.Len(t, shaped.Spec.Volumes, 1)
 		assert.Equal(t, podcontract.SnapshotControlVolumeName, shaped.Spec.Volumes[0].Name)
 		for _, container := range shaped.Spec.Containers {
