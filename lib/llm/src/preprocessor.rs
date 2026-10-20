@@ -5463,6 +5463,21 @@ impl OpenAIPreprocessor {
         // that delays the grammar still ends reasoning with `</mm:think>`, which
         // dangling-end recovery splits as reasoning, and marker-free output is
         // decided as content when the parser is finalized.
+        //
+        // The cost is truncation under explicitly enabled thinking. If such a
+        // worker's output ends before `</mm:think>` for any reason (a `length`
+        // finish, a stop string, or a stream with no `finish_reason`), the held
+        // reasoning has no end marker to split on, so finalization delivers it
+        // as `content`, which does not match the grammar. Keeping it as
+        // reasoning means seeding the parser only where the worker delays the
+        // grammar. Workers publish that today for tool grammars only: vLLM sets
+        // `tool_call_structural_tag_excludes_reasoning` when its engine-side
+        // reasoning parser delays the grammar, and SGLang sets
+        // `tool_call_structural_tag_reasoning_gate` when it honors a per-request
+        // `require_reasoning`, which `guided_*` alone does not request.
+        // Extending those signals to `guided_*` is left for a follow-up.
+        // `test_minimax_m3_reasoning_before_guided_output_still_splits` pins
+        // this outcome.
         let seed_reasoning_parser = prompt_injected_reasoning
             && !(Self::is_minimax_m3_reasoning_parser(reasoning_parser)
                 && crate::preprocessor::tool_choice::has_explicit_guided_decoding(request));
@@ -15094,6 +15109,9 @@ mod tests {
     enum MiniMaxM3StreamEnd {
         /// A terminal chunk with `finish_reason: "stop"`.
         Stop,
+        /// A terminal chunk with `finish_reason: "length"`, as when
+        /// `max_tokens` cuts the generation off.
+        Length,
         /// Nothing more: every `finish_reason` stays null, as when the
         /// generation is aborted or truncated.
         NoFinishReason,
@@ -15158,6 +15176,9 @@ mod tests {
         match end {
             MiniMaxM3StreamEnd::Stop => backend.push(chunk(
                 serde_json::json!([{"index": 0, "delta": {}, "finish_reason": "stop"}]),
+            )),
+            MiniMaxM3StreamEnd::Length => backend.push(chunk(
+                serde_json::json!([{"index": 0, "delta": {}, "finish_reason": "length"}]),
             )),
             MiniMaxM3StreamEnd::UsageOnlyNoFinishReason => {
                 let mut usage = chunk(serde_json::json!([]));
@@ -15416,6 +15437,42 @@ mod tests {
             Vec::<(String, (String, String))>::new(),
             "rows whose reasoning/answer split changed"
         );
+
+        // Cut off before `</mm:think>` (a `length` finish, or the stream ends
+        // with no `finish_reason`), the reasoning has no end marker to split
+        // on. With an explicit `guided_*` the parser is unseeded (see
+        // `seed_reasoning_parser`), so finalization delivers it as content.
+        // `response_format` keeps the seeded parser, so it stays reasoning.
+        let truncated = "Let me think about";
+        let mut truncated_rows = Vec::new();
+        for (field, body, _) in minimax_m3_constrained_output_cases() {
+            let expected = if field == "response_format" {
+                ("", truncated)
+            } else {
+                (truncated, "")
+            };
+            for (control, control_body) in [
+                ("thinking_mode=enabled", &enabled),
+                ("reasoning_effort=high", &effort),
+            ] {
+                truncated_rows.push((
+                    format!("truncated {field} + {control}"),
+                    minimax_m3_merge_body(body.clone(), control_body),
+                    truncated,
+                    expected,
+                ));
+            }
+        }
+        for (end_label, end) in [
+            ("length", MiniMaxM3StreamEnd::Length),
+            ("no finish_reason", MiniMaxM3StreamEnd::NoFinishReason),
+        ] {
+            assert_eq!(
+                minimax_m3_mismatched_rows(truncated_rows.clone(), end).await,
+                Vec::<(String, (String, String))>::new(),
+                "truncated rows ({end_label}) whose split changed"
+            );
+        }
     }
 
     #[tokio::test]
