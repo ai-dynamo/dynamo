@@ -13,16 +13,19 @@
 //!
 //! Run with: `cargo test --test lora_simulation -- --nocapture`
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
 use dynamo_llm::lora::config::LoraAllocationConfig;
 use dynamo_llm::lora::controller::LoraController;
-use dynamo_llm::lora::load_estimator::LoadEstimator;
+use dynamo_llm::lora::filter::LoraFilter;
+use dynamo_llm::lora::load_estimator::{LoadEstimator, LoadEstimatorConfig};
 use dynamo_llm::lora::routing::AllocationAlgorithmType;
-use dynamo_llm::lora::routing::table::LoraRoutingTable;
+use dynamo_llm::lora::routing::table::{LoraReplicaConfig, LoraRoutingTable};
 use dynamo_llm::lora::state_tracker::LoraStateTracker;
+use dynamo_llm::model_card::LoraInfo;
 
 use rand::SeedableRng;
 use rand::prelude::*;
@@ -30,9 +33,6 @@ use rand::rngs::StdRng;
 
 // Workload configuration and generators are kept separate from allocation runners.
 include!("workloads.rs");
-
-/// Keep allocator comparisons free of the controller's separate scale-down policy.
-const COMPARISON_SCALE_DOWN_COOLDOWN_TICKS: u32 = 0;
 
 // ============================================================================
 // Random Allocator (for baseline comparison)
@@ -100,6 +100,177 @@ impl RandomAllocator {
 
 /// Snapshot of the allocation state at a given tick
 type AllocationSnapshot = HashMap<String, Vec<WorkerWithDpRank>>;
+
+#[derive(Default)]
+struct RequestMetrics {
+    adapter_loads: usize,
+    adapter_unloads: usize,
+    requests: usize,
+    hits: usize,
+    mean_occupancy: f64,
+    max_occupancy: usize,
+    worker_load_cov: f64,
+}
+
+/// Deterministic, capacity-bounded LRU residency model for simulated workers.
+struct ResidencyModel {
+    adapters: HashMap<WorkerWithDpRank, VecDeque<String>>,
+    next_candidate: HashMap<String, usize>,
+}
+
+impl ResidencyModel {
+    fn new(workers: &[WorkerWithDpRank]) -> Self {
+        Self {
+            adapters: workers
+                .iter()
+                .copied()
+                .map(|worker| (worker, VecDeque::new()))
+                .collect(),
+            next_candidate: HashMap::new(),
+        }
+    }
+
+    fn serve_tick(
+        &mut self,
+        schedules: &[LoraLoadSchedule],
+        tick: usize,
+        filter: &LoraFilter,
+        workers: &[WorkerWithDpRank],
+        state_tracker: &LoraStateTracker,
+        slots_per_backend: usize,
+    ) -> RequestMetrics {
+        let available_ids: Vec<u64> = workers.iter().map(|worker| worker.worker_id).collect();
+        let worker_by_id: HashMap<u64, WorkerWithDpRank> = workers
+            .iter()
+            .copied()
+            .map(|worker| (worker.worker_id, worker))
+            .collect();
+        let mut metrics = RequestMetrics::default();
+        let mut requests_per_worker: HashMap<WorkerWithDpRank, usize> =
+            workers.iter().copied().map(|worker| (worker, 0)).collect();
+
+        for schedule in schedules {
+            for _ in 0..schedule.load_at_tick(tick) {
+                metrics.requests += 1;
+                let candidates =
+                    filter.filter_worker_ids_for_lora(Some(&schedule.lora_name), &available_ids);
+                if candidates.is_empty() {
+                    continue;
+                }
+                let cursor = self
+                    .next_candidate
+                    .entry(schedule.lora_name.clone())
+                    .or_insert(0);
+                let candidate = candidates
+                    .get(*cursor % candidates.len())
+                    .copied()
+                    .expect("simulation requires at least one available worker");
+                *cursor += 1;
+                let worker = worker_by_id[&candidate];
+                *requests_per_worker.entry(worker).or_default() += 1;
+                let resident = self.adapters.entry(worker).or_default();
+
+                if state_tracker.is_loaded(&schedule.lora_name, &worker) {
+                    metrics.hits += 1;
+                    if let Some(position) =
+                        resident.iter().position(|name| name == &schedule.lora_name)
+                    {
+                        let name = resident.remove(position).expect("position came from deque");
+                        resident.push_back(name);
+                    }
+                    continue;
+                }
+
+                if resident.len() >= slots_per_backend {
+                    let evicted = resident
+                        .pop_front()
+                        .expect("full resident deque is non-empty");
+                    state_tracker.handle_mdc_removal(worker, &evicted);
+                    metrics.adapter_unloads += 1;
+                }
+                resident.push_back(schedule.lora_name.clone());
+                state_tracker.handle_mdc_addition(
+                    worker,
+                    &LoraInfo {
+                        name: schedule.lora_name.clone(),
+                        max_gpu_lora_count: Some(slots_per_backend as u32),
+                    },
+                );
+                metrics.adapter_loads += 1;
+            }
+        }
+
+        if workers.is_empty() {
+            return metrics;
+        }
+
+        let occupancy: Vec<usize> = workers
+            .iter()
+            .map(|worker| self.adapters.get(worker).map_or(0, VecDeque::len))
+            .collect();
+        metrics.mean_occupancy = occupancy.iter().sum::<usize>() as f64 / workers.len() as f64;
+        metrics.max_occupancy = occupancy.iter().copied().max().unwrap_or(0);
+        let worker_loads: Vec<f64> = workers
+            .iter()
+            .map(|worker| requests_per_worker[worker] as f64)
+            .collect();
+        let mean_load = worker_loads.iter().sum::<f64>() / worker_loads.len() as f64;
+        if mean_load > 0.0 {
+            let variance = worker_loads
+                .iter()
+                .map(|load| (load - mean_load).powi(2))
+                .sum::<f64>()
+                / worker_loads.len() as f64;
+            metrics.worker_load_cov = variance.sqrt() / mean_load;
+        }
+
+        metrics
+    }
+}
+
+fn record_request_metrics(metrics: &mut ChurnMetrics, request_metrics: RequestMetrics) {
+    metrics
+        .per_tick_adapter_loads
+        .push(request_metrics.adapter_loads);
+    metrics
+        .per_tick_adapter_unloads
+        .push(request_metrics.adapter_unloads);
+    metrics.per_tick_requests.push(request_metrics.requests);
+    metrics.per_tick_hits.push(request_metrics.hits);
+    metrics
+        .per_tick_mean_occupancy
+        .push(request_metrics.mean_occupancy);
+    metrics
+        .per_tick_max_occupancy
+        .push(request_metrics.max_occupancy);
+    metrics
+        .per_tick_worker_load_cov
+        .push(request_metrics.worker_load_cov);
+}
+
+fn record_routing_metrics(
+    metrics: &mut ChurnMetrics,
+    routing_table: &LoraRoutingTable,
+    solve_ms: f64,
+    overflow_count: usize,
+) {
+    let configs = routing_table.snapshot_configs();
+    metrics.per_tick_active_loras.push(
+        configs
+            .iter()
+            .filter(|(_, config)| config.is_active)
+            .count(),
+    );
+    metrics.per_tick_routing_entries.push(configs.len());
+    metrics.per_tick_cold_start_entries.push(
+        configs
+            .iter()
+            .filter(|(_, config)| !config.is_active)
+            .count(),
+    );
+    metrics.per_tick_solve_ms.push(solve_ms);
+    metrics.per_tick_overflow_count.push(overflow_count);
+}
 
 /// Compute churn between two allocation snapshots
 fn compute_churn(prev: &AllocationSnapshot, curr: &AllocationSnapshot) -> (usize, usize) {
@@ -270,17 +441,20 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
     let alloc_config = LoraAllocationConfig {
         enabled: true,
         algorithm: AllocationAlgorithmType::Hrw,
-        timestep_secs: 1, // Not used in sync mode
-        // The benchmark isolates routing-target selection. Hysteresis is a separate policy
-        // that the random baseline does not implement and would confound the comparison.
-        scale_down_cooldown_ticks: COMPARISON_SCALE_DOWN_COOLDOWN_TICKS,
-        rate_window_multiplier: 5,
+        timestep_secs: config.timestep_secs,
+        scale_down_cooldown_ticks: config.scale_down_cooldown_ticks,
+        rate_window_multiplier: config.rate_window_multiplier,
         ..Default::default()
     };
 
     let routing_table = LoraRoutingTable::new();
     let state_tracker = LoraStateTracker::new();
-    let load_estimator = Arc::new(LoadEstimator::new());
+    let load_estimator = Arc::new(LoadEstimator::with_config(
+        LoadEstimatorConfig::from_controller_timestep(
+            config.timestep_secs,
+            config.rate_window_multiplier,
+        ),
+    ));
     let mut controller = LoraController::new(
         alloc_config,
         routing_table.clone(),
@@ -298,38 +472,28 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
     for &worker in &workers {
         state_tracker.set_worker_capacity(worker, config.slots_per_backend as u32);
     }
+    let filter = LoraFilter::new(routing_table.clone(), state_tracker.clone());
+    let mut residency = ResidencyModel::new(&workers);
 
     let mut metrics = ChurnMetrics::new("HRW");
     let mut prev_snapshot: AllocationSnapshot = HashMap::new();
+    let base = Instant::now();
 
     for tick in 0..config.total_ticks {
-        // Fully clear the previous tick's load signal. `decrement_load` only touches the in-flight
-        // counter, not the windowed rate counter the controller actually reads via
-        // `get_current_load()`; since the whole simulation runs in one real-time instant, without
-        // `remove_lora` the rate counter would accumulate across ticks and the controller would see
-        // ever-growing load instead of this tick's pattern.
-        for name in load_estimator
-            .get_current_load()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            load_estimator.remove_lora(&name);
-        }
+        let now = base + Duration::from_secs(tick as u64 * config.timestep_secs);
 
-        // The controller unions adapter names from the load estimator with discovery state, so
-        // active adapters do not need synthetic MDC registrations. Registering them on an
-        // arbitrary worker would consume that worker's simulated slots for HRW but not MCF.
-        // Set only this tick's demand to keep the compared allocators capacity-equivalent.
+        // The controller learns active adapters from the estimator. Virtual time gives its
+        // windowed signal the same three-second control cadence as production.
         for schedule in schedules {
             let load = schedule.load_at_tick(tick);
             for _ in 0..load {
-                load_estimator.increment_load(&schedule.lora_name);
+                load_estimator.increment_load_at(&schedule.lora_name, now);
             }
         }
 
-        // Recompute allocations
-        controller.recompute_now();
+        let solve_start = Instant::now();
+        controller.recompute_now_at(now);
+        let solve_ms = solve_start.elapsed().as_secs_f64() * 1_000.0;
 
         // Snapshot current allocation
         let mut curr_snapshot: AllocationSnapshot = HashMap::new();
@@ -361,6 +525,21 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
             *replica_dist.entry(replica_set.len()).or_insert(0) += 1;
         }
         metrics.per_tick_replica_dist.push(replica_dist);
+        record_routing_metrics(&mut metrics, &routing_table, solve_ms, 0);
+        let request_metrics = residency.serve_tick(
+            schedules,
+            tick,
+            &filter,
+            &workers,
+            &state_tracker,
+            config.slots_per_backend,
+        );
+        record_request_metrics(&mut metrics, request_metrics);
+        for schedule in schedules {
+            for _ in 0..schedule.load_at_tick(tick) {
+                load_estimator.decrement_load_at(&schedule.lora_name, now);
+            }
+        }
 
         prev_snapshot = curr_snapshot;
     }
@@ -377,28 +556,82 @@ fn run_random_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> 
     let workers: Vec<WorkerWithDpRank> = (0..config.num_backends)
         .map(|i| WorkerWithDpRank::new(i as u64, 0))
         .collect();
+    let routing_table = LoraRoutingTable::new();
+    let state_tracker = LoraStateTracker::new();
+    for &worker in &workers {
+        state_tracker.set_worker_capacity(worker, config.slots_per_backend as u32);
+    }
+    let filter = LoraFilter::new(routing_table.clone(), state_tracker.clone());
+    let mut residency = ResidencyModel::new(&workers);
+    let load_estimator = LoadEstimator::with_config(LoadEstimatorConfig::from_controller_timestep(
+        config.timestep_secs,
+        config.rate_window_multiplier,
+    ));
 
     let mut metrics = ChurnMetrics::new("Random");
     let mut prev_snapshot: AllocationSnapshot = HashMap::new();
+    let base = Instant::now();
 
     for tick in 0..config.total_ticks {
-        // Compute loads for this tick
-        let mut active_loads: Vec<(String, usize)> = Vec::new();
-        // Match the controller paths: adapters with zero current load have no load-estimator
-        // entry, so the random baseline excludes them rather than adding unmatched cold pins.
+        let now = base + Duration::from_secs(tick as u64 * config.timestep_secs);
         for schedule in schedules {
             let load = schedule.load_at_tick(tick);
-            if load > 0 {
-                active_loads.push((schedule.lora_name.clone(), load));
+            for _ in 0..load {
+                load_estimator.increment_load_at(&schedule.lora_name, now);
             }
         }
+        let active_loads: Vec<(String, usize)> = load_estimator
+            .get_current_load_at(now)
+            .into_iter()
+            .collect();
+        let active_loras: HashSet<&str> = active_loads
+            .iter()
+            .map(|(lora_name, _)| lora_name.as_str())
+            .collect();
+        let inactive_pins: HashMap<String, WorkerWithDpRank> = state_tracker
+            .list_loras()
+            .into_iter()
+            .filter(|lora_name| !active_loras.contains(lora_name.as_str()))
+            .filter_map(|lora_name| {
+                state_tracker
+                    .get_loaded_workers(&lora_name)
+                    .into_iter()
+                    .filter(|worker| workers.contains(worker))
+                    .min_by_key(|worker| (worker.worker_id, worker.dp_rank))
+                    .map(|worker| (lora_name, worker))
+            })
+            .collect();
 
-        let curr_snapshot = compute_random_snapshot(
+        let mut curr_snapshot = compute_random_snapshot(
             &mut random_allocator,
             &active_loads,
             &workers,
             config.slots_per_backend,
         );
+        // A resident adapter whose load has aged out of the window remains a cold-start target in
+        // the controller. Retain one live warm worker for it so Random measures the same routing
+        // entry lifecycle without consuming a new slot or replacing the resident adapter.
+        for (lora_name, worker) in &inactive_pins {
+            curr_snapshot.insert(lora_name.clone(), vec![*worker]);
+        }
+        for lora_name in routing_table.list_loras() {
+            if !curr_snapshot.contains_key(&lora_name) {
+                routing_table.remove_lora(&lora_name);
+            }
+        }
+        for (lora_name, replica_set) in &curr_snapshot {
+            routing_table.update_allocation(
+                lora_name.clone(),
+                LoraReplicaConfig {
+                    lora_name: lora_name.clone(),
+                    replica_factor: replica_set.len(),
+                    replica_set: replica_set.clone(),
+                    updated_at: Instant::now(),
+                    is_active: !inactive_pins.contains_key(lora_name),
+                },
+            );
+        }
+        record_routing_metrics(&mut metrics, &routing_table, 0.0, 0);
         // Compute churn
         let (loads, unloads) = compute_churn(&prev_snapshot, &curr_snapshot);
         let tick_churn = loads + unloads;
@@ -420,6 +653,22 @@ fn run_random_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> 
             *replica_dist.entry(replica_set.len()).or_insert(0) += 1;
         }
         metrics.per_tick_replica_dist.push(replica_dist);
+        record_request_metrics(
+            &mut metrics,
+            residency.serve_tick(
+                schedules,
+                tick,
+                &filter,
+                &workers,
+                &state_tracker,
+                config.slots_per_backend,
+            ),
+        );
+        for schedule in schedules {
+            for _ in 0..schedule.load_at_tick(tick) {
+                load_estimator.decrement_load_at(&schedule.lora_name, now);
+            }
+        }
 
         prev_snapshot = curr_snapshot;
     }
@@ -433,16 +682,20 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
     let alloc_config = LoraAllocationConfig {
         enabled: true,
         algorithm: AllocationAlgorithmType::MinCostFlow,
-        timestep_secs: 1,
-        // See run_hrw_simulation: keep the comparison focused on routing-target selection.
-        scale_down_cooldown_ticks: COMPARISON_SCALE_DOWN_COOLDOWN_TICKS,
-        rate_window_multiplier: 5,
+        timestep_secs: config.timestep_secs,
+        scale_down_cooldown_ticks: config.scale_down_cooldown_ticks,
+        rate_window_multiplier: config.rate_window_multiplier,
         ..Default::default()
     };
 
     let routing_table = LoraRoutingTable::new();
     let state_tracker = LoraStateTracker::new();
-    let load_estimator = Arc::new(LoadEstimator::new());
+    let load_estimator = Arc::new(LoadEstimator::with_config(
+        LoadEstimatorConfig::from_controller_timestep(
+            config.timestep_secs,
+            config.rate_window_multiplier,
+        ),
+    ));
     let mut controller = LoraController::new(
         alloc_config,
         routing_table.clone(),
@@ -459,31 +712,25 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
     for &worker in &workers {
         state_tracker.set_worker_capacity(worker, config.slots_per_backend as u32);
     }
+    let filter = LoraFilter::new(routing_table.clone(), state_tracker.clone());
+    let mut residency = ResidencyModel::new(&workers);
 
     let mut metrics = ChurnMetrics::new("MCF");
     let mut prev_snapshot: AllocationSnapshot = HashMap::new();
+    let base = Instant::now();
     for tick in 0..config.total_ticks {
-        // Fully clear the previous tick's load signal (see run_hrw_simulation: `decrement_load`
-        // leaves the windowed rate counter, which would otherwise accumulate across ticks).
-        for name in load_estimator
-            .get_current_load()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            load_estimator.remove_lora(&name);
-        }
+        let now = base + Duration::from_secs(tick as u64 * config.timestep_secs);
 
-        // See run_hrw_simulation: use the load estimator as the active-adapter source instead of
-        // synthetic loaded locations, which would give HRW and MCF different capacity inputs.
         for schedule in schedules {
             let load = schedule.load_at_tick(tick);
             for _ in 0..load {
-                load_estimator.increment_load(&schedule.lora_name);
+                load_estimator.increment_load_at(&schedule.lora_name, now);
             }
         }
 
-        controller.recompute_now();
+        let solve_start = Instant::now();
+        controller.recompute_now_at(now);
+        let solve_ms = solve_start.elapsed().as_secs_f64() * 1_000.0;
 
         let mut curr_snapshot: AllocationSnapshot = HashMap::new();
         for lora_name in routing_table.list_loras() {
@@ -511,6 +758,26 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
             *replica_dist.entry(replica_set.len()).or_insert(0) += 1;
         }
         metrics.per_tick_replica_dist.push(replica_dist);
+        record_routing_metrics(
+            &mut metrics,
+            &routing_table,
+            solve_ms,
+            controller.last_overflow_count(),
+        );
+        let request_metrics = residency.serve_tick(
+            schedules,
+            tick,
+            &filter,
+            &workers,
+            &state_tracker,
+            config.slots_per_backend,
+        );
+        record_request_metrics(&mut metrics, request_metrics);
+        for schedule in schedules {
+            for _ in 0..schedule.load_at_tick(tick) {
+                load_estimator.decrement_load_at(&schedule.lora_name, now);
+            }
+        }
 
         prev_snapshot = curr_snapshot;
     }
@@ -550,8 +817,8 @@ fn print_simulation_header(config: &SimConfig) {
     }
     println!("  Max Load/LoRA:       {}", config.max_load_per_lora);
     println!(
-        "  Scale-Down Cooldown: {} (comparison mode)",
-        COMPARISON_SCALE_DOWN_COOLDOWN_TICKS
+        "  Scale-Down Cooldown: {} ticks",
+        config.scale_down_cooldown_ticks
     );
     println!("  Seed:                {}", config.seed);
     println!();

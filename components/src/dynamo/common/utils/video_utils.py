@@ -45,7 +45,7 @@ def parse_size(
 def compute_num_frames(
     num_frames: int | None = None,
     seconds: int | None = None,
-    fps: int | None = None,
+    fps: float | None = None,
     default_fps: int = DEFAULT_VIDEO_FPS,
     default_num_frames: int = DEFAULT_VIDEO_NUM_FRAMES,
 ) -> int:
@@ -58,7 +58,7 @@ def compute_num_frames(
     if seconds is not None or fps is not None:
         _seconds = seconds if seconds is not None else 4
         _fps = fps if fps is not None else default_fps
-        return _seconds * _fps
+        return round(_seconds * _fps)
     return default_num_frames
 
 

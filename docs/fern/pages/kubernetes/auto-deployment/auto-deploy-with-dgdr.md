@@ -271,7 +271,7 @@ deploy the reviewed snapshot, enable `autoApply`:
 
 ```bash
 kubectl patch dgdr my-model -n <namespace> --type=merge \
-  -p '{"spec":{"runtimeVersionOverride":"1.4.0"}}'
+  -p '{"spec":{"runtimeVersionOverride":"1.5.0"}}'
 kubectl patch dgdr my-model -n <namespace> --type=merge \
   -p '{"spec":{"autoApply":true}}'
 ```
@@ -392,9 +392,24 @@ spec:
                   value: kv
 ```
 
-Inspect `.status.profilingResults.selectedConfig` with `autoApply: false` to find the generated
-component names. An override can modify only components already present in that generated DGD; it
-cannot add a new worker, EPP, or other topology component.
+Add overrides before profiling starts, using the exact, case-sensitive component names generated
+for the selected backend and topology. To discover the names for a specific Dynamo release:
+
+1. Create a temporary DGDR with `autoApply: false` and without component overrides.
+2. Wait for the DGDR to reach the `Ready` phase, then list the generated names:
+
+```bash
+kubectl get dgdr <name> -n <namespace> \
+  -o jsonpath='{range .status.profilingResults.selectedConfig.spec.components[*]}{.name}{"\n"}{end}'
+```
+
+3. Delete the temporary DGDR, then create the final DGDR with overrides that use those names.
+
+The DGDR spec becomes immutable after profiling starts, so you cannot add or change overrides on
+the temporary resource. An override can modify only components already present in the generated
+DGD; it cannot add a new worker, EPP, or other topology component. See
+[Generated component names](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-component-names)
+for the current profiler names by backend and topology.
 
 > [!IMPORTANT]
 > Older overrides used the `nvidia.com/v1alpha1` DGD shape. They remain supported for compatibility,
@@ -436,6 +451,49 @@ replacement behavior and requires the complete desired argument list.
 
 For the complete merge, metadata, and validation rules, see
 [DGDR Reference — Generated DGD overrides](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides).
+
+### Profiling job overrides and the trust boundary
+
+`spec.overrides.profilingJob` accepts a partial Kubernetes `JobSpec` that the operator merges
+into the profiling Job it launches (for example, to add tolerations or adjust resources). Because
+the operator creates that Job on your behalf, treat this the way Kubernetes treats any
+workload-creation API:
+
+> [!IMPORTANT]
+> Any principal that can create workloads in a namespace where Dynamo runs — a `Pod` directly, or
+> any resource that creates Pods (`Job`, `Deployment`, `DynamoGraphDeploymentRequest`, …) — is
+> inside that namespace's trust boundary: it can run code with the Secrets and ServiceAccount
+> tokens mounted in that namespace. Creating a DGDR is one such path and is no more privileged than
+> creating a `Job` or `Pod` there — including through `overrides.profilingJob`. This is by design
+> and matches how Kubernetes treats every Pod-spawning resource.
+>
+> Enforce Pod security **centrally on the resulting Pods** with
+> [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
+> (and any admission webhooks), which applies the full
+> [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) —
+> not only `securityContext` fields but also `privileged`, host namespaces, `hostPath` volumes, and
+> host ports. PSA applies no policy until you label the namespace — set
+> `pod-security.kubernetes.io/enforce: <level>` (plus the matching `audit`/`warn` labels) on every
+> namespace where Dynamo runs, exactly as you would for any workload. The operator does not
+> re-implement those checks.
+>
+> Dynamo's operator-generated workloads — including the DGDR profiling Job — satisfy the **`baseline`**
+> standard. Enforce **`baseline`** to block the privileged-container, host-namespace, host-device, and
+> `hostPath` escalation paths while keeping Dynamo running.
+>
+> PSA governs a Pod's security *posture*, not its *identity*: `overrides.profilingJob` can set the
+> Job's `serviceAccountName` and `automountServiceAccountToken`, and those are bounded by RBAC and
+> namespace membership, not by PSA — the same authority any Pod author in the namespace already has.
+> So grant `create`/`update` on DGDRs — and on workload resources generally — only to principals you
+> would trust to create Pods in that namespace, and use namespaces as the tenancy boundary — see
+> [Kubernetes RBAC good practices](https://kubernetes.io/docs/concepts/security/rbac-good-practices/#workload-creation).
+
+The profiling Job object always remains in the DGDR's own namespace and overrides cannot relocate
+it — but namespace containment is not node or cross-tenant isolation. If admission permits
+privileged containers, host namespaces, host devices, or `hostPath` mounts, a DGDR creator can
+obtain those capabilities through the operator, exactly as any Pod author in the namespace could.
+Enforcing `baseline` non-exempt on every resulting Pod closes those paths; use namespaces as the
+tenancy boundary for anything stronger.
 
 ## Next steps
 

@@ -51,6 +51,7 @@ fn bs_event_with_cache_namespace(
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     }
 }
 

@@ -32,10 +32,14 @@
 pub mod backend;
 pub mod listener;
 pub mod logging;
+pub mod lookup;
 pub mod metrics;
+pub mod recording;
 pub mod recovery;
 pub mod registry;
 pub mod server;
+#[doc(hidden)]
+pub mod session_updates;
 
 use std::path::PathBuf;
 use std::sync::Arc;

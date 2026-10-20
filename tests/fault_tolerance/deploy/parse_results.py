@@ -30,8 +30,11 @@ from tabulate import tabulate
 from tests.fault_tolerance.deploy.scenarios import (
     OVERFLOW_SUFFIX,
     RECOVERY_SUFFIX,
-    WORKER_MAP,
     TestPhase,
+)
+from tests.fault_tolerance.deploy.worker_names import (
+    WORKER_MAP,
+    get_worker_service_name,
 )
 
 
@@ -229,12 +232,7 @@ def get_decode_worker_dir(backend: str, deploy_type: str) -> Optional[str]:
     if backend not in WORKER_MAP:
         return None
 
-    # For trtllm agg deployments, use different worker name
-    if backend == "trtllm" and deploy_type == "agg":
-        return WORKER_MAP[backend]["decode_agg"]  # "TRTLLMWorker"
-    else:
-        return WORKER_MAP[backend]["decode"]
-        # "decode" (trtllm disagg), "VllmDecodeWorker", or "decode" (sglang)
+    return get_worker_service_name(backend, deploy_type)
 
 
 def calculate_recovery_time(

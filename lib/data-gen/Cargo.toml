@@ -13,6 +13,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+blake3 = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
 flate2 = "1"
 rustc-hash = "2"

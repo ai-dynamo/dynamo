@@ -11,6 +11,7 @@ use dynamo_kv_router::services::selection::{
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
+    soft_pin_repin_policy::register(registry)?;
     simple_filter_score_pick_policy::register(registry)?;
     disagg_filter_score_pick_policy::register(registry)?;
     simple_stacked_score_pick_policy::register(registry)
@@ -25,6 +26,10 @@ mod tests {
         let mut registry = WorkerSelectionPolicyRegistry::default();
         register(&mut registry).unwrap();
 
+        assert!(matches!(
+            soft_pin_repin_policy::register(&mut registry),
+            Err(WorkerSelectionPolicyRegistryError::Duplicate { name }) if name == "soft-pin-repin"
+        ));
         assert!(matches!(
             simple_filter_score_pick_policy::register(&mut registry),
             Err(WorkerSelectionPolicyRegistryError::Duplicate { name }) if name == "simple-filter-score-pick"

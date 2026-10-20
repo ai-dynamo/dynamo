@@ -20,8 +20,7 @@ use aisimulate_core::engine::{
     Admission, Command, CommandEffects, CommandResult, ForwardPassMetrics, KvEvent, Metrics,
     PassCompletionEffects,
 };
-use anyhow::{Context, Result, anyhow, bail, ensure};
-use dynamo_kv_router::protocols::StorageTier;
+use anyhow::{Context, Result, anyhow, ensure};
 #[cfg(test)]
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -34,19 +33,21 @@ use uuid::Uuid;
 #[cfg(test)]
 use crate::common::protocols::ForwardPassSnapshot;
 use crate::common::protocols::{
-    DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal, RawKvEvent,
+    DirectRequest, FpmPublisher, G2Scope, KvEventPublishers, MockerConfig, OutputSignal, RawKvEvent,
 };
 use crate::engine_adapter::{EngineComponents, engine_components, engine_factory};
-use crate::engine_observations::{dynamo_forward_pass_snapshot, dynamo_kv_event};
+use crate::engine_observations::{
+    dynamo_forward_pass_snapshot, dynamo_kv_event, dynamo_storage_tier,
+};
 use crate::generalized_live::{
     GroupedLiveDriverConfig, GroupedLiveEngineHandle, GroupedLiveEvent, GroupedLiveRuntime,
     GroupedPassBoundary, spawn_grouped_live_engine,
 };
+use crate::live::LiveRouteDelivery;
 use crate::scheduler::{
     AdmissionEvent, MockerMetrics, SchedulerCancellationEnvelope, SchedulerCommand,
-    SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerCommandResult,
-    SchedulerEventSendError, SchedulerEventSender, SchedulerHandle, SchedulerLifecycleEvent,
-    handoff_channel_capacity,
+    SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerCommandResult, SchedulerHandle,
+    SchedulerLifecycleEvent, handoff_channel_capacity,
 };
 
 /// Per-rank Dynamo sinks consumed by [`create_grouped_scheduler`].
@@ -175,30 +176,41 @@ impl CompletionBoundaryTestControl {
 /// Construct one generalized engine and a rank-fixed compatibility handle for
 /// each attention-DP rank.
 pub fn create_grouped_scheduler(
-    args: MockEngineArgs,
+    args: MockerConfig,
     rank_sinks: Vec<GroupedSchedulerRankSinks>,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<GroupedSchedulers> {
     let rank_sinks = rank_sinks
         .into_iter()
-        .map(|sinks| GroupedSchedulerRankEventSinks {
-            event_tx: sinks.output_tx.map(SchedulerEventSender::from),
+        .map(|sinks| RankSinks {
+            output: sinks
+                .output_tx
+                .map(RankOutputSink::Channel)
+                .unwrap_or_default(),
             kv_event_publishers: sinks.kv_event_publishers,
             fpm_publisher: sinks.fpm_publisher,
         })
         .collect();
-    create_grouped_scheduler_with_event_senders(args, rank_sinks, cancellation_token)
+    create_grouped_scheduler_with_rank_sinks(args, rank_sinks, cancellation_token)
 }
 
-pub(crate) struct GroupedSchedulerRankEventSinks {
-    pub(crate) event_tx: Option<SchedulerEventSender>,
+#[derive(Clone, Default)]
+pub(crate) enum RankOutputSink {
+    #[default]
+    None,
+    Channel(mpsc::UnboundedSender<Vec<OutputSignal>>),
+    Routes(LiveRouteDelivery),
+}
+
+pub(crate) struct RankSinks {
+    pub(crate) output: RankOutputSink,
     pub(crate) kv_event_publishers: KvEventPublishers,
     pub(crate) fpm_publisher: FpmPublisher,
 }
 
-pub(crate) fn create_grouped_scheduler_with_event_senders(
-    args: MockEngineArgs,
-    rank_sinks: Vec<GroupedSchedulerRankEventSinks>,
+pub(crate) fn create_grouped_scheduler_with_rank_sinks(
+    args: MockerConfig,
+    rank_sinks: Vec<RankSinks>,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<GroupedSchedulers> {
     let emit_kv_events = rank_sinks
@@ -231,10 +243,10 @@ pub(crate) fn create_grouped_scheduler_with_event_senders(
 
 /// Construct the historical one-rank scheduler facade while retaining the
 /// caller's externally visible DP-rank identity.
-pub(crate) fn create_single_rank_scheduler_with_event_sender(
-    args: MockEngineArgs,
+pub(crate) fn create_single_rank_scheduler_with_rank_sink(
+    args: MockerConfig,
     dp_rank: u32,
-    rank_sink: GroupedSchedulerRankEventSinks,
+    rank_sink: RankSinks,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<GroupedSchedulers> {
     let emit_kv_events = !rank_sink.kv_event_publishers.is_empty();
@@ -254,7 +266,7 @@ pub(crate) fn create_single_rank_scheduler_with_event_sender(
 
 fn create_grouped_scheduler_from_components(
     components: EngineComponents,
-    rank_sinks: Vec<GroupedSchedulerRankEventSinks>,
+    rank_sinks: Vec<RankSinks>,
     rank_identities: Vec<RankIdentity>,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<GroupedSchedulers> {
@@ -277,6 +289,14 @@ fn create_grouped_scheduler_from_components(
         .checked_mul(dp_size.get() as usize)
         .context("grouped scheduler control capacity overflow")?;
     let event_capacity = control_capacity.max(dp_size.get() as usize * 4).max(64);
+    ensure!(
+        components
+            .rank
+            .native_host_offload
+            .as_ref()
+            .is_none_or(|host| host.scope != G2Scope::ClusterShared),
+        "cluster_shared native_host_offload is supported only in offline replay"
+    );
     let factory = engine_factory(components.rank, components.timing)?;
     // Existing live schedulers seed every process-local worker from DP rank.
     // A logical worker therefore retains worker_id=0 at this compatibility
@@ -332,7 +352,7 @@ fn create_grouped_scheduler_from_components(
 
         dispatch_ranks.push(RankDispatch {
             external_dp_rank,
-            event_tx: sinks.event_tx,
+            output: sinks.output,
             kv_event_publishers: sinks.kv_event_publishers,
             fpm_publisher: sinks.fpm_publisher,
             lifecycle_tx,

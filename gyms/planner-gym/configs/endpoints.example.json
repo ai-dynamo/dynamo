@@ -1,0 +1,46 @@
+{
+  "endpoints": [
+    {
+      "name": "fast-endpoint",
+      "url": "http://127.0.0.1:8112",
+      "model": "gpt2",
+      "declared_deployment": {
+        "topology": "disagg",
+        "model": {
+          "name": "gpt2"
+        },
+        "engines": {
+          "common": {
+            "backend": "vllm",
+            "backend_version": "replace-with-deployed-version",
+            "system": "replace-with-deployed-system",
+            "tp_size": 1,
+            "attention_dp_size": 1
+          }
+        }
+      },
+      "description": "Example endpoint (low latency). Replace with a real Planner/KEDA/static deployment URL."
+    },
+    {
+      "name": "slow-endpoint",
+      "url": "http://127.0.0.1:8113",
+      "model": "gpt2",
+      "declared_deployment": {
+        "topology": "disagg",
+        "model": {
+          "name": "gpt2"
+        },
+        "engines": {
+          "common": {
+            "backend": "vllm",
+            "backend_version": "replace-with-deployed-version",
+            "system": "replace-with-deployed-system",
+            "tp_size": 1,
+            "attention_dp_size": 1
+          }
+        }
+      },
+      "description": "Example endpoint (higher latency) — fails tight ITL SLOs."
+    }
+  ]
+}

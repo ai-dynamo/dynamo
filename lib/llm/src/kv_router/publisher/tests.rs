@@ -233,6 +233,7 @@ mod test_event_processing {
             None,
             None,
             None,
+            None,
         );
 
         assert_eq!(blocks.len(), 2);
@@ -247,6 +248,7 @@ mod test_event_processing {
             None,
             Some("tenant-a"),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
             None,
             None,
@@ -286,6 +288,7 @@ mod test_event_processing {
             None,
             None,
             None,
+            None,
         );
 
         // should early-exit as second has mismatch
@@ -314,6 +317,7 @@ mod test_event_processing {
             kv_cache_spec_sliding_window: None,
             locality: None,
             ownership: None,
+            session_id: None,
         };
 
         let out = convert_event(
@@ -322,6 +326,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
         )
         .unwrap();
@@ -348,6 +353,7 @@ mod test_event_processing {
             kv_cache_spec_sliding_window: None,
             locality: None,
             ownership: None,
+            session_id: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -364,6 +370,7 @@ mod test_event_processing {
             kv_cache_spec_sliding_window: None,
             locality: None,
             ownership: None,
+            session_id: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
@@ -374,6 +381,7 @@ mod test_event_processing {
             WorkerWithDpRank::from_worker_id(1),
             &wc,
             None,
+            None,
         )
         .unwrap();
         let lora_out = convert_event(
@@ -382,6 +390,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
             None,
         )
         .unwrap();
@@ -421,6 +430,7 @@ mod test_event_processing {
             kv_cache_spec_sliding_window: None,
             locality: None,
             ownership: None,
+            session_id: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -437,6 +447,7 @@ mod test_event_processing {
             kv_cache_spec_sliding_window: None,
             locality: None,
             ownership: None,
+            session_id: None,
         };
 
         let out1 = convert_event(
@@ -446,6 +457,7 @@ mod test_event_processing {
             WorkerWithDpRank::from_worker_id(1),
             &wc,
             None,
+            None,
         )
         .unwrap();
         let out2 = convert_event(
@@ -454,6 +466,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
             None,
         )
         .unwrap();
@@ -547,6 +560,7 @@ mod test_event_processing {
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
             None,
+            None,
         )
         .unwrap();
 
@@ -563,6 +577,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
         )
         .unwrap();
@@ -800,7 +815,7 @@ mod tests_startup_helpers {
             &self,
             event: &RouterEvent,
         ) -> impl Future<Output = anyhow::Result<()>> + Send {
-            let bytes = rmp_serde::to_vec(event).unwrap();
+            let bytes = rmp_serde::to_vec_named(event).unwrap();
             self.published
                 .lock()
                 .unwrap()
@@ -1285,6 +1300,7 @@ mod tests_startup_helpers {
                 4,
                 next_event_id,
                 None,
+                None,
             )
         });
 
@@ -1415,6 +1431,7 @@ mod tests_startup_helpers {
                 4,
                 Arc::new(AtomicU64::new(0)),
                 None,
+                None,
             )
         });
 
@@ -1513,6 +1530,7 @@ mod tests_startup_helpers {
                 4,
                 Arc::new(AtomicU64::new(0)),
                 None,
+                None,
             )
         });
 
@@ -1595,7 +1613,7 @@ mod tests_startup_helpers {
         let listener_handle = tokio::spawn({
             let token = token.clone();
             let endpoint = endpoint.clone();
-            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None)
+            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None, None)
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
@@ -1617,6 +1635,7 @@ mod tests_startup_helpers {
                 kv_cache_spec_sliding_window: None,
                 locality: None,
                 ownership: None,
+                session_id: None,
             }],
             data_parallel_rank: Some(0),
         };
@@ -2116,6 +2135,63 @@ mod test_event_dedup_filter {
         // Remove hash 1 on rank 0 again — refcount 1→0, passes through
         let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
+    }
+}
+
+#[cfg(test)]
+mod worker_metrics_tests {
+    use std::time::Duration;
+
+    use anyhow::Result;
+    use dynamo_kv_router::protocols::ActiveLoad;
+
+    use super::super::worker_metrics::{WorkerMetricsPublisher, WorkerMetricsSink};
+
+    struct ChannelSink(tokio::sync::mpsc::UnboundedSender<ActiveLoad>);
+
+    #[async_trait::async_trait]
+    impl WorkerMetricsSink for ChannelSink {
+        async fn publish(&self, active_load: ActiveLoad) -> Result<()> {
+            self.0
+                .send(active_load)
+                .map_err(|_| anyhow::anyhow!("metrics test channel closed"))
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_debounces_updates_independently_per_rank() {
+        let publisher = WorkerMetricsPublisher::new().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        publisher.start_metrics_publishing_with(ChannelSink(tx), 42);
+
+        publisher.publish(Some(0), None, Some(100)).unwrap();
+        publisher.publish(Some(1), None, Some(200)).unwrap();
+        publisher.publish(Some(0), None, Some(300)).unwrap();
+
+        let mut published = Vec::new();
+        for _ in 0..2 {
+            published.push(
+                tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                    .await
+                    .expect("timed out waiting for rank metrics")
+                    .expect("metrics publishing task stopped"),
+            );
+        }
+        published.sort_unstable_by_key(|load| load.dp_rank);
+
+        assert_eq!(published[0].worker_id, 42);
+        assert_eq!(published[0].dp_rank, 0);
+        assert_eq!(published[0].kv_used_blocks, Some(300));
+        assert_eq!(published[1].worker_id, 42);
+        assert_eq!(published[1].dp_rank, 1);
+        assert_eq!(published[1].kv_used_blocks, Some(200));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), rx.recv())
+                .await
+                .is_err(),
+            "same-rank updates should be coalesced"
+        );
     }
 }
 

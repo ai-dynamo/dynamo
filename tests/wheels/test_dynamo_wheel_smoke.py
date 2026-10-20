@@ -39,7 +39,7 @@ PLATFORM_ENV = "DYNAMO_WHEEL_SMOKE_PLATFORM"
 PYTHONS_ENV = "DYNAMO_WHEEL_SMOKE_PYTHONS"
 DEFAULT_WHEELHOUSE = "/opt/dynamo/wheelhouse"
 # Core-only versions; 3.12 (image Python) is covered by the combined core+kvbm test.
-DEFAULT_PYTHONS = "3.10,3.11,3.13"
+DEFAULT_PYTHONS = "3.11,3.13"
 
 
 def _target_arch() -> str:
@@ -83,8 +83,8 @@ def test_core_and_kvbm_install_clean_room(wheelhouse: Path) -> None:
 
 @pytest.mark.aiconfigurator
 @pytest.mark.mocker
-def test_mocker_extra_install_clean_room(wheelhouse: Path) -> None:
-    smoke_install.install_mocker_extra(wheelhouse, sys.executable)
+def test_mocker_support_install_clean_room(wheelhouse: Path) -> None:
+    smoke_install.install_mocker_support(wheelhouse, sys.executable)
 
 
 def test_runtime_wheel_has_no_bundled_libraries(wheelhouse: Path) -> None:

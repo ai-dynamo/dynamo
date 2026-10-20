@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	lpxcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/lpx"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
@@ -83,6 +84,9 @@ func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploy
 }
 
 func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetupOptions) error {
+	if err := lpxcontroller.Setup(mgr, opts.Config, opts.RuntimeConfig, opts.DockerSecretRetriever); err != nil {
+		return err
+	}
 	if err := (&DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorder("dynamographdeployment"),
@@ -138,21 +142,6 @@ func SetupDynamoModel(mgr ctrl.Manager, opts DynamoModelSetupOptions) error {
 		RuntimeConfig:  opts.RuntimeConfig,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoModel controller: %w", err)
-	}
-	return nil
-}
-
-// SetupDynamoCheckpoint always registers the reconciler so existing checkpoint finalizers can
-// converge when Checkpoint is disabled. CheckpointReconciler.SetupWithManager omits the external
-// PodSnapshot watch unless the resolved Checkpoint gate is enabled.
-func SetupDynamoCheckpoint(mgr ctrl.Manager, opts SetupOptions) error {
-	if err := (&CheckpointReconciler{
-		Client:        mgr.GetClient(),
-		Config:        opts.Config,
-		RuntimeConfig: opts.RuntimeConfig,
-		Recorder:      mgr.GetEventRecorder("checkpoint"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
 	}
 	return nil
 }

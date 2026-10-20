@@ -251,7 +251,7 @@ Much of this prose is now drafted by agents. Edit it so it does not read that wa
 - **Lists by purpose:** numbered (`1.`) for sequences and steps, bulleted (`-`) otherwise; consistent
   within a page. Tables stay scannable; keep long prose out of cells.
 - **File names** are kebab-case (`router-configuration.md`); Chinese translations live under
-  `fern/translations/zh-CN/pages-dev/` at the same relative path and file name as the English page
+  `docs/fern/translations/zh-CN/pages/` at the same relative path and file name as the English page
   (Fern's native localization pairs them and adds the language picker automatically).
 - **Code fences** always tag the language (`bash`, `yaml`, `python`, `json`, `rust`, `text`,
   `mermaid`; `bash`, not `sh`). Keep commands copy-pasteable: no `$`/`#` prompt prefixes, real flags
@@ -262,8 +262,10 @@ Much of this prose is now drafted by agents. Edit it so it does not read that wa
 python3 -m dynamo.frontend --router-mode kv
 ```
 
-- **Diagrams** use ` ```mermaid ` blocks. **Images** live under `docs/assets/img/` with descriptive
-  alt text: `![KV-aware routing data flow](assets/img/kv-routing.svg)`.
+- **Diagrams** use ` ```mermaid ` blocks. **Images** live under `docs/fern/assets/img/` with
+  descriptive alt text, referenced by a relative path from the page:
+  `![KV-aware routing data flow](../../../assets/img/kv-routing.svg)`. Blog posts use their own
+  `pages/blog/_assets/` tree instead.
 - Whitespace, trailing newlines, and line endings are normalized by pre-commit.
 
 ## Links
@@ -342,7 +344,7 @@ For `.md` pages, the build maps `[!NOTE]→<Note>`, `[!TIP]→<Tip>`, `[!IMPORTA
 
 ## Fern components and build behavior
 
-Author source pages under `docs/fern/`. Use the lightest format that supports the page:
+Author source pages under `docs/fern/pages/`. Use the lightest format that supports the page:
 
 - Use `.mdx` when a tutorial or installation page needs `<Steps>`, `<Tabs>`, cards, or another Fern
   component.
@@ -357,18 +359,26 @@ Author source pages under `docs/fern/`. Use the lightest format that supports th
 
 ## Navigation and placement
 
-- Add every new `docs/fern/` page to `docs/fern/index.yml` under the right `section`, as a `- page:` + `path:`
-  entry. A page that isn't in the nav is unreachable.
-- Match the topic directory under `docs/fern/`: `getting-started`, `reference`, `kubernetes`, `backends/<engine>`,
-  `features`, `components/<component>`, `observability`, `design-docs`, `tool-calling`, `benchmarks`,
-  `agents`, `integrations`, `performance`.
+- Add every new page to `docs/fern/index.yml` under the right tab and `section`, as a `- page:` +
+  `path:` entry. `path:` is relative to `docs/fern/`, so it starts with `pages/`. A page that isn't in
+  the nav is unreachable.
+- The site is tab-based, and each tab is rooted at one directory under `docs/fern/pages/`:
+  `kubernetes/` and `cli/` (parallel deployment guides), `use-cases/`, `recipes/`,
+  `developer-guide/`, `reference/`, `blog/`, `community/`, and `home/`.
+- Choose the tab before the directory. `kubernetes/` and `cli/` cover the same features for two
+  different readers, so place a page by the surface its instructions target — manifests, Helm, CRDs,
+  or `kubectl` in `kubernetes/`; `dynamo` commands, local processes, and env vars in `cli/`. Content
+  that genuinely serves both gets two pages, each complete for its reader; a contract that's
+  independent of how Dynamo is launched belongs in `reference/`.
+- Within the tab, place the file beside the nearest existing page on the same topic and reuse that
+  sibling's subdirectory. Read `index.yml` for the live structure.
 - Don't duplicate content across pages; link the canonical page. Prefer extending an existing page
   over adding a new file.
 
 ## Examples and recipes
 
 - **Examples** (`examples/`): code-first, each in a topic directory with a `README.md`, surfaced
-  from the relevant `docs/<area>/*-examples.md` page.
+  from the relevant `*-examples.md` page or from the topic page that needs it.
 - **Recipes** (`recipes/`): one `<model>/` directory each, with a `README.md`, `Dockerfile`, and
   configs. Add every new recipe to the **Available Recipes** table in `recipes/README.md`.
 - Their READMEs use the HTML-comment SPDX form (no frontmatter).

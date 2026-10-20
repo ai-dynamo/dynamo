@@ -26,8 +26,12 @@ import pytest
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import (
+    BatchDispatcherFeedback,
+    BatchJobDemand,
+    BatchSchedulingObservation,
     EngineCapabilities,
     FpmObservations,
+    PoolTrafficDemand,
     ScheduledTick,
     TickInput,
     TrafficObservation,
@@ -66,6 +70,58 @@ def _agg_config_throughput_on() -> PlannerConfig:
         enable_throughput_scaling=True,
         optimization_target="sla",
         served_model_name="test",
+    )
+
+
+def test_tick_input_to_context_maps_batch_observations():
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    tick_input = TickInput(
+        now_s=1_700_000_010.0,
+        batch=BatchSchedulingObservation(
+            job_demands=[
+                BatchJobDemand(
+                    observed_at_s=1_700_000_000.0,
+                    pool_id="pool-a",
+                    job_id="batch-123",
+                    status="in_progress",
+                    total_requests=1_000,
+                    completed_requests=275,
+                    failed_requests=25,
+                    deadline_at_s=1_700_003_600.0,
+                    work_class="chat-8k",
+                )
+            ],
+            pool_traffic=[
+                PoolTrafficDemand(
+                    observed_at_s=1_700_000_001.0,
+                    pool_id="pool-a",
+                    online_offered_rps=90.0,
+                )
+            ],
+            dispatcher_feedback=[
+                BatchDispatcherFeedback(
+                    observed_at_s=1_700_000_002.0,
+                    pool_id="pool-a",
+                    observation_window_s=30.0,
+                    queued_requests=700,
+                    inflight_requests=20,
+                    actual_dispatch_rps=9.5,
+                    applied_max_admission_rps=10.0,
+                )
+            ],
+        ),
+    )
+
+    context = adapter._tick_input_to_context(tick_input)
+
+    assert context.observations.batch is not None
+    assert context.observations.batch.job_demands[0].remaining_requests == 700
+    assert context.observations.batch.job_demands[0].deadline_at_s == 1_700_003_600.0
+    assert context.observations.batch.pool_traffic[0].online_offered_rps == 90.0
+    assert context.observations.batch.dispatcher_feedback[0].queued_requests == 700
+    assert (
+        context.observations.batch.dispatcher_feedback[0].applied_max_admission_rps
+        == 10.0
     )
 
 
@@ -409,6 +465,43 @@ def test_project_scale_to_applies_final_gpu_budget_to_external_proposal():
     assert dec.num_prefill + dec.num_decode <= 4
 
 
+@pytest.mark.parametrize(
+    ("gpu_cost_per_replica", "expected_replicas"),
+    [
+        pytest.param(None, 2, id="legacy-fallback"),
+        pytest.param(4, 2, id="zero-gpu-sidecar"),
+        pytest.param(5, 1, id="one-gpu-sidecar"),
+    ],
+)
+def test_final_gpu_budget_uses_replica_cost(
+    gpu_cost_per_replica: int | None, expected_replicas: int
+):
+    """Auxiliary GPUs affect the final clamp, not the engine width."""
+
+    config = PlannerConfig(
+        mode="agg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=8,
+        min_gpu_budget=-1,
+    )
+    capabilities = WorkerCapabilities(
+        decode=EngineCapabilities(
+            num_gpu=4,
+            gpu_cost_per_replica=gpu_cost_per_replica,
+            max_num_batched_tokens=2048,
+            max_kv_tokens=16384,
+        )
+    )
+    adapter = OrchestratorEngineAdapter(config, capabilities)
+
+    assert adapter._apply_gpu_final_budget(
+        None, 3, WorkerCounts(ready_num_decode=1)
+    ) == (None, expected_replicas)
+
+
 def test_project_scale_to_budget_preserves_single_component_target_mask():
     """Decode-only proposal: residual GPU clamp must not invent a prefill target.
 
@@ -548,26 +641,50 @@ def test_power_off_partial_proposal_keeps_joint_gpu_clamp():
     assert adapter._apply_gpu_final_budget(None, 7, wc) == (None, 4)
 
 
-def test_project_scale_to_does_not_apply_budget_on_baseline_only_noop():
+@pytest.mark.asyncio
+async def test_tick_reconciles_runtime_gpu_budget_on_baseline_only_noop():
     cfg = PlannerConfig(
         mode="disagg",
         enable_load_scaling=True,
         enable_throughput_scaling=True,
         optimization_target="sla",
         served_model_name="test",
-        max_gpu_budget=4,
+        max_gpu_budget=16,
         min_gpu_budget=-1,
     )
     adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
-    wc = WorkerCounts(ready_num_prefill=6, ready_num_decode=6)
+    initial_tick = adapter.initial_tick(start_s=0.0)
+    worker_counts = WorkerCounts(
+        ready_num_prefill=6,
+        ready_num_decode=6,
+        expected_num_prefill=6,
+        expected_num_decode=6,
+    )
     outcome = _apply_outcome(
         [
             ComponentTarget(sub_component_type="prefill", replicas=6),
             ComponentTarget(sub_component_type="decode", replicas=6),
-        ]
+        ],
+        proposed=set(),
     )
 
-    assert adapter._project_scale_to(outcome, wc) is None
+    async def hold_tick(ctx, baseline, *, tick_now=None):
+        return outcome
+
+    adapter._orchestrator.tick = hold_tick  # type: ignore[method-assign]
+
+    # Simulate the runtime API mutating the shared PlannerConfig after the
+    # adapter has been constructed. The plugins otherwise HOLD at (6, 6).
+    cfg.max_gpu_budget = 4
+    effects = await adapter.tick(
+        initial_tick,
+        TickInput(now_s=initial_tick.at_s, worker_counts=worker_counts),
+    )
+
+    assert effects.scale_to is not None
+    assert effects.scale_to.num_prefill is not None
+    assert effects.scale_to.num_decode is not None
+    assert effects.scale_to.num_prefill + effects.scale_to.num_decode <= 4
 
 
 def test_tick_input_to_context_maps_observations_and_fpm():
@@ -933,24 +1050,33 @@ async def test_observation_prefetch_and_dispatch_share_tick_timestamp():
     assert first.at_monotonic_s == pytest.approx(5.0)
     assert first.need_worker_fpm is True
 
-    clock.set_monotonic(first.at_monotonic_s)
-    effects = await adapter.tick(
-        first,
-        TickInput(
-            now_s=first.at_s,
-            worker_counts=WorkerCounts(
-                ready_num_decode=1,
-                expected_num_decode=1,
-            ),
-            fpm_observations=FpmObservations(decode={("w1", 0): _make_fpm("w1")}),
-        ),
-    )
-
     load_plugin = adapter._orchestrator.registry.get_plugin("builtin_load_propose")
     assert load_plugin is not None
-    assert load_plugin.last_call_at == pytest.approx(first.at_monotonic_s)
-    assert effects.next_tick is not None
-    assert effects.next_tick.need_worker_fpm is True
+    scheduled = first
+    for has_fpm in (True, True, False, True):
+        assert scheduled.need_worker_fpm is True
+        clock.set_monotonic(scheduled.at_monotonic_s)
+        effects = await adapter.tick(
+            scheduled,
+            TickInput(
+                now_s=scheduled.at_s,
+                worker_counts=WorkerCounts(
+                    ready_num_decode=1,
+                    expected_num_decode=1,
+                ),
+                fpm_observations=FpmObservations(
+                    decode={("w1", 0): _make_fpm("w1")} if has_fpm else None
+                ),
+            ),
+        )
+        assert load_plugin.last_call_at == pytest.approx(scheduled.at_monotonic_s)
+        if has_fpm:
+            assert effects.diagnostics.load_decision_reason == "no_change"
+        else:
+            assert effects.scale_to is None
+            assert effects.diagnostics.load_decision_reason == "no_fpm_data"
+        assert effects.next_tick is not None
+        scheduled = effects.next_tick
 
 
 def test_throughput_only_sla_still_pulls_fpm_for_live_regression():

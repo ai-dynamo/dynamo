@@ -23,6 +23,7 @@ rules:
   - agent-docs/rules/benchmarking/proxy-workload-selection.md
   - agent-docs/rules/benchmarking/result-storage.md
   - agent-docs/rules/benchmarking/series-boundaries.md
+  - agent-docs/rules/benchmarking/tool-version.md
   - agent-docs/rules/optimization/evidence-before-spend.md
   - agent-docs/rules/optimization/one-variable.md
   - agent-docs/rules/verification/config-engagement.md
@@ -228,13 +229,28 @@ ungated.
 
 ## 7. Finalize
 
-Before recommending, the top-level loop agent runs a correctness regression check whenever the recommended configuration differs from the
-user-provided baseline in an output-affecting dimension (parallelism or reduction order, speculative decoding,
-quantization, attention or MoE backend, KV dtype or reuse): replay 8-16 fixed representative prompts with frozen
-continuations through both configurations and compare teacher-forced per-token log-probabilities, calibrating the
-tolerance with a baseline-versus-baseline repeat; require zero request failures, malformed responses, non-finite
-scores, and no unexpected truncation. Run it against the currently deployed recommended configuration; run the
-baseline side only when the baseline is still live or can be redeployed within remaining budget. If no such check
+Correctness evidence is captured opportunistically, not by redeployment. Before deploying the FIRST candidate that
+differs from the baseline in an output-affecting dimension (parallelism or reduction order, speculative decoding,
+quantization, attention or MoE backend, KV dtype or reuse) — that is, while the baseline side is still live and
+capturable — capture and store the baseline's side of the correctness check: 8-16 fixed representative prompts with
+frozen continuations, teacher-forced per-token log-probabilities where the API exposes them, plus a
+baseline-versus-baseline repeat to calibrate tolerance, under `EXP_ROOT/analysis/correctness/`. (An engagement
+whose candidate families are all output-preserving never pays this cost.) Earlier output-preserving candidates may
+already have replaced the baseline deployment by this point; the current live endpoint still represents the
+baseline's correctness side exactly as long as every intervening candidate was output-preserving, so capture from
+it and record which deployment served the capture. A candidate whose output-preserving status cannot be
+classified against the dimension list above is treated as output-affecting. Before tearing down any
+output-affecting candidate, capture its side against the same frozen prompt set.
+
+Before recommending, the top-level loop agent runs the correctness regression check whenever the recommended
+configuration differs from the engagement baseline (the user-provided baseline when one exists, otherwise the
+established iteration-0 baseline) in an output-affecting dimension: compare the already-captured evidence from
+both sides. The pass criterion is semantic, not just structural: where teacher-forced per-token
+log-probabilities were captured, their divergence on the frozen prompt set must not exceed the tolerance
+calibrated by the baseline-versus-baseline repeat; where the API exposes no log-probabilities, the frozen greedy
+continuations must match within that same calibrated tolerance. Additionally require zero request failures,
+malformed responses, non-finite scores, and no unexpected truncation. Redeploy a side only when its captured artifacts are missing or incompatible
+AND the redeploy fits the remaining budget. If no such check
 is possible, record an ask; report a waived check as
 `correctness: unverified`, never as a pass. Record the correctness status in `recommended_config.md`.
 

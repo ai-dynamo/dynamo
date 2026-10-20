@@ -17,7 +17,7 @@ Dynamo 拥有 200 多位外部贡献者、220 多个已合并的社区 PR，并�
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - [设计提案](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22) -- 重大功能的 RFC，以带 `dep:*` 标签的 GitHub issue 形式跟踪
 - [Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X) -- 双周会议
-- [社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community)) -- 每周（Wed 10:30 AM PT）开发者社区会议
+- [社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community)) -- 每周（Tue 9:00 AM PT）开发者社区会议
 - [Dynamo Day 录像](https://nvevents.nvidia.com/dynamoday) -- 来自生产用户的深入分享
 
 ## TL;DR
@@ -28,7 +28,7 @@ Dynamo 拥有 200 多位外部贡献者、220 多个已合并的社区 PR，并�
 2. 对于 ≥100 行的变更或新功能，请先[创建 issue](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml)
 3. 创建分支：`git checkout -b yourname/fix-router-timeout`
 4. 修改代码，运行 `pre-commit run`
-5. 使用 DCO sign-off 提交：`git commit -s -m "fix: description"`
+5. 使用 DCO sign-off 提交：`git commit -s -m "fix: description"`；对于符合自动受信任 CI 批准条件的 fork PR，每个提交还必须包含 GitHub 显示为 `Verified` 的加密签名。DCO sign-off 不会添加加密签名，签名本身也不会使 PR 获得自动批准资格
 6. 打开一个面向 `main` 的 PR
 
 ---
@@ -221,7 +221,7 @@ pre-commit install
 
 4. **处理 Code Rabbit Review** — 回复自动化 Code Rabbit 建议，包括 nitpick。
 
-5. **触发 CI 测试** — 对于外部贡献者，维护者必须评论 `/ok to test COMMIT-ID` 才能运行完整 CI 套件，其中 `COMMIT-ID` 是你最新提交的短 SHA。请求人工审阅前，请修复所有失败的测试。
+5. **触发 CI 测试** — 对于符合自动批准条件的 fork PR，每个 PR 提交都必须包含 GitHub 显示为 `Verified` 的加密签名。`git commit -s` 只会添加 DCO sign-off，不会添加加密签名，签名本身也不会让 PR 获得自动批准资格。如果自动批准不可用，维护者可以审阅当前 head 并评论 `/ok to test COMMIT-ID` 以启动 CI，其中 `COMMIT-ID` 是最新提交的短 SHA。请求人工审阅前，请修复所有失败的测试。
 
 6. **请求审阅** — 将批准你 issue 的人员添加为 reviewer。根据修改的文件，查看 [CODEOWNERS](https://github.com/ai-dynamo/dynamo/blob/main/CODEOWNERS) 了解必需 approver。
 
@@ -399,6 +399,12 @@ git commit -s -m "fix: your descriptive message"
 
 **DCO 检查失败？** 请参阅我们的 [DCO 故障排除指南](https://github.com/ai-dynamo/dynamo/blob/main/DCO.md)，按步骤修复。
 
+### Fork PR 的自动 CI 签名
+
+对于符合自动受信任 CI 批准条件的 fork PR，GitHub 必须将 PR 中的每个提交显示为 `Verified`。DCO sign-off 不会添加加密签名。请按照 [GitHub 提交签名说明](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) 配置签名，并在创建、修订或 rebase 提交时使用该配置。签名本身不会让 PR 获得自动批准资格。
+
+在 PR 的 **Commits** 标签页确认每个提交都显示为 `Verified`。如果任何提交未验证，系统不会自动发布 `/ok to test` 评论。如果自动批准不可用，维护者可以审阅当前 head 并评论 `/ok to test COMMIT-ID` 来启动 CI，其中 `COMMIT-ID` 是最新提交的短 SHA。
+
 ### 许可证
 
 通过贡献，你同意你的贡献将依据 [Apache 2.0 License](https://github.com/ai-dynamo/dynamo/blob/main/LICENSE) 授权。
@@ -424,7 +430,7 @@ git commit -s -m "fix: your descriptive message"
 - **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - **设计提案**: [重大功能的 RFC，以带 `dep:*` 标签的 GitHub issue 形式跟踪](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)
 - **Office Hours**: [双周会议](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
-- **社区会议**: [每周（Wed 10:30 AM PT）开发者社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community))
+- **社区会议**: [每周（Tue 9:00 AM PT）开发者社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community))
 - **Dynamo Day 录像**: [来自生产用户的深入分享](https://nvevents.nvidia.com/dynamoday)
 - **Documentation**: [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/)
 

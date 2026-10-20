@@ -9,10 +9,10 @@ import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
-from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 
 from dynamo import prometheus_names
 from dynamo.common.model_taints import register_model_taint_route
+from dynamo.common.protocols.image_protocol import NvCreateImageRequest
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.output_modalities import (
     RequestType,
@@ -20,11 +20,15 @@ from dynamo.common.utils.output_modalities import (
     parse_request_type,
 )
 from dynamo.llm import ModelInput, WorkerType, register_model
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.omni.connectors import register_dynamoomni_nixl_connector
-from dynamo.vllm.omni.output_formatter import OutputFormatter
+from dynamo.vllm.omni.output_formatter import (
+    OutputFormatter,
+    _normalize_image_output_options,
+)
 from dynamo.vllm.omni.stage_worker import (
     _connector_key,
     _ensure_stage_connectors,
@@ -36,6 +40,7 @@ from dynamo.vllm.omni.types import StageOutput
 from dynamo.vllm.omni.utils import (
     ensure_awaited,
     is_empty_payload,
+    resolve_stage_configs,
     shm_deserialize,
     unwrap_connector_payload,
 )
@@ -53,24 +58,21 @@ class OmniStageRouter:
     ) -> None:
         self.config = config
         self.connectors: dict[tuple[str, str], Any] = {}
-        (
-            resolved_stage_configs_path,
-            self.stage_configs,
-            _omni_lb_policy,
-        ) = load_and_resolve_stage_configs(
+        resolved_path, self.stage_configs = resolve_stage_configs(
             config.model,
-            stage_configs_path,
-            kwargs={},
-            trust_remote_code=getattr(
-                getattr(config, "engine_args", None), "trust_remote_code", False
+            trust_remote_code=bool(
+                getattr(
+                    getattr(config, "engine_args", None), "trust_remote_code", False
+                )
             ),
+            deploy_config_path=stage_configs_path,
         )
         self.stage_clients: Dict[str, Any] = {}
 
         # Initialize connectors so the router can fetch final-stage output
         # via connector.get() instead of SHM -- enabling multi-node deployments.
         connector_configs_path = _ensure_stage_connectors(
-            resolved_stage_configs_path,
+            resolved_path,
             self.stage_configs,
         )
         # Only register NixlConnector if it's actually used in stage configs
@@ -99,6 +101,7 @@ class OmniStageRouter:
             media_fs=media_fs,
             media_http_url=config.media_output_http_url,
             default_fps=config.default_video_fps,
+            image_png_compression_level=config.image_png_compression_level,
         )
 
     def set_stage_client(self, model_stage: str, client: Any) -> None:
@@ -111,7 +114,22 @@ class OmniStageRouter:
         context,  # noqa: ARG002 — context unused; router generates its own request_id
     ) -> AsyncGenerator[dict, None]:
         request_id = str(uuid.uuid4())
-        _, request_type = parse_request_type(request, self.config.output_modalities)
+        parsed_request, request_type = parse_request_type(
+            request, self.config.output_modalities
+        )
+        image_output_format = None
+        if request_type == RequestType.IMAGE_GENERATION:
+            if not isinstance(parsed_request, NvCreateImageRequest):
+                raise InvalidArgument("Invalid image-generation request")
+            try:
+                image_output_format = _normalize_image_output_options(
+                    parsed_request.output_format,
+                    parsed_request.response_format,
+                    quality=parsed_request.quality,
+                    background=parsed_request.background,
+                )
+            except ValueError as exc:
+                raise InvalidArgument(str(exc)) from exc
 
         stage_outputs: List[StageOutput] = []
         for stage_idx, stage_cfg in enumerate(self.stage_configs):
@@ -188,7 +206,11 @@ class OmniStageRouter:
         output_format = (
             request.get("response_format")
             if request_type == RequestType.AUDIO_GENERATION
-            else request.get("output_format")
+            else (
+                image_output_format
+                if request_type == RequestType.IMAGE_GENERATION
+                else request.get("output_format")
+            )
         )
         if response_format is not None:
             fmt_ctx["response_format"] = response_format
