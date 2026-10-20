@@ -52,6 +52,15 @@ func (r *graphReconciler) reconcileCheckpointDownloads(
 	}
 
 	downloaded, pending, err := ensureCheckpointsDownloaded(ctx, workloadCheckpoints(workloads), r.modelRegistry, existing)
+
+	// Date confirmed checkpoints by their oldest confirmation so that pending
+	// passes reuse them without extending their freshness.
+	if len(existing) == 0 && len(downloaded) > 0 {
+		lastCheckedAt = new(metav1.Now())
+	} else if len(downloaded) == 0 {
+		lastCheckedAt = nil
+	}
+
 	if err != nil || len(pending) > 0 {
 		if recheck {
 			if err != nil {
@@ -60,7 +69,7 @@ func (r *graphReconciler) reconcileCheckpointDownloads(
 			return ctrl.Result{}, nil
 		}
 
-		deployment.Status.CheckpointDownload = &v1alpha1.CheckpointDownloadStatus{Checkpoints: downloaded}
+		deployment.Status.CheckpointDownload = &v1alpha1.CheckpointDownloadStatus{Checkpoints: downloaded, LastCheckedAt: lastCheckedAt}
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -75,10 +84,6 @@ func (r *graphReconciler) reconcileCheckpointDownloads(
 			deployment.Status.CheckpointDownload = &v1alpha1.CheckpointDownloadStatus{}
 		}
 		return ctrl.Result{}, nil
-	}
-
-	if len(existing) == 0 {
-		lastCheckedAt = new(metav1.Now())
 	}
 
 	deployment.Status.CheckpointDownload = &v1alpha1.CheckpointDownloadStatus{Checkpoints: downloaded, LastCheckedAt: lastCheckedAt}

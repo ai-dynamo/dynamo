@@ -22,6 +22,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -268,38 +269,133 @@ func TestBuildCheckpointAdoptionSurvivesPendingBuildDownload(t *testing.T) {
 }
 
 func TestPendingCheckpointKeepsReleasingAgentPods(t *testing.T) {
-	t.Log("Publish a hybrid workload whose checkpoint download now fails")
-	ctx := t.Context()
-	child, dgd, baseRegistry := newLPXCheckpointTestDGD(t, deploymentcapnpv1.CompilationMode_lpx)
-	registry := &fakeModelDownloadRegistry{
-		ModelRegistry: baseRegistry,
-		err:           map[string]error{checkpointTestKey: fmt.Errorf("model express unavailable")},
+	for _, test := range []struct {
+		name        string
+		err         error
+		wantRequeue time.Duration
+		wantErr     string
+	}{
+		{name: "download in progress", wantRequeue: modelDownloadRequeueAfter},
+		{
+			name:    "download error",
+			err:     fmt.Errorf("model express unavailable"),
+			wantErr: fmt.Sprintf("ensure checkpoint %q is downloaded: model express unavailable", checkpointTestKey),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Publish a hybrid workload whose checkpoint is not downloaded")
+			ctx := t.Context()
+			child, dgd, baseRegistry := newLPXCheckpointTestDGD(t, deploymentcapnpv1.CompilationMode_lpx)
+			registry := &fakeModelDownloadRegistry{ModelRegistry: baseRegistry, err: map[string]error{checkpointTestKey: test.err}}
+			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+			r.config.Infrastructure.ModelExpressURL = checkpointTestModelExpressURL
+			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+			createLPXTestObjects(t, ctx, r.Client, objects...)
+			publishSelectedLPXForTest(t, ctx, r, child, selected)
+
+			t.Log("Journal one Agent Pod for release")
+			agentClique := getResource[*grovev1alpha1.PodClique](t, objects, selected.plan.Agents[0].CliqueName)
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: child.Namespace, Name: "released", UID: "released-uid",
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(agentClique, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))},
+			}}
+			sibling := pod.DeepCopy()
+			sibling.Name, sibling.UID = "sibling", "sibling-uid"
+			createLPXTestObjects(t, ctx, r.Client, pod, sibling)
+			request := getTestPipelineRequest(t, ctx, r, child.Namespace, selected.requests[0].Name)
+			request.Status = newLPXTestReleaseRequest(pod).Status
+			require.NoError(t, r.Update(ctx, request))
+
+			t.Log("Release the journaled Pod once while the checkpoint holds forward publication")
+			result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
+			if test.wantErr != "" {
+				require.EqualError(t, err, test.wantErr)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, test.wantRequeue, result.RequeueAfter)
+			}
+			require.Equal(t, []string{checkpointTestKey}, registry.checkpointCalls)
+			require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})))
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(sibling), &corev1.Pod{}))
+		})
 	}
+}
+
+func TestPendingCheckpointHoldsAnAddedWorkload(t *testing.T) {
+	t.Log("Publish one hybrid workload whose checkpoint is downloaded")
+	ctx := t.Context()
+	_, dgd, baseRegistry := newLPXCheckpointTestDGD(t, deploymentcapnpv1.CompilationMode_lpx)
+	dgd.Spec.Components[0].Replicas = ptr.To(int32(1))
+	child := newLPXTestDeployment(t, dgd)
+	registry := &fakeModelDownloadRegistry{ModelRegistry: baseRegistry, ready: map[string]bool{checkpointTestKey: true}}
 	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 	r.config.Infrastructure.ModelExpressURL = checkpointTestModelExpressURL
 	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
 	createLPXTestObjects(t, ctx, r.Client, objects...)
 	publishSelectedLPXForTest(t, ctx, r, child, selected)
+	key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+	_, err := r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	before := findLPXTestPodCliqueSet(t, objects)
 
-	t.Log("Journal one Agent Pod for release")
-	agentClique := getResource[*grovev1alpha1.PodClique](t, objects, selected.plan.Agents[0].CliqueName)
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Namespace: child.Namespace, Name: "released", UID: "released-uid",
-		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(agentClique, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))},
-	}}
-	sibling := pod.DeepCopy()
-	sibling.Name, sibling.UID = "sibling", "sibling-uid"
-	createLPXTestObjects(t, ctx, r.Client, pod, sibling)
-	request := getTestPipelineRequest(t, ctx, r, child.Namespace, selected.requests[0].Name)
-	request.Status = newLPXTestReleaseRequest(pod).Status
-	require.NoError(t, r.Update(ctx, request))
+	t.Log("Add a second workload, which renames the scaling groups, while its checkpoint download is pending")
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+	second := dgd.Spec.Components[0].DeepCopy()
+	second.ComponentName = "second"
+	dgd.Spec.Components = append(dgd.Spec.Components, *second)
+	require.NoError(t, r.Update(ctx, dgd))
+	require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+	child.Spec.InputRevision = mustLPXInputRevision(t, dgd)
+	child.Generation++
+	require.NoError(t, r.Update(ctx, child))
+	child.Status.CheckpointDownload = &v1alpha1.CheckpointDownloadStatus{}
+	require.NoError(t, r.Status().Update(ctx, child))
+	registry.ready = nil
 
-	t.Log("Release the journaled Pod while the checkpoint failure holds forward publication")
-	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
-	require.ErrorContains(t, err, "model express unavailable")
-	require.Equal(t, []string{checkpointTestKey}, registry.checkpointCalls)
-	require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})))
-	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(sibling), &corev1.Pod{}))
+	t.Log("Hold the existing PodCliqueSet without deriving capacity for the new layout")
+	result, err := r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	require.Equal(t, modelDownloadRequeueAfter, result.RequeueAfter)
+	live := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(before), live))
+	require.True(t, live.DeletionTimestamp.IsZero())
+	require.Equal(t, before.Spec.Template.PodCliqueScalingGroupConfigs, live.Spec.Template.PodCliqueScalingGroupConfigs)
+}
+
+func TestPendingCheckpointReusesConfirmedCheckpoints(t *testing.T) {
+	t.Log("Deploy two hybrid workloads whose builds name different checkpoints")
+	const otherBuildID = "build-v1-other"
+	root := t.TempDir()
+	writeLPXCheckpointTestBuild(t, root, "build-v1", deploymentcapnpv1.CompilationMode_lpx, checkpointTestModel, checkpointTestRevision)
+	writeLPXCheckpointTestBuild(t, root, otherBuildID, deploymentcapnpv1.CompilationMode_lpx, "openai/gpt-oss-120b", "0000000000000000000000000000000000000000")
+	baseRegistry, err := lpx.NewModelRegistry((&url.URL{Scheme: lpx.BuildSchemeFile, Path: root}).String(), nil)
+	require.NoError(t, err)
+	dgd := loadTestDGD(t, lpx.PipelineHybrid, "build-v1")
+	second := dgd.Spec.Components[0].DeepCopy()
+	second.ComponentName = "second"
+	second.LPX.BuildID = otherBuildID
+	dgd.Spec.Components = append(dgd.Spec.Components, *second)
+	child := newLPXTestDeployment(t, dgd)
+	registry := &fakeModelDownloadRegistry{ModelRegistry: baseRegistry, ready: map[string]bool{checkpointTestKey: true}}
+	reconciler := newLPXCheckpointTestReconciler(t, registry, child, dgd)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+
+	t.Log("Record the confirmed checkpoint and its confirmation time while the other downloads")
+	result, err := reconciler.Reconcile(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, modelDownloadRequeueAfter, result.RequeueAfter)
+	require.NoError(t, reconciler.Get(t.Context(), request.NamespacedName, child))
+	require.Equal(t, []string{checkpointTestKey}, child.Status.CheckpointDownload.Checkpoints)
+	confirmedAt := child.Status.CheckpointDownload.LastCheckedAt
+	require.NotNil(t, confirmedAt)
+
+	t.Log("Check only the pending checkpoint on the next pass and keep the original confirmation time")
+	registry.checkpointCalls = nil
+	_, err = reconciler.Reconcile(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, []string{checkpointTestOtherKey}, registry.checkpointCalls)
+	require.NoError(t, reconciler.Get(t.Context(), request.NamespacedName, child))
+	require.True(t, confirmedAt.Equal(child.Status.CheckpointDownload.LastCheckedAt))
 }
 
 // newLPXCheckpointTestDGD returns a deployment of a deployment.v1 build that
@@ -310,9 +406,31 @@ func newLPXCheckpointTestDGD(
 ) (*v1alpha1.LPXGraphDeployment, *v1beta1.DynamoGraphDeployment, lpx.ModelRegistry) {
 	t.Helper()
 	const buildID = "build-v1"
+	root := t.TempDir()
+	writeLPXCheckpointTestBuild(t, root, buildID, mode, checkpointTestModel, checkpointTestRevision)
+	registry, err := lpx.NewModelRegistry((&url.URL{Scheme: lpx.BuildSchemeFile, Path: root}).String(), nil)
+	require.NoError(t, err)
+
+	pipeline := lpx.PipelineSingle
+	if mode == deploymentcapnpv1.CompilationMode_lpx {
+		pipeline = lpx.PipelineHybrid
+	}
+	dgd := loadTestDGD(t, pipeline, buildID)
+	return newLPXTestDeployment(t, dgd), dgd, registry
+}
+
+// writeLPXCheckpointTestBuild writes a deployment.v1 build under root that
+// names the checkpoint model at revision.
+func writeLPXCheckpointTestBuild(
+	t *testing.T,
+	root, buildID string,
+	mode deploymentcapnpv1.CompilationMode,
+	model, revision string,
+) {
+	t.Helper()
 	partitionIDs := []int{7, 8}
 
-	t.Log("Encode a deployment.v1 build with one prop-sync chain and the test checkpoint")
+	t.Log("Encode a deployment.v1 build with one prop-sync chain and a checkpoint")
 	_, segment := capnp.NewSingleSegmentMessage(nil)
 	deployment, err := deploymentcapnpv1.NewRootDeployment(segment)
 	require.NoError(t, err)
@@ -339,8 +457,8 @@ func newLPXCheckpointTestDGD(
 	checkpoint, err := deployment.NewCheckpoint()
 	require.NoError(t, err)
 	checkpoint.SetProvider(deploymentcapnpv1.CheckpointProvider_huggingface)
-	require.NoError(t, checkpoint.SetModel(checkpointTestModel))
-	require.NoError(t, checkpoint.SetRevision(checkpointTestRevision))
+	require.NoError(t, checkpoint.SetModel(model))
+	require.NoError(t, checkpoint.SetRevision(revision))
 
 	partitionCount := len(partitionIDs)
 	if mode == deploymentcapnpv1.CompilationMode_lpx {
@@ -368,21 +486,11 @@ func newLPXCheckpointTestDGD(
 		ref.SetPartitionId(uint32(len(partitionIDs)))
 	}
 
-	t.Log("Publish the build in a file registry")
+	t.Log("Publish the build in the file registry")
 	payload, err := deployment.Message().Marshal()
 	require.NoError(t, err)
-	root := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(root, buildID), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(root, buildID, "deployment.v1.capnp.bin"), payload, 0o600))
-	registry, err := lpx.NewModelRegistry((&url.URL{Scheme: lpx.BuildSchemeFile, Path: root}).String(), nil)
-	require.NoError(t, err)
-
-	pipeline := lpx.PipelineSingle
-	if mode == deploymentcapnpv1.CompilationMode_lpx {
-		pipeline = lpx.PipelineHybrid
-	}
-	dgd := loadTestDGD(t, pipeline, buildID)
-	return newLPXTestDeployment(t, dgd), dgd, registry
 }
 
 // newLPXCheckpointTestReconciler returns a reconciler with Model Express configured.

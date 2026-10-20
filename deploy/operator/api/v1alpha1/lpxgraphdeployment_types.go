@@ -106,7 +106,7 @@ type CheckpointDownloadStatus struct {
 	// +optional
 	Checkpoints []string `json:"checkpoints,omitempty"`
 
-	// lastCheckedAt is the last time all checkpoints were checked with ModelExpress.
+	// lastCheckedAt is the oldest Model Express confirmation of the listed checkpoints.
 	// +optional
 	LastCheckedAt *metav1.Time `json:"lastCheckedAt,omitempty"`
 }

@@ -43,6 +43,9 @@ func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput)
 	// Only a hybrid build's Cyborg conductor consumes a checkpoint.
 	var checkpoint *Checkpoint
 	if intent.Pipeline == PipelineHybrid {
+		if err := intent.Build.checkpointErr; err != nil {
+			return nil, err
+		}
 		checkpoint = intent.Build.checkpoint
 	}
 	for _, projection := range projections[len(dst):] {
