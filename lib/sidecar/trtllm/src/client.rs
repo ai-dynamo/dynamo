@@ -46,7 +46,7 @@ impl SupportedMedia {
 
 /// Startup metadata from `--context-length` and `Control.GetModelInfo`.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct ModelMetadata {
+pub(crate) struct ModelLimits {
     /// Maximum input + output tokens; backs both the registered context window
     /// and the default `max_tokens`. Absent when neither source supplied one,
     /// which leaves requests that omit `max_tokens` to be rejected.
@@ -60,7 +60,7 @@ pub(crate) struct ModelMetadata {
 }
 
 pub(crate) enum ModelInfoResponse {
-    Available(ModelMetadata),
+    Available(ModelLimits),
     Unsupported(tonic::Status),
 }
 
@@ -73,9 +73,8 @@ impl TrtllmClient {
         endpoint: &GrpcEndpoint,
         transport: GrpcTransportConfig,
     ) -> Result<Self, DynamoError> {
-        // bootstrap=false: TrtllmClient::connect's only call site is
-        // LLMEngine::start (lib/sidecar/trtllm/src/engine.rs), after the
-        // tracing subscriber is installed. See GrpcChannelPool::connect.
+        // Both async sidecar bootstrap and deferred LLMEngine::start run after
+        // logging initialization. See GrpcChannelPool::connect's bootstrap flag.
         let pool = GrpcChannelPool::connect("TensorRT-LLM", endpoint, transport, false).await?;
         Ok(Self { pool })
     }
@@ -118,7 +117,7 @@ impl TrtllmClient {
     /// unset rather than substituting its `max_input_len` default (measured
     /// against TensorRT-LLM main at 8bbaf66bd5), so `None` here means "the
     /// server did not say", and `--context-length` supplies it instead.
-    async fn get_model_info(&self, model: &str) -> Result<ModelMetadata, tonic::Status> {
+    async fn get_model_info(&self, model: &str) -> Result<ModelLimits, tonic::Status> {
         let info = self
             .control()
             .get_model_info(pb::GetModelInfoRequest {
@@ -146,7 +145,7 @@ impl TrtllmClient {
                 }
             }
         }
-        Ok(ModelMetadata {
+        Ok(ModelLimits {
             context_length: info.max_context_length.filter(|len| *len > 0),
             max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
             supported_media: Some(supported_media),
@@ -186,7 +185,7 @@ impl TrtllmClient {
         model: &str,
         deadline: Instant,
         retry_interval: Duration,
-    ) -> Result<ModelMetadata, DynamoError> {
+    ) -> Result<ModelLimits, DynamoError> {
         let mut last = "it never answered".to_string();
         loop {
             match timeout_at(deadline, self.get_model_info(model)).await {

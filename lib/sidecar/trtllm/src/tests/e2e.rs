@@ -3,6 +3,8 @@
 
 //! Ignored by default: these drive a live TensorRT-LLM OpenEngine server.
 
+use std::collections::HashMap;
+
 use super::*;
 
 /// Drives a real disaggregated prefill -> decode handoff against two live
