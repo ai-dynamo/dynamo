@@ -68,9 +68,7 @@ kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 
 ## Topologies
 
-The frontend reaches each sidecar over Dynamo's request, discovery, and event
-planes; the sidecar reaches the engine over its native gRPC API. The sidecar
-discovers per-rank KV event sources and routing load from OpenEngine.
+The frontend sends inference requests to each engine's leader sidecar, which forwards them to OpenEngine over gRPC and polls routing load for all attention-DP ranks. Each sidecar discovers its node's KV event sources through OpenEngine and relays local KV events through Dynamo's event plane. Follower sidecars do not serve inference requests.
 
 ### Single-Node TP
 

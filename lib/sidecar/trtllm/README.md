@@ -33,13 +33,7 @@ gRPC server. See the [sidecar overview](../README.md) for installation.
 | Disaggregated | Yes |
 | KV routing | Yes |
 
-For child-agent context affinity, enable frontend session affinity and
-TensorRT-LLM conversation affinity, then set the same private
-`TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY` on the prefill sidecar and OpenEngine server.
-The sidecar requires the server to advertise signed affinity support. It sends
-the child's own conversation ID and a signed parent hint for context requests;
-decode requests retain the child's identity. The gateway must authorize client
-parent-session headers before they reach the router.
+For child-agent context affinity, enable frontend session affinity and TensorRT-LLM conversation affinity. Set `TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY` on the prefill sidecar and set `internal_request_auth_key` to the same private value in the OpenEngine server YAML configuration. The sidecar requires the server to advertise signed affinity support. It sends the child's own conversation ID and a signed parent hint for context requests; decode requests retain the child's identity. The gateway must authorize client parent-session headers before they reach the router.
 
 ## Run locally
 
@@ -76,9 +70,7 @@ kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 
 ## Topologies
 
-The frontend reaches each sidecar over Dynamo's request, discovery, and event
-planes; the sidecar reaches the engine over its native gRPC API. The sidecar
-discovers per-rank KV event sources and routing load from OpenEngine.
+The frontend sends inference requests to each engine's leader sidecar, which forwards them to OpenEngine over gRPC and polls routing load for all attention-DP ranks. Each sidecar discovers its node's KV event sources through OpenEngine and relays local KV events through Dynamo's event plane. Follower sidecars do not serve inference requests.
 
 ### Single-Node TP
 
