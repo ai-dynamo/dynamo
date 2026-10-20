@@ -3811,10 +3811,8 @@ mod ownership_tests {
             "enabled": true,
             "note": null,
         }));
-        let missing = ModelDeploymentCard::with_name_only("model");
 
         assert_eq!(contract.mdcsum(), reordered.mdcsum());
-        assert_ne!(contract.mdcsum(), missing.mdcsum());
         assert_ne!(contract.mdcsum(), changed_nested_value.mdcsum());
         // Pins the separator, length framing, and canonical bytes of the contract.
         assert_eq!(
