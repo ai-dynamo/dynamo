@@ -126,6 +126,14 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
     )
 
 
+class _KeepaliveReached(Exception):
+    pass
+
+
+def _stop_at_keepalive(seconds):
+    raise _KeepaliveReached
+
+
 def test_main_forwards_process_argv_to_v1_helper(monkeypatch):
     forwarded = []
 
@@ -140,8 +148,10 @@ def test_main_forwards_process_argv_to_v1_helper(monkeypatch):
         "run_per_device",
         lambda module, argv: forwarded.append((module, argv)),
     )
+    monkeypatch.setattr(loader.time, "sleep", _stop_at_keepalive)
 
-    loader.main()
+    with pytest.raises(_KeepaliveReached):
+        loader.main()
 
     # These base arguments are forwarded to each per-device child, so an empty
     # list here would make each child fail on a missing --checkpoint-dir.
@@ -163,8 +173,10 @@ def test_main_forwards_explicit_argv_unchanged(monkeypatch):
         "run_per_device",
         lambda module, argv: forwarded.append((module, argv)),
     )
+    monkeypatch.setattr(loader.time, "sleep", _stop_at_keepalive)
 
-    loader.main(argv=["--checkpoint-dir", "/tmp/cp"])
+    with pytest.raises(_KeepaliveReached):
+        loader.main(argv=["--checkpoint-dir", "/tmp/cp"])
 
     assert forwarded == [
         ("gpu_memory_service.v1.snapshot.loader", ["--checkpoint-dir", "/tmp/cp"])
