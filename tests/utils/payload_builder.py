@@ -18,6 +18,7 @@ from tests.utils.payloads import (
     CompletionPayload,
     CompletionPayloadWithLogprobs,
     DisaggregatedChatPayload,
+    DisaggregatedKvRoutingPayload,
     ElasticEPScalePayload,
     EmbeddingPayload,
     GuidedDecodingChatPayload,
@@ -25,6 +26,7 @@ from tests.utils.payloads import (
     ImagesPayload,
     ImageTokenMetricsPayload,
     KvEventMetricsPayload,
+    KvRoutingPayload,
     LMCacheMetricsPayload,
     LoraTestChatPayload,
     MetricsPayload,
@@ -32,6 +34,8 @@ from tests.utils.payloads import (
     ResponsesPayload,
     ResponsesStreamPayload,
     RouterNvextChatPayload,
+    SGLangGenerateCancellationPayload,
+    SGLangGenerateRecoveryPayload,
     SGLangMetricsPayload,
     StreamingChatPayload,
     TRTLLMMetricsPayload,
@@ -962,6 +966,71 @@ def http_cancellation_payloads(
             expected_completion_tokens=4,
         ),
     ]
+
+
+def sglang_generate_cancellation_payloads(
+    metrics: EngineMetrics, *, max_tokens: int
+) -> list[BasePayload]:
+    body = {
+        "input_ids": [11] * 128,
+        "sampling_params": {
+            "max_new_tokens": max_tokens,
+            "ignore_eos": True,
+            "temperature": 0,
+        },
+        "stream": True,
+        "return_logprob": True,
+    }
+    return [
+        SGLangGenerateCancellationPayload(
+            body=body, expected_response=[], expected_log=[], metrics=metrics
+        ),
+        SGLangGenerateRecoveryPayload(
+            body={
+                **body,
+                "sampling_params": {**body["sampling_params"], "max_new_tokens": 4},
+            },
+            expected_response=[],
+            expected_log=[],
+            metrics=metrics,
+        ),
+    ]
+
+
+_KV_ROUTING_SMOKE_BODY = {
+    "messages": [{"role": "user", "content": "Say hello."}],
+    "max_tokens": 1,
+    "temperature": 0,
+}
+
+
+def kv_routing_payload(
+    routed_workers: tuple[int, ...],
+    *,
+    block_size: int,
+    dp_ranks: tuple[int, ...] = (0,),
+) -> KvRoutingPayload:
+    return KvRoutingPayload(
+        body=dict(_KV_ROUTING_SMOKE_BODY),
+        expected_response=[],
+        expected_log=[],
+        routed_workers=routed_workers,
+        block_size=block_size,
+        dp_ranks=dp_ranks,
+    )
+
+
+def disaggregated_kv_routing_payload(
+    prefill_workers: tuple[int, ...],
+    transfer_metrics: tuple[EngineMetrics, ...],
+) -> DisaggregatedKvRoutingPayload:
+    return DisaggregatedKvRoutingPayload(
+        body=dict(_KV_ROUTING_SMOKE_BODY),
+        expected_response=[],
+        expected_log=[],
+        routed_workers=prefill_workers,
+        transfer_metrics=transfer_metrics,
+    )
 
 
 def completion_payload_with_logprobs(

@@ -319,3 +319,44 @@ def test_publish_kv_hint_capabilities_fails_with_invalid_transfer_hint_config(
         )
 
     runtime_config.set_engine_specific.assert_not_called()
+
+
+def test_publish_kv_hint_capabilities_reads_tier_inside_multi_connector():
+    runtime_config = MagicMock()
+    engine_args = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "NixlConnector", "kv_role": "kv_both"},
+                    {
+                        "kv_connector": "OffloadingConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "spec_name": "TieringOffloadingSpec",
+                            "secondary_tiers": [
+                                {
+                                    "type": "kvcr",
+                                    "router_capabilities": [
+                                        KV_HINT_TRANSFER_CAPABILITY_KEY
+                                    ],
+                                    "control_advertise_host": "127.0.0.1",
+                                    "control_ports": [17771],
+                                }
+                            ],
+                        },
+                    },
+                ]
+            },
+        )
+    )
+
+    publish_kv_hint_capabilities(runtime_config, engine_args, WorkerType.Prefill)
+
+    runtime_config.set_engine_specific.assert_any_call(
+        KV_HINT_TRANSFER_CAPABILITY_KEY, json.dumps(True)
+    )
+    runtime_config.set_engine_specific.assert_any_call(
+        KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        json.dumps({"0": "tcp://127.0.0.1:17771"}),
+    )
