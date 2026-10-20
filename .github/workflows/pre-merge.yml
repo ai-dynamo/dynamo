@@ -578,7 +578,7 @@ jobs:
     - name: Show compiler cache statistics
       if: ${{ !cancelled() && matrix.dir == '.' }}
       run: |
-        container/use-sccache.sh show-stats "rust-tests (.)"
+        container/use-sccache.sh show-stats "rust-tests (.)" || echo "::warning::Unable to collect compiler cache statistics"
         # Stopping the server flushes pending cache writes before the save step.
         sccache --stop-server || true
     # Only push runs save; pull requests restore the base-branch cache without adding multi-GB entries.
