@@ -37,6 +37,39 @@ def capture_inputs():
 
 
 class VllmCaptureTests(unittest.TestCase):
+    def test_capture_clears_inherited_vllm_switches(self):
+        """Only the helper's VLLM_* settings reach build_app; other settings survive."""
+        seen = {}
+
+        def build_app(args, supported_tasks):
+            """Record the environment seen by app construction without importing vLLM."""
+            seen.update(capture.os.environ)
+            return "app"
+
+        response = SimpleNamespace(content=b"{}", raise_for_status=lambda: None)
+        client = SimpleNamespace(get=lambda _: response, close=lambda: None)
+        modules = {
+            "torch": SimpleNamespace(
+                cuda=SimpleNamespace(is_initialized=lambda: False)
+            ),
+            "fastapi.testclient": SimpleNamespace(TestClient=lambda app: client),
+            "vllm.entrypoints.launchers.app": SimpleNamespace(build_app=build_app),
+        }
+        inherited = {
+            "VLLM_SERVER_DEV_MODE": "1",
+            "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "1",
+            "VLLM_ENABLE_COHERE_API": "1",
+            "VLLM_PLUGINS": "caller_plugin",
+            "CAPTURE_TEST_UNRELATED": "preserved",
+        }
+        with patch.dict(capture.os.environ, inherited), patch.dict(
+            capture.sys.modules, modules
+        ):
+            self.assertEqual(capture.capture(), b"{}")
+        switches = {k: v for k, v in seen.items() if k.startswith("VLLM_")}
+        self.assertEqual(switches, {"VLLM_PLUGINS": ""})
+        self.assertEqual(seen["CAPTURE_TEST_UNRELATED"], "preserved")
+
     def test_loaded_sources_reject_edits_and_missing_records(self):
         """Imported source must match its recorded digest, including generated files."""
         with tempfile.TemporaryDirectory() as directory:

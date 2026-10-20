@@ -64,10 +64,11 @@ uv pip check --python .venv-vllm-schema/bin/python
 ```
 
 The [capture helper](../../../scripts/protocol_compatibility/frameworks/capture_vllm_openapi.py)
-uses the pinned upstream [production-app schema test](https://github.com/vllm-project/vllm/blob/338dab077c187e1bd421c4624af1169f95f60e06/tests/entrypoints/openai/test_openai_schema.py#L32-L63)
+uses the pinned upstream [production-app schema test](https://github.com/vllm-project/vllm/blob/338dab077c187e1bd421c4624af1169f95f60e06/tests/entrypoints/openai/test_openai_schema.py#L53-L69)
 configuration. It requests `/openapi.json` in-process without entering lifespan,
-disables GPU visibility and plugins, and enables offline model access. This is a
-schema-only capture, not a running inference-server capture.
+clears inherited `VLLM_*` settings before importing vLLM, disables GPU visibility
+and plugins, and enables offline model access. This is a schema-only capture, not
+a running inference-server capture.
 
 ```sh
 .venv-vllm-schema/bin/python \

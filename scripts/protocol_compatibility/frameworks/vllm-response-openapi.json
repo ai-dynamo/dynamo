@@ -49,7 +49,7 @@
     "upstream_runtime_tests": "not_run",
     "paired_inference": "not_run",
     "assessment": "not_run",
-    "environment": "Pinned upstream nightly wheel and recorded dependency freeze; no model, engine, CUDA initialization or native-kernel execution",
-    "note": "Schema capture qualifies declarations only, not inference behavior or native-kernel execution. Verify each new capture against its own source, wheel and dependency pins."
+    "environment": "The recorded capture used the pinned upstream nightly wheel and a dependency freeze retained with its validation evidence, not in this repository; no model, engine, CUDA initialization or native-kernel execution",
+    "note": "New installations leave dependencies unpinned and can produce different schema bytes. The capture checksum and qualification describe the recorded capture only. Schema capture qualifies declarations, not inference behavior or native-kernel execution. Verify each new capture against its own source, wheel and recorded dependency versions."
   }
 }

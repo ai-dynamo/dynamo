@@ -69,10 +69,14 @@ def verify_loaded_sources(dist) -> None:
 def capture() -> bytes:
     """GET production-app OpenAPI without lifespan; return unaltered HTTP bytes.
 
-    Call in a fresh process, before importing vLLM. Disable GPU visibility and
-    plugins and enable offline model access. Never enter TestClient's context
-    manager: that starts lifespan. HTTP errors or CUDA initialization fail.
+    Call in a fresh process, before importing vLLM. Clear inherited VLLM_* settings
+    in this process, disable GPU visibility and plugins, and enable offline model
+    access. Never enter TestClient's context manager: that starts lifespan.
+    HTTP errors or CUDA initialization fail.
     """
+    # Inherited VLLM_* switches can add routes (dev mode, LoRA, Cohere).
+    for name in [name for name in os.environ if name.startswith("VLLM_")]:
+        del os.environ[name]
     os.environ.update(
         CUDA_VISIBLE_DEVICES="",
         VLLM_PLUGINS="",
