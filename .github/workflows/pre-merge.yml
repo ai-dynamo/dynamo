@@ -73,7 +73,7 @@ jobs:
 
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, planner-gym, recipe-check, api-docs, fern-check, fern-broken-links, docs-lint, operator, rust-tests, rust-clippy, docs-website-composition]
+    needs: [changed-files, pre-commit, n2-workflow-contract, planner-gym, recipe-check, api-docs, fern-check, fern-broken-links, docs-lint, operator, rust-tests, rust-clippy, docs-website-composition]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -89,6 +89,22 @@ jobs:
     - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd  # v3.0.1
       timeout-minutes: 3
+
+  n2-workflow-contract:
+    name: N-2 Workflow Contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      with:
+        python-version: '3.12'
+    - name: Install workflow check dependencies
+      run: python3 -m pip install 'PyYAML==6.0.3'
+    - name: Check rolling upgrade image prerequisites
+      run: python3 .github/scripts/test_n2_rolling_workflow.py
 
   planner-gym:
     name: Planner Gym CPU, adapters excluded (Python ${{ matrix.python }})

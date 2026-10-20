@@ -2,14 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import yaml
 from kubernetes_asyncio.client.exceptions import ApiException
 
 from tests.deploy import test_n2_rolling_upgrade as suite
@@ -169,39 +167,6 @@ def test_execution_guard_rejects_missing_incomplete_or_skipped_cases(
     else:
         with pytest.raises(ContractError):
             require_executed_cases([path])
-
-
-@pytest.mark.parametrize("change", ["sglang", "core", "frontend"])
-def test_rolling_pr_lane_builds_all_required_candidate_images(change):
-    workflow = yaml.safe_load((suite.ROOT / ".github/workflows/pr.yaml").read_text())
-    outcomes = {}
-    for name in (
-        "operator",
-        "frontend-build",
-        "sglang-build",
-        "frontend-copy-to-acr",
-        "sglang-copy-to-acr",
-        "rolling-upgrade-compatibility",
-    ):
-        condition = workflow["jobs"][name]["if"]
-        condition = re.sub(
-            r"needs\.changed-files\.outputs\.(\w+) == 'true'",
-            lambda match: str(match[1] in (change, "run_deploy_tests")),
-            condition,
-        )
-        condition = re.sub(
-            r"needs\.([\w-]+)\.result == 'success'",
-            lambda match: str(outcomes.get(match[1], False)),
-            condition,
-        )
-        condition = (
-            condition.replace("always()", "True")
-            .replace("!cancelled()", "True")
-            .replace("&&", " and ")
-            .replace("||", " or ")
-        )
-        outcomes[name] = eval(" ".join(condition.split()), {"__builtins__": {}})
-    assert all(outcomes.values()), outcomes
 
 
 async def test_watch_resumes_from_last_resource_version_and_fails_on_expired_history(
