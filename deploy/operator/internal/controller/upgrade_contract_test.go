@@ -84,19 +84,8 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 				}
 			}
 		case "Deployment", "LeaderWorkerSet":
-			if old.GetGeneration() != current.GetGeneration() {
-				return fmt.Errorf("workload generation changed: %s/%s", old.GetKind(), old.GetName())
-			}
-			a, _, err := unstructured.NestedMap(old.Object, "spec")
-			if err != nil {
+			if err := upgradeComponentWorkloadSafetyError(old, current); err != nil {
 				return err
-			}
-			b, _, err := unstructured.NestedMap(current.Object, "spec")
-			if err != nil {
-				return err
-			}
-			if diff := cmp.Diff(a, b); diff != "" {
-				return fmt.Errorf("effective worker template or rollout intent changed: %s", diff)
 			}
 		case upgradePodCliqueSetKind:
 			a, err := upgradeWorkerTemplates(old)
@@ -119,6 +108,25 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 				}
 			}
 		}
+	}
+	return nil
+}
+
+// Component workloads preserve both their generation and complete effective spec.
+func upgradeComponentWorkloadSafetyError(old, current unstructured.Unstructured) error {
+	if old.GetGeneration() != current.GetGeneration() {
+		return fmt.Errorf("workload generation changed: %s/%s", old.GetKind(), old.GetName())
+	}
+	a, _, err := unstructured.NestedMap(old.Object, "spec")
+	if err != nil {
+		return err
+	}
+	b, _, err := unstructured.NestedMap(current.Object, "spec")
+	if err != nil {
+		return err
+	}
+	if diff := cmp.Diff(a, b); diff != "" {
+		return fmt.Errorf("effective worker template or rollout intent changed: %s", diff)
 	}
 	return nil
 }

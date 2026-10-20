@@ -14,6 +14,8 @@ import (
 )
 
 // A DGD reconcile can finish before its DCD controllers have rendered workloads.
+//
+//nolint:unparam // Tagged cluster tests pass the actual component count; unit tests use one.
 func upgradeComponentGraphReady(objects []unstructured.Unstructured, components int) error {
 	dcds := 0
 	for _, object := range objects {
