@@ -82,6 +82,7 @@ pub fn convert_event(
             kv_cache_spec_sliding_window: _,
             locality: _,
             ownership: _,
+            session_id,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             {
@@ -116,7 +117,7 @@ pub fn convert_event(
                 .into_iter()
                 .map(BlockHashValue::into_u64)
                 .collect();
-            KvCacheEvent {
+            let event = KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: parent_block_hash
@@ -138,7 +139,15 @@ pub fn convert_event(
                     ),
                 }),
                 dp_rank,
-            }
+            };
+            let placement_event = PlacementEvent::new(
+                Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
+                event,
+            );
+            return Some(match session_id {
+                Some(session_id) => placement_event.with_session_id(session_id),
+                None => placement_event,
+            });
         }
         RawKvEvent::BlockRemoved { block_hashes, .. } => {
             let hashes = block_hashes

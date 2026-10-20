@@ -13,6 +13,7 @@ embedding worker while keeping generation workers unchanged.
 from __future__ import annotations
 
 import copy
+import importlib
 import json
 import logging
 import os
@@ -25,11 +26,46 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
+import vllm
 from vllm.config import VllmConfig
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines
 from vllm.v1.executor import Executor
+
+# Resolved on first use, not at import: vLLM renamed get_engine_zmq_addresses in
+# vllm-project/vllm#54113, and this module is imported by every dynamo.vllm worker
+# while only --embedding-worker-processes > 1 calls into it. Module attributes so
+# tests can substitute them.
+get_engine_zmq_addresses: Callable[..., Any] | None = None
+launch_core_engines: Callable[..., Any] | None = None
+
+
+def _resolve_engine_utils() -> tuple[Callable[..., Any], Callable[..., Any]]:
+    """Bind the vLLM engine-launch helpers this pool needs, failing with a clear message.
+
+    Returns ``(get_engine_zmq_addresses, launch_core_engines)`` so callers hold
+    non-optional references; the module attributes are kept in sync for tests.
+    """
+    global get_engine_zmq_addresses, launch_core_engines
+    engine_utils = importlib.import_module("vllm.v1.engine.utils")
+
+    if launch_core_engines is None:
+        launch_core_engines = engine_utils.launch_core_engines
+    if get_engine_zmq_addresses is None:
+        resolved = getattr(engine_utils, "get_engine_zmq_addresses", None)
+        if resolved is None:
+            # vllm#54113: the supervisor now binds the frontend listeners up front and
+            # children adopt them; this pool still lets children bind the addresses
+            # themselves, so refuse rather than hand out addresses that are already bound.
+            raise RuntimeError(
+                "--embedding-worker-processes > 1 is not yet supported on this vLLM: "
+                f"vLLM {vllm.__version__} has no get_engine_zmq_addresses (it binds "
+                "frontend listeners in the supervisor since vllm-project/vllm#54113). "
+                "Run with --embedding-worker-processes 1 until the pool adopts inherited listeners."
+            )
+        get_engine_zmq_addresses = resolved
+    return get_engine_zmq_addresses, launch_core_engines
+
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +75,10 @@ _PARENT_PID_ENV = "DYN_VLLM_EMBEDDING_PARENT_PID"
 _ENGINE_ADDRESSES_ENV = "DYN_VLLM_EMBEDDING_ENGINE_ADDRESSES"
 _CHILD_ROLE = "child"
 _RPC_BASE_PATH_ENV = "VLLM_RPC_BASE_PATH"
+# The two shapes _unpack_core_engine_launch accepts were read from these vLLM
+# releases: 0.27.1, which container/context.yaml builds the XPU images on, and
+# 0.28.0, the pin in pyproject.toml. Re-check that helper when either moves.
+_VERIFIED_VLLM_VERSIONS = ("0.27.1", "0.28.0")
 
 
 def is_embedding_process_child() -> bool:
@@ -372,6 +412,44 @@ def _short_rpc_directory() -> tempfile.TemporaryDirectory:
     return rpc_directory
 
 
+def _unrecognized_launch_shape(detail: str) -> RuntimeError:
+    """Name the installed vLLM and the shape it yielded, not just the symptom."""
+    return RuntimeError(
+        f"vLLM {vllm.__version__} yields {detail} from launch_core_engines. "
+        f"This unpacking was verified against vLLM "
+        f"{' and '.join(_VERIFIED_VLLM_VERSIONS)}; the result shape has most "
+        "likely changed upstream and _unpack_core_engine_launch needs "
+        "updating to match."
+    )
+
+
+def _unpack_core_engine_launch(launch: Any) -> tuple[Any, Any, Any, Any]:
+    """Normalize what ``launch_core_engines`` yields across vLLM releases.
+
+    vLLM 0.28 and later yield a ``CoreEngineLaunch`` object defining no
+    ``__iter__``; earlier releases yield a plain 4-tuple. Duck-typing the
+    yielded object avoids importing ``CoreEngineLaunch``, a name that does not
+    exist before 0.28.
+    """
+    if isinstance(launch, tuple):
+        if len(launch) != 4:
+            raise _unrecognized_launch_shape(
+                f"a {len(launch)}-tuple rather than the expected 4-tuple"
+            )
+        return launch
+    try:
+        return (
+            launch.engine_manager,
+            launch.coordinator,
+            launch.addresses,
+            launch.tensor_queue,
+        )
+    except AttributeError as error:
+        raise _unrecognized_launch_shape(
+            f"a {type(launch).__name__} with no {error.name!r} attribute"
+        ) from error
+
+
 def create_shared_embedding_engine_client(
     *,
     vllm_config: VllmConfig,
@@ -420,7 +498,8 @@ def create_shared_embedding_engine_client(
         vllm_config.parallel_config._api_process_count = process_count
         vllm_config.parallel_config._api_process_rank = -1
         executor_class = Executor.get_class(vllm_config)
-        addresses = get_engine_zmq_addresses(vllm_config, process_count)
+        engine_zmq_addresses, core_engines_launcher = _resolve_engine_utils()
+        addresses = engine_zmq_addresses(vllm_config, process_count)
 
         parent_logger_config = _client_config(
             vllm_config,
@@ -433,13 +512,18 @@ def create_shared_embedding_engine_client(
         with ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="dynamo-embedding-client"
         ) as client_pool:
-            with launch_core_engines(
+            with core_engines_launcher(
                 vllm_config,
                 executor_class,
                 not disable_log_stats,
                 addresses,
-                process_count,
-            ) as (engine_manager, coordinator, addresses, tensor_queue):
+            ) as core_engine_launch:
+                (
+                    engine_manager,
+                    coordinator,
+                    addresses,
+                    tensor_queue,
+                ) = _unpack_core_engine_launch(core_engine_launch)
                 if coordinator is not None or tensor_queue is not None:
                     raise RuntimeError(
                         "--embedding-worker-processes currently supports one "

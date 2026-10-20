@@ -7,6 +7,7 @@ intent: >-
   unchanged DGD draft that can answer the target performance question.
 skills:
   - perform-adversarial-review
+  - report-skillpack-issue
 "Required Readings: Docs":
   - agent-docs/references/definitions.md
   - agent-docs/guides/knob-tuning/tuning-hierarchy.md

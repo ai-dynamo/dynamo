@@ -23,11 +23,13 @@ mod model_manager;
 pub use model_manager::{ModelManager, ModelManagerError, UNKNOWN_METRIC_MODEL};
 
 mod controller;
+pub(crate) mod worker_inventory;
 
 mod allocator;
 
 mod worker_set;
 pub use worker_set::WorkerSet;
+pub(crate) use worker_set::{CommittedWorkerSetTarget, WorkerSetTarget, WorkerSetTargetId};
 
 pub(crate) mod runtime_configs;
 pub use runtime_configs::{RuntimeConfigWatch, runtime_config_watch};

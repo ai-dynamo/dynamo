@@ -35,12 +35,10 @@ const UNSET_DP_RANK_LABEL: &str = "none";
 /// Called when workers are removed to prevent stale metrics from accumulating.
 fn cleanup_worker_metrics(worker_id: u64, dp_ranks: &[u32], worker_type: &str) {
     let worker_id_str = worker_id.to_string();
-    let m = &*WORKER_LOAD_METRICS;
     for dp_rank in dp_ranks {
+        WORKER_LOAD_METRICS.remove(worker_id, *dp_rank, worker_type);
         let dp_rank_str = dp_rank.to_string();
         let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
-        let _ = m.active_decode_blocks.remove_label_values(labels);
-        let _ = m.active_prefill_tokens.remove_label_values(labels);
         let _ = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.remove_label_values(labels);
         let _ = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.remove_label_values(labels);
         let _ = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.remove_label_values(labels);
@@ -78,9 +76,9 @@ fn publish_overloaded_instances_if_needed(
     overloaded_tracker: &OverloadedWorkerTracker,
     overloaded_changed: bool,
 ) -> bool {
-    // NOTE: Recovery still relies on load producers publishing after meaningful capacity or
-    // lifecycle changes. This only prevents the next observation from being suppressed when
-    // request-path backpressure changed Client state outside this monitor's cached set.
+    // A fresh load observation clears request-path overload leases early.
+    // This prevents the monitor's unchanged-set suppression from retaining
+    // a request-path mark until its bounded lease expires.
     if !overloaded_changed && !overload_reconciliation_needed(client) {
         return false;
     }
@@ -907,6 +905,14 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                         last_thresholds = cfg.clone();
                         let overloaded_workers = collect_overloaded_workers(&worker_load_states, &cfg);
+                        // Deliberately not `publish_overloaded_instances_if_needed`: unlike the
+                        // load branches below, this one carries no fresh load observation. It wakes
+                        // on endpoint membership and runtime-config changes, so the recompute above
+                        // reads whatever load state was last observed. Publishing on an unchanged
+                        // set here would retire request-path overload leases on no load evidence at
+                        // all — and because `runtime_config_watch` joins availability for the whole
+                        // endpoint, one unrelated worker appearing would clear another worker's
+                        // in-force lease. Leases are bounded, so they expire on their own instead.
                         if overloaded_tracker.replace(overloaded_workers) {
                             publish_overloaded_instances(&client, &overloaded_tracker.ids());
                         }
@@ -1131,8 +1137,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 mod tests {
     use super::{
         LoadObservation, LoadThresholdConfig, OverloadedWorkerTracker, RemoteActiveLoadSnapshot,
-        WorkerLoadState, collect_overloaded_workers, overload_reconciliation_needed,
-        publish_overloaded_instances_if_needed,
+        WORKER_LOAD_METRICS, WorkerLoadState, cleanup_worker_metrics, collect_overloaded_workers,
+        overload_reconciliation_needed, publish_overloaded_instances_if_needed,
     };
     use dynamo_kv_router::protocols::{ActiveLoad, WorkerWithDpRank};
     use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
@@ -1710,5 +1716,45 @@ mod tests {
         assert_eq!(client.overloaded_instance_ids(), None);
         assert!(!client.overload_reconciliation_needed());
         rt.shutdown();
+    }
+
+    #[test]
+    fn cleanup_removes_every_load_series_for_the_worker_ranks() {
+        use dynamo_kv_router::sequences::LocalWorkerLoad;
+        use prometheus::core::Collector;
+
+        const WORKER_ID: u64 = 0x10696;
+        let load = LocalWorkerLoad {
+            active_blocks: 1,
+            active_tokens: 1,
+            active_requests: 2,
+            prefill_requests: 1,
+        };
+        for dp_rank in [0, 1] {
+            WORKER_LOAD_METRICS.observe(WORKER_ID, dp_rank, "decode", load);
+        }
+        let worker_series = || {
+            let worker_id = WORKER_ID.to_string();
+            let m = &*WORKER_LOAD_METRICS;
+            [
+                m.active_decode_blocks.collect(),
+                m.active_prefill_tokens.collect(),
+                m.active_requests.collect(),
+            ]
+            .into_iter()
+            .flatten()
+            .flat_map(|family| family.get_metric().to_vec())
+            .filter(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "worker_id" && label.value() == worker_id)
+            })
+            .count()
+        };
+        assert_eq!(worker_series(), 2 * (1 + 1 + 2));
+
+        cleanup_worker_metrics(WORKER_ID, &[0, 1], "decode");
+        assert_eq!(worker_series(), 0);
     }
 }

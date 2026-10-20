@@ -60,7 +60,7 @@ impl LoRADownloader {
         lora_uri: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let downloader = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let path = downloader
                 .download_if_needed(&lora_uri)
                 .await

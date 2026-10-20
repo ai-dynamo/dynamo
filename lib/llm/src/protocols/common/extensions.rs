@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use axum::http::HeaderMap;
 use derive_builder::Builder;
@@ -13,8 +14,11 @@ use crate::protocols::TokenIdType;
 use crate::protocols::agents::{
     AgentContextHeaderValues, agent_context_header_values, session_affinity_header_value,
 };
+use crate::protocols::common::FinishReason;
 use crate::protocols::common::llm_backend::PromptLogprobs;
-use crate::protocols::common::timing::TimingInfo;
+use crate::protocols::common::metadata_upload::ArtifactMode;
+pub use crate::protocols::common::metadata_upload::MetadataUpload;
+use crate::protocols::common::timing::{RequestTracker, TimingInfo};
 
 /// Request-level taint constraints carried by `nvext.routing_constraints`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -39,35 +43,6 @@ pub struct RouterParams {
     pub itl_target: Option<f64>,
 }
 
-/// Destination for large backend metadata uploaded out of band.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct MetadataUpload {
-    #[serde(deserialize_with = "deserialize_metadata_upload_url")]
-    pub url: String,
-}
-
-fn deserialize_metadata_upload_url<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let url = String::deserialize(deserializer)?;
-    let url = url.trim();
-    if url.is_empty() {
-        return Err(serde::de::Error::custom(
-            "metadata_upload.url must not be empty",
-        ));
-    }
-    Ok(url.to_string())
-}
-
-/// Internal KV cache hints derived from agent lifecycle metadata.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct KvHints {
-    pub evict_session: bool,
-}
-
 /// Causal trigger that produced an incoming agent request.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -78,32 +53,6 @@ pub enum InputTrigger {
     ToolResult,
     /// Any request not triggered by a user message or tool result.
     Other,
-}
-
-/// Metadata for an inference request that creates a compacted session summary.
-///
-/// Fields are optional because harnesses may expose different levels of detail.
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
-pub struct AgentCompaction {
-    /// How the compaction was initiated, such as `manual` or `automatic`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trigger: Option<String>,
-
-    /// Why the compaction was initiated.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-
-    /// Compaction mechanism selected by the harness.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub implementation: Option<String>,
-
-    /// Position of this inference within the compaction flow.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-
-    /// Summary or checkpoint strategy selected by the harness.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strategy: Option<String>,
 }
 
 /// Identity metadata for agentic workloads.
@@ -125,14 +74,19 @@ pub struct AgentContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_final: Option<bool>,
 
-    /// Present when the current inference creates a compacted session summary.
-    #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction: Option<AgentCompaction>,
-
-    #[builder(default, setter(strip_option))]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kv_hints: Option<KvHints>,
+    /// Opaque coding-agent HTTP headers captured at ingress for this request.
+    ///
+    /// Names are lowercase; values retain their text and repetition order.
+    /// Capture includes open `x-claude-code-*` and `x-codex-*` families plus
+    /// supported session/subagent headers. It skips sensitive or non-text values
+    /// and bounds capture to 64 values, 16 KiB per value, and 32 KiB total
+    /// (including name bytes per value), omitting whole values over the limits.
+    /// Absence does not imply a negative signal. Consumers own interpretation,
+    /// including compaction, unknown values, and malformed embedded JSON.
+    /// Shared across pipeline clones; serialized as a JSON object of arrays.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "agent_headers_empty")]
+    pub agent_headers: Arc<BTreeMap<String, Vec<String>>>,
 
     /// Causal trigger that produced the request, derived from inbound request content.
     #[builder(default, setter(strip_option))]
@@ -146,6 +100,10 @@ impl AgentContext {
     pub fn builder() -> AgentContextBuilder {
         AgentContextBuilder::default()
     }
+}
+
+fn agent_headers_empty(headers: &Arc<BTreeMap<String, Vec<String>>>) -> bool {
+    headers.is_empty()
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -375,15 +333,11 @@ pub fn has_non_cache_salt_routing_headers(headers: &HeaderMap) -> bool {
 
 impl From<AgentContextHeaderValues> for AgentContext {
     fn from(values: AgentContextHeaderValues) -> Self {
-        let kv_hints = (values.session_final == Some(true)).then_some(KvHints {
-            evict_session: true,
-        });
         Self {
             session_id: values.session_id,
             parent_session_id: values.parent_session_id,
             session_final: values.session_final,
-            compaction: values.compaction,
-            kv_hints,
+            agent_headers: values.agent_headers,
             input_trigger: None,
         }
     }
@@ -663,8 +617,19 @@ pub struct NvExtResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
 
+    /// Opaque delivery result returned by a backend for an artifact request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_upload: Option<serde_json::Value>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<serde_json::Value>,
+
+    /// Dynamo's internal finish reason before OpenAI conversion.
+    ///
+    /// Backend-specific reasons are normalized before this value is set.
+    /// For example, SGLang's `abort` becomes `cancelled`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detailed_finish_reason: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_token_ids: Option<Vec<TokenIdType>>,
@@ -721,19 +686,79 @@ pub struct NvExtResponseFieldSelection {
     pub token_ids: bool,
     pub routed_experts: bool,
     pub engine_data: bool,
+    pub metadata_upload: Option<ArtifactMode>,
     pub stop_reason: bool,
+    pub detailed_finish_reason: bool,
     pub completion_token_ids: bool,
     pub prompt_token_ids: bool,
     pub prompt_logprobs: bool,
 }
 
+/// Backend data available when building an NVExt response.
+#[derive(Debug, Default)]
+pub struct NvExtResponseInput<'a> {
+    pub tracker: Option<&'a RequestTracker>,
+    pub finish_reason: Option<&'a FinishReason>,
+    pub engine_data: Option<serde_json::Value>,
+    pub stop_reason: Option<StopReason>,
+    pub completion_token_ids: Option<&'a [TokenIdType]>,
+    pub prompt_logprobs: Option<PromptLogprobs>,
+}
+
 impl NvExtResponseFieldSelection {
+    pub fn validate_metadata_upload_result(
+        &self,
+        finish_reason: Option<&FinishReason>,
+        engine_data: Option<&serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        let Some(mode) = self.metadata_upload else {
+            return Ok(());
+        };
+        if matches!(
+            finish_reason,
+            Some(FinishReason::Error(_) | FinishReason::Cancelled)
+        ) {
+            return Ok(());
+        }
+        let result = engine_data.and_then(|data| data.get("metadata_upload"));
+        let valid = result.is_some_and(|result| {
+            result.get("kind").and_then(serde_json::Value::as_str) == Some("generation_artifact")
+                && result
+                    .get("mode")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|name| {
+                        serde_json::from_value::<ArtifactMode>(serde_json::Value::String(
+                            name.to_owned(),
+                        ))
+                        .ok()
+                    })
+                    == Some(mode)
+        });
+        if (result.is_some() || finish_reason.is_some()) && !valid {
+            let message =
+                "backend did not provide the requested generation_artifact delivery result";
+            return Err(dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::BackendProtocol)
+                .message(message)
+                .public_message(message)
+                .build()
+                .into());
+        }
+        Ok(())
+    }
+
     pub fn from_nvext(nvext: Option<&NvExt>) -> Self {
         let Some(ext) = nvext else {
             return Self::default();
         };
 
-        let mut selection = Self::default();
+        let mut selection = Self {
+            metadata_upload: match ext.metadata_upload.as_ref() {
+                Some(MetadataUpload::GenerationArtifact(upload)) => Some(upload.mode),
+                _ => None,
+            },
+            ..Default::default()
+        };
         if let Some(fields) = ext.extra_fields.as_ref() {
             for field in fields {
                 match field.as_str() {
@@ -742,6 +767,7 @@ impl NvExtResponseFieldSelection {
                     "routed_experts" => selection.routed_experts = true,
                     "engine_data" => selection.engine_data = true,
                     "stop_reason" => selection.stop_reason = true,
+                    "detailed_finish_reason" => selection.detailed_finish_reason = true,
                     "completion_token_ids" => selection.completion_token_ids = true,
                     "prompt_token_ids" => selection.prompt_token_ids = true,
                     "prompt_logprobs" => selection.prompt_logprobs = true,
@@ -756,30 +782,26 @@ impl NvExtResponseFieldSelection {
         selection
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn build_response_nvext(
-        &self,
-        tracker: Option<&std::sync::Arc<crate::protocols::common::timing::RequestTracker>>,
-        finish_reason_present: bool,
-        engine_data_from_backend: Option<serde_json::Value>,
-        stop_reason_from_backend: Option<StopReason>,
-        completion_token_ids_from_backend: Option<&[TokenIdType]>,
-        prompt_logprobs_from_backend: Option<PromptLogprobs>,
-    ) -> Option<NvExtResponse> {
+    pub fn build_response_nvext(&self, input: NvExtResponseInput<'_>) -> Option<NvExtResponse> {
+        let finish_reason_present = input.finish_reason.is_some();
+
         let worker_id = if self.worker_id {
-            tracker.and_then(|t| t.get_worker_info())
+            input.tracker.and_then(RequestTracker::get_worker_info)
         } else {
             None
         };
 
         let token_ids = if self.token_ids {
-            tracker.and_then(|t| t.query_token_ids().map(<[u32]>::to_vec))
+            input
+                .tracker
+                .and_then(|tracker| tracker.query_token_ids().map(<[u32]>::to_vec))
         } else {
             None
         };
 
         let routed_experts = if self.routed_experts {
-            engine_data_from_backend
+            input
+                .engine_data
                 .as_ref()
                 .and_then(|data| data.get("routed_experts"))
                 .cloned()
@@ -788,25 +810,43 @@ impl NvExtResponseFieldSelection {
         };
 
         let timing = if finish_reason_present && self.timing {
-            tracker.map(|t| t.get_timing_info())
+            input.tracker.map(RequestTracker::get_timing_info)
+        } else {
+            None
+        };
+
+        let metadata_upload = if self.metadata_upload.is_some() {
+            input
+                .engine_data
+                .as_ref()
+                .and_then(|data| data.get("metadata_upload"))
+                .cloned()
         } else {
             None
         };
 
         let engine_data = if self.engine_data {
-            engine_data_from_backend
+            input.engine_data
         } else {
             None
         };
 
         let stop_reason = if self.stop_reason {
-            stop_reason_from_backend.and_then(|reason| serde_json::to_value(reason).ok())
+            input
+                .stop_reason
+                .and_then(|reason| serde_json::to_value(reason).ok())
+        } else {
+            None
+        };
+
+        let detailed_finish_reason = if self.detailed_finish_reason {
+            input.finish_reason.map(ToString::to_string)
         } else {
             None
         };
 
         let completion_token_ids = if self.completion_token_ids {
-            completion_token_ids_from_backend.map(<[u32]>::to_vec)
+            input.completion_token_ids.map(<[u32]>::to_vec)
         } else {
             None
         };
@@ -814,13 +854,15 @@ impl NvExtResponseFieldSelection {
         // Prompt IDs can be large, so emit them only once on the terminal
         // chunk. The tracker stores them only for an explicit opt-in request.
         let prompt_token_ids = if self.prompt_token_ids && finish_reason_present {
-            tracker.and_then(|t| t.prompt_token_ids().map(<[u32]>::to_vec))
+            input
+                .tracker
+                .and_then(|tracker| tracker.prompt_token_ids().map(<[u32]>::to_vec))
         } else {
             None
         };
 
         let prompt_logprobs = if self.prompt_logprobs && finish_reason_present {
-            prompt_logprobs_from_backend
+            input.prompt_logprobs
         } else {
             None
         };
@@ -830,7 +872,9 @@ impl NvExtResponseFieldSelection {
             && routed_experts.is_none()
             && timing.is_none()
             && engine_data.is_none()
+            && metadata_upload.is_none()
             && stop_reason.is_none()
+            && detailed_finish_reason.is_none()
             && completion_token_ids.is_none()
             && prompt_token_ids.is_none()
             && prompt_logprobs.is_none()
@@ -844,7 +888,9 @@ impl NvExtResponseFieldSelection {
             token_ids,
             routed_experts,
             engine_data,
+            metadata_upload,
             stop_reason,
+            detailed_finish_reason,
             completion_token_ids,
             prompt_token_ids,
             prompt_logprobs,
@@ -869,14 +915,46 @@ pub(crate) fn validate_completion_token_ids_single_choice(
     Ok(())
 }
 
+pub(crate) fn validate_metadata_upload_single_choice(
+    total_choices: usize,
+    nvext: Option<&NvExt>,
+) -> anyhow::Result<()> {
+    if total_choices > 1
+        && nvext
+            .and_then(|ext| ext.metadata_upload.as_ref())
+            .is_some_and(MetadataUpload::is_artifact)
+    {
+        return Err(crate::protocols::common::invalid_argument_error(
+            "generation_artifact metadata_upload requires a single prompt and n = best_of = 1",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_metadata_upload_stop_strings(
+    has_stop_strings: bool,
+    nvext: Option<&NvExt>,
+) -> anyhow::Result<()> {
+    if has_stop_strings
+        && nvext
+            .and_then(|ext| ext.metadata_upload.as_ref())
+            .is_some_and(MetadataUpload::is_artifact)
+    {
+        return Err(crate::protocols::common::invalid_argument_error(
+            "generation_artifact metadata_upload does not support stop strings",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
         HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
-        HEADER_CODEX_TURN_METADATA, HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL,
-        HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID,
+        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[derive(Default)]
@@ -906,15 +984,31 @@ mod tests {
     }
 
     #[test]
-    fn agent_context_accepts_nested_compaction() {
+    fn agent_context_preserves_wire_compatibility() {
         let context = serde_json::from_str::<AgentContext>(
             r#"{"session_id":"root","compaction":{"trigger":"manual"}}"#,
         )
         .unwrap();
-        assert_eq!(
-            context.compaction.and_then(|compaction| compaction.trigger),
-            Some("manual".to_string())
-        );
+        // Older frontends may send the optional normalized field. It never
+        // drove core behavior and is now ignored by tolerant wire readers.
+        assert!(context.agent_headers.is_empty());
+        assert_eq!(context.session_id, "root");
+        let wire = serde_json::to_value(context).unwrap();
+        assert!(wire.get("compaction").is_none());
+        assert!(wire.get("agent_headers").is_none());
+
+        #[derive(Deserialize)]
+        struct LegacyAgentContext {
+            session_id: String,
+            compaction: Option<serde_json::Value>,
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "root".parse().unwrap());
+        headers.insert("x-codex-future", "unknown".parse().unwrap());
+        let wire = serde_json::to_value(agent_context_from_headers(&headers).unwrap()).unwrap();
+        let legacy: LegacyAgentContext = serde_json::from_value(wire).unwrap();
+        assert_eq!(legacy.session_id, "root");
+        assert!(legacy.compaction.is_none());
     }
 
     #[test]
@@ -987,7 +1081,10 @@ mod tests {
         .unwrap();
 
         let upload = nvext.metadata_upload.as_ref().unwrap();
-        assert_eq!(upload.url, "s3://bucket/root/rollouts");
+        assert_eq!(
+            serde_json::to_value(upload).unwrap()["url"],
+            "s3://bucket/root/rollouts"
+        );
         assert!(!NvExtResponseFieldSelection::from_nvext(Some(&nvext)).engine_data);
 
         assert!(
@@ -1013,6 +1110,206 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn metadata_upload_artifact_modes_round_trip() {
+        for upload in [
+            serde_json::json!({"kind": "generation_artifact", "contents": ["backend_data"], "mode": "inline_base64"}),
+            serde_json::json!({"kind": "generation_artifact", "contents": [], "mode": "object_store", "destination": {"kind": "managed_store", "profile": "artifacts", "object_key": "run/result.bin"}}),
+            serde_json::json!({"kind": "generation_artifact", "contents": ["moe_routes"], "mode": "relay_store", "destination": {"kind": "mooncake_store", "profile": "relay", "consumer_group": "trainers", "retention_seconds": 120}}),
+        ] {
+            let input = serde_json::json!({"metadata_upload": upload});
+            let ext: NvExt = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(serde_json::to_value(ext).unwrap(), input);
+        }
+    }
+
+    #[test]
+    fn metadata_upload_discriminator_and_mode_are_strict() {
+        for upload in [
+            serde_json::json!({"url": "s3://bucket", "mode": "inline_base64"}),
+            serde_json::json!({"kind": null, "url": "s3://bucket"}),
+            serde_json::json!({"kind": "unknown", "url": "s3://bucket"}),
+            serde_json::json!({"kind": "generation_artifact", "contents": [], "mode": "inline_base64", "destination": null}),
+            serde_json::json!({"kind": "generation_artifact", "contents": [], "mode": "inline_base64", "url": "s3://bucket"}),
+            serde_json::json!({"kind": "generation_artifact", "contents": [], "mode": "object_store"}),
+            serde_json::json!({"kind": "generation_artifact", "contents": [], "mode": "object_store", "destination": {"kind": "mooncake_store", "profile": "relay", "consumer_group": "trainers", "retention_seconds": 120}}),
+            serde_json::json!({"kind": "generation_artifact", "contents": ["a", "a"], "mode": "inline_base64"}),
+        ] {
+            assert!(
+                serde_json::from_value::<NvExt>(serde_json::json!({"metadata_upload": upload}))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_upload_artifact_result_is_projected_opaquely() {
+        let ext: NvExt = serde_json::from_value(serde_json::json!({
+            "metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "inline_base64"}
+        })).unwrap();
+        let result = serde_json::json!({"kind": "generation_artifact", "mode": "inline_base64", "backend_payload": {"custom": [1, 2]}});
+        let selection = NvExtResponseFieldSelection::from_nvext(Some(&ext));
+        let response = selection
+            .build_response_nvext(NvExtResponseInput {
+                engine_data: Some(
+                    serde_json::json!({"metadata_upload": result, "private_backend_field": 42}),
+                ),
+                ..Default::default()
+            })
+            .unwrap();
+        let wire = serde_json::to_value(response).unwrap();
+        assert_eq!(wire["metadata_upload"], result);
+        assert!(wire.get("engine_data").is_none());
+        assert!(
+            NvExtResponseFieldSelection::default()
+                .build_response_nvext(NvExtResponseInput {
+                    engine_data: Some(serde_json::json!({"metadata_upload": result})),
+                    ..Default::default()
+                })
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn metadata_upload_terminal_result_cannot_be_silently_omitted() {
+        let ext: NvExt = serde_json::from_value(serde_json::json!({
+            "metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "inline_base64"}
+        })).unwrap();
+        let selection = NvExtResponseFieldSelection::from_nvext(Some(&ext));
+        assert!(
+            selection
+                .validate_metadata_upload_result(None, None)
+                .is_ok()
+        );
+        for result in [
+            serde_json::json!({"url": "s3://bucket/legacy"}),
+            serde_json::json!({"kind": "generation_artifact", "mode": "object_store"}),
+            serde_json::json!({"kind": "other", "mode": "inline_base64"}),
+            serde_json::json!({"kind": "generation_artifact", "mode": {"inline_base64": null}}),
+        ] {
+            assert!(
+                selection
+                    .validate_metadata_upload_result(
+                        Some(&FinishReason::Stop),
+                        Some(&serde_json::json!({"metadata_upload": result})),
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            selection
+                .validate_metadata_upload_result(Some(&FinishReason::Stop), None)
+                .is_err()
+        );
+        let error = selection
+            .validate_metadata_upload_result(Some(&FinishReason::Stop), None)
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<dynamo_runtime::error::DynamoError>()
+                .unwrap()
+                .class(),
+            dynamo_runtime::error::ErrorType::BackendProtocol
+        );
+        assert!(
+            selection
+                .validate_metadata_upload_result(
+                    Some(&FinishReason::Stop),
+                    Some(&serde_json::json!({"metadata_upload": null}))
+                )
+                .is_err()
+        );
+        assert!(
+            selection
+                .validate_metadata_upload_result(
+                    Some(&FinishReason::Stop),
+                    Some(&serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "mode": "inline_base64", "opaque": true}}))
+                )
+                .is_ok()
+        );
+        assert!(selection
+            .validate_metadata_upload_result(
+                None,
+                Some(&serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "mode": {"inline_base64": null}}})),
+            )
+            .is_err());
+        assert!(
+            selection
+                .validate_metadata_upload_result(
+                    Some(&FinishReason::Error("worker failed".into())),
+                    None
+                )
+                .is_ok()
+        );
+        assert!(
+            selection
+                .validate_metadata_upload_result(Some(&FinishReason::Cancelled), None)
+                .is_ok()
+        );
+        assert!(
+            NvExtResponseFieldSelection::default()
+                .validate_metadata_upload_result(Some(&FinishReason::Stop), None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn metadata_upload_single_choice_admission_covers_both_endpoints() {
+        use crate::engines::ValidateRequest;
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+        use crate::protocols::openai::completions::NvCreateCompletionRequest;
+        let artifact = serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "inline_base64"}});
+        let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}], "n": 2, "nvext": artifact})).unwrap();
+        assert!(chat.validate().is_err());
+        for (prompt, n, best_of) in [
+            (serde_json::json!("hello"), 1, 2),
+            (serde_json::json!(["hello", "world"]), 1, 1),
+        ] {
+            let request: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "prompt": prompt, "n": n, "best_of": best_of, "nvext": artifact})).unwrap();
+            assert!(request.validate().is_err());
+        }
+        let legacy: NvExt = serde_json::from_value(
+            serde_json::json!({"metadata_upload": {"url": "s3://bucket/prefix"}}),
+        )
+        .unwrap();
+        assert!(validate_metadata_upload_single_choice(2, Some(&legacy)).is_ok());
+    }
+
+    #[test]
+    fn artifact_upload_rejects_frontend_string_stop_before_generation() {
+        use crate::engines::ValidateRequest;
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+        use crate::protocols::openai::completions::NvCreateCompletionRequest;
+
+        let artifact = serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "inline_base64"}});
+        for stop in [serde_json::json!("END"), serde_json::json!(["END"])] {
+            let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}], "stop": stop, "nvext": artifact})).unwrap();
+            assert!(chat.validate().unwrap_err().to_string().contains("stop"));
+            let completion: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "prompt": "hello", "stop": stop, "nvext": artifact})).unwrap();
+            assert!(
+                completion
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("stop")
+            );
+        }
+
+        let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}], "stop_token_ids": [42], "nvext": artifact})).unwrap();
+        assert!(chat.validate().is_ok());
+        let completion: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "prompt": "hello", "stop_token_ids": [42], "nvext": artifact})).unwrap();
+        assert!(completion.validate().is_ok());
+        let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}], "stop": [42], "nvext": artifact})).unwrap();
+        assert!(chat.validate().is_ok());
+        let completion: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "prompt": "hello", "stop": [42], "nvext": artifact})).unwrap();
+        assert!(completion.validate().is_ok());
+
+        let legacy: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}], "stop": "END", "nvext": {"metadata_upload": {"url": "s3://bucket/prefix"}}})).unwrap();
+        assert!(legacy.validate().is_ok());
+        let legacy: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({"model": "test", "prompt": "hello", "stop": "END", "nvext": {"metadata_upload": {"url": "s3://bucket/prefix"}}})).unwrap();
+        assert!(legacy.validate().is_ok());
     }
 
     #[test]
@@ -1300,7 +1597,6 @@ mod tests {
                 expected_parent_session_id
             );
             assert_eq!(agent_context.session_final, None);
-            assert_eq!(agent_context.kv_hints, None);
         }
     }
 
@@ -1309,7 +1605,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
         headers.insert(
-            HEADER_CODEX_TURN_METADATA,
+            "x-codex-turn-metadata",
             r#"{"request_kind":"compaction","compaction":{"trigger":"manual","reason":"user_requested","implementation":"responses_compact","phase":"standalone_turn","strategy":"memento"}}"#
                 .parse()
                 .unwrap(),
@@ -1317,56 +1613,35 @@ mod tests {
 
         let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(
-            agent_context.compaction,
-            Some(AgentCompaction {
-                trigger: Some("manual".to_string()),
-                reason: Some("user_requested".to_string()),
-                implementation: Some("responses_compact".to_string()),
-                phase: Some("standalone_turn".to_string()),
-                strategy: Some("memento".to_string()),
-            })
+            agent_context.agent_headers["x-codex-turn-metadata"],
+            [headers["x-codex-turn-metadata"].to_str().unwrap()]
         );
 
         headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
         let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(agent_context.session_id, "canonical");
         assert_eq!(
-            agent_context
-                .compaction
-                .and_then(|compaction| compaction.strategy),
-            Some("memento".to_string())
+            agent_context.agent_headers["x-codex-turn-metadata"],
+            [headers["x-codex-turn-metadata"].to_str().unwrap()]
         );
     }
 
     #[test]
-    fn agent_context_ignores_invalid_or_non_compaction_codex_metadata() {
+    fn agent_context_preserves_codex_metadata_without_interpreting_it() {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
-        headers.insert(HEADER_CODEX_TURN_METADATA, "{".parse().unwrap());
-        assert_eq!(
-            agent_context_from_headers(&headers).unwrap().compaction,
-            None
-        );
-
-        headers.insert(
-            HEADER_CODEX_TURN_METADATA,
-            r#"{"request_kind":"turn","compaction":{"trigger":"manual"}}"#
-                .parse()
-                .unwrap(),
-        );
-        assert_eq!(
-            agent_context_from_headers(&headers).unwrap().compaction,
-            None
-        );
-
-        headers.insert(
-            HEADER_CODEX_TURN_METADATA,
-            r#"{"request_kind":"compaction"}"#.parse().unwrap(),
-        );
-        assert_eq!(
-            agent_context_from_headers(&headers).unwrap().compaction,
-            Some(AgentCompaction::default())
-        );
+        for raw in [
+            "{",
+            r#"{"request_kind":"future","extra":{"nested":true}}"#,
+            r#"{"request_kind":"compaction"}"#,
+        ] {
+            headers.insert("x-codex-turn-metadata", raw.parse().unwrap());
+            let context = agent_context_from_headers(&headers).unwrap();
+            assert_eq!(context.agent_headers["x-codex-turn-metadata"], [raw]);
+            let restored: AgentContext =
+                serde_json::from_value(serde_json::to_value(&context).unwrap()).unwrap();
+            assert_eq!(restored, context);
+        }
     }
 
     #[test]
@@ -1546,15 +1821,11 @@ mod tests {
             Some("generic-parent")
         );
         assert_eq!(agent_context.session_final, Some(true));
-        assert_eq!(
-            agent_context.kv_hints,
-            Some(KvHints {
-                evict_session: true
-            })
-        );
-
         headers.insert(HEADER_DYNAMO_SESSION_FINAL, "false".parse().unwrap());
-        assert_eq!(agent_context_from_headers(&headers).unwrap().kv_hints, None);
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().session_final,
+            Some(false)
+        );
     }
 
     #[test]
@@ -1624,6 +1895,7 @@ mod tests {
                 "worker_id".to_string(),
                 "routed_experts".to_string(),
                 "prompt_token_ids".to_string(),
+                "detailed_finish_reason".to_string(),
             ])
             .build()
             .unwrap();
@@ -1634,6 +1906,7 @@ mod tests {
                 worker_id: true,
                 routed_experts: true,
                 prompt_token_ids: true,
+                detailed_finish_reason: true,
                 ..Default::default()
             }
         );
@@ -1715,9 +1988,13 @@ mod tests {
 
     #[test]
     fn build_response_nvext_all_false_returns_none() {
+        let finish_reason = FinishReason::Cancelled;
         assert!(
             NvExtResponseFieldSelection::default()
-                .build_response_nvext(None, false, None, None, None, None)
+                .build_response_nvext(NvExtResponseInput {
+                    finish_reason: Some(&finish_reason),
+                    ..Default::default()
+                })
                 .is_none()
         );
     }
@@ -1731,7 +2008,10 @@ mod tests {
         let tracker = tracker_with_prefill_worker();
 
         let out = selection
-            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                ..Default::default()
+            })
             .expect("worker_id should emit regardless of finish_reason");
 
         assert!(out.worker_id.is_some());
@@ -1749,7 +2029,10 @@ mod tests {
         let tracker = tracker_with_forwarded_worker_info();
 
         let out = selection
-            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                ..Default::default()
+            })
             .expect("forwarded worker_id should surface in nvext");
 
         assert_eq!(
@@ -1773,12 +2056,20 @@ mod tests {
 
         assert!(
             selection
-                .build_response_nvext(Some(&tracker), false, None, None, None, None)
+                .build_response_nvext(NvExtResponseInput {
+                    tracker: Some(&tracker),
+                    ..Default::default()
+                })
                 .is_none()
         );
 
+        let finish_reason = FinishReason::Stop;
         let out = selection
-            .build_response_nvext(Some(&tracker), true, None, None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                finish_reason: Some(&finish_reason),
+                ..Default::default()
+            })
             .expect("timing should emit on finish");
         assert!(out.timing.is_some());
     }
@@ -1792,7 +2083,10 @@ mod tests {
         let tracker = tracker_with_query_token_ids();
 
         let out = selection
-            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                ..Default::default()
+            })
             .expect("token_ids should emit when present");
 
         assert_eq!(out.token_ids, Some(vec![11u32, 22, 33]));
@@ -1807,7 +2101,10 @@ mod tests {
         let engine_data = serde_json::json!({ "routed_experts": {"layer_0": [1, 3]} });
 
         let out = selection
-            .build_response_nvext(None, false, Some(engine_data), None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                engine_data: Some(engine_data),
+                ..Default::default()
+            })
             .expect("routed_experts should emit when present");
 
         assert_eq!(
@@ -1824,11 +2121,32 @@ mod tests {
         };
 
         let out = selection
-            .build_response_nvext(None, false, None, None, Some(&[101u32, 102, 103]), None)
+            .build_response_nvext(NvExtResponseInput {
+                completion_token_ids: Some(&[101u32, 102, 103]),
+                ..Default::default()
+            })
             .expect("completion_token_ids should emit when requested and present");
 
         assert_eq!(out.completion_token_ids, Some(vec![101u32, 102, 103]));
         assert!(out.prompt_logprobs.is_none());
+    }
+
+    #[test]
+    fn build_response_nvext_detailed_finish_reason_pass_through() {
+        let selection = NvExtResponseFieldSelection {
+            detailed_finish_reason: true,
+            ..Default::default()
+        };
+
+        let finish_reason = FinishReason::Cancelled;
+        let out = selection
+            .build_response_nvext(NvExtResponseInput {
+                finish_reason: Some(&finish_reason),
+                ..Default::default()
+            })
+            .expect("detailed_finish_reason should emit when requested and present");
+
+        assert_eq!(out.detailed_finish_reason.as_deref(), Some("cancelled"));
     }
 
     #[test]
@@ -1841,12 +2159,20 @@ mod tests {
 
         assert!(
             selection
-                .build_response_nvext(Some(&tracker), false, None, None, None, None)
+                .build_response_nvext(NvExtResponseInput {
+                    tracker: Some(&tracker),
+                    ..Default::default()
+                })
                 .is_none()
         );
 
+        let finish_reason = FinishReason::Stop;
         let out = selection
-            .build_response_nvext(Some(&tracker), true, None, None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                finish_reason: Some(&finish_reason),
+                ..Default::default()
+            })
             .expect("prompt_token_ids should emit on the final chunk");
         assert_eq!(out.prompt_token_ids, Some(vec![101u32, 102, 103]));
     }
@@ -1870,12 +2196,20 @@ mod tests {
 
         assert!(
             selection
-                .build_response_nvext(None, false, None, None, None, Some(payload.clone()))
+                .build_response_nvext(NvExtResponseInput {
+                    prompt_logprobs: Some(payload.clone()),
+                    ..Default::default()
+                })
                 .is_none()
         );
 
+        let finish_reason = FinishReason::Stop;
         let out = selection
-            .build_response_nvext(None, true, None, None, None, Some(payload))
+            .build_response_nvext(NvExtResponseInput {
+                finish_reason: Some(&finish_reason),
+                prompt_logprobs: Some(payload),
+                ..Default::default()
+            })
             .expect("prompt_logprobs should emit on the final chunk");
         let got = out.prompt_logprobs.expect("prompt_logprobs payload");
         assert_eq!(got.len(), 2);

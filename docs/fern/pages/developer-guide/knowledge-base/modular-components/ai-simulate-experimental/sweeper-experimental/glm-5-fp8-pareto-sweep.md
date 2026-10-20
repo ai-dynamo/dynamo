@@ -65,7 +65,8 @@ provide one config as a strict pin or several configs as a custom projection poo
 
 ## Configuration
 
-Use this reference configuration:
+The experiment used the following configuration shape. It documents the retired
+`aisimulate==0.1.0.dev1` API and is not accepted by AISimulate 0.12.0:
 
 ```yaml
 search_space:

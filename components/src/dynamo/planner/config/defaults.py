@@ -74,7 +74,7 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     itl_ms = 50.0
 
     # for load predictor
-    load_predictor = "arima"  # ["constant", "arima", "kalman", "prophet"]
+    load_predictor: Literal["constant", "arima", "kalman", "prophet"] = "arima"
     prophet_window_size = 50
     load_predictor_log1p = False
     kalman_q_level = 1.0
@@ -117,7 +117,8 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     # Per-GPU caps are DGD-owned: authored on each worker component's
     # ``podTemplate.metadata.annotations`` (``dynamo.nvidia.com/gpu-power-limit``),
     # stamped onto Pods by the operator, and enforced by the Power Agent. The
-    # planner only reads them. It does NOT own or write per-GPU caps, so no
+    # operator projects them into component status, which is the Planner's only
+    # input. It does NOT own or write per-GPU caps, so no
     # per-GPU / safe-default / sweep-interval fields live here — the planner
     # config carries only the deployment-wide budget. Power inputs are
     # process-static: DGD admission protects the per-component tuple, and a

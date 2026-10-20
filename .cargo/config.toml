@@ -18,4 +18,6 @@ rustflags = ["-C", "target-cpu=neoverse-n1", "-C", "force-frame-pointers=yes", "
 # which breaks Docker builds and bundles a .so into the Python wheel.
 [env]
 PCRE2_SYS_STATIC = "1"
-
+# Utoipa's default UI predates OpenAPI 3.2. This release loads the document;
+# rendering itemSchema remains limited (swagger-api/swagger-ui#11065).
+SWAGGER_UI_DOWNLOAD_URL = { value = "https://github.com/swagger-api/swagger-ui/archive/refs/tags/v5.33.1.zip", force = true }

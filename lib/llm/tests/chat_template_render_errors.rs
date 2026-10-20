@@ -83,6 +83,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         };
 
         Ok(ResponseStream::new(
@@ -280,10 +281,11 @@ async fn template_render_failure_returns_400_json_not_sse() {
 
         let body: serde_json::Value = response.json().await.expect("error body was not JSON");
         assert_eq!(body["code"], 400, "stream={stream}");
+        assert_eq!(body["message"], "Invalid request", "stream={stream}");
         assert!(
-            body["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("No user query found in messages.")),
+            !body
+                .to_string()
+                .contains("No user query found in messages."),
             "stream={stream}, body={body}"
         );
     }

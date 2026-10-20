@@ -11,7 +11,6 @@ use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use super::prometheus_names::{frontend_perf, name_prefix, tokio_perf as names};
-use crate::MetricsRegistry;
 
 const QUEUE_DEPTH_THRESHOLD_PER_WORKER: usize = 4;
 const QUEUE_DEPTH_RECOVERY_THRESHOLD_PER_WORKER: usize = 2;
@@ -179,64 +178,8 @@ pub static EVENT_LOOP_STALL_TOTAL: Lazy<Counter> = Lazy::new(|| {
     .expect("event_loop_stall_total counter")
 });
 
-/// Guards idempotency for the `MetricsRegistry` registration path.
-static REGISTERED: OnceCell<()> = OnceCell::new();
-
 /// Guards idempotency for the raw `prometheus::Registry` registration path.
-/// Kept separate from `REGISTERED` so that calling `ensure_tokio_perf_metrics_registered`
-/// first does not silently prevent the metrics from being registered in the prometheus registry.
 static PROMETHEUS_REGISTERED: OnceCell<()> = OnceCell::new();
-
-/// Register tokio perf and canary metrics with the given registry. Idempotent.
-pub fn ensure_tokio_perf_metrics_registered(registry: &MetricsRegistry) {
-    let _ = REGISTERED.get_or_init(|| {
-        registry
-            .add_metric(Box::new(TOKIO_GLOBAL_QUEUE_DEPTH.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKIO_BUDGET_FORCED_YIELD_TOTAL.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKIO_BLOCKING_THREADS.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKIO_BLOCKING_IDLE_THREADS.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKIO_BLOCKING_QUEUE_DEPTH.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKIO_ALIVE_TASKS.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKIO_WORKER_MEAN_POLL_TIME_NS.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKIO_WORKER_BUSY_RATIO_VEC.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKIO_WORKER_PARK_COUNT_TOTAL.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKIO_WORKER_LOCAL_QUEUE_DEPTH.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKIO_WORKER_STEAL_COUNT_TOTAL.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKIO_WORKER_OVERFLOW_COUNT_TOTAL.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKIO_QUEUE_OVERLOAD_WARNINGS_TOTAL.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(EVENT_LOOP_DELAY_SECONDS.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(EVENT_LOOP_STALL_TOTAL.clone()))
-            .ok();
-    });
-}
 
 /// Register tokio perf and canary metrics with a raw Prometheus registry.
 pub fn ensure_tokio_perf_metrics_registered_prometheus(
@@ -678,16 +621,6 @@ mod tests {
         let before = TOKIO_QUEUE_OVERLOAD_WARNINGS_TOTAL.get();
         warn_queue_overload(&snapshot(1, 2, 2, 2), QUEUE_OVERLOAD_DURATION);
         assert_eq!(TOKIO_QUEUE_OVERLOAD_WARNINGS_TOTAL.get(), before + 1.0);
-
-        let metrics_registry = MetricsRegistry::new();
-        ensure_tokio_perf_metrics_registered(&metrics_registry);
-        assert!(
-            metrics_registry
-                .get_prometheus_registry()
-                .gather()
-                .iter()
-                .any(|family| family.name() == "dynamo_tokio_queue_overload_warnings_total")
-        );
 
         let prometheus_registry = prometheus::Registry::new();
         ensure_tokio_perf_metrics_registered_prometheus(&prometheus_registry).unwrap();
