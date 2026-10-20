@@ -61,13 +61,20 @@ GAIE routing moves worker selection into the Gateway's request path. A Kubernete
 the request and asks the Dynamo Endpoint Picker Plugin (EPP) to select an endpoint before forwarding
 the request to a worker pod.
 
+Choose this topology when:
+
+- Your organization already uses Gateway API as the standard ingress layer.
+- Authentication, authorization, rate limiting, traffic policy, or telemetry belongs at the Gateway.
+- Multiple model routes should share a platform-managed address and listener.
+- A platform team manages the Gateway while an application team manages the DGD and `HTTPRoute`.
+
 A Gateway in front of your models does not by itself call for this topology, because the Frontend
 topology also runs behind a Gateway. Choose GAIE routing when your platform requires the Gateway to
 pick the worker through the GAIE EPP `ext_proc` mechanism. This EPP deployment style does not have
 full feature parity with Dynamo Frontend routing; see
 [Features Not Supported by the Dynamo EPP](#features-not-supported-by-the-dynamo-epp).
 
-GAIE routing requires a separate installation. See
+Gateway API routing requires a separate installation. See
 [Install Gateway API Inference Extension](../installation/gateway-api-routing.mdx), then
 [GAIE with Dynamo](gateway-api.mdx) or [GAIE with vanilla vLLM](vanilla-vllm-onramp.mdx).
 
