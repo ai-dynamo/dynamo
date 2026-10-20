@@ -133,15 +133,6 @@ fn unsupported_request_controls_are_rejected() {
     assert_rejected(
         |r| {
             r.routing = Some(dynamo_backend_common::engine::RoutingHints {
-                cache_namespace: Some("tenant-a".to_string()),
-                ..Default::default()
-            })
-        },
-        "cache namespace",
-    );
-    assert_rejected(
-        |r| {
-            r.routing = Some(dynamo_backend_common::engine::RoutingHints {
                 priority: Some(5),
                 ..Default::default()
             })
@@ -376,5 +367,33 @@ fn prefill_result_on_a_non_decode_worker_is_rejected() {
                 .contains("must be routed to a decode worker"),
             "unexpected error for {mode}: {error}"
         );
+    }
+}
+
+#[test]
+fn cache_namespace_preserves_the_decode_handoff() {
+    for namespace in [None, Some(""), Some("tenant-a"), Some("tenant-b")] {
+        for mode in [AGG, PREFILL, DisaggregationMode::Decode] {
+            let mut req = request();
+            req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+                cache_namespace: namespace.map(str::to_owned),
+                ..Default::default()
+            });
+            if mode == DisaggregationMode::Decode {
+                req.prefill_result = Some(dynamo_backend_common::PrefillResult {
+                    disaggregated_params: crate::disagg::session_to_json(fake_session()).unwrap(),
+                    prompt_tokens_details: None,
+                });
+            }
+            let proto = build_generate_request(&req, "req", "model", None, mode).unwrap();
+            assert_eq!(
+                proto.kv.as_ref().and_then(|kv| kv.cache_salt.as_deref()),
+                namespace
+            );
+            assert_eq!(
+                proto.kv.and_then(|kv| kv.session),
+                (mode == DisaggregationMode::Decode).then(fake_session)
+            );
+        }
     }
 }

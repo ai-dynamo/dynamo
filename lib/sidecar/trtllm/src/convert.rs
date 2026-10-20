@@ -56,7 +56,7 @@ pub(crate) fn build_generate_request(
     };
     // The decode worker replays the prefill worker's session; the prefill worker
     // marks its request `context_only` through `extra`.
-    let kv = match mode {
+    let mut kv = match mode {
         DisaggregationMode::Prefill => None,
         // A handoff is the normal case, but conditional disaggregation
         // dispatches straight to a decode worker with none, expecting it to run
@@ -71,6 +71,14 @@ pub(crate) fn build_generate_request(
         },
         DisaggregationMode::Aggregated | DisaggregationMode::Encode => None,
     };
+
+    if let Some(namespace) = request
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.cache_namespace.as_ref())
+    {
+        kv.get_or_insert_with(pb::KvOptions::default).cache_salt = Some(namespace.clone());
+    }
 
     Ok(pb::GenerateRequest {
         request_id: request_id.to_string(),
@@ -384,21 +392,6 @@ fn validate_request(
     {
         return Err(client::invalid_argument(
             "LoRA request selection is not supported by the TensorRT-LLM sidecar",
-        ));
-    }
-    if request
-        .routing
-        .as_ref()
-        .and_then(|routing| routing.cache_namespace.as_deref())
-        .is_some_and(|namespace| !namespace.is_empty())
-    {
-        // `cache_namespace` is the request-scoped KV-cache isolation contract.
-        // The OpenEngine request carries `kv.cache_salt`, but the sidecar does
-        // not yet map the namespace onto it, so honoring the request would let
-        // requests from different namespaces share prefix-cache entries. Reject
-        // until the mapping is implemented.
-        return Err(client::invalid_argument(
-            "cache namespace isolation is not supported by the TensorRT-LLM sidecar",
         ));
     }
     if request
