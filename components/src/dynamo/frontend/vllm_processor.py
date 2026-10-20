@@ -50,6 +50,7 @@ from .structural_tag_policy import (
     runtime_structural_tag_options,
 )
 from .thinking import runtime_default_thinking_mode
+from .usage import response_usage, update_usage_metadata
 from .utils import (
     PromptLogprobsAccumulator,
     as_error_envelope,
@@ -1258,7 +1259,7 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
-        latest_backend_usage: dict[str, Any] = {}
+        usage_metadata: dict[str, Any] = {}
         locally_finished = False
         # Per-request reasoning-token usage (NVBug 6678449b); see
         # _ReasoningUsageAnnotator. Must be per-request, never module-level.
@@ -1280,17 +1281,21 @@ class VllmProcessor:
         pending_terminals: dict[int, dict[str, Any]] = {}
         locally_stopped_requests: set[str] = set()
 
-        def local_stop_usage() -> dict[str, Any]:
-            usage = dict(latest_backend_usage)
-            prompt_tokens = usage.get("prompt_tokens")
-            if prompt_tokens is None:
-                prompt_tokens = input_tokens
-            usage.update(
-                prompt_tokens=prompt_tokens,
+        def attach_usage(output: dict[str, Any], *, finished: bool) -> None:
+            # Local completion may precede every backend usage report. Preserve
+            # sparse metadata when available, and use the same usage projection
+            # for synthesized terminal counts and normal backend reports.
+            metadata = usage_metadata
+            if locally_finished and not metadata:
+                metadata = {"prompt_tokens": input_tokens}
+            if usage := response_usage(
+                request,
+                metadata,
+                prompt_tokens=input_tokens,
                 completion_tokens=cumulative_output_tokens,
-                total_tokens=prompt_tokens + cumulative_output_tokens,
-            )
-            return usage
+                finished=finished,
+            ):
+                output["usage"] = reasoning_usage.annotate(usage)
 
         try:
             _inject_routing_metadata(dynamo_preproc, dynamo_preproc, mm_routing_info)
@@ -1345,10 +1350,9 @@ class VllmProcessor:
                     break
 
                 prompt_logprobs.update(engine_response)
-
-                usage = engine_response.get("completion_usage")
-                if usage:
-                    latest_backend_usage = dict(usage)
+                # Keep sparse metadata even when a choice is suppressed locally.
+                if backend_usage := engine_response.get("completion_usage"):
+                    update_usage_metadata(usage_metadata, backend_usage)
 
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
@@ -1384,10 +1388,7 @@ class VllmProcessor:
                         if prompt_logprobs.needs_payload and pending_idx != output_idx:
                             continue
                         terminal = pending_terminals.pop(pending_idx)
-                        if locally_finished:
-                            terminal["usage"] = reasoning_usage.annotate(
-                                local_stop_usage()
-                            )
+                        attach_usage(terminal, finished=True)
                         prompt_logprobs.attach(terminal)
                         yield {"_dynamo_annotated": True, "data": terminal}
 
@@ -1495,12 +1496,11 @@ class VllmProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    if locally_stopped_requests and (usage or locally_finished):
-                        # A sibling may have reported cache metadata before the
-                        # final local stop, which carries no backend usage.
-                        usage = local_stop_usage()
-                    if usage:
-                        dynamo_out["usage"] = reasoning_usage.annotate(usage)
+                    attach_usage(
+                        dynamo_out,
+                        finished=bool(raw_finish_reason)
+                        or output_request_id in locally_stopped_requests,
+                    )
                     prompt_logprobs.attach(dynamo_out)
                     if (
                         output_request_id in locally_stopped_requests
@@ -1536,8 +1536,7 @@ class VllmProcessor:
                     break
             else:
                 for terminal in pending_terminals.values():
-                    if locally_finished:
-                        terminal["usage"] = reasoning_usage.annotate(local_stop_usage())
+                    attach_usage(terminal, finished=True)
                     yield {"_dynamo_annotated": True, "data": terminal}
             _nvtx.end_range(rng_stream)
         except VLLMClientError:
