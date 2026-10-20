@@ -418,6 +418,8 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/overview.md
                   - page: Protocol Field Handling
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/protocol-field-handling.md
+                  - page: OpenAPI Request-Contract Comparison
+                    path: pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md
                   - page: KServe gRPC Frontend
                     slug: kserve-grpc-frontend
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/frontend-guide.md
@@ -957,6 +959,13 @@ navigation:
               - page: Motif-3 NVFP4
                 path: pages/recipes/model-recipes/motif-3.mdx
                 slug: motif-3
+          - section: Reflection
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Beam-1.0-501B-A23B
+                path: pages/recipes/model-recipes/beam-1-0-501b.mdx
+                slug: beam-1-0-501b
           # recipe-nav:end
 
       # ==================== Kubernetes Templates ====================

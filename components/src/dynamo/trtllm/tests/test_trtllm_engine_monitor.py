@@ -3,8 +3,8 @@
 
 import asyncio
 import os
-import signal
 import threading
+import time
 
 import pytest
 
@@ -16,6 +16,7 @@ from dynamo.common.engine_monitor import (
     ENGINE_HEALTH_SHUTDOWN_TIMEOUT,
     ENGINE_HEALTH_SHUTDOWN_TIMEOUT_ENV,
 )
+from dynamo.trtllm import engine_monitor as engine_monitor_module
 from dynamo.trtllm.engine_monitor import TrtllmEngineMonitor
 
 pytestmark = [
@@ -71,6 +72,16 @@ class _BlockingEngine(_FakeEngine):
         return True
 
 
+class _HangingShutdownEngine(_FakeEngine):
+    def __init__(self, health_results=None, *, fatal_error=None):
+        super().__init__(health_results, fatal_error=fatal_error)
+        self.release = threading.Event()
+
+    def shutdown(self):
+        self.shutdown_count += 1
+        self.release.wait()
+
+
 class _FakeRuntime:
     def __init__(self, *, shutdown_exception=None):
         self.shutdown_count = 0
@@ -82,6 +93,15 @@ class _FakeRuntime:
             raise self._shutdown_exception
 
 
+@pytest.fixture(autouse=True)
+def _fresh_fatal_exit_lock(monkeypatch):
+    # os._exit is patched in these tests, so the process-wide run-once lock
+    # would otherwise stay held by the first test that reaches it.
+    monkeypatch.setattr(
+        engine_monitor_module, "_fatal_exit_lock", threading.Lock(), raising=False
+    )
+
+
 def _record_exit(monkeypatch):
     exit_calls = []
 
@@ -90,6 +110,15 @@ def _record_exit(monkeypatch):
 
     monkeypatch.setattr(os, "_exit", exit_fn)
     return exit_calls
+
+
+async def _wait_for_exit(exit_calls, timeout=1.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not exit_calls:
+        if loop.time() >= deadline:
+            raise AssertionError("timed out waiting for os._exit")
+        await asyncio.sleep(0.01)
 
 
 async def _wait_for_check_count(engine, expected=1, timeout=1.0):
@@ -175,7 +204,7 @@ async def test_monitor_stops_cleanly_on_shutdown_event():
 async def test_monitor_shuts_down_engine_runtime_and_exits_when_unhealthy(monkeypatch):
     exit_calls = _record_exit(monkeypatch)
     shutdown_event = asyncio.Event()
-    engine = _FakeEngine([False], fatal_error=RuntimeError("fatal"))
+    engine = _FakeEngine([False])
     runtime = _FakeRuntime()
 
     monitor = TrtllmEngineMonitor(
@@ -192,6 +221,130 @@ async def test_monitor_shuts_down_engine_runtime_and_exits_when_unhealthy(monkey
     assert engine.shutdown_count == 1
     assert runtime.shutdown_count == 1
     assert not shutdown_event.is_set()
+    assert exit_calls == [1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_monitor_bounds_hanging_engine_shutdown(monkeypatch):
+    """Stop admission before waiting for a teardown that cannot finish."""
+    exit_calls = _record_exit(monkeypatch)
+    engine = _HangingShutdownEngine([False])
+    runtime = _FakeRuntime()
+    runtime_calls_at_teardown = []
+    engine_shutdown = engine.shutdown
+
+    def shutdown_engine():
+        runtime_calls_at_teardown.append(runtime.shutdown_count)
+        engine_shutdown()
+
+    monkeypatch.setattr(engine, "shutdown", shutdown_engine)
+
+    try:
+        monitor = TrtllmEngineMonitor(
+            engine,
+            runtime=runtime,
+            interval=0.01,
+            shutdown_timeout=0.2,
+        )
+        # The loop must keep serving while the teardown waits for its bound.
+        ticks = 0
+        while not exit_calls:
+            await asyncio.sleep(0.01)
+            ticks += 1
+        await asyncio.wait_for(monitor._monitor_task, timeout=1.0)
+
+        assert ticks > 5
+        assert runtime_calls_at_teardown == [1]
+        assert engine.shutdown_count == 1
+        assert runtime.shutdown_count == 1
+        assert exit_calls == [1]
+    finally:
+        engine.release.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_monitor_stops_waiting_when_engine_dies_during_shutdown(monkeypatch):
+    exit_calls = _record_exit(monkeypatch)
+    engine = _HangingShutdownEngine([False])
+    runtime = _FakeRuntime()
+
+    try:
+        monitor = TrtllmEngineMonitor(
+            engine,
+            runtime=runtime,
+            interval=0.01,
+            shutdown_timeout=60.0,
+        )
+        while engine.shutdown_count == 0:
+            await asyncio.sleep(0.01)
+        engine._fatal_error = RuntimeError("MPI worker rank 0 exited unexpectedly")
+        await _wait_for_exit(exit_calls, timeout=3.0)
+        await asyncio.wait_for(monitor._monitor_task, timeout=1.0)
+
+        assert engine.shutdown_count == 1
+        assert runtime.shutdown_count == 1
+        assert exit_calls == [1]
+    finally:
+        engine.release.set()
+
+
+@pytest.mark.parametrize(
+    ("interval", "expected"),
+    [(0.0, 0.05), (0.2, 0.2), (10.0, 0.5)],
+)
+def test_watchdog_poll_has_positive_floor_and_upper_bound(interval, expected):
+    assert engine_monitor_module._watchdog_poll_seconds(interval) == expected
+
+
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("stop_method", [None, "shutdown_event", "monitor_stop"])
+def test_watchdog_exits_when_event_loop_is_blocked(monkeypatch, stop_method):
+    """A dead rank can block the loop thread in a TRT-LLM IPC send; the
+    watchdog thread must still end the process."""
+    exit_calls = _record_exit(monkeypatch)
+    engine = _HangingShutdownEngine([True])
+    runtime = _FakeRuntime()
+
+    async def start_then_block_loop():
+        shutdown_event = asyncio.Event()
+        monitor = TrtllmEngineMonitor(
+            engine,
+            runtime=runtime,
+            shutdown_event=shutdown_event,
+            interval=0.01,
+            shutdown_timeout=60.0,
+        )
+        engine._fatal_error = RuntimeError("MPI worker rank 0 exited unexpectedly")
+        if stop_method == "shutdown_event":
+            shutdown_event.set()
+        elif stop_method == "monitor_stop":
+            await monitor.stop()
+        deadline = time.monotonic() + 5.0
+        while not exit_calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    try:
+        asyncio.run(start_then_block_loop())
+
+        assert exit_calls == [1]
+        assert engine.shutdown_count == 0
+        assert runtime.shutdown_count == 1
+    finally:
+        engine.release.set()
+
+
+def test_fatal_exit_runs_once(monkeypatch):
+    exit_calls = _record_exit(monkeypatch)
+    engine = _FakeEngine(supports_health_check=False)
+    runtime = _FakeRuntime()
+
+    engine_monitor_module.exit_worker_on_fatal_error(engine, runtime, 1.0)
+    engine_monitor_module.exit_worker_on_fatal_error(engine, runtime, 1.0)
+
+    assert engine.shutdown_count == 1
+    assert runtime.shutdown_count == 1
     assert exit_calls == [1]
 
 
@@ -279,29 +432,6 @@ async def test_monitor_shutdown_works_without_runtime(monkeypatch):
 
     assert engine.shutdown_count == 1
     assert exit_calls == [1]
-
-
-def test_monitor_shutdown_engine_restores_sigalrm_handler():
-    engine = _FakeEngine(supports_health_check=False)
-    monitor = TrtllmEngineMonitor(
-        engine,
-        interval=0.01,
-        shutdown_timeout=1.0,
-    )
-
-    original_handler = signal.getsignal(signal.SIGALRM)
-
-    def previous_handler(signum, frame):
-        return None
-
-    try:
-        signal.signal(signal.SIGALRM, previous_handler)
-        monitor._shutdown_engine()
-        assert signal.getsignal(signal.SIGALRM) is previous_handler
-        assert engine.shutdown_count == 1
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, original_handler)
 
 
 @pytest.mark.asyncio

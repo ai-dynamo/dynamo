@@ -31,7 +31,9 @@ use super::types::{
 };
 use crate::plugins::request_classifier::{ClassifyRequest, RequestClassifier};
 use crate::protocols::RoutingConstraints;
-use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{
+    LocalBlockHash, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillCompletion, PrefillTokenDeltas,
@@ -475,6 +477,13 @@ where
         self.queue.set_non_max_overlap_selection_observer(observer)
     }
 
+    /// Install per-candidate cost capture for admitted selections.
+    ///
+    /// Returns `false` when a spec is already installed.
+    pub fn set_selection_trace(&self, spec: SelectionTraceSpec) -> bool {
+        self.queue.set_selection_trace(spec)
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,
@@ -788,6 +797,13 @@ where
     /// With queueing disabled, return immediately without an admission barrier.
     pub async fn update_queue(&self) {
         self.queue.update().await;
+    }
+
+    /// Process submitted admissions and ready work, including when queueing is
+    /// disabled. Capacity-blocked requests remain pending. Scheduling futures
+    /// must be polled to submit their commands before awaiting this barrier.
+    pub async fn admission_barrier(&self) -> Result<(), KvSchedulerError> {
+        self.queue.admission_barrier().await
     }
 
     pub fn pending_count(&self) -> usize {
@@ -1171,6 +1187,102 @@ mod tests {
             retain_kv_transfer_chain: false,
             shared_cache_hits: None,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn admission_barrier_processes_submitted_requests_in_both_queueing_modes() {
+        let now = Instant::now();
+        for threshold in [None, Some(0.5)] {
+            let (scheduler, slots, _configs, cancellation) = make_scheduler(
+                HashMap::from([(0, SimpleWorkerConfig::default())]),
+                threshold,
+                false,
+                None,
+            );
+            let mut admission = Box::pin(scheduler.schedule_request_admitted(request(
+                ScheduleMode::TrackedWithLifecycle {
+                    request_id: "admitted".into(),
+                },
+            )));
+            assert!(poll_once(admission.as_mut()).is_pending());
+            if threshold.is_none() {
+                // Keep the existing no-queue update fast path: it does not
+                // drive the actor or finish the submitted admission.
+                assert!(poll_once(scheduler.update_queue()).is_ready());
+                assert!(poll_once(admission.as_mut()).is_pending());
+            }
+            scheduler.admission_barrier().await.unwrap();
+            let std::task::Poll::Ready(Ok(admitted)) = poll_once(admission.as_mut()) else {
+                panic!("barrier did not process a runnable admission");
+            };
+            assert_eq!(admitted.response.best_worker, WorkerWithDpRank::new(0, 0));
+            assert!(matches!(admitted.attempt, AdmissionAttempt::Tracked(_)));
+            assert!(scheduler.has_request("admitted"));
+            scheduler.free("admitted").await.unwrap();
+            scheduler.admission_barrier().await.unwrap();
+            slots.assert_completely_drained(Instant::now());
+            assert_eq!(Instant::now(), now);
+            cancellation.cancel();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn admission_barrier_handles_blocked_admission_cancellation_and_capacity() {
+        let now = Instant::now();
+        let (scheduler, slots, _configs, cancellation) = make_scheduler(
+            HashMap::from([(
+                0,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(64),
+                    ..Default::default()
+                },
+            )]),
+            Some(0.5),
+            false,
+            None,
+        );
+        scheduler
+            .schedule_request_admitted(request(ScheduleMode::TrackedWithLifecycle {
+                request_id: "active".into(),
+            }))
+            .await
+            .unwrap();
+        let mut blocked = Box::pin(scheduler.schedule_request_admitted(request(
+            ScheduleMode::TrackedWithLifecycle {
+                request_id: "cancelled".into(),
+            },
+        )));
+        assert!(poll_once(blocked.as_mut()).is_pending());
+        scheduler.admission_barrier().await.unwrap();
+        assert!(poll_once(blocked.as_mut()).is_pending());
+        assert_eq!(scheduler.pending_count(), 1);
+        drop(blocked);
+        scheduler.admission_barrier().await.unwrap();
+        assert_eq!(scheduler.pending_count(), 0);
+        assert!(scheduler.has_request("active"));
+        assert!(!scheduler.has_request("cancelled"));
+
+        let mut next = Box::pin(scheduler.schedule_request_admitted(request(
+            ScheduleMode::TrackedWithLifecycle {
+                request_id: "next".into(),
+            },
+        )));
+        assert!(poll_once(next.as_mut()).is_pending());
+        scheduler.admission_barrier().await.unwrap();
+        assert!(poll_once(next.as_mut()).is_pending());
+        scheduler.mark_prefill_completed("active").await.unwrap();
+        scheduler.admission_barrier().await.unwrap();
+        assert!(matches!(
+            poll_once(next.as_mut()),
+            std::task::Poll::Ready(Ok(_))
+        ));
+        assert_eq!(scheduler.pending_count(), 0);
+        scheduler.free("active").await.unwrap();
+        scheduler.free("next").await.unwrap();
+        scheduler.admission_barrier().await.unwrap();
+        slots.assert_completely_drained(Instant::now());
+        assert_eq!(Instant::now(), now);
+        cancellation.cancel();
     }
 
     #[tokio::test]

@@ -29,14 +29,14 @@ spec:
           - dynamo-vllm-sidecar
           args:
           - --grpc-endpoint
-          - 127.0.0.1:50051
+          - 127.0.0.1:30001
           restartPolicy: Always
         containers:
         - name: main
           image: vllm/vllm-openai:v0.28.0
           startupProbe:
             grpc:
-              port: 50051
+              port: 30001
               # vLLM 0.28.0: overall health mirrors Control and Inference.
               # Reverify this behavior when upgrading vLLM.
               service: ""
@@ -45,14 +45,14 @@ spec:
             failureThreshold: 180
           readinessProbe:
             grpc:
-              port: 50051
+              port: 30001
               service: ""
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 3
           livenessProbe:
             grpc:
-              port: 50051
+              port: 30001
               service: ""
             periodSeconds: 10
             timeoutSeconds: 5
@@ -66,6 +66,6 @@ spec:
           - /bin/sh
           - -c
           - exec "$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
-            serve Qwen/Qwen3-0.6B --host 0.0.0.0 --grpc-port 50051
+            serve Qwen/Qwen3-0.6B --host 0.0.0.0 --grpc-port 30001
             --reasoning-parser none
   backendFramework: vllm

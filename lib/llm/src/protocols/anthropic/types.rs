@@ -201,17 +201,19 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             // when a reasoning parser is configured. The conversion layer only
             // forwards the client's explicit thinking preference here; the handler
             // has access to parsing_options and makes the final decision.
-            chat_template_args: if req
-                .thinking
-                .as_ref()
-                .is_some_and(|t| t.thinking_type == "enabled")
-            {
+            chat_template_args: req.thinking.as_ref().and_then(|thinking| {
+                let enabled = match thinking.thinking_type.as_str() {
+                    "enabled" => true,
+                    "disabled" => false,
+                    _ => return None,
+                };
                 let mut args = std::collections::HashMap::new();
-                args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+                args.insert(
+                    "enable_thinking".to_string(),
+                    serde_json::Value::Bool(enabled),
+                );
                 Some(args)
-            } else {
-                None
-            },
+            }),
             thinking: None,
             thinking_token_budget: None,
             media_io_kwargs: None,
@@ -3037,5 +3039,109 @@ mod anthropic_types_tests {
             Some(r#"he said "hi", ok"#)
         );
         assert_eq!(recovered.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod thinking_control_tests {
+    use super::*;
+
+    fn request_with_thinking(thinking: Option<serde_json::Value>) -> AnthropicCreateMessageRequest {
+        let mut request = serde_json::json!({
+            "model": "test-model",
+            "max_tokens": 2048,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        if let Some(thinking) = thinking {
+            request["thinking"] = thinking;
+        }
+        serde_json::from_value(request).unwrap()
+    }
+
+    #[test]
+    fn enabled_thinking_survives_conversion() {
+        let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+            serde_json::json!({"type": "enabled", "budget_tokens": 1024}),
+        )))
+        .unwrap();
+        assert_eq!(
+            converted.chat_template_args.unwrap()["enable_thinking"],
+            true
+        );
+    }
+
+    #[test]
+    fn disabled_thinking_survives_conversion() {
+        let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+            serde_json::json!({"type": "disabled"}),
+        )))
+        .unwrap();
+        assert_eq!(
+            converted.chat_template_args.unwrap()["enable_thinking"],
+            false
+        );
+    }
+
+    #[test]
+    fn omitted_thinking_keeps_template_default() {
+        let converted =
+            NvCreateChatCompletionRequest::try_from(request_with_thinking(None)).unwrap();
+        assert!(converted.chat_template_args.is_none());
+    }
+
+    #[test]
+    fn null_thinking_keeps_template_default() {
+        let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+            serde_json::Value::Null,
+        )))
+        .unwrap();
+        assert!(converted.chat_template_args.is_none());
+    }
+
+    #[test]
+    fn other_thinking_modes_keep_existing_behavior() {
+        for mode in ["adaptive", "unknown"] {
+            let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+                serde_json::json!({"type": mode}),
+            )))
+            .unwrap();
+            assert!(converted.chat_template_args.is_none(), "{mode}");
+        }
+    }
+
+    #[test]
+    fn disabling_thinking_preserves_history_and_tools() {
+        let mut value = serde_json::json!({
+            "model": "test-model", "max_tokens": 2048,
+            "messages": [
+                {"role": "user", "content": "Read x"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "Inspect the file", "signature": "sig"},
+                    {"type": "tool_use", "id": "call_1", "name": "read", "input": {"path": "x"}}
+                ]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "hello"}]}
+            ],
+            "tools": [{"name": "read", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}],
+            "tool_choice": {"type": "tool", "name": "read"},
+            "nvext": {"cache_salt": "test-salt"}
+        });
+        let unspecified = NvCreateChatCompletionRequest::try_from(
+            serde_json::from_value::<AnthropicCreateMessageRequest>(value.clone()).unwrap(),
+        )
+        .unwrap();
+        value["thinking"] = serde_json::json!({"type": "disabled"});
+        let mut disabled = NvCreateChatCompletionRequest::try_from(
+            serde_json::from_value::<AnthropicCreateMessageRequest>(value).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            disabled.chat_template_args.as_ref().unwrap()["enable_thinking"],
+            false
+        );
+        disabled.chat_template_args = None;
+        assert_eq!(
+            serde_json::to_value(unspecified).unwrap(),
+            serde_json::to_value(disabled).unwrap()
+        );
     }
 }
