@@ -43,9 +43,9 @@
 #     unquantized BF16 MoE gate in ep_moe/layer.py only covers the deepep and
 #     pplx a2a backends, not nixl. Without these, the first MoE forward lands on
 #     `assert False, "forward_deepgemm_masked is deprecated"` and the worker
-#     crash-loops (NVBug 6912358 / DYN-4850). SGLang's own elastic-EP tests never
-#     hit this: they use a different checkpoint (lmsys/sglang-ci-dsv3-test) and
-#     pass none of these knobs.
+#     crash-loops (#16874). SGLang's own elastic-EP tests never hit this: they
+#     use a different checkpoint (lmsys/sglang-ci-dsv3-test) and pass none of
+#     these knobs.
 #     The joiner in run_sglang_elastic_ep_scale_up_test.sh passes the same three.
 #   * The NIXL-EP low-latency dispatch budget raised to 1024 tokens per rank
 #     (SGLANG_NIXL_EP_NUM_MAX_DISPATCH_TOKENS_PER_RANK, default 128, 1024 is the
@@ -54,12 +54,16 @@
 #     that dispatcher; SGLang divides the chunk across the DP ranks (1024 / 4 =
 #     256 tokens per rank) and nixl_ep aborts the process on any batch above the
 #     budget, so the default 8192-token chunk fails on the first real prompt.
-#   * A lenient liveness probe (below, on the worker container). The scale-up
-#     pauses serving for a few seconds while DeepGEMM recompiles for the new
-#     expert-group count; the operator's default probe kills the worker then.
+#   * A lenient liveness probe on the worker container. The first forward at
+#     the new EP size JIT-compiles the DeepGEMM kernels for the new expert-group
+#     count, Dynamo's health check (3 s timeout) flips /live to 503 meanwhile,
+#     and the operator's default probe (period 5 s, failureThreshold 3) kills
+#     the worker right after a successful scale.
 #   * --moe-dense-tp-size 1 on the primary and the joiner, as in SGLang's own
-#     scale test; with the dense MLP sharded over TP the joiner's first forward
-#     after admission fails (see the comment at the flag).
+#     scale test: dense (non-MoE) MLP layers stay local to each DP rank. With
+#     them sharded over TP, the joiner's first forward after admission (an idle
+#     DP-attention batch) dies in fused_add_rmsnorm with "Mismatched
+#     mR.shape[0]" and the primary hangs on the lost ranks.
 #
 # The joining group is NOT launched by the operator yet (that orchestration is
 # tracked separately). The accompanying run_sglang_elastic_ep_scale_up_test.sh
@@ -104,16 +108,10 @@ spec:
         # Rendezvous address the joining group dials on scale-up.
         - name: SGLANG_ELASTIC_SCALE_DIST_INIT
           value: "127.0.0.1:24555"
-        # Unquantized (BF16) experts over the nixl a2a backend: route the MoE
-        # layer through the modern FusedMoE/DeepGEMM path and make the nixl
-        # dispatcher ship BF16 activations (together with --moe-runner-backend
-        # deep_gemm below). See the header for why all three are required.
         - name: SGLANG_DEEPEP_BF16_DISPATCH
           value: "1"
         - name: SGLANG_NIXL_EP_BF16_DISPATCH
           value: "1"
-        # NIXL-EP low-latency dispatch budget per rank (default 128, maximum
-        # 1024); paired with --chunked-prefill-size 1024 below. See the header.
         - name: SGLANG_NIXL_EP_NUM_MAX_DISPATCH_TOKENS_PER_RANK
           value: "1024"
       extraPodSpec:
@@ -130,11 +128,7 @@ spec:
           volumeMounts:
           - name: model-cache
             mountPath: /model-cache
-          # A scale-up pauses serving for a few seconds: the first forward at the
-          # new EP size JIT-compiles the DeepGEMM kernels for the new expert-group
-          # count, Dynamo's health check (3 s timeout) flips /live to 503 meanwhile,
-          # and the operator's default liveness probe (period 5 s, failureThreshold
-          # 3) kills the worker right after a successful scale. Tolerate it.
+          # Lenient on purpose; see REQUIREMENTS in the header.
           livenessProbe:
             httpGet:
               path: /live
@@ -155,9 +149,6 @@ spec:
             - --skip-tokenizer-init
             - --page-size
             - "16"
-            # Keeps every per-rank prefill chunk (1024 / dp 4 = 256 tokens) under
-            # the NIXL-EP dispatch budget set by
-            # SGLANG_NIXL_EP_NUM_MAX_DISPATCH_TOKENS_PER_RANK above.
             - --chunked-prefill-size
             - "1024"
             # DP-attention MoE: the primary group runs EP size 4 (4 GPUs).
@@ -167,11 +158,6 @@ spec:
             - "4"
             - --enable-dp-attention
             - --enable-dp-lm-head
-            # Dense (non-MoE) MLP layers stay local to each DP rank, as in
-            # SGLang's own scale test. Without it the joiner's first forward
-            # after admission (an idle DP-attention batch) dies in
-            # fused_add_rmsnorm with "Mismatched mR.shape[0]" and the primary
-            # hangs on the lost ranks.
             - --moe-dense-tp-size
             - "1"
             # All-to-all + elastic-EP weight transfer backends.
@@ -179,8 +165,6 @@ spec:
             - nixl
             - --deepep-mode
             - low_latency
-            # BF16 DeepGEMM expert runner (with the two SGLANG_*_BF16_DISPATCH
-            # envs above); nixl + unquantized experts has no other working path.
             - --moe-runner-backend
             - deep_gemm
             - --elastic-ep-backend
