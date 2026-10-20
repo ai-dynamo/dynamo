@@ -346,12 +346,13 @@ fn read_otlp_pem(
     signal_var: &'static str,
     generic_var: &'static str,
 ) -> Result<Option<(std::path::PathBuf, Vec<u8>)>, OtlpTlsError> {
-    let Some(path) = std::env::var(signal_var)
-        .ok()
-        .or_else(|| std::env::var(generic_var).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    else {
+    let non_empty = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let Some(path) = non_empty(signal_var).or_else(|| non_empty(generic_var)) else {
         return Ok(None);
     };
     let path_buf = std::path::PathBuf::from(&path);
@@ -472,11 +473,14 @@ fn build_tonic_tls_config(
     Ok(Some(config))
 }
 
-/// Returns `None` when nothing needs to be overridden and the default reqwest
-/// client (rustls-tls with webpki roots) is sufficient.
+/// Returns `None` when nothing needs to be overridden and the default client
+/// (rustls-tls with webpki roots) is sufficient.
+///
+/// The OTLP SDK's batch processors export on an SDK-owned thread with no
+/// Tokio reactor, so this builds a `reqwest::blocking::Client`, not async.
 fn build_otlp_http_client(
     material: &OtlpTlsMaterial,
-) -> Result<Option<reqwest::Client>, OtlpTlsError> {
+) -> Result<Option<reqwest::blocking::Client>, OtlpTlsError> {
     if material.ca_pem.is_none() && material.client_identity.is_none() {
         return Ok(None);
     }
@@ -488,7 +492,7 @@ fn build_otlp_http_client(
         }
     };
 
-    let mut builder = reqwest::Client::builder().use_rustls_tls();
+    let mut builder = reqwest::blocking::Client::builder().use_rustls_tls();
     if let Some(ca) = &material.ca_pem {
         for cert in reqwest::Certificate::from_pem_bundle(ca).map_err(invalid("<ca>"))? {
             builder = builder.add_root_certificate(cert);
@@ -504,15 +508,19 @@ fn build_otlp_http_client(
         builder = builder
             .identity(reqwest::Identity::from_pem(&bundle).map_err(invalid("<client-identity>"))?);
     }
-    builder
-        .build()
-        .map(Some)
+    // Building a blocking client starts an internal Tokio runtime; do it on a
+    // dedicated std thread so it doesn't panic when we're already inside one.
+    std::thread::spawn(move || builder.build().map(Some))
+        .join()
+        .expect("spawn client-builder thread")
         .map_err(|err| OtlpTlsError::ReadFile {
             path: std::path::PathBuf::from("<reqwest-builder>"),
             source: std::io::Error::other(err),
         })
 }
 
+/// Build the OTLP span exporter for the selected protocol, with any TLS or
+/// mTLS overrides from `OTEL_EXPORTER_OTLP_{,TRACES_}*` applied.
 fn build_span_exporter(
     protocol: OtlpProtocol,
     endpoint: &str,
@@ -548,6 +556,8 @@ fn build_span_exporter(
     }
 }
 
+/// Build the OTLP log exporter for the selected protocol, with any TLS or
+/// mTLS overrides from `OTEL_EXPORTER_OTLP_{,LOGS_}*` applied.
 fn build_log_exporter(
     protocol: OtlpProtocol,
     endpoint: &str,
@@ -3822,6 +3832,38 @@ pub mod tests {
     }
 
     #[test]
+    fn otlp_tls_empty_signal_var_falls_back_to_generic() {
+        // Deployment templates often leave a per-signal var as "" by default —
+        // treat it as unset, not as "disable TLS for this signal".
+        let (ca_pem, _) = self_signed_pem();
+        let ca_file = write_temp_pem("dynamo-otlp-ca", &ca_pem);
+        with_otlp_tls_env(
+            &[
+                (
+                    env_logging::otlp::OTEL_EXPORTER_OTLP_CERTIFICATE,
+                    Some(ca_file.path().to_string_lossy().into_owned()),
+                ),
+                (
+                    env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE,
+                    Some(String::new()),
+                ),
+            ],
+            || {
+                let traces = otlp_tls_material_for(
+                    env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE,
+                    env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE,
+                    env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY,
+                )
+                .unwrap();
+                assert!(
+                    traces.ca_pem.is_some(),
+                    "empty TRACES var should fall back to generic"
+                );
+            },
+        );
+    }
+
+    #[test]
     fn otlp_tls_errors_when_only_client_cert_is_set() {
         let (cert_pem, _) = self_signed_pem();
         let cert_file = write_temp_pem("dynamo-otlp-cert", &cert_pem);
@@ -3883,7 +3925,10 @@ pub mod tests {
                 // Smoke test via Debug formatting because tonic does not expose
                 // identity/cert fields publicly.
                 let debug = format!("{tls:?}");
-                assert!(debug.contains("identity"), "expect identity in {debug}");
+                assert!(
+                    debug.contains("identity: Some"),
+                    "expect a set identity in {debug}"
+                );
             },
         );
     }
