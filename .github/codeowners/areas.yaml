@@ -1585,6 +1585,9 @@ test_selection:
       markers: [kvbm]
       paths:
       - lib/kvbm*/**
+      - lib/bindings/kvbm/**
+      - lib/llm/src/block_manager.rs
+      - lib/llm/src/block_manager/**
       - tests/kvbm_integration/**
     lmcache:
       markers: [lmcache]
@@ -1596,6 +1599,9 @@ test_selection:
   - docs/**
   - '**/*.md'
   - '**/*.mdx'
+  - lib/bench/**
+  - lib/data-gen/**
+  - lib/gpu_memory_service/**
   shared_full:
   - lib/runtime/**
   - lib/bindings/**
