@@ -3791,6 +3791,49 @@ mod ownership_tests {
         assert_ne!(nemotron.mdcsum(), different_nemotron.mdcsum());
         assert_ne!(qwen.mdcsum(), nemotron.mdcsum());
     }
+
+    #[test]
+    fn nested_nemotron_contract_checksum_is_canonical_and_pinned() {
+        use crate::local_model::runtime_config::VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
+
+        fn card_with_contract(value: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config.runtime_data.insert(
+                VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY.to_string(),
+                value,
+            );
+            card
+        }
+
+        let contract = card_with_contract(serde_json::json!({
+            "video_pruning_rate": 0.5,
+            "sampling": {"max_frames": 64, "fps": 2.0, "frames": [{"z": 1, "a": 2}, {"y": [3, 1, 2]}]},
+            "enabled": true,
+            "note": null,
+        }));
+        let reordered = card_with_contract(serde_json::json!({
+            "note": null,
+            "enabled": true,
+            "sampling": {"frames": [{"a": 2, "z": 1}, {"y": [3, 1, 2]}], "fps": 2.0, "max_frames": 64},
+            "video_pruning_rate": 0.5,
+        }));
+        let changed_nested_value = card_with_contract(serde_json::json!({
+            "video_pruning_rate": 0.5,
+            "sampling": {"max_frames": 64, "fps": 2.0, "frames": [{"z": 1, "a": 3}, {"y": [3, 1, 2]}]},
+            "enabled": true,
+            "note": null,
+        }));
+        let missing = ModelDeploymentCard::with_name_only("model");
+
+        assert_eq!(contract.mdcsum(), reordered.mdcsum());
+        assert_ne!(contract.mdcsum(), missing.mdcsum());
+        assert_ne!(contract.mdcsum(), changed_nested_value.mdcsum());
+        // Pins the separator, length framing, and canonical bytes of the contract.
+        assert_eq!(
+            contract.mdcsum(),
+            "88381ff5b5f10389bacc63e1e2bac947a76ffc5b32c4864b7499f0d10928a96e"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -1527,6 +1527,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn nested_qwen_video_contract_digest_is_pinned() {
+        fn card_with_contract(contract: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config.runtime_data.insert(
+                SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY.to_string(),
+                contract,
+            );
+            card
+        }
+
+        let contract = card_with_contract(serde_json::json!({
+            "resize_mode": "legacy_ceil",
+            "placeholder_target": "bare_video_token",
+            "sglang_preprocess": {"max_frames": 768, "fps": 2.0, "steps": [{"z": 1, "a": null}, [3, 1, 2]]},
+        }));
+        let reordered = card_with_contract(serde_json::json!({
+            "sglang_preprocess": {"steps": [{"a": null, "z": 1}, [3, 1, 2]], "fps": 2.0, "max_frames": 768},
+            "placeholder_target": "bare_video_token",
+            "resize_mode": "legacy_ceil",
+        }));
+
+        let digest = qwen_video_contract_digest(&contract);
+        assert_eq!(digest, qwen_video_contract_digest(&reordered));
+        assert_eq!(
+            digest.as_deref(),
+            Some("0f41282772c9f97d4ba2e92440ee54e1255db432071c3d107ce56801cadbf342")
+        );
+    }
+
+    #[test]
+    fn lora_projection_fingerprint_is_pinned() {
+        let card = ModelDeploymentCard::with_name_only("model");
+        assert_eq!(
+            lora_projection_fingerprint(&card).unwrap(),
+            "41b4a4d82fbf40581e136f3ba40b148d62de3928fa08fe1676216ed9a450ff19"
+        );
+    }
+
     #[tokio::test]
     async fn retired_worker_set_prevents_late_prefill_from_retained_chat_pipeline() {
         use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
