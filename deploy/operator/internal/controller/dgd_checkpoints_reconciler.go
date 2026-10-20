@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"strings"
 
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/imdario/mergo"
 	corev1 "k8s.io/api/core/v1"
@@ -1133,16 +1134,16 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 	// Snapshot preloads cuInterpose by prefixing the target command with its
 	// launcher, so capture covers CUDA memory shared between processes, such as
 	// NCCL cuMem and NVLS buffers. An explicit DGD annotation takes precedence.
-	if _, set := podTemplate.Annotations[consts.CUDASharedMemorySupportAnnotation]; !set {
-		podTemplate.Annotations[consts.CUDASharedMemorySupportAnnotation] = "enabled"
+	if _, set := podTemplate.Annotations[podcontract.CuInterposeAnnotation]; !set {
+		podTemplate.Annotations[podcontract.CuInterposeAnnotation] = "enabled"
 	}
-	if strings.TrimSpace(podTemplate.Annotations[consts.CUDASharedMemorySupportAnnotation]) == "enabled" {
+	if strings.TrimSpace(podTemplate.Annotations[podcontract.CuInterposeAnnotation]) == "enabled" {
 		target, err := findPodTemplateContainer(&podTemplate, targetContainerName)
 		if err != nil {
 			return corev1.PodTemplateSpec{}, err
 		}
 		if len(target.Command) == 0 {
-			return corev1.PodTemplateSpec{}, fmt.Errorf("checkpoint target container %q must set command for Snapshot's cuInterpose launcher, or the DGD must set %s: disabled", targetContainerName, consts.CUDASharedMemorySupportAnnotation)
+			return corev1.PodTemplateSpec{}, fmt.Errorf("checkpoint target container %q must set command for Snapshot's cuInterpose launcher, or the DGD must set %s: disabled", targetContainerName, podcontract.CuInterposeAnnotation)
 		}
 	}
 

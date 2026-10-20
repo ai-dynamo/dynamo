@@ -36,6 +36,55 @@ pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRe
     error
 }
 
+// Raised by `RoutedEngine.generate` when the routed pipeline reports that no
+// worker on the request's route can serve it yet (for example, prefill routing
+// is still activating). Python chat processors re-raise it unchanged, and
+// `map_python_exception` restores `ErrorClass::WorkerUnavailable` so the client
+// gets the intended HTTP 503 instead of a generic 500.
+pyo3::create_exception!(dynamo._core, WorkerUnavailable, DynamoException);
+
+/// Convert a routed-pipeline error to a Python exception, keeping the
+/// `WorkerUnavailable` class that the generic [`crate::to_pyerr`] would drop.
+pub fn routed_error_to_pyerr(err: anyhow::Error) -> PyErr {
+    if is_worker_unavailable(err.as_ref()) {
+        return WorkerUnavailable::new_err(err.to_string());
+    }
+    crate::to_pyerr(err)
+}
+
+fn is_worker_unavailable(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        // `class()` normalizes `WorkerUnavailable` to `Unavailable`; the raw
+        // error type keeps the migratable worker-scoped distinction.
+        if cause
+            .downcast_ref::<DynamoError>()
+            .is_some_and(|error| error.error_type() == ErrorClass::WorkerUnavailable)
+        {
+            return true;
+        }
+        current = cause.source();
+    }
+    false
+}
+
+pub(crate) fn worker_unavailable_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<DynamoError> {
+    if !err.is_instance_of::<WorkerUnavailable>(py) {
+        return None;
+    }
+    let message = err
+        .value(py)
+        .str()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some(
+        DynamoError::builder()
+            .class(ErrorClass::WorkerUnavailable)
+            .message(message)
+            .build(),
+    )
+}
+
 // Raised by the in-process `SelectionService` bindings for selector failures
 // that are not malformed input. Instances carry `kind` (a stable,
 // machine-readable category) and `status_code` (an HTTP-style status) so
@@ -105,6 +154,7 @@ macro_rules! define_dynamo_exceptions {
                 "SelectionServiceError",
                 m.py().get_type::<SelectionServiceError>(),
             )?;
+            m.add("WorkerUnavailable", m.py().get_type::<WorkerUnavailable>())?;
             $(
                 m.add(stringify!($name), m.py().get_type::<$name>())?;
             )*
@@ -244,6 +294,26 @@ mod tests {
     struct LegacyHttpError {
         code: u16,
         message: String,
+    }
+
+    #[test]
+    fn worker_unavailable_survives_class_normalization_and_context() {
+        let rejection = DynamoError::builder()
+            .class(ErrorClass::WorkerUnavailable)
+            .message("prefill routing is still activating")
+            .build();
+        // `class()` reports the normalized `Unavailable`; detection must not rely on it.
+        assert_eq!(rejection.class(), ErrorClass::Unavailable);
+        assert!(is_worker_unavailable(&rejection));
+
+        let wrapped = anyhow::Error::from(rejection).context("routed pipeline failed");
+        assert!(is_worker_unavailable(wrapped.as_ref()));
+
+        let pool_unavailable = DynamoError::builder()
+            .class(ErrorClass::Unavailable)
+            .message("no workers")
+            .build();
+        assert!(!is_worker_unavailable(&pool_unavailable));
     }
 
     #[test]

@@ -16,7 +16,7 @@ This example demonstrates how to:
 
 ### Required Software
 - Docker (for running MinIO)
-- Python 3.10+
+- Python 3.11+
 - AWS CLI: `pip install awscli`
 - Hugging Face CLI: `pip install huggingface-hub[cli]`
 - jq (optional, for pretty JSON output): `sudo apt install jq`

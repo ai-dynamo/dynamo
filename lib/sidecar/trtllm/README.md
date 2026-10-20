@@ -50,9 +50,11 @@ curl -s localhost:8000/v1/chat/completions \
 
 ## Deploy on Kubernetes
 
-Before applying, replace `<your-registry>/dynamo-sidecar` in the manifest with a
-[sidecar image](../README.md#docker) and create the `hf-token-secret`
-Secret that the manifest reads.
+The manifests pin compatible Dynamo frontend and TensorRT-LLM runtime nightlies
+with `runtimeVersionOverride: "1.6.0"`. Use an operator that supports the
+engine-primary native-sidecar layout. If you change the images, keep the
+frontend, runtime, and operator versions compatible. Create the
+`hf-token-secret` Secret that the manifests read before applying them.
 
 See [`deploy/`](deploy/) for all manifests. For example, aggregated serving:
 

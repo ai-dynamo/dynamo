@@ -5,13 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Sidecar testing
 
-Unit tests live beside the production code they exercise. They construct inputs,
-call the real parsing, conversion or state-management functions, and check the
-results without starting an inference engine. Common behavior is tested in the
-common crate; backend behavior is tested in the vLLM or SGLang crate. There is
-no shared unit scenario or backend-adapter layer. Shared CPU integration tests live
-in the testkit crate and connect real sidecars to local Mocker servers, which
-simulate engine responses without loading a model.
+Unit tests live beside the production code they exercise. They construct inputs, call the real parsing, conversion or state-management functions, and check the results without starting an inference engine. Common behavior is tested in the common crate; backend behavior is tested in the corresponding sidecar crate. There is no shared unit scenario or backend-adapter layer. Shared CPU integration tests live in the testkit crate and connect real sidecars to local Mocker servers, which simulate engine responses without loading a model.
 
 ## File layout
 
@@ -56,6 +50,7 @@ lib/sidecar/
     │       ├── mod.rs         # Fixture contracts and scheduler-state waits
     │       ├── vllm.rs        # vLLM protocol, discovery, health and child-command adapter
     │       ├── sglang.rs      # SGLang gRPC/HTTP peers, discovery, health and child-command adapter
+    │       ├── trtllm.rs      # OpenEngine peer, context limits and child-command adapter
     │       └── process.rs     # Local discovery, worker processes and TCP routing
     └── README.md              # This guide
 ```
@@ -165,9 +160,12 @@ Each suite exercises a different request path:
 The SGLang fixture owns its optional HTTP peer, discovery metadata and shutdown.
 The HTTP cancellation regression uses that peer and the production sidecar engine.
 It holds an admitted request before headers or during streaming, then checks
-targeted abort before disconnect, another request's isolation and recovery. These
-CPU checks do not exercise cancellation before engine admission or during physical
-KV transfer.
+targeted abort before disconnect, another request's isolation and recovery.
+The existing SGLang aggregate GPU deployment sends chat and native `/generate`
+payloads through the Dynamo HTTP frontend, disconnects each active stream, and
+checks actual scheduler drain and successful recovery. Explicit native stop and
+consumer drop are exercised by the Rust CPU testkit. These checks do not synchronize
+cancellation before engine admission or during physical KV transfer.
 
 The controller sits at the native protocol boundary. Each request ID has its
 own plan and observations, so a test can hold or fail one request while proving
@@ -184,27 +182,16 @@ clients. That makes peer-loss tests deterministic.
 
 | Suite | Scope | Execution |
 | --- | --- | --- |
-| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection, malformed responses and shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
-| `router_sidecar_mocker_integration.rs` | Both backends: registration/error recovery, model alias publication, health-gated readiness, unhealthy startup, cancellation, SIGTERM and real PrefillRouter handoff; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
-| `tests/serve/test_sidecar.py` | Real engine logprobs, structured output, cancellation and recovery, completed KV transfer, and routing | GPU, existing sidecar E2E jobs in post-merge and nightly |
+| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM, SGLang and TensorRT-LLM; native rejection, malformed responses and shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
+| `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
+| `tests/serve/test_sidecar.py` | vLLM/SGLang: real engine logprobs, structured output, cancellation/recovery, KV transfer and routing, where the `*_kv_router` configs warm two caches and require cache-based selection, plus a completed transfer to decode when disaggregated; TensorRT-LLM: basic aggregated/disaggregated chat | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
-Both vLLM and SGLang register the shared wire and process scenarios.
-TensorRT-LLM is not enrolled here.
+vLLM, SGLang and TensorRT-LLM register the shared wire and process scenarios. TensorRT-LLM uses the existing OpenEngine Mocker through a controlled inference service. Its process tests supply a local model path and verify the context limit returned by OpenEngine.
 
-The alias and health-publication scenarios use `ProcessFixture` controls for
-both backends. vLLM keeps Control healthy while the fixture controls Inference
-readiness; SGLang uses its native HealthCheck RPC. Separate tokenizer discovery,
-parser settings inherited from engine metadata, changed engine roles and native
-trace headers remain SGLang-specific because vLLM has different contracts for
-those values.
+The alias and health-publication scenarios use `DiscoveryFixture` controls for vLLM and SGLang. TensorRT-LLM is excluded from these scenarios because its sidecar uses a configured model path and does not discover served aliases or gate publication on native health. vLLM keeps Control healthy while the fixture controls Inference readiness; SGLang uses its native HealthCheck RPC. Separate tokenizer discovery, parser settings inherited from engine metadata, changed engine roles and native trace headers remain SGLang-specific because vLLM has different contracts for those values.
 
-CPU handoff checks opaque vLLM metadata and SGLang concurrent bootstrap
-coordination. CPU handoff cancellation holds the peers before Mocker admission;
-it proves transport cleanup and recovery, not native scheduler or transfer
-cleanup. A Mocker cannot prove that a real engine accepts the serialized request,
-executes a structured-output constraint, releases its real scheduler work, or
-transfers GPU KV cache.
+CPU handoff checks opaque vLLM metadata, SGLang concurrent bootstrap coordination, and TensorRT-LLM OpenEngine KV session forwarding. CPU handoff cancellation holds the peers before Mocker admission; it proves transport cleanup and recovery, not native scheduler or transfer cleanup. A Mocker cannot prove that a real engine accepts the serialized request, executes a structured-output constraint, releases its real scheduler work, or transfers GPU KV cache.
 
 Existing tests in `lib/mocker/servers/{vllm,sglang}/tests/sidecar.rs` retain distinct
 KV-event and handoff coverage. Backend-local socket tests in `vllm/src/tests.rs`
@@ -219,7 +206,8 @@ and real engines through the existing launch scripts. Payloads validate HTTP
 streaming, logprobs, structured output, distinct prefill/decode workers and
 KV-aware routing, including exact token/usage accounting. Payloads also check
 HTTP disconnection, scheduler cleanup, recovery and fresh completed KV transfers.
-GPU assertions share each deployment's existing startup and teardown.
+GPU assertions share each deployment's existing startup and teardown, and use
+the same engine-metrics adapters for cancellation and completed transfers.
 
 GPU requests and worker discovery use frontend HTTP, with engine metrics for
 scheduler and transfer assertions. Explicit native stop, consumer drop and exact
@@ -280,6 +268,7 @@ Build the sidecar binary and run the testkit together from the repository root:
 ```sh
 CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 \
   cargo test --locked -p dynamo-vllm-sidecar -p dynamo-sglang-sidecar \
+    -p dynamo-trtllm-sidecar \
     -p dynamo-sidecar-testkit
 ```
 
@@ -288,11 +277,7 @@ Rust build prerequisites, permission to bind loopback sockets and spawn child
 processes, and writable temporary storage. Running them needs no GPU, engine
 installation, model download or external discovery service.
 
-The workspace's ordinary `cargo test --locked --all-targets` builds both sidecar
-executables through their executable integration targets. A testkit-only command
-can instead pick up an older binary from the build directory. Always build the
-vLLM and SGLang packages alongside testkit when validating source changes. After that build,
-you can select a suite or test by name:
+The workspace's ordinary `cargo test --locked --all-targets` builds the sidecar executables through their executable integration targets. A testkit-only command can instead pick up an older binary from the build directory. Always build all three sidecar packages alongside testkit when validating source changes. After that build, you can select a suite or test by name:
 
 ```sh
 cargo test --locked -p dynamo-sidecar-testkit --test sidecar_mocker_integration

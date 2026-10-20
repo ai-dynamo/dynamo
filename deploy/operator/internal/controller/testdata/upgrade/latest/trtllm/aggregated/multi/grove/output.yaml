@@ -1,0 +1,739 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: $var:pcs-spec-hash
+  creationTimestamp: $ignore
+  generation: $ignore
+  labels:
+    nvidia.com/dynamo-graph-deployment-name: workers
+  name: workers
+  namespace: upgrade-latest-trtllm-aggregated-multi-grove
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  replicas: 1
+  template:
+    cliqueStartupType: CliqueStartupTypeExplicit
+    cliques:
+    - annotations:
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-operator-origin-version: $var:operator-version
+      labels:
+        nvidia.com/dynamo-component: frontend
+        nvidia.com/dynamo-component-type: frontend
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-discovery-enabled: 'true'
+        nvidia.com/dynamo-graph-deployment-name: workers
+        nvidia.com/dynamo-namespace: upgrade-latest-trtllm-aggregated-multi-grove-workers
+        nvidia.com/metrics-enabled: 'true'
+        nvidia.com/selector: workers-frontend
+      name: frontend
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - command:
+            - python3
+            - -m
+            - dynamo.frontend
+            env:
+            - name: DYNAMO_PORT
+              value: '8000'
+            - name: DYN_COMPONENT
+              value: frontend
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_HTTP_PORT
+              value: '8000'
+            - name: DYN_NAMESPACE
+              value: upgrade-latest-trtllm-aggregated-multi-grove-workers
+            - name: DYN_NAMESPACE_PREFIX
+              value: upgrade-latest-trtllm-aggregated-multi-grove-workers
+            - name: DYN_NAMESPACE_PREFIX_STRICT
+              value: 'true'
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: workers
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: upgrade-latest-trtllm-aggregated-multi-grove
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.0
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /live
+                port: http
+              initialDelaySeconds: 15
+              periodSeconds: 10
+              timeoutSeconds: 1
+            name: main
+            ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: http
+              initialDelaySeconds: 10
+              periodSeconds: 10
+              timeoutSeconds: 3
+            resources: {}
+            startupProbe:
+              failureThreshold: 30
+              httpGet:
+                path: /live
+                port: http
+              periodSeconds: 10
+              timeoutSeconds: 1
+            volumeMounts:
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          securityContext:
+            fsGroup: 1000
+          serviceAccountName: workers-k8s-service-discovery
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+        replicas: 1
+        roleName: frontend
+    - annotations:
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-operator-origin-version: $var:operator-version
+      labels:
+        nvidia.com/dynamo-component: worker
+        nvidia.com/dynamo-component-type: worker
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-discovery-enabled: 'true'
+        nvidia.com/dynamo-graph-deployment-name: workers
+        nvidia.com/dynamo-namespace: upgrade-latest-trtllm-aggregated-multi-grove-workers
+        nvidia.com/dynamo-worker-hash: $var:worker-hash
+        nvidia.com/metrics-enabled: 'true'
+        nvidia.com/selector: workers-worker
+      name: worker-ldr
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - args:
+            - mkdir -p $HOME/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key $HOME/.ssh/id_rsa
+              && cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub
+              $HOME/.ssh/authorized_keys && chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys
+              && chmod 644 $HOME/.ssh/id_rsa.pub && printf 'Host *\nIdentityFile '$HOME'/.ssh/id_rsa\nStrictHostKeyChecking
+              no\nPort 2222\n' > $HOME/.ssh/config && mpirun $([ "$(id -u)" = "0"
+              ] && echo --allow-run-as-root) --oversubscribe -n 2 -H $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE),$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-wkr-0.$(GROVE_HEADLESS_SERVICE)
+              --mca pml ob1 --mca plm_rsh_args "-p 2222 -o StrictHostKeyChecking=no
+              -i $HOME/.ssh/id_rsa" -x CPATH -x CUDA_VISIBLE_DEVICES -x DYNAMO_LEADER_ADDRESS
+              -x DYNAMO_RANK -x DYN_COMPONENT -x DYN_DISCOVERY_BACKEND -x DYN_FORWARDPASS_METRIC_PORT
+              -x DYN_HEALTH_CHECK_ENABLED -x DYN_NAMESPACE -x DYN_NAMESPACE_WORKER_SUFFIX
+              -x DYN_PARENT_DGD_K8S_NAME -x DYN_PARENT_DGD_K8S_NAMESPACE -x DYN_SYSTEM_ENABLED
+              -x DYN_SYSTEM_PORT -x DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS -x HF_DATASETS_CACHE
+              -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN
+              -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x
+              NCCL_P2P_DISABLE -x NIXL_TELEMETRY_ENABLE -x NIXL_TELEMETRY_EXPORTER
+              -x NIXL_TELEMETRY_PROMETHEUS_PORT -x OMPI_MCA_orte_keep_fqdn_hostnames
+              -x PATH -x POD_NAME -x POD_NAMESPACE -x POD_UID -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR
+              -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x TRITON_PTXAS_PATH
+              -x TRTLLM_USE_UCX_KVCACHE -x USER bash -c 'trtllm-llmapi-launch python3
+              -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B'
+            command:
+            - /bin/sh
+            - -c
+            env:
+            - name: DYNAMO_LEADER_ADDRESS
+              value: $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE)
+            - name: DYNAMO_RANK
+              value: $(GROVE_PCSG_POD_INDEX)
+            - name: DYN_COMPONENT
+              value: worker
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: '20380'
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: 'true'
+            - name: DYN_NAMESPACE
+              value: upgrade-latest-trtllm-aggregated-multi-grove-workers
+            - name: DYN_NAMESPACE_WORKER_SUFFIX
+              value: $var:worker-hash
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: workers
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: upgrade-latest-trtllm-aggregated-multi-grove
+            - name: DYN_SYSTEM_ENABLED
+              value: 'true'
+            - name: DYN_SYSTEM_PORT
+              value: '9090'
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: NIXL_TELEMETRY_ENABLE
+              value: n
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: '19090'
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: OMPI_MCA_orte_keep_fqdn_hostnames
+              value: '1'
+            image: nvcr.io/nvidia/ai-dynamo/trtllm-runtime:1.6.0
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: main
+            ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            - containerPort: 19090
+              name: nixl
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 4
+            resources:
+              limits:
+                nvidia.com/gpu: '1'
+            startupProbe:
+              failureThreshold: 720
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 5
+            volumeMounts:
+            - mountPath: /ssh-pk
+              name: upgrade-mpi-ssh
+              readOnly: true
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          securityContext:
+            fsGroup: 1000
+          serviceAccountName: workers-k8s-service-discovery
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: upgrade-mpi-ssh
+            secret:
+              defaultMode: 420
+              secretName: upgrade-mpi-ssh
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+        replicas: 1
+        roleName: worker-ldr
+        startsAfter:
+        - worker-wkr
+    - annotations:
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-operator-origin-version: $var:operator-version
+      labels:
+        nvidia.com/dynamo-component: worker
+        nvidia.com/dynamo-component-type: worker
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-discovery-enabled: 'true'
+        nvidia.com/dynamo-graph-deployment-name: workers
+        nvidia.com/dynamo-namespace: upgrade-latest-trtllm-aggregated-multi-grove-workers
+        nvidia.com/dynamo-worker-hash: $var:worker-hash
+        nvidia.com/metrics-enabled: 'true'
+        nvidia.com/selector: workers-worker
+      name: worker-wkr
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - args:
+            - mkdir -p $HOME/.ssh $HOME/.ssh/host_keys $HOME/.ssh/run && ls -la /ssh-pk/
+              && cp /ssh-pk/private.key $HOME/.ssh/id_rsa && cp /ssh-pk/private.key.pub
+              $HOME/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys
+              && chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys && chmod 644
+              $HOME/.ssh/id_rsa.pub && printf 'Host *\nIdentityFile '$HOME'/.ssh/id_rsa\nStrictHostKeyChecking
+              no\nPort 2222\n' > $HOME/.ssh/config && ssh-keygen -t rsa -f $HOME/.ssh/host_keys/ssh_host_rsa_key
+              -N '' && ssh-keygen -t ecdsa -f $HOME/.ssh/host_keys/ssh_host_ecdsa_key
+              -N '' && ssh-keygen -t ed25519 -f $HOME/.ssh/host_keys/ssh_host_ed25519_key
+              -N '' && printf 'Port 2222\nHostKey '$HOME'/.ssh/host_keys/ssh_host_rsa_key\nHostKey
+              '$HOME'/.ssh/host_keys/ssh_host_ecdsa_key\nHostKey '$HOME'/.ssh/host_keys/ssh_host_ed25519_key\nPidFile
+              '$HOME'/.ssh/run/sshd.pid\nStrictModes no\nPermitRootLogin yes\nPasswordAuthentication
+              no\nPubkeyAuthentication yes\nAuthorizedKeysFile '$HOME'/.ssh/authorized_keys\n'
+              > $HOME/.ssh/sshd_config && /usr/sbin/sshd -D -f $HOME/.ssh/sshd_config
+            command:
+            - /bin/sh
+            - -c
+            env:
+            - name: DYNAMO_LEADER_ADDRESS
+              value: $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE)
+            - name: DYNAMO_RANK
+              value: $(GROVE_PCSG_POD_INDEX)
+            - name: DYN_COMPONENT
+              value: worker
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: '20380'
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: 'true'
+            - name: DYN_NAMESPACE
+              value: upgrade-latest-trtllm-aggregated-multi-grove-workers
+            - name: DYN_NAMESPACE_WORKER_SUFFIX
+              value: $var:worker-hash
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: workers
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: upgrade-latest-trtllm-aggregated-multi-grove
+            - name: DYN_SYSTEM_ENABLED
+              value: 'true'
+            - name: DYN_SYSTEM_PORT
+              value: '9090'
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: NIXL_TELEMETRY_ENABLE
+              value: n
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: '19090'
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: OMPI_MCA_orte_keep_fqdn_hostnames
+              value: '1'
+            image: nvcr.io/nvidia/ai-dynamo/trtllm-runtime:1.6.0
+            name: main
+            ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            - containerPort: 19090
+              name: nixl
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 10
+              initialDelaySeconds: 20
+              periodSeconds: 20
+              tcpSocket:
+                port: 2222
+              timeoutSeconds: 5
+            resources:
+              limits:
+                nvidia.com/gpu: '1'
+            volumeMounts:
+            - mountPath: /ssh-pk
+              name: upgrade-mpi-ssh
+              readOnly: true
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          securityContext:
+            fsGroup: 1000
+          serviceAccountName: workers-k8s-service-discovery
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: upgrade-mpi-ssh
+            secret:
+              defaultMode: 420
+              secretName: upgrade-mpi-ssh
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+        replicas: 1
+        roleName: worker-wkr
+    headlessServiceConfig:
+      publishNotReadyAddresses: true
+    podCliqueScalingGroups:
+    - cliqueNames:
+      - worker-ldr
+      - worker-wkr
+      minAvailable: 1
+      name: worker
+      replicas: 2
+    terminationDelay: 15m0s
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  annotations:
+    nvidia.com/current-worker-hash-v2: $var:worker-hash
+    nvidia.com/dynamo-operator-origin-version: $var:operator-version
+    nvidia.com/enable-grove: 'true'
+    nvidia.com/workload-provider: grove
+  creationTimestamp: $ignore
+  finalizers:
+  - nvidia.com/finalizer
+  generation: $ignore
+  name: workers
+  namespace: upgrade-latest-trtllm-aggregated-multi-grove
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  backendFramework: trtllm
+  components:
+  - name: frontend
+    podTemplate:
+      spec:
+        containers:
+        - command:
+          - python3
+          - -m
+          - dynamo.frontend
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.0
+          name: main
+    replicas: 1
+    type: frontend
+  - multinode:
+      nodeCount: 2
+    name: worker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          image: nvcr.io/nvidia/ai-dynamo/trtllm-runtime:1.6.0
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+    replicas: 2
+    type: worker
+status:
+  components:
+    frontend:
+      componentKind: PodClique
+      componentNames:
+      - workers-0-frontend
+      gpusPerEngine: 0
+      gpusPerReplica: 0
+      replicas: 0
+      runtimeNamespace: upgrade-latest-trtllm-aggregated-multi-grove-workers
+      updatedReplicas: 0
+    worker:
+      componentKind: PodCliqueScalingGroup
+      componentNames:
+      - workers-0-worker
+      gpusPerEngine: 2
+      gpusPerReplica: 2
+      replicas: 0
+      servedModelName: Qwen/Qwen3-0.6B
+      updatedReplicas: 0
+  conditions:
+  - lastTransitionTime: $ignore
+    message: 'Resources not ready: workers: frontend: resource not found; worker:
+      resource not found'
+    observedGeneration: 1
+    reason: some_resources_are_not_ready
+    status: 'False'
+    type: Ready
+  observedGeneration: 1
+  state: pending
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: 0d454cc8266ac38ed6453ee2ef3cf6d9dd237faebc63af22f67ca911e106796c
+  creationTimestamp: $ignore
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: dynamo-operator
+    app.kubernetes.io/name: workers-k8s-service-discovery
+  name: workers-k8s-service-discovery-role
+  namespace: upgrade-latest-trtllm-aggregated-multi-grove
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - endpoints
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamoworkermetadatas
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - update
+  - patch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: e679ba024ba79efa722d6eabc21c99b9b01fc703933717df55e262d824f5734e
+  creationTimestamp: $ignore
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: dynamo-operator
+    app.kubernetes.io/name: workers-k8s-service-discovery
+  name: workers-k8s-service-discovery-binding
+  namespace: upgrade-latest-trtllm-aggregated-multi-grove
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workers-k8s-service-discovery-role
+subjects:
+- kind: ServiceAccount
+  name: workers-k8s-service-discovery
+  namespace: upgrade-latest-trtllm-aggregated-multi-grove
+---
+apiVersion: v1
+data:
+  wait-for-leader.py: "import socket, time, json, ssl, urllib.request, os\n\nSA =\
+    \ \"/var/run/secrets/kubernetes.io/serviceaccount\"\nhost = os.environ[\"LEADER_HOST\"\
+    ]\nport = int(os.environ[\"LEADER_PORT\"])\n\ndef _k8s_ctx():\n    return ssl.create_default_context(cafile=f\"\
+    {SA}/ca.crt\")\n\ndef _k8s_headers():\n    token = open(f\"{SA}/token\").read()\n\
+    \    return {\"Authorization\": f\"Bearer {token}\"}\n\ndef _k8s_api():\n    ns\
+    \ = open(f\"{SA}/namespace\").read()\n    return f\"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods\"\
+    \n\ndef resolve_leader_ip():\n    # gethostbyname is IPv4-only; fall back to IPv6\
+    \ for IPv6-only clusters.\n    try:\n        return socket.gethostbyname(host)\n\
+    \    except socket.gaierror:\n        return socket.getaddrinfo(host, None, socket.AF_INET6,\
+    \ socket.SOCK_STREAM)[0][4][0]\n\ndef leader_pod_is_healthy():\n    try:\n   \
+    \     ip = resolve_leader_ip()\n    except socket.gaierror:\n        return False,\
+    \ \"DNS resolution failed\", None, None\n    try:\n        req = urllib.request.Request(\n\
+    \            f\"{_k8s_api()}?fieldSelector=status.podIP={ip}\",\n            headers=_k8s_headers(),\n\
+    \        )\n        resp = json.loads(urllib.request.urlopen(req, context=_k8s_ctx(),\
+    \ timeout=5).read())\n        pods = resp.get(\"items\", [])\n        if not pods:\n\
+    \            return False, f\"no pod found with IP {ip}\", None, ip\n        pod\
+    \ = pods[0]\n        name = pod[\"metadata\"].get(\"name\", \"unknown\")\n   \
+    \     uid = pod[\"metadata\"].get(\"uid\", \"unknown\")\n        phase = pod.get(\"\
+    status\", {}).get(\"phase\")\n        deletion_ts = pod[\"metadata\"].get(\"deletionTimestamp\"\
+    )\n        info = f\"ip={ip} pod={name} uid={uid} phase={phase} deletionTimestamp={deletion_ts}\"\
+    \n        if deletion_ts:\n            return False, f\"pod {name} is terminating\"\
+    , info, ip\n        if phase != \"Running\":\n            return False, f\"pod\
+    \ {name} phase is {phase}\", info, ip\n        return True, \"\", info, ip\n \
+    \   except Exception as e:\n        # Fall back to TCP-only when the API is unavailable\
+    \ (e.g. 403 no RBAC)\n        return True, f\"K8s API unavailable ({e}), falling\
+    \ back to TCP\", f\"ip={ip}\", ip\n\nprint(f\"Waiting for leader master port at\
+    \ {host}:{port}...\", flush=True)\ntime.sleep(5)\nstart = time.monotonic()\nlast_status\
+    \ = start\nlast_err = \"\"\nwhile True:\n    healthy, reason, pod_info, leader_ip\
+    \ = leader_pod_is_healthy()\n    if healthy:\n        try:\n            s = socket.create_connection((leader_ip,\
+    \ port), timeout=2)\n            s.close()\n            elapsed = time.monotonic()\
+    \ - start\n            print(f\"Leader master port ready (waited {elapsed:.1f}s)\
+    \ [{pod_info}]\", flush=True)\n            break\n        except Exception as\
+    \ e:\n            last_err = f\"tcp: {type(e).__name__}: {e} [{pod_info}]\"\n\
+    \    else:\n        last_err = f\"{reason} [{pod_info}]\" if pod_info else reason\n\
+    \    now = time.monotonic()\n    if now - last_status >= 30:\n        print(f\"\
+    Still waiting for {host}:{port}... ({now - start:.0f}s elapsed, last: {last_err})\"\
+    , flush=True)\n        last_status = now\n    time.sleep(5)\n"
+kind: ConfigMap
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: a615bfc016f57bef619ea5c67d88da24755349bb07efff9da0b2c79f18d6d076
+  creationTimestamp: $ignore
+  labels:
+    nvidia.com/dynamo-graph-deployment-name: workers
+  name: workers-wait-leader-script
+  namespace: upgrade-latest-trtllm-aggregated-multi-grove
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: a827d0155fa966ef0923ab1125efcc6f102985dcd169f03b65ebd5800f9e4239
+  creationTimestamp: $ignore
+  labels:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-discovery-enabled: 'true'
+  name: workers-frontend
+  namespace: upgrade-latest-trtllm-aggregated-multi-grove
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  clusterIP: $ignore
+  clusterIPs:
+  - $ignore
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: http
+    port: 8000
+    protocol: TCP
+    targetPort: http
+  selector:
+    nvidia.com/dynamo-component: frontend
+    nvidia.com/dynamo-component-type: frontend
+    nvidia.com/dynamo-namespace: upgrade-latest-trtllm-aggregated-multi-grove-workers
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: 2d627fb1abc3b2cb7b3e924939af86715fbab5f35880634d41c35f4477ee3243
+  creationTimestamp: $ignore
+  labels:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-worker-hash: $var:worker-hash
+  name: workers-worker
+  namespace: upgrade-latest-trtllm-aggregated-multi-grove
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  clusterIP: $ignore
+  clusterIPs:
+  - $ignore
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: system
+    port: 9090
+    protocol: TCP
+    targetPort: system
+  selector:
+    nvidia.com/dynamo-component: worker
+    nvidia.com/dynamo-component-type: worker
+    nvidia.com/dynamo-namespace: upgrade-latest-trtllm-aggregated-multi-grove-workers
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
+  creationTimestamp: $ignore
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: dynamo-operator
+    app.kubernetes.io/name: workers-k8s-service-discovery
+  name: workers-k8s-service-discovery
+  namespace: upgrade-latest-trtllm-aggregated-multi-grove
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
