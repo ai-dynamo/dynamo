@@ -90,6 +90,29 @@ def test_helper_uses_real_sdk_decisions_and_chat_serialization():
     assert result["qualified_counter"] is False
 
 
+def test_verifier_prompt_defines_integer_indices_and_valid_json_examples():
+    seen = []
+
+    def handler(req):
+        seen.append(strict_json(req.content))
+        return sdk_response(req)
+
+    async def run():
+        async with make_client(
+            "http://fixture.invalid/v1", httpx.MockTransport(handler)
+        ) as client:
+            return await SDKModels(client, profile(), fixture=True).verify(
+                request().units, (), request().units, "cpu-session"
+            )
+
+    asyncio.run(run())
+    instruction = seen[0]["messages"][0]["content"]
+    assert "zero-based integer indices" in instruction
+    assert '{"supported":true,"unsupported_claims":[]}' in instruction
+    assert '{"supported":false,"unsupported_claims":[0]}' in instruction
+    assert "essential omissions" in instruction
+
+
 @pytest.mark.parametrize("mode", ["fixture", "fixture-sdk"])
 def test_cpu_helper_execution_modes(mode):
     result = asyncio.run(execute(packet(), mode))
@@ -206,3 +229,37 @@ def test_local_client_requires_explicit_nonempty_credential(credential):
             httpx.MockTransport(sdk_response),
             api_key=credential,
         )
+
+
+def test_observed_decision_usage_must_match_local_rendering():
+    async def run():
+        async with make_client(
+            "http://fixture.invalid/v1", httpx.MockTransport(sdk_response)
+        ) as client:
+            models = SDKModels(
+                client, profile(usage_counter=lambda _: 999), fixture=True
+            )
+            result = await Pipeline(models, profile().counter).run(request())
+            assert result.reason == "decision_token_count_mismatch"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("limit", [True, 0, -1, 4097])
+def test_generation_reserve_requires_bounded_integer(limit):
+    with pytest.raises(Invalid, match="invalid_generation_limit"):
+        profile(generation_max_tokens=limit).validate()
+
+
+def test_observed_chat_usage_must_match_local_rendering():
+    async def run():
+        async with make_client(
+            "http://fixture.invalid/v1", httpx.MockTransport(sdk_response)
+        ) as client:
+            models = SDKModels(
+                client, profile(usage_counter=lambda _: 999), fixture=True
+            )
+            with pytest.raises(Invalid, match="chat_token_count_mismatch"):
+                await models.verify(request().units, (), request().units, "cpu-session")
+
+    asyncio.run(run())
