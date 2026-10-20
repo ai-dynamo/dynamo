@@ -10,7 +10,8 @@ logger = logging.getLogger(__name__)
 
 
 class ShutdownHandle(Protocol):
-    def shutdown(self) -> None: ...
+    def shutdown(self) -> None:
+        ...
 
 
 def install_signal_handlers(

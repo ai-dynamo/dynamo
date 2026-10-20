@@ -34,8 +34,8 @@ from dynamo.llm import (
     AisPerfConfig,
     EngineType,
     EntrypointArgs,
-    FrontendShutdown,
     FrontendRoute,
+    FrontendShutdown,
     make_engine,
     run_input,
 )
@@ -416,9 +416,11 @@ async def async_main():
         response_plane=config.response_plane,
     )
 
-    frontend_shutdown = FrontendShutdown() if not (
-        config.interactive or config.kserve_grpc_server
-    ) else None
+    frontend_shutdown = (
+        FrontendShutdown()
+        if not (config.interactive or config.kserve_grpc_server)
+        else None
+    )
     install_signal_handlers(loop, runtime, frontend_shutdown)
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)

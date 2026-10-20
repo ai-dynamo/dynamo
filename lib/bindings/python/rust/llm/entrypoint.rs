@@ -40,9 +40,9 @@ use super::replay::{
     materialize_mocker_config, mocker_config_from_json, mocker_config_from_python,
 };
 use dynamo_mocker::config::MockerConfig;
+use dynamo_runtime::CancellationToken;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
-use dynamo_runtime::CancellationToken;
 
 use super::local_model::ModelRuntimeConfig;
 use super::model_card::ModelDeploymentCard;
