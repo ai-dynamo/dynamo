@@ -1505,6 +1505,7 @@ Package v1beta1 contains API Schema definitions for the nvidia.com v1beta1 API g
 ### Resource Types
 - [DynamoComponentDeployment](#dynamocomponentdeployment)
 - [DynamoGraphDeployment](#dynamographdeployment)
+- [DynamoGraphDeploymentEngineGroup](#dynamographdeploymentenginegroup)
 - [DynamoGraphDeploymentRequest](#v1beta1-dynamographdeploymentrequest)
 - [DynamoGraphDeploymentScalingAdapter](#dynamographdeploymentscalingadapter)
 
@@ -1664,6 +1665,42 @@ _Appears in:_
 | `checkpointID` _string_ | checkpointID is a deprecated legacy Dynamo artifact ID. Native standalone<br />snapshots leave this field empty. |  | Optional: \{\} <br /> |
 | `identityHash` _string_ | identityHash is a deprecated legacy checkpoint identity hash. Native<br />standalone snapshots leave this field empty. |  | Optional: \{\} <br /> |
 | `ready` _boolean_ | ready indicates the checkpoint artifact is ready for future pods to restore. |  | Optional: \{\} <br /> |
+
+
+#### ComponentEngineGroupPolicy
+
+
+
+ComponentEngineGroupPolicy configures initial allocation bounds for newly created worlds.
+
+
+
+_Appears in:_
+- [ComponentEngineGroupSpec](#componentenginegroupspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `minSize` _integer_ | minSize seeds the generated Engine Group's policy.minReplicas. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `maxSize` _integer_ | maxSize seeds the generated Engine Group's policy.maxReplicas. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+
+
+#### ComponentEngineGroupSpec
+
+
+
+ComponentEngineGroupSpec configures creation of independent engine worlds.
+Initialization and live /scale targets both count whole replica allocations.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `initialSize` _integer_ | initialSize is the immutable number of replica allocations in each new world.<br />It is not a GPU, EP-rank, or native-member count. The profile resolves those counts. |  | Minimum: 1 <br /> |
+| `policy` _[ComponentEngineGroupPolicy](#componentenginegrouppolicy)_ | policy supplies initial bounds copied into each new Engine Group's live policy. |  | Optional: \{\} <br /> |
 
 
 #### ComponentKind
@@ -1893,7 +1930,8 @@ _Appears in:_
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the component's Pod configuration. New components must<br />include a container named "main" with a non-empty image. Existing components<br />created without a podTemplate may remain unchanged. The operator merges<br />defaults into the main container.<br />For DGD components whose main image tag is not a Dynamo semantic version,<br />set runtimeVersionOverride explicitly.<br />All other containers are user-managed sidecars and must specify their<br />required fields, including image. |  | Optional: \{\} <br /> |
-| `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `replicas` _integer_ | replicas is the desired number of Pods for an ordinary component. For an<br />engineGroup component it counts independent engine worlds. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `engineGroup` _[ComponentEngineGroupSpec](#componentenginegroupspec)_ | engineGroup opts a DGD component into independently resizable engine worlds.<br />Component replicas then count worlds, not allocations inside a world. Each new<br />group's spec.replicas is seeded from initialSize and subsequently scaled independently.<br />DGD-driven Engine Group creation is not enabled yet; admission rejects this<br />block until that workload pathway is implemented. Standalone DCDs cannot use it. |  | Optional: \{\} <br /> |
 | `minAvailable` _integer_ | minAvailable maps to Grove PodCliqueScalingGroup minAvailable for<br />components rendered as a scaling group (multi-node, inter-pod GMS, or<br />`experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove<br />PodClique minAvailable for all other single-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  | Optional: \{\} <br /> |
 | `roles` _[ComponentRoleSpec](#componentrolespec) array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout. |  | Optional: \{\} <br /> |
@@ -1926,7 +1964,8 @@ _Appears in:_
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the component's Pod configuration. New components must<br />include a container named "main" with a non-empty image. Existing components<br />created without a podTemplate may remain unchanged. The operator merges<br />defaults into the main container.<br />For DGD components whose main image tag is not a Dynamo semantic version,<br />set runtimeVersionOverride explicitly.<br />All other containers are user-managed sidecars and must specify their<br />required fields, including image. |  | Optional: \{\} <br /> |
-| `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `replicas` _integer_ | replicas is the desired number of Pods for an ordinary component. For an<br />engineGroup component it counts independent engine worlds. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `engineGroup` _[ComponentEngineGroupSpec](#componentenginegroupspec)_ | engineGroup opts a DGD component into independently resizable engine worlds.<br />Component replicas then count worlds, not allocations inside a world. Each new<br />group's spec.replicas is seeded from initialSize and subsequently scaled independently.<br />DGD-driven Engine Group creation is not enabled yet; admission rejects this<br />block until that workload pathway is implemented. Standalone DCDs cannot use it. |  | Optional: \{\} <br /> |
 | `minAvailable` _integer_ | minAvailable maps to Grove PodCliqueScalingGroup minAvailable for<br />components rendered as a scaling group (multi-node, inter-pod GMS, or<br />`experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove<br />PodClique minAvailable for all other single-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  | Optional: \{\} <br /> |
 | `roles` _object array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context. |  | Optional: \{\} <br /> |
@@ -1981,6 +2020,79 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | name is the `metadata.name` of the target DynamoGraphDeployment. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `componentName` _string_ | componentName is the `componentName` of the entry within the target<br />DGD's `spec.components` list to scale. |  | MinLength: 1 <br />Required: \{\} <br /> |
+
+
+#### DynamoGraphDeploymentEngineGroup
+
+
+
+DynamoGraphDeploymentEngineGroup represents one independently resizable distributed engine world.
+The scale subresource counts logical replicas, while status keeps physical allocation, engine
+membership, and traffic admission separately observable.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
+| `kind` _string_ | `DynamoGraphDeploymentEngineGroup` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoGraphDeploymentEngineGroupSpec](#dynamographdeploymentenginegroupspec)_ |  |  |  |
+| `status` _[DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)_ |  |  |  |
+
+
+#### DynamoGraphDeploymentEngineGroupSpec
+
+
+
+DynamoGraphDeploymentEngineGroupSpec defines the desired capacity of one independently
+resizable distributed engine world.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroup](#dynamographdeploymentenginegroup)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicas` _integer_ | replicas is the absolute desired number of independently scalable replica allocations.<br />The profile maps each allocation to whole Pods and one or more native engine members. |  | Minimum: 1 <br />Required: \{\} <br /> |
+| `policy` _[EngineGroupScalingPolicy](#enginegroupscalingpolicy)_ | policy constrains user- or autoscaler-selected replica targets independently from hard<br />engine capability bounds reported in status.profile. |  | Optional: \{\} <br /> |
+
+
+#### DynamoGraphDeploymentEngineGroupStatus
+
+
+
+DynamoGraphDeploymentEngineGroupStatus defines the observed state of one Engine Group.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroup](#dynamographdeploymentenginegroup)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | observedGeneration is the most recent object generation observed by the controller. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `replicas` _integer_ | replicas is the number of logical replicas with complete physical allocations. It is the<br />current replica count exposed through the scale subresource. |  | Minimum: 0 <br /> |
+| `availableReplicas` _integer_ | availableReplicas counts allocations whose complete steady-state member set is active<br />and admitted with usable backing capacity. Partially serving allocations do not count. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `desiredNativeMembers` _string array_ | desiredNativeMembers is the canonical durable assignment of exact identities to the desired<br />replica slots, not a projection of observed membership. Survivor recovery does not rewrite it. |  | items:MinLength: 1 <br />Optional: \{\} <br /> |
+| `desiredAssignmentGeneration` _integer_ | desiredAssignmentGeneration correlates the resolved assignment with a spec generation.<br />A superseded or unresolved target cannot be reported as reached from an older assignment. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `desiredNativeMemberCount` _integer_ | desiredNativeMemberCount is the cardinality of desiredNativeMembers. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `activeNativeMemberCount` _integer_ | activeNativeMemberCount counts exact members in the authoritative committed topology.<br />A partially serving allocation contributes only its active members, not one active replica. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `selector` _string_ | selector matches exactly one representative Pod for every allocated logical replica.<br />It represents allocation, not availability or engine admission. |  | Optional: \{\} <br /> |
+| `scaleUnit` _[EngineGroupScaleUnit](#enginegroupscaleunit)_ | scaleUnit names the logical unit counted by spec.replicas and status.replicas. |  | Enum: [replicas] <br />Optional: \{\} <br /> |
+| `profile` _[EngineGroupProfileStatus](#enginegroupprofilestatus)_ | profile is the immutable resolved mapping between logical replicas and physical capacity. |  | Optional: \{\} <br /> |
+| `topology` _[EngineGroupTopologyStatus](#enginegrouptopologystatus)_ | topology is the engine's current authoritative committed topology. |  | Optional: \{\} <br /> |
+| `lastStableReplicas` _integer_ | lastStableReplicas is the most recent allocation count that reached its desired target<br />without degradation. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `lastStableTopologyGeneration` _integer_ | lastStableTopologyGeneration identifies the exact last fully restored serving membership.<br />It distinguishes unexpected member loss from a planned change in allocation target. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `replicaStates` _[EngineGroupReplicaStatus](#enginegroupreplicastatus) array_ | replicaStates contains the stable identity and independently observed physical and engine<br />state of each known logical replica. |  | Optional: \{\} <br /> |
+| `traffic` _[EngineGroupTrafficStatus](#enginegrouptrafficstatus)_ | traffic is the runtime's authoritative routing and drain observation. |  | Optional: \{\} <br /> |
+| `releaseAuthorizations` _[EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization) array_ | releaseAuthorizations names the exact Pod UIDs that may be removed from stable replica slots. |  | Optional: \{\} <br /> |
+| `targetValidation` _[EngineGroupTargetValidationStatus](#enginegrouptargetvalidationstatus)_ | targetValidation describes a desired replica target rejected from reconciliation-time<br />profile or capability information. |  | Optional: \{\} <br /> |
+| `operation` _[EngineGroupOperationStatus](#enginegroupoperationstatus)_ | operation summarizes the current or most recent immutable membership operation.<br />It is a projection; the private controller checkpoint owns restart recovery. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | conditions contains the latest observations of group availability, progress, degradation,<br />target convergence, target validity, and topology authority. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentExperimentalSpec
@@ -2219,6 +2331,522 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `configMapRef` _[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)_ | configMapRef references a user-provided ConfigMap containing EPP<br />configuration. Mutually exclusive with `config`. |  | Optional: \{\} <br /> |
 | `config` _EndpointPickerConfig_ | config allows specifying EPP `EndpointPickerConfig` directly as a<br />structured object. The operator marshals this to YAML and creates a<br />ConfigMap automatically. Mutually exclusive with `configMapRef`. One of<br />`configMapRef` or `config` must be specified. |  | Type: object <br />Optional: \{\} <br /> |
+
+
+#### EngineGroupAllocationHealth
+
+_Underlying type:_ _string_
+
+EngineGroupAllocationHealth records allocation health without collapsing it into membership.
+
+_Validation:_
+- Enum: [Healthy Degraded Failed Unknown]
+
+_Appears in:_
+- [EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus)
+
+| Field | Description |
+| --- | --- |
+| `Healthy` |  |
+| `Degraded` |  |
+| `Failed` |  |
+| `Unknown` |  |
+
+
+#### EngineGroupCapacityRef
+
+
+
+EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+
+
+
+_Appears in:_
+- [EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization)
+- [EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus)
+- [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | name is the Pod name. |  | MinLength: 1 <br /> |
+| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ | uid is the concrete Pod incarnation and prevents name reuse from inheriting authority. |  |  |
+
+
+#### EngineGroupFailureClassification
+
+_Underlying type:_ _string_
+
+EngineGroupFailureClassification states whether reconciliation may retry the same external intent.
+
+_Validation:_
+- Enum: [Retryable Terminal]
+
+_Appears in:_
+- [EngineGroupFailureStatus](#enginegroupfailurestatus)
+
+| Field | Description |
+| --- | --- |
+| `Retryable` | EngineGroupFailureClassificationRetryable permits retrying the same intent.<br /> |
+| `Terminal` | EngineGroupFailureClassificationTerminal means the same intent cannot safely make progress.<br /> |
+
+
+#### EngineGroupFailureStatus
+
+
+
+EngineGroupFailureStatus is one structured subsystem or transition failure.
+
+
+
+_Appears in:_
+- [EngineGroupOperationStatus](#enginegroupoperationstatus)
+- [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `classification` _[EngineGroupFailureClassification](#enginegroupfailureclassification)_ | classification states whether the same external intent may be retried. |  | Enum: [Retryable Terminal] <br /> |
+| `reason` _string_ | reason is a stable machine-readable failure reason. |  | MinLength: 1 <br /> |
+| `message` _string_ | message explains the failure for a human reader. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupMemberStatus
+
+
+
+EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+
+
+
+_Appears in:_
+- [EngineGroupTopologyStatus](#enginegrouptopologystatus)
+- [EngineGroupTrafficStatus](#enginegrouptrafficstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicaID` _string_ | replicaID is the stable logical identity. |  | MinLength: 1 <br /> |
+| `nativeMembers` _[EngineGroupNativeMemberIncarnationStatus](#enginegroupnativememberincarnationstatus) array_ | nativeMembers correlates backend-native IDs with exact process lifetimes. Terminal traffic evidence may<br />retain several lifetimes of a reused native ID; committed topology must contain only its current lifetime. |  | MinItems: 1 <br /> |
+
+
+#### EngineGroupMemberTraffic
+
+_Underlying type:_ _string_
+
+EngineGroupMemberTraffic records per-member traffic evidence, independently of Pod readiness.
+
+_Validation:_
+- Enum: [Admitted Draining Drained Withdrawn Unknown]
+
+_Appears in:_
+- [EngineGroupNativeMemberStatus](#enginegroupnativememberstatus)
+
+| Field | Description |
+| --- | --- |
+| `Admitted` |  |
+| `Draining` |  |
+| `Drained` |  |
+| `Withdrawn` |  |
+| `Unknown` |  |
+
+
+#### EngineGroupNativeMemberIncarnationStatus
+
+
+
+EngineGroupNativeMemberIncarnationStatus binds one native ID to an independent process lifetime.
+
+
+
+_Appears in:_
+- [EngineGroupMemberStatus](#enginegroupmemberstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `id` _string_ | id is the engine-native member identity. |  | MinLength: 1 <br /> |
+| `runtimeIncarnation` _string_ | runtimeIncarnation changes on every restart of this member's process. |  | MinLength: 1 <br /> |
+
+
+#### EngineGroupNativeMemberStatus
+
+
+
+EngineGroupNativeMemberStatus records one engine-authoritative native member and its traffic evidence.
+
+
+
+_Appears in:_
+- [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `id` _string_ | id is a stable backend-native member identity. |  | MinLength: 1 <br /> |
+| `runtimeIncarnation` _string_ | runtimeIncarnation identifies the process to which membership and traffic evidence apply. |  | MinLength: 1 <br />Optional: \{\} <br /> |
+| `membership` _[EngineGroupReplicaMembership](#enginegroupreplicamembership)_ | membership distinguishes committed participation from masking or orchestration intent. |  | Enum: [Active Masked Joining Retiring Unknown] <br /> |
+| `traffic` _[EngineGroupMemberTraffic](#enginegroupmembertraffic)_ | traffic is admission or terminal drain evidence from the runtime traffic authority. |  | Enum: [Admitted Draining Drained Withdrawn Unknown] <br /> |
+
+
+#### EngineGroupOperationPhase
+
+_Underlying type:_ _string_
+
+EngineGroupOperationPhase summarizes progress without replacing engine transaction authority.
+
+_Validation:_
+- Enum: [Pending Submitting Committing Committed Failed Unknown Aborting Aborted]
+
+_Appears in:_
+- [EngineGroupOperationStatus](#enginegroupoperationstatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` | EngineGroupOperationPhasePending means preparatory capacity or traffic work remains.<br /> |
+| `Submitting` | EngineGroupOperationPhaseSubmitting means a durable membership target has no conclusive observation yet.<br /> |
+| `Committing` | EngineGroupOperationPhaseCommitting means the engine accepted its membership transition.<br /> |
+| `Committed` | EngineGroupOperationPhaseCommitted means membership committed; verification or admission may still remain.<br /> |
+| `Failed` | EngineGroupOperationPhaseFailed means a definitive failure blocks or rejects progress.<br /> |
+| `Unknown` | EngineGroupOperationPhaseUnknown means the membership outcome cannot be established conclusively.<br /> |
+| `Aborting` | EngineGroupOperationPhaseAborting means a provably uncommitted change is restoring preparatory state.<br /> |
+| `Aborted` | EngineGroupOperationPhaseAborted means preparatory state has been restored after rejection.<br /> |
+
+
+#### EngineGroupOperationStatus
+
+
+
+EngineGroupOperationStatus is a user-facing projection of one immutable membership operation.
+Recovery authority lives in the controller's private, versioned checkpoint, not this projection.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `id` _string_ | id identifies the same operation across retries and controller restarts. |  | MinLength: 1 <br /> |
+| `intent` _string_ | intent distinguishes planned growth, planned shrink, failure recovery, and deletion-driven retirement. |  | Enum: [Grow Shrink Recover Retire] <br /> |
+| `shape` _string_ | shape records the resolved backend operation semantics. |  | Enum: [Grow Retire ReduceToSurvivors Restore Remap] <br /> |
+| `specGeneration` _integer_ | specGeneration is the object generation from which this operation was planned.<br />It does not change when a newer scale target arrives. |  | Minimum: 1 <br /> |
+| `baseTopology` _[EngineGroupTopologyStatus](#enginegrouptopologystatus)_ | baseTopology is the exact committed membership from which the operation starts. |  |  |
+| `targetReplicas` _integer_ | targetReplicas is this operation's immutable logical allocation target.<br />It may differ from the latest spec.replicas while a multi-step resize progresses. |  | Minimum: 0 <br /> |
+| `joiningReplicas` _string array_ | joiningReplicas names logical allocations introduced or restored by this operation. |  | items:MinLength: 1 <br />Optional: \{\} <br /> |
+| `nominatedReplicas` _string array_ | nominatedReplicas names allocations selected for planned retirement or recovery. |  | items:MinLength: 1 <br />Optional: \{\} <br /> |
+| `targetNativeMembers` _string array_ | targetNativeMembers names the exact desired native membership for this operation. |  | items:MinLength: 1 <br />Optional: \{\} <br /> |
+| `queuedTargetReplicas` _integer_ | queuedTargetReplicas reports a newer absolute target without mutating the active plan. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `trafficRequirement` _[EngineGroupTrafficRequirement](#enginegrouptrafficrequirement)_ | trafficRequirement records whether retained members may keep serving during the change. |  | Enum: [KeepServing QuiesceGroup] <br /> |
+| `servingVerification` _[EngineGroupVerificationRequirement](#enginegroupverificationrequirement)_ | servingVerification records whether commit requires serving-progress proof before admission. |  | Enum: [None Required] <br /> |
+| `phase` _[EngineGroupOperationPhase](#enginegroupoperationphase)_ | phase summarizes membership and cross-subsystem progress, not a second transaction protocol. |  | Enum: [Pending Submitting Committing Committed Failed Unknown Aborting Aborted] <br /> |
+| `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | startedAt records when the immutable plan was persisted. |  |  |
+| `lastTransitionTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | lastTransitionTime changes only when phase changes. |  |  |
+| `committedTopology` _[EngineGroupTopologyStatus](#enginegrouptopologystatus)_ | committedTopology is the result correlated with this exact operation, when observed. |  | Optional: \{\} <br /> |
+| `verification` _[EngineGroupVerificationStatus](#enginegroupverificationstatus)_ | verification contains topology-bound serving evidence, independently from membership commit. |  | Optional: \{\} <br /> |
+| `error` _[EngineGroupFailureStatus](#enginegroupfailurestatus)_ | error is the current structured operation failure, if any. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupProfileStatus
+
+
+
+EngineGroupProfileStatus records immutable geometry and hard capability bounds resolved for a group.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `backend` _string_ | backend is the inference engine that owns native membership. |  | Enum: [sglang vllm trtllm] <br /> |
+| `fingerprint` _string_ | fingerprint identifies the immutable engine and workload geometry used by this group. |  | MinLength: 1 <br /> |
+| `gpusPerReplica` _integer_ | gpusPerReplica is the accelerator requirement of one logical replica. |  | Minimum: 1 <br /> |
+| `podsPerReplica` _integer_ | podsPerReplica is the number of physically disjoint capacity Pods allocated and released<br />together for one logical replica. |  | Minimum: 1 <br /> |
+| `nativeMembersPerReplica` _integer_ | nativeMembersPerReplica is the fixed steady-state member count per allocation.<br />Partial survival and advertised surge may temporarily change the active count. |  | Minimum: 1 <br /> |
+| `minSafeServingNativeMembers` _integer_ | minSafeServingNativeMembers is the lowest committed native-member count at which this profile may<br />continue serving while degraded or recovering. |  | Minimum: 1 <br /> |
+| `minSupportedReplicas` _integer_ | minSupportedReplicas is the hard lower bound for live membership operations other than terminal<br />group retirement. |  | Minimum: 1 <br /> |
+| `maxSupportedReplicas` _integer_ | maxSupportedReplicas is the hard upper bound for live membership operations. |  | Minimum: 1 <br /> |
+
+
+#### EngineGroupReleaseAuthorization
+
+
+
+EngineGroupReleaseAuthorization permits removal of only named concrete Pod incarnations.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `operationID` _string_ | operationID identifies the membership result authorizing release. |  | MinLength: 1 <br /> |
+| `topologyGeneration` _integer_ | topologyGeneration identifies the exact committed topology authorizing release. |  | Minimum: 1 <br /> |
+| `replicaID` _string_ | replicaID is the stable logical replica being released. |  | MinLength: 1 <br /> |
+| `slotID` _string_ | slotID is the stable workload-manager position being fenced. |  | MinLength: 1 <br /> |
+| `capacityRefs` _[EngineGroupCapacityRef](#enginegroupcapacityref) array_ | capacityRefs is the complete set of concrete Pod UIDs authorized for deletion. |  | MinItems: 1 <br /> |
+
+
+#### EngineGroupReplicaAllocationStatus
+
+
+
+EngineGroupReplicaAllocationStatus binds concrete capacity to independently observed health.
+
+
+
+_Appears in:_
+- [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `capacityRefs` _[EngineGroupCapacityRef](#enginegroupcapacityref) array_ | capacityRefs contains every concrete Pod incarnation in this replica allocation. |  | MinItems: 1 <br /> |
+| `availability` _[EngineGroupReplicaAvailability](#enginegroupreplicaavailability)_ | availability reports usable backing capacity for the members this allocation still serves.<br />Pod Ready is only an input; a degraded allocation may keep serving surviving members. |  | Enum: [Available Unavailable Unknown] <br /> |
+| `health` _[EngineGroupAllocationHealth](#enginegroupallocationhealth)_ | health records physical and runtime health independently of committed membership. |  | Enum: [Healthy Degraded Failed Unknown] <br /> |
+
+
+#### EngineGroupReplicaAvailability
+
+_Underlying type:_ _string_
+
+EngineGroupReplicaAvailability reports physical and runtime availability independently from membership.
+
+_Validation:_
+- Enum: [Available Unavailable Unknown]
+
+_Appears in:_
+- [EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus)
+
+| Field | Description |
+| --- | --- |
+| `Available` | EngineGroupReplicaAvailabilityAvailable means capacity is usable for the members it still backs.<br /> |
+| `Unavailable` | EngineGroupReplicaAvailabilityUnavailable means at least one required capacity or runtime check failed.<br /> |
+| `Unknown` | EngineGroupReplicaAvailabilityUnknown means availability cannot currently be established.<br /> |
+
+
+#### EngineGroupReplicaMembership
+
+_Underlying type:_ _string_
+
+EngineGroupReplicaMembership reports committed engine state or current orchestration intent.
+
+_Validation:_
+- Enum: [Active Masked Joining Retiring Unknown]
+
+_Appears in:_
+- [EngineGroupNativeMemberStatus](#enginegroupnativememberstatus)
+
+| Field | Description |
+| --- | --- |
+| `Active` | EngineGroupReplicaMembershipActive means the engine has committed this native member.<br /> |
+| `Masked` | EngineGroupReplicaMembershipMasked means the engine committed a topology excluding this member.<br /> |
+| `Joining` | EngineGroupReplicaMembershipJoining means orchestration intends this replica to join.<br /> |
+| `Retiring` | EngineGroupReplicaMembershipRetiring means orchestration intends this replica to leave.<br /> |
+| `Unknown` | EngineGroupReplicaMembershipUnknown means authoritative engine membership is unavailable.<br /> |
+
+
+#### EngineGroupReplicaStatus
+
+
+
+EngineGroupReplicaStatus preserves one stable logical identity across physical replacement.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicaID` _string_ | replicaID is stable across physical and runtime replacement. |  | MinLength: 1 <br /> |
+| `slotID` _string_ | slotID identifies the stable workload-manager position backing this replica. |  | MinLength: 1 <br /> |
+| `representativeRef` _[EngineGroupCapacityRef](#enginegroupcapacityref)_ | representativeRef identifies the Pod selected by status.selector for this allocation. |  | Optional: \{\} <br /> |
+| `currentAllocation` _[EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus)_ | currentAllocation is the allocation currently backing this stable replica slot. |  | Optional: \{\} <br /> |
+| `candidateAllocation` _[EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus)_ | candidateAllocation is the sole replacement being prepared for this replica.<br />A dormant candidate has no native identities until reuse is safe. A backend<br />advertising surge may temporarily assign it distinct members before promotion. |  | Optional: \{\} <br /> |
+| `nativeMembers` _[EngineGroupNativeMemberStatus](#enginegroupnativememberstatus) array_ | nativeMembers reports membership and traffic independently for every correlated member. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupScaleUnit
+
+_Underlying type:_ _string_
+
+EngineGroupScaleUnit names the logical unit exposed through the Scale subresource.
+
+_Validation:_
+- Enum: [replicas]
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description |
+| --- | --- |
+| `replicas` | EngineGroupScaleUnitReplicas means Scale counts logical engine replicas within one world.<br /> |
+
+
+#### EngineGroupScalingPolicy
+
+
+
+EngineGroupScalingPolicy defines operator-selected scaling bounds for one Engine Group.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupSpec](#dynamographdeploymentenginegroupspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `minReplicas` _integer_ | minReplicas is the minimum ordinary scaling target. Terminal group retirement is driven by<br />deletion and may retire membership below this bound without writing an out-of-policy target. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `maxReplicas` _integer_ | maxReplicas is the maximum target selected by policy. It cannot exceed the resolved hard<br />engine capability bound. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+
+
+#### EngineGroupServingProofStatus
+
+
+
+EngineGroupServingProofStatus binds successful verification to an immutable topology.
+
+
+
+_Appears in:_
+- [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `topologyGeneration` _integer_ | topologyGeneration identifies the verified topology. |  | Minimum: 1 <br /> |
+| `runtimeDigest` _string_ | runtimeDigest identifies the runtime-observed membership and serving path. |  | MinLength: 1 <br /> |
+| `observedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | observedAt records when serving progress was proven. |  |  |
+
+
+#### EngineGroupTargetValidationStatus
+
+
+
+EngineGroupTargetValidationStatus records a reconcile-time target rejection without silently
+changing the requested target.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `requestedReplicas` _integer_ | requestedReplicas is the rejected desired target. |  | Minimum: 0 <br /> |
+| `effectiveReplicas` _integer_ | effectiveReplicas is the last valid target still in force. |  | Minimum: 0 <br /> |
+| `minReplicas` _integer_ | minReplicas is the effective lower bound used for validation. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `maxReplicas` _integer_ | maxReplicas is the effective upper bound used for validation. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `reason` _string_ | reason is a stable machine-readable rejection reason. |  | MinLength: 1 <br /> |
+| `message` _string_ | message explains the rejection for a human reader. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupTopologyStatus
+
+
+
+EngineGroupTopologyStatus is one immutable engine-authoritative committed topology snapshot.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+- [EngineGroupOperationStatus](#enginegroupoperationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `generation` _integer_ | generation is the engine's topology generation. |  | Minimum: 1 <br /> |
+| `replicas` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | replicas is the complete logical-to-native membership mapping at this generation. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupTrafficRequirement
+
+_Underlying type:_ _string_
+
+EngineGroupTrafficRequirement describes the traffic boundary around membership mutation.
+
+_Validation:_
+- Enum: [KeepServing QuiesceGroup]
+
+_Appears in:_
+- [EngineGroupOperationStatus](#enginegroupoperationstatus)
+
+| Field | Description |
+| --- | --- |
+| `KeepServing` | EngineGroupTrafficRequirementKeepServing permits retained replicas to continue serving.<br /> |
+| `QuiesceGroup` | EngineGroupTrafficRequirementQuiesceGroup drains the complete base topology before mutation.<br /> |
+
+
+#### EngineGroupTrafficStatus
+
+
+
+EngineGroupTrafficStatus is the runtime's exact routing and terminal drain state.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `operationID` _string_ | operationID identifies the operation for which this observation was produced. |  | Optional: \{\} <br /> |
+| `topologyGeneration` _integer_ | topologyGeneration binds the observation to an exact committed topology. |  | Minimum: 1 <br /> |
+| `admitted` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | admitted is the exact set of member incarnations eligible for new work. |  | Optional: \{\} <br /> |
+| `draining` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | draining is the exact set of member incarnations whose in-flight work has not completed. |  | Optional: \{\} <br /> |
+| `drained` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | drained is durable terminal non-serving evidence for exact member incarnations. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupVerificationPhase
+
+_Underlying type:_ _string_
+
+EngineGroupVerificationPhase is the independent serving-verification state.
+
+_Validation:_
+- Enum: [Pending Passed Failed]
+
+_Appears in:_
+- [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` | EngineGroupVerificationPhasePending means a proof is required for the committed topology.<br /> |
+| `Passed` | EngineGroupVerificationPhasePassed means the exact topology produced serving progress.<br /> |
+| `Failed` | EngineGroupVerificationPhaseFailed means a conclusive serving check failed.<br /> |
+
+
+#### EngineGroupVerificationRequirement
+
+_Underlying type:_ _string_
+
+EngineGroupVerificationRequirement states whether commit needs a serving-progress proof.
+
+_Validation:_
+- Enum: [None Required]
+
+_Appears in:_
+- [EngineGroupOperationStatus](#enginegroupoperationstatus)
+
+| Field | Description |
+| --- | --- |
+| `None` | EngineGroupVerificationRequirementNone permits admission after authoritative membership commit.<br /> |
+| `Required` | EngineGroupVerificationRequirementRequired requires a matching serving proof before admission.<br /> |
+
+
+#### EngineGroupVerificationStatus
+
+
+
+EngineGroupVerificationStatus records serving progress independently from membership commit.
+
+
+
+_Appears in:_
+- [EngineGroupOperationStatus](#enginegroupoperationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `phase` _[EngineGroupVerificationPhase](#enginegroupverificationphase)_ | phase is the durable serving-verification state. |  | Enum: [Pending Passed Failed] <br /> |
+| `proof` _[EngineGroupServingProofStatus](#enginegroupservingproofstatus)_ | proof is a positive result bound to one immutable topology. |  | Optional: \{\} <br /> |
+| `failure` _[EngineGroupFailureStatus](#enginegroupfailurestatus)_ | failure is a conclusive verification failure. |  | Optional: \{\} <br /> |
 
 
 #### ExperimentalSpec
