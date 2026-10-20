@@ -265,6 +265,113 @@ instead, with curl directed to local `127.0.0.1:8080`.
 > still exposes the SSH daemon to the public internet. Rotate keys promptly and destroy the stack
 > when the environment is not in use.
 
+## Multi-cluster: Karmada and SIG Multicluster (MCS)
+
+A deployment with `multiCluster` set in `lib/const.ts` is ready for Karmada and the SIG
+Multicluster (MCS) API. Ohio is the Karmada hub (`aws-ohio`) and West is a member (`aws-west`).
+The member names match the Global Router's `site_id` values. For every such cluster, CDK:
+
+- adds an ingress rule from each peer VPC range to the EKS cluster security group. MCS
+  EndpointSlices list pod addresses, so callers in the other cluster connect to pods directly;
+- excludes the peer VPC ranges from source NAT in the VPC CNI (`aws-node`
+  `AWS_VPC_K8S_CNI_EXCLUDE_SNAT_CIDRS`), so traffic between the clusters keeps its pod address;
+- installs the MCS `ServiceExport` and `ServiceImport` CRDs (`crds/`, from Karmada 1.19.0);
+- in the hub only, installs the Karmada 1.19.0 control plane from the release Helm chart into
+  `karmada-system`, with every image pinned. Its API Service is an internal NLB on TCP 5443 that
+  only the configured member VPC ranges can reach, and its certificate covers
+  `*.elb.<region>.amazonaws.com`.
+
+Karmada's etcd uses `hostPath` storage, as `karmadactl init` does. If the etcd pod moves to
+another node, the members must register again.
+
+Deploy the hub first, then the members, then `deployment=both`:
+
+```bash
+pnpm exec cdk deploy -c deployment=ohio   # add the routerImage flags if the Router is deployed
+pnpm exec cdk deploy -c deployment=west
+pnpm exec cdk deploy --all -c deployment=both
+```
+
+### Let the bastions reach the other VPC
+
+The peering routes cover only the private subnets, so a bastion in a public subnet cannot reach
+the other VPC, including the Karmada API load balancer. Add each VPC's public route tables to
+`publicRouteTableIds` in `POC_PEERING_OHIO` and `POC_PEERING_WEST`, then deploy
+`deployment=both` again. Existing private routes keep their logical IDs. To find the IDs:
+
+```bash
+aws ec2 describe-route-tables --region us-east-2 \
+  --filters Name=vpc-id,Values=<vpc-id> Name=route.gateway-id,Values='igw-*' \
+  --query 'RouteTables[].RouteTableId' --output text
+```
+
+### Join the clusters to Karmada (Pull mode)
+
+Each member's `karmada-agent` dials the hub, so the hub never needs a member's private EKS API.
+The join uses a short-lived token from the hub, so it is a step after deployment, not a
+CloudFormation resource. Install `karmadactl` 1.19.0 on each bastion first:
+
+```bash
+curl -fLO https://github.com/karmada-io/karmada/releases/download/v1.19.0/karmadactl-linux-amd64.tgz
+tar xzf karmadactl-linux-amd64.tgz && sudo install -m 0755 karmadactl /usr/local/bin/
+```
+
+On the Ohio bastion, write the Karmada kubeconfig, point it at the load balancer, and create a
+join token. The `KarmadaKubeconfigCommand` and `KarmadaApiEndpointCommand` stack outputs print
+the first two commands:
+
+```bash
+kubectl get secret -n karmada-system karmada-kubeconfig -o jsonpath='{.data.kubeconfig}' | base64 -d > karmada-apiserver.config
+LB=$(kubectl get service -n karmada-system karmada-apiserver -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+kubectl config set-cluster karmada-apiserver --server "https://$LB:5443" --kubeconfig karmada-apiserver.config
+karmadactl token create --print-register-command --kubeconfig karmada-apiserver.config
+```
+
+On each cluster's bastion, Ohio included, register it under its `KarmadaMemberName` output.
+Use the load balancer name in place of the address that `token create` printed:
+
+```bash
+karmadactl register "$LB:5443" --token "<token>" --discovery-token-ca-cert-hash "<hash>" --cluster-name aws-west
+```
+
+Then, on the Ohio bastion, both members should be `Pull` and `Ready`:
+
+```bash
+kubectl --kubeconfig karmada-apiserver.config get clusters
+```
+
+### Export and import Services
+
+Create a Service and its `ServiceExport` directly in the cluster that runs the pods, not
+through Karmada propagation. Kubernetes copies a Service's labels onto its EndpointSlices, so a
+Service that Karmada propagates gives its slices Karmada's labels. In a test with Karmada 1.19.0,
+deleting the `ServiceExport` of such a Service also made `karmada-agent` delete the Service's
+EndpointSlice, and exporting it again found no slice until the Service changed.
+
+Karmada collects the EndpointSlices of every exported Service on its control plane as
+`imported-<cluster>-<slice>`. To use a Service from a cluster, create a `ServiceImport` on the
+Karmada control plane and propagate it there: that cluster gets a `derived-<service>` Service
+whose EndpointSlices list the pods of every exporting cluster, its own included.
+
+### Moving the current clusters to the CDK-managed Karmada
+
+The running clusters have a Karmada control plane that was installed by hand with
+`karmadactl init`. Helm cannot install over it, and the CDK-managed CRDs take over the ones that
+Karmada propagated. Before deploying `deployment=ohio` with `multiCluster`:
+
+1. Add the public route tables (above) and deploy `deployment=both`, so both bastions reach the
+   Karmada API.
+2. On each bastion, remove that cluster's agent. `karmadactl` reads the hub address from the
+   agent's own kubeconfig: `karmadactl unregister aws-west --cluster-kubeconfig ~/.kube/config`
+   on West, and the same with `aws-ohio` on Ohio.
+3. On the Ohio bastion, remove the control plane: `karmadactl deinit`, then
+   `kubectl delete namespace karmada-system`.
+4. In both clusters, delete what the old Karmada created: the `mcs-test` namespace, the
+   `derived-*` Services and their `imported-*` EndpointSlices, and in West the
+   Karmada-propagated `relay-mocker-west-1` Service and its `ServiceExport`.
+
+Then deploy as above and join the members again.
+
 ## Prerequisites
 
 - Node.js 20 or later
@@ -740,6 +847,9 @@ See:
 | `MOCKER_OHIO_1_DGD.mockerSpeedupRatio` | `1` | Simulated worker speed multiplier |
 | `US_EAST2_DEPLOYMENT.dgdPools` | `MOCKER_OHIO_1_POOL` | Infrastructure pools created by this deployment |
 | `US_EAST2_DEPLOYMENT.dgds` | `MOCKER_OHIO_1_DGD` | DGD workloads created by this deployment |
+| `US_EAST2_DEPLOYMENT.multiCluster.memberName` | `aws-ohio` | Karmada member name and Router site ID |
+| `US_EAST2_DEPLOYMENT.multiCluster.peerCidrs` | `10.43.0.0/16` | Peer VPCs whose pods may reach this cluster's pods |
+| `US_EAST2_DEPLOYMENT.multiCluster.karmadaControlPlane.version` | `1.19.0` | Karmada release installed in the hub |
 
 ## Destroy
 
