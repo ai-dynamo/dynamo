@@ -195,6 +195,27 @@ def test_unsupported_shape_is_explicit_and_has_no_wire_rows(tmp_path):
     assert not list(output.glob("*.oai.json"))
 
 
+def test_manifest_identifies_expected_released_core_not_measured_runtime(tmp_path):
+    output = tmp_path / "out"
+    manifest = generate_workloads(
+        output, FakeTokenizer(), "model", count=1, shapes=(Shape("tiny", choices=2),)
+    )
+    assert manifest["expected_decision_core"] == {
+        "package": "dynamo-decisions",
+        "version": "0.1.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "checksum": "a45fccc7c4e78332eca3b9d1580bed699db2dea71d0b67a6ae1232472dd6b71f",
+        "vcs_revision": "7c90d5616a40c34893f2b6dea2757a2a0be230ec",
+    }
+    assert (
+        manifest["frontend_crates_revision"]
+        == manifest["expected_decision_core"]["vcs_revision"]
+    )
+    assert manifest["core_provenance_scope"] == "expected_workload_profile"
+    assert "runtime_decision_core" not in manifest
+    assert json.loads((output / "manifest.json").read_text()) == manifest
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [{"target_tokens": 2049}, {"questions": 0}, {"choices": 1}, {"name": "../escape"}],

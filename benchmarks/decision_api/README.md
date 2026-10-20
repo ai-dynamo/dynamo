@@ -68,6 +68,8 @@ Set `DECISION_MODEL_SNAPSHOT` to the existing local model snapshot; generation i
 
 The base is approximately 256 rendered tokens, one question, and eight choices. One-factor variations target 1,024/1,536 tokens, 4/16 questions, and 2/32 choices, plus predicate, score, and mixed requests. Manifests contain actual per-question prompt lengths, expanded token work, label IDs, prompt/payload hashes, and explicit unsupported findings. The tokenizer must verify distinct single-token label suffixes at the actual answer position. There is no truncation or substitution. Native multi-question latency is unsupported because one native call cannot represent the frontend's question fan-out.
 
+The manifest's `expected_decision_core` identifies the workload profile's expected `dynamo-decisions` 0.1.0 release by Cargo registry source, archive checksum, and published VCS revision. The compatibility field `frontend_crates_revision` aliases that VCS revision; it is not the serving checkout's commit. `core_provenance_scope` labels both fields as `expected_workload_profile`, not measured runtime provenance. Workload generation does not inspect the server or prove which dependency it loaded. Preserve the serving build's resolved dependency and binding/build evidence separately with each measured series.
+
 For the pinned tokenizer, strict mixed-question and 32-choice/256-token shapes may be unsupported because their prompt overhead cannot meet the requested per-question range. Preserve those findings; a longer-input alternative is a separately named series, not a replacement baseline.
 
 ## Local serving and authorization

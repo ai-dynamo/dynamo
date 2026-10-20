@@ -23,7 +23,9 @@ from .rendering import (
 )
 
 MODEL_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
-CORE_REVISION = "6ce6582b25e78d8dd85b5f4e9dc107838217e1fa"
+CORE_REVISION = "7c90d5616a40c34893f2b6dea2757a2a0be230ec"
+CORE_VERSION = "0.1.0"
+CORE_CHECKSUM = "a45fccc7c4e78332eca3b9d1580bed699db2dea71d0b67a6ae1232472dd6b71f"
 DIALECTS = ("oai", "systemone")
 
 
@@ -322,6 +324,14 @@ def generate_workloads(
         "model": model,
         "model_revision": MODEL_REVISION,
         "frontend_crates_revision": CORE_REVISION,
+        "core_provenance_scope": "expected_workload_profile",
+        "expected_decision_core": {
+            "package": "dynamo-decisions",
+            "version": CORE_VERSION,
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "checksum": CORE_CHECKSUM,
+            "vcs_revision": CORE_REVISION,
+        },
         "prompt_format_version": 1,
         "seed": seed,
         "count": count,
