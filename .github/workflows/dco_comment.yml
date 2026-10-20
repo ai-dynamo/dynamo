@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   dco-comment:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Get DCO status
         id: dco
