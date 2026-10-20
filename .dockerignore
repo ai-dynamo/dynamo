@@ -95,3 +95,8 @@ docs/_build/
 # AI
 .cursor/
 .claude/
+
+# Local Global Router CDK dependencies and generated output.
+examples/global-router/cdk/node_modules/
+examples/global-router/cdk/dist/
+examples/global-router/cdk/cdk.out/
