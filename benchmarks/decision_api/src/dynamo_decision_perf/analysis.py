@@ -12,8 +12,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from aiperf.common.models.record_models import MetricRecordInfo, RawRecordInfo
 from pydantic import ValidationError
+
+from aiperf.common.models.record_models import MetricRecordInfo, RawRecordInfo
 
 from .contracts import DecisionContractError, validate_response
 

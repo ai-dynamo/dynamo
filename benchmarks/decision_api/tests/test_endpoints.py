@@ -6,7 +6,6 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from aiperf.common.models import TextResponse
 from dynamo_decision_perf.contracts import DecisionContractError
 from dynamo_decision_perf.endpoints import (
     NativeScoreEndpoint,
@@ -14,6 +13,8 @@ from dynamo_decision_perf.endpoints import (
     payload_hash,
 )
 from test_contracts import fixture, native_fixture
+
+from aiperf.common.models import TextResponse
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
@@ -173,8 +174,9 @@ def test_native_skips_nonterminal_but_requires_one_terminal():
 
 
 def test_decision_transport_omits_wire_request_id_only(monkeypatch):
-    from aiperf.transports.aiohttp_transport import AioHttpTransport
     from dynamo_decision_perf.transport import DecisionHttpTransport
+
+    from aiperf.transports.aiohttp_transport import AioHttpTransport
 
     original = {
         "X-Request-ID": "measurement-1",
