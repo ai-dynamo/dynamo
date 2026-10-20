@@ -54,6 +54,12 @@
 #     that dispatcher; SGLang divides the chunk across the DP ranks (1024 / 4 =
 #     256 tokens per rank) and nixl_ep aborts the process on any batch above the
 #     budget, so the default 8192-token chunk fails on the first real prompt.
+#   * A lenient liveness probe (below, on the worker container). The scale-up
+#     pauses serving for a few seconds while DeepGEMM recompiles for the new
+#     expert-group count; the operator's default probe kills the worker then.
+#   * --moe-dense-tp-size 1 on the primary and the joiner, as in SGLang's own
+#     scale test; with the dense MLP sharded over TP the joiner's first forward
+#     after admission fails (see the comment at the flag).
 #
 # The joining group is NOT launched by the operator yet (that orchestration is
 # tracked separately). The accompanying run_sglang_elastic_ep_scale_up_test.sh
@@ -124,6 +130,18 @@ spec:
           volumeMounts:
           - name: model-cache
             mountPath: /model-cache
+          # A scale-up pauses serving for a few seconds: the first forward at the
+          # new EP size JIT-compiles the DeepGEMM kernels for the new expert-group
+          # count, Dynamo's health check (3 s timeout) flips /live to 503 meanwhile,
+          # and the operator's default liveness probe (period 5 s, failureThreshold
+          # 3) kills the worker right after a successful scale. Tolerate it.
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 30
+            failureThreshold: 20
+            timeoutSeconds: 10
           command:
           - python3
           - -m
@@ -149,6 +167,13 @@ spec:
             - "4"
             - --enable-dp-attention
             - --enable-dp-lm-head
+            # Dense (non-MoE) MLP layers stay local to each DP rank, as in
+            # SGLang's own scale test. Without it the joiner's first forward
+            # after admission (an idle DP-attention batch) dies in
+            # fused_add_rmsnorm with "Mismatched mR.shape[0]" and the primary
+            # hangs on the lost ranks.
+            - --moe-dense-tp-size
+            - "1"
             # All-to-all + elastic-EP weight transfer backends.
             - --moe-a2a-backend
             - nixl

@@ -175,7 +175,7 @@ launch_joiner() {
       --model-path $MODEL_PATH \
       --trust-remote-code --skip-tokenizer-init --page-size 16 \
       --tp $join_gpus --dp $join_gpus \
-      --enable-dp-attention --enable-dp-lm-head \
+      --enable-dp-attention --enable-dp-lm-head --moe-dense-tp-size 1 \
       --moe-a2a-backend nixl --deepep-mode low_latency \
       --moe-runner-backend deep_gemm \
       --chunked-prefill-size 1024 \
