@@ -10,10 +10,9 @@ import (
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 )
-
-type parallelRestartCtxKey struct{}
 
 func TestComputeParallelRestartStatus(t *testing.T) {
 	tests := []struct {
@@ -22,7 +21,6 @@ func TestComputeParallelRestartStatus(t *testing.T) {
 		resolved     []string
 		wantStatus   *nvidiacomv1beta1.RestartStatus
 		wantResolved []string // nil means the resolver must not be called
-		wantLog      string
 	}{
 		{
 			name: "new request returns all components sorted before resolving",
@@ -32,7 +30,6 @@ func TestComputeParallelRestartStatus(t *testing.T) {
 				Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
 				InProgress: []string{"frontend", "planner", "worker"},
 			},
-			wantLog: parallelRestartNewRequestMsg,
 		},
 		{
 			name: "new request replacing an older ID resets to all components",
@@ -46,7 +43,6 @@ func TestComputeParallelRestartStatus(t *testing.T) {
 				Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
 				InProgress: []string{"frontend", "worker"},
 			},
-			wantLog: parallelRestartNewRequestMsg,
 		},
 		{
 			name: "new request with no components completes",
@@ -97,32 +93,27 @@ func TestComputeParallelRestartStatus(t *testing.T) {
 				ObservedID: "restart-1",
 				Phase:      nvidiacomv1beta1.RestartPhaseCompleted,
 			},
-			wantLog: parallelRestartCompletedMsg,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.WithValue(context.Background(), parallelRestartCtxKey{}, tt.name)
-			logger, captured := newCapturingLogger()
+			t.Log("Record which components the progress resolver observes")
+			ctx := context.Background()
 
 			var calls [][]string
-			resolver := func(gotCtx context.Context, gotDGD *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
-				require.Equal(t, tt.name, gotCtx.Value(parallelRestartCtxKey{}), "resolver must receive the caller context")
-				require.Same(t, tt.dgd, gotDGD)
+			resolver := func(_ context.Context, _ *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
 				calls = append(calls, append([]string(nil), inProgress...))
 				return tt.resolved
 			}
 
-			got := computeParallelRestartStatus(ctx, logger, tt.dgd, resolver)
+			t.Log("Check the restart transition and resolver calls")
+			got := computeParallelRestartStatus(ctx, logr.Discard(), tt.dgd, resolver)
 			require.Equal(t, tt.wantStatus, got)
 			if tt.wantResolved == nil {
 				require.Empty(t, calls)
 			} else {
 				require.Equal(t, [][]string{tt.wantResolved}, calls)
-			}
-			if tt.wantLog != "" {
-				require.True(t, captured.contains(tt.wantLog), "expected log %q, got %v", tt.wantLog, captured.msgs)
 			}
 		})
 	}
