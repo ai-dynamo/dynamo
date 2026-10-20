@@ -7,10 +7,15 @@ import type { Request } from "./adapter.js";
 
 export function helperClient(command: string, args: string[], env: NodeJS.ProcessEnv = {}) {
   if (!isAbsolute(command)) throw Error("helper_requires_absolute_executable");
-  return (request: Request, signal: AbortSignal): Promise<unknown> => new Promise((resolve, reject) => {
+  return (request: Request, signal: AbortSignal) => jsonProcess(command, args, env, request.budget.max_input_bytes, request.budget.max_output_bytes)(request, signal);
+}
+
+export function jsonProcess(command: string, args: string[], env: NodeJS.ProcessEnv, maxInputBytes: number, maxOutputBytes: number) {
+  if (!isAbsolute(command)) throw Error("helper_requires_absolute_executable");
+  return (request: unknown, signal: AbortSignal): Promise<unknown> => new Promise((resolve, reject) => {
     if (signal.aborted) return reject(Error("aborted"));
     const payload = JSON.stringify(request);
-    if (Buffer.byteLength(payload) > request.budget.max_input_bytes) return reject(Error("input_budget"));
+    if (Buffer.byteLength(payload) > maxInputBytes) return reject(Error("input_budget"));
     const child = spawn(command, args, { shell: false, env, stdio: ["pipe", "pipe", "ignore"] });
     const chunks: Buffer[] = [];
     let size = 0;
@@ -21,7 +26,7 @@ export function helperClient(command: string, args: string[], env: NodeJS.Proces
     child.on("error", () => { signal.removeEventListener("abort", abort); reject(Error("helper_unavailable")); });
     child.stdout.on("data", (chunk: Buffer) => {
       size += chunk.length;
-      if (size > request.budget.max_output_bytes) abort();
+      if (size > maxOutputBytes) abort();
       else chunks.push(chunk);
     });
     child.on("close", (code) => {

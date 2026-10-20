@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 This experimental, opt-in proof of concept exercises evidence selection through Dynamo's OpenAI-compatible `POST /v1/decisions`, summary generation, validation, and native Pi checkpoint adoption. It is a client of the Decision APIs, not another server endpoint. Pi owns the transcript, retained tail, active projection, and persistence. The implementation builds on the Decision API qualification stack; it adds no `nvext.format` selector or SGLang-native wire protocol.
 
 > [!IMPORTANT]
-> The CPU fixture demonstrates pipeline and harness correctness with deterministic model responses. It does not run a learned decision model, establish model quality or savings, qualify a real tokenizer, or enable unattended compaction of an existing user's session. Native Strands pointer-head execution and live Dynamo model qualification remain follow-up work.
+> The CPU fixture demonstrates pipeline and harness correctness with deterministic model responses. It does not establish model quality or savings or enable unattended compaction of an existing user's session. The separate live runner exercises a narrowly pinned Qwen3-0.6B profile against local Dynamo; a rejected candidate is a valid safety result, not successful checkpoint adoption. Native Strands pointer-head execution remains follow-up work.
 
 ## Run the offline POC
 
@@ -35,7 +35,31 @@ npm audit --audit-level=high
 
 The demo creates its own temporary synthetic Pi session, invokes the bounded Python helper in `fixture-sdk` mode, and removes that session afterward. The helper uses the real pinned OpenAI SDK with an in-memory HTTP transport: Decisions selection followed by generation-shaped compaction and verification replies. It never sends transcript data to a remote service or downloads model weights. The final record identifies fixture mode and reports persistence, restart, and the next actor payload separately from model-quality qualification. The isolated Python environment remains available for reruns.
 
-The helper accepts a versioned request on stdin and writes one bounded JSON result on stdout. `--mode fixture` is a simpler deterministic fixture; `--mode fixture-sdk` also exercises SDK serialization. `--mode model` deliberately rejects until a real model profile and exact counters are qualified. Do not install either fixture mode into a real user's session. The SDK client classes are integration building blocks, not an already-qualified live compaction deployment.
+The helper accepts a versioned request on stdin and writes one bounded JSON result on stdout. `--mode fixture` is a simpler deterministic fixture; `--mode fixture-sdk` also exercises SDK serialization. `--mode model` requires the explicitly pinned local profile, credentials and selection thresholds. It rejects unsupported aliases, tokenizer artifacts, context limits and server-reported token-count mismatches. Do not install either fixture mode into a real user's session. A passing live smoke test does not establish a production-qualified compaction policy.
+
+## Run the live smoke test
+
+Start the Decision API stack with SGLang 0.5.19, the local `Qwen/Qwen3-0.6B` snapshot `c1899de289a04d12100db370d81485cdf75e47ca`, an 8,192-token context, one rank and `--max-running-requests 1`. Disable overlap scheduling and CUDA graphs. Enable both public decision routes and ordinary chat generation. Do not replace the serving environment's OpenAI SDK; install `components/src/dynamo/compaction/requirements-live.txt` in the isolated client environment.
+
+Set the following variables to the explicit local client executable, tokenizer snapshot and API root. Supply `DYNAMO_COMPACTION_API_KEY` through your environment; do not put a credential in the example or evidence files.
+
+```bash
+export DYNAMO_COMPACTION_PYTHON="$COMPACTION_ENV/bin/python"
+export DYNAMO_COMPACTION_TOKENIZER="/absolute/path/to/c1899de289a04d12100db370d81485cdf75e47ca"
+export DYNAMO_COMPACTION_BASE_URL="http://127.0.0.1:8000/v1"
+export DYNAMO_COMPACTION_DECISION_MODEL="Qwen/Qwen3-0.6B"
+export DYNAMO_COMPACTION_GENERATION_MODEL="Qwen/Qwen3-0.6B"
+export DYNAMO_COMPACTION_CONTEXT_TOKENS=8192
+export DYNAMO_COMPACTION_OUTPUT_TOKENS=1024
+export DYNAMO_COMPACTION_MIN_PROBABILITY=0.9
+export DYNAMO_COMPACTION_MIN_CONFIDENCE=0.9
+cd examples/agents/decision_compaction/pi
+npm run live
+```
+
+The runner owns a new synthetic Pi session, uses actual model-backed actor requests, checks rendered prompt counts against server usage and invokes selection, generation and semantic validation. On acceptance it checks native checkpoint persistence, restart and continuation; on rejection it keeps the original context. Each attempt retains its evidence separately. Do not lower thresholds solely to obtain a passing run. This narrow text-only profile does not qualify tools, repeated compaction, other models or the separate Dynamo provider plugin.
+
+The [pinned lookski/OpenJev implementation](https://github.com/lookski/openjev/tree/49eb1382c88024e0f2550005264c13847d6ec167) can independently validate its `RemoteJev` client against Dynamo's `/v1/systemone` and compare `LocalJev` scoring against `/generate` with identical prompt and candidate token IDs. The Pi selector still uses the official OpenAI Decisions SDK. Dynamo runs its SGLang causal executor, not an embedded OpenJev server. Keep cross-runtime numerical comparisons separate from API and Pi lifecycle results.
 
 ## Architecture and boundaries
 

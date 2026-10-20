@@ -51,3 +51,12 @@ test("multiple tool calls are grouped once with out-of-order matching results", 
   assert.equal(JSON.parse(units[0].text).length, 3);
   assert.throws(() => sourceUnits([entry("calls", { ...assistant(""), content: calls }), result("one")]));
 });
+
+test("native Pi text system sections remain exact protected source records", () => {
+  const message = { role: "system", content: "", sections: { preamble: "Never deploy", cwd: "<cwd>/owned/session</cwd>" }, timestamp: 1 };
+  const units = sourceUnits([entry("system", message)]);
+  assert.equal(units[0].role, "system");
+  assert.equal(units[0].protected, true);
+  assert.deepEqual(JSON.parse(units[0].text), message);
+  assert.throws(() => sourceUnits([entry("system", { ...message, toolsAdded: [{ name: "unsupported" }] })]));
+});
