@@ -109,6 +109,20 @@ impl LowerTierIndexers {
         self.indexers.read().unwrap().values().cloned().collect()
     }
 
+    /// Physical lower tiers affected by this clear's independent lifetime.
+    pub fn for_clear(
+        &self,
+        source_tier: StorageTier,
+    ) -> Vec<Arc<ThreadPoolIndexer<LowerTierIndexer>>> {
+        self.indexers
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(tier, _)| source_tier.clear_affects_tier(**tier))
+            .map(|(_, indexer)| indexer.clone())
+            .collect()
+    }
+
     /// All currently allocated lower-tier indexers paired with the
     /// [`StorageTier`] each one indexes. Used by callers that need to retag
     /// per-tier dumps (e.g. peer-recovery).

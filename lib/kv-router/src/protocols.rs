@@ -908,6 +908,14 @@ impl<'de> Deserialize<'de> for WireResidencyDomain {
 pub struct UnsupportedResidencyDomain;
 
 impl StorageTier {
+    /// Whether a clear originating in this tier revokes `tier` residency.
+    /// Retained GPU memory has an independent lifetime from native execution
+    /// and the legacy CPU/disk reset cascade. Domain/rank scope is resolved
+    /// separately by the event owner.
+    pub fn clear_affects_tier(self, tier: Self) -> bool {
+        (self == Self::GpuDirect) == (tier == Self::GpuDirect)
+    }
+
     pub fn from_kv_medium(medium: &str) -> Option<Self> {
         match medium {
             "GPU" | "DEVICE" => Some(Self::Device),
@@ -1667,7 +1675,8 @@ impl RouterEvent {
         // stores or removes in Device.
         if domain == ResidencyDomain::CacheOwner
             && self.storage_tier.is_gpu()
-            && !matches!(self.event.data, KvCacheEventData::Cleared)
+            && (self.storage_tier == StorageTier::GpuDirect
+                || !matches!(self.event.data, KvCacheEventData::Cleared))
         {
             return Err(UnsupportedResidencyDomain);
         }
@@ -1698,14 +1707,14 @@ impl RouterEvent {
     }
 
     pub fn targets_primary(&self) -> Result<bool, UnsupportedResidencyDomain> {
+        self.resolved_residency_domain()?;
         if let Some(scope) = self.reset_scope()? {
             // Retained GPU storage is independent of the engine's Device
             // cache. Its explicit clear must never reset native execution
             // residency; legacy Device/CPU reset behavior remains unchanged.
-            return Ok(self.storage_tier != StorageTier::GpuDirect
+            return Ok(self.storage_tier.clear_affects_tier(StorageTier::Device)
                 && !matches!(scope, ResetScope::Domain(ResidencyDomain::CacheOwner)));
         }
-        self.resolved_residency_domain()?;
         Ok(self.storage_tier == StorageTier::Device)
     }
 }
@@ -3019,5 +3028,27 @@ mod tests {
             assert_eq!(event.reset_scope(), Ok(Some(ResetScope::All)));
 
         }
+    }
+
+    #[test]
+    fn retained_gpu_cache_owner_clear_is_rejected_but_legacy_domain_clear_survives() {
+        let clear = |tier| {
+            RouterEvent::with_residency_domain(
+                7,
+                KvCacheEvent {
+                    event_id: 1,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+                tier,
+                ResidencyDomain::CacheOwner,
+            )
+        };
+        assert!(clear(StorageTier::GpuDirect).targets_primary().is_err());
+        assert_eq!(clear(StorageTier::Device).targets_primary(), Ok(false));
+        assert_eq!(
+            clear(StorageTier::Device).reset_scope(),
+            Ok(Some(ResetScope::Domain(ResidencyDomain::CacheOwner)))
+        );
     }
 }

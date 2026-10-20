@@ -103,6 +103,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                                 event.dp_rank,
                                 residency_domain,
                                 EventDedupPolicy::RefCounted,
+                                storage_tier,
                             );
                             let applied = emit(
                                 &local_indexer,

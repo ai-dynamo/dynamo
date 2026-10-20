@@ -70,7 +70,16 @@ impl RankState {
     ) -> LiveEventAction {
         let event_id = event.event.event_id;
 
-        if matches!(event.reset_scope(), Ok(Some(ResetScope::All))) {
+        // A single tier's clear does not supersede independent retained GPU
+        // history. It is a live barrier only when every earlier event has
+        // already been admitted and no recovery is in flight.
+        if matches!(event.reset_scope(), Ok(Some(ResetScope::All)))
+            && !self.recovery_inflight
+            && matches!(
+                self.cursor.observe(event_id),
+                CursorObservation::Contiguous { .. }
+            )
+        {
             if self
                 .last_admitted_id()
                 .is_some_and(|last_admitted_id| event_id <= last_admitted_id)
@@ -315,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn only_all_domain_clear_supersedes_same_rank_gap_recovery() {
+    fn tier_clear_keeps_missing_independent_gpu_history_in_recovery() {
         let mut state = RankState::default();
         assert!(matches!(
             state.observe_live_event(store(1), false),
@@ -342,15 +351,35 @@ mod tests {
         clear.residency_domain = Default::default();
         assert!(matches!(
             state.observe_live_event(clear, true),
-            LiveEventAction::Clear { event_id: 6, .. }
+            LiveEventAction::Ignore
         ));
-        state.discard_recovery_before_clear();
-        state.commit_live_admission(6);
-
-        assert!(!state.recovery_inflight);
+        assert!(state.recovery_inflight);
+        assert_eq!(state.last_admitted_id(), Some(1));
+        assert_eq!(
+            state
+                .pending_live_events
+                .iter()
+                .map(|event| event.event.event_id)
+                .collect::<Vec<_>>(),
+            vec![4, 5, 6]
+        );
+        // Only a completed recovery can account for the missing GPU Stores or
+        // Removes before this native clear. Neither clear bypasses that replay.
+        assert_eq!(
+            state
+                .drain_advisory_tail_after(3)
+                .iter()
+                .map(|event| event.event.event_id)
+                .collect::<Vec<_>>(),
+            vec![4, 5, 6]
+        );
+        assert_eq!(state.last_admitted_id(), Some(6));
+        let mut contiguous_clear = store(7);
+        contiguous_clear.event.data = KvCacheEventData::Cleared;
+        contiguous_clear.residency_domain = Default::default();
         assert!(matches!(
-            state.observe_live_event(store(7), true),
-            LiveEventAction::Apply { event_id: 7, .. }
+            state.observe_live_event(contiguous_clear, true),
+            LiveEventAction::Clear { event_id: 7, .. }
         ));
     }
 }

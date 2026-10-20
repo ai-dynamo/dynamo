@@ -2263,6 +2263,67 @@ mod test_event_dedup_filter {
     }
 
     #[test]
+    fn tier_clear_preserves_independent_gpu_refcounts_and_gpu_clear_preserves_native() {
+        let mut filter = EventDedupFilter::new();
+        for tier in [
+            StorageTier::Device,
+            StorageTier::HostPinned,
+            StorageTier::GpuDirect,
+        ] {
+            for _ in 0..2 {
+                filter.track_store(0, tier, &store_data(&[1]));
+            }
+        }
+        filter.clear_rank_domain(
+            0,
+            ResidencyDomain::Worker,
+            EventDedupPolicy::RefCounted,
+            StorageTier::Device,
+        );
+        assert!(
+            filter
+                .filter_remove(0, StorageTier::Device, remove_data(&[1]))
+                .is_some()
+        );
+        assert!(
+            filter
+                .filter_remove(0, StorageTier::HostPinned, remove_data(&[1]))
+                .is_some()
+        );
+        assert!(
+            filter
+                .filter_remove(0, StorageTier::GpuDirect, remove_data(&[1]))
+                .is_none()
+        );
+        assert!(
+            filter
+                .filter_remove(0, StorageTier::GpuDirect, remove_data(&[1]))
+                .is_some()
+        );
+        for tier in [StorageTier::Device, StorageTier::GpuDirect] {
+            for _ in 0..2 {
+                filter.track_store(0, tier, &store_data(&[2]));
+            }
+        }
+        filter.clear_rank_domain(
+            0,
+            ResidencyDomain::Worker,
+            EventDedupPolicy::RefCounted,
+            StorageTier::GpuDirect,
+        );
+        assert!(
+            filter
+                .filter_remove(0, StorageTier::GpuDirect, remove_data(&[2]))
+                .is_some()
+        );
+        assert!(
+            filter
+                .filter_remove(0, StorageTier::Device, remove_data(&[2]))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn mixed_blocks_in_single_remove() {
         let mut filter = EventDedupFilter::new();
 

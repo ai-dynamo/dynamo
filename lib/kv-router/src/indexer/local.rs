@@ -344,8 +344,8 @@ impl LocalKvIndexer {
     ///
     /// - `Events`: Buffered events with original IDs through the current buffered tail,
     ///   plus the buffered `last_event_id`. If the buffered suffix contains an all-domain
-    ///   `Cleared` event, events before the last such clear may be omitted because it supersedes
-    ///   every residency owned by this rank publisher.
+    ///   `Cleared` event, earlier events may be omitted only if this publisher has never
+    ///   indexed independent retained GPU residency; native clears cannot supersede that tier.
     /// - `TreeDump`: Full tree dump with synthetic IDs and the worker's latest real event ID (when range is too old or unspecified)
     /// - `TooNew`: Error when requested range is newer than available data
     /// - `InvalidRange`: Error when end_id < start_id
@@ -478,7 +478,19 @@ impl LocalKvIndexer {
             Ok(idx) => idx,
             Err(insertion_point) => insertion_point,
         };
-        let response_start_idx = Self::buffer_response_start_idx(buffer, start_idx);
+        // A native clear no longer supersedes independent retained GPU state.
+        // Read this registry while the recovery lock is held: any GPU event
+        // already in the journal registered its tier before being recorded.
+        let gpu_direct_seen = self
+            .lower_tier_indexers
+            .lock()
+            .unwrap()
+            .contains_key(&StorageTier::GpuDirect);
+        let response_start_idx = if gpu_direct_seen {
+            start_idx
+        } else {
+            Self::buffer_response_start_idx(buffer, start_idx)
+        };
         let events = buffer.iter().skip(response_start_idx).cloned().collect();
 
         DumpPlan::Immediate(WorkerKvQueryResponse::Events {
@@ -492,10 +504,11 @@ impl LocalKvIndexer {
             .iter()
             .skip(start_idx)
             .rposition(|event| {
-                matches!(
-                    event.reset_scope(),
-                    Ok(Some(crate::protocols::ResetScope::All))
-                )
+                event.storage_tier != StorageTier::GpuDirect
+                    && matches!(
+                        event.reset_scope(),
+                        Ok(Some(crate::protocols::ResetScope::All))
+                    )
             })
             .map_or(start_idx, |idx| start_idx + idx)
     }
@@ -682,10 +695,7 @@ impl LocalKvIndexer {
                 let indexers = self.lower_tier_indexers.lock().unwrap();
                 indexers
                     .iter()
-                    .filter(|(tier, _)| {
-                        (**tier == StorageTier::GpuDirect)
-                            == (event.storage_tier == StorageTier::GpuDirect)
-                    })
+                    .filter(|(tier, _)| event.storage_tier.clear_affects_tier(**tier))
                     .map(|(_, indexer)| indexer.clone())
                     .collect()
             };
@@ -1327,6 +1337,91 @@ mod tests {
         assert_eq!(
             lower_tier_hits(&indexer, StorageTier::GpuDirect, 11, 1, 2000, 22),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn native_clear_recovery_retains_independent_gpu_history_and_replays_it() {
+        let make = || {
+            LocalKvIndexer::new(
+                CancellationToken::new(),
+                4,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+                16,
+            )
+        };
+        let source = make();
+        source
+            .apply_event_with_buffer(lower_tier_store_event(
+                11,
+                0,
+                1,
+                1000,
+                21,
+                201,
+                StorageTier::GpuDirect,
+            ))
+            .await
+            .unwrap();
+        source
+            .apply_event_with_buffer(lower_tier_store_event(
+                11,
+                0,
+                2,
+                1000,
+                21,
+                201,
+                StorageTier::HostPinned,
+            ))
+            .await
+            .unwrap();
+        source
+            .apply_event_with_buffer(RouterEvent::with_storage_tier(
+                11,
+                KvCacheEvent {
+                    event_id: 3,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+                StorageTier::Device,
+            ))
+            .await
+            .unwrap();
+        let WorkerKvQueryResponse::Events { events, .. } =
+            source.get_events_in_id_range(Some(1), None).await
+        else {
+            panic!("retained buffer should replay exact history");
+        };
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event.event_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        let receiver = make();
+        for event in events {
+            receiver.apply_event_with_buffer(event).await.unwrap();
+        }
+        receiver.dump_events().await.unwrap();
+        assert_eq!(
+            lower_tier_hits(&receiver, StorageTier::GpuDirect, 11, 0, 1000, 21),
+            1
+        );
+        assert_eq!(
+            lower_tier_hits(&receiver, StorageTier::HostPinned, 11, 0, 1000, 21),
+            0
+        );
+        let WorkerKvQueryResponse::TreeDump { events, .. } =
+            source.get_events_in_id_range(None, None).await
+        else {
+            panic!("full snapshot required");
+        };
+        assert!(
+            events
+                .iter()
+                .any(|event| event.storage_tier == StorageTier::GpuDirect
+                    && matches!(event.event.data, KvCacheEventData::Stored(_)))
         );
     }
 }
