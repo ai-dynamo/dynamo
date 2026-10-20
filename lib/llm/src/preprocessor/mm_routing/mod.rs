@@ -9,6 +9,7 @@
 #![cfg_attr(not(feature = "media-ffmpeg"), allow(dead_code))]
 
 mod config;
+pub(super) mod glm5_next;
 pub mod image;
 pub(super) mod nemotron;
 mod qwen3;
