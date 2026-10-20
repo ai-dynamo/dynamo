@@ -91,8 +91,7 @@ func ApplyRestoreCandidateMetadata(annotations map[string]string, checkpointInfo
 }
 
 // RemoveRestoreCandidateMetadata deletes Dynamo's private restore-candidate
-// handoff annotations. Rendering and restore admission share it; it leaves the
-// standalone Snapshot annotations untouched.
+// handoff annotations and leaves the standalone Snapshot annotations untouched.
 func RemoveRestoreCandidateMetadata(annotations map[string]string) {
 	delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
 	delete(annotations, commonconsts.CheckpointNameAnnotation)
