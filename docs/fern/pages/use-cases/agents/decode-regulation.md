@@ -171,15 +171,18 @@ The worker's `/metrics` endpoint exposes the same counts, labeled by `model` and
 
 ## Measured Effect
 
-Measured so far with coding agents only. MiniMax-M2 on 4 H200 GPUs (tensor parallelism 4, FP8 KV cache), 24 Claude Code agents on 64 SWE-bench Verified tasks, and one interactive request every 2 s on average with `max_tokens` 64. Deadline: 500 ms plus 18.48 ms per token after the first.
+Measured so far with coding agents only. MiniMax-M2 on 4 H200 GPUs (tensor parallelism 4, FP8 KV cache), 24 or 28 Claude Code agents on 64 SWE-bench Verified tasks, and one interactive request every 2 s on average with `max_tokens` 64. Deadline: 500 ms plus 18.48 ms per token after the first. Regulation used `DYN_DECODE_REGULATION_MODE=class_blind` and `DYN_DECODE_REGULATION_DEADLINE=500,18.48`.
 
-| Configuration (runs) | Interactive requests on deadline | Agent tasks per hour | Agent task time, p90 |
-|---|---|---|---|
-| Stock vLLM (6) | 34% | 226 | 9.9 min |
-| vLLM `--scheduling-policy priority` (1) | 24% | 203 | 9.6 min |
-| `DYN_DECODE_REGULATION_MODE=class_blind`, `DYN_DECODE_REGULATION_DEADLINE=500,18.48` (2) | 94% | 273 | 7.0 min |
+| Agents | Configuration (runs) | Interactive requests on deadline | Agent tasks per hour | Agent task time, p90 |
+|---|---|---|---|---|
+| 24 | Stock vLLM (6) | 34% | 226 | 9.9 min |
+| 24 | vLLM `--scheduling-policy priority` (1) | 24% | 203 | 9.6 min |
+| 24 | Decode regulation (2) | 94% | 273 | 7.0 min |
+| 28 | Stock vLLM (4) | 25% | 232 | 9.8 min |
+| 28 | vLLM `--scheduling-policy priority` (1) | 17% | 184 | 13.2 min |
+| 28 | Decode regulation (2) | 92% | 242 | 8.1 min |
 
-Regulation deferred 4.6% of agent decode steps. Stock runs varied by up to 20% in tasks per hour and 1.5× in task p90 between identical runs, so the agent differences are within run-to-run noise.
+Regulation deferred 4.6% of agent decode steps at 24 agents and 8.2% at 28. Stock runs varied by up to 25% in tasks per hour and 1.6× in task p90 between identical runs, so the agent differences are within run-to-run noise.
 
 Two choices matter for the agents' cost. A fixed per-token target (`DYN_DECODE_REGULATION_DEADLINE` unset) protects every step as if an interactive request were about to miss: in an earlier version it reached 97% on deadline but cut agent throughput to 173 tasks per hour, with a 14.0 min task p90. An earlier version that also regulated agents while no interactive request was running deferred 20% of agent decode steps instead of 4.6%.
 
