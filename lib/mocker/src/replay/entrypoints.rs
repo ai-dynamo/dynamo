@@ -2592,6 +2592,8 @@ mod tests {
                 session_id: "request_1".to_string(),
                 first_arrival_timestamp_ms,
                 turns: vec![TurnTrace {
+                    // This fixture represents a trace row without an authored session.
+                    synthetic_session_id: true,
                     input_length: 4,
                     max_output_tokens: 1,
                     hash_ids: vec![1],

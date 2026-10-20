@@ -12,6 +12,12 @@ subtitle: Install and compose Planner, Router, and Dynamo Replay with AISimulate
 AISimulate's Sweeper core does not depend on Dynamo. Dynamo owns its optional Planner and Router
 sweep configuration providers and `DynamoReplayRunnerFactory`.
 
+AISimulate owns its conversation-aware simulation and calls the independently installed
+Dynamo runtime policy API from [Dynamo #16854](https://github.com/ai-dynamo/dynamo/pull/16854).
+The Dynamo runner described here is an optional downstream
+integration; upgrading its AISimulate dependency is not a prerequisite for AISimulate
+AgentX acceptance. No Dynamo Router implementation is bundled into the AISimulate wheel.
+
 ## Install
 
 AISimulate requires Python 3.11 through 3.13.
@@ -54,8 +60,10 @@ aisimulate predict --stack dynamo --config prediction.yaml
 aisimulate recommend --stack dynamo --config recommendation.yaml
 ```
 
-The `--stack` option defaults to `engine`. Without `--stack dynamo`, top-level `router` and
-`planner` sections have no matching adapter and fail configuration resolution.
+The `--stack` option defaults to `engine`. Its built-in `engine.router` adapter supports
+fixed routing configuration, including conversation affinity, through the separately installed
+Dynamo policy API. Select `--stack dynamo` for the Planner, router parameter search, or a
+custom AIS prefill-load estimator. The top-level `planner` section requires that Dynamo stack.
 
 The `ai-dynamo` distribution registers:
 
