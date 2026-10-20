@@ -87,8 +87,6 @@ node holds the remaining TP ranks.
 
 ### Multi-Node DP
 
-The sidecar forwards the selected attention-DP rank to OpenEngine when the
-server advertises rank targeting. KV routing requires a TensorRT-LLM build
-with native KVCM2 event streaming and routing load support.
+The sidecar forwards the selected attention-DP rank to OpenEngine for KV-aware routing.
 
 ![TensorRT-LLM data parallelism across two nodes. Only the leader sidecar serves requests: the Dynamo Frontend router picks a DP rank and sends requests over the request plane to the node 0 Dynamo Sidecar, which registers DP ranks 0-3 and calls its local TensorRT-LLM over native gRPC.](../../../../../../assets/img/sidecar-trtllm-multinode-dp.svg)
