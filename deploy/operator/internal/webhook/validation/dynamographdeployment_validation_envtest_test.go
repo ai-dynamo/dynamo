@@ -26,6 +26,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
@@ -76,11 +77,51 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	}{
 		// Baseline create-path rules.
 		{
-			name: "engineGroup creation config is explicit but its workload pathway remains gated",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{InitialSize: 2}
+			name:       "DGD creates a supported SGLang Engine Group through Grove",
+			deployment: betaEngineGroupDGDForAdmission(nil),
+		},
+		{
+			name:            "Engine Groups cannot silently use the non-Grove pathway",
+			groveDisabled:   true,
+			deployment:      betaEngineGroupDGDForAdmission(nil),
+			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: Engine Groups require the DGD Grove workload pathway"},
+		},
+		{
+			name: "Engine Group admission requires the implemented SGLang backend",
+			deployment: betaEngineGroupDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = "vllm"
 			}),
-			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: DGD-driven Engine Group creation is not implemented; use a standalone DynamoGraphDeploymentEngineGroup for the gated proof of concept"},
+			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: the implemented Engine Group runtime requires backendFramework sglang"},
+		},
+		{
+			name: "Engine Group world count cannot be scaled before outer lifecycle support",
+			deployment: betaEngineGroupDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Replicas = k8sptr.To(int32(2))
+			}),
+			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: Engine Group components require one independent worker world"},
+		},
+		{
+			name:          "Engine Group component launch configuration cannot roll healthy peers",
+			oldDeployment: betaEngineGroupDGDForAdmission(nil),
+			deployment: betaEngineGroupDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Image = "registry.example/engine-group:1.2.0"
+			}),
+			wantWebhookErrs: []string{"spec.components[1]: Forbidden: Engine Group component configuration is immutable; scale the child Engine Group instead"},
+		},
+		{
+			name:          "frontend replica scaling leaves the immutable Engine Group declaration intact",
+			oldDeployment: betaEngineGroupDGDForAdmission(nil),
+			deployment: betaEngineGroupDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.GetComponentByName("frontend").Replicas = k8sptr.To(int32(2))
+			}),
+		},
+		{
+			name:          "graph launch environment cannot change under a live Engine Group",
+			oldDeployment: betaEngineGroupDGDForAdmission(nil),
+			deployment: betaEngineGroupDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Env = append(dgd.Spec.Env, corev1.EnvVar{Name: "LAUNCH_SETTING", Value: "changed"})
+			}),
+			wantWebhookErrs: []string{"spec: Forbidden: Engine Group backend, launch environment, provider overrides and restart are immutable until coordinated world rollout is implemented"},
 		},
 		{
 			name: "initialSize must satisfy the template policy independently of world count",
@@ -3406,6 +3447,23 @@ func betaWorkerComponent(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
 	return dgd.GetComponentByName("worker")
+}
+
+func betaEngineGroupDGDForAdmission(mutate func(*nvidiacomv1beta1.DynamoGraphDeployment)) *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := betaDGDForAdmission(nil)
+	dgd.Spec.BackendFramework = "sglang"
+	worker := betaWorkerComponent(dgd)
+	worker.Replicas = k8sptr.To(int32(1))
+	worker.EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{InitialSize: 2}
+	worker.PodTemplate.Spec.RestartPolicy = corev1.RestartPolicyNever
+	main := &worker.PodTemplate.Spec.Containers[0]
+	main.Command = []string{"python3", "-m", dynamo.SGLangElasticEPBootstrapModule}
+	main.Args = []string{"--model-path", "model", "--tp", "2", "--dp", "2", "--nnodes", "2", "--moe-dense-tp-size", "1", "--enable-dp-attention", "--enable-dp-lm-head", "--elastic-ep-backend", "mooncake", "--moe-a2a-backend", "nixl", "--elastic-ep-initial-size", "2", "--max-ep-size", "3", "--load-balance-method", "round_robin", "--disable-cuda-graph"}
+	main.Resources.Limits = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}
+	if mutate != nil {
+		mutate(dgd)
+	}
+	return dgd
 }
 
 func setBetaExplicitMultinodeRoles(

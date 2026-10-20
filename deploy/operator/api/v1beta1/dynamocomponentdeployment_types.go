@@ -148,8 +148,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// engineGroup opts a DGD component into independently resizable engine worlds.
 	// Component replicas then count worlds, not allocations inside a world. Each new
 	// group's spec.replicas is seeded from initialSize and subsequently scaled independently.
-	// DGD-driven Engine Group creation is not enabled yet; admission rejects this
-	// block until that workload pathway is implemented. Standalone DCDs cannot use it.
+	// The Grove pathway supports one growth-only SGLang world per component.
+	// Standalone DCDs cannot use this block.
 	// +optional
 	EngineGroup *ComponentEngineGroupSpec `json:"engineGroup,omitempty"`
 
@@ -370,7 +370,7 @@ func (s *DynamoComponentDeploymentSharedSpec) IsGroveScalingGroupForced() bool {
 // UsesPCSG reports whether Grove renders this component as a
 // PodCliqueScalingGroup rather than a standalone PodClique.
 func (s *DynamoComponentDeploymentSharedSpec) UsesPCSG() bool {
-	return s.GetNumberOfNodes() > 1 || s.IsInterPodGMSEnabled() || s.IsGroveScalingGroupForced()
+	return s.EngineGroup != nil || s.GetNumberOfNodes() > 1 || s.IsInterPodGMSEnabled() || s.IsGroveScalingGroupForced()
 }
 
 // IsInterPodFailoverEnabled reports whether inter-pod GMS failover is configured.

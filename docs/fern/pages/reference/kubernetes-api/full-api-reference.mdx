@@ -2688,7 +2688,7 @@ replicas is the desired number of Pods for an ordinary component. For an engineG
 </ParamField>
 
 <ParamField path="engineGroup" type="ComponentEngineGroupSpec">
-engineGroup opts a DGD component into independently resizable engine worlds. Component replicas then count worlds, not allocations inside a world. Each new group's spec.replicas is seeded from initialSize and subsequently scaled independently. DGD-driven Engine Group creation is not enabled yet; admission rejects this block until that workload pathway is implemented. Standalone DCDs cannot use it.
+engineGroup opts a DGD component into independently resizable engine worlds. Component replicas then count worlds, not allocations inside a world. Each new group's spec.replicas is seeded from initialSize and subsequently scaled independently. The Grove pathway supports one growth-only SGLang world per component. Standalone DCDs cannot use this block.
 See [ComponentEngineGroupSpec](#componentenginegroupspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2803,7 +2803,7 @@ replicas is the desired number of Pods for an ordinary component. For an engineG
 </ParamField>
 
 <ParamField path="engineGroup" type="ComponentEngineGroupSpec">
-engineGroup opts a DGD component into independently resizable engine worlds. Component replicas then count worlds, not allocations inside a world. Each new group's spec.replicas is seeded from initialSize and subsequently scaled independently. DGD-driven Engine Group creation is not enabled yet; admission rejects this block until that workload pathway is implemented. Standalone DCDs cannot use it.
+engineGroup opts a DGD component into independently resizable engine worlds. Component replicas then count worlds, not allocations inside a world. Each new group's spec.replicas is seeded from initialSize and subsequently scaled independently. The Grove pathway supports one growth-only SGLang world per component. Standalone DCDs cannot use this block.
 See [ComponentEngineGroupSpec](#componentenginegroupspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

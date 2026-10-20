@@ -1264,6 +1264,8 @@ func expandRolesForComponent(componentName string, componentReplicas *int32, num
 	isMultinode := numberOfNodes > 1
 
 	switch {
+	case component.EngineGroup != nil:
+		return []ServiceRole{{Name: componentName, Role: RoleMain, Replicas: component.EngineGroup.InitialSize}}
 	case isMultinode && isInterPodGMS:
 		return expandMultinodeGMSRoles(componentName, numberOfNodes, component.GetTotalEnginePods())
 	case isMultinode:
@@ -2385,6 +2387,11 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	if p.isMultinode && !p.isInterPodFailover {
 		minAvailable = p.r.Replicas
 	}
+	// The growth-only world must gang-admit every initial allocation together.
+	if p.component.EngineGroup != nil {
+		minAvailable = p.component.EngineGroup.InitialSize
+		podSpec.RestartPolicy = corev1.RestartPolicyNever
+	}
 	replicas := p.r.Replicas
 	// if checkpoint is enabled and not ready, set replicas to 0
 	// to prevent the engine clique from being scheduled
@@ -2418,6 +2425,11 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate labels: %w", err)
 	}
 	clique.Labels = labels
+	// A single member clique belongs to one world and supplies its Scale representatives.
+	if p.component.EngineGroup != nil {
+		clique.Labels[commonconsts.KubeLabelDynamoEngineGroup] = EngineGroupNameForComponent(p.dynamoDeployment.Name, p.componentName, 0)
+		clique.Labels[commonconsts.KubeLabelDynamoScaleRepresentative] = commonconsts.KubeLabelDynamoScaleRepresentativeYes
+	}
 	if p.isInterPodFailover && p.r.Role != RoleGMS {
 		clique.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = commonconsts.KubeLabelValueTrue
 	}
@@ -2622,6 +2634,22 @@ func GenerateGrovePodCliqueSet(
 	for i := range dynamoDeployment.Spec.Components {
 		component := dynamoDeployment.Spec.Components[i].DeepCopy()
 		componentName := component.ComponentName
+		// Validate the opt-in before emitting any capacity, without applying legacy node-count geometry.
+		if component.EngineGroup != nil {
+			if dynamoDeployment.Spec.ProviderOverride != nil {
+				return nil, fmt.Errorf("Engine Group workload overrides cannot bypass the resolved launch profile")
+			}
+			if dynamoDeployment.Spec.BackendFramework != string(BackendFrameworkSGLang) {
+				return nil, fmt.Errorf("Engine Group workloads require backendFramework sglang")
+			}
+			if _, err := ResolveComponentEngineGroupProfile(component); err != nil {
+				return nil, fmt.Errorf("component %q: %w", componentName, err)
+			}
+			if updateStrategy != nil && *updateStrategy != grovev1alpha1.OnDeleteStrategy {
+				return nil, fmt.Errorf("Engine Group workloads require the Grove OnDelete update strategy")
+			}
+			gangSet.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: grovev1alpha1.OnDeleteStrategy}
+		}
 		dynamoNamespace := GetDynamoNamespace(dynamoDeployment, component)
 
 		propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
