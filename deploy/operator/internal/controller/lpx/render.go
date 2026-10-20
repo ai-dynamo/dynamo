@@ -65,8 +65,13 @@ func (r *graphReconciler) resolveWorkloads(
 		groups    = lpx.ComponentGroups(dgd)
 	)
 
+	registry := r.modelRegistry
+	if !adoptBuildCheckpoints(r.config.Infrastructure.ModelExpressURL, deployment) {
+		registry = lpx.WithoutBuildCheckpoints(registry)
+	}
+
 	for _, groupName := range slices.Sorted(maps.Keys(groups)) {
-		workload, err := lpx.ResolveWorkload(ctx, r.Client, dgd, groups[groupName], r.modelRegistry)
+		workload, err := lpx.ResolveWorkload(ctx, r.Client, dgd, groups[groupName], registry)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -392,4 +397,25 @@ func newClientIdentitySecret(namespace, name string) (*corev1.Secret, error) {
 			"private.key.pub": sshPub,
 		},
 	}, nil
+}
+
+// markBuildCheckpointAdoption records that new input adopts hybrid builds' own
+// checkpoints. The record is the checkpointDownload status, which persists the
+// decision while build downloads hold rendering across reconciles that each
+// advance observedGeneration. Without Model Express, build checkpoints are
+// ignored. A running deployment without a record keeps its workload across an
+// operator-only upgrade. deployment is non-nil.
+func markBuildCheckpointAdoption(modelExpressURL string, deployment *v1alpha1.LPXGraphDeployment) {
+	if modelExpressURL == "" || deployment.Status.CheckpointDownload != nil ||
+		deployment.Generation == deployment.Status.ObservedGeneration {
+		return
+	}
+	deployment.Status.CheckpointDownload = &v1alpha1.CheckpointDownloadStatus{}
+}
+
+// adoptBuildCheckpoints reports whether hybrid builds' own checkpoints reach the
+// Cyborg conductor: Model Express is configured and the deployment records
+// adoption. deployment is non-nil.
+func adoptBuildCheckpoints(modelExpressURL string, deployment *v1alpha1.LPXGraphDeployment) bool {
+	return modelExpressURL != "" && deployment.Status.CheckpointDownload != nil
 }
