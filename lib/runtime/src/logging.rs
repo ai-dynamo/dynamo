@@ -3777,13 +3777,11 @@ pub mod tests {
             .unwrap();
             assert!(traces.ca_pem.is_none());
             assert!(traces.client_identity.is_none());
-            // Plain http:// stays plaintext — no TLS override.
             assert!(
                 build_tonic_tls_config("http://localhost:4317", &traces)
                     .unwrap()
                     .is_none()
             );
-            // But https:// always gets webpki-root TLS even without user material.
             assert!(
                 build_tonic_tls_config("https://collector:4317", &traces)
                     .unwrap()
@@ -3930,8 +3928,6 @@ pub mod tests {
                 // Smoke test via Debug formatting because tonic does not expose
                 // identity/cert fields publicly.
                 let debug = format!("{tls:?}");
-                // Both halves must be observable — dropping either ca_certificate
-                // or identity from build_tonic_tls_config must fail this test.
                 assert!(
                     debug.contains("identity: Some"),
                     "expect a set identity in {debug}"
