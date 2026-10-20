@@ -233,10 +233,24 @@ class TestAddArgument:
         )
 
         assert parser.parse_args([]).percentiles == expected
-        assert parser.parse_args(["--percentiles", "10", "90"]).percentiles == [
-            10.0,
-            90.0,
-        ]
+
+    def test_list_default_with_typed_items_cli_overrides_env(self, monkeypatch):
+        """Test CLI values still take precedence over a typed list env value."""
+        monkeypatch.setenv("TEST_PERCENTILES", "25 75")
+        parser = argparse.ArgumentParser()
+
+        add_argument(
+            parser,
+            flag_name="--percentiles",
+            env_var="TEST_PERCENTILES",
+            default=[50.0],
+            help="Percentiles",
+            arg_type=float,
+            nargs="+",
+        )
+
+        args = parser.parse_args(["--percentiles", "10", "90"])
+        assert args.percentiles == [10.0, 90.0]
 
 
 class TestAddNegatableBool:
