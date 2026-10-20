@@ -877,6 +877,8 @@ mod parser_env_tests {
         ) {
             return;
         }
+        let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy_port = busy.local_addr().unwrap().port().to_string();
         // Each case sets one variable over a valid TCP configuration.
         let mut cases = vec![
             (
@@ -903,6 +905,16 @@ mod parser_env_tests {
             (
                 "DYN_TCP_RESPONSE_STREAM_HOST",
                 "192.0.2.1",
+                "Failed to pre-bind TCP listener",
+            ),
+            (
+                "DYN_VELO_RESPONSE_PORT",
+                "invalid",
+                "DYN_VELO_RESPONSE_PORT",
+            ),
+            (
+                "DYN_VELO_RESPONSE_PORT",
+                busy_port.as_str(),
                 "Failed to pre-bind TCP listener",
             ),
             // Velo has no TLS, so TLS settings must not be silently ignored.

@@ -906,12 +906,18 @@ pub mod response_plane {
     /// worker misses three to four heartbeats. Must be positive. Set on the
     /// frontend; workers follow it. Read once when the service starts.
     pub const DYN_VELO_RESPONSE_HEARTBEAT_MS: &str = "DYN_VELO_RESPONSE_HEARTBEAT_MS";
+    /// TCP port of the Velo response listener. Every Velo process, workers
+    /// included, opens one, and frontends connect to the workers' listeners as
+    /// well as workers to the frontends'. Only one process per IP address can
+    /// use a given port. If unset or 0, the OS assigns a free ephemeral port.
+    pub const DYN_VELO_RESPONSE_PORT: &str = "DYN_VELO_RESPONSE_PORT";
 }
 
 /// TCP request callback listener environment variables. Names are retained for compatibility.
 pub mod tcp_response_stream {
     /// Port shared by the TCP request callback and QUIC response listeners.
-    /// If unset or 0, the OS assigns a free ephemeral port.
+    /// If unset or 0, the OS assigns a free ephemeral port. Velo responses
+    /// use `DYN_VELO_RESPONSE_PORT` instead.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
 
     /// Listen backlog of the TCP response stream (CallHome) listener. Defaults to
@@ -1268,6 +1274,7 @@ mod tests {
             response_plane::DYN_VELO_RESPONSE_TRANSPORT,
             response_plane::DYN_VELO_RESPONSE_BATCH_MS,
             response_plane::DYN_VELO_RESPONSE_HEARTBEAT_MS,
+            response_plane::DYN_VELO_RESPONSE_PORT,
             request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
             request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE,
             request_plane::DYN_TCP_RPC_HOST,

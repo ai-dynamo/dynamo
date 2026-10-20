@@ -171,6 +171,18 @@ pub(crate) fn reject_tls_settings() -> Result<()> {
     Ok(())
 }
 
+fn response_port() -> Result<u16> {
+    use crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_PORT;
+
+    match std::env::var(DYN_VELO_RESPONSE_PORT) {
+        Err(std::env::VarError::NotPresent) => Ok(0),
+        Ok(value) => value.parse::<u16>().map_err(|_| {
+            anyhow::anyhow!("{DYN_VELO_RESPONSE_PORT} must be a port number from 0 to 65535")
+        }),
+        Err(error) => bail!("{DYN_VELO_RESPONSE_PORT}: {error}"),
+    }
+}
+
 fn tcp_transport(address: SocketAddr) -> Result<velo::transports::tcp::TcpTransport> {
     velo::transports::tcp::TcpTransportBuilder::new()
         .bind_addr(address)
@@ -467,7 +479,11 @@ impl VeloResponseService {
             Some(host) => crate::utils::ip_resolver::resolve_host_or_interface(&host, &resolver)?,
             None => crate::utils::ip_resolver::resolve_local_host(&resolver)?,
         };
-        Self::new(transport, SocketAddr::new(host.advertise_ip(), 0)).await
+        Self::new(
+            transport,
+            SocketAddr::new(host.advertise_ip(), response_port()?),
+        )
+        .await
     }
 
     async fn new(transport: ResponseTransport, address: SocketAddr) -> Result<Arc<Self>> {
@@ -1199,6 +1215,32 @@ mod tests {
         velo::transports::utils::interfaces::parse_endpoints(&entry).unwrap()[0]
             .socket_addr()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn configured_port_binds_the_listener() {
+        // Bound and released, so the port is very likely still free.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+            .to_string();
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::configured_port_binds_the_listener"),
+            &[
+                ("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1"),
+                ("DYN_VELO_RESPONSE_PORT", &port),
+            ],
+        ) {
+            return;
+        }
+        let service = VeloResponseService::from_env().await.unwrap();
+        assert_eq!(
+            tcp_address(&service).port().to_string(),
+            std::env::var("DYN_VELO_RESPONSE_PORT").unwrap()
+        );
+        service.shutdown().await;
     }
 
     /// A service built on an External runtime holds only a `Handle`, so its
