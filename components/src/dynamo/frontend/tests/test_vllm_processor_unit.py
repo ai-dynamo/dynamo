@@ -3076,7 +3076,6 @@ def test_parallel_tool_calls_survive_split_start_marker(tokenizer):
 
 
 def test_tool_call_opener_split_at_reasoning_end(tokenizer):
-    """The step that ends reasoning can stop partway through the opener."""
     split = _GLM_TWO_CALLS.index("</think>") + len("</think><tool")
     _assert_two_glm_calls_streamed(
         tokenizer,
