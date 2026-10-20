@@ -123,8 +123,8 @@ Once requests work, you can cut latency and raise throughput for image
 workloads. [VLM Performance Optimization](vlm-performance-optimization.md) shows
 where a request spends its time and when each feature helps:
 
-- [Multimodal KV routing](vlm-performance-optimization.md#multimodal-kv-routing): send repeated images to the worker that already holds their KV cache.
-- [Frontend media decoding](vlm-performance-optimization.md#frontend-media-decoding): decode images in the Rust frontend.
-- [Shared image cache](vlm-performance-optimization.md#shared-image-cache): reuse downloaded image bytes across workers.
-- [Embedding cache](vlm-performance-optimization.md#embedding-cache): skip the vision encoder for images it has seen.
-- [Encoder disaggregation](vlm-performance-optimization.md#encoder-disaggregation): scale vision encoders separately from LLM workers.
+- [Multimodal KV routing](vlm-performance-optimization/multimodal-kv-routing.md): send repeated images to the worker that already holds their KV cache.
+- [Frontend media decoding](vlm-performance-optimization/frontend-media-decoding.md): decode images in the Rust frontend.
+- [Shared image cache](vlm-performance-optimization/shared-image-cache.md): reuse downloaded image bytes across workers.
+- [Embedding cache](vlm-performance-optimization/embedding-cache.md): skip the vision encoder for images it has seen.
+- [Encoder disaggregation](vlm-performance-optimization/encoder-disaggregation.md): scale vision encoders separately from LLM workers.

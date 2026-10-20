@@ -75,7 +75,7 @@ flowchart TD
   `<|image_pad|>` are frequently declared only in `tokenizer_config.json`. Requests still complete,
   and per-image token metrics remain available when the model is supported by the image-token
   counter; routing falls back to text-prefix overlap. See
-  [Multimodal KV Routing](../../../../use-cases/image-understanding/vlm-performance-optimization.md#multimodal-kv-routing).
+  [Multimodal KV Routing](../../../../use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md).
 - Has no effect on TikToken-format tokenizers (`.model` / `.tiktoken` files), which always use the TikToken backend.
 - Dedicated vLLM embedding workers let vLLM tokenize raw text by default. When [`--embedding-frontend-tokenization`](../../../../reference/backends/vllm-configuration.mdx) is enabled, raw-text requests use a request-specific Dynamo tokenizer. The request's `add_special_tokens` value overrides `DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS`; the default is `true`. For `tokenizer.json` models, `true` selects HuggingFace while `false` follows the configured backend selection shown above. TikToken artifacts always use TikToken, and token-ID inputs bypass frontend tokenization.
 

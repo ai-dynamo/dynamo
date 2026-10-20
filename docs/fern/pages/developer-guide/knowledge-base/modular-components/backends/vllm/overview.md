@@ -93,7 +93,7 @@ vLLM offers the broadest feature coverage in Dynamo, with full support for disag
 | **Speculative Decoding** | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | — | ✅ | — |
 
 > **Notes:**
-> 1. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported in the documented vLLM paths. The default Rust frontend path supports model families handled by `llm-multimodal`; the Python chat-processor path delegates to vLLM's multimodal processor. ([Source](../../../../../use-cases/image-understanding/vlm-performance-optimization.md#multimodal-kv-routing))
+> 1. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported in the documented vLLM paths. The default Rust frontend path supports model families handled by `llm-multimodal`; the Python chat-processor path delegates to vLLM's multimodal processor. ([Source](../../../../../use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md))
 > 2. **KV-Aware LoRA Routing**: vLLM supports routing requests based on LoRA adapter affinity.
 > 3. **Audio Support**: vLLM supports audio models like Qwen2-Audio (experimental). ([Source](multimodal.md))
 > 4. **Video Support**: vLLM supports video input with frame sampling. ([Source](multimodal.md))

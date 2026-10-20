@@ -50,7 +50,7 @@ register_model(
 > **Requires GPU node**: The frontend must run on a node with GPU access. During media processing, decoded tensors are written to GPU memory via NIXL, which requires `libcuda.so.1` to be available. Running the frontend on a CPU-only node will fail with something like: `add UCX backend to media-loader NIXL agent: No UCX plugin found`.
 
 > [!NOTE]
-> **NIXL progress thread**: `DYN_MM_NIXL_PROGRESS_DELAY_US` sets how long the progress thread of the frontend's NIXL agent sleeps between polls (default 1000 µs). `0` trades one CPU core per agent for lower read latency over TCP. See [NIXL Progress Thread](../../../../../docs/fern/pages/use-cases/image-understanding/vlm-performance-optimization.md#frontend-media-decoding) for the trade-off.
+> **NIXL progress thread**: `DYN_MM_NIXL_PROGRESS_DELAY_US` sets how long the progress thread of the frontend's NIXL agent sleeps between polls (default 1000 µs). `0` trades one CPU core per agent for lower read latency over TCP. See [NIXL Progress Thread](../../../../../docs/fern/pages/use-cases/image-understanding/vlm-performance-optimization/frontend-media-decoding.md) for the trade-off.
 
 > [!WARNING]
 > **Video decoding**: Video decoding needs to be enabled via the `dynamo-llm/media-ffmpeg` rust feature. The following ffmpeg dynamic libraries must be available on the system: `libavcodec`, `libavdevice`, `libavfilter`, `libavformat`, `libswresample`, `libswscale`. These are available in dynamo dockerfiles rendered with `enable_media_ffmpeg` set to true in `container/context.yaml`.

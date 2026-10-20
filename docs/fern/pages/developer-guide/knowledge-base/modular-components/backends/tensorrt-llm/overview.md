@@ -62,7 +62,7 @@ The matrix below shows which TensorRT-LLM feature pairs are validated to work to
 
 > **Notes:**
 > 1. **Multimodal Disaggregation**: Supports **EP/D** (Traditional) and **E/P/D** (Full Disaggregation) image flows, including image URLs and pre-computed embeddings. ([Source](multimodal.md))
-> 2. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported through the dedicated TRT-LLM MM Router Worker. It requires KV event publishing on the TRT-LLM workers. ([Source](../../../../../use-cases/image-understanding/vlm-performance-optimization.md#multimodal-kv-routing))
+> 2. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported through the dedicated TRT-LLM MM Router Worker. It requires KV event publishing on the TRT-LLM workers. ([Source](../../../../../use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md))
 > 3. **Request Cancellation**: Due to known issues, the TensorRT-LLM engine is temporarily not notified of request cancellations, meaning allocated resources for cancelled requests are not freed.
 
 ## Prerequisites

@@ -139,7 +139,7 @@ Prefer upgrading to 0.5.13 or later instead of patching an installed package.
 
 Enable `DYN_LOG=info,mm_routing=debug` to inspect media-token counts, multimodal hashes, the video processor contract, and the selected worker's overlap. A repeated request should select the same worker with high block overlap.
 
-For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/image-understanding/vlm-performance-optimization.md#multimodal-kv-routing).
+For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md).
 
 ## Use the Latest Release
 

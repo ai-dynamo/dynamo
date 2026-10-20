@@ -755,8 +755,21 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/image-understanding/overview.md
-          - page: VLM Performance Optimization
+          - section: VLM Performance Optimization
+            collapsed: true
+            slug: vlm-performance-optimization
             path: pages/use-cases/image-understanding/vlm-performance-optimization.md
+            contents:
+              - page: Multimodal KV Routing
+                path: pages/use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md
+              - page: Frontend Media Decoding
+                path: pages/use-cases/image-understanding/vlm-performance-optimization/frontend-media-decoding.md
+              - page: Shared Image Cache
+                path: pages/use-cases/image-understanding/vlm-performance-optimization/shared-image-cache.md
+              - page: Embedding Cache
+                path: pages/use-cases/image-understanding/vlm-performance-optimization/embedding-cache.md
+              - page: Encoder Disaggregation
+                path: pages/use-cases/image-understanding/vlm-performance-optimization/encoder-disaggregation.md
           - page: Custom Vision Encoders
             path: pages/use-cases/image-understanding/custom-vision-encoders.md
 

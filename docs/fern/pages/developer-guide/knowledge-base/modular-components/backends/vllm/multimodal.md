@@ -136,7 +136,7 @@ This launcher sets `--dyn-chat-processor vllm`. The frontend runs vLLM's Hugging
 
 If a client supplies opaque multimodal UUIDs, Dynamo cannot derive a matching content hash. Those requests use text-prefix routing.
 
-For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/image-understanding/vlm-performance-optimization.md#multimodal-kv-routing).
+For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md).
 
 ## Image/Video Serving
 

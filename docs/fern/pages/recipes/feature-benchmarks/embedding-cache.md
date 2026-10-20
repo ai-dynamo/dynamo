@@ -9,7 +9,7 @@ subtitle: Throughput and TTFT gains from caching vision-encoder embeddings on a 
 
 This page reports the performance impact of Dynamo's multimodal frontend-decoding and embedding cache on a repeated-image workload, measured against a vanilla `vllm serve` baseline.
 
-For the feature itself — what the embedding cache is, support across backends (vLLM / TRT-LLM / SGLang), aggregated vs disaggregated workflows, and how to enable it — see [Embedding Cache](../../use-cases/image-understanding/vlm-performance-optimization.md#embedding-cache).
+For the feature itself — what the embedding cache is, support across backends (vLLM / TRT-LLM / SGLang), aggregated vs disaggregated workflows, and how to enable it — see [Embedding Cache](../../use-cases/image-understanding/vlm-performance-optimization/embedding-cache.md).
 
 ## Recipe
 

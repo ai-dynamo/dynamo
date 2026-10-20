@@ -5,7 +5,7 @@ title: Exact Video KV Routing
 subtitle: Route repeated video to the worker that already holds its KV cache
 ---
 
-Exact video KV routing extends [Multimodal KV Routing](../image-understanding/vlm-performance-optimization.md#multimodal-kv-routing)
+Exact video KV routing extends [Multimodal KV Routing](../image-understanding/vlm-performance-optimization/multimodal-kv-routing.md)
 to video input. The frontend decodes and samples each video, computes a stable
 identity for it, and reproduces the worker's video token layout, so the KV router
 can credit cached video blocks when it picks a worker.
@@ -25,7 +25,7 @@ The selected worker receives the same per-video hash, and its KV events use that
 
 ## Launch
 
-Exact video routing requires [frontend decoding](../image-understanding/vlm-performance-optimization.md#frontend-media-decoding)
+Exact video routing requires [frontend decoding](../image-understanding/vlm-performance-optimization/frontend-media-decoding.md)
 (`--frontend-decoding`) on the worker.
 
 <Tabs>

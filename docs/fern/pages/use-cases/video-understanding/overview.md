@@ -124,6 +124,6 @@ Video requests share most of their performance features with image requests.
 shows where a request spends its time and when each feature helps. The ones that
 apply to video:
 
-- [Frontend media decoding](../image-understanding/vlm-performance-optimization.md#frontend-media-decoding): decode VP8/VP9 video in the Rust frontend.
-- [Embedding cache](../image-understanding/vlm-performance-optimization.md#embedding-cache): skip the vision encoder for clips it has seen.
-- [Multimodal KV routing](../image-understanding/vlm-performance-optimization.md#multimodal-kv-routing) and [Exact Video KV Routing](exact-video-kv-routing.md): send repeated clips to the worker that already holds their KV cache.
+- [Frontend media decoding](../image-understanding/vlm-performance-optimization/frontend-media-decoding.md): decode VP8/VP9 video in the Rust frontend.
+- [Embedding cache](../image-understanding/vlm-performance-optimization/embedding-cache.md): skip the vision encoder for clips it has seen.
+- [Multimodal KV routing](../image-understanding/vlm-performance-optimization/multimodal-kv-routing.md) and [Exact Video KV Routing](exact-video-kv-routing.md): send repeated clips to the worker that already holds their KV cache.
