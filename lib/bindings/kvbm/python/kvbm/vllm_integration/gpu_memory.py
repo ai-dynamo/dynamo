@@ -13,6 +13,7 @@ import json
 import os
 import stat
 import tempfile
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -99,6 +100,8 @@ class GPUCacheRegion:
         self.path = region_path(engine_id)
         self.path.mkdir(mode=0o700)
         self.metadata = export_ipc(self.tensor)
+        self._local_export_consumed = False
+        self._local_export_lock = threading.Lock()
         self._closed = False
         fd = os.open(
             self.path / "ipc.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
@@ -110,18 +113,39 @@ class GPUCacheRegion:
     def __len__(self):
         return self.shape[0]
 
+    def consume_local_export(self):
+        with self._local_export_lock:
+            self._consume_local_export()
+
+    def _consume_local_export(self):
+        if self._local_export_consumed:
+            return
+        # reduce_tensor creates one producer reference for a future importer.
+        # UniProcExecutor already owns the storage, so balance that unused
+        # reference just as PyTorch's cached-storage rebuild branch does.
+        torch.storage.TypedStorage._release_ipc_counter(
+            base64.b64decode(self.metadata["ref_handle"], validate=True),
+            self.metadata["ref_offset"],
+            device=self.tensor.device.index,
+        )
+        self._local_export_consumed = True
+        # This export has been consumed locally and cannot also serve an IPC
+        # worker. The TP1 worker keeps using the original allocation.
+        (self.path / "ipc.json").unlink()
+
     def cleanup(self):
-        # Retain the tensor until the owning process exits: imported worker
-        # views may outlive connector shutdown, even after all DMA has drained.
+        # The caller has drained local/native work. Local views own their
+        # storage; PyTorch's IPC references retain it for external consumers.
+        # Keeping the producer Tensor until static allocator teardown would
+        # instead leave its IPC bookkeeping alive past the owning singleton.
         if self._closed:
             return
         self._closed = True
-        _RETAINED_GPU_REGIONS.append(self)
         (self.path / "ipc.json").unlink(missing_ok=True)
         self.path.rmdir()
+        self.tensor = None
 
 
-_RETAINED_GPU_REGIONS: list[GPUCacheRegion] = []
 _OWNED_GPU_REGIONS: dict[Path, GPUCacheRegion] = {}
 
 
@@ -133,6 +157,7 @@ def open_region(engine_id: str, shape: tuple[int, int], timeout: float = 30):
             raise ValueError("Local GPU cache owner has a different or closed layout")
         # UniProcExecutor runs the model worker and scheduler in one process.
         # CUDA forbids importing an IPC handle exported by that same process.
+        owned.consume_local_export()
         return owned.tensor
     path = directory / "ipc.json"
     deadline = time.monotonic() + timeout
@@ -269,3 +294,7 @@ class GPUCacheWorker(OffloadingWorker):
     def shutdown(self):
         for handler in self.handlers or ():
             handler.shutdown()
+        # A failed handler shutdown retains its views above. Once all CUDA
+        # events have drained, release imported/local views before IPC teardown.
+        self.handlers = None
+        self.region = None

@@ -125,6 +125,28 @@ def test_gpu_reset_does_not_release_native_owned_slots():
 
 
 @pytest.mark.gpu_0
+def test_failed_native_shutdown_preserves_primary_gpu_owner():
+    manager = GPUTieringManager.__new__(GPUTieringManager)
+    manager._gpu_lock = threading.RLock()
+    manager._gpu_stop = threading.Event()
+    manager._gpu_thread = SimpleNamespace(
+        join=lambda **kwargs: None, is_alive=lambda: False
+    )
+    released = []
+    manager.primary_tier = SimpleNamespace(shutdown=lambda: released.append(True))
+
+    def failed_shutdown():
+        raise RuntimeError("native transfer has not quiesced")
+
+    manager.secondary_tiers = [
+        SimpleNamespace(tier_type="gpu_kvcr", shutdown=failed_shutdown)
+    ]
+    with pytest.raises(RuntimeError, match="not quiesced"):
+        manager.shutdown()
+    assert released == []
+
+
+@pytest.mark.gpu_0
 def test_gpu_reset_revokes_published_keys_and_drops_unpublished_stores():
     spec = SimpleNamespace(
         num_chunks=4,
@@ -217,7 +239,12 @@ def test_ipc_rejects_different_geometry_before_touching_cuda():
 def test_uniprocess_worker_uses_owned_gpu_storage_without_self_ipc(monkeypatch):
     engine_id = f"uniprocess-test-{uuid.uuid4()}"
     tensor = object()
-    owner = SimpleNamespace(shape=(8, 384), tensor=tensor, _closed=False)
+    owner = SimpleNamespace(
+        shape=(8, 384),
+        tensor=tensor,
+        _closed=False,
+        consume_local_export=lambda: None,
+    )
     monkeypatch.setitem(
         gpu_memory._OWNED_GPU_REGIONS, gpu_memory.region_path(engine_id), owner
     )
@@ -227,6 +254,38 @@ def test_uniprocess_worker_uses_owned_gpu_storage_without_self_ipc(monkeypatch):
     owner._closed = True
     with pytest.raises(ValueError, match="closed"):
         gpu_memory.open_region(engine_id, (8, 384))
+
+
+@pytest.mark.gpu_1
+def test_local_cuda_owner_balances_unused_ipc_export_once(monkeypatch):
+    engine_id = f"local-ipc-refcount-{uuid.uuid4()}"
+    region = GPUCacheRegion(engine_id, 4, 256)
+    released = []
+    original = torch.storage.TypedStorage._release_ipc_counter
+
+    def release(*args, **kwargs):
+        original(*args, **kwargs)
+        released.append((args, kwargs))
+
+    monkeypatch.setattr(
+        torch.storage.TypedStorage, "_release_ipc_counter", staticmethod(release)
+    )
+    try:
+        alias = gpu_memory.open_region(engine_id, region.shape)
+        assert alias is region.tensor
+        assert gpu_memory.open_region(engine_id, region.shape) is region.tensor
+        assert len(released) == 1
+        assert not (region.path / "ipc.json").exists()
+        region.tensor.fill_(29)
+        assert bool(torch.all(region.tensor == 29).item())
+        region.cleanup()
+        assert region.tensor is None
+        # A local worker alias retains its own storage after the closed native
+        # endpoint drops the primary owner. No payload crosses host memory.
+        alias.fill_(31)
+        assert bool(torch.all(alias == 31).item())
+    finally:
+        region.cleanup()
 
 
 @pytest.mark.gpu_1
