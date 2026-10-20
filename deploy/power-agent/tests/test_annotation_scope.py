@@ -291,7 +291,7 @@ class TestReleaseDcgmReenumeration(unittest.TestCase):
         here belongs to GPU-B, NOT to GPU-A — it is no evidence that GPU-A
         should be released (GPU-A may still be running its annotated workload
         at its new index). Release must SKIP the stale index→UUID projection:
-        no restore, and GPU-A's ownership state is preserved so its own index
+        no restore, and GPU-A's UUID ownership is preserved so its own index
         reconcile (or UUID-keyed SIGTERM / startup recovery) decides its fate.
         """
         power_agent._managed_gpu_indices.add(0)
@@ -306,9 +306,10 @@ class TestReleaseDcgmReenumeration(unittest.TestCase):
 
         persist = self._run(actuator)
 
-        # No relocation-restore of the displaced GPU, and state untouched.
+        # No relocation-restore of the displaced GPU and UUID ownership kept;
+        # only the obsolete index projection is dropped.
         self.assertEqual(actuator.restore_calls, [])
-        self.assertIn(0, power_agent._managed_gpu_indices)
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
         self.assertIn("GPU-A", power_agent._previously_managed)
         persist.assert_not_called()
 
@@ -331,7 +332,7 @@ class TestReleaseDcgmReenumeration(unittest.TestCase):
         persist = self._run(actuator)
 
         self.assertEqual(actuator.restore_calls, [])
-        self.assertIn(0, power_agent._managed_gpu_indices)
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
         self.assertIn("GPU-A", power_agent._previously_managed)
         persist.assert_not_called()
 
@@ -540,8 +541,8 @@ class TestReleaseDcgmReenumeration(unittest.TestCase):
     def test_reenumerated_unmanaged_occupant_by_uuid_path_still_skips(self):
         """The UUID-addressed release only fires when the CURRENT occupant is
         itself managed. If a re-enumeration dropped an UNRELATED GPU onto the
-        index, release must still skip (no restore, state preserved) — the GPU
-        we capped is handled at its own current index."""
+        index, release must still skip (no restore, UUID ownership preserved) —
+        the GPU we capped is handled at its own current index."""
         power_agent._managed_gpu_indices.add(0)
         power_agent._previously_managed.add("GPU-A")
 
@@ -578,7 +579,7 @@ class TestReleaseDcgmReenumeration(unittest.TestCase):
 
         self.assertEqual(actuator.restored_uuids, [])
         self.assertEqual(actuator.restore_calls, [])
-        self.assertIn(0, power_agent._managed_gpu_indices)
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
         self.assertIn("GPU-A", power_agent._previously_managed)
         persist.assert_not_called()
 

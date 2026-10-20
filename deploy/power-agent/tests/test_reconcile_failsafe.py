@@ -20,7 +20,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import power_agent
-from actuator import _GpuIdentityMismatch
+from actuator import CapWriteResult, _GpuIdentityMismatch
 from power_agent import PowerAgent
 
 from tests.actuator_double import actuator_double
@@ -597,6 +597,46 @@ class TestCycleEnforcementBoolean(unittest.TestCase):
         # Skipped WITHOUT restoring or pruning — the displaced GPU is assessed
         # at its current index.
         actuator.restore_default_by_uuid.assert_not_called()
+
+    def test_stale_projection_recovers_on_the_next_cycle(self):
+        """GPU-A was capped at index 0; a dcgm re-enumeration swapped it with
+        GPU-B, which runs an unannotated workload and was never ours. The
+        actuator keeps reporting GPU-A as index 0's recorded identity. The
+        remap cycle is False, but every later cycle must clear — whether GPU-A
+        is still running its annotated workload at index 1 or idle there —
+        while GPU-A stays owned and GPU-B is never touched."""
+        for a_pids in ([100], []):
+            with self.subTest(displaced_gpu="active" if a_pids else "idle"):
+                power_agent._managed_gpu_indices.clear()
+                power_agent._managed_gpu_indices.add(0)
+                power_agent._previously_managed.clear()
+                power_agent._previously_managed.add("GPU-A")
+                actuator = _DcgmStyleActuator(current_uuid=None, managed_uuid=None)
+                actuator.get_uuid = {0: "GPU-B", 1: "GPU-A"}.get
+                actuator.managed_uuid_for_idx = {0: "GPU-A"}.get
+                actuator.device_count = MagicMock(return_value=2)
+                actuator.list_running_pids = lambda idx, expected_uuid=None: {
+                    0: [200],
+                    1: a_pids,
+                }[idx]
+                actuator.apply_cap = MagicMock(return_value=CapWriteResult(300, True))
+                agent = self._gpu_agent(actuator, device_count=2)
+                pod_a = MagicMock()
+                pod_a.metadata.uid = "pod-a"
+                pod_a.metadata.annotations = {power_agent.POWER_ANNOTATION_KEY: "300"}
+                agent._core_v1.list_pod_for_all_namespaces.return_value = MagicMock(
+                    items=[pod_a]
+                )
+
+                with patch(
+                    "power_agent._extract_pod_uid_from_cgroup",
+                    side_effect={100: "pod-a", 200: "pod-b"}.get,
+                ):
+                    results = [agent.reconcile_once() for _ in range(3)]
+
+                self.assertEqual(results, [False, True, True])
+                actuator.restore_default_by_uuid.assert_not_called()
+                self.assertIn("GPU-A", power_agent._previously_managed)
 
 
 if __name__ == "__main__":

@@ -691,8 +691,8 @@ def _release_managed_gpu(
     GPU we capped moves elsewhere — in that case the observed unannotated
     workload belongs to the new occupant, NOT to the GPU we capped, so we must
     NOT relocate a restore onto the displaced GPU (it may still be running its
-    annotated workload at its new index). We skip the stale index→UUID
-    projection without pruning; the displaced GPU is evaluated when reconcile
+    annotated workload at its new index). We drop the stale index projection
+    but keep the displaced GPU's UUID ownership; it is evaluated when reconcile
     reaches its current index (or by the UUID-keyed SIGTERM / startup orphan
     recovery), so its cap is never stranded.
     """
@@ -796,7 +796,7 @@ def _release_managed_gpu(
 
         # The current occupant is NOT a GPU we manage (a re-enumeration dropped
         # an unrelated GPU onto this index, or the actuator has no UUID-addressed
-        # restore). Skip the stale projection WITHOUT restoring or pruning: the
+        # restore). Skip it WITHOUT restoring or dropping UUID ownership: the
         # GPU we capped is evaluated when reconcile reaches ITS current index
         # (its own snapshot decides keep-vs-release), and meanwhile its cap is
         # held in _previously_managed for the UUID-keyed SIGTERM / startup
@@ -808,8 +808,11 @@ def _release_managed_gpu(
         # forward, so a re-enumeration that lands the displaced managed GPU on
         # an ALREADY-PASSED index leaves it unassessed this cycle, and True
         # would publish a fresh successful timestamp for a cycle that skipped a
-        # managed GPU. When the displaced GPU lands on a not-yet-reached index
-        # this is a false negative, which the next cycle clears.
+        # managed GPU. Dropping this index from `_managed_gpu_indices` (UUID
+        # ownership is untouched) is what lets the next cycle clear it: the
+        # occupant then takes the "not ours" no-op above instead of hitting
+        # this obsolete projection forever.
+        _managed_gpu_indices.discard(gpu_idx)
         logger.info(
             "Skipping cap release for GPU %d: index now hosts %s (not managed by "
             "us) but we capped %s here (dcgm re-enumeration). Deferring the "
