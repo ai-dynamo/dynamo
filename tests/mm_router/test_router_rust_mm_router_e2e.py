@@ -60,9 +60,8 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.model(VLLM_MM_MODEL),
     pytest.mark.requested_vllm_kv_cache_bytes(KV_CACHE_BYTES),
-    # No profiled_vram_gib on purpose: this module runs in the sequential GPU
-    # stage, so its tests share one module-scoped worker and frontend instead
-    # of starting them once per test in the parallel stage.
+    # No profiled_vram_gib on purpose: it keeps this module in the sequential
+    # GPU stage, where its tests share one module-scoped worker and frontend.
 ]
 
 
