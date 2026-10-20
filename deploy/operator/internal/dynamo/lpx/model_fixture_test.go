@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/url"
 	"testing"
@@ -84,6 +85,14 @@ func (c *fakeModelServiceClient) StreamModelFiles(
 	stream := c.fileStreams[0]
 	c.fileStreams = c.fileStreams[1:]
 	return stream, nil
+}
+
+func (c *fakeModelServiceClient) DeleteModel(
+	context.Context,
+	*modelpb.DeleteModelRequest,
+	...grpc.CallOption,
+) (*modelpb.DeleteModelResponse, error) {
+	return nil, errors.New("DeleteModel is not used by LPX")
 }
 
 func (c *fakeModelServiceClient) ListModelFiles(
