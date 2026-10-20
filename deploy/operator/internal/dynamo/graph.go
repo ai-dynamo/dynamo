@@ -1936,6 +1936,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	}
 
 	podSpec.Volumes = appendMissingPVCVolumesForMounts(podSpec.Volumes, podSpec.Containers[0].VolumeMounts)
+	applyModelExpressServerCache(&podSpec, component, operatorConfig)
 
 	shouldDisableImagePullSecret := annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
 	if !shouldDisableImagePullSecret && secretsRetriever != nil {
@@ -2004,6 +2005,66 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	}
 
 	return &podSpec, nil
+}
+
+// modelExpressNoSharedStorageEnvVar switches Model Express clients from "the model files are already on
+// a shared filesystem" to fetching them from the Model Express server, which downloads from Hugging
+// Face once and serves every replica.
+const modelExpressNoSharedStorageEnvVar = "MODEL_EXPRESS_NO_SHARED_STORAGE"
+
+// hfHubOfflineEnvVar stops Hugging Face clients from contacting the Hub. Once Model Express has put the
+// model files in the local cache, the engine and tokenizer would otherwise still send tree-listing,
+// model-info and resolve requests to the Hub from every replica.
+const hfHubOfflineEnvVar = "HF_HUB_OFFLINE"
+
+// applyModelExpressServerCache makes a worker without shared model storage get its model files from the
+// Model Express server and stop talking to Hugging Face, so N replicas starting together cost the Hub
+// one download rather than N. It does nothing unless the operator is configured with a Model Express URL
+// and Infrastructure.ModelExpressServerCache, the component is a worker, and no volume mounted into the
+// main container (other than the compilation cache) is a PVC, hostPath or NFS volume. If the user already
+// set MODEL_EXPRESS_NO_SHARED_STORAGE the container is left alone; a user-set HF_HUB_OFFLINE is kept.
+//
+// podSpec must be non-nil and its first container must be the main container.
+func applyModelExpressServerCache(podSpec *corev1.PodSpec, component *v1beta1.DynamoComponentDeploymentSharedSpec, operatorConfig *configv1alpha1.OperatorConfiguration) {
+	if !operatorConfig.Infrastructure.ModelExpressServerCache || operatorConfig.Infrastructure.ModelExpressURL == "" {
+		return
+	}
+	if !IsWorkerComponent(string(component.ComponentType)) {
+		return
+	}
+
+	container := &podSpec.Containers[0]
+	hasEnv := func(name string) bool {
+		for _, env := range container.Env {
+			if env.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+	if hasEnv(modelExpressNoSharedStorageEnvVar) {
+		return
+	}
+
+	// Index the volumes that can hold model files shared between replicas, leaving out the compilation cache.
+	sharedVolumes := map[string]bool{}
+	for _, volume := range podSpec.Volumes {
+		isCompilationCache := component.CompilationCache != nil && volume.PersistentVolumeClaim != nil &&
+			volume.PersistentVolumeClaim.ClaimName == component.CompilationCache.PVCName
+		if !isCompilationCache && (volume.PersistentVolumeClaim != nil || volume.HostPath != nil || volume.NFS != nil) {
+			sharedVolumes[volume.Name] = true
+		}
+	}
+	for _, mount := range container.VolumeMounts {
+		if sharedVolumes[mount.Name] {
+			return
+		}
+	}
+
+	container.Env = append(container.Env, corev1.EnvVar{Name: modelExpressNoSharedStorageEnvVar, Value: "true"})
+	if !hasEnv(hfHubOfflineEnvVar) {
+		container.Env = append(container.Env, corev1.EnvVar{Name: hfHubOfflineEnvVar, Value: "1"})
+	}
 }
 
 func validateContainerVolumeMounts(volumeMounts []corev1.VolumeMount) error {

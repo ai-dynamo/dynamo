@@ -203,6 +203,11 @@ etcdAddr: ""
 
 modelExpressURL: ""
 
+# Workers without shared model storage (no PVC, hostPath or NFS mount) fetch model files through the
+# Model Express server and set HF_HUB_OFFLINE=1 instead of each downloading from Hugging Face. Requires
+# modelExpressURL and a worker image with Model Express client 0.7.0 or newer.
+modelExpressServerCache: false
+
 # TLS configuration for inter-component encryption.
 # Paths are injected into all DGD pods via InfrastructureConfiguration.
 natsTLSCAPath: ""
