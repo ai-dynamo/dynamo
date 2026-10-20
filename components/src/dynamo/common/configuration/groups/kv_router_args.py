@@ -227,7 +227,7 @@ class KvRouterConfigBase(ConfigBase):
     minimum_transfer_prefix_blocks: int = 1
     minimum_estimated_ttft_saving_ms: float = 0.0
     transfer_source_estimated_block_us: Optional[float] = None
-    transfer_source_gpu_estimated_block_us: Optional[float] = None
+    transfer_source_gpu_estimated_block_us: float | None = None
     transfer_source_prefill_token_us: Optional[float] = None
     load_aware: bool = False
 
@@ -640,7 +640,7 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "Experimental direct decode-GPU to prefill-GPU KV reuse. "
                 "Requires GPU-only pin/transport endpoints, certified layout, "
-                "local Device KV events, and separately calibrated GPU costs. "
+                "ready gpu_direct KV events, and separately calibrated GPU costs. "
                 "Does not enable the CPU offload transfer path."
             ),
         )
