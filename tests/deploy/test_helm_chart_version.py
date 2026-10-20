@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Chart.yaml version rewrite shared by release cut and nightly Helm packaging."""
-
 import importlib.util
 from pathlib import Path
 

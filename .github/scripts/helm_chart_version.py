@@ -35,7 +35,7 @@ def set_chart_versions(path: Path, new: str, expect_operator_pin: bool = False) 
     `expect_operator_pin`, raise before writing unless exactly one operator pin
     matched.
     """
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
 
     text, n_top = _TOP_LEVEL.subn(
         lambda m: f"{m.group('pre')}{m.group('q')}{new}{m.group('q')}{m.group('post')}",
@@ -54,4 +54,4 @@ def set_chart_versions(path: Path, new: str, expect_operator_pin: bool = False) 
 
     # No generic indented-version rewrite: it would clobber a third-party pin
     # equal to the workspace version (nats is pinned 1.3.2).
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")
