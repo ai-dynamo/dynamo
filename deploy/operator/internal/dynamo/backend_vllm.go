@@ -397,7 +397,7 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 // getExpandedArgs will expand the containers args in the case where
 // the args are joined together with spaces as an individual string (i.e. "python3 -m dynamo.vllm")
 func getExpandedArgs(container *corev1.Container) []string {
-	expandedArgs := []string{}
+	expandedArgs := make([]string, 0, len(container.Args))
 	for _, arg := range container.Args {
 		expandedArgs = append(expandedArgs, strings.Fields(arg)...)
 	}
