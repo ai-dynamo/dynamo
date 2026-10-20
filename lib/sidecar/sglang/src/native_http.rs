@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Opaque transport for SGLang's native streaming `/generate` API.
+//! Opaque transport for SGLang's native `/generate` API.
 
 use std::{collections::HashMap, io, time::Duration};
 
@@ -67,7 +67,19 @@ pub(crate) fn request(
 
     body.insert("input_ids".into(), serde_json::json!(request.token_ids));
     body.insert("rid".into(), Value::String(request_id.to_string()));
-    body.insert("stream".into(), Value::Bool(true));
+    if mode.is_prefill()
+        && body.get("return_flat_raw_output_top_logprobs") == Some(&Value::Bool(true))
+    {
+        // The HTTP headers must arrive before publishing the KV handoff.
+        body.remove("return_flat_raw_output_top_logprobs");
+        if body.get("return_flat_raw_top_logprobs") != Some(&Value::Bool(true)) {
+            body.remove("return_flat_raw_top_logprobs_b64");
+        }
+    }
+    // SGLang only supports output-flat logprobs on its unary response.
+    if body.get("return_flat_raw_output_top_logprobs") != Some(&Value::Bool(true)) {
+        body.insert("stream".into(), Value::Bool(true));
+    }
 
     let routing = request.routing.as_ref();
     if let Some(priority) = routing.and_then(|routing| routing.priority) {
@@ -331,10 +343,15 @@ impl NativeHttp {
     }
 
     async fn open(self, body: Value) -> Result<Response, DynamoError> {
+        let accept = if body.get("stream") == Some(&Value::Bool(true)) {
+            "text/event-stream"
+        } else {
+            "application/json"
+        };
         let response = self
             .client
             .post(self.endpoint.with_path("/generate"))
-            .header(header::ACCEPT, "text/event-stream")
+            .header(header::ACCEPT, accept)
             .json(&body)
             .send()
             .await
@@ -500,6 +517,36 @@ fn response_stream(
     response: Response,
     max_event_bytes: usize,
 ) -> BoxStream<'static, Result<String, LinesCodecError>> {
+    if response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(';').next() == Some("application/json"))
+    {
+        // Adapt the bounded unary body to the same response decoder as SSE.
+        return Box::pin(async_stream::stream! {
+            let chunks = response.bytes_stream();
+            futures::pin_mut!(chunks);
+            let mut body = Vec::new();
+            while let Some(chunk) = chunks.next().await {
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        yield Err(LinesCodecError::Io(io::Error::other(error)));
+                        return;
+                    }
+                };
+                if chunk.len() > max_event_bytes.saturating_sub(body.len()) {
+                    yield Err(LinesCodecError::MaxLineLengthExceeded);
+                    return;
+                }
+                body.extend_from_slice(&chunk);
+            }
+            yield String::from_utf8(body)
+                .map(|body| format!("data: {body}"))
+                .map_err(|error| LinesCodecError::Io(io::Error::other(error)));
+        });
+    }
     let bytes = response.bytes_stream().map_err(io::Error::other);
     let reader = StreamReader::new(bytes);
     Box::pin(FramedRead::new(
@@ -723,6 +770,15 @@ mod tests {
     }
 
     async fn serve_once(body: String, status: &str) -> (u16, tokio::task::JoinHandle<()>) {
+        serve_once_with_content_type(body, status, "text/event-stream").await
+    }
+
+    async fn serve_once_with_content_type(
+        body: String,
+        status: &str,
+        content_type: &str,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        let content_type = content_type.to_string();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let status = status.to_string();
@@ -731,7 +787,7 @@ mod tests {
             let mut request = [0_u8; 4096];
             let _ = socket.read(&mut request).await.unwrap();
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             socket.write_all(response.as_bytes()).await.unwrap();
@@ -922,6 +978,42 @@ mod tests {
             error.error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)
         );
+    }
+
+    #[test]
+    fn prefill_output_flat_keeps_streaming_and_prompt_encoding() {
+        for prompt_flat in [false, true] {
+            let mut canonical = canonical_request();
+            canonical.extra_args = Some(json!({"sglang_tito": {
+                "stream": false,
+                "return_flat_raw_output_top_logprobs": true,
+                "return_flat_raw_top_logprobs": prompt_flat,
+                "return_flat_raw_top_logprobs_b64": true
+            }}));
+            let native = request(
+                &canonical,
+                "request",
+                DisaggregationMode::Prefill,
+                Some("prefill"),
+                Some(5000),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(native.body["stream"], true);
+            assert!(
+                native
+                    .body
+                    .get("return_flat_raw_output_top_logprobs")
+                    .is_none()
+            );
+            assert_eq!(
+                native
+                    .body
+                    .get("return_flat_raw_top_logprobs_b64")
+                    .and_then(serde_json::Value::as_bool),
+                prompt_flat.then_some(true),
+            );
+        }
     }
 
     #[test]
@@ -1197,6 +1289,67 @@ mod tests {
         assert_eq!(terminal.completion_usage.unwrap().total_tokens, 3);
         assert!(stream.next().await.is_none());
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_unary_output_flat_logprobs_preserve_response_and_size_limit() {
+        let response = json!({
+            "output_ids": [101, 102],
+            "meta_info": {
+                "finish_reason": {"type": "length", "length": 2},
+                "output_top_logprobs_val_flat": [-0.1, -0.2, -0.3, -0.4],
+                "output_top_logprobs_idx_flat": [101, 201, 102, 202],
+                "output_top_logprobs_shape": [2, 2]
+            }
+        });
+        for limit in [MAX_EVENT_BYTES, 16] {
+            let mut canonical = canonical_request();
+            canonical.extra_args = Some(json!({"sglang_tito": {
+                "stream": false,
+                "return_logprob": true,
+                "top_logprobs_num": 2,
+                "return_flat_raw_output_top_logprobs": true
+            }}));
+            let native = request(
+                &canonical,
+                "request",
+                DisaggregationMode::Aggregated,
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(native.body["stream"], false);
+            assert_eq!(native.body["return_flat_raw_output_top_logprobs"], true);
+            let (port, server) = serve_once_with_content_type(
+                serde_json::to_string_pretty(&response).unwrap(),
+                "200 OK",
+                "application/json",
+            )
+            .await;
+            let mut http = native_http(port);
+            http.max_event_bytes = limit;
+            let mut stream = http.generate(
+                native,
+                GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+                CancellationToken::new(),
+            );
+            let output = stream.next().await.unwrap();
+            if limit == MAX_EVENT_BYTES {
+                let output = output.unwrap();
+                assert_eq!(output.token_ids, [101, 102]);
+                assert_eq!(output.engine_data.unwrap()["sglang_response"], response);
+                assert!(stream.next().await.is_none());
+            } else {
+                assert!(
+                    output
+                        .unwrap_err()
+                        .to_string()
+                        .contains("exceeded 16 bytes")
+                );
+            }
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

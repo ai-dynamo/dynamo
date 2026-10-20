@@ -43,6 +43,14 @@ pub struct SglangGenerateRequest {
 
 impl SglangGenerateRequest {
     pub fn validate(&self) -> Result<(), String> {
+        if self.stream
+            && self.passthrough.get("return_flat_raw_output_top_logprobs")
+                == Some(&Value::Bool(true))
+        {
+            return Err(
+                "return_flat_raw_output_top_logprobs does not support stream=true.".to_string(),
+            );
+        }
         if self.input_ids.is_empty() {
             return Err("input_ids cannot be empty.".to_string());
         }
@@ -103,7 +111,7 @@ impl SglangGenerateRequest {
                 .unwrap_or(Value::Null),
         );
         envelope.insert("rid".to_string(), Value::String(request_id.to_string()));
-        envelope.insert("stream".to_string(), Value::Bool(true));
+        envelope.insert("stream".to_string(), Value::Bool(self.stream));
         (self.input_ids, Value::Object(envelope))
     }
 }
@@ -146,7 +154,7 @@ mod tests {
         let (input_ids, envelope) = request.into_worker_envelope("resolved-request");
         assert_eq!(input_ids, [1, 2, 3]);
         assert_eq!(envelope["rid"], "resolved-request");
-        assert_eq!(envelope["stream"], true);
+        assert_eq!(envelope["stream"], false);
         assert_eq!(envelope["session_id"], "session-1");
         assert_eq!(envelope["return_text_in_logprobs"], true);
         assert_eq!(envelope["token_ids_logprob"], serde_json::json!([17]));
@@ -157,6 +165,24 @@ mod tests {
         assert_eq!(envelope["future_top_level_field"]["opaque"], true);
         assert!(envelope.get("input_ids").is_none());
         assert!(envelope.get("priority").is_none());
+    }
+
+    #[test]
+    fn output_flat_logprobs_require_and_preserve_unary_mode() {
+        for streaming in [false, true] {
+            let request: SglangGenerateRequest = serde_json::from_value(serde_json::json!({
+                "input_ids": [1],
+                "stream": streaming,
+                "return_flat_raw_output_top_logprobs": true
+            }))
+            .unwrap();
+            assert_eq!(request.validate().is_ok(), !streaming);
+            if !streaming {
+                let (_, envelope) = request.into_worker_envelope("request");
+                assert_eq!(envelope["stream"], false);
+                assert_eq!(envelope["return_flat_raw_output_top_logprobs"], true);
+            }
+        }
     }
 
     #[test]
