@@ -383,7 +383,6 @@ async fn e2e_real_openengine_image() {
     );
 }
 
-/// Drives a video data URI through the real sidecar and OpenEngine server.
 /// `TRTLLM_E2E_VIDEO_DATA_URI` must contain a complete `data:video/...` URI.
 #[tokio::test]
 #[ignore = "requires a live video-capable TensorRT-LLM OpenEngine server"]

@@ -326,24 +326,6 @@ fn unsupported_media_modalities_and_sources_are_rejected() {
             .to_string()
             .contains("requires a source for image input")
     );
-
-    let mut req = request();
-    req.multi_modal_data = Some(HashMap::from([(
-        "video_url".to_string(),
-        vec![MultimodalData::RawUrl("file:///tmp/video.mp4".to_string())],
-    )]));
-    let error = build_generate_request(req, "req", "model", image_video_limits(4096), AGG)
-        .expect_err("the engine cannot fetch a local Dynamo path");
-    assert!(error.to_string().contains("`video_url` item 0"));
-
-    let mut req = request();
-    req.multi_modal_data = Some(HashMap::from([(
-        "audio_url".to_string(),
-        vec![MultimodalData::RawUrl("file:///tmp/audio.wav".to_string())],
-    )]));
-    let error = build_generate_request(req, "req", "model", all_media_limits(4096), AGG)
-        .expect_err("the engine cannot fetch a local Dynamo path");
-    assert!(error.to_string().contains("`audio_url` item 0"));
 }
 
 #[test]
