@@ -116,6 +116,21 @@ test("a member admits peer pod traffic, keeps pod addresses and installs the MCS
   assert.equal(rules[0].Properties.CidrIp, "10.43.0.0/16");
   assert.equal(rules[0].Properties.IpProtocol, "tcp");
   assert.deepEqual([rules[0].Properties.FromPort, rules[0].Properties.ToPort], [0, 65535]);
+  // Pods use their node's security groups. The node launch templates set none,
+  // so EKS gives the nodes the cluster security group, which this rule is on.
+  const [clusterId] = Object.keys(template.findResources("AWS::EKS::Cluster"));
+  assert.deepEqual(rules[0].Properties.GroupId, {
+    "Fn::GetAtt": [clusterId, "ClusterSecurityGroupId"],
+  });
+  const nodegroups = resources(template, "AWS::EKS::Nodegroup");
+  assert.ok(nodegroups.length > 0);
+  for (const nodegroup of nodegroups) {
+    const { Id } = nodegroup.Properties.LaunchTemplate as { Id: { Ref: string } };
+    const data = template.toJSON().Resources[Id.Ref].Properties.LaunchTemplateData;
+    for (const key of ["SecurityGroupIds", "SecurityGroups", "NetworkInterfaces"]) {
+      assert.equal(data[key], undefined, `node launch template sets ${key}`);
+    }
+  }
 
   const [patch] = resources(template, "Custom::AWSCDK-EKS-KubernetesPatch");
   assert.equal(patch.Properties.ResourceName, "daemonset/aws-node");

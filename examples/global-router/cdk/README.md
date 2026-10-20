@@ -260,8 +260,11 @@ A deployment with `multiCluster` set in `lib/const.ts` is ready for Karmada and 
 Multicluster (MCS) API. Ohio is the Karmada hub (`aws-ohio`) and West is a member (`aws-west`).
 The member names match the Global Router's `site_id` values. For every such cluster, CDK:
 
-- adds an ingress rule from each peer VPC range to the EKS cluster security group. MCS
-  EndpointSlices list pod addresses, so callers in the other cluster connect to pods directly;
+- adds an ingress rule for all TCP from each peer VPC range to the EKS cluster security group.
+  MCS EndpointSlices list pod addresses, so a caller in the other cluster, such as a Global Router
+  dialing a Relay it found through discovery, connects to the pod directly; without this rule only
+  the Relay's NLB is reachable. Pods use their node's security groups, and the nodes get the
+  cluster security group because their launch templates set none;
 - excludes the peer VPC ranges from source NAT in the VPC CNI (`aws-node`
   `AWS_VPC_K8S_CNI_EXCLUDE_SNAT_CIDRS`), so traffic between the clusters keeps its pod address;
 - installs the MCS `ServiceExport` and `ServiceImport` CRDs (`crds/`, from Karmada 1.19.0);
@@ -398,8 +401,9 @@ route table IDs from the deployed stacks; refresh them if a regional VPC is rebu
 Deploy these two stacks with `pnpm exec cdk deploy --all -c deployment=both` after bootstrapping
 both Regions. Each private and public subnet route table gets a native CloudFormation route to the
 opposite VPC CIDR. The regional load balancer controller applies security group
-ingress from the NLB Service source ranges: West allows the Ohio VPC CIDR, so no broad worker
-ingress rule is added. The private NLB DNS hostname resolves to its private node addresses; VPC
+ingress from the NLB Service source ranges: West allows the Ohio VPC CIDR, so the NLB path needs no
+broad worker ingress rule. Only a `multiCluster` deployment adds one, for direct pod traffic
+between the clusters. The private NLB DNS hostname resolves to its private node addresses; VPC
 peering DNS-resolution options for EC2 public hostnames are not needed for that NLB name. Verify DNS
 resolution and connectivity from Ohio after peering becomes active.
 
