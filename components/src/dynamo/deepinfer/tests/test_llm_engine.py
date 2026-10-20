@@ -68,7 +68,7 @@ async def test_shared_owner_demux_limits_and_cancel(model, monkeypatch):
 
         monkeypatch.setattr(MockDeepInfer, method, record)
     engine, worker = await DeepInferLLMEngine.from_args(
-        ["--model", str(model), "--mock-token-delay", "0"]
+        ["--model", str(model), "--mock", "--mock-token-delay", "0"]
     )
     assert worker.tool_call_parser == worker.reasoning_parser == "deepseek_v41"
     await engine.start(1)
@@ -121,7 +121,7 @@ async def test_driver_failure_reaches_request_and_cleanup(model, monkeypatch):
         raise RuntimeError("engine failed")
 
     monkeypatch.setattr(MockDeepInfer, "step", broken_step)
-    engine, _ = await DeepInferLLMEngine.from_args(["--model", str(model)])
+    engine, _ = await DeepInferLLMEngine.from_args(["--model", str(model), "--mock"])
     await engine.start(1)
     stream = engine.generate({"token_ids": [1]}, SimpleNamespace(id=lambda: "failed"))
     with pytest.raises(RuntimeError, match="engine failed"):

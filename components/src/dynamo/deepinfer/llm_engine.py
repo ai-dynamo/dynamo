@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import os
 from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from functools import partial
+from typing import Any
 
 import numpy as np
 
@@ -31,7 +34,7 @@ from dynamo.llm.exceptions import InvalidArgument
 class DeepInferLLMEngine(LLMEngine):
     def __init__(self, config: Config):
         self.config = config
-        self.engine: MockDeepInfer | None = None
+        self.engine: Any = None
         self.executor: ThreadPoolExecutor | None = None
         self.driver: asyncio.Task | None = None
         self.wake = asyncio.Event()
@@ -63,7 +66,7 @@ class DeepInferLLMEngine(LLMEngine):
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="deepinfer"
         )
-        self.engine = await self._on_owner(MockDeepInfer, self.config.model)
+        self.engine = await self._on_owner(create_engine, self.config)
         self.driver = asyncio.create_task(self._drive())
         return EngineConfig(
             model=self.config.model,
@@ -76,15 +79,25 @@ class DeepInferLLMEngine(LLMEngine):
         try:
             while True:
                 await self.wake.wait()
-                # Copy all output fields on the owner thread before another step.
-                # A native engine adapter must dereference pooled RequestOutput
-                # pointers here; never send those pointers to request consumers.
                 outputs = await self._on_owner(self.engine.step)
                 for output in outputs:
                     stream = self.streams.get(output.request_id)
                     if stream is None:
                         continue
-                    chunk: GenerateChunk = {"index": 0, "token_ids": [output.token_id]}
+                    if output.finished and output.finish_reason not in (
+                        "stop",
+                        "length",
+                    ):
+                        stream.put_nowait(
+                            RuntimeError(
+                                f"DeepInfer request failed: {output.finish_reason}"
+                            )
+                        )
+                        continue
+                    chunk: GenerateChunk = {
+                        "index": 0,
+                        "token_ids": [output.token_id] if output.token_id >= 0 else [],
+                    }
                     if output.finished:
                         chunk["finish_reason"] = output.finish_reason
                         chunk["completion_usage"] = {
@@ -96,7 +109,9 @@ class DeepInferLLMEngine(LLMEngine):
                     stream.put_nowait(chunk)
                 if not self.streams:
                     self.wake.clear()
-                await asyncio.sleep(self.config.mock_token_delay)
+                await asyncio.sleep(
+                    self.config.mock_token_delay if self.config.mock else 0
+                )
         except Exception as error:
             self.failure = error
             for stream in self.streams.values():
@@ -138,9 +153,10 @@ class DeepInferLLMEngine(LLMEngine):
             self.streams.pop(request_id, None)
 
     async def abort(self, context: Context) -> None:
-        if self.engine is not None:
-            await self._on_owner(self.engine.abort_request, context.id())
-            stream = self.streams.get(context.id())
+        request_id = context.id()
+        if self.engine is not None and request_id is not None:
+            await self._on_owner(self.engine.abort_request, request_id)
+            stream = self.streams.get(request_id)
             if stream is not None:
                 stream.put_nowait(None)
 
@@ -152,21 +168,37 @@ class DeepInferLLMEngine(LLMEngine):
                     await self.driver
         finally:
             self.driver = None
-            if self.executor is not None:
-                self.executor.shutdown(wait=True, cancel_futures=True)
-                self.executor = None
-            self.engine = None
+            try:
+                if self.engine is not None:
+                    await self._on_owner(self.engine.close)
+            finally:
+                if self.executor is not None:
+                    self.executor.shutdown(wait=True, cancel_futures=True)
+                    self.executor = None
+                self.engine = None
+
+
+def create_engine(config: Config):
+    if config.mock:
+        return MockDeepInfer(config.model)
+    if not os.environ.get("CUDA_VISIBLE_DEVICES"):
+        raise ValueError("Set CUDA_VISIBLE_DEVICES before starting native DeepInfer")
+    # Keep the optional CUDA engine and its dependencies out of mock mode.
+    module = importlib.import_module("dynamo.deepinfer.native_engine")
+    return module.NativeDeepInfer(config)
 
 
 def build_sampling_params(request: GenerateRequest, context_length: int) -> dict:
     sampling = request.get("sampling_options") or {}
     stops = request.get("stop_conditions") or {}
     if sampling.get("n") is not None and sampling["n"] != 1:
-        raise InvalidArgument("DeepInfer mock supports only n=1")
+        raise InvalidArgument("DeepInfer backend supports only n=1")
     if sampling.get("guided_decoding"):
-        raise InvalidArgument("DeepInfer mock does not implement constrained decoding")
+        raise InvalidArgument(
+            "DeepInfer backend does not implement constrained decoding"
+        )
     if request.get("multi_modal_data"):
-        raise InvalidArgument("DeepInfer mock supports text input only")
+        raise InvalidArgument("DeepInfer backend supports text input only")
     remaining = context_length - len(request["token_ids"])
     if remaining <= 0:
         raise InvalidArgument("prompt exceeds DeepInfer context length")

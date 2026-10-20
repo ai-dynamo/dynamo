@@ -13,15 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 from tokenizers import Tokenizer
 
-
-@dataclass(frozen=True)
-class RequestOutput:
-    request_id: str
-    prompt_len: int
-    token_id: int
-    num_output_tokens: int
-    finished: bool
-    finish_reason: str
+from dynamo.deepinfer.output import RequestOutput
 
 
 @dataclass
@@ -90,6 +82,9 @@ class MockDeepInfer:
 
     def abort_request(self, request_id: str) -> None:
         self.requests.pop(request_id, None)
+
+    def close(self) -> None:
+        self.requests.clear()
 
 
 def mock_response(prompt: str) -> str:

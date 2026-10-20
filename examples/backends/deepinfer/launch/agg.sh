@@ -1,14 +1,26 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# CPU-only DeepInfer mock with the real Dynamo token frontend.
+# Native DeepInfer serving; add --mock for CPU-only synthetic inference.
 
 set -euo pipefail
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-MODEL_PATH="${MODEL_PATH:-$(python3 "$SCRIPT_DIR/../prepare_model.py")}"
-export DYN_NAMESPACE="${DYN_NAMESPACE:-deepinfer-mock}"
+MOCK=false
+for arg in "$@"; do
+    if [[ "$arg" == "--mock" ]]; then
+        MOCK=true
+    fi
+done
+if "$MOCK"; then
+    MODEL_PATH="${MODEL_PATH:-$(python3 "$SCRIPT_DIR/../prepare_model.py")}"
+    SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-deepinfer-mock}"
+else
+    : "${MODEL_PATH:?Set MODEL_PATH to the local DeepInfer model checkpoint, or add --mock}"
+    SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-deepinfer}"
+fi
+export DYN_NAMESPACE="${DYN_NAMESPACE:-deepinfer}"
 export DYN_DISCOVERY_BACKEND=file
 export DYN_REQUEST_PLANE=tcp
 export DYN_RESPONSE_PLANE=tcp
@@ -28,8 +40,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-print_launch_banner "DeepInfer mock (CPU only)" "deepinfer-mock" "$DYN_HTTP_PORT"
+print_launch_banner "DeepInfer aggregated serving (mock=$MOCK)" "$SERVED_MODEL_NAME" "$DYN_HTTP_PORT"
 python3 -m dynamo.frontend --router-mode round-robin &
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-0}" python3 -m dynamo.deepinfer \
-    --model "$MODEL_PATH" --served-model-name deepinfer-mock "$@" &
+    --model "$MODEL_PATH" --served-model-name "$SERVED_MODEL_NAME" "$@" &
 wait_any_exit
