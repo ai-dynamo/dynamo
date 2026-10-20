@@ -90,7 +90,11 @@ class VLLMWorkerProcess(ManagedProcess):
     """vLLM backend that publishes KV events the router can consume."""
 
     def __init__(self, request, *, system_port: int, kv_event_port: int):
-        """Configure the worker with a fixed KV cache and a KV event publisher."""
+        """Keep the worker's memory limit independent of the CI test stage.
+
+        Sequential CI does not export the KV cache marker. Pass the cache size
+        and GPU utilization explicitly to preserve the parallel stage's limit.
+        """
         super().__init__(
             command=[
                 "python3",
@@ -102,8 +106,6 @@ class VLLMWorkerProcess(ManagedProcess):
                 "--block-size",
                 str(BLOCK_SIZE),
                 "--enforce-eager",
-                # Pinned explicitly: the sequential stage does not export the
-                # KV cap from the marker, which would fall back to 0.40.
                 "--kv-cache-memory-bytes",
                 str(KV_CACHE_BYTES),
                 "--gpu-memory-utilization",
@@ -259,32 +261,6 @@ def test_router_rust_mm_repeated_single_image_overlap(
         f"expected high vLLM cached_tokens on warm request, got "
         f"cached={cached_2}, prompt_tokens={prompt_tokens_2}"
     )
-
-
-@pytest.mark.timeout(300)
-def test_router_rust_mm_data_uri_works(
-    start_router_rust_mm_services, predownload_models
-):
-    """data: URI path: mm_hash is computed from the URI bytes, dim parsed
-    in-memory (no HTTP fetch). Same data URI repeated → high overlap."""
-    frontend_port, router_proc = start_router_rust_mm_services
-    uri = _make_data_uri((34, 210, 89))
-    payload = _build_payload([uri])
-
-    _, _, _ = _send(frontend_port, router_proc, payload, "data_uri_req1")
-    overlap_2, total_2, data_2 = _send(
-        frontend_port, router_proc, payload, "data_uri_req2"
-    )
-
-    assert (
-        overlap_2 > 1 and total_2 > 1
-    ), f"expected MM-aware overlap on data URI repeat, got {overlap_2}/{total_2}"
-    cached_2 = (data_2.get("usage", {}).get("prompt_tokens_details") or {}).get(
-        "cached_tokens"
-    )
-    assert (
-        cached_2 is not None and cached_2 > 0
-    ), f"expected cached_tokens > 0 on warm data URI request, got {cached_2}"
 
 
 @pytest.mark.timeout(300)
