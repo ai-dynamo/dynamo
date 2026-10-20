@@ -22,6 +22,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -101,6 +102,17 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 		},
 		{
+			name:    "v1beta2 create bypasses legacy v1beta1 validation",
+			request: beta2DGDRForAdmission(nil),
+		},
+		{
+			name:       "v1beta2 update bypasses legacy v1beta1 validation",
+			oldRequest: beta2DGDRForAdmission(nil),
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
 			name: "v1beta1 empty native representation is rejected by envelope validation",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Model = ""
@@ -118,8 +130,8 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 					},
 				}
 			}),
-			gpuDiscovery:  true,
-			wantStatusErr: "v1beta1 spec contains both native fields and v1beta2 envelope",
+			gpuDiscovery: true,
+			wantCELErr:   `spec: Invalid value: v1beta2 is mutually exclusive with native v1beta1 fields`,
 		},
 		{
 			name: "v1beta1 SLA optimization enum is rejected by source schema",
@@ -593,6 +605,27 @@ func alphaDGDRForAdmission(
 			RuntimeVersionOverride: "1.1.0",
 			ProfilingConfig: &nvidiacomv1alpha1.ProfilingConfigSpec{
 				ProfilerImage: "profiler:latest",
+			},
+		},
+	}
+	if mutate != nil {
+		mutate(request)
+	}
+	return request
+}
+
+func beta2DGDRForAdmission(
+	mutate func(*nvidiacomv1beta2.DynamoGraphDeploymentRequest),
+) *nvidiacomv1beta2.DynamoGraphDeploymentRequest {
+	request := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: nvidiacomv1beta2.GroupVersion.String(),
+			Kind:       "DynamoGraphDeploymentRequest",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
+			NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
+				Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"},
 			},
 		},
 	}

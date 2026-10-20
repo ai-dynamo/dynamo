@@ -534,6 +534,52 @@ func TestBugDGDRLegacyUnnamedAnnotationMigratesInPlace(t *testing.T) {
 	}
 }
 
+func TestBugDGDRLiveAlphaRepresentationOverridesStaleV1Beta2Annotations(t *testing.T) {
+	t.Log("Seed live v1alpha1 fields alongside stale annotation-backed v1beta2 envelopes")
+	spoke := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				annDGDRSpec: mustDGDRHubSpecAnnotation(t, v1beta1.DynamoGraphDeploymentRequestSpec{
+					V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"model":{"name":"stale-model"}}`)},
+				}),
+				annDGDRStatus: mustDGDRHubStatusAnnotation(t, v1beta1.DynamoGraphDeploymentRequestStatus{
+					V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"observedGeneration":99}`)},
+				}),
+			},
+		},
+		Spec: DynamoGraphDeploymentRequestSpec{
+			Model:   "live-model",
+			Backend: "vllm",
+			ProfilingConfig: &ProfilingConfigSpec{
+				ProfilerImage: "profiler:1.6.0",
+			},
+		},
+		Status: DynamoGraphDeploymentRequestStatus{
+			State:              DGDRStateReady,
+			ObservedGeneration: 7,
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	t.Log("Verify live native fields win and obsolete migration annotations are removed")
+	if hub.Spec.V1Beta2 != nil || hub.Spec.Model != "live-model" {
+		t.Fatalf("hub spec = %#v, want live native v1beta1 projection", hub.Spec)
+	}
+	if hub.Status.V1Beta2 != nil || hub.Status.Phase != v1beta1.DGDRPhaseReady || hub.Status.ObservedGeneration != 7 {
+		t.Fatalf("hub status = %#v, want live native v1beta1 projection", hub.Status)
+	}
+	if _, found := hub.Annotations[annDGDRSpec]; found {
+		t.Fatalf("stale %q annotation survived conversion", annDGDRSpec)
+	}
+	if _, found := hub.Annotations[annDGDRStatus]; found {
+		t.Fatalf("stale %q annotation survived conversion", annDGDRStatus)
+	}
+}
+
 func TestBugDGDRLiveHubUnnamedProfilerMigratesOnRoundTrip(t *testing.T) {
 	resources := corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},

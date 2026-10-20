@@ -282,7 +282,7 @@ func ConvertFromDynamoGraphDeploymentRequestSpec(src *DynamoGraphDeploymentReque
 
 	// Accept the annotation-backed representation emitted before v1alpha1
 	// gained its public structural carrier, then migrate it on the next read.
-	if restored != nil && restored.V1Beta2 != nil {
+	if restored != nil && restored.V1Beta2 != nil && !hasNativeV1Alpha1Spec(*src) {
 		dst.V1Beta2 = restored.V1Beta2.DeepCopy()
 		return nil
 	}
@@ -1070,7 +1070,7 @@ func ConvertFromDynamoGraphDeploymentRequestStatus(src *DynamoGraphDeploymentReq
 	}
 
 	// Accept and migrate the legacy annotation-backed envelope representation.
-	if restored != nil && restored.V1Beta2 != nil {
+	if restored != nil && restored.V1Beta2 != nil && !hasNativeV1Alpha1Status(*src) {
 		dst.V1Beta2 = restored.V1Beta2.DeepCopy()
 		return
 	}

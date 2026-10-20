@@ -45,6 +45,11 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 		return err
 	}
 
+	// Empty status has no representation discriminator, so inherit it from spec.
+	if src.Spec.V1Beta1 != nil && src.Status.V1Beta1 == nil && !hasNativeV1Beta2Status(src.Status) {
+		return nil
+	}
+
 	return convertPayload(
 		src.Status, src.Status.V1Beta1, hasNativeV1Beta2Status, &dst.Status,
 		func(envelope *apiextensionsv1.JSON) { dst.Status.V1Beta2 = envelope },
@@ -66,6 +71,11 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 		"v1beta1", "v1beta2", "spec",
 	); err != nil {
 		return err
+	}
+
+	// Empty status has no representation discriminator, so inherit it from spec.
+	if src.Spec.V1Beta2 != nil && src.Status.V1Beta2 == nil && !hasNativeV1Beta1Status(src.Status) {
+		return nil
 	}
 
 	return convertPayload(

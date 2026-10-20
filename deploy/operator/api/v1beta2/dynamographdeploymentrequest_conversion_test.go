@@ -150,6 +150,58 @@ func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 	}
 }
 
+func TestEmptyStatusInheritsNativeV1Beta2Representation(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Convert stored native v1beta2 spec with status omitted by the status subresource strategy.")
+	hub := &v1beta1.DynamoGraphDeploymentRequest{
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"model":{"name":"Qwen/Qwen3-32B"}}`)},
+		},
+	}
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	t.Log("Verify empty status stays native instead of becoming a v1beta1 envelope.")
+	if spoke.Spec.Model == nil || spoke.Spec.Model.Name != "Qwen/Qwen3-32B" {
+		t.Fatalf("native spec.model = %#v, want Qwen/Qwen3-32B", spoke.Spec.Model)
+	}
+	if spoke.Status.V1Beta1 != nil {
+		t.Fatalf("status.v1beta1 = %s, want nil", spoke.Status.V1Beta1.Raw)
+	}
+	if !reflect.DeepEqual(spoke.Status, DynamoGraphDeploymentRequestStatus{}) {
+		t.Fatalf("status = %#v, want empty native v1beta2 status", spoke.Status)
+	}
+}
+
+func TestEmptyStatusInheritsV1Beta1CarrierRepresentation(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Convert a v1beta2 view of native v1beta1 spec with empty status.")
+	spoke := &DynamoGraphDeploymentRequest{
+		Spec: DynamoGraphDeploymentRequestSpec{
+			V1Beta1: &apiextensionsv1.JSON{Raw: []byte(`{"model":"legacy-model"}`)},
+		},
+	}
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	t.Log("Verify empty status stays native in the v1beta1 storage representation.")
+	if hub.Spec.Model != "legacy-model" {
+		t.Fatalf("spec.model = %q, want legacy-model", hub.Spec.Model)
+	}
+	if hub.Status.V1Beta2 != nil {
+		t.Fatalf("status.v1beta2 = %s, want nil", hub.Status.V1Beta2.Raw)
+	}
+	if !reflect.DeepEqual(hub.Status, v1beta1.DynamoGraphDeploymentRequestStatus{}) {
+		t.Fatalf("status = %#v, want empty native v1beta1 status", hub.Status)
+	}
+}
+
 func TestEnvelopeJSONShape(t *testing.T) {
 	t.Parallel()
 
