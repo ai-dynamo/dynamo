@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="440" viewBox="0 0 1400 440" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">How Dynamo uses agent request metadata</title>
+  <desc id="desc">An agent harness owns prompts, tools, subagents, and reasoning state, and sends each LLM request with a session ID and optional agent hints. The Dynamo frontend normalizes the metadata across the Chat Completions, Responses, and Messages APIs. The router uses it to place requests for KV reuse, bind sessions to workers, and order queued work. The backend engine uses priority for scheduling and cache eviction. The frontend also records a request trace.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect width="1400" height="440" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">AGENTS ON DYNAMO</text>
+  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">What the harness sends, and what Dynamo does with it</text>
+  <rect x="50" y="126" width="240" height="158" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect x="66.4" y="140.4" width="13.2" height="13.2" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
+  <rect x="69.92" y="143.92" width="6.16" height="6.16" fill="#374151"/>
+  <line x1="68.6" y1="136" x2="68.6" y2="140.4" stroke="#374151" stroke-width="2"/><line x1="68.6" y1="153.6" x2="68.6" y2="158" stroke="#374151" stroke-width="2"/>
+  <line x1="62" y1="142.6" x2="66.4" y2="142.6" stroke="#374151" stroke-width="2"/><line x1="79.6" y1="142.6" x2="84" y2="142.6" stroke="#374151" stroke-width="2"/>
+  <line x1="73.0" y1="136" x2="73.0" y2="140.4" stroke="#374151" stroke-width="2"/><line x1="73.0" y1="153.6" x2="73.0" y2="158" stroke="#374151" stroke-width="2"/>
+  <line x1="62" y1="147.0" x2="66.4" y2="147.0" stroke="#374151" stroke-width="2"/><line x1="79.6" y1="147.0" x2="84" y2="147.0" stroke="#374151" stroke-width="2"/>
+  <line x1="77.4" y1="136" x2="77.4" y2="140.4" stroke="#374151" stroke-width="2"/><line x1="77.4" y1="153.6" x2="77.4" y2="158" stroke="#374151" stroke-width="2"/>
+  <line x1="62" y1="151.4" x2="66.4" y2="151.4" stroke="#374151" stroke-width="2"/><line x1="79.6" y1="151.4" x2="84" y2="151.4" stroke="#374151" stroke-width="2"/>
+  <text x="102" y="153" font-size="13" font-weight="700" fill="#374151">Agent harness</text>
+  <circle cx="69" cy="170" r="2.2" fill="#1A1A1A"/>
+  <text x="78" y="174" font-size="13" fill="#1A1A1A">Owns prompts, tools,</text>
+  <text x="78" y="192" font-size="13" fill="#1A1A1A">subagents, and reasoning</text>
+  <text x="78" y="210" font-size="13" fill="#1A1A1A">state</text>
+  <circle cx="69" cy="224" r="2.2" fill="#1A1A1A"/>
+  <text x="78" y="228" font-size="13" fill="#1A1A1A">Sends a session ID and</text>
+  <text x="78" y="246" font-size="13" fill="#1A1A1A">optional hints with each</text>
+  <text x="78" y="264" font-size="13" fill="#1A1A1A">request</text>
+  <rect x="358" y="96" width="1000" height="188" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="374" y="118" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">DYNAMO</text>
+  <rect x="374" y="126" width="310" height="140" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <text x="388" y="153" font-size="13" font-weight="700" fill="#1A1A1A">Frontend API</text>
+  <circle cx="393" cy="170" r="2.2" fill="#4B5563"/>
+  <text x="402" y="174" font-size="13" fill="#4B5563">Reads x-dynamo-session-id and</text>
+  <text x="402" y="192" font-size="13" fill="#4B5563">nvext.agent_hints</text>
+  <circle cx="393" cy="206" r="2.2" fill="#4B5563"/>
+  <text x="402" y="210" font-size="13" fill="#4B5563">Normalizes identity across the Chat</text>
+  <text x="402" y="228" font-size="13" fill="#4B5563">Completions, Responses, and Messages</text>
+  <text x="402" y="246" font-size="13" fill="#4B5563">APIs</text>
+  <rect x="722" y="126" width="330" height="140" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <text x="736" y="153" font-size="13" font-weight="700" fill="#1A1A1A">Router</text>
+  <circle cx="741" cy="170" r="2.2" fill="#4B5563"/>
+  <text x="750" y="174" font-size="13" fill="#4B5563">Places requests for KV reuse</text>
+  <circle cx="741" cy="188" r="2.2" fill="#4B5563"/>
+  <text x="750" y="192" font-size="13" fill="#4B5563">Binds sessions to workers when affinity</text>
+  <text x="750" y="210" font-size="13" fill="#4B5563">is on</text>
+  <circle cx="741" cy="224" r="2.2" fill="#4B5563"/>
+  <text x="750" y="228" font-size="13" fill="#4B5563">Orders queued work by priority</text>
+  <rect x="1090" y="126" width="252" height="140" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <text x="1104" y="153" font-size="13" font-weight="700" fill="#1A1A1A">Backend engine</text>
+  <circle cx="1109" cy="170" r="2.2" fill="#4B5563"/>
+  <text x="1118" y="174" font-size="13" fill="#4B5563">Uses priority for engine</text>
+  <text x="1118" y="192" font-size="13" fill="#4B5563">scheduling</text>
+  <circle cx="1109" cy="206" r="2.2" fill="#4B5563"/>
+  <text x="1118" y="210" font-size="13" fill="#4B5563">Uses priority for cache</text>
+  <text x="1118" y="228" font-size="13" fill="#4B5563">eviction, where the backend</text>
+  <text x="1118" y="246" font-size="13" fill="#4B5563">supports it</text>
+  <line x1="294" y1="196.0" x2="354" y2="196.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="324" y="186.0" font-size="12" fill="#4B5563" text-anchor="middle">request</text>
+  <line x1="686" y1="196.0" x2="720" y2="196.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <line x1="1054" y1="196.0" x2="1088" y2="196.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="374" y="326" width="400" height="68" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <path d="M386,340.356 L386,355.844 A11.0,3.8720000000000003 0 0 0 408,355.844 L408,340.356" fill="#F4F9E8" stroke="#4C7A00" stroke-width="2"/>
+  <ellipse cx="397.0" cy="340.356" rx="11.0" ry="3.8720000000000003" fill="#F4F9E8" stroke="#4C7A00" stroke-width="2"/>
+  <path d="M386,348.1 A11.0,3.8720000000000003 0 0 0 408,348.1" fill="none" stroke="#4C7A00" stroke-width="1.5"/>
+  <text x="426" y="353" font-size="13" font-weight="700" fill="#4C7A00">Request trace</text>
+  <text x="388" y="374" font-size="13" fill="#1A1A1A">A session-labeled record of every request.</text>
+  <line x1="489.0" y1="288" x2="489.0" y2="322" stroke="#76B900" stroke-width="2.5" stroke-dasharray="1 7" stroke-linecap="round" marker-end="url(#arrow-green)"/>
+  <text x="503.0" y="304" font-size="12" fill="#4B5563">records</text>
+  <text x="50" y="424" font-size="13" fill="#4B5563">Session IDs identify requests and hints state intent. Neither pins a session to a worker: that is session affinity, turned on separately.</text>
+</svg>

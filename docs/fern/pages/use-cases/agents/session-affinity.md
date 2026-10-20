@@ -11,6 +11,8 @@ An agent turn repeats the whole conversation so far. If the turn lands on the wo
 
 Use it when your agents run many turns on a growing context and you have more than one worker. Pinning can unbalance load, so start with `soft` mode if your sessions vary a lot in length.
 
+![Each turn of a session repeats a growing prefix. With affinity on, the frontend binds the session to one worker and sends later turns there so they reuse its KV cache. Hard mode always uses the bound worker; soft mode treats it as a preference.](../../../assets/img/session-affinity.svg)
+
 ## Before You Start
 
 - The frontend runs with `--router-mode kv`.

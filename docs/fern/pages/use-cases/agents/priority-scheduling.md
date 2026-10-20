@@ -9,6 +9,8 @@ By the end of this guide, requests that you mark as higher priority are served a
 
 Priority only changes anything under contention. If a request can be routed and scheduled immediately, there is no queue to reorder. Each layer below has its own switch, so turn on the layers you need.
 
+![A high-priority interactive request is released ahead of earlier background requests from the router queue. Priority can act in three places, each with its own switch: the router queue, the backend engine scheduler, and KV cache eviction.](../../../assets/img/priority-scheduling.svg)
+
 ## Send a Priority
 
 Add `nvext.agent_hints` to the request body:

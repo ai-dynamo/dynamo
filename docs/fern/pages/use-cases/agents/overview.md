@@ -40,6 +40,8 @@ The response is a normal chat completion. The session ID labels the request for 
 
 ## How Dynamo Uses the Metadata
 
+![The agent harness sends each LLM request with a session ID and optional hints. The Dynamo frontend normalizes the metadata, the router uses it for placement, session binding, and queue order, and the backend engine uses priority for scheduling and eviction. The frontend also records a request trace.](../../../assets/img/agents-metadata-flow.svg)
+
 | Layer | Signal | What Dynamo does with it |
 |---|---|---|
 | Frontend API | Session headers and `nvext` request extensions | Normalizes agent identity and serving intent across the Chat Completions, Responses, and Messages APIs. |

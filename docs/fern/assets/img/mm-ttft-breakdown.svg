@@ -1,0 +1,52 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1240' height='600' viewBox='0 0 1240 600'>
+<rect width='1240' height='600' fill='white'/>
+<text x='40' y='40' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='22' font-weight='700' fill='#1a1a1a'>Where TTFT actually goes on a multimodal request</text>
+<text x='40' y='66' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='14' fill='#5a6572'>Uncached requests. Both bars share one millisecond scale.</text>
+<text x='232' y='176' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='17' font-weight='700' fill='#1a1a1a' text-anchor='end'>Single image</text>
+<text x='232' y='197' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='12' fill='#5a6572' text-anchor='end'>480p JPEG</text>
+<rect x='250.0' y='150' width='10.2' height='56' fill='#68acd1'/>
+<rect x='260.2' y='150' width='6.8' height='56' fill='#358bc1'/>
+<rect x='267.1' y='150' width='20.4' height='56' fill='#9c9c9c'/>
+<rect x='287.5' y='150' width='36.6' height='56' fill='#76b900'/>
+<rect x='324.1' y='150' width='138.0' height='56' fill='#2d7d34'/>
+<text x='393.1' y='183.0' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='13.5' font-weight='700' fill='white' text-anchor='middle'>242.6</text>
+<polyline points='255.1,137 255.1,142 255.1,146 255.1,150' fill='none' stroke='#5a6572' stroke-width='1'/>
+<text x='255.1' y='132' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='12' font-weight='700' fill='#5a6572' text-anchor='middle'>18.0</text>
+<polyline points='299.1,137 299.1,142 263.6,146 263.6,150' fill='none' stroke='#5a6572' stroke-width='1'/>
+<text x='299.1' y='132' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='12' font-weight='700' fill='#5a6572' text-anchor='middle'>12.0</text>
+<polyline points='343.1,137 343.1,142 277.3,146 277.3,150' fill='none' stroke='#5a6572' stroke-width='1'/>
+<text x='343.1' y='132' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='12' font-weight='700' fill='#5a6572' text-anchor='middle'>35.9</text>
+<polyline points='387.1,137 387.1,142 305.8,146 305.8,150' fill='none' stroke='#5a6572' stroke-width='1'/>
+<text x='387.1' y='132' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='12' font-weight='700' fill='#5a6572' text-anchor='middle'>64.4</text>
+<line x1='250' y1='218' x2='462.1' y2='218' stroke='#1a1a1a' stroke-width='1.4'/>
+<line x1='250.0' y1='213' x2='250.0' y2='223' stroke='#1a1a1a' stroke-width='1.4'/>
+<line x1='462.1' y1='213' x2='462.1' y2='223' stroke='#1a1a1a' stroke-width='1.4'/>
+<text x='250' y='243' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='13.5' fill='#1a1a1a'><tspan font-weight='700'>TTFT 385.7 ms</tspan><tspan fill='#5a6572'>   +  915.2 ms decode to 128 tokens  =  1300.9 ms end to end</tspan></text>
+<text x='232' y='356' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='17' font-weight='700' fill='#1a1a1a' text-anchor='end'>Video</text>
+<text x='232' y='377' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='12' fill='#5a6572' text-anchor='end'>720p @ 24fps, 10 s, H.264</text>
+<rect x='250.0' y='330' width='155.7' height='56' fill='#68acd1'/>
+<text x='327.8' y='363.0' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='13.5' font-weight='700' fill='#1a1a1a' text-anchor='middle'>273.7</text>
+<rect x='405.7' y='330' width='250.3' height='56' fill='#358bc1'/>
+<text x='530.8' y='363.0' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='13.5' font-weight='700' fill='white' text-anchor='middle'>440.2</text>
+<rect x='656.0' y='330' width='24.3' height='56' fill='#9c9c9c'/>
+<rect x='680.3' y='330' width='517.9' height='56' fill='#2d7d34'/>
+<text x='939.3' y='363.0' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='13.5' font-weight='700' fill='white' text-anchor='middle'>910.7</text>
+<polyline points='668.2,317 668.2,322 668.2,326 668.2,330' fill='none' stroke='#5a6572' stroke-width='1'/>
+<text x='668.2' y='312' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='12' font-weight='700' fill='#5a6572' text-anchor='middle'>42.8</text>
+<line x1='250' y1='398' x2='1198.2' y2='398' stroke='#1a1a1a' stroke-width='1.4'/>
+<line x1='250.0' y1='393' x2='250.0' y2='403' stroke='#1a1a1a' stroke-width='1.4'/>
+<line x1='1198.2' y1='393' x2='1198.2' y2='403' stroke='#1a1a1a' stroke-width='1.4'/>
+<text x='250' y='423' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='13.5' fill='#1a1a1a'><tspan font-weight='700'>TTFT 1670.5 ms</tspan><tspan fill='#5a6572'>   +  779.0 ms decode to 128 tokens  =  2449.5 ms end to end</tspan></text>
+<text x='40' y='468' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='14' fill='#1a1a1a'><tspan font-weight='700'>Single image:</tspan> everything before LLM prefill costs 130.3 ms, 34% of TTFT.</text>
+<text x='40' y='492' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='14' fill='#1a1a1a'><tspan font-weight='700'>Video:</tspan> fetch, decode and preprocessing alone cost 713.9 ms, 43% of TTFT, before the worker starts ViT or prefill.</text>
+<rect x='40' y='538' width='14' height='14' fill='#68acd1' rx='2'/>
+<text x='61' y='550' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='12.5' fill='#5a6572'>Media fetch / decode</text>
+<rect x='212.0' y='538' width='14' height='14' fill='#358bc1' rx='2'/>
+<text x='233.0' y='550' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='12.5' fill='#5a6572'>MM preprocess</text>
+<rect x='334.3' y='538' width='14' height='14' fill='#9c9c9c' rx='2'/>
+<text x='355.3' y='550' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='12.5' fill='#5a6572'>Queue / transfer</text>
+<rect x='477.9' y='538' width='14' height='14' fill='#76b900' rx='2'/>
+<text x='498.9' y='550' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='12.5' fill='#5a6572'>ViT + projector</text>
+<rect x='614.4' y='538' width='14' height='14' fill='#2d7d34' rx='2'/>
+<text x='635.4' y='550' font-family='Helvetica Neue, Helvetica, Arial, sans-serif' font-size='12.5' fill='#5a6572'>LLM prefill / worker phase</text>
+</svg>

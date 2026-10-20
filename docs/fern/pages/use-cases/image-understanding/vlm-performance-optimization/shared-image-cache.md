@@ -10,6 +10,8 @@ before image decoding. Workers can reuse those bytes across processes while
 keeping their local decoded-image caches independent. Data URLs,
 frontend-decoded NIXL inputs, video, and audio do not use this cache.
 
+![Images seen before are found in the shared encoded-image cache and returned without a download. A new image is a miss: it is downloaded once from the image origin and stored in the cache for the next worker.](../../../../assets/img/shared-image-cache.svg)
+
 ## Backend Support
 
 | Backend | Mode | Shared encoded-image cache |

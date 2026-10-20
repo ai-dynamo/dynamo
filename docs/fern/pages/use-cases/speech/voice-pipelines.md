@@ -10,6 +10,8 @@ automatic speech recognition (ASR), LLM, and text-to-speech (TTS) workers for a
 cascaded pipeline, or one vLLM-Omni model that takes audio in and returns audio
 out.
 
+![A voice agent application chooses between a cascaded pipeline of streaming ASR, an LLM, and text to speech, each on its own endpoint, or one full-duplex audio-in, audio-out model on the realtime endpoint.](../../../assets/img/voice-pipeline-stages.svg)
+
 ## Endpoints
 
 | Stage | Endpoint | Output | Guide |
@@ -77,8 +79,10 @@ Bring up and test each stage on its own before you connect them:
 Each launcher starts its own frontend on port 8000, so test the stages one at a
 time on a single host.
 
-## Planned Work
+## Incremental Text Input (Experimental)
 
-[Incremental text input](https://github.com/ai-dynamo/dynamo/issues/14476) is under
-development to overlap ASR with LLM prefill. Session recovery across worker
-failures is a further goal. Neither capability is provided by the examples above.
+Incremental text input lets an orchestrator forward ASR text to the LLM while transcription is still running. The LLM warms its prefix cache from the provisional text, so less prefill remains when the user stops speaking. The client sends `input_text.append` events with provisional text, then `input_text.commit` with the final text to start generation, or `input_text.clear` to discard the speculative work.
+
+![With incremental text input, the LLM prefills the stable prefix while the user is still speaking, so the first token arrives earlier than when it waits for the final transcript. Sequentially, prefill starts only after the final transcript. Illustrative timings.](../../../assets/img/voice-incremental-text-input.svg)
+
+It is limited to text-only `/v1/realtime` sessions on aggregated vLLM workers, without tools or disaggregation, and it needs prefix caching. Short or revised input can yield no benefit. The input events are Dynamo extensions, not standard OpenAI events, and realtime text does not yet apply `--dyn-reasoning-parser`. ASR and TTS orchestration remain external. Session recovery across worker failures is a further goal and is not provided by the examples above.

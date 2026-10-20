@@ -23,6 +23,8 @@ is built without a video backend for still-image work only.
 This page covers which GPUs provide NVDEC, what the container must expose, and how
 Dynamo behaves when hardware decode is unavailable.
 
+![H.264 and H.265 decode on the GPU with NVDEC. VP8 and VP9 decode on the CPU with the in-tree FFmpeg when frontend decoding is on. Video without frontend decoding is decoded by the backend's Python library.](../../../assets/img/video-decoding-paths.svg)
+
 ## GPU support
 
 NVDEC is a fixed-function decode engine, separate from the SMs used for inference, so

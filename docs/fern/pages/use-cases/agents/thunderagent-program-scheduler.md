@@ -10,6 +10,8 @@ By the end of this guide, the frontend schedules each agent session as one progr
 > [!NOTE]
 > ThunderAgent is experimental. Dynamo includes a native plugin that ports the scheduler from the [ThunderAgent](https://arxiv.org/abs/2602.13692) paper (Kang et al., 2026). It runs inside the frontend and is enabled through router-policy YAML.
 
+![Agent sessions feed the ThunderAgent program scheduler in the frontend. Under KV cache pressure it defers the next turn of sessions waiting on tools and resumes them when there is room.](../../../assets/img/thunderagent-scheduling.svg)
+
 ## When to Use It
 
 Agentic workloads (SWE-bench, browser-use, anything with a tool loop) make many short LLM calls separated by non-GPU work: `docker exec`, `pytest`, `curl`, waiting on a subagent. Between turns the agent's KV cache stays resident, holding blocks while doing nothing. A request-level router (vLLM's, SGLang's, Dynamo's stock `KvRouter`) sees each turn but not the agent behind it, which costs you two ways:

@@ -73,15 +73,7 @@ In vLLM/TRT-LLM disaggregated flows, the prefill worker owns the CPU-side LRU ca
 
 In SGLang E/PD, the encode worker owns the cache and skips re-encoding on cache hits before forwarding the cached image or video embeddings downstream.
 
-```mermaid
-flowchart LR
-    req[Request] --> check{CPU cache hit?}
-    check -. hit .-> use[Use cached embedding]
-    check -- miss --> E[Encode Worker]
-    E -- embeddings via NIXL --> save[Save to cache]
-    save --> engine[Inference Engine]
-    use --> engine
-```
+![An image seen before is a hit in the CPU embedding cache and the encode worker is skipped. A new image is a miss: the encode worker runs the vision encoder, sends embeddings over NIXL, and they are saved to the cache before reaching the inference engine.](../../../../assets/img/embedding-cache.svg)
 
 ## Support Matrix
 

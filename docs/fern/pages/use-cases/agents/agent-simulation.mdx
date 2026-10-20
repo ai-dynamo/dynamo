@@ -7,6 +7,8 @@ subtitle: Capture an agent workload once, then replay it on real or simulated in
 
 By the end of this guide, you have captured an agent run once and replayed it, either against a live Dynamo endpoint or in an offline simulation. Agent simulation records the workload that an agent sends to Dynamo and turns it into a reusable benchmark. Capture one real run, then use the same request graph to validate a live endpoint or explore configurations offline. It replays the serving workload rather than the agent itself, so the model does not repeat its decisions and tools are not executed again.
 
+![A real agent run is captured as a request graph. The graph replays live with AIPerf against a real endpoint or offline with DynoSim against a simulated scheduler, router, and KV cache.](../../../assets/img/agent-simulation-flow.svg)
+
 ## What This Captures
 
 A Dynamo request trace preserves the parts of an agent run that affect serving:

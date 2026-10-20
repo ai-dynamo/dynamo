@@ -14,6 +14,8 @@ The backend still runs its model-specific multimodal processor and vision
 encoder. This feature changes where media input is decoded; it does not skip
 vision encoding.
 
+![Timeline comparing sequential and parallel image decoding for a request with five images at about 50 ms each. Sequential decoding on the worker takes about 250 ms. Parallel decoding in the Rust frontend takes about 60 ms, saving about 200 ms.](../../../../assets/img/frontend-media-decoding.svg)
+
 ## Support Matrix
 
 | Input modality | vLLM | SGLang | TensorRT-LLM |
@@ -43,6 +45,10 @@ with:
 - Multiple images or supported videos in one request
 - Backend workers whose request path is constrained by media fetching or
   decompression
+
+On uncached requests, the media work that runs before the vision encoder grows with media size. For a 480p image, fetch, decode, and preprocessing take 30 ms of a 385.7 ms time to first token (TTFT). For a 10-second 720p video, they take 713.9 ms of 1,670.5 ms (43%):
+
+![Stacked bars of where time to first token goes on an uncached single-image request and a video request. Media fetch, decode, and preprocessing are 30 ms of 385.7 ms for the image and 713.9 ms of 1,670.5 ms for the video.](../../../../assets/img/mm-ttft-breakdown.svg)
 
 Frontend media decoding can also be combined with the [embedding
 cache](./embedding-cache.md). Frontend decoding reduces media input processing

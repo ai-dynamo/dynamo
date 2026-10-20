@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="560" viewBox="0 0 1400 560" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">How Dynamo handles a multimodal request, aggregated versus EPD</title>
+  <desc id="desc">In aggregated serving, a client sends a request over HTTP to the frontend, which routes and tokenizes it and sends it over TCP to one aggregated worker that does media decode, preprocessing, the vision encoder, prefill, and decode, streaming tokens back. In EPD serving, the frontend sends it to a prefill worker that checks the embedding cache first, calls encoder workers over NIXL on a miss, runs LLM prefill, and sends the KV cache over NIXL to a decode worker.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect width="1400" height="560" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">ENCODER DISAGGREGATION</text>
+  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Aggregated versus EPD serving</text>
+  <text x="50" y="104" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">AGGREGATED</text>
+  <rect x="50" y="118" width="140" height="84" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="64" y="166.0" font-size="13" font-weight="700" fill="#374151">Client</text>
+  <rect x="260" y="118" width="200" height="84" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="274" y="153.0" font-size="13" font-weight="700" fill="#374151">Frontend</text>
+  <text x="274" y="174.0" font-size="13" fill="#1A1A1A">routing, tokenize</text>
+  <rect x="540" y="118" width="680" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="554" y="145" font-size="13" font-weight="700" fill="#4C7A00">Aggregated worker</text>
+  <text x="554" y="166" font-size="13" fill="#1A1A1A">media decode, preprocess, ViT, prefill, decode</text>
+  <text x="556" y="188" font-size="12.5" font-weight="700" fill="#92400E">one worker, one queue, one scheduler</text>
+  <line x1="192" y1="160" x2="256" y2="160" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <text x="224" y="150" font-size="12" fill="#4B5563" text-anchor="middle">HTTP</text>
+  <line x1="462" y1="160" x2="536" y2="160" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <text x="499" y="150" font-size="12" fill="#4B5563" text-anchor="middle">TCP</text>
+  <line x1="1222" y1="160" x2="1330" y2="160" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <text x="1276" y="150" font-size="12" fill="#4B5563" text-anchor="middle">tokens (SSE)</text>
+  <text x="50" y="270" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">EPD</text>
+  <rect x="50" y="284" width="140" height="84" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="64" y="332.0" font-size="13" font-weight="700" fill="#374151">Client</text>
+  <rect x="260" y="284" width="200" height="84" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="274" y="319.0" font-size="13" font-weight="700" fill="#374151">Frontend</text>
+  <text x="274" y="340.0" font-size="13" fill="#1A1A1A">routing, tokenize</text>
+  <rect x="540" y="284" width="420" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="554" y="311" font-size="13" font-weight="700" fill="#4C7A00">Prefill worker (P)</text>
+  <text x="554" y="332" font-size="13" fill="#1A1A1A">checks the embedding cache first, calls E on a miss,</text>
+  <text x="554" y="350" font-size="13" fill="#1A1A1A">then runs LLM prefill itself</text>
+  <rect x="1050" y="284" width="250" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="1064" y="319.0" font-size="13" font-weight="700" fill="#4C7A00">Decode worker (D)</text>
+  <text x="1064" y="340.0" font-size="13" fill="#1A1A1A">token generation</text>
+  <line x1="192" y1="326" x2="256" y2="326" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <text x="224" y="316" font-size="12" fill="#4B5563" text-anchor="middle">HTTP</text>
+  <line x1="462" y1="326" x2="536" y2="326" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <text x="499" y="316" font-size="12" fill="#4B5563" text-anchor="middle">TCP</text>
+  <line x1="962" y1="326" x2="1046" y2="326" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <text x="1004" y="316" font-size="12" fill="#4B5563" text-anchor="middle">NIXL KV</text>
+  <line x1="1302" y1="326" x2="1372" y2="326" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <text x="1337" y="316" font-size="12" fill="#1A1A1A"></text>
+  <text x="1336" y="308" font-size="12" fill="#4B5563" text-anchor="middle">tokens</text>
+  <text x="1336" y="324" font-size="12" fill="#4B5563" text-anchor="middle">(SSE)</text>
+  <rect x="540" y="452" width="420" height="84" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="554" y="479" font-size="13" font-weight="700" fill="#234CDA">Encoder workers (E)</text>
+  <text x="554" y="500" font-size="13" fill="#1A1A1A">media decode, preprocess, ViT. No LLM weights, no KV</text>
+  <text x="554" y="518" font-size="13" fill="#1A1A1A">cache.</text>
+  <line x1="750" y1="370" x2="750" y2="450" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)" marker-start="url(#arrow-green-start)"/>
+  <text x="764" y="404" font-size="12" font-weight="700" fill="#4C7A00">NIXL embedding</text>
+  <text x="764" y="422" font-size="12" fill="#4B5563">cache miss only</text>
+</svg>

@@ -7,6 +7,8 @@ subtitle: Packing many small models onto a shared GPU and understanding the perf
 
 GPU sharing enables many lightly-used models to run on the same GPU. Dynamo offers multiple paths - MIG, MPS, HAMi and GPU fractions, offering various levels of isolation - to enable sharing a GPU. This page compares serving one model per GPU against packing two models onto a GPU and walks you through evaluating the throughput and latency tradeoffs involved.
 
+![The baseline runs one model per GPU. HAMi runs two models with memory caps while the CUDA driver time-slices the SMs. GPU fractions give each model half the memory and half the SMs, running concurrently.](../../../assets/img/gpu-sharing-modes.svg)
+
 ## Setup
 
 We ran the same models on an 8× A100 node with Qwen3-4B, with a fixed input length of 2048 tokens, and a fixed output length of 256 tokens.

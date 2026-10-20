@@ -35,6 +35,8 @@ The routing flow in general has three steps:
 2. The frontend represents the media in a routing-only token view that matches the backend's cache identity and token layout.
 3. The KV router includes that overlap in its combined cache-and-load score, selects the lowest-cost eligible worker, and forwards the same media identity.
 
+![A request with a repeated image reaches the frontend. The frontend hashes the image URL, reads the image size, counts image tokens, builds a routing-only prompt, and scores workers. Worker A, which holds the image's KV blocks, is selected; workers B and C are considered but not chosen.](../../../../assets/img/mm-kv-routing.svg)
+
 ## Image Identity
 
 By default, an HTTP image's identity hashes the exact URL bytes, including its

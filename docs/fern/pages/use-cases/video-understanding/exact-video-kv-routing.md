@@ -15,6 +15,8 @@ across requests, such as several questions about one video. Exact video routing
 decodes and samples the video in the frontend before worker selection, so use it
 when the expected KV reuse offsets that frontend work.
 
+![A request with a repeated video reaches the frontend. The frontend decodes and samples the video, hashes the decoded content, reproduces the worker's token layout, builds a routing-only prompt, and scores workers. Worker A, which holds the clip's KV blocks, is selected.](../../../assets/img/exact-video-kv-routing.svg)
+
 ## Video Identity and Token Layout
 
 Exact video routing requires frontend decoding. The frontend samples the video and computes an XXH3-64 identity over the sampled RGB frames, decoded shape and data type, and video metadata such as the source frame rate and sampled timestamps. Two URLs that decode to the same sampled content and metadata receive the same identity.

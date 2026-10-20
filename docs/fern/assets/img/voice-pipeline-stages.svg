@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="430" viewBox="0 0 1400 430" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Choosing a voice pipeline on Dynamo</title>
+  <desc id="desc">A voice agent application, for example Pipecat, owns conversation history, turn detection, interruptions, and orchestration. It can use a cascaded pipeline of three Dynamo stages: streaming ASR on the realtime endpoint in transcription mode, an LLM on chat completions, and text to speech on the speech endpoint. Or it can use one full-duplex audio-in, audio-out model on the realtime endpoint in realtime mode.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect width="1400" height="430" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">VOICE PIPELINES</text>
+  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Cascaded or full-duplex: one application, two paths</text>
+  <rect x="50" y="150" width="270" height="122" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect x="68.6" y="160" width="8.8" height="13.2" rx="4.4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <path d="M65.3,169.9 A7.699999999999999,7.699999999999999 0 0 0 80.7,169.9" fill="none" stroke="#234CDA" stroke-width="2"/>
+  <line x1="73.0" y1="177.6" x2="73.0" y2="182" stroke="#234CDA" stroke-width="2"/>
+  <text x="102" y="177" font-size="13" font-weight="700" fill="#374151">Voice agent application</text>
+  <circle cx="69" cy="194" r="2.2" fill="#1A1A1A"/>
+  <text x="78" y="198" font-size="13" fill="#1A1A1A">For example Pipecat</text>
+  <circle cx="69" cy="212" r="2.2" fill="#1A1A1A"/>
+  <text x="78" y="216" font-size="13" fill="#1A1A1A">Owns conversation history, turn</text>
+  <text x="78" y="234" font-size="13" fill="#1A1A1A">detection, interruptions, and</text>
+  <text x="78" y="252" font-size="13" fill="#1A1A1A">orchestration</text>
+  <rect x="400" y="96" width="960" height="150" rx="12" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.2" stroke-dasharray="5 5"/>
+  <text x="416" y="118" font-size="12" font-weight="700" letter-spacing="1.2" fill="#374151">CASCADED PIPELINE</text>
+  <rect x="416" y="134" width="250" height="86" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <text x="430" y="161" font-size="13" font-weight="700" fill="#1A1A1A">Streaming ASR</text>
+  <circle cx="435" cy="178" r="2.2" fill="#4B5563"/>
+  <text x="444" y="182" font-size="13" fill="#4B5563">/v1/realtime WebSocket</text>
+  <circle cx="435" cy="196" r="2.2" fill="#4B5563"/>
+  <text x="444" y="200" font-size="13" fill="#4B5563">session.type=transcription</text>
+  <rect x="750" y="134" width="250" height="86" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <text x="764" y="161" font-size="13" font-weight="700" fill="#1A1A1A">LLM</text>
+  <circle cx="769" cy="178" r="2.2" fill="#4B5563"/>
+  <text x="778" y="182" font-size="13" fill="#4B5563">/v1/chat/completions</text>
+  <circle cx="769" cy="196" r="2.2" fill="#4B5563"/>
+  <text x="778" y="200" font-size="13" fill="#4B5563">stream: true</text>
+  <rect x="1084" y="134" width="260" height="86" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <text x="1098" y="161" font-size="13" font-weight="700" fill="#1A1A1A">Text to speech</text>
+  <circle cx="1103" cy="178" r="2.2" fill="#4B5563"/>
+  <text x="1112" y="182" font-size="13" fill="#4B5563">/v1/audio/speech</text>
+  <circle cx="1103" cy="196" r="2.2" fill="#4B5563"/>
+  <text x="1112" y="200" font-size="13" fill="#4B5563">Streams wav and pcm</text>
+  <line x1="668" y1="177.0" x2="748" y2="177.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="708" y="167.0" font-size="12" fill="#4B5563" text-anchor="middle">transcript</text>
+  <line x1="1002" y1="177.0" x2="1082" y2="177.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="1042" y="167.0" font-size="12" fill="#4B5563" text-anchor="middle">text</text>
+  <rect x="400" y="276" width="960" height="130" rx="12" fill="#FFFFFF" stroke="#76B900" stroke-width="1.2" stroke-dasharray="5 5"/>
+  <text x="416" y="298" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4C7A00">FULL-DUPLEX: ONE AUDIO-IN, AUDIO-OUT MODEL</text>
+  <rect x="416" y="314" width="580" height="86" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="430" y="341" font-size="13" font-weight="700" fill="#4C7A00">Audio-in, audio-out model</text>
+  <circle cx="435" cy="358" r="2.2" fill="#1A1A1A"/>
+  <text x="444" y="362" font-size="13" fill="#1A1A1A">/v1/realtime WebSocket, session.type=realtime</text>
+  <circle cx="435" cy="376" r="2.2" fill="#1A1A1A"/>
+  <text x="444" y="380" font-size="13" fill="#1A1A1A">vLLM-Omni. Text and audio events on one connection</text>
+  <path d="M322,191.0 C360,191.0 360,177.0 412,177.0" fill="none" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="362" y="150" font-size="12" fill="#4B5563" text-anchor="middle">cascaded</text>
+  <path d="M322,231.0 C360,231.0 360,357.0 412,357.0" fill="none" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <text x="362" y="336" font-size="12" fill="#4B5563" text-anchor="middle">full-duplex</text>
+</svg>

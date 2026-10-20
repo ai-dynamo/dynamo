@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="430" viewBox="0 0 1300 430" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Capture an agent run once, replay it many times</title>
+  <desc id="desc">A Dynamo request trace of a real agent run becomes a request graph with arrival times, token lengths, shared prompt blocks, sessions, and parent-child links. The graph replays either live with AIPerf against a real endpoint, or offline with DynoSim against a simulated scheduler, router, and KV cache. The agent and its tools are not run again.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect width="1300" height="430" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">AGENT SIMULATION</text>
+  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">One capture, two ways to replay</text>
+  <rect x="50" y="170" width="220" height="86" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="76" cy="196" r="13" fill="#234CDA"/>
+  <text x="76" y="201" font-size="14" font-weight="700" fill="#FFFFFF" text-anchor="middle">1</text>
+  <text x="98" y="201" font-size="15" font-weight="700" fill="#1A1A1A">Real agent run</text>
+  <text x="64" y="223" font-size="13" fill="#4B5563">Captured with request</text>
+  <text x="64" y="241" font-size="13" fill="#4B5563">tracing on.</text>
+  <rect x="330" y="130" width="300" height="122" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
+  <circle cx="356" cy="156" r="13" fill="#234CDA"/>
+  <text x="356" y="161" font-size="14" font-weight="700" fill="#FFFFFF" text-anchor="middle">2</text>
+  <text x="378" y="161" font-size="15" font-weight="700" fill="#1A1A1A">Request graph</text>
+  <circle cx="349" cy="179" r="2.2" fill="#1A1A1A"/>
+  <text x="358" y="183" font-size="13" fill="#1A1A1A">When each request arrived</text>
+  <circle cx="349" cy="197" r="2.2" fill="#1A1A1A"/>
+  <text x="358" y="201" font-size="13" fill="#1A1A1A">Input and output token lengths</text>
+  <circle cx="349" cy="215" r="2.2" fill="#1A1A1A"/>
+  <text x="358" y="219" font-size="13" fill="#1A1A1A">Which prompt blocks were shared</text>
+  <circle cx="349" cy="233" r="2.2" fill="#1A1A1A"/>
+  <text x="358" y="237" font-size="13" fill="#1A1A1A">Sessions and parent-child links</text>
+  <line x1="272" y1="213.0" x2="328" y2="213.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="720" y="100" width="270" height="86" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="734" y="127" font-size="13" font-weight="700" fill="#4C7A00">Live replay: AIPerf</text>
+  <text x="734" y="148" font-size="13" fill="#1A1A1A">Synthetic requests against a real</text>
+  <text x="734" y="166" font-size="13" fill="#1A1A1A">endpoint and GPUs.</text>
+  <rect x="1040" y="100" width="210" height="86" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="1054" y="127" font-size="13" font-weight="700" fill="#4C7A00">Measure</text>
+  <text x="1054" y="148" font-size="13" fill="#1A1A1A">Latency, throughput, and</text>
+  <text x="1054" y="166" font-size="13" fill="#1A1A1A">cache hit rate.</text>
+  <rect x="720" y="270" width="270" height="86" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="734" y="297" font-size="13" font-weight="700" fill="#4C7A00">Offline simulation: DynoSim</text>
+  <text x="734" y="318" font-size="13" fill="#1A1A1A">The graph against a simulated</text>
+  <text x="734" y="336" font-size="13" fill="#1A1A1A">scheduler, router, and KV cache.</text>
+  <rect x="1040" y="270" width="210" height="86" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="1054" y="297" font-size="13" font-weight="700" fill="#4C7A00">Compare configurations</text>
+  <text x="1054" y="318" font-size="13" fill="#1A1A1A">Worker counts, topologies,</text>
+  <text x="1054" y="336" font-size="13" fill="#1A1A1A">routing, and cache size.</text>
+  <line x1="632" y1="161.0" x2="718" y2="143.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <line x1="632" y1="221.0" x2="718" y2="313.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <line x1="992" y1="143.0" x2="1038" y2="143.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <line x1="992" y1="313.0" x2="1038" y2="313.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <line x1="1145.0" y1="266" x2="1145.0" y2="192" stroke="#9CA3AF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrow-gray)"/>
+  <text x="1157.0" y="232.0" font-size="12" fill="#4B5563">validate live</text>
+  <text x="50" y="410" font-size="13" fill="#4B5563">Replay re-sends the serving workload. The model does not repeat its decisions, and tools are not run again.</text>
+</svg>

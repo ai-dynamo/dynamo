@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="514" viewBox="0 0 1300 514" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Where video is decoded, by codec</title>
+  <desc id="desc">H.264 and H.265 video decodes on the GPU with NVDEC through PyNvVideoCodec. VP8 and VP9 decode on the CPU with Dynamo's in-tree FFmpeg when frontend decoding is enabled. Video without frontend decoding is decoded by the backend's Python decode library.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect width="1300" height="514" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">VIDEO DECODING</text>
+  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Which decoder handles which codec</text>
+  <rect x="50" y="220" width="220" height="86" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <rect x="62" y="230" width="28.6" height="22" rx="4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <polygon points="73.44,236.16 73.44,245.84 82.02,241.0" fill="#234CDA"/>
+  <rect x="64.288" y="234.4" width="2.8600000000000003" height="2.6399999999999997" fill="#234CDA"/>
+  <rect x="64.288" y="239.9" width="2.8600000000000003" height="2.6399999999999997" fill="#234CDA"/>
+  <rect x="64.288" y="245.4" width="2.8600000000000003" height="2.6399999999999997" fill="#234CDA"/>
+  <text x="102" y="247" font-size="13" font-weight="700" fill="#1A1A1A">Video input</text>
+  <text x="64" y="268" font-size="13" fill="#4B5563">A video URL or data URL in</text>
+  <text x="64" y="286" font-size="13" fill="#4B5563">the request.</text>
+  <rect x="380" y="134.0" width="280" height="56" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <text x="394" y="161.0" font-size="13" font-weight="700" fill="#1A1A1A">H.264 and H.265 (HEVC)</text>
+  <rect x="760" y="110" width="520" height="104" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="774" y="146.0" font-size="13" font-weight="700" fill="#4C7A00">NVDEC on the GPU</text>
+  <circle cx="779" cy="163.0" r="2.2" fill="#1A1A1A"/>
+  <text x="788" y="167.0" font-size="13" fill="#1A1A1A">Fixed-function decoder, separate from the SMs used for inference</text>
+  <circle cx="779" cy="181.0" r="2.2" fill="#1A1A1A"/>
+  <text x="788" y="185.0" font-size="13" fill="#1A1A1A">Through PyNvVideoCodec</text>
+  <line x1="662" y1="162.0" x2="756" y2="162.0" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <line x1="272" y1="263.0" x2="376" y2="162.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="380" y="260.0" width="280" height="56" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <text x="394" y="287.0" font-size="13" font-weight="700" fill="#1A1A1A">VP8 and VP9</text>
+  <rect x="760" y="236" width="520" height="104" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="774" y="272.0" font-size="13" font-weight="700" fill="#4C7A00">In-tree FFmpeg on the CPU</text>
+  <circle cx="779" cy="289.0" r="2.2" fill="#1A1A1A"/>
+  <text x="788" y="293.0" font-size="13" fill="#1A1A1A">Needs --frontend-decoding (vLLM, or SGLang on CUDA)</text>
+  <circle cx="779" cy="307.0" r="2.2" fill="#1A1A1A"/>
+  <text x="788" y="311.0" font-size="13" fill="#1A1A1A">Codec-limited build</text>
+  <line x1="662" y1="288.0" x2="756" y2="288.0" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <line x1="272" y1="263.0" x2="376" y2="288.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="380" y="386.0" width="280" height="56" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <text x="394" y="413.0" font-size="13" font-weight="700" fill="#1A1A1A">Video without frontend decoding</text>
+  <rect x="760" y="362" width="520" height="104" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="774" y="389" font-size="13" font-weight="700" fill="#92400E">Backend decode library</text>
+  <circle cx="779" cy="406" r="2.2" fill="#1A1A1A"/>
+  <text x="788" y="410" font-size="13" fill="#1A1A1A">The backend owns decode and needs a Python carrier: OpenCV, PyAV, or</text>
+  <text x="788" y="428" font-size="13" fill="#1A1A1A">decord</text>
+  <circle cx="779" cy="442" r="2.2" fill="#1A1A1A"/>
+  <text x="788" y="446" font-size="13" fill="#1A1A1A">The default images omit the wider carriers</text>
+  <line x1="662" y1="414.0" x2="756" y2="414.0" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
+  <line x1="272" y1="263.0" x2="376" y2="414.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="50" y="500" font-size="13" fill="#4B5563">The in-tree FFmpeg does not include H.264, H.265, or AV1 decoders. NVDEC availability varies by GPU; see the table below.</text>
+</svg>

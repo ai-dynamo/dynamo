@@ -5,6 +5,8 @@ title: Encoder Disaggregation
 subtitle: Scale vision encoders separately from LLM workers
 ---
 
+![In aggregated serving, one worker does media decode, preprocessing, the vision encoder, prefill, and decode. In EPD serving, a prefill worker checks the embedding cache first and calls encoder workers over NIXL on a miss, then runs LLM prefill and sends the KV cache over NIXL to a decode worker.](../../../../assets/img/encoder-disaggregation.svg)
+
 ## Overview
 
 Encoder disaggregation separates the vision encoder from the prefill/decode pipeline into its own worker. Instead of running image encoding inline, a dedicated encode worker handles media processing and transfers the resulting embeddings to downstream workers via NIXL (RDMA).
@@ -43,6 +45,16 @@ For simple deployments or development and testing, the aggregated pattern (EPD, 
     The encode worker transfers embeddings over NIXL to the prefill worker. The prefill worker then transfers the KV cache to the decode worker.
   </Card>
 </CardGroup>
+
+## Placement Options
+
+Where the encoder runs is a separate choice from whether it is disaggregated:
+
+- **Aggregated:** every GPU runs one worker that encodes, prefills, and decodes. This is the simplest setup.
+- **Colocated encoder:** every GPU runs encoder workers and a prefill and decode (PD) worker side by side, sharing the GPU through CUDA MPS. Encoding no longer queues behind prefill on the same scheduler, and you need no extra hardware.
+- **Disaggregated encoder:** encoders run on their own GPUs, which can be lower-tier hardware, and send embeddings to the PD workers over NIXL.
+
+![Three topologies. Aggregated serving runs an aggregated worker on each of four identical GPUs. Colocated encoder runs encoder workers and a PD worker on each of four identical GPUs using MPS. Disaggregated encoder runs encoder workers on two lower-tier GPUs and sends embeddings over NIXL to PD workers on four other GPUs.](../../../../assets/img/encoder-placement-options.svg)
 
 ## Launching
 
