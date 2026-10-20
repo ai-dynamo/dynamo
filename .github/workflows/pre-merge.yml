@@ -473,6 +473,8 @@ jobs:
         mkdir -p "$RUNNER_TEMP/sccache-download" "$bin_dir"
         (cd "$RUNNER_TEMP/sccache-download" && SCCACHE_BIN_DIR="$bin_dir" "$GITHUB_WORKSPACE/container/use-sccache.sh" install)
         echo "$bin_dir" >> "$GITHUB_PATH"
+        # The installer skips the download when sccache is already on PATH; resolve the binary later steps will run.
+        sccache_bin="$(PATH="$bin_dir:$PATH" command -v sccache)"
         export SCCACHE_DIR="$RUNNER_TEMP/sccache-cache"
         export SCCACHE_CACHE_SIZE=4G
         # Keep one server for the whole job; the default 600s idle timeout can expire during unit tests.
@@ -483,7 +485,7 @@ jobs:
           echo "SCCACHE_IDLE_TIMEOUT=$SCCACHE_IDLE_TIMEOUT"
           echo "CARGO_INCREMENTAL=0"
         } >> "$GITHUB_ENV"
-        if "$bin_dir/sccache" --start-server; then
+        if "$sccache_bin" --start-server; then
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         else
           echo "::warning::sccache server failed to start, building without compiler cache"
