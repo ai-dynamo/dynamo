@@ -251,6 +251,7 @@ areas:
   - components/src/dynamo/common/utils/
   - components/src/dynamo/experimental/
   - examples/backends/sample/
+  - examples/backends/deepinfer/
   - examples/common/
   - examples/custom_backend/
   - lib/backend-common/

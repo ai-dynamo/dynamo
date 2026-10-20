@@ -247,6 +247,7 @@
 /lib/runtime/src/protocols/                                                                             @ai-dynamo/dynamo-runtime-codeowners
 /lib/sidecar/dynamo-sidecar                                                                             @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/transports/                                                                            @ai-dynamo/dynamo-runtime-codeowners
+/examples/backends/deepinfer/                                                                           @ai-dynamo/dynamo-runtime-codeowners
 /lib/backend-common/examples/                                                                           @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /tests/test_models_dir_flag.py                                                                          @ai-dynamo/dynamo-runtime-codeowners

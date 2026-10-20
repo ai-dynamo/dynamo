@@ -672,6 +672,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 # Complete the root Cargo workspace after the expensive runtime build. Planner
 # wheel metadata and optional source archival both validate every member.
 COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-policy-example/
+COPY examples/backends/deepinfer/ /opt/dynamo/examples/backends/deepinfer/
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/sidecar/
 

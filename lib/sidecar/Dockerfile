@@ -71,6 +71,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY .cargo/ .cargo/
 COPY lib/ lib/
 COPY examples/router/custom-policy-example/ examples/router/custom-policy-example/
+COPY examples/backends/deepinfer/ examples/backends/deepinfer/
 COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 

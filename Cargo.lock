@@ -2558,6 +2558,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-deepinfer-openengine"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "dynamo-sidecar-common",
+ "dynamo-trtllm-sidecar",
+ "futures",
+ "parking_lot",
+ "prost-types 0.13.5",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-health 0.13.1",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dynamo-epp-sidecar"
 version = "1.6.0"
 dependencies = [
