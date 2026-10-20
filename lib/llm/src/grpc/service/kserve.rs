@@ -19,7 +19,6 @@ use derive_builder::Builder;
 use dynamo_runtime::config::environment_names::llm::metrics as env_metrics;
 use futures::pin_mut;
 use tokio::task::JoinHandle;
-use tokio_stream::wrappers::TcpListenerStream;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
@@ -72,7 +71,10 @@ use crate::grpc::service::tensor::{
     ExtendedNvCreateTensorResponse, kserve_metadata_shape, tensor_response_stream,
 };
 use std::convert::{TryFrom, TryInto};
-use tonic::{Request, Response, Status, transport::Server};
+use tonic::{
+    Request, Response, Status,
+    transport::{Server, server::TcpIncoming},
+};
 
 use crate::protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
@@ -260,8 +262,9 @@ impl KserveService {
         let observer = cancel_token.child_token();
         self.server_builder()
             .add_service(GrpcInferenceServiceServer::new(self.clone()))
+            // Match the TCP_NODELAY default that `serve_with_shutdown` applies.
             .serve_with_incoming_shutdown(
-                TcpListenerStream::new(listener),
+                TcpIncoming::from(listener).with_nodelay(Some(true)),
                 observer.cancelled_owned(),
             )
             .await
