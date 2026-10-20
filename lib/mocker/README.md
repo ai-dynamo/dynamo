@@ -47,11 +47,10 @@ configured KV-event lag delays both indexes together. This is opt-in and does no
 change placement or eviction policy.
 
 Session IDs come from replay request metadata and `RouterEvent.session_id`.
-Unattributed stores and lower-tier events do not create session lineage. The
-parent session-plumbing change forwards AISimulate stored-block attribution into
-router events. The adapter never infers a store's session from whichever requests
-happen to be running. Disaggregated decode
-placement remains load-only; prefill observes the cache events.
+Unattributed stores and lower-tier events do not create session lineage. Replay
+forwards AISimulate stored-block attribution into router events. The adapter never
+infers a store's session from whichever requests happen to be running.
+Disaggregated decode placement remains load-only; prefill observes the cache events.
 
 ## Further Reading
 
