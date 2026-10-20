@@ -198,6 +198,10 @@ impl ResponsePublisher for velo_response::VeloResponseSender {
     async fn abort(&mut self) -> anyhow::Result<()> {
         velo_response::VeloResponseSender::abort(self).await
     }
+    // `reset_on_stop` stays false on purpose. `stop_generating` does not
+    // invalidate results already in the stream, so after a graceful Stop the
+    // frontend still gets what the engine yields, final chunk included. TCP
+    // and QUIC instead end the stream at the worker.
     fn strict_prologue(&self) -> bool {
         true
     }

@@ -874,6 +874,9 @@ pub mod response_plane {
     ///
     /// Velo has no TLS, so a velo runtime refuses to start while any
     /// `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is truthy.
+    ///
+    /// On a graceful Stop, velo still delivers what the worker's engine
+    /// yields, final chunk included; tcp and quic end the stream at the worker.
     pub const DYN_RESPONSE_PLANE: &str = "DYN_RESPONSE_PLANE";
 
     /// Seconds a frontend waits, after a worker ACKs a unary request, for that
