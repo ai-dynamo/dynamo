@@ -645,6 +645,10 @@ class StreamingChatPayload(BasePayload):
                 assert usage["completion_tokens"] == self.expected_completion_tokens
         if self.body.get("logprobs"):
             _validate_chat_logprobs(output_logprobs)
+            if (self.body.get("top_logprobs") or 0) > 0:
+                assert all(
+                    item["top_logprobs"] for item in output_logprobs
+                ), "Expected top_logprobs alternatives"
         if "completion_token_ids" in fields:
             assert completion_ids, "Missing requested completion token IDs"
             assert all(type(token) is int and token >= 0 for token in completion_ids)

@@ -16,10 +16,21 @@ from tests.utils.payload_builder import (
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 
-@pytest.mark.parametrize("prompt_tokens", [2, 1])
-def test_streaming_prompt_ids_match_usage_without_prompt_logprobs(prompt_tokens):
+@pytest.mark.parametrize(
+    "prompt_tokens,top_logprobs,with_candidates,error",
+    [
+        (2, 0, False, None),
+        (1, 0, False, "Incorrect prompt usage"),
+        (2, 2, True, None),
+        (2, 2, False, "Expected top_logprobs alternatives"),
+    ],
+)
+def test_streaming_token_metadata_without_prompt_logprobs(
+    prompt_tokens, top_logprobs, with_candidates, error
+):
     payload = streaming_chat_payload_with_logprobs(
         expected_response=[],
+        top_logprobs=top_logprobs,
         extra_body={"nvext": {"extra_fields": ["prompt_token_ids"]}},
     )
     token = {
@@ -29,6 +40,11 @@ def test_streaming_prompt_ids_match_usage_without_prompt_logprobs(prompt_tokens)
         "bytes": None,
         "top_logprobs": [],
     }
+    if with_candidates:
+        token["top_logprobs"] = [
+            {"token": "token_id:17", "logprob": -0.5, "bytes": None},
+            {"token": "token_id:18", "logprob": -1.0, "bytes": None},
+        ]
     chunk = {
         "choices": [
             {
@@ -49,10 +65,10 @@ def test_streaming_prompt_ids_match_usage_without_prompt_logprobs(prompt_tokens)
     response.iter_lines.return_value = iter(
         [f"data: {json.dumps(chunk)}", "data: [DONE]"]
     )
-    if prompt_tokens == 2:
+    if error is None:
         assert payload.process_response(response) == "hello"
     else:
-        with pytest.raises(AssertionError, match="Incorrect prompt usage"):
+        with pytest.raises(AssertionError, match=error):
             payload.process_response(response)
     response.close.assert_called_once()
 
