@@ -68,7 +68,7 @@ Choose this topology when:
 - Multiple model routes should share a platform-managed address and listener.
 - A platform team manages the Gateway while an application team manages the DGD and `HTTPRoute`.
 
-A Gateway in front of your models does not by itself call for this topology, because the Frontend
+These reasons alone do not call for this topology, because the Frontend
 topology also runs behind a Gateway. Choose GAIE routing when your platform requires the Gateway to
 pick the worker through the GAIE EPP `ext_proc` mechanism. This EPP deployment style does not have
 full feature parity with Dynamo Frontend routing; see
