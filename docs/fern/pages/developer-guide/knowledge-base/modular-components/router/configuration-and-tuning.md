@@ -478,6 +478,29 @@ Topology-aware KV transfer is configured on workers through runtime metadata, no
 For the full runtime contract and routing behavior, see [Topology-Aware KV Transfer](topology-aware-kv-transfer.md).
 For the Kubernetes configuration fields, see the [KvTransferPolicy API](../../../../reference/kubernetes-api/full-api-reference.mdx#kvtransferpolicy).
 
+## Decode-to-Prefill Reuse
+
+**Experimental.** Decode-to-prefill transfer selection is disabled by default.
+`--router-decode-to-prefill-reuse` selects eligible CPU-retained sources;
+`--router-decode-to-prefill-gpu-reuse` selects the separate `gpu_direct` tier.
+Neither option enables the other path. GPU reuse requires explicit GPU-only
+capability, compatible source/target domains and ready retained inventory. It
+does not treat normal model-GPU overlap or CPU inventory as transferable GPU KV.
+
+The router first selects the normal prefill target, then queries eligible
+decode inventory for additional reusable blocks. It accounts for the target's
+existing model and retained-GPU prefix, rejects transfers without a positive
+estimated saving, and preserves one cumulative lookup deadline. If both paths
+are enabled, GPU selection precedes an independently eligible CPU fallback.
+Unsupported or unavailable sources preserve ordinary request handling.
+
+Calibrate the GPU transfer cost separately from the CPU transfer cost. Include
+source acquisition, transfer, local cache onboarding, donor contention and any
+incremental prefill-to-decode cost. Use a conservative positive prefill saving
+per reused token. A configured coefficient is an admission estimate, not a
+measured speedup. See the [frontend flag reference](../../../../reference/components/frontend-configuration.mdx#decode-to-prefill-reuse)
+and [retained GPU integration](../backends/vllm/native-kv-offloading.md#retained-gpu-decode-to-prefill-reuse).
+
 ## Block Tracking
 
 - `--no-router-track-active-blocks`: Disables tracking of active blocks used for ongoing generation or decode phases. Disable this when routing to workers that only perform prefill.

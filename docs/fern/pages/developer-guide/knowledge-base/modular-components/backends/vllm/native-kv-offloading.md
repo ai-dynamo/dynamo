@@ -119,6 +119,42 @@ The GPU and CPU copies then evict independently:
 Without this event wiring, offloading still works inside each worker, but the
 router treats CPU-resident prefixes as cache misses.
 
+## Retained GPU Decode-to-Prefill Reuse
+
+**Experimental.** `GPUOffloadingConnector` with `GPUOffloadingSpec` retains sealed
+KV blocks in a dedicated CUDA allocation. Decode-to-prefill reuse copies from
+the decode GPU allocation into a retained allocation on the prefill GPU through
+KVCR and NIXL CUDA IPC. Local model-cache stores and loads use device-to-device
+copies. CPU memory carries control messages and pointer/size descriptors; it
+does not hold KV payloads. Budget additional VRAM on both workers.
+
+The initial implementation requires one worker per role, tensor parallel size
+one, identical raw cache layouts and a same-host GPU pair with working CUDA IPC.
+Canonical layouts, replicated layouts, cross-node transport, CPU/disk payload
+pools and the versioned state-agent ingress are unsupported. Use the native
+worker event publisher and a compatible vLLM offloading/tiering API.
+
+The retained tier publishes `gpu_direct` events and has an independent lifetime
+from the model's normal GPU cache. Native cache clears preserve retained
+inventory; retained-cache removals revoke it explicitly. The router requires
+`router_hint_gpu_direct`, GPU source endpoints and a matching certified
+`router_hint_transfer_domain` before emitting `kv.fetch_gpu@1.0`. The domain is
+an operator-supplied layout contract, not automatic model compatibility proof.
+
+Both workers require a native NIXL/UCX implementation of the strict
+`NIXL_UCX_CUDA_IPC_ONLY=1` policy with `UCX_TLS=cuda_ipc,posix,self` and actual
+CUDA memory support. A stock installation that rejects this profile is not
+compatible. See the [KVCR GPU endpoint contract](https://github.com/ai-dynamo/kvcr#direct-gpu-memory-endpoints)
+for registration, dependency and lifetime requirements.
+
+Enable the separate GPU router option only after measuring its acquisition,
+transfer, onboarding and prefill costs. CPU coefficients do not qualify it.
+See [Decode-to-Prefill Reuse](../../router/configuration-and-tuning.md#decode-to-prefill-reuse)
+for selection behavior. Missing capabilities or inventory leave the normal
+request path available. A deadline does not cancel native DMA: uncertain source
+pins and target allocations remain retained until actual quiescence. The strict
+IPC profile does not provide native peer-death recovery.
+
 ## Known Limitations
 
 - **Cache-salted requests are not routable through `STORAGE`-tier events.**
