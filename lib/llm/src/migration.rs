@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use anyhow::{Error, Result};
 use futures::{stream, stream::StreamExt};
+use tracing::Instrument;
 
 use crate::{
     http::service::metrics::Metrics,
@@ -358,6 +359,10 @@ where
     /// Delivered tokens replayed in the active attempt's prompt. The worker counts them in its
     /// `prompt_tokens` although the client received them as completion.
     replayed_tokens: u32,
+    /// The request span current when the operator was invoked. The response body
+    /// is polled outside it, so mid-stream retries re-enter it to keep their
+    /// router and dispatch spans under the request's lifecycle.
+    request_span: tracing::Span,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -454,6 +459,7 @@ where
             pending_migration: None,
             prompt_len,
             replayed_tokens: 0,
+            request_span: tracing::Span::current(),
         };
         slf.new_stream(None).await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
@@ -505,7 +511,12 @@ where
                             MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
                         // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
                         // When no replacement is established, preserve the triggering stream error.
-                        if let Err(err) = self.new_stream(Some(migration_event)).await {
+                        let request_span = self.request_span.clone();
+                        if let Err(err) = self
+                            .new_stream(Some(migration_event))
+                            .instrument(request_span)
+                            .await
+                        {
                             tracing::warn!(error = ?err, "Cannot recreate stream");
                         } else {
                             self.release_replay_prompt_if_final();
@@ -1311,6 +1322,8 @@ mod tests {
         call_count: Arc<AtomicU32>,
         context_id: String,
         initial_min_tokens: Option<u32>,
+        /// Name of the span current at each `generate` call.
+        call_spans: Arc<std::sync::Mutex<Vec<Option<&'static str>>>>,
     }
 
     impl MockEngine {
@@ -1327,6 +1340,7 @@ mod tests {
                 call_count: Arc::new(AtomicU32::new(0)),
                 context_id,
                 initial_min_tokens: None,
+                call_spans: Default::default(),
             }
         }
 
@@ -1346,6 +1360,10 @@ mod tests {
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<BackendOutput>>> {
             let call_num = self.call_count.fetch_add(1, Ordering::SeqCst);
+            self.call_spans
+                .lock()
+                .unwrap()
+                .push(tracing::Span::current().metadata().map(|meta| meta.name()));
             if matches!(self.behavior, MockBehavior::FailThenSuccessWithAffinity) {
                 let actual = request
                     .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
@@ -1945,6 +1963,39 @@ mod tests {
         while stream.next().await.is_some() {}
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_mid_stream_migration_retry_stays_under_the_request_span() {
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::MidStreamFail { fail_after: 3 },
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let call_spans = mock_engine.call_spans.clone();
+        let request =
+            Context::with_id_and_metadata(create_mock_request(10), context_id, BTreeMap::new());
+
+        let migration = Migration::new(1, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+        let mut stream = migration
+            .generate(request, mock_engine)
+            .instrument(tracing::info_span!("request.lifecycle"))
+            .await
+            .unwrap();
+        // Like the HTTP response body, poll the stream outside the request span.
+        let mut responses = 0;
+        while stream.next().await.is_some() {
+            responses += 1;
+        }
+
+        assert_eq!(responses, 10);
+        assert_eq!(
+            *call_spans.lock().unwrap(),
+            [Some("request.lifecycle"), Some("request.lifecycle")]
+        );
     }
 
     #[tokio::test]
