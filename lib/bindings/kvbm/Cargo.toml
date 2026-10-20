@@ -3,6 +3,10 @@
 
 [workspace]
 
+# Keep the pinned decision core on the published protocol types.
+[patch."https://github.com/ai-dynamo/frontend-crates.git"]
+dynamo-protocols = { version = "=8.2.0" }
+
 [package]
 name = "kvbm-py3"
 version = "1.6.0"

@@ -5,6 +5,10 @@
 # empty workspace to exclude from top level workspace
 # excluded due to pyo3 extension module build issues
 
+# Keep the pinned decision core on the published protocol types.
+[patch."https://github.com/ai-dynamo/frontend-crates.git"]
+dynamo-protocols = { version = "=8.2.0" }
+
 [package]
 name = "dynamo-py3"
 version = "1.6.0"
