@@ -116,7 +116,9 @@ def merge(base, overrides):
 
 base_path, overrides_json, output_path = sys.argv[1:]
 with open(base_path, encoding="utf-8") as source:
-    config = yaml.safe_load(source) or {}
+    config = yaml.safe_load(source)
+if config is None:
+    config = {}
 if not isinstance(config, dict):
     raise TypeError(f"TensorRT-LLM engine config must be a mapping: {base_path}")
 merge(config, json.loads(overrides_json))
