@@ -409,10 +409,12 @@ fn check_cert_key_match(
         }
     })?;
     let certified_key = rustls::sign::CertifiedKey::new(cert_chain, signing_key);
-    certified_key.keys_match().map_err(|_| OtlpTlsError::InvalidPem {
-        path: cert_path.to_path_buf(),
-        reason: "certificate and private key do not match",
-    })?;
+    certified_key
+        .keys_match()
+        .map_err(|_| OtlpTlsError::InvalidPem {
+            path: cert_path.to_path_buf(),
+            reason: "certificate and private key do not match",
+        })?;
     Ok(())
 }
 
@@ -426,7 +428,10 @@ fn otlp_tls_material_for(
     use env_logging::otlp as otlp_env;
 
     let ca = read_otlp_pem(signal_ca_var, otlp_env::OTEL_EXPORTER_OTLP_CERTIFICATE)?;
-    let cert = read_otlp_pem(signal_cert_var, otlp_env::OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE)?;
+    let cert = read_otlp_pem(
+        signal_cert_var,
+        otlp_env::OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE,
+    )?;
     let key = read_otlp_pem(signal_key_var, otlp_env::OTEL_EXPORTER_OTLP_CLIENT_KEY)?;
 
     if let Some((path, bytes)) = &ca {
@@ -496,9 +501,8 @@ fn build_otlp_http_client(
             bundle.push(b'\n');
         }
         bundle.extend_from_slice(key);
-        builder = builder.identity(
-            reqwest::Identity::from_pem(&bundle).map_err(invalid("<client-identity>"))?,
-        );
+        builder = builder
+            .identity(reqwest::Identity::from_pem(&bundle).map_err(invalid("<client-identity>"))?);
     }
     builder
         .build()

@@ -111,8 +111,7 @@ pub mod logging {
             "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE";
 
         /// CA bundle for log export. Falls back to OTEL_EXPORTER_OTLP_CERTIFICATE.
-        pub const OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE: &str =
-            "OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE";
+        pub const OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE: &str = "OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE";
 
         /// PEM-encoded client certificate presented to the collector for mutual TLS.
         /// Must be paired with `OTEL_EXPORTER_OTLP_CLIENT_KEY`.
