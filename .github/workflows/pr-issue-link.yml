@@ -43,16 +43,20 @@ on:
 
 env:
   # The check fails pull requests without a link once this branch exists, and
-  # passes them with a warning before it does. It is a required status check
-  # ahead of the cut, so the switch happens at the cut with no settings change:
-  # 1.6 stays advisory throughout and the check first governs what lands for
-  # 1.7. The script matches the full branch name, so model-launch branches like
-  # `release/1.6.0-<model>-dev.1` do not trip it.
+  # passes them with a warning before it does. Make it a required status check
+  # before the cut, so it switches on at the cut with no further settings
+  # change: 1.6 stays advisory throughout and the check first governs what
+  # lands for 1.7. The script matches the full branch name, so model-launch
+  # branches like `release/1.6.0-<model>-dev.1` do not trip it.
+  #
+  # A branch, once cut, stays, so the check stays on without maintenance. Do
+  # not bump this for later minors: naming a branch not yet cut switches the
+  # check back off until that cut.
   #
   # The pull request template and the script default name this branch too, so
-  # that a contributor reads it before the check fails rather than after. Bump
-  # all three together for the next minor; the unit tests below fail when they
-  # disagree.
+  # that a contributor reads it before the check fails rather than after. If
+  # the switch-on release moves, change all three together; the unit tests
+  # below fail when they disagree.
   BLOCKING_BRANCH: "release/1.7.0"
 
 jobs:

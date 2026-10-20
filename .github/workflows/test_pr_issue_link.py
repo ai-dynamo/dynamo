@@ -24,7 +24,7 @@ Two properties carry the check and neither is visible from reading one branch:
     lookup budget is not an outage, so a pull request whose checked
     references all came back definitively not-an-issue must still fail.
 
-Every test drives `main()` with the three verification calls replaced, so
+Every test drives `main()` with the four API calls replaced, so
 nothing here touches the network.
 """
 
@@ -57,7 +57,7 @@ ENV_DEFAULTS = {
 
 
 class FakeApi:
-    """Programmed stand-in for the three verification calls.
+    """Programmed stand-in for the four GitHub and Linear calls.
 
     Each map is keyed the way the check asks: `owner/repo#number` for GitHub
     issues, `owner/repo` for repository visibility, and the identifier for
@@ -653,8 +653,9 @@ def test_the_template_and_the_workflow_name_the_same_blocking_branch() -> None:
     branch in the message a contributor sees. The pull request template
     carries the same branch so they read it before it fails, and the script
     repeats it as a default for any run that does not set the variable.
-    Bumping one without the others leaves the template naming the old release,
-    or the script gating on one the workflow never chose.
+    If the switch-on release moves and only one copy changes, the template
+    names the wrong release, or the script gates on one the workflow never
+    chose.
     """
     workflows = Path(__file__).parent
     workflow = (workflows / "pr-issue-link.yml").read_text()
