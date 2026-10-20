@@ -456,7 +456,6 @@ async fn e2e_real_openengine_video() {
     );
 }
 
-/// Drives an audio data URI through the real sidecar and OpenEngine server.
 /// `TRTLLM_E2E_AUDIO_DATA_URI` must contain a complete `data:audio/...` URI.
 #[tokio::test]
 #[ignore = "requires a live audio-capable TensorRT-LLM OpenEngine server"]

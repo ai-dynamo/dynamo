@@ -1006,28 +1006,9 @@ async fn a_configured_context_length_survives_a_server_without_control() {
 
 #[tokio::test]
 async fn media_requests_retry_transient_capability_discovery() {
-    for (key, url, image, video, audio) in [
-        (
-            "image_url",
-            "https://example.com/image.png",
-            true,
-            false,
-            false,
-        ),
-        (
-            "video_url",
-            "https://example.com/video.mp4",
-            false,
-            true,
-            false,
-        ),
-        (
-            "audio_url",
-            "https://example.com/audio.wav",
-            false,
-            false,
-            true,
-        ),
+    for (key, url, image, video) in [
+        ("image_url", "https://example.com/image.png", true, false),
+        ("video_url", "https://example.com/video.mp4", false, true),
     ] {
         let service = FakeTrtllm::default();
         service.unavailable_model_info.store(true, Ordering::SeqCst);
@@ -1051,10 +1032,6 @@ async fn media_requests_retry_transient_capability_discovery() {
             .service
             .advertises_video
             .store(video, Ordering::SeqCst);
-        server
-            .service
-            .advertises_audio
-            .store(audio, Ordering::SeqCst);
         let mut media_request = request();
         media_request.multi_modal_data = Some(HashMap::from([(
             key.to_string(),

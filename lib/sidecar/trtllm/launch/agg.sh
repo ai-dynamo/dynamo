@@ -103,7 +103,7 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 TRTLLM_EXTRA_CONFIG=$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-sidecar.XXXXXX.yaml")
 TRTLLM_REQUIRED_OVERRIDES='{"guided_decoding_backend": "xgrammar"}'
 if [[ "${TRTLLM_DISABLE_GUIDED_DECODING:-0}" == "1" ]]; then
-    TRTLLM_REQUIRED_OVERRIDES='{}'
+    TRTLLM_REQUIRED_OVERRIDES='{"guided_decoding_backend": null}'
 fi
 TRTLLM_OVERRIDES=$(build_trtllm_override_args_with_mem \
     --merge-with-json "$TRTLLM_REQUIRED_OVERRIDES")
