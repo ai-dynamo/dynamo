@@ -128,8 +128,11 @@ func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
 			originalDCD := dcd.DeepCopy()
 			backend, err := GetBackendFrameworkFromDynamoComponent(dcd)
 			require.NoError(t, err)
+
+			t.Log("Copy the component before rendering, as the production DCD renderer does")
+			componentForRendering := dcd.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
 			pod, err := GenerateBasePodSpec(
-				&dcd.Spec.DynamoComponentDeploymentSharedSpec,
+				componentForRendering,
 				backend,
 				nil,
 				dcd.Name,
