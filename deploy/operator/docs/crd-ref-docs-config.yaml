@@ -38,6 +38,7 @@ processor:
     # LPXGraphDeployment is an operator-generated private child, not a public API.
     - "LPXGraphDeployment.*$"
     - "LPXComponentStatus$"
+    - "CheckpointDownloadStatus$"
     - "DynamoComponentDeploymentStatus$"
     - "BaseStatus$"
     - "ExcludedNamespacesChecker"
