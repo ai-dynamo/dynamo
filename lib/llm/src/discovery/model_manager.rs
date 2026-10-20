@@ -26,16 +26,15 @@ use super::{
 };
 
 use dynamo_runtime::{
-    component::{Client, Endpoint, build_transport_type},
-    discovery::{Discovery, DiscoverySpec, ModelCardInstanceId},
-    pipeline::network::RequestPlanePayloadCodec,
+    component::{Client, Endpoint},
+    discovery::{Discovery, ModelCardInstanceId},
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
 };
 
 use crate::{
     kv_router::{
-        KvEventSourceRequirement, KvRouter, SelectionPolicySource, router_endpoint_id,
+        KvEventSourceRequirement, KvRouter, SelectionPolicySource,
         shared_cache::HicacheSharedKvCache,
     },
     local_model::runtime_config::{
@@ -171,6 +170,8 @@ pub struct ModelManager {
     /// Controller-owned committed groups, keyed by the controller's stable GroupKey encoding.
     discovery_groups: DashMap<String, CommittedDiscoveryGroup>,
 
+    worker_inventory: super::worker_inventory::WorkerInventory,
+
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     ///
     /// NOTE: These shared receivers currently live for the manager lifetime. Rebinding to a new
@@ -214,12 +215,70 @@ impl Default for ModelManager {
 }
 
 impl ModelManager {
+    pub(crate) fn publish_worker_group_observation(
+        &self,
+        group_id: String,
+        observation: Option<super::worker_inventory::WorkerGroupObservation>,
+    ) {
+        self.worker_inventory.publish(group_id, observation);
+    }
+
+    pub(crate) fn worker_inventory(
+        &self,
+    ) -> Vec<(String, super::worker_inventory::WorkerGroupObservation)> {
+        self.worker_inventory.snapshot()
+    }
+
+    pub(crate) fn worker_group_available_ids(
+        &self,
+        group_id: &str,
+        endpoint: &EndpointId,
+    ) -> HashSet<u64> {
+        let Some((mut available, primary, namespace)) =
+            self.discovery_groups.get(group_id).map(|group| {
+                (
+                    group.worker_set.available_worker_ids().unwrap_or_default(),
+                    group.primary.clone(),
+                    group.namespace.clone(),
+                )
+            })
+        else {
+            return HashSet::new();
+        };
+        // Hop clients have their own local fault inhibition. A worker remains available if
+        // any active consumer can route to it, but must still belong to the admitted group.
+        let mut hops = None::<HashSet<u64>>;
+        for group in self.discovery_groups.iter() {
+            if group.primary != primary || group.namespace != namespace {
+                continue;
+            }
+            let prefill = group
+                .worker_set
+                .prefill_router
+                .as_ref()
+                .and_then(|router| router.available_worker_ids_for(group_id, endpoint));
+            let encode = group
+                .worker_set
+                .encoder_router
+                .as_ref()
+                .and_then(|router| router.available_worker_ids_for(group_id, endpoint));
+            for ids in prefill.into_iter().chain(encode) {
+                hops.get_or_insert_with(HashSet::new).extend(ids);
+            }
+        }
+        if let Some(hops) = hops {
+            available.retain(|worker| hops.contains(worker));
+        }
+        available
+    }
+
     pub fn new() -> Self {
         Self {
             models: DashMap::new(),
             catalog: ArcSwap::from_pointee(CommittedCatalog::default()),
             cards: DashMap::new(),
             discovery_groups: DashMap::new(),
+            worker_inventory: Default::default(),
             runtime_configs: DashMap::new(),
             hicache_caches: DashMap::new(),
             kv_source_memberships: DashMap::new(),
@@ -2267,27 +2326,6 @@ impl ModelManager {
         let endpoint = client.endpoint.clone();
         let lora_domain = self.lora_domain(&endpoint.id());
 
-        // Register router via discovery mechanism.
-        let drt = endpoint.component().drt();
-        let instance_id = drt.discovery().instance_id();
-
-        // Build transport for router endpoint based on request plane mode
-        // Use the worker's component name so each target pool gets its own router discovery group
-        let router_endpoint_id =
-            router_endpoint_id(endpoint.id().namespace, endpoint.id().component);
-        let transport = build_transport_type(&endpoint, &router_endpoint_id, instance_id).await?;
-
-        let discovery_spec = DiscoverySpec::Endpoint {
-            namespace: router_endpoint_id.namespace.clone(),
-            component: router_endpoint_id.component.clone(),
-            endpoint: router_endpoint_id.name.clone(),
-            transport,
-            device_type: None,
-            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
-        };
-
-        let registration = drt.register_endpoint_lease(discovery_spec).await?;
-
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(&endpoint).await?;
 
@@ -2340,7 +2378,7 @@ impl ModelManager {
             None
         };
 
-        let mut chooser = KvRouter::new_with_worker_role_and_scheduler_load(
+        let chooser = KvRouter::new_with_worker_role_and_scheduler_load(
             endpoint.clone(),
             client,
             workers_with_configs,
@@ -2359,7 +2397,6 @@ impl ModelManager {
             cancellation_token,
         )
         .await?;
-        chooser.set_endpoint_registration(registration);
 
         // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
         // subscription per decode endpoint. WORKER_TYPE_DECODE is the routing path for BOTH
@@ -2813,7 +2850,7 @@ mod tests {
     use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
-        discovery::{Discovery, MockDiscovery, SharedMockRegistry},
+        discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
         distributed::DistributedConfig,
         pipeline::RouterMode,
         transports::event_plane::EventScope,
@@ -2833,6 +2870,88 @@ mod tests {
         )
     }
 
+    #[test]
+    fn worker_inventory_availability_follows_active_hops_and_group_admission() {
+        struct Hop {
+            group_id: String,
+            endpoint: EndpointId,
+            ids: Arc<parking_lot::Mutex<HashSet<u64>>>,
+        }
+        impl crate::kv_router::prefill_router::PrefillRouterLifecycle for Hop {
+            fn set_target(&self, _: Option<crate::discovery::WorkerSetTarget>) {}
+
+            fn available_worker_ids_for(
+                &self,
+                group_id: &str,
+                endpoint: &EndpointId,
+            ) -> Option<HashSet<u64>> {
+                (group_id == self.group_id && endpoint == &self.endpoint)
+                    .then(|| self.ids.lock().clone())
+            }
+        }
+        let manager = ModelManager::new();
+        let endpoint = EndpointId::from("ns.prefill.generate");
+        let (tx, rx) = tokio::sync::watch::channel(vec![1, 2]);
+        let mut target = make_worker_set("ns", "target");
+        target.set_instance_watcher(rx);
+        let insert = |key: &str, worker_set: WorkerSet| {
+            manager.discovery_groups.insert(
+                key.to_string(),
+                CommittedDiscoveryGroup {
+                    primary: "model".into(),
+                    namespace: "ns".into(),
+                    worker_set_key: key.into(),
+                    aliases: Vec::new(),
+                    cards: HashMap::new(),
+                    adapters: HashMap::new(),
+                    representative: ModelDeploymentCard::default(),
+                    worker_set: Arc::new(worker_set),
+                },
+            );
+        };
+        insert("target", target);
+        assert_eq!(
+            manager.worker_group_available_ids("target", &endpoint),
+            HashSet::from([1, 2])
+        );
+        let ids = Arc::new(parking_lot::Mutex::new(HashSet::from([2, 99])));
+        let mut consumer = make_worker_set("ns", "consumer");
+        let (_consumer_tx, consumer_rx) = tokio::sync::watch::channel(vec![3]);
+        consumer.set_instance_watcher(consumer_rx);
+        consumer.prefill_router = Some(Arc::new(Hop {
+            group_id: "target".into(),
+            endpoint: endpoint.clone(),
+            ids: ids.clone(),
+        }));
+        insert("consumer", consumer);
+        assert_eq!(
+            manager.worker_group_available_ids("consumer", &endpoint),
+            HashSet::from([3])
+        );
+        assert_eq!(
+            manager.worker_group_available_ids("target", &endpoint),
+            HashSet::from([2])
+        );
+        ids.lock().clear();
+        assert!(
+            manager
+                .worker_group_available_ids("target", &endpoint)
+                .is_empty()
+        );
+        ids.lock().extend([1, 2]);
+        tx.send_replace(vec![1]);
+        assert_eq!(
+            manager.worker_group_available_ids("target", &endpoint),
+            HashSet::from([1])
+        );
+        manager.discovery_groups.remove("target");
+        assert!(
+            manager
+                .worker_group_available_ids("target", &endpoint)
+                .is_empty()
+        );
+    }
+
     fn insert_runtime_configs(
         mm: &ModelManager,
         endpoint_id: &EndpointId,
@@ -2840,6 +2959,65 @@ mod tests {
     ) {
         let (_tx, rx) = tokio::sync::watch::channel(configs);
         mm.runtime_configs.insert(endpoint_id.clone(), rx);
+    }
+
+    #[tokio::test]
+    async fn kv_chooser_ignores_stale_presence() {
+        use dynamo_runtime::{component::TransportType, discovery::DiscoveryQuery};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = distributed
+            .namespace("router-presence".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate");
+        let discovery = distributed.discovery();
+        let query = DiscoveryQuery::Endpoint {
+            namespace: endpoint.id().namespace,
+            component: endpoint.id().component,
+            endpoint: "router-discovery".to_string(),
+        };
+        // Model a prior frontend process with the same discovery identity and an old port.
+        discovery
+            .register(DiscoverySpec::Endpoint {
+                namespace: endpoint.id().namespace,
+                component: endpoint.id().component,
+                endpoint: "router-discovery".to_string(),
+                transport: TransportType::Tcp("127.0.0.1:1".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+        let before = discovery.list(query.clone()).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        let manager = ModelManager::new();
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_replica_sync: true,
+            skip_initial_worker_wait: true,
+            ..Default::default()
+        };
+        let router = manager
+            .kv_chooser_for(
+                &endpoint,
+                16,
+                Some(config),
+                None,
+                crate::protocols::common::timing::WORKER_TYPE_DECODE,
+                Some("test-model".to_string()),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(discovery.list(query).await.unwrap(), before);
+        drop(router);
+        distributed.shutdown();
     }
 
     #[tokio::test]

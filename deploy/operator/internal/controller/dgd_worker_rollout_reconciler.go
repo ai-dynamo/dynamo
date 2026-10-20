@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -788,11 +789,11 @@ func (r *dgdWorkerRolloutReconciler) oldWorkerDCDsDrained(
 // dcdComponentState holds replica signals extracted from a DCD's Spec and Status.
 type dcdComponentState struct {
 	Spec      int32 `json:"spec"`      // DCD Spec.Replicas (declared intent)
-	Available int32 `json:"available"` // Status.Component.AvailableReplicas (serving traffic)
+	Available int32 `json:"available"` // AvailableReplicas, or ReadyReplicas when availability is not reported
 	Actual    int32 `json:"actual"`    // Status.Component.Replicas (non-terminated pods, excludes Terminating)
 }
 
-// dcdComponentStateFromDCD extracts replica signals from a single DCD.
+// dcdComponentStateFromDCD extracts replica signals from a non-nil DCD.
 func dcdComponentStateFromDCD(dcd *nvidiacomv1beta1.DynamoComponentDeployment) dcdComponentState {
 	s := dcdComponentState{Spec: 1}
 	if dcd.Spec.Replicas != nil {
@@ -802,6 +803,9 @@ func dcdComponentStateFromDCD(dcd *nvidiacomv1beta1.DynamoComponentDeployment) d
 		s.Actual = dcd.Status.Component.Replicas
 		if dcd.Status.Component.AvailableReplicas != nil {
 			s.Available = *dcd.Status.Component.AvailableReplicas
+		} else if dcd.Status.Component.ReadyReplicas != nil {
+			// LWS only reports readiness; an explicit availability count, including zero, wins.
+			s.Available = *dcd.Status.Component.ReadyReplicas
 		}
 	}
 	return s
@@ -953,9 +957,13 @@ func oldWorkerDCDsAtZero(dcds []*nvidiacomv1beta1.DynamoComponentDeployment) boo
 		if dcd == nil || dcd.Spec.Replicas == nil || *dcd.Spec.Replicas != 0 {
 			return false
 		}
-		if dcd.Status.ObservedGeneration < dcd.Generation {
+
+		// Deletion can advance generation after the drain was observed, but the
+		// DCD controller only finalizes deleting objects and cannot acknowledge it.
+		if dcd.DeletionTimestamp.IsZero() && dcd.Status.ObservedGeneration < dcd.Generation {
 			return false
 		}
+
 		if dcd.Status.Component == nil || dcd.Status.Component.Replicas != 0 {
 			return false
 		}
@@ -965,19 +973,31 @@ func oldWorkerDCDsAtZero(dcds []*nvidiacomv1beta1.DynamoComponentDeployment) boo
 
 // oldWorkerPodsTerminated reports whether every pod belonging to an old DCD
 // is in a terminal phase. A deletion timestamp does not make a pod terminal:
-// Pending, Running, and Unknown pods continue to block Recreate until they
+// Pending, Running, and Unknown pods continue to block cleanup until they
 // reach Failed or Succeeded, or disappear from the informer cache.
+// Pods must already be scoped to the same DGD component as the old DCDs.
 func oldWorkerPodsTerminated(dcds []*nvidiacomv1beta1.DynamoComponentDeployment, pods []corev1.Pod) bool {
+	// Native LWS pods omit the DCD selector, so retain both generation identities.
 	oldDCDNames := make(map[string]struct{}, len(dcds))
+	oldWorkerHashes := make(map[string]struct{}, len(dcds))
 	for _, dcd := range dcds {
-		if dcd != nil && dcd.Name != "" {
+		if dcd == nil {
+			continue
+		}
+		if dcd.Name != "" {
 			oldDCDNames[dcd.Name] = struct{}{}
+		}
+		if workerHash := dcd.Labels[consts.KubeLabelDynamoWorkerHash]; workerHash != "" {
+			oldWorkerHashes[workerHash] = struct{}{}
 		}
 	}
 
+	// Wait for serving pods; checkpoint captures can share the hash without being workers.
 	for i := range pods {
 		pod := &pods[i]
-		if _, old := oldDCDNames[pod.Labels[consts.KubeLabelDynamoSelector]]; !old {
+		_, oldSelector := oldDCDNames[pod.Labels[consts.KubeLabelDynamoSelector]]
+		_, oldHash := oldWorkerHashes[pod.Labels[consts.KubeLabelDynamoWorkerHash]]
+		if !oldSelector && !(oldHash && isDGDManagedWorkerPod(pod)) {
 			continue
 		}
 		if !isTerminalPhase(pod.Status.Phase) {
@@ -1331,10 +1351,14 @@ func (r *dgdWorkerRolloutReconciler) aggregateOldWorkerComponentStatuses(
 	for componentName, dcds := range oldDCDsByComponent {
 		sortOldWorkerDCDsNewestFirst(dcds)
 		status := aggregateOldWorkerDCDStatuses(dcds)
-		status.RuntimeNamespace = selectOldWorkerRuntimeNamespace(
+		activeDCD := selectActiveOldWorkerDCD(
 			dcds,
 			rollingUpdateCtx.OldWorkerReplicaTargetsByDCD,
 		)
+		if activeDCD != nil {
+			copyActiveWorkerProjection(&status, activeDCD.Status.Component)
+			status.RuntimeNamespace = oldWorkerRuntimeNamespace(*activeDCD)
+		}
 		oldStatuses[componentName] = status
 	}
 
@@ -1371,20 +1395,21 @@ func aggregateOldWorkerDCDStatuses(
 	return status
 }
 
-func selectOldWorkerRuntimeNamespace(
+func selectActiveOldWorkerDCD(
 	dcds []nvidiacomv1beta1.DynamoComponentDeployment,
 	replicaTargets map[string]int32,
-) string {
-	for _, dcd := range dcds {
+) *nvidiacomv1beta1.DynamoComponentDeployment {
+	for i := range dcds {
+		dcd := &dcds[i]
 		if replicaTargets[dcd.Name] > 0 {
-			return oldWorkerRuntimeNamespace(dcd)
+			return dcd
 		}
 	}
 
 	if len(dcds) == 0 {
-		return ""
+		return nil
 	}
-	return oldWorkerRuntimeNamespace(dcds[0])
+	return &dcds[0]
 }
 
 func oldWorkerRuntimeNamespace(dcd nvidiacomv1beta1.DynamoComponentDeployment) string {
@@ -1563,10 +1588,8 @@ func mergeWorkerComponentStatuses(
 			continue
 		}
 
-		if oldStatus.RuntimeNamespace != "" {
-			// Keep routing consumers on the old active worker namespace until rollout cutover.
-			newStatus.RuntimeNamespace = oldStatus.RuntimeNamespace
-		}
+		// Keep consumers on the old active worker projection until rollout cutover.
+		copyActiveWorkerProjection(&newStatus, &oldStatus)
 
 		// Build sorted ComponentNames from old and new DCD names.
 		componentNames := append(slices.Clone(oldStatus.ComponentNames), newStatus.ComponentNames...)
@@ -1581,6 +1604,28 @@ func mergeWorkerComponentStatuses(
 
 		componentStatuses[componentName] = newStatus
 	}
+}
+
+func copyActiveWorkerProjection(
+	dst *nvidiacomv1beta1.ComponentReplicaStatus,
+	src *nvidiacomv1beta1.ComponentReplicaStatus,
+) {
+	if dst == nil || src == nil {
+		return
+	}
+	dst.RuntimeNamespace = src.RuntimeNamespace
+	dst.ServedModelName = src.ServedModelName
+	dst.RuntimeComponentName = src.RuntimeComponentName
+	dst.GPUPowerLimitWatts = cloneInt64(src.GPUPowerLimitWatts)
+	dst.GPUsPerEngine = cloneInt64(src.GPUsPerEngine)
+	dst.GPUsPerReplica = cloneInt64(src.GPUsPerReplica)
+}
+
+func cloneInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	return ptr.To(*value)
 }
 
 func componentReplicaResourceNames(status *nvidiacomv1beta1.ComponentReplicaStatus, fallback string) []string {

@@ -3,7 +3,12 @@
 
 //! Command-line arguments for the SGLang sidecar.
 
+use std::num::NonZeroUsize;
+
 use dynamo_sidecar_common::SidecarArgs;
+
+pub(crate) const DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES: NonZeroUsize =
+    NonZeroUsize::new(512 * 1024 * 1024).unwrap();
 
 /// Parsed sidecar arguments.
 #[derive(clap::Parser, Debug, Clone)]
@@ -46,4 +51,13 @@ pub struct Args {
     /// Missing versions keep the endpoint unregistered. Requires unregister-on-pause.
     #[arg(long, env = "DYN_SGLANG_POLICY_VERSION_TAINTS")]
     pub policy_version_taints: bool,
+
+    /// Maximum size, in bytes, of one event line in SGLang's native `/generate`
+    /// stream. Each in-flight request may buffer up to this much.
+    #[arg(
+        long,
+        env = "DYN_SGLANG_NATIVE_HTTP_MAX_EVENT_BYTES",
+        default_value_t = DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES
+    )]
+    pub native_http_max_event_bytes: NonZeroUsize,
 }

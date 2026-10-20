@@ -31,3 +31,27 @@ fn engine_state_snapshot_has_stable_wire_tags() {
         [0x08, 0x07, 0x10, 0x09, 0x18, 0x01, 0x20, 0x01]
     );
 }
+
+#[test]
+fn release_0522_fields_keep_their_wire_tags() {
+    let request = dynamo_sglang_sidecar::proto::GenerateRequest {
+        return_text: Some(true),
+        ..Default::default()
+    };
+    // return_text is optional field 18.
+    assert_eq!(request.encode_to_vec(), [0x90, 0x01, 0x01]);
+
+    let response = dynamo_sglang_sidecar::proto::GenerateResponse {
+        text: Some("ok".to_string()),
+        ..Default::default()
+    };
+    // text is optional field 4.
+    assert_eq!(response.encode_to_vec(), [0x22, 0x02, b'o', b'k']);
+
+    let chunk = dynamo_sglang_sidecar::proto::OpenAiStreamChunk {
+        status_code: Some(404),
+        ..Default::default()
+    };
+    // status_code is optional field 3.
+    assert_eq!(chunk.encode_to_vec(), [0x18, 0x94, 0x03]);
+}

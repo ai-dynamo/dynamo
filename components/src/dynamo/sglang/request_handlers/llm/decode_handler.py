@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Mapping, Optional
+from typing import Any, AsyncGenerator, AsyncIterator, Dict, Mapping, Optional
 
 import numpy as np
 import sglang as sgl
@@ -29,6 +29,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     prefill_dp_rank_kwargs,
     require_reasoning_kwargs,
+    supports_external_mm_hashes,
 )
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.agent_session import agent_session_kwargs
@@ -46,10 +47,17 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     IMAGE_URL_KEY,
     VIDEO_URL_KEY,
     build_disagg_mm_kwargs,
+    engine_consumes_media,
     extract_media_urls,
+    extract_mm_hashes,
     raise_if_unextracted_multimodal,
+    reject_unconsumed_media,
 )
 from dynamo.sglang.request_utils import request_cache_salt
+from dynamo.sglang.thinking_budget import (
+    apply_thinking_budget,
+    thinking_budget_requested,
+)
 
 _SAMPLING_OPTION_FIELDS = (
     "presence_penalty",
@@ -64,17 +72,30 @@ BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 _MAX_ABORT_MESSAGE_LENGTH = 8192
 
 
+def _sglang_abort_error_message(finish_reason: Mapping[str, Any]) -> str | None:
+    """Return the message of an error-bearing SGLang abort, or None otherwise."""
+    if finish_reason.get("type") != "abort":
+        return None
+    if (
+        finish_reason.get("status_code") is None
+        and finish_reason.get("err_type") is None
+    ):
+        # SGLang also uses FINISH_ABORT for ordinary cancellation. Its default
+        # message is "Aborted", but both error metadata fields are absent/null.
+        return None
+    message = finish_reason.get("message")
+    if not isinstance(message, str) or not message:
+        return "SGLang aborted the request with an error"
+    return message
+
+
 def _raise_if_sglang_error(finish_reason: dict[str, Any]) -> None:
     """Propagate error-bearing aborts before their placeholder output is emitted."""
-    if finish_reason.get("type") != "abort":
+    message = _sglang_abort_error_message(finish_reason)
+    if message is None:
         return
 
     status_code = finish_reason.get("status_code")
-    if status_code is None and finish_reason.get("err_type") is None:
-        # SGLang also uses FINISH_ABORT for ordinary cancellation. Its default
-        # message is "Aborted", but both error metadata fields are absent/null.
-        return
-
     if (
         isinstance(status_code, bool)
         or not isinstance(status_code, int)
@@ -82,9 +103,6 @@ def _raise_if_sglang_error(finish_reason: dict[str, Any]) -> None:
     ):
         status_code = 500
 
-    message = finish_reason.get("message")
-    if not isinstance(message, str) or not message:
-        message = "SGLang aborted the request with an error"
     message = message[:_MAX_ABORT_MESSAGE_LENGTH]
 
     if status_code == 400:
@@ -171,6 +189,76 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
         if isinstance(extra_fields, list) and field in extra_fields:
             return True
     return False
+
+
+def _kv_cache_hit_engine_data(meta_info: Mapping[str, Any]) -> Dict[str, Any]:
+    """Build the final-chunk cache-hit report read by the KV router.
+
+    SGLang reports one ``cached_tokens`` count per request, with any HiCache
+    host hits folded in, so there is no per-tier split.
+    """
+    prompt_tokens = meta_info.get("prompt_tokens")
+    if prompt_tokens is None:
+        return {}
+    return {
+        "prompt_tokens": prompt_tokens,
+        "reused_tokens": meta_info.get("cached_tokens") or 0,
+    }
+
+
+def _sglang_completion_usage(meta_info: Mapping[str, Any]) -> Dict[str, Any] | None:
+    """Build Dynamo's completion_usage from SGLang metadata."""
+    prompt_tokens = meta_info.get("prompt_tokens")
+    completion_tokens = meta_info.get("completion_tokens")
+    if prompt_tokens is None or completion_tokens is None:
+        return None
+    usage: Dict[str, Any] = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+    cached_tokens = meta_info.get("cached_tokens")
+    if cached_tokens is not None:
+        usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
+    return usage
+
+
+def _native_terminal_fields(
+    finish_reason: Mapping[str, Any],
+    meta_info: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Typed terminal fields for Dynamo's router and request tracking.
+
+    Unlike the token path, error aborts are reported rather than raised so the
+    native client still receives SGLang's own response.
+    """
+    finish_type = finish_reason.get("type")
+    if finish_type in ("stop", "length"):
+        fields: Dict[str, Any] = {"finish_reason": finish_type}
+    elif finish_type == "abort":
+        message = _sglang_abort_error_message(finish_reason)
+        fields = {
+            "finish_reason": "cancelled" if message is None else f"error: {message}"
+        }
+    else:
+        fields = {"finish_reason": "stop"}
+    completion_usage = _sglang_completion_usage(meta_info)
+    if completion_usage is not None:
+        fields["completion_usage"] = completion_usage
+    return fields
+
+
+def _has_parallel_prefix_warmup(sampling_params: Any) -> bool:
+    """Whether SGLang caches the prompt with a zero-token request before sampling.
+
+    For n > 1 every sample's cached_tokens then includes that warm-up hit, so
+    none of them measures reuse from before the request.
+    """
+    if isinstance(sampling_params, list):
+        sampling_params = sampling_params[0] if sampling_params else {}
+    if not isinstance(sampling_params, Mapping):
+        return False
+    return (sampling_params.get("n") or 1) > 1
 
 
 def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
@@ -421,43 +509,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     @staticmethod
     def _resolve_mm_hashes_supported(engine: Any) -> bool:
-        """Probe whether engine.async_generate accepts ``mm_hashes``.
+        """Prepare caller hashes when engine.async_generate accepts them.
 
-        SGLang accepted the kwarg starting with the upstream interop PR; older
-        builds (and forks lacking the patch) raise TypeError if we pass it.
-        Probing the signature once at init keeps the request hot path free of
-        repeated inspection. Returns ``False`` when the kwarg is absent — the
-        request still completes, MM-aware routing just falls back to the
-        text-prefix overlap signal.
+        Older builds (and forks lacking the interop patch) raise TypeError if
+        we pass it. Supported releases accept it but may apply the hash after
+        constructing padded multimodal IDs; the compatibility helper repairs
+        that derived data once per tokenized request.
         """
-        probe = filter_supported_async_generate_kwargs(engine, {"mm_hashes": None})
-        return "mm_hashes" in probe
-
-    @staticmethod
-    def _extract_mm_hashes(request: Dict[str, Any]) -> Optional[List[str]]:
-        """Pull the per-image hashes the Rust frontend forwards via extra_args.
-
-        Returns ``None`` when the field is absent or malformed; SGLang then
-        recomputes the hash internally via ``hash_feature()``.
-        """
-        extra_args = request.get("extra_args")
-        if not isinstance(extra_args, dict):
-            return None
-        mm_hashes = extra_args.get("mm_hashes")
-        if not mm_hashes:
-            return None
-        if not isinstance(mm_hashes, list):
-            return None
-        # Fail closed if a non-string slipped into the list — downstream
-        # SGLang treats mm_hashes as List[str] and a bad element would
-        # crash the worker mid-request. Routing falls back to text-prefix.
-        if not all(isinstance(h, str) for h in mm_hashes):
-            logging.warning(
-                "extra_args.mm_hashes contained non-str entries; "
-                "ignoring routing-side hashes and letting SGLang recompute"
-            )
-            return None
-        return mm_hashes
+        return supports_external_mm_hashes(engine)
 
     def _metadata_uploader_from_request(
         self, request: Dict[str, Any]
@@ -529,15 +588,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Keep max_new_tokens even when None — SGLang treats None as "generate
         # until EOS/context-length" whereas omitting it triggers a default of 128.
         keep_if_none = {"max_new_tokens"}
-        return {
+        sampling_params = {
             k: v for k, v in param_mapping.items() if v is not None or k in keep_if_none
         }
+        return apply_thinking_budget(
+            request,
+            sampling_params,
+            self.config.server_args,
+            engine=getattr(self, "engine", None),
+        )
 
     @staticmethod
     def _build_logprob_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
         return _shared_logprobs.build_sglang_logprob_kwargs(
             request.get("output_options", {}) or {},
-            allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
         )
 
     @staticmethod
@@ -545,10 +609,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         meta_info: Dict[str, Any],
         *,
         return_tokens_as_token_ids: bool = False,
+        top_logprobs_num: int | None = None,
     ) -> tuple:
         return _shared_logprobs.extract_from_sglang_meta(
             meta_info,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
+            top_logprobs_num=top_logprobs_num,
         )
 
     def _native_generate_stream(
@@ -593,6 +659,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
         return native_generate_stream(self.engine, native_request)
 
+    @property
+    def _reports_kv_cache_hit(self) -> bool:
+        # Disaggregated decode copies the prefill worker's cached_tokens into its
+        # own meta_info, so only the prefill attempt reports cache reuse.
+        return self.serving_mode != DisaggregationMode.DECODE
+
     async def generate(
         self, request: Dict[str, Any], context: Context
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -632,9 +704,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             context.id(),
         )
         if native_payload is not None:
+            native_sampling_params = native_payload.get("sampling_params")
             submitted_request_id = _ordered_cancellation_request_id(
                 sglang_request_id,
-                native_payload.get("sampling_params"),
+                native_sampling_params,
                 supported=(
                     getattr(self, "_supports_ordered_cancellation", False)
                     # Session node IDs are caller-visible. Waiting for SGLang's
@@ -658,12 +731,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 submitted_request_id=submitted_request_id,
                 internal_request_id=sglang_request_id,
                 response_request_id=native_payload.get("rid") or context.id(),
+                report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                    native_sampling_params
+                ),
             ):
                 yield output
             return
 
         priority_kwargs = self._priority_kwargs(priority)
         sampling_params = self._build_sampling_params(request)
+        thinking_budget = sampling_params.get("custom_params", {}).get(
+            "thinking_budget"
+        )
+        if thinking_budget is not None:
+            logging.debug("SGLang thinking budget configured: %s", thinking_budget)
         submitted_request_id = _ordered_cancellation_request_id(
             sglang_request_id,
             sampling_params,
@@ -673,6 +754,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         metadata_uploader = self._metadata_uploader_from_request(request)
 
         output_options = request.get("output_options", {})
+        (
+            completion_logprobs_count,
+            prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(output_options)
         return_tokens_as_token_ids = bool(
             output_options.get("return_tokens_as_token_ids")
         )
@@ -684,6 +769,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         if self.serving_mode == DisaggregationMode.DECODE:
             raise_if_unextracted_multimodal(request)
+            reject_unconsumed_media(
+                request, consumes_media=engine_consumes_media(self.engine)
+            )
 
             # Check if bootstrap_info is pre-computed in the request (from frontend)
             bootstrap_info = request.get("bootstrap_info")
@@ -716,7 +804,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **cache_salt_kwargs(self.engine, request_cache_salt(request)),
                 sampling_params=sampling_params,
                 stream=True,
-                **require_reasoning_kwargs(self.engine, request),
+                **require_reasoning_kwargs(
+                    self.engine,
+                    request,
+                    thinking_budget_requested=thinking_budget_requested(request),
+                ),
                 **self._routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
@@ -738,6 +830,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
+                    prompt_logprobs_count=prompt_logprobs_count,
+                    completion_logprobs_count=completion_logprobs_count,
+                    report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                        sampling_params
+                    ),
                 ):
                     yield out
             else:
@@ -752,6 +849,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     yield out
         else:
             raise_if_unextracted_multimodal(request)
+            reject_unconsumed_media(
+                request, consumes_media=engine_consumes_media(self.engine)
+            )
 
             # Extract media URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
@@ -797,7 +897,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             mm_hashes_kwargs: Dict[str, Any] = {}
             if self._mm_hashes_supported:
-                forwarded = self._extract_mm_hashes(request)
+                forwarded = extract_mm_hashes(request)
                 if forwarded is not None:
                     mm_hashes_kwargs["mm_hashes"] = forwarded
 
@@ -809,7 +909,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 video_data=video_data,
                 sampling_params=sampling_params,
                 stream=True,
-                **require_reasoning_kwargs(self.engine, request),
+                **require_reasoning_kwargs(
+                    self.engine,
+                    request,
+                    thinking_budget_requested=thinking_budget_requested(request),
+                ),
                 **self._routed_experts_kwargs,
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,
@@ -828,6 +932,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
+                    prompt_logprobs_count=prompt_logprobs_count,
+                    completion_logprobs_count=completion_logprobs_count,
+                    report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                        sampling_params
+                    ),
                 ):
                     yield out
             else:
@@ -848,6 +957,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         submitted_request_id: str | None = None,
         internal_request_id: str | None = None,
         response_request_id: str | list[str] | None = None,
+        report_kv_cache_hit: bool = True,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
@@ -902,6 +1012,28 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                 "sglang_response": public_response,
                             },
                         }
+                finish_reason = (
+                    meta_info.get("finish_reason")
+                    if isinstance(meta_info, dict)
+                    else None
+                )
+                if isinstance(finish_reason, dict):
+                    output = {
+                        **output,
+                        **_native_terminal_fields(finish_reason, meta_info),
+                    }
+                if report_kv_cache_hit and self._reports_kv_cache_hit and finish_reason:
+                    # Native Generate is routed too; the frontend forwards only
+                    # sglang_response, so this sibling key stays router-only.
+                    kv_cache_hit = _kv_cache_hit_engine_data(meta_info)
+                    if kv_cache_hit:
+                        output = {
+                            **output,
+                            "engine_data": {
+                                **output["engine_data"],
+                                "kv_cache_hit": kv_cache_hit,
+                            },
+                        }
                 if not context.is_stopped():
                     yield output
 
@@ -913,6 +1045,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
         submitted_request_id: str | None = None,
+        report_kv_cache_hit: bool = True,
+        prompt_logprobs_count: int | None = None,
+        completion_logprobs_count: int | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -930,6 +1065,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id_future: asyncio.Future[str] = asyncio.Future()
         request_ids: set[str] = set()
         first_output_seen = False
+        usage_metadata_by_index: dict[int, tuple[int, int | None]] = {}
         async with self._cancellation_monitor(
             request_id_future,
             context,
@@ -997,6 +1133,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     log_probs, top_logprobs = self._extract_logprobs(
                         meta_info,
                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                        top_logprobs_num=completion_logprobs_count,
                     )
                     if log_probs is not None:
                         out["log_probs"] = log_probs
@@ -1010,31 +1147,36 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # the engine's opaque engine_data passthrough (surfaced by the frontend
                     # as nvext.routed_experts); disaggregated_params stays KV-transfer only.
                     engine_data["routed_experts"] = routed_experts
+                # The frontend retains prompt/cache metadata and counts output
+                # tokens itself. Capture changes before metadata upload clears it.
+                usage_metadata = (
+                    meta_info.get("prompt_tokens"),
+                    meta_info.get("cached_tokens"),
+                )
+                changed = (
+                    finish_reason
+                    or usage_metadata_by_index.get(output_idx) != usage_metadata
+                )
+                if changed and (usage := _sglang_completion_usage(meta_info)):
+                    out["completion_usage"] = usage
+                    usage_metadata_by_index[output_idx] = usage_metadata
+
                 if finish_reason:
                     prompt_payload = (
                         _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(
-                            meta_info
+                            meta_info, prompt_logprobs_count=prompt_logprobs_count
                         )
                     )
                     if prompt_payload is not None and metadata_uploader is None:
                         engine_data["prompt_logprobs"] = prompt_payload
-                    input_tokens = meta_info.get("prompt_tokens")
-                    completion_tokens = meta_info.get("completion_tokens")
-                    cached_tokens = meta_info.get("cached_tokens")
-                    prefill_prompt_tokens_details = None
-                    if cached_tokens is not None and cached_tokens > 0:
-                        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
-                    if input_tokens is not None and completion_tokens is not None:
-                        completion_usage = {
-                            "prompt_tokens": input_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": input_tokens + completion_tokens,
-                        }
-                        if prefill_prompt_tokens_details is not None:
-                            completion_usage[
-                                "prompt_tokens_details"
-                            ] = prefill_prompt_tokens_details
-                        out["completion_usage"] = completion_usage
+                    # Router-facing, so kept even when metadata is uploaded instead.
+                    kv_cache_hit = (
+                        _kv_cache_hit_engine_data(meta_info)
+                        if report_kv_cache_hit and self._reports_kv_cache_hit
+                        else {}
+                    )
+                    if kv_cache_hit:
+                        engine_data["kv_cache_hit"] = kv_cache_hit
                     if metadata_uploader is not None:
                         try:
                             await metadata_uploader.upload_choice(output_idx, meta_info)

@@ -4,15 +4,21 @@
 use super::results::BenchmarkResults;
 
 /// Compute logarithmically spaced benchmark durations for sweep mode.
-pub fn compute_sweep_durations(min_ms: u64, max_ms: u64, steps: usize) -> Vec<u64> {
+pub fn compute_sweep_durations(min_ms: u64, max_ms: u64, steps: usize) -> anyhow::Result<Vec<u64>> {
+    if steps < 2 || min_ms == 0 || min_ms > max_ms {
+        anyhow::bail!(
+            "sweep requires --sweep-steps >= 2 and 0 < --sweep-min-ms <= --sweep-max-ms; \
+             got steps={steps}, min={min_ms}, max={max_ms}"
+        );
+    }
     let log_min = (min_ms as f64).ln();
     let log_max = (max_ms as f64).ln();
-    (0..steps)
+    Ok((0..steps)
         .map(|i| {
             let t = i as f64 / (steps - 1) as f64;
             (log_max * (1.0 - t) + log_min * t).exp().round() as u64
         })
-        .collect()
+        .collect())
 }
 
 /// Print a formatted sweep summary table.

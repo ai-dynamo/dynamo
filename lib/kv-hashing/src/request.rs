@@ -107,7 +107,7 @@ impl Request {
     }
 
     /// Returns `mm_info` projected to the dynamo-tokens type, ready for
-    /// [`dynamo_tokens::TokenBlockSequence::new_with_mm`] (already sorted/validated).
+    /// [`dynamo_tokens::hash_complete_blocks`] (already sorted/validated).
     pub(crate) fn token_mm_info(&self) -> Vec<TokenBlockMmInfo> {
         self.mm_info.iter().copied().map(Into::into).collect()
     }
