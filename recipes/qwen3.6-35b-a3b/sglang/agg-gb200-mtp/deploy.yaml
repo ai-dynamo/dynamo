@@ -53,8 +53,13 @@ spec:
                 - "1"
                 - --attention-backend
                 - trtllm_mha
+                # The checkpoint's MoE experts are W4A16_NVFP4. SGLang 0.5.20+ accepts
+                # marlin for them, or flashinfer_cutedsl with --moe-a2a-backend none and
+                # SGLANG_FLASHINFER_CUTEDSL_NVFP4_W4A16=1 (set in env below).
                 - --moe-runner-backend
-                - flashinfer_cutlass
+                - flashinfer_cutedsl
+                - --moe-a2a-backend
+                - none
                 # SGLang already resolves kv-cache-dtype auto to fp8_e4m3 for this
                 # NVFP4 checkpoint; set explicitly so a change to that default cannot
                 # silently move the published numbers.
@@ -87,6 +92,8 @@ spec:
                   value: /model-cache
                 - name: DYN_FORWARDPASS_METRIC_PORT
                   value: ""
+                - name: SGLANG_FLASHINFER_CUTEDSL_NVFP4_W4A16
+                  value: "1"
                 # Uncomment these variables for benchmarking with simulated
                 # MTP acceptance. Leave them commented for normal serving.
                 # - name: SGLANG_SIMULATE_ACC_LEN
