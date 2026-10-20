@@ -81,7 +81,7 @@ from dynamo.frontend.utils import (
     random_call_id,
     random_uuid,
 )
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 from dynamo.sglang.thinking_budget import apply_thinking_budget
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
@@ -166,12 +166,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         result = _build_dynamo_preproc(request, [1, 2], "test", None)
         assert result["output_options"]["prompt_logprobs"] == expected
         if expected is None:
-            assert (
-                build_sglang_logprob_kwargs(
-                    result["output_options"], allow_top_logprobs=True
-                )
-                == {}
-            )
+            assert build_sglang_logprob_kwargs(result["output_options"]) == {}
 
     def test_defaults(self):
         """Default sampling options when request has minimal fields."""
@@ -694,14 +689,44 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert result["output_options"]["logprobs"] == 0
 
     def test_logprobs_true_without_top_logprobs(self):
-        """logprobs=True without top_logprobs yields 1."""
+        """logprobs=True without top_logprobs asks for the sampled token only."""
         result = _build_dynamo_preproc(
             {"model": "test", "logprobs": True},
             [1],
             "test",
             None,
         )
-        assert result["output_options"]["logprobs"] == 1
+        assert result["output_options"]["logprobs"] == 0
+
+    @pytest.mark.parametrize("logprobs", [None, False, 3])
+    def test_top_logprobs_without_logprobs_true_is_rejected(self, logprobs):
+        with pytest.raises(PreprocessError, match="`logprobs` must be set to true"):
+            _build_dynamo_preproc(
+                {"model": "test", "logprobs": logprobs, "top_logprobs": 5},
+                [1],
+                "test",
+                None,
+            )
+
+    @pytest.mark.parametrize("logprobs", [False, None])
+    def test_zero_top_logprobs_without_logprobs_disables_logprobs(self, logprobs):
+        result = _build_dynamo_preproc(
+            {"model": "test", "logprobs": logprobs, "top_logprobs": 0},
+            [1],
+            "test",
+            None,
+        )
+        assert result["output_options"]["logprobs"] is None
+
+    @pytest.mark.parametrize("top_logprobs", [-1, True, "2"])
+    def test_invalid_top_logprobs_is_rejected(self, top_logprobs):
+        with pytest.raises(PreprocessError, match="must be an integer >= 0"):
+            _build_dynamo_preproc(
+                {"model": "test", "logprobs": True, "top_logprobs": top_logprobs},
+                [1],
+                "test",
+                None,
+            )
 
     def test_logprobs_integer(self):
         """Integer logprobs pass through."""
@@ -726,12 +751,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
             None,
         )
         assert result["output_options"]["logprobs"] is None
-        assert (
-            build_sglang_logprob_kwargs(
-                result["output_options"], allow_top_logprobs=True
-            )
-            == {}
-        )
+        assert build_sglang_logprob_kwargs(result["output_options"]) == {}
 
     def test_metadata_upload_nvext_is_forwarded_to_backend(self):
         result = _build_dynamo_preproc(
@@ -1151,6 +1171,42 @@ def _qwen_guided_request_without_separation(tool_choice):
     request.pop("reasoning_effort")
     request["separate_reasoning"] = False
     return request
+
+
+@pytest.mark.parametrize(
+    ("routed_error", "expected"),
+    [
+        (WorkerUnavailable("prefill routing is still activating"), WorkerUnavailable),
+        (RuntimeError("worker crashed"), Unknown),
+    ],
+)
+def test_routed_engine_rejection_keeps_worker_unavailable(
+    tokenizer, routed_error, expected
+):
+    class RejectingRoutedEngine(FakeRoutedEngine):
+        async def generate(self, preprocessed, **kwargs):
+            raise routed_error
+
+    processor = SglangProcessor(
+        tokenizer=tokenizer,
+        routed_engine=RejectingRoutedEngine(),
+        tool_call_parser_name="qwen25",
+        reasoning_parser_name="qwen3",
+        eos_token_ids=[tokenizer.eos_token_id],
+    )
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Say hello."}],
+        "max_tokens": 4,
+    }
+
+    async def collect():
+        return [item async for item in processor.generator(request)]
+
+    with pytest.raises(expected) as caught:
+        asyncio.run(collect())
+    if expected is WorkerUnavailable:
+        assert caught.value is routed_error
 
 
 @pytest.mark.parametrize(
@@ -4671,6 +4727,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             (0, None, None, None),
             (0, False, None, None),
             (0, True, 0, 0),
+            (3, True, None, 0),
             (3, True, 1, 1),
             (0, True, 3, 3),
             (1, True, 3, 3),
@@ -4690,7 +4747,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         }
         preproc = _build_dynamo_preproc(request, [1, 17], MODEL, None)
         options = preproc["output_options"]
-        kwargs = build_sglang_logprob_kwargs(options, allow_top_logprobs=True)
+        kwargs = build_sglang_logprob_kwargs(options)
         assert kwargs["top_logprobs_num"] == max(prompt_count, expected_top_count or 0)
         alternatives = [
             (-0.1, ord("A"), "A"),
@@ -4914,13 +4971,19 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             "cancelled",
         ],
     )
+    @pytest.mark.parametrize("usage_mode", ["stream", "unary"])
     def test_processor_finishes_locally_without_stopping_parent_context(
-        self, with_tool_parser, backend_end
+        self, with_tool_parser, backend_end, usage_mode
     ):
         payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
         terminal = {"token_ids": list(b"not-displayed"), "finish_reason": "stop"}
         if backend_end == "metadata":
             terminal["engine_data"] = {"prompt_logprobs": payload}
+            terminal["completion_usage"] = {
+                "prompt_tokens": 7,
+                "completion_tokens": 999,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            }
         elif backend_end == "error":
             terminal = FakeRoutedItem(
                 None, is_error=True, comments=["backend disconnected"]
@@ -4984,9 +5047,17 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     "req-stop",
                     {
                         "model": "test-model",
+                        "stream": usage_mode == "stream",
+                        "nvext": (
+                            {"extra_fields": ["prompt_logprobs"]}
+                            if usage_mode == "stream" and backend_end != "unrequested"
+                            else {}
+                        ),
                         "logprobs": True,
                         "prompt_logprobs": None if backend_end == "unrequested" else 0,
-                        "stream_options": {"include_usage": True},
+                        "stream_options": (
+                            {"include_usage": True} if usage_mode == "stream" else None
+                        ),
                     },
                     {},
                     [1, 2],
@@ -5017,14 +5088,24 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunks[1]["choices"][0]["delta"] == {}
         assert chunks[1]["choices"][0]["finish_reason"] == "stop"
         assert chunks[1]["choices"][0]["logprobs"] is None
-        assert chunks[1]["usage"] == {
-            "prompt_tokens": 2,
+        expected_usage = {
+            "prompt_tokens": 7 if backend_end == "metadata" else 2,
             "completion_tokens": 11,
-            "total_tokens": 13,
+            "total_tokens": 18 if backend_end == "metadata" else 13,
         }
-        assert chunks[1].get("prompt_logprobs") == (
-            payload if backend_end == "metadata" else None
+        if backend_end == "metadata":
+            expected_usage["prompt_tokens_details"] = {"cached_tokens": 0}
+        assert chunks[1]["usage"] == expected_usage
+        if backend_end == "metadata":
+            assert chunks[1]["llm_metrics"]["cached_tokens"] == 0
+            assert chunks[1]["llm_metrics"]["input_tokens"] == 2
+            assert chunks[1]["llm_metrics"]["output_tokens"] == 11
+        projected_logprobs = (
+            chunks[1].get("nvext", {}).get("prompt_logprobs")
+            if usage_mode == "stream"
+            else chunks[1].get("prompt_logprobs")
         )
+        assert projected_logprobs == (payload if backend_end == "metadata" else None)
 
     @pytest.mark.parametrize("include_prompt_logprobs", [False, True])
     def test_logprob_shape_flush_finishes_without_stopping_parent_context(

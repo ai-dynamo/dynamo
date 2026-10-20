@@ -32,6 +32,7 @@ use dynamo_runtime::pipeline::ManyIn;
 use super::context::{Context, callable_accepts_kwarg};
 use super::errors::{
     http_like_error_to_dynamo, py_exception_to_backend_error, worker_shutdown_to_dynamo,
+    worker_unavailable_to_dynamo,
 };
 use crate::python_payload::{PythonPayload, PythonResponseItem};
 
@@ -385,6 +386,12 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
         error.display(py);
 
         if let Some(error) = worker_shutdown_to_dynamo(py, &error) {
+            return error;
+        }
+
+        // Checked before the backend mapping, whose `DynamoException` fallback
+        // would otherwise classify it as `Unknown`.
+        if let Some(error) = worker_unavailable_to_dynamo(py, &error) {
             return error;
         }
 

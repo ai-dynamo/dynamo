@@ -267,6 +267,7 @@ impl MockerBackend {
             engine_args,
             disaggregation_mode,
         );
+        let structural_tag = args.common.structural_tag(false);
         let config = WorkerConfig {
             runtime: args.common.runtime,
             namespace: args.common.namespace,
@@ -282,6 +283,7 @@ impl MockerBackend {
             tool_call_parser,
             reasoning_parser,
             exclude_tools_when_tool_choice_none: args.common.exclude_tools_when_tool_choice_none,
+            structural_tag,
             ..Default::default()
         };
         Ok((engine, config))
