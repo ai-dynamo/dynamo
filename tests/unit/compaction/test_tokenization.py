@@ -204,6 +204,37 @@ def test_invalid_tokenizer_paths_reject_before_loading(path, monkeypatch):
         tokenization.load_counter(path)
 
 
+def test_template_directory_override_rejects_before_tokenizer_load(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / tokenization.PROFILE_REVISION
+    path.mkdir()
+    (path / "tokenizer.json").write_bytes(b"tokenizer")
+    (path / "tokenizer_config.json").write_bytes(b"config")
+    monkeypatch.setattr(
+        tokenization,
+        "PROFILE_ARTIFACT_SHA256",
+        hashlib.sha256(b"tokenizerconfig").hexdigest(),
+    )
+    templates = path / "chat_templates"
+    templates.mkdir()
+    (templates / "default.jinja").write_text("unqualified default override")
+    calls = []
+
+    def load(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(chat_template="unqualified default override")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=load)),
+    )
+    with pytest.raises(Invalid, match="unqualified_tokenizer_profile"):
+        tokenization.load_counter(str(path))
+    assert calls == []
+
+
 def test_decision_usage_aggregates_questions_but_context_uses_largest():
     counter = RenderedCounter(Tokenizer(), "fixture")
     question = {

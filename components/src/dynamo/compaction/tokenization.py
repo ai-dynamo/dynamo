@@ -122,6 +122,7 @@ def load_counter(tokenizer_path):
 
     path = Path(tokenizer_path)
     require(path.is_absolute() and path.is_dir(), "invalid_tokenizer_path")
+    require(not (path / "chat_templates").exists(), "unqualified_tokenizer_profile")
     artifacts = (path / "tokenizer.json", path / "tokenizer_config.json")
     require(all(item.is_file() for item in artifacts), "missing_tokenizer_artifacts")
     digest = hashlib.sha256()
