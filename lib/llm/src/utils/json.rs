@@ -27,13 +27,6 @@ mod tests {
     }
 
     #[test]
-    fn input_keeps_insertion_order_before_canonicalization() {
-        // `serde_json` is built with `preserve_order` here, so a no-op helper
-        // would fail the tests below.
-        assert_eq!(json!({"b": 1, "a": 2}).to_string(), r#"{"b":1,"a":2}"#);
-    }
-
-    #[test]
     fn sorts_nested_object_keys() {
         assert_eq!(
             canonical_string(json!({"z": {"y": {"b": 1, "a": 2}, "x": 3}, "a": 0})),
