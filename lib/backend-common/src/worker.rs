@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_llm::admission_gate::{self, AdmissionEngine};
+use dynamo_llm::admission_gate::{AdmissionEngine, WorkerAdmissionGate};
 use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::local_model::runtime_config::{
     DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagConfig, TOPOLOGY_TAINT_PREFIX,
@@ -24,7 +24,6 @@ use dynamo_llm::preprocessor::media::{MediaDecoder, MediaFetcher};
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::config::HealthStatus;
 use dynamo_runtime::engine_routes::EngineRouteCallback;
-use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::system_health::ReadinessHold;
@@ -456,6 +455,10 @@ pub struct Worker {
     /// step. Always present once `start()` returns Ok, independent of
     /// whether the engine returned a component publisher.
     lifecycle: Option<crate::metrics::LifecycleGauges>,
+    /// This worker's backend admission gate, which its token pipeline admits
+    /// network requests through. Created as the worker serves, for its
+    /// component; anything else serving for this worker holds a clone.
+    admission_gate: WorkerAdmissionGate,
 }
 
 impl Worker {
@@ -482,7 +485,16 @@ impl Worker {
             engine_route_shutdown: CancellationToken::new(),
             publishers: None,
             lifecycle: None,
+            admission_gate: WorkerAdmissionGate::default(),
         }
+    }
+
+    /// Admit this worker's requests through `admission_gate`, a handle its
+    /// caller also gave the worker's engine, so the engine's own registrations
+    /// size the gate the worker admits through rather than another.
+    pub fn with_admission_gate(mut self, admission_gate: WorkerAdmissionGate) -> Self {
+        self.admission_gate = admission_gate;
+        self
     }
 
     /// Lifecycle driver. Takes owned `self` — `Worker` is single-shot and
@@ -1093,12 +1105,14 @@ impl Worker {
                     DisaggregationMode::Encode => LifecycleOperationRole::Encode,
                     DisaggregationMode::Aggregated => LifecycleOperationRole::Worker,
                 };
-                // Network requests are admitted through the backend admission
-                // gate before they reach the engine; the local health-check
-                // probe below calls the adapter directly, outside admission.
-                admission_gate::register_metrics(endpoint.get_metrics_registry());
+                // Network requests are admitted through this worker's gate
+                // before they reach the engine, sized by the model card it
+                // registered above; the local health-check probe below calls
+                // the adapter directly, outside admission.
+                let admission_gate = self.admission_gate.get_or_create(endpoint.component());
+                admission_gate.record_model_card(local_model.card());
                 let ingress = Ingress::for_engine_with_lifecycle_role(
-                    AdmissionEngine::new(engine_adapter.clone()),
+                    AdmissionEngine::new(admission_gate, engine_adapter.clone()),
                     lifecycle_role,
                 )
                 .map_err(|e| {

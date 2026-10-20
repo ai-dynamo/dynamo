@@ -4,7 +4,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
-    admission_gate::{self, AdmissionEngine},
+    admission_gate::AdmissionEngine,
     backend::ExecutionContext,
     engines::StreamingEngineAdapter,
     first_token::{FirstTokenNotifier, FirstTokenSource},
@@ -20,7 +20,6 @@ use crate::{
 };
 
 use dynamo_runtime::engine::AsyncEngineStream;
-use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, Context, Error, ManyOut, ResponseStream, SingleIn,
     async_trait, network::Ingress,
@@ -114,6 +113,7 @@ pub async fn run(
             mut model,
             is_prefill,
             is_decode,
+            admission_gate,
         } => {
             let (model_type, worker_type, needs) = if is_prefill {
                 (
@@ -144,10 +144,14 @@ pub async fn run(
 
             // The frontend owns tokenization and detokenization. Send raw engine
             // output so distributed token workers exercise that same path. The
-            // network path admits each request through the backend admission
-            // gate first, which this backend's metrics then expose.
-            admission_gate::register_metrics(endpoint.get_metrics_registry());
-            let ingress = Ingress::for_engine(AdmissionEngine::new(inner_engine))?;
+            // network path admits each request through this worker's gate
+            // first: the config's own, shared with every endpoint serving a
+            // clone of it.
+            let admission_gate = admission_gate.get_or_create(&component);
+            let ingress = Ingress::for_engine(AdmissionEngine::new(
+                Arc::clone(&admission_gate),
+                inner_engine,
+            ))?;
 
             // The disaggregation role is carried by `worker_type`, not
             // `model_type`. Prefill workers register with an empty
@@ -168,6 +172,7 @@ pub async fn run(
                     needs,
                 )
                 .await?;
+            admission_gate.record_model_card(model.card());
 
             let fut = endpoint.endpoint_builder().handler(ingress).start();
             Box::pin(fut)

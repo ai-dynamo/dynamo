@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::admission_gate::WorkerAdmissionGate;
 use dynamo_llm::local_model::{
     LocalModel, register_model_card, update_model_taints as update_model_taints_rs,
 };
@@ -790,17 +791,19 @@ fn register_model<'p>(
         WorkerType::Encode => rs::telemetry::LifecycleOperationRole::Encode,
         WorkerType::Aggregated => rs::telemetry::LifecycleOperationRole::Worker,
     };
-    // Recording the role, before the card is built and published, is also what
-    // makes this endpoint a model backend, whose requests the backend admission
-    // gate admits from now on, even if it is already serving. The gate's
-    // metrics are exposed with the endpoint's own.
+    // The gate of the worker this endpoint serves for, created by its first
+    // registration with its metrics exposed on the endpoint's component. It
+    // exists before the role is recorded: recording the role, before the card
+    // is built and published, is what makes this endpoint a model backend,
+    // whose requests that gate admits from now on, even if it is already
+    // serving.
+    let admission_gate = endpoint
+        .admission_gate
+        .get_or_create(endpoint.inner.component());
     endpoint
         .inner
         .set_lifecycle_operation_role(lifecycle_role)
         .map_err(to_pyerr)?;
-    llm_rs::admission_gate::register_metrics(rs::metrics::MetricsHierarchy::get_metrics_registry(
-        &endpoint.inner,
-    ));
 
     crate::future_into_py(py, async move {
         let runtime_config = runtime_config.unwrap_or_default();
@@ -855,6 +858,7 @@ fn register_model<'p>(
             register_model_card(&endpoint.inner, &card)
                 .await
                 .map_err(|e| PyException::new_err(format!("{}", e)))?;
+            admission_gate.record_model_card(&card);
 
             return Ok(());
         }
@@ -923,6 +927,7 @@ fn register_model<'p>(
             )
             .await
             .map_err(to_pyerr)?;
+        admission_gate.record_model_card(local_model.card());
 
         if let Some(lora_name) = lora_identifier {
             tracing::info!("Registered LoRA '{}' MDC", lora_name);
@@ -1032,6 +1037,10 @@ fn fetch_model<'p>(
 pub struct DistributedRuntime {
     inner: rs::DistributedRuntime,
     event_loop: PyObject,
+    /// The admission gate of the Python worker this runtime serves, shared
+    /// with every endpoint it creates: a Python backend's runtime is its
+    /// worker, so backends sharing one runtime share one gate.
+    admission_gate: WorkerAdmissionGate,
 }
 
 impl DistributedRuntime {
@@ -1052,6 +1061,9 @@ struct CancellationToken {
 struct Endpoint {
     inner: rs::component::Endpoint,
     event_loop: PyObject,
+    /// The admission gate of the worker this endpoint serves for: its
+    /// runtime's, or the backend `Worker`'s that handed it to its engine.
+    admission_gate: WorkerAdmissionGate,
 }
 
 #[pyclass(name = "FirstTokenSource")]
@@ -1423,7 +1435,11 @@ impl DistributedRuntime {
             .block_on(rs::DistributedRuntime::new(runtime, runtime_config))
             .map_err(to_pyerr)?;
 
-        Ok(DistributedRuntime { inner, event_loop })
+        Ok(DistributedRuntime {
+            inner,
+            event_loop,
+            admission_gate: WorkerAdmissionGate::default(),
+        })
     }
 
     #[staticmethod]
@@ -1440,6 +1456,7 @@ impl DistributedRuntime {
         Ok(DistributedRuntime {
             inner,
             event_loop: py.None(),
+            admission_gate: WorkerAdmissionGate::default(),
         })
     }
 
@@ -1472,6 +1489,7 @@ impl DistributedRuntime {
         Ok(Endpoint {
             inner: endpoint,
             event_loop: self.event_loop.clone(),
+            admission_gate: self.admission_gate.clone(),
         })
     }
 
@@ -1626,8 +1644,13 @@ impl Endpoint {
         health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // The network engines read the role per request, so one recorded later
-        // by `register_model` takes effect from then on.
+        // by `register_model` takes effect from then on, through the gate of
+        // the worker this endpoint serves for.
         let backend_role = engine::BackendRole::of(&self.inner);
+        let admission = engine::EndpointAdmission::new(
+            self.admission_gate.clone(),
+            self.inner.component().clone(),
+        );
 
         // Push egress: the handler pushes each response into a Rust channel via
         // its `response_sender` argument, instead of Rust pulling `__anext__`
@@ -1675,6 +1698,7 @@ impl Endpoint {
                     generator,
                     self.event_loop.clone(),
                     backend_role,
+                    admission,
                 )),
                 python_payload::PythonIngressPayloadAdapter,
             )
@@ -1686,7 +1710,7 @@ impl Endpoint {
                 generator,
                 self.event_loop.clone(),
             )?);
-            let network_engine = Arc::new(engine.network_engine(backend_role));
+            let network_engine = Arc::new(engine.network_engine(backend_role, admission));
             let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
                 network_engine,
                 python_payload::PythonIngressPayloadAdapter,

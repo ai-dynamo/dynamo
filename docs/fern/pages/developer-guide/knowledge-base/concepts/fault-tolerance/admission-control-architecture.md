@@ -41,7 +41,8 @@ are planned at the router.
 ## Backend
 
 Backend admission control supports both Dynamo Python and Dynamo Sidecar backends. Each worker has
-its own gate, including separate prefill and decode workers in a disaggregated deployment.
+its own gate, including separate prefill and decode workers in a disaggregated deployment. All
+endpoints of a worker share its gate.
 
 ### Request Flow
 

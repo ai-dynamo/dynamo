@@ -505,17 +505,6 @@ pub async fn register_model_card(
         model_suffix,
     )?;
     let _instance = discovery.register(spec).await?;
-
-    // Size the process-global admission gate from this card's engine capacity
-    // and DP ranks, after registration succeeds. LoRA adapters carry no
-    // capacity of their own.
-    if lora_name.is_none() {
-        crate::admission_gate::record_engine_capacity(
-            card.runtime_config.max_num_seqs,
-            card.runtime_config.data_parallel_start_rank,
-            card.runtime_config.data_parallel_size,
-        );
-    }
     Ok(())
 }
 

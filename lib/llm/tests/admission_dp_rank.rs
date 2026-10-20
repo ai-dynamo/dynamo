@@ -13,8 +13,9 @@
 //! saturated and refusing backend work, and a request stream is still answered
 //! before it sends a frame.
 //!
-//! Lives in its own `tests/` binary so the process-global gate, configured and
-//! given its served ranks below, is this test's alone.
+//! The backend's worker owns its gate, configured through the environment and
+//! given its served ranks below; its own `tests/` binary keeps that environment
+//! this test's alone.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -27,7 +28,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use dynamo_llm::admission_gate::{
-    self, AdmissionEngine, AdmissionRequest, AdmissionResponse, ResponseOutput,
+    AdmissionEngine, AdmissionRequest, AdmissionResponse, ResponseOutput, WorkerAdmissionGate,
 };
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
@@ -316,7 +317,7 @@ where
 async fn admission_applies_only_at_the_typed_backend_boundary() {
     // A standalone process: clear any inherited codec override before the
     // request-plane codec cache is initialized, and configure the gate before
-    // its first use. Per rank: one engine request, one waiting, no queue.
+    // it is created. Per rank: one engine request, one waiting, no queue.
     unsafe {
         std::env::remove_var("DYN_REQUEST_PLANE_CODEC");
         std::env::set_var("DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT", "1");
@@ -334,25 +335,29 @@ async fn admission_applies_only_at_the_typed_backend_boundary() {
         RequestPlanePayloadCodec::configured(),
         RequestPlanePayloadCodec::Msgpack
     );
-    // This worker serves global ranks 4 and 5: two engine requests, and two
-    // waiting, process-wide.
-    admission_gate::record_engine_capacity(None, 4, 2);
 
     let rt = Runtime::from_current().unwrap();
     let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
         .await
         .unwrap();
 
-    // The backend opts in: its typed wrapper admits, and it exposes the gate's
-    // family, as a backend registering its model does.
+    // The backend opts in as a worker serving it does: its gate is created for
+    // the component it serves, which exposes the gate's family, and its typed
+    // wrapper admits through that gate.
     let reached = Arc::new(AtomicUsize::new(0));
     let backend_endpoint = endpoint(&drt, "generate");
-    admission_gate::register_metrics(backend_endpoint.get_metrics_registry());
+    let gate = WorkerAdmissionGate::default().get_or_create(backend_endpoint.component());
+    // This worker serves global ranks 4 and 5: two engine requests, and two
+    // waiting, worker-wide.
+    gate.record_engine_capacity(None, 4, 2);
     let backend = serve(
         backend_endpoint,
-        Ingress::for_engine(AdmissionEngine::<Ranked, Token>::new(Arc::new(Backend {
-            reached: Arc::clone(&reached),
-        })))
+        Ingress::for_engine(AdmissionEngine::<Ranked, Token>::new(
+            gate,
+            Arc::new(Backend {
+                reached: Arc::clone(&reached),
+            }),
+        ))
         .unwrap(),
     )
     .await;
@@ -424,7 +429,7 @@ async fn admission_applies_only_at_the_typed_backend_boundary() {
     occupancy_reaches(&drt, (0.0, 0.0)).await;
 
     // Saturate the backend: one held request on each served rank fills the
-    // process's two engine requests.
+    // worker's two engine requests.
     let hold = |dp_rank| {
         Context::new(Ranked {
             dp_rank: Some(dp_rank),

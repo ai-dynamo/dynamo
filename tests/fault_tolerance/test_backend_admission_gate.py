@@ -1,23 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Process-level coverage for the shared backend admission gate.
+"""Process-level coverage for each backend worker's admission gate.
 
 The gate sits at the backend's typed request boundary rather than in the
 request plane: the mocker serves its engine through the native backend's
 admission wrapper, which admits each `PreprocessedRequest` before the engine
 sees it, so a CPU-only mocker worker exercises the real thing over TCP and NATS
-alike.
+alike. Each worker owns its gate, so workers sharing one mocker process never
+share capacity.
 
 The oracle here is the worker's own `dynamo_backend_admission_*` family, scraped
-from its system port. Every series carries the `dp_rank` label the gate admitted
-the request under: a rank the worker serves, or `unspecified`. The frontend
-routes round-robin, which assigns no rank, so a request is unspecified unless
-the test pins it to a worker and rank with the `x-dynamo-worker-instance-id` and
-`x-dynamo-dp-rank` headers; the frontend then names that rank in the request
-body's `routing.dp_rank`, which the worker's gate reads from the decoded
-request, and the mocker serves the request on the engine of that rank, whose
-own per-engine gauges the multi-rank scenario compares against the gate's.
+from its system port. Every series carries the worker's standard owner labels —
+its namespace, component and `worker_id` — and the `dp_rank` label the gate
+admitted the request under: a rank the worker serves, or `unspecified`. The
+frontend routes round-robin, which assigns no rank, so a request is unspecified
+unless the test pins it to a worker and rank with the
+`x-dynamo-worker-instance-id` and `x-dynamo-dp-rank` headers; the frontend then
+names that rank in the request body's `routing.dp_rank`, which the worker's gate
+reads from the decoded request, and the mocker serves the request on the engine
+of that rank, whose own per-engine gauges the multi-rank scenario compares
+against the gate's.
 
 A refusal must reach the client as an overload — HTTP 529 under the default
 configuration — and the frontend must mark the refusing worker overloaded, never
@@ -29,7 +32,7 @@ produce a `worker_inhibited` one. For the length of that overload lease (one
 second) the frontend refuses new work for the worker itself, so a scenario that
 sends new requests after a refusal waits the lease out first.
 
-The gate has two engine limits, applied per rank and across the process. A
+The gate has two engine limits, applied per rank and across the worker. A
 request holds engine request capacity from admission until it finishes, and
 engine waiting capacity from admission until its first generated token or
 completion, whichever comes first. The mocker's first response to a request
@@ -75,7 +78,11 @@ from typing import Any, Callable, Coroutine, Iterator
 import aiohttp
 import pytest
 
-from tests.router.helper import wait_for_frontend_ready
+from tests.router.helper import (
+    managed_runtime,
+    poll_for_worker_instances,
+    wait_for_frontend_ready,
+)
 from tests.router.mocker_process import MockerProcess
 from tests.router.router_process import FrontendRouterProcess
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
@@ -144,6 +151,10 @@ GAUGES = (ENGINE_REQUEST_COUNT, ENGINE_REQUEST_WAITING_COUNT, REQUEST_QUEUE_COUN
 # The `dp_rank` of requests the gate admitted without a usable rank.
 UNSPECIFIED = "unspecified"
 
+# The runtime's standard labels every series of a worker's family carries,
+# naming the worker whose gate it is.
+OWNER_LABELS = ("dynamo_component", "dynamo_namespace", "worker_id")
+
 # Each outcome counter, by the short name scenarios use, as (family, labels
 # beside `dp_rank`). Rejections carry no reason label.
 COUNTERS = {
@@ -179,6 +190,11 @@ def _parse_series(series: str) -> Series:
 
 def _key(name: str, **labels: str) -> Series:
     return name, tuple(sorted(labels.items()))
+
+
+def _label_value(name: str) -> str:
+    """A namespace or component name as the runtime's label values spell it."""
+    return re.sub(r"[^a-zA-Z0-9_]", "_", name)
 
 
 def _payload(max_tokens: int, stream: bool) -> dict[str, Any]:
@@ -218,6 +234,12 @@ async def _hold(
     it to the garbage collector.
     """
     response = await session.post(url, json=_payload(2000, True), headers=headers)
+    return await _first_chunk(response)
+
+
+async def _first_chunk(response: aiohttp.ClientResponse) -> aiohttp.ClientResponse:
+    """`response`, a long stream, once it has begun answering; closed if it
+    fails, or is cancelled, first."""
     try:
         assert response.status == 200, await response.text()
         async for line in response.content:
@@ -243,12 +265,16 @@ class Gate:
         system_port: int,
         ranks: tuple[str, ...],
         frontend: LogReadable,
+        mockers: MockerProcess,
     ) -> None:
         self._session = session
         self._url = f"http://localhost:{system_port}/metrics"
         # Every `dp_rank` the gate must expose: its served ranks and unspecified.
         self.ranks = ranks
         self.frontend = frontend
+        # The worker's namespace and component, as its family's labels name them.
+        self._namespace = _label_value(mockers.namespace)
+        self._component = _label_value(mockers.component_name)
         # Learned from the frontend before the scenario starts.
         self.worker_id = 0
         self._baseline: dict[Series, float] = {}
@@ -258,15 +284,37 @@ class Gate:
             assert response.status == 200, await response.text()
             return await response.text()
 
+    def _owner(self) -> dict[str, str]:
+        """The owner labels every series of this worker's family carries."""
+        return {
+            "dynamo_component": self._component,
+            "dynamo_namespace": self._namespace,
+            "worker_id": format(self.worker_id, "x"),
+        }
+
     async def sample(self) -> dict[Series, float]:
+        """Every sample on the worker's port. Each series of the gate's family
+        must carry exactly this worker's owner labels, which are dropped here, so
+        the family is keyed by `dp_rank` (and `source`) alone."""
+        owner = self._owner()
         samples: dict[Series, float] = {}
         for line in (await self._scrape()).splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
             series, _, value = line.rpartition(" ")
-            if series:
-                samples[_parse_series(series)] = float(value)
+            if not series:
+                continue
+            name, labels = _parse_series(series)
+            if name.startswith(PREFIX):
+                rest = dict(labels)
+                found = {label: rest.pop(label, None) for label in OWNER_LABELS}
+                assert found == owner, (
+                    f"{name} must carry its worker's owner labels {owner}, got "
+                    f"{found}"
+                )
+                labels = tuple(sorted(rest.items()))
+            samples[(name, labels)] = float(value)
         return samples
 
     async def families(self) -> dict[str, str]:
@@ -284,7 +332,8 @@ class Gate:
         Also checks the shape of the family: exactly its seven metrics, no limit
         gauge among them, one series per served rank and `unspecified` in each
         — no aggregate series — and every counter series present before its
-        first event, with no label on rejections beyond `dp_rank`.
+        first event, with no label on rejections beyond `dp_rank` and, as every
+        sample is checked for, the worker's owner labels.
         """
         families = await self.families()
         assert (
@@ -329,7 +378,7 @@ class Gate:
         return requests, waits, queued
 
     async def totals(self) -> tuple[float, float, float]:
-        """Process occupancy: each gauge summed over its `dp_rank` series."""
+        """The worker's occupancy: each gauge summed over its `dp_rank` series."""
         samples = await self.sample()
         requests, waits, queued = (
             sum(samples[_key(name, dp_rank=rank)] for rank in self.ranks)
@@ -584,12 +633,16 @@ def _deployment(
     settings: dict[str, int],
     max_num_seqs: int,
     dp_size: int = 1,
+    num_workers: int = 1,
+    worker_env: dict[str, str] | None = None,
 ) -> Iterator["Deployment"]:
-    """One mocker and one frontend, sized for this scenario.
+    """One mocker process, running `num_workers` workers, and one frontend,
+    sized for this scenario.
 
-    The worker's gate configuration is patched around `MockerProcess` alone; the
-    frontend is built outside it and is told explicitly not to inherit the
-    worker's system port.
+    The workers' gate configuration, and any `worker_env`, is patched around
+    `MockerProcess` alone; the frontend is built outside it and is told
+    explicitly not to inherit the workers' system port. Each worker has its own
+    runtime, so only the first to bind that port serves its metrics there.
     """
     system_port = ports.system_ports[0]
     # Slowed down so a running stream lasts a whole scenario. The sequence
@@ -612,10 +665,12 @@ def _deployment(
                 environment.setenv(name, str(settings[name]))
             else:
                 environment.delenv(name, raising=False)
+        for name, value in (worker_env or {}).items():
+            environment.setenv(name, value)
         mockers = MockerProcess(
             request,
             mocker_args=mocker_args,
-            num_mockers=1,
+            num_mockers=num_workers,
             request_plane=request_plane,
         )
 
@@ -670,7 +725,7 @@ def _run(
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
         ranks = (*(str(rank) for rank in range(dp_size)), UNSPECIFIED)
         async with aiohttp.ClientSession() as session:
-            gate = Gate(session, system_port, ranks, frontend)
+            gate = Gate(session, system_port, ranks, frontend, deployment.mockers)
             gate.worker_id = await _worker_id(session, url)
             # Readiness has already sent traffic, so the gate is idle but its
             # counters are not zero. Everything below is a delta from here.
@@ -1045,14 +1100,14 @@ def test_ranks_admit_and_queue_independently_and_share_the_aggregate(
     dynamo_dynamic_ports,
 ):
     """A worker serving ranks 0 and 1, with every limit at one per rank: the
-    process-wide limits are two of each.
+    worker-wide limits are two of each.
 
     Rank 0 at its own limit queues its next request but never blocks rank 1.
     The gate accounts each pinned request under the rank the mocker serves it
     on. Unspecified work has no capacity of its own: it queues behind ranked
     work that fills the aggregate, its queue shares the aggregate queue limit,
     and once admitted it in turn holds rank 1's share against a rank 1 request.
-    Each rank's gauges and counters stay separate, and they sum to the process
+    Each rank's gauges and counters stay separate, and they sum to the worker's
     totals.
     """
 
@@ -1141,6 +1196,171 @@ def test_ranks_admit_and_queue_independently_and_share_the_aggregate(
         dp_size=2,
     ) as deployment:
         _run(dynamo_dynamic_ports.frontend_port, deployment, scenario, dp_size=2)
+
+
+######################### WORKERS IN ONE PROCESS #########################
+
+
+async def _hold_once_admitted(
+    session: aiohttp.ClientSession, url: str, headers: dict[str, str]
+) -> aiohttp.ClientResponse:
+    """`_hold` on a worker whose gate this test cannot scrape, so cannot wait to
+    see idle: it may still be releasing earlier work, such as readiness
+    traffic. Only an overload refusal is retried, each after the frontend's
+    overload lease on the worker, until the settle deadline; any other failure
+    fails at once."""
+    deadline = time.monotonic() + SETTLE_TIMEOUT_S
+    while True:
+        response = await session.post(url, json=_payload(2000, True), headers=headers)
+        if response.status != OVERLOADED:
+            return await _first_chunk(response)
+        refusal = await response.text()
+        response.close()
+        assert (
+            time.monotonic() < deadline
+        ), f"the worker still refused a stream after {SETTLE_TIMEOUT_S}s: {refusal}"
+        await _await_overload_lease()
+
+
+async def _scraped_worker_ids(
+    session: aiohttp.ClientSession, system_port: int
+) -> set[str | None]:
+    """The `worker_id` of every admission series the system port serves."""
+    async with session.get(f"http://localhost:{system_port}/metrics") as response:
+        assert response.status == 200, await response.text()
+        text = await response.text()
+    return {
+        dict(_parse_series(line.rpartition(" ")[0])[1]).get("worker_id")
+        for line in text.splitlines()
+        if line.startswith(PREFIX)
+    }
+
+
+@pytest.mark.timeout(120)
+def test_workers_in_one_process_admit_through_their_own_gates(
+    request,
+    runtime_services_session,
+    predownload_tokenizers,
+    request_plane,
+    dynamo_dynamic_ports,
+):
+    """Two mocker workers in one process (`--num-workers 2`), each with its own
+    runtime and its own gate of one engine request and no queue.
+
+    Each runtime keeps its own metrics, and only the first to bind the system
+    port serves them there: worker A is the one whose `worker_id` the port's
+    family carries, and worker B shows its gate through its answers. With A's
+    gate full, B still admits a stream; with that stream filling B's own gate, B
+    refuses its next request as an overload, which moves none of A's counters;
+    and A refuses its own next request. Neither is ever reported down. The
+    workers' instance IDs come from discovery, so the scenario sends no request
+    beyond its own after readiness.
+    """
+
+    async def scenario(
+        gate: Gate, session: aiohttp.ClientSession, url: str, worker_b: int
+    ) -> None:
+        on_a, on_b = _pin(gate.worker_id, 0), _pin(worker_b, 0)
+
+        hold_a = await _start_running(
+            gate, session, url, (1, 0, 0), "worker A's", "0", on_a
+        )
+        # A's gate is full, and stays full, but B's own gate has room: B admits a
+        # stream, whose first response proves it, and which keeps B's gate full
+        # from then on. B may still be releasing readiness traffic, so only its
+        # overload refusals are retried; through A's full gate none would ever
+        # pass, and none of them reaches A's counters.
+        hold_b = await _hold_once_admitted(session, url, on_b)
+        await gate.assert_counters("worker B's admission", "0", received=1, direct=1)
+        assert await gate.occupancy("0") == (1, 0, 0)
+
+        # B's gate is full too now: B refuses on its own gate, as an overload,
+        # and A's counters do not move.
+        marks = len(
+            worker_routing_events(
+                gate.frontend, instance_id=worker_b, routing_event="worker_overloaded"
+            )
+        )
+        status, body = await _unary(session, url, on_b)
+        assert (
+            status == OVERLOADED
+        ), f"worker B must refuse once its own gate is full: {status}: {body}"
+        await asyncio.to_thread(
+            wait_for_worker_routing_events,
+            gate.frontend,
+            instance_id=worker_b,
+            routing_event="worker_overloaded",
+            expected_count=marks + 1,
+        )
+        await gate.assert_counters("worker B's refusal", "0", received=1, direct=1)
+        assert await gate.occupancy("0") == (1, 0, 0)
+
+        # A refuses its own next request.
+        await _shed(gate, session, url, "0", on_a)
+
+        for response in (hold_a, hold_b):
+            response.close()
+        await gate.await_idle()
+        await gate.assert_counters("worker A", "0", received=2, direct=1, rejected=1)
+        await gate.assert_counters("no unspecified work on worker A")
+        inhibited_b = worker_routing_events(
+            gate.frontend, instance_id=worker_b, routing_event="worker_inhibited"
+        )
+        assert not inhibited_b, f"worker B must never be reported down: {inhibited_b}"
+
+    settings = {
+        ENGINE_REQUEST_LIMIT_ENV: 1,
+        ENGINE_REQUEST_WAITING_LIMIT_ENV: 1,
+        REQUEST_QUEUE_LIMIT_ENV: 0,
+    }
+    # Only the worker that binds the shared system port could serve its model
+    # metadata from it, which would make the other worker's card differ, and
+    # the frontend hold that worker incompatible. Both publish their metadata
+    # through shared storage instead, so their cards match.
+    with _deployment(
+        request,
+        dynamo_dynamic_ports,
+        request_plane,
+        settings,
+        max_num_seqs=1,
+        num_workers=2,
+        worker_env={"DYN_SELF_HOST_METADATA": "0"},
+    ) as deployment:
+
+        async def main() -> None:
+            url = f"http://localhost:{dynamo_dynamic_ports.frontend_port}/v1/chat/completions"
+            # The workers' instance IDs, read from discovery: no engine traffic.
+            mockers = deployment.mockers
+            with managed_runtime(request_plane=request_plane) as runtime:
+                endpoint = runtime.endpoint(
+                    f"{mockers.namespace}.{mockers.component_name}.generate"
+                )
+                workers = set(await poll_for_worker_instances(endpoint, 2))
+            async with aiohttp.ClientSession() as session:
+                gate = Gate(
+                    session,
+                    deployment.system_port,
+                    ("0", UNSPECIFIED),
+                    deployment.frontend,
+                    mockers,
+                )
+                scraped = await _scraped_worker_ids(session, deployment.system_port)
+                owners = {
+                    worker for worker in workers if format(worker, "x") in scraped
+                }
+                assert len(scraped) == 1 and len(owners) == 1, (
+                    f"the system port must serve exactly one of the workers "
+                    f"{sorted(workers)}, found worker_id labels {scraped}"
+                )
+                (gate.worker_id,) = owners
+                (worker_b,) = workers - owners
+                await gate.await_idle()
+                await gate.take_baseline()
+                await scenario(gate, session, url, worker_b)
+                await gate.assert_settled()
+                _assert_never_reported_down(gate)
+
+        asyncio.run(main())
 
 
 ######################### CALLER DISCONNECT WHILE QUEUED #########################
@@ -1239,6 +1459,7 @@ def test_a_failed_worker_is_still_reported_down(
                     deployment.system_port,
                     ("0", UNSPECIFIED),
                     deployment.frontend,
+                    deployment.mockers,
                 )
                 gate.worker_id = await _worker_id(session, url)
                 await gate.await_idle()

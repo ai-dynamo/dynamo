@@ -38,6 +38,11 @@ occupancy after each one reaches the caller.
 The binding classifies a response only while the gate still reads it: each up
 to the first that ends its request's wait, and none for a request that arrived
 while its endpoint was no model backend.
+
+A Python worker's gate belongs to its runtime: every endpoint the runtime
+serves admits through it, and a second runtime in the same process, a worker of
+its own, has its own gate, whose family its own metrics endpoint serves under
+its own `worker_id`.
 Classifying takes the length of a response's `token_ids` once, so these tests
 send it, and an equal `neutral_ids` that nothing classifies, as lists that
 count how often their length is taken: the extra lengths taken of `token_ids`
@@ -74,12 +79,29 @@ pytestmark = [
     pytest.mark.integration,
 ]
 
+FAMILY = "dynamo_backend_admission_"
 RECEIVED = "dynamo_backend_admission_request_receive_total"
 ADMITTED = "dynamo_backend_admission_request_admit_total"
+REJECTED = "dynamo_backend_admission_rejection_total"
 ENGINE_REQUESTS = "dynamo_backend_admission_engine_request_count"
 WAITING = "dynamo_backend_admission_engine_request_waiting_count"
 DP_RANK_LABEL = re.compile(r'dp_rank="([^"]*)"')
+WORKER_ID_LABEL = re.compile(r'worker_id="([^"]*)"')
 UNSPECIFIED = "unspecified"
+
+# A gate admitting one engine request, waiting until its first token, and
+# queueing none, under the canonical names; the aliases are cleared so none can
+# shadow them.
+ONE_REQUEST_LIMITS = {
+    "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT": "1",
+    "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT": "1",
+    "DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT": "0",
+}
+LIMIT_ALIASES = (
+    "DYN_ENGINE_REQUEST_LIMIT",
+    "DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT",
+    "DYN_DYNAMO_REQUEST_QUEUE_LIMIT",
+)
 
 # The worker serves global ranks 4 through 7. Every rank a body names anywhere,
 # decoys included, is one of them, so a rank read from the wrong place shows up
@@ -349,8 +371,24 @@ class Gate:
     async def receives(self) -> dict[str, float]:
         return await self.by_rank(RECEIVED)
 
+    async def total(self, metric: str) -> float:
+        return sum((await self.by_rank(metric)).values())
+
+    async def worker_ids(self) -> set[str]:
+        """The `worker_id` of every series of the gate's family served here."""
+        async with self._session.get(self._url) as response:
+            text = await response.text()
+            assert response.status == 200, text
+        worker_ids = set()
+        for line in text.splitlines():
+            if line.startswith(FAMILY):
+                label = WORKER_ID_LABEL.search(line)
+                assert label, line
+                worker_ids.add(label.group(1))
+        return worker_ids
+
     async def occupancy(self) -> tuple[float, float]:
-        """Process-wide (engine requests, engine-waiting requests)."""
+        """The worker's (engine requests, engine-waiting requests)."""
         return (
             sum((await self.by_rank(ENGINE_REQUESTS)).values()),
             sum((await self.by_rank(WAITING)).values()),
@@ -375,28 +413,58 @@ class Gate:
 
 
 @contextlib.asynccontextmanager
-async def _runtime(tmp_path, codec: str):
-    """A runtime with a metrics endpoint, and a session to scrape it."""
+async def _runtimes(tmp_path, codec: str, count: int):
+    """`count` runtimes in this one process — each a Python worker, with a
+    metrics endpoint of its own — and a session to scrape them."""
     # The system port must fit the runtime's port range, which the shared
     # allocator respects; an arbitrary ephemeral port may not.
-    with reserved_ports(1, DefaultPort.SYSTEM1.value) as (port,):
-        os.environ["DYN_SYSTEM_PORT"] = str(port)
+    with reserved_ports(count, DefaultPort.SYSTEM1.value) as ports:
         os.environ["DYN_FILE_KV"] = str(tmp_path)
         os.environ["DYN_REQUEST_PLANE_CODEC"] = codec
-        runtime = DistributedRuntime(
-            asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
-        )
+        runtimes: list = []
         servers: list = []
         try:
+            for port in ports:
+                # Each runtime reads its system port as it is created.
+                os.environ["DYN_SYSTEM_PORT"] = str(port)
+                runtimes.append(
+                    DistributedRuntime(
+                        asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
+                    )
+                )
             async with aiohttp.ClientSession() as session:
-                yield runtime, servers, Gate(session, port)
+                yield runtimes, servers, [Gate(session, port) for port in ports]
         finally:
             for server in servers:
                 server.cancel()
             for server in servers:
                 with contextlib.suppress(asyncio.CancelledError):
                     await server
-            runtime.shutdown()
+            for runtime in runtimes:
+                runtime.shutdown()
+
+
+@contextlib.asynccontextmanager
+async def _runtime(tmp_path, codec: str):
+    """A runtime with a metrics endpoint, and a session to scrape it."""
+    async with _runtimes(tmp_path, codec, 1) as (runtimes, servers, gates):
+        yield runtimes[0], servers, gates[0]
+
+
+def _admit_one_request_per_worker() -> None:
+    """Configure every gate created from now on to admit one engine request,
+    waiting until its first token, and to queue none."""
+    for alias in LIMIT_ALIASES:
+        os.environ.pop(alias, None)
+    os.environ.update(ONE_REQUEST_LIMITS)
+
+
+async def _refused_as_overloaded(client, body) -> None:
+    """Send `body`, which the worker's gate must refuse as an overload."""
+    with pytest.raises(Exception, match="(?i)overload"):
+        stream = await client.generate(body)
+        async for _ in stream:
+            pass
 
 
 async def _serve(runtime, servers, name, handler):
@@ -1135,3 +1203,114 @@ async def test_a_request_keeps_the_role_its_endpoint_had_when_it_arrived(
         await _ends(stream)
         assert sum((await gate.receives()).values()) == 1
         await gate.occupancy_reaches((0, 0))
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("path", ["pull", "push"])
+async def test_python_workers_in_one_process_admit_through_their_own_gates(
+    request, tmp_path, path
+):
+    """Two runtimes in one process are two Python workers, each with a gate of
+    one engine request: one worker's full gate never refuses the other's work,
+    and each worker's metrics endpoint serves only its own gate's family."""
+    if _run_in_fresh_process(request, tmp_path):
+        return
+
+    _admit_one_request_per_worker()
+    async with _runtimes(tmp_path, "msgpack", 2) as (runtimes, servers, gates):
+        scripted = [Scripted([{"token_ids": [11]}]) for _ in runtimes]
+        clients = []
+        for index, (runtime, handler) in enumerate(zip(runtimes, scripted)):
+            endpoint, client = await _serve(
+                runtime, servers, f"{path}-{index}", getattr(handler, path)
+            )
+            await _register(endpoint, f"admission-model-{index}", WorkerType.Aggregated)
+            clients.append(client)
+        for gate in gates:
+            await gate.ready()
+        worker_ids = [await gate.worker_ids() for gate in gates]
+        assert [len(ids) for ids in worker_ids] == [1, 1], worker_ids
+        assert worker_ids[0] != worker_ids[1], "each worker labels its own family"
+
+        # The first worker's gate fills up.
+        held = await clients[0].generate({"token_ids": [1]})
+        scripted[0].release()
+        assert await _next(held) == {"token_ids": [11]}
+        assert await gates[0].occupancy() == (1, 0)
+
+        # The second worker admits through its own gate all the same.
+        other = await clients[1].generate({"token_ids": [1]})
+        assert await gates[1].occupancy() == (1, 1)
+        scripted[1].release()
+        assert await _next(other) == {"token_ids": [11]}
+        assert await gates[1].occupancy() == (1, 0)
+        assert await gates[0].occupancy() == (1, 0)
+
+        # Each gate is full now, and refuses only its own worker's next request.
+        for full, (client, gate) in enumerate(zip(clients, gates)):
+            await _refused_as_overloaded(client, {"token_ids": [1]})
+            assert [await each.total(REJECTED) for each in gates] == [
+                float(index <= full) for index in range(len(gates))
+            ]
+        for gate in gates:
+            assert await gate.total(RECEIVED) == 2
+            assert await gate.total(ADMITTED) == 1
+
+        for handler, stream in zip(scripted, (held, other)):
+            handler.release()
+            await _ends(stream)
+        for gate in gates:
+            await gate.occupancy_reaches((0, 0))
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(120)
+async def test_endpoints_of_one_python_worker_share_its_gate(request, tmp_path):
+    """A runtime's endpoints serve one Python worker, so they admit through its
+    one gate, whichever egress path they take: one endpoint's request fills it
+    for the other's, until that request ends."""
+    if _run_in_fresh_process(request, tmp_path):
+        return
+
+    _admit_one_request_per_worker()
+    async with _runtime(tmp_path, "msgpack") as (runtime, servers, gate):
+        scripted = {path: Scripted([{"token_ids": [11]}]) for path in ("pull", "push")}
+        endpoints = {}
+        clients = {}
+        for path, handler in scripted.items():
+            endpoints[path], clients[path] = await _serve(
+                runtime, servers, path, getattr(handler, path)
+            )
+            await _register(
+                endpoints[path], f"admission-model-{path}", WorkerType.Aggregated
+            )
+        await gate.ready()
+        assert len(await gate.worker_ids()) == 1
+
+        held = await clients["pull"].generate({"token_ids": [1]})
+        scripted["pull"].release()
+        assert await _next(held) == {"token_ids": [11]}
+        assert await gate.occupancy() == (1, 0)
+
+        # The push endpoint's request finds the worker's one gate full.
+        await _refused_as_overloaded(clients["push"], {"token_ids": [1]})
+        assert await gate.total(REJECTED) == 1
+
+        # Once the pull request ends, the push endpoint admits. The refusal
+        # leased the worker out of the refused client's own routing for a
+        # moment, so a fresh client of the endpoint sends the request.
+        scripted["pull"].release()
+        await _ends(held)
+        await gate.occupancy_reaches((0, 0))
+        fresh = await endpoints["push"].client()
+        await asyncio.wait_for(fresh.wait_for_instances(), TIMEOUT_S)
+        stream = await fresh.generate({"token_ids": [1]})
+        assert await gate.occupancy() == (1, 1)
+        scripted["push"].release()
+        assert await _next(stream) == {"token_ids": [11]}
+        scripted["push"].release()
+        await _ends(stream)
+        await gate.occupancy_reaches((0, 0))
+        assert await gate.total(RECEIVED) == 3
+        assert await gate.total(ADMITTED) == 2

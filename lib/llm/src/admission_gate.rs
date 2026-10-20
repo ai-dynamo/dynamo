@@ -1,26 +1,33 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Backend admission gate, shared by every backend request path in a process.
+//! Backend admission gates: one per backend worker, shared by every backend
+//! request path that serves for that worker.
 //!
 //! Admission happens where a backend receives its typed requests, never in the
 //! generic transport. The request planes keep routing serialized requests,
 //! responses, cancellation and errors to registered endpoints; a backend's own
-//! engine wrapper admits each request through [`admit`] — directly, or through
-//! [`AdmissionEngine`] — before handing it to its engine, and the stream that
-//! comes back holds the request's capacity.
+//! engine wrapper admits each request through its worker's gate —
+//! [`BackendAdmissionGate::admit`], directly or through [`AdmissionEngine`] —
+//! before handing it to its engine, and the stream that comes back holds the
+//! request's capacity.
 //!
 //! ```text
 //!                                      ┌─> native backend (PreprocessedRequest) ─┐
-//! TCP / NATS request plane ─> Ingress ─┤                                         ├─> gate ─> engine
+//! TCP / NATS request plane ─> Ingress ─┤                                         ├─> worker's gate ─> engine
 //!                                      └─> Python backend (PythonPayload) ───────┘
 //! ```
 //!
-//! Every backend path of a process shares this one gate, so endpoints serving
-//! the same worker ranks draw on the same capacity. Ordinary runtime endpoints —
-//! control, indexer and other RPCs, and generic Python endpoints — never reach
-//! it, and neither do a worker's local health-check canaries, which call its
-//! engine directly.
+//! Each backend worker owns its gate through a [`WorkerAdmissionGate`] held by
+//! the object that is the worker — the backend-common `Worker`, a native
+//! `EngineConfig::InProcessTokens`, or the Python `DistributedRuntime` that
+//! serves a Python backend's endpoints — and every endpoint serving for that
+//! worker is built with a clone of it. Endpoints of one worker therefore draw
+//! on the same capacity, while independent workers, even in one process, share
+//! none; nothing ever looks a gate up. Ordinary runtime endpoints — control,
+//! indexer and other RPCs, and generic Python endpoints — never reach a gate,
+//! and neither do a worker's local health-check canaries, which call its engine
+//! directly.
 //!
 //! # Engine limits
 //!
@@ -50,17 +57,17 @@
 //!
 //! # DP ranks
 //!
-//! A worker process may serve several data-parallel ranks, which its model card
-//! reports as a range of global rank IDs: start rank `A` and count `N` serve
-//! `A..A + N`. Every limit applies to each rank, and the process-wide limits
+//! A worker may serve several data-parallel ranks, which its model card reports
+//! as a range of global rank IDs: start rank `A` and count `N` serve
+//! `A..A + N`. Every limit applies to each rank, and the worker-wide limits
 //! aggregate that same capacity, `N` times each per-rank limit, without adding
 //! any. A request is admitted under the rank its own decoded body names, read
 //! through [`AdmissionRequest`] from the field the backend also reads to choose
-//! its engine rank, when that rank is one the process serves: it then needs room
-//! under both its rank's limits and the process-wide ones, and counts at both.
-//! Any other request — naming no rank, arriving before the process has reported
-//! its ranks, or naming a rank the process does not serve — is admitted as
-//! **unspecified**: it needs room under the process-wide limits only and counts
+//! its engine rank, when that rank is one the worker serves: it then needs room
+//! under both its rank's limits and the worker-wide ones, and counts at both.
+//! Any other request — naming no rank, arriving before the worker has reported
+//! its ranks, or naming a rank the worker does not serve — is admitted as
+//! **unspecified**: it needs room under the worker-wide limits only and counts
 //! only there, sharing, not adding to, the capacity of every rank. A request
 //! keeps the rank it was classified under for its whole stay, however the
 //! reported ranks later change, so every release returns exactly what it took.
@@ -70,7 +77,7 @@
 //! A request that cannot enter immediately waits in a bounded FIFO queue,
 //! holding no engine capacity while it does. Each served rank has its own
 //! queue, bounded by the queue limit, and unspecified requests share one more;
-//! all of them together are bounded by the process-wide queue limit. A new
+//! all of them together are bounded by the worker-wide queue limit. A new
 //! arrival is admitted directly only when its own queue is empty, so it never
 //! bypasses an older request in it. Whenever capacity is released, the oldest
 //! request at the head of any queue that now has all the room it needs is
@@ -90,14 +97,14 @@
 //! arrival, and a transition reschedules only the queues it changed, each at
 //! O(log Q) in the Q queues there are: one per rank with queued requests, served
 //! or no longer, and one for unspecified work. A head stays scheduled while only
-//! the process-wide limits are full, so whatever frees process-wide room hands
-//! it to the oldest scheduled head at once. Only a change of limits or ranks
+//! the worker-wide limits are full, so whatever frees worker-wide room hands it
+//! to the oldest scheduled head at once. Only a change of limits or ranks
 //! reschedules every queue.
 //!
 //! # Configuration
 //!
-//! Each setting is a per-rank limit, read once when the process-global gate is
-//! created from the first of its environment names that holds a valid value:
+//! Each setting is a per-rank limit, read once when a worker's gate is created,
+//! from the first of its environment names that holds a valid value:
 //!
 //! | Setting | Environment names, in precedence order | Automatic value |
 //! |---|---|---|
@@ -112,11 +119,12 @@
 //! explicit flag takes precedence over both environment names.
 //!
 //! A setting without an explicit value is automatic: it follows the
-//! `max_num_seqs` the engine reports through its model card, and assumes
-//! [`FALLBACK_MAX_NUM_SEQS`] until then. Capacity and rank reports update the
-//! automatic limits and the rank count at any time, without resetting live
-//! occupancy; they never replace an explicit value. A lower limit evicts
-//! nothing: it holds further admission back until occupancy falls below it.
+//! `max_num_seqs` the engine reports through its worker's model card, and
+//! assumes [`FALLBACK_MAX_NUM_SEQS`] until then. Capacity and rank reports
+//! update the automatic limits and the rank count at any time, without
+//! resetting live occupancy; they never replace an explicit value. A lower
+//! limit evicts nothing: it holds further admission back until occupancy falls
+//! below it.
 //!
 //! TCP requests pass through the TCP work queue and worker pool before reaching
 //! this gate, then keep their worker-pool permit while waiting here. The TCP
@@ -128,19 +136,23 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 
+use dynamo_runtime::component::Component;
 use dynamo_runtime::engine::{
     AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream, Data,
     EngineStream,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType};
+use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::pipeline::{ManyOut, ServiceEngine, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::Stream;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
+
+use crate::model_card::ModelDeploymentCard;
 
 mod metrics;
 
@@ -283,7 +295,7 @@ impl ExplicitLimits {
     }
 }
 
-/// The global DP ranks a worker process serves, as its model card reports
+/// The global DP ranks a worker serves, as its model card reports
 /// them: `start` through `start + count - 1`, which map to local slots `0`
 /// through `count - 1`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -312,7 +324,7 @@ impl std::fmt::Display for RankRange {
     }
 }
 
-/// The limits the gate enforces. Each is per DP rank; its process-wide limit is
+/// The limits the gate enforces. Each is per DP rank; its worker-wide limit is
 /// the same capacity aggregated over `rank_count` ranks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AdmissionLimits {
@@ -322,7 +334,7 @@ struct AdmissionLimits {
     engine_request_waiting_limit: usize,
     /// Requests waiting in a queue.
     request_queue_limit: usize,
-    /// The ranks the process serves: one until it reports them.
+    /// The ranks the worker serves: one until it reports them.
     rank_count: usize,
 }
 
@@ -344,7 +356,7 @@ impl AdmissionLimits {
         }
     }
 
-    /// The process-wide limit for a per-rank one.
+    /// The worker-wide limit for a per-rank one.
     fn aggregate(&self, per_rank_limit: usize) -> usize {
         per_rank_limit.saturating_mul(self.rank_count)
     }
@@ -370,13 +382,16 @@ impl LimitsSnapshot {
         }
     }
 
-    /// Log the limits in force, with each one's source and scope.
-    fn log(&self, message: &str) {
+    /// Log the limits in force for `owner`'s worker, with each one's source and
+    /// scope.
+    fn log(&self, owner: &GateOwner, message: &str) {
         let limits = self.limits;
         let served = self
             .served
             .map_or_else(|| "unreported".to_string(), |served| served.to_string());
         tracing::info!(
+            component = %owner.component,
+            worker_id = %owner.worker_id,
             engine_request_limit = limits.engine_request_limit,
             engine_request_limit_source = self.source(self.explicit.engine_request_limit),
             engine_request_waiting_limit = limits.engine_request_waiting_limit,
@@ -387,10 +402,10 @@ impl LimitsSnapshot {
             limit_scope = "per DP rank",
             dp_rank_count = limits.rank_count,
             dp_ranks = %served,
-            process_engine_request_limit = limits.aggregate(limits.engine_request_limit),
-            process_engine_request_waiting_limit =
+            worker_engine_request_limit = limits.aggregate(limits.engine_request_limit),
+            worker_engine_request_waiting_limit =
                 limits.aggregate(limits.engine_request_waiting_limit),
-            process_request_queue_limit = limits.aggregate(limits.request_queue_limit),
+            worker_request_queue_limit = limits.aggregate(limits.request_queue_limit),
             "{message}"
         );
     }
@@ -409,7 +424,7 @@ struct CapacityWarning {
 impl CapacityWarning {
     /// Every limit in `limits` that exceeds `max_num_seqs` by more than the
     /// warning factor. A per-rank limit is compared with per-rank capacity; the
-    /// process-wide one with process capacity, which is the same ratio.
+    /// worker-wide one with the worker's capacity, which is the same ratio.
     fn check(limits: &AdmissionLimits, max_num_seqs: usize) -> Vec<Self> {
         let threshold = max_num_seqs.saturating_mul(CAPACITY_WARNING_FACTOR);
         [
@@ -437,13 +452,15 @@ impl CapacityWarning {
         .collect()
     }
 
-    fn log(&self) {
+    fn log(&self, owner: &GateOwner) {
         tracing::warn!(
+            component = %owner.component,
+            worker_id = %owner.worker_id,
             setting = self.setting,
             per_rank_limit = self.per_rank_limit,
             per_rank_capacity = self.max_num_seqs,
-            process_limit = self.per_rank_limit.saturating_mul(self.rank_count),
-            process_capacity = self.max_num_seqs.saturating_mul(self.rank_count),
+            worker_limit = self.per_rank_limit.saturating_mul(self.rank_count),
+            worker_capacity = self.max_num_seqs.saturating_mul(self.rank_count),
             "Backend admission limit is more than {CAPACITY_WARNING_FACTOR}x the engine's \
              reported max_num_seqs, so it is unlikely to hold work back"
         );
@@ -458,40 +475,31 @@ const OVERLOADED_MESSAGE: &str = "Server overloaded: worker at capacity";
 /// backpressure.
 const CANCELLED_MESSAGE: &str = "Request cancelled while queued for backend admission";
 
-/// The process-global gate, constructed on first touch.
-static GATE: LazyLock<Arc<BackendAdmissionGate>> =
-    LazyLock::new(BackendAdmissionGate::from_environment);
-
-/// The one gate every backend request in this process admits through.
-fn global() -> &'static Arc<BackendAdmissionGate> {
-    &GATE
-}
-
-/// Accept the capacity and DP ranks a registered model card reports:
-/// `max_num_seqs` per rank, and the ranks `data_parallel_start_rank` through
-/// `data_parallel_start_rank + data_parallel_size - 1`.
+/// One backend worker's admission gate, held by the object that is the worker
+/// and shared, by cloning this handle, with every endpoint and request path
+/// that serves for it.
 ///
-/// Updates the automatic limits and the rank count the process-wide limits
-/// aggregate over, whenever a report arrives or changes. Explicit settings,
-/// live occupancy, queued requests and outstanding permits are kept; a request
-/// already classified keeps its rank.
-pub fn record_engine_capacity(
-    max_num_seqs: Option<u64>,
-    data_parallel_start_rank: u32,
-    data_parallel_size: u32,
-) {
-    global().record_engine_capacity(max_num_seqs, data_parallel_start_rank, data_parallel_size);
-}
+/// Clones share one gate; separately created handles never do. A request
+/// reaches its gate only through the handle its serving path was built with,
+/// so the gate lives as long as its worker and the paths serving for it.
+#[derive(Clone, Default)]
+pub struct WorkerAdmissionGate(Arc<OnceLock<Arc<BackendAdmissionGate>>>);
 
-/// Expose the process-global gate's metrics for scraping, with `registry`'s.
-///
-/// Every backend calls it as it opts into admission — a native backend as it
-/// builds its admission wrapper, a Python endpoint as it records its role — so
-/// the family is exposed before its first request. Idempotent: the first call
-/// registers it, and the rest do nothing.
-pub fn register_metrics(registry: &dynamo_runtime::MetricsRegistry) {
-    static REGISTERED: OnceLock<()> = OnceLock::new();
-    REGISTERED.get_or_init(|| global().state.lock().metrics.register(registry));
+impl WorkerAdmissionGate {
+    /// The worker's gate, created by the first call — as the worker first
+    /// registers or serves as a model backend — with its settings read from
+    /// the environment then, once.
+    ///
+    /// `component` is the one the worker serves. It only labels the gate's
+    /// metric family and exposes it, once, on that component's registry when
+    /// the gate is created (see [`metrics`]); it never selects a gate, and a
+    /// later call through any endpoint of the worker returns the same one.
+    pub fn get_or_create(&self, component: &Component) -> Arc<BackendAdmissionGate> {
+        Arc::clone(
+            self.0
+                .get_or_init(|| BackendAdmissionGate::for_component(component)),
+        )
+    }
 }
 
 /// A backend request, which may name the global DP rank its router selected
@@ -565,45 +573,25 @@ impl<T: AdmissionResponse> AdmissionResponse for Annotated<T> {
     }
 }
 
-/// Run `generate` under engine capacity reserved for one backend request, under
-/// the DP rank it names, and return the engine's own stream, which holds
-/// waiting capacity until the first response that ends the wait (see
-/// [`ResponseOutput::ends_wait`]) and request capacity until the stream ends.
-///
-/// This is a backend boundary's whole admission interface. Call it inside the
-/// backend's typed `generate`, with the request's own context, before the
-/// request reaches the engine: capacity is reserved *before* `generate` is
-/// polled, so a refused request never reaches the engine, and the refusal is
-/// this call's error — [`ErrorType::WorkerOverloaded`] when the gate is full —
-/// before any response stream exists. The gate watches `context` while the
-/// request is queued, and refuses it as [`ErrorType::Cancelled`] once stopped.
-/// An engine failure keeps its own error untouched.
-pub async fn admit<R, F>(
-    context: &Arc<dyn AsyncEngineContext>,
-    dp_rank: Option<u32>,
-    generate: F,
-) -> anyhow::Result<EngineStream<R>>
-where
-    R: Data + AdmissionResponse,
-    F: Future<Output = anyhow::Result<EngineStream<R>>>,
-{
-    global().admit(Some(context), dp_rank, generate).await
-}
-
-/// A backend engine whose every request is admitted through the gate first:
-/// the typed wrapper a native backend serves on its network ingress.
+/// A backend engine whose every request is admitted through its worker's gate
+/// first: the typed wrapper a native backend serves on its network ingress.
 ///
 /// Each request is admitted under the rank it names, and its stream holds
 /// waiting capacity until the first response that ends the wait. Serve only
 /// the network path through it: local callers and health-check canaries use
 /// the inner engine, outside admission.
 pub struct AdmissionEngine<Req: Data, Resp: Data> {
+    gate: Arc<BackendAdmissionGate>,
     engine: ServiceEngine<SingleIn<Req>, ManyOut<Resp>>,
 }
 
 impl<Req: Data, Resp: Data> AdmissionEngine<Req, Resp> {
-    pub fn new(engine: ServiceEngine<SingleIn<Req>, ManyOut<Resp>>) -> Arc<Self> {
-        Arc::new(Self { engine })
+    /// Admit `engine`'s network requests through `gate`, its worker's.
+    pub fn new(
+        gate: Arc<BackendAdmissionGate>,
+        engine: ServiceEngine<SingleIn<Req>, ManyOut<Resp>>,
+    ) -> Arc<Self> {
+        Arc::new(Self { gate, engine })
     }
 }
 
@@ -617,7 +605,9 @@ where
     async fn generate(&self, request: SingleIn<Req>) -> anyhow::Result<ManyOut<Resp>> {
         let context = request.context();
         let dp_rank = AdmissionRequest::dp_rank(&*request);
-        admit(&context, dp_rank, self.engine.generate(request)).await
+        self.gate
+            .admit(&context, dp_rank, self.engine.generate(request))
+            .await
     }
 }
 
@@ -662,9 +652,9 @@ fn reject(rejection: Rejection, context: Option<&Arc<dyn AsyncEngineContext>>) -
 /// The occupancy a request is counted under for its whole stay at the gate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum AdmissionRank {
-    /// A global DP rank the process served when the request arrived.
+    /// A global DP rank the worker served when the request arrived.
     Rank(u32),
-    /// No usable rank: none was supplied, the process had not reported its
+    /// No usable rank: none was supplied, the worker had not reported its
     /// ranks yet, or it does not serve the supplied one.
     Unspecified,
 }
@@ -682,9 +672,9 @@ impl AdmissionRank {
 /// Why a request that supplied a rank is admitted as unspecified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RankFallback {
-    /// The process has not reported which ranks it serves yet.
+    /// The worker has not reported which ranks it serves yet.
     RanksUnreported { supplied: u32 },
-    /// The process does not serve the supplied rank.
+    /// The worker does not serve the supplied rank.
     OutOfRange { supplied: u32, served: RankRange },
 }
 
@@ -708,7 +698,7 @@ impl RankFallback {
     }
 }
 
-/// Classify a request's supplied rank against the ranks the process serves.
+/// Classify a request's supplied rank against the ranks the worker serves.
 ///
 /// A rank inside the served range is used as is. Without a supplied rank the
 /// request is unspecified, with nothing to warn about. A supplied rank the gate
@@ -733,7 +723,7 @@ fn classify(
     }
 }
 
-/// Occupancy of one admission measure across a process's DP ranks.
+/// Occupancy of one admission measure across a worker's DP ranks.
 ///
 /// The gate keeps three: engine requests, engine-waiting requests and queued
 /// requests. Each owns its measure's limits and counts and nothing else — no
@@ -741,7 +731,7 @@ fn classify(
 /// transition needs before changing any of them, under its one mutex, so the
 /// three always change together.
 ///
-/// A request with a rank counts at that rank and in the process total; an
+/// A request with a rank counts at that rank and in the worker total; an
 /// unspecified one counts only in the total, through the unspecified count. The
 /// total is therefore always the ranks' counts plus the unspecified count, and
 /// both kinds draw on the one aggregate limit: unspecified requests have no
@@ -750,7 +740,7 @@ fn classify(
 struct DpRankCounts {
     /// Each rank's limit.
     per_rank_limit: usize,
-    /// The process-wide limit: the per-rank limit over every served rank.
+    /// The worker-wide limit: the per-rank limit over every served rank.
     aggregate_limit: usize,
     /// Each rank's count, for ranks with any; a rank that drains is dropped.
     ranks: HashMap<u32, usize>,
@@ -778,14 +768,14 @@ impl DpRankCounts {
         self.aggregate_limit = per_rank_limit.saturating_mul(rank_count);
     }
 
-    /// Whether one more request fits under the process-wide limit, whatever
+    /// Whether one more request fits under the worker-wide limit, whatever
     /// its rank.
     fn has_aggregate_room(&self) -> bool {
         self.total < self.aggregate_limit
     }
 
     /// Whether one more request of `rank` fits under its rank's own limit,
-    /// whatever the process-wide one: always, for an unspecified request, which
+    /// whatever the worker-wide one: always, for an unspecified request, which
     /// has no rank limit.
     fn has_rank_room(&self, rank: AdmissionRank) -> bool {
         match rank {
@@ -794,7 +784,7 @@ impl DpRankCounts {
         }
     }
 
-    /// Whether one more request of `rank` fits: under the process-wide limit,
+    /// Whether one more request of `rank` fits: under the worker-wide limit,
     /// and under its rank's limit when it has one.
     fn has_room(&self, rank: AdmissionRank) -> bool {
         self.has_aggregate_room() && self.has_rank_room(rank)
@@ -1084,7 +1074,7 @@ struct GateState {
     explicit: ExplicitLimits,
     /// The engine's `max_num_seqs` per rank, once a model card reports it.
     max_num_seqs: Option<usize>,
-    /// The ranks the process serves, once a model card reports them.
+    /// The ranks the worker serves, once a model card reports them.
     served: Option<RankRange>,
     limits: AdmissionLimits,
     /// Admitted requests that have not finished, including those whose wait
@@ -1100,7 +1090,7 @@ struct GateState {
     queues: HashMap<AdmissionRank, Fifo>,
     /// The candidates for the next admission: the head of every queue whose
     /// rank's own limits have room for it, by arrival, oldest first. The
-    /// process-wide limits are the same for every queue, so they are checked
+    /// worker-wide limits are the same for every queue, so they are checked
     /// apart, and a head stays scheduled while only they are full.
     schedule: BTreeMap<u64, AdmissionRank>,
     slots: QueueSlots,
@@ -1134,7 +1124,7 @@ struct RankMetrics {
 }
 
 impl GateState {
-    fn new(explicit: ExplicitLimits) -> Self {
+    fn new(explicit: ExplicitLimits, metrics: BackendAdmissionMetrics) -> Self {
         let limits = AdmissionLimits::resolve(&explicit, None, 1);
         let mut state = Self {
             explicit,
@@ -1151,7 +1141,7 @@ impl GateState {
             schedule: BTreeMap::new(),
             slots: QueueSlots::with_capacity(limits.aggregate(limits.request_queue_limit)),
             next_arrival: 0,
-            metrics: BackendAdmissionMetrics::new(),
+            metrics,
             series: HashMap::new(),
             touched: Vec::new(),
             capacity_checked: None,
@@ -1222,7 +1212,7 @@ impl GateState {
         self.touched = touched;
     }
 
-    /// Whether the process-wide limits of both engine measures have room for
+    /// Whether the worker-wide limits of both engine measures have room for
     /// one more request, whatever its rank.
     fn has_aggregate_engine_room(&self) -> bool {
         self.engine_requests.has_aggregate_room()
@@ -1236,7 +1226,7 @@ impl GateState {
     }
 
     /// Whether one more request of `rank` can enter the engine: both engine
-    /// measures need room, at its rank and process-wide.
+    /// measures need room, at its rank and worker-wide.
     fn has_engine_room(&self, rank: AdmissionRank) -> bool {
         self.has_aggregate_engine_room() && self.has_rank_engine_room(rank)
     }
@@ -1360,7 +1350,7 @@ impl GateState {
         Some(waiter)
     }
 
-    /// Hand engine capacity to queued requests for as long as the process-wide
+    /// Hand engine capacity to queued requests for as long as the worker-wide
     /// limits have room and a queue's head is scheduled, oldest arrival first.
     /// Each admission reads the schedule's oldest head and reschedules only that
     /// head's queue, so it never scans the other queues.
@@ -1500,30 +1490,108 @@ struct ReportOutcome {
     warnings: Vec<CapacityWarning>,
 }
 
-/// Two engine limits plus bounded FIFO queues, per DP rank, shared by every
-/// endpoint in the process.
-pub(crate) struct BackendAdmissionGate {
+/// Which worker a gate admits for, as its logs name it.
+#[derive(Debug, Default)]
+struct GateOwner {
+    /// The component the worker serves, as `namespace.component`.
+    component: String,
+    /// The worker's runtime connection ID, in hex as its metrics label it.
+    worker_id: String,
+}
+
+/// One worker's two engine limits plus bounded FIFO queues, per DP rank,
+/// shared by every endpoint serving for that worker. Reached only through the
+/// [`WorkerAdmissionGate`] its worker holds.
+pub struct BackendAdmissionGate {
+    owner: GateOwner,
     state: Mutex<GateState>,
 }
 
 impl BackendAdmissionGate {
-    fn from_environment() -> Arc<Self> {
-        let gate = Self::new(ExplicitLimits::from_environment());
-        // Logged once per process, as the effective configuration: the limits
+    /// The gate of a worker serving `component`: its settings read once from
+    /// the environment, and its metric family created, once, on `component`,
+    /// as the component's own metrics are.
+    fn for_component(component: &Component) -> Arc<Self> {
+        let metrics = BackendAdmissionMetrics::new(component);
+        let owner = GateOwner {
+            component: component.to_string(),
+            worker_id: component
+                .connection_id()
+                .map(|worker_id| format!("{worker_id:x}"))
+                .unwrap_or_default(),
+        };
+        let gate = Self::with_metrics(owner, ExplicitLimits::from_environment(), metrics);
+        // Logged once per worker, as the effective configuration: the limits
         // are not exported as metrics.
         gate.state
             .lock()
             .snapshot()
-            .log("Backend admission gate created");
+            .log(&gate.owner, "Backend admission gate created");
         gate
     }
 
-    /// Build a standalone gate. Production uses [`global`]; tests build their
-    /// own so they never contend for process-global capacity.
+    /// Build a standalone gate whose metrics are exposed nowhere, so tests
+    /// never contend for any worker's capacity.
+    #[cfg(test)]
     fn new(explicit: ExplicitLimits) -> Arc<Self> {
+        Self::with_metrics(
+            GateOwner::default(),
+            explicit,
+            BackendAdmissionMetrics::new(&metrics::TestHierarchy::standalone()),
+        )
+    }
+
+    fn with_metrics(
+        owner: GateOwner,
+        explicit: ExplicitLimits,
+        metrics: BackendAdmissionMetrics,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(GateState::new(explicit)),
+            owner,
+            state: Mutex::new(GateState::new(explicit, metrics)),
         })
+    }
+
+    /// Run `generate` under engine capacity reserved for one backend request
+    /// of this gate's worker, under the DP rank it names, and return the
+    /// engine's own stream, which holds waiting capacity until the first
+    /// response that ends the wait (see [`ResponseOutput::ends_wait`]) and
+    /// request capacity until the stream ends.
+    ///
+    /// This is a backend boundary's whole admission interface. Call it inside
+    /// the backend's typed `generate`, with the request's own context, before
+    /// the request reaches the engine: capacity is reserved *before* `generate`
+    /// is polled, so a refused request never reaches the engine, and the
+    /// refusal is this call's error — [`ErrorType::WorkerOverloaded`] when the
+    /// gate is full — before any response stream exists. The gate watches
+    /// `context` while the request is queued, and refuses it as
+    /// [`ErrorType::Cancelled`] once stopped. An engine failure keeps its own
+    /// error untouched.
+    pub async fn admit<R, F>(
+        self: &Arc<Self>,
+        context: &Arc<dyn AsyncEngineContext>,
+        dp_rank: Option<u32>,
+        generate: F,
+    ) -> anyhow::Result<EngineStream<R>>
+    where
+        R: Data + AdmissionResponse,
+        F: Future<Output = anyhow::Result<EngineStream<R>>>,
+    {
+        self.admit_inner(Some(context), dp_rank, generate).await
+    }
+
+    /// Accept the capacity and DP ranks a model card this worker registered
+    /// reports, once its registration has succeeded. A LoRA adapter's card
+    /// carries no capacity of its own, so it changes nothing.
+    pub fn record_model_card(&self, card: &ModelDeploymentCard) {
+        if card.lora.is_some() {
+            return;
+        }
+        self.record_engine_capacity(
+            card.runtime_config.max_num_seqs,
+            card.runtime_config.data_parallel_start_rank,
+            card.runtime_config.data_parallel_size,
+        );
     }
 
     /// Apply one state transition under the lock, then publish the occupancy
@@ -1538,7 +1606,9 @@ impl BackendAdmissionGate {
     }
 
     /// Run `generate` under engine capacity reserved by both limits, for the
-    /// DP rank the request names (see [`AdmissionRequest`]), if any.
+    /// DP rank the request names (see [`AdmissionRequest`]), if any, watching
+    /// `context` when there is one: [`Self::admit`], which tests also drive
+    /// without a context.
     ///
     /// The result is exactly [`AsyncEngine::generate`]'s own result type:
     /// capacity is reserved *before* `generate` is polled, so a refused request
@@ -1552,7 +1622,7 @@ impl BackendAdmissionGate {
     /// reaches `generate` as admitted, under the rank it is admitted as. A
     /// refusal is traced and classified here and surfaces as the standardized
     /// [`DynamoError`]; an engine failure keeps its own error untouched.
-    async fn admit<R, F>(
+    async fn admit_inner<R, F>(
         self: &Arc<Self>,
         context: Option<&Arc<dyn AsyncEngineContext>>,
         dp_rank: Option<u32>,
@@ -1681,17 +1751,26 @@ impl BackendAdmissionGate {
         removed.is_some()
     }
 
-    /// Apply a model card's capacity and rank report. See
-    /// [`record_engine_capacity`].
-    fn record_engine_capacity(
+    /// Accept the capacity and DP ranks this worker's engine reports:
+    /// `max_num_seqs` per rank, and the ranks `data_parallel_start_rank`
+    /// through `data_parallel_start_rank + data_parallel_size - 1`.
+    ///
+    /// Updates the automatic limits and the rank count the worker-wide limits
+    /// aggregate over, whenever a report arrives or changes. Explicit settings,
+    /// live occupancy, queued requests and outstanding permits are kept; a
+    /// request already classified keeps its rank.
+    pub fn record_engine_capacity(
         &self,
         max_num_seqs: Option<u64>,
         data_parallel_start_rank: u32,
         data_parallel_size: u32,
     ) {
+        let owner = &self.owner;
         let max_num_seqs = match max_num_seqs {
             Some(0) => {
                 tracing::warn!(
+                    component = %owner.component,
+                    worker_id = %owner.worker_id,
                     "Ignoring a reported max_num_seqs of 0 for backend admission sizing"
                 );
                 None
@@ -1700,6 +1779,8 @@ impl BackendAdmissionGate {
         };
         let served = if data_parallel_size == 0 {
             tracing::warn!(
+                component = %owner.component,
+                worker_id = %owner.worker_id,
                 data_parallel_start_rank,
                 "Ignoring a reported data_parallel_size of 0 for backend admission"
             );
@@ -1712,10 +1793,13 @@ impl BackendAdmissionGate {
         };
         let outcome = self.transition(|state| state.apply_report(max_num_seqs, served));
         if let Some(snapshot) = outcome.changed {
-            snapshot.log("Backend admission limits updated from the reported engine capacity");
+            snapshot.log(
+                owner,
+                "Backend admission limits updated from the reported engine capacity",
+            );
         }
         for warning in outcome.warnings {
-            warning.log();
+            warning.log(owner);
         }
     }
 }
@@ -4275,7 +4359,7 @@ mod tests {
         gate: &Arc<BackendAdmissionGate>,
         ran: &Arc<AtomicUsize>,
     ) -> EngineStream<Item> {
-        gate.admit(None, None, generate(Arc::clone(ran), engine_context()))
+        gate.admit_inner(None, None, generate(Arc::clone(ran), engine_context()))
             .await
             .expect("admitted")
     }
@@ -4288,11 +4372,11 @@ mod tests {
         items: Vec<Item>,
     ) -> (EngineStream<Item>, EngineStream<Item>) {
         let held = gate
-            .admit(None, None, generate_then_hold(Vec::new()))
+            .admit_inner(None, None, generate_then_hold(Vec::new()))
             .await
             .expect("admitted");
         let stream = gate
-            .admit(None, None, generate_items(items))
+            .admit_inner(None, None, generate_items(items))
             .await
             .expect("admitted");
         (held, stream)
@@ -4309,7 +4393,7 @@ mod tests {
         let _held = admit_two(&gate, &ran).await;
         let context = engine_context();
         let mut stream = gate
-            .admit(None, None, generate(Arc::clone(&ran), Arc::clone(&context)))
+            .admit_inner(None, None, generate(Arc::clone(&ran), Arc::clone(&context)))
             .await
             .expect("admitted");
         assert_eq!(ran.load(Ordering::SeqCst), 2);
@@ -4417,7 +4501,7 @@ mod tests {
     async fn a_tokenless_completion_ends_the_wait_while_its_stream_stays_open() {
         let gate = gate(10, 1, 4);
         let mut stream = gate
-            .admit(
+            .admit_inner(
                 None,
                 None,
                 generate_then_hold(vec![interim(1), completion(2), token(3)]),
@@ -4538,7 +4622,7 @@ mod tests {
                 })
                 .collect();
             let mut stream = gate
-                .admit(None, None, async {
+                .admit_inner(None, None, async {
                     let stream: EngineStream<Read> = dynamo_runtime::engine::ResponseStream::new(
                         Box::pin(futures::stream::iter(responses)),
                         engine_context(),
@@ -4616,7 +4700,7 @@ mod tests {
         let ran = Arc::new(AtomicUsize::new(0));
         let _held = admit_two(&gate, &ran).await;
         let mut empty = gate
-            .admit(None, None, generate_nothing())
+            .admit_inner(None, None, generate_nothing())
             .await
             .expect("admitted");
         assert_eq!(published(&gate), (2, 2, 0));
@@ -4680,7 +4764,7 @@ mod tests {
             let gate = Arc::clone(&gate);
             let running = Arc::clone(&running);
             async move {
-                gate.admit(None, None, async move {
+                gate.admit_inner(None, None, async move {
                     running.fetch_add(1, Ordering::SeqCst);
                     std::future::pending::<anyhow::Result<EngineStream<Item>>>().await
                 })
@@ -4706,7 +4790,7 @@ mod tests {
         let gate = gate(1, 1, 0);
 
         let error = gate
-            .admit(None, None, async {
+            .admit_inner(None, None, async {
                 Err::<EngineStream<Item>, _>(anyhow::anyhow!("engine failed to start"))
             })
             .await
@@ -4730,7 +4814,7 @@ mod tests {
         let _held = admit_two(&gate, &ran).await;
 
         let error = gate
-            .admit(None, None, generate(Arc::clone(&ran), engine_context()))
+            .admit_inner(None, None, generate(Arc::clone(&ran), engine_context()))
             .await
             .expect_err("the second request is refused");
         assert_eq!(
@@ -4759,7 +4843,7 @@ mod tests {
         controller.stop_generating();
 
         let error = gate
-            .admit(
+            .admit_inner(
                 Some(&context),
                 None,
                 generate(Arc::clone(&ran), engine_context()),
@@ -4798,7 +4882,7 @@ mod tests {
             let gate = Arc::clone(gate);
             let ran = Arc::clone(ran);
             async move {
-                gate.admit(context.as_ref(), None, generate(ran, engine_context()))
+                gate.admit_inner(context.as_ref(), None, generate(ran, engine_context()))
                     .await
             }
         });
@@ -4932,7 +5016,7 @@ mod tests {
         );
 
         let shed = gate
-            .admit(None, None, generate(Arc::clone(&ran), engine_context()))
+            .admit_inner(None, None, generate(Arc::clone(&ran), engine_context()))
             .await;
         assert_eq!(
             admit_refusal(&shed),
@@ -4948,7 +5032,7 @@ mod tests {
         let (controller, context) = stoppable();
         controller.stop_generating();
         let cancelled = gate
-            .admit(
+            .admit_inner(
                 Some(&context),
                 None,
                 generate(Arc::clone(&ran), engine_context()),
@@ -4985,7 +5069,7 @@ mod tests {
         // whose engine then fails.
         drop(queued);
         let failed = gate
-            .admit(None, None, async {
+            .admit_inner(None, None, async {
                 Err::<EngineStream<Item>, _>(anyhow::anyhow!("engine failed to start"))
             })
             .await;
@@ -5089,7 +5173,7 @@ mod tests {
         let mut held = admit_two(&gate, &ran).await;
 
         let (controller, context) = stoppable();
-        let mut doomed = Box::pin(gate.admit(
+        let mut doomed = Box::pin(gate.admit_inner(
             Some(&context),
             None,
             generate(Arc::clone(&ran), engine_context()),

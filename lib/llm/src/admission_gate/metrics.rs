@@ -5,17 +5,21 @@
 //! [`METRIC_PREFIX`].
 //!
 //! One instance per gate rather than the process-global statics the other
-//! metric modules use, so a test that builds its own gate never observes
-//! another's counts, and so the collectors registered for scraping are exactly
-//! the ones that gate updates. The gate, [`super`], owns one and drives it from
-//! its authoritative state under the gate lock, so no transition can drift a
-//! gauge.
+//! metric modules use, so each worker's gate, and each test's, counts only its
+//! own requests, and the collectors registered for scraping are exactly the
+//! ones that gate updates. The gate, [`super`], owns one and drives it from its
+//! authoritative state under the gate lock, so no transition can drift a gauge.
+//! A worker's gate creates its family once, as the gate is created, through the
+//! runtime's shared metric creation on its worker's component, which adds the
+//! component's standard labels to every series and registers each collector on
+//! the component's registry. A collector that registry refuses is kept,
+//! unregistered, with a warning.
 //!
 //! Every metric carries a [`DP_RANK`] label: the global data-parallel rank the
 //! gate admitted the request under, or [`DP_RANK_UNSPECIFIED`] for a request
 //! without a usable rank. Each request contributes to exactly one series of
-//! each metric, so summing a metric's series, including `unspecified`, gives
-//! the process total; no aggregate series is published.
+//! each metric, so summing a worker's series of a metric, including
+//! `unspecified`, gives the worker's total; no aggregate series is published.
 //!
 //! The three gauges are the gate's occupancy. `engine_request_count` is
 //! admitted requests that have not finished, including those whose wait for the
@@ -35,10 +39,12 @@
 //! The TCP request plane's own pool saturation metrics are an unrelated family
 //! and stay in [`dynamo_runtime::metrics::work_handler_pool`].
 
-use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts};
+use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec};
 
-use dynamo_runtime::MetricsRegistry;
 use dynamo_runtime::metrics::prometheus_names::{clamp_u64_to_i64, labels::DP_RANK};
+use dynamo_runtime::metrics::{
+    MetricOptions, MetricsHierarchy, PrometheusMetric, create_metric_with_options,
+};
 
 /// Metric names for this family, kept here rather than in
 /// [`dynamo_runtime::metrics::prometheus_names`] because that module is the
@@ -51,6 +57,13 @@ const REQUEST_RECEIVE_TOTAL: &str = "request_receive_total";
 const REQUEST_ADMIT_TOTAL: &str = "request_admit_total";
 const REJECTION_TOTAL: &str = "rejection_total";
 const CANCELLATION_TOTAL: &str = "cancellation_total";
+
+/// How each metric of the family is created: named under [`METRIC_PREFIX`],
+/// and kept with a warning, rather than failing, when its registry refuses it.
+const OPTIONS: MetricOptions = MetricOptions {
+    prefix: METRIC_PREFIX,
+    warn_on_registration_failure: true,
+};
 
 /// The [`DP_RANK`] value of a request admitted without a usable rank.
 pub(super) const DP_RANK_UNSPECIFIED: &str = "unspecified";
@@ -72,14 +85,22 @@ pub(super) enum AdmissionSource {
     Queue,
 }
 
-fn metric_name(suffix: &str) -> String {
-    format!("{METRIC_PREFIX}_{suffix}")
-}
-
 /// Gate counts are `usize`; Prometheus gauges are `i64`. Saturating rather than
 /// wrapping, via the shared helper, so an absurd value cannot report as negative.
 fn gauge_value(count: usize) -> i64 {
     clamp_u64_to_i64(count as u64)
+}
+
+/// One metric of the family on `hierarchy`, by `label_names`, created by the
+/// runtime's shared metric creation under [`OPTIONS`].
+fn create<T: PrometheusMetric>(
+    hierarchy: &dyn MetricsHierarchy,
+    name: &str,
+    help: &str,
+    label_names: &[&str],
+) -> T {
+    create_metric_with_options(hierarchy, OPTIONS, name, help, &[], None, Some(label_names))
+        .expect("backend admission metric")
 }
 
 /// One gate's Prometheus view, under [`METRIC_PREFIX`].
@@ -94,15 +115,13 @@ pub(super) struct BackendAdmissionMetrics {
 }
 
 impl BackendAdmissionMetrics {
-    pub(super) fn new() -> Self {
-        let gauge = |suffix, help: &str| {
-            IntGaugeVec::new(Opts::new(metric_name(suffix), help), &[DP_RANK])
-                .expect("backend admission gauge")
-        };
-        let counter = |suffix, help: &str| {
-            IntCounterVec::new(Opts::new(metric_name(suffix), help), &[DP_RANK])
-                .expect("backend admission counter")
-        };
+    /// The family, created on `hierarchy` — the component a worker serves —
+    /// with that component's standard labels on every series, and registered
+    /// on its registry.
+    pub(super) fn new(hierarchy: &dyn MetricsHierarchy) -> Self {
+        let gauge = |name, help: &str| -> IntGaugeVec { create(hierarchy, name, help, &[DP_RANK]) };
+        let counter =
+            |name, help: &str| -> IntCounterVec { create(hierarchy, name, help, &[DP_RANK]) };
         Self {
             engine_request_count: gauge(
                 ENGINE_REQUEST_COUNT,
@@ -122,15 +141,13 @@ impl BackendAdmissionMetrics {
                 REQUEST_RECEIVE_TOTAL,
                 "Requests received by the backend admission gate, by admission DP rank",
             ),
-            admissions: IntCounterVec::new(
-                Opts::new(
-                    metric_name(REQUEST_ADMIT_TOTAL),
-                    "Requests passed into the engine by the backend admission gate, by \
-                     admission DP rank and by whether they waited in its queue",
-                ),
+            admissions: create(
+                hierarchy,
+                REQUEST_ADMIT_TOTAL,
+                "Requests passed into the engine by the backend admission gate, by \
+                 admission DP rank and by whether they waited in its queue",
                 &[DP_RANK, SOURCE_LABEL],
-            )
-            .expect("backend admission counter"),
+            ),
             rejections: counter(
                 REJECTION_TOTAL,
                 "Requests rejected by the backend admission gate because they could not be \
@@ -158,31 +175,6 @@ impl BackendAdmissionMetrics {
             admitted_queue: self.admissions.with_label_values(&[dp_rank, SOURCE_QUEUE]),
             rejected: self.rejections.with_label_values(&[dp_rank]),
             cancelled: self.cancellations.with_label_values(&[dp_rank]),
-        }
-    }
-
-    /// Expose this instance's collectors for scraping.
-    pub(super) fn register(&self, registry: &MetricsRegistry) {
-        let collectors: [(Box<dyn prometheus::core::Collector>, &str); 7] = [
-            (
-                Box::new(self.engine_request_count.clone()),
-                ENGINE_REQUEST_COUNT,
-            ),
-            (
-                Box::new(self.engine_request_waiting_count.clone()),
-                ENGINE_REQUEST_WAITING_COUNT,
-            ),
-            (
-                Box::new(self.request_queue_count.clone()),
-                REQUEST_QUEUE_COUNT,
-            ),
-            (Box::new(self.receives.clone()), REQUEST_RECEIVE_TOTAL),
-            (Box::new(self.admissions.clone()), REQUEST_ADMIT_TOTAL),
-            (Box::new(self.rejections.clone()), REJECTION_TOTAL),
-            (Box::new(self.cancellations.clone()), CANCELLATION_TOTAL),
-        ];
-        for (collector, name) in collectors {
-            registry.add_metric_or_warn(collector, name);
         }
     }
 }
@@ -267,6 +259,56 @@ impl RankSeries {
     }
 }
 
+/// A metrics hierarchy for tests: a level named `name` under `parents`, from
+/// the root, with a registry of its own.
+#[cfg(test)]
+pub(super) struct TestHierarchy {
+    name: &'static str,
+    parents: Vec<TestHierarchy>,
+    registry: dynamo_runtime::MetricsRegistry,
+    connection_id: Option<u64>,
+}
+
+#[cfg(test)]
+impl TestHierarchy {
+    /// No parents and no identity, so a family created here carries only its
+    /// own labels, and nothing else scrapes it.
+    pub(super) fn standalone() -> Self {
+        Self::level("", Vec::new(), None)
+    }
+
+    fn level(name: &'static str, parents: Vec<TestHierarchy>, connection_id: Option<u64>) -> Self {
+        Self {
+            name,
+            parents,
+            registry: Default::default(),
+            connection_id,
+        }
+    }
+}
+
+#[cfg(test)]
+impl MetricsHierarchy for TestHierarchy {
+    fn basename(&self) -> String {
+        self.name.to_string()
+    }
+
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        self.parents
+            .iter()
+            .map(|parent| parent as &dyn MetricsHierarchy)
+            .collect()
+    }
+
+    fn get_metrics_registry(&self) -> &dynamo_runtime::MetricsRegistry {
+        &self.registry
+    }
+
+    fn connection_id(&self) -> Option<u64> {
+        self.connection_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,15 +340,14 @@ mod tests {
     /// `dp_rank` alone, plus `source` on admissions.
     #[test]
     fn a_registry_receives_exactly_the_whole_family() {
-        let metrics = BackendAdmissionMetrics::new();
-        let registry = MetricsRegistry::default();
-        metrics.register(&registry);
+        let hierarchy = TestHierarchy::standalone();
+        let metrics = BackendAdmissionMetrics::new(&hierarchy);
         let unspecified = metrics.series(DP_RANK_UNSPECIFIED);
         let rank = metrics.series("4");
         assert_eq!(unspecified.published(), (0, 0, 0));
         assert_eq!(rank.outcomes(), (0, 0, 0, 0, 0));
 
-        let families = registry.get_prometheus_registry().gather();
+        let families = hierarchy.registry.get_prometheus_registry().gather();
         let mut names: Vec<&str> = families.iter().map(|family| family.name()).collect();
         names.sort();
         assert_eq!(
@@ -346,11 +387,51 @@ mod tests {
         );
     }
 
+    /// A worker's family, created on the component it serves, keeps its names
+    /// and carries that component's standard labels on every series — no
+    /// endpoint label, as the family is the worker's — beside `dp_rank`, plus
+    /// `source` on admissions.
+    #[test]
+    fn a_worker_family_carries_its_component_labels_on_every_series() {
+        let namespace = TestHierarchy::level("ns", Vec::new(), None);
+        let component = TestHierarchy::level(
+            "backend",
+            vec![TestHierarchy::standalone(), namespace],
+            Some(0x1a),
+        );
+        let metrics = BackendAdmissionMetrics::new(&component);
+        metrics.series("4");
+
+        let families = component.registry.get_prometheus_registry().gather();
+        assert_eq!(families.len(), 7);
+        let owner = "dynamo_component=backend,dynamo_namespace=ns";
+        for family in &families {
+            let name = family.name();
+            assert!(name.starts_with("dynamo_backend_admission_"), "{name}");
+            let expected = if name == "dynamo_backend_admission_request_admit_total" {
+                vec![
+                    format!("dp_rank=4,{owner},source=direct,worker_id=1a"),
+                    format!("dp_rank=4,{owner},source=queue,worker_id=1a"),
+                ]
+            } else {
+                vec![format!("dp_rank=4,{owner},worker_id=1a")]
+            };
+            let series = series_labels(&families, name);
+            assert!(
+                series
+                    .iter()
+                    .all(|pairs| !pairs.contains("dynamo_endpoint=")),
+                "{name}"
+            );
+            assert_eq!(series, expected, "{name}");
+        }
+    }
+
     /// Each counter and gauge reaches its own series, and one rank's events
     /// never reach another rank's series.
     #[test]
     fn every_metric_lands_on_its_own_series() {
-        let metrics = BackendAdmissionMetrics::new();
+        let metrics = BackendAdmissionMetrics::new(&TestHierarchy::standalone());
         let four = metrics.series("4");
         let five = metrics.series("5");
 

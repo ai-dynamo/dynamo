@@ -36,7 +36,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 
 use tokio::sync::mpsc;
 
-use dynamo_llm::admission_gate::{self, AdmissionRequest, AdmissionResponse, ResponseOutput};
+use dynamo_llm::admission_gate::{AdmissionRequest, AdmissionResponse, ResponseOutput};
 use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::logging::get_distributed_tracing_context;
@@ -676,6 +676,8 @@ pub(crate) struct PythonPushEngine {
     event_loop: Arc<PyObject>,
     /// The role its endpoint serves as a model backend, once one is recorded.
     backend_role: engine::BackendRole,
+    /// The admission gate of the worker its endpoint serves for.
+    admission: engine::EndpointAdmission,
 }
 
 impl PythonPushEngine {
@@ -683,18 +685,20 @@ impl PythonPushEngine {
         handler: PyObject,
         event_loop: PyObject,
         backend_role: engine::BackendRole,
+        admission: engine::EndpointAdmission,
     ) -> Self {
         Self {
             handler: Arc::new(handler),
             event_loop: Arc::new(event_loop),
             backend_role,
+            admission,
         }
     }
 }
 
 #[async_trait::async_trait]
 impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PushFrame>, Error> for PythonPushEngine {
-    /// A model backend's request is admitted through the backend admission
+    /// A model backend's request is admitted through its worker's admission
     /// gate before its handler is invoked or its driver task spawned; any other
     /// endpoint's request goes straight to its handler.
     async fn generate(
@@ -704,7 +708,10 @@ impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PushFrame>, Error> for PythonP
         if self.backend_role.uses_admission() {
             let context = request.context();
             let dp_rank = request.dp_rank();
-            admission_gate::admit(&context, dp_rank, self.push(request, true)).await
+            self.admission
+                .gate()
+                .admit(&context, dp_rank, self.push(request, true))
+                .await
         } else {
             self.push(request, false).await
         }
