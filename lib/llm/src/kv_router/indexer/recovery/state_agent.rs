@@ -888,12 +888,14 @@ async fn run_state_agent_router(
                 }
             }
             Input::Withdrawn((owner, publisher_id)) => {
-                if let Some(state) = runtime.get_mut(&owner)
-                    && state.publisher_id == Some(publisher_id)
-                    && (state.ready || state.hint_ready)
-                {
-                    state.ready = false;
-                    state.hint_ready = false;
+                if withdraw_owner(
+                    owner,
+                    publisher_id,
+                    &mut runtime,
+                    &sources,
+                    &attachments,
+                    &mut retries,
+                ) {
                     fence.lock().await.commit(&indexer, &runtime);
                 }
             }
@@ -1129,6 +1131,44 @@ fn owners_on_workers(
                 .then_some(*owner)
         }))
         .collect()
+}
+
+/// Withdraws an owner whose live stream now requires recovery and schedules
+/// that recovery. Returns whether its routing changed.
+fn withdraw_owner(
+    owner: CacheOwnerId,
+    publisher_id: u64,
+    runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
+    sources: &HashMap<u64, KvStateSourceAdvertisement>,
+    attachments: &HashMap<u64, KvStateAttachmentAdvertisement>,
+    retries: &mut RecoveryRetries,
+) -> bool {
+    let Some(state) = runtime
+        .get_mut(&owner)
+        .filter(|state| state.publisher_id == Some(publisher_id))
+    else {
+        return false;
+    };
+    // Without its source record, the discovery change re-plans the owner.
+    if let Some(source) = sources.get(&publisher_id) {
+        let attachment = state
+            .attachment_generation
+            .and_then(|generation| attachments.get(&attachment_record_id(publisher_id, generation)))
+            .cloned();
+        retries.schedule(
+            owner,
+            RecoveryRetryFence {
+                source: source.clone(),
+                activation_expected: attachment.is_some() && state.last_worker.is_some(),
+                attachment,
+                revision: state.revision,
+            },
+        );
+    }
+    let was_published = state.ready || state.hint_ready;
+    state.ready = false;
+    state.hint_ready = false;
+    was_published
 }
 
 async fn wait_for_retry_deadline(deadline: Option<Instant>) {
@@ -2515,6 +2555,44 @@ mod tests {
             &sources,
             &attachments,
             revision,
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn withdrawn_owner_retries_recovery_without_discovery() {
+        let owner = owner(4);
+        let source = source_advertisement(owner);
+        let attachment = attachment_advertisement(owner, 7);
+        let sources = HashMap::from([(source.publisher_id, source)]);
+        let attachments = HashMap::from([(
+            attachment_record_id(attachment.publisher_id, attachment.attachment_generation),
+            attachment.clone(),
+        )]);
+        let mut runtime = HashMap::from([(owner, ready_runtime(attachment.worker))]);
+        let mut retries = RecoveryRetries::default();
+
+        assert!(withdraw_owner(
+            owner,
+            41,
+            &mut runtime,
+            &sources,
+            &attachments,
+            &mut retries,
+        ));
+        assert!(!runtime[&owner].ready);
+
+        tokio::time::advance(RECONCILE_RETRY_INITIAL_BACKOFF).await;
+        let (_, due) = retries.take_due();
+        let [(due_owner, due)] = due.as_slice() else {
+            panic!("the withdrawn owner's recovery should be retried");
+        };
+        assert_eq!(*due_owner, owner);
+        assert!(due.activation_expected);
+        assert!(recovery_retry_is_current(
+            due,
+            &sources,
+            &attachments,
+            runtime[&owner].revision,
         ));
     }
 
