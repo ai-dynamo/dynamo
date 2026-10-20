@@ -59,7 +59,7 @@ func RenderNodeLocal(
 	projections := workload.modelProjections
 
 	// Keep the hybrid GPU clique before the workload's LPU roles.
-	hybrid := projections[0].pipeline == PipelineLPX
+	hybrid := projections[0].pipeline == PipelineHybrid
 	rendered := &WorkloadTemplates{}
 	cyborg := input.Cyborg
 	if hybrid {
@@ -254,9 +254,9 @@ func RenderNodeLocal(
 // specs. Agent and projection are nonnil, and projection has validated partitions;
 // nil conductor means no emitted launcher.
 func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, projection *ModelProjection, configMapName, allocation string) {
-	family := projection.configuredBuild.Family
+	family := projection.configuredBuild.family
 	ensureLPUConfigVolume(agentPodSpec, configMapName)
-	configureAgentScheduling(agentPodSpec, family, projection.partitions[0].DevicesPerNode)
+	configureAgentScheduling(agentPodSpec, family, projection.partitions[0].devicesPerNode)
 	if conductorPodSpec != nil {
 		configureLPUConductorPod(conductorPodSpec, configMapName, allocation)
 	}

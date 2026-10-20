@@ -1230,7 +1230,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) confirmDGDIdentity(
 	}
 	apply := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": nvidiacomv1beta1.GroupVersion.String(),
-		"kind":       "DynamoGraphDeploymentRequest",
+		"kind":       nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind,
 		"metadata": map[string]any{
 			"name":            dgdr.Name,
 			"namespace":       dgdr.Namespace,
@@ -1301,7 +1301,7 @@ func removeDGDROwnerReferences(ownerReferences []metav1.OwnerReference, dgdr *nv
 	filtered := ownerReferences[:0]
 	removed := false
 	for _, ownerReference := range ownerReferences {
-		if ownerReference.Kind == "DynamoGraphDeploymentRequest" &&
+		if ownerReference.Kind == nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind &&
 			ownerReference.Name == dgdr.Name {
 			removed = true
 			continue
@@ -2282,7 +2282,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	}
 	apply := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": nvidiacomv1beta1.GroupVersion.String(),
-		"kind":       "DynamoGraphDeploymentRequest",
+		"kind":       nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind,
 		"metadata": map[string]any{
 			"name":            dgdr.Name,
 			"namespace":       dgdr.Namespace,
