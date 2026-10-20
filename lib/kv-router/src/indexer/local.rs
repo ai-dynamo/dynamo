@@ -690,7 +690,7 @@ impl LocalKvIndexer {
         &self,
         storage_tier: StorageTier,
     ) -> Arc<ThreadPoolIndexer<LowerTierIndexer>> {
-        debug_assert!(!storage_tier.is_gpu());
+        debug_assert_ne!(storage_tier, StorageTier::Device);
         let mut indexers = self.lower_tier_indexers.lock().unwrap();
         indexers
             .entry(storage_tier)

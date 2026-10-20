@@ -4,16 +4,16 @@
 //! Advisory, bounded decode-source lookup after prefill admission. This path
 //! owns no source bookings, affinity state, buffers, or transport operations.
 //!
-//! TODO: Add direct decode-GPU to prefill-GPU KV transfer without staging KV
-//! payloads in CPU RAM. The current integration uses CPU-offload inventory and
-//! CPU landing slots; the ordinary P-to-D NIXL handoff is a separate path.
+//! CPU and GPU actions use separate inventory, capability and cost gates. A GPU
+//! hint is advisory: only its GPU-only backend endpoint may acquire source
+//! leases and reserve target GPU blocks. The ordinary P-to-D handoff is separate.
 
 use std::time::Instant;
 
 use dynamo_kv_router::{
     config::KvRouterConfig,
     kv_hints::{KvHint, KvHintAction, KvSourceLocationsPayload},
-    services::selection::{PromptView, TransferSourceQuery},
+    services::selection::{PromptView, TransferSourceMemoryKind, TransferSourceQuery},
 };
 use uuid::Uuid;
 
@@ -42,6 +42,7 @@ fn baseline_prefix_blocks(selection: &WorkerSelection, block_size: u32) -> Optio
     Some((local, local.max(payload.block_hashes.len())))
 }
 
+#[cfg(test)]
 fn transfer_is_profitable(
     config: &KvRouterConfig,
     block_size: u32,
@@ -50,8 +51,31 @@ fn transfer_is_profitable(
     donor_prefix: usize,
     lookup_us: f64,
 ) -> bool {
+    transfer_is_profitable_for_kind(
+        config,
+        TransferSourceMemoryKind::Host,
+        block_size,
+        local_prefix,
+        baseline_prefix,
+        donor_prefix,
+        lookup_us,
+    )
+}
+
+fn transfer_is_profitable_for_kind(
+    config: &KvRouterConfig,
+    memory_kind: TransferSourceMemoryKind,
+    block_size: u32,
+    local_prefix: usize,
+    baseline_prefix: usize,
+    donor_prefix: usize,
+    lookup_us: f64,
+) -> bool {
     let (Some(block_us), Some(token_us)) = (
-        config.transfer_source_estimated_block_us,
+        match memory_kind {
+            TransferSourceMemoryKind::Host => config.transfer_source_estimated_block_us,
+            TransferSourceMemoryKind::Gpu => config.transfer_source_gpu_estimated_block_us,
+        },
         config.transfer_source_prefill_token_us,
     ) else {
         return false;
@@ -71,7 +95,9 @@ fn transfer_is_profitable(
     }
     let saved_us = (donor_prefix - baseline_prefix) as f64 * block_size as f64 * token_us;
     let cost_us = donor_prefix.saturating_sub(local_prefix) as f64 * block_us + lookup_us;
-    saved_us - cost_us > config.minimum_estimated_ttft_saving_ms * 1000.0
+    saved_us.is_finite()
+        && cost_us.is_finite()
+        && saved_us - cost_us > config.minimum_estimated_ttft_saving_ms * 1000.0
 }
 
 impl RoutingHost {
@@ -81,54 +107,90 @@ impl RoutingHost {
         selection: &mut WorkerSelection,
         source_host: Option<&RoutingHost>,
     ) {
+        // Both optional lookups share one deadline and cumulative lookup cost.
+        // Unsupported/unprofitable GPU capability falls through to the existing
+        // independently enabled CPU path, then ordinary local computation.
+        let started = Instant::now();
+        for kind in [
+            TransferSourceMemoryKind::Gpu,
+            TransferSourceMemoryKind::Host,
+        ] {
+            if let Some(hint) = self
+                .prefill_transfer_hint_for_kind(request, selection, source_host, kind, started)
+                .await
+            {
+                selection.kv_hint = Some(hint);
+                return;
+            }
+        }
+    }
+
+    async fn prefill_transfer_hint_for_kind(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        selection: &WorkerSelection,
+        source_host: Option<&RoutingHost>,
+        memory_kind: TransferSourceMemoryKind,
+        started: Instant,
+    ) -> Option<KvHint> {
         let Some(target_router) = self.kv_router_if_enabled() else {
-            return;
+            return None;
         };
         let config = target_router.kv_router_config();
-        if !config.enable_decode_to_prefill_reuse {
-            return;
+        let enabled = |config: &KvRouterConfig| match memory_kind {
+            TransferSourceMemoryKind::Host => config.enable_decode_to_prefill_reuse,
+            TransferSourceMemoryKind::Gpu => config.enable_decode_to_prefill_gpu_reuse,
+        };
+        if !enabled(config) {
+            return None;
         }
         let Some(source_router) = source_host.and_then(RoutingHost::kv_router_if_enabled) else {
-            return;
+            return None;
         };
-        if !source_router
-            .kv_router_config()
-            .enable_decode_to_prefill_reuse
-        {
-            return;
+        if !enabled(source_router.kv_router_config()) {
+            return None;
         }
         let source_partition = source_router.selection.partition_key();
         if target_router.selection.partition_key() != source_partition {
-            return;
+            return None;
         }
         let block_size = target_router.block_size();
-        let Some((local_prefix, baseline_prefix)) = baseline_prefix_blocks(selection, block_size)
+        let Some((mut local_prefix, mut baseline_prefix)) =
+            baseline_prefix_blocks(selection, block_size)
         else {
-            return;
+            return None;
         };
         let (target_snapshot, target_domain) = {
             let configs = target_router.workers_with_configs.borrow();
             let Some(target) = configs.get(&selection.worker.worker_id) else {
-                return;
+                return None;
             };
-            let Some(metadata) =
-                target.kv_hint_transfer_metadata_for_dp_rank(selection.worker.dp_rank)
-            else {
-                return;
+            let metadata = match memory_kind {
+                TransferSourceMemoryKind::Host => {
+                    target.kv_hint_transfer_metadata_for_dp_rank(selection.worker.dp_rank)
+                }
+                TransferSourceMemoryKind::Gpu => {
+                    target.kv_hint_gpu_transfer_metadata_for_dp_rank(selection.worker.dp_rank)
+                }
+            };
+            let Some(metadata) = metadata else {
+                return None;
             };
             if metadata.worker_type != "prefill" {
-                return;
+                return None;
             }
             let Some(domain) = target.router_hint_transfer_domain() else {
-                return;
+                return None;
             };
             (target.clone(), domain.to_owned())
         };
         let routing = request.routing.as_ref();
         let parts = RoutingRequestParts::new(request);
         let timeout = Duration::from_millis(config.transfer_source_lookup_budget_ms);
-        let started = Instant::now();
-        let query = TransferSourceQuery {
+        if Instant::now() >= started + timeout {
+            return None;
+        }
+        let mut query = TransferSourceQuery {
             model_name: &source_partition.model_name,
             routing_group: &source_partition.routing_group,
             prompt: PromptView {
@@ -144,6 +206,8 @@ impl RoutingHost {
             },
             target: selection.worker,
             target_worker_type: "prefill",
+            memory_kind,
+            target_gpu_direct: memory_kind == TransferSourceMemoryKind::Gpu,
             target_transfer_domain: Some(&target_domain),
             target_topology_domains: target_snapshot.topology_domains(),
             target_kv_transfer_domain: target_snapshot.kv_transfer_domain(),
@@ -156,37 +220,56 @@ impl RoutingHost {
         // Cancellation cancels only this advisory query. Existing prefill guard
         // and dispatch retain sole ownership of target cleanup.
         let context = request.context();
+        if memory_kind == TransferSourceMemoryKind::Gpu {
+            let retained = tokio::select! {
+                biased;
+                _ = context.stopped() => return None,
+                result = tokio::time::timeout_at((started + timeout).into(), target_router.query_local_gpu_direct_prefix(&query)) => result,
+            };
+            let Ok(Ok(Some(retained))) = retained else {
+                return None;
+            };
+            // Retained GPU blocks remain usable after native Device eviction.
+            // Do not credit them as saved prefill or charge them as network copy.
+            local_prefix = local_prefix.max(retained);
+            baseline_prefix = baseline_prefix.max(local_prefix);
+            query.minimum_prefix_blocks = baseline_prefix;
+        }
         let result = tokio::select! {
             biased;
-            _ = context.stopped() => return,
-            result = tokio::time::timeout(timeout, source_router.query_transfer_sources(query)) => result,
+            _ = context.stopped() => return None,
+            result = tokio::time::timeout_at((started + timeout).into(), source_router.query_transfer_sources(query)) => result,
         };
         let result = match result {
             Ok(Ok(Some(result))) => result,
-            Ok(Ok(None)) => return,
+            Ok(Ok(None)) => return None,
             Ok(Err(error)) => {
                 tracing::debug!(request_id = context.id(), %error, "Decode transfer source unavailable");
-                return;
+                return None;
             }
             Err(_) => {
                 tracing::debug!(
                     request_id = context.id(),
                     "Decode transfer source lookup timed out"
                 );
-                return;
+                return None;
             }
         };
+        if result.memory_kind != memory_kind {
+            return None;
+        }
         let donor_prefix = result.payload.block_hashes.len();
         let lookup_us = started.elapsed().as_secs_f64() * 1_000_000.0;
-        if !transfer_is_profitable(
+        if !transfer_is_profitable_for_kind(
             config,
+            memory_kind,
             block_size,
             local_prefix,
             baseline_prefix,
             donor_prefix,
             lookup_us,
         ) {
-            return;
+            return None;
         }
         // Revalidate target-dependent metadata after the asynchronous query.
         // A replacement worker/card must never inherit the previous estimate.
@@ -197,28 +280,36 @@ impl RoutingHost {
             .is_some_and(|target| {
                 target == &target_snapshot
                     && target.router_hint_transfer_domain() == Some(target_domain.as_str())
-                    && target
-                        .kv_hint_transfer_metadata_for_dp_rank(selection.worker.dp_rank)
-                        .is_some_and(|metadata| metadata.worker_type == "prefill")
+                    && match memory_kind {
+                        TransferSourceMemoryKind::Host => {
+                            target.kv_hint_transfer_metadata_for_dp_rank(selection.worker.dp_rank)
+                        }
+                        TransferSourceMemoryKind::Gpu => target
+                            .kv_hint_gpu_transfer_metadata_for_dp_rank(selection.worker.dp_rank),
+                    }
+                    .is_some_and(|metadata| metadata.worker_type == "prefill")
             });
         if !target_still_compatible {
-            return;
+            return None;
         }
         tracing::debug!(
             request_id = context.id(),
+            source_memory_kind = ?memory_kind,
             donor_prefix_blocks = donor_prefix,
             local_prefix_blocks = local_prefix,
             baseline_prefix_blocks = baseline_prefix,
             lookup_us,
             "Attaching decode-to-prefill transfer hint"
         );
-        selection.kv_hint = Some(KvHint::new(
-            Uuid::new_v4().to_string(),
-            vec![KvHintAction::fetch(
-                Uuid::new_v4().to_string(),
-                result.payload,
-            )],
-        ));
+        let action = match memory_kind {
+            TransferSourceMemoryKind::Host => {
+                KvHintAction::fetch(Uuid::new_v4().to_string(), result.payload)
+            }
+            TransferSourceMemoryKind::Gpu => {
+                KvHintAction::fetch_gpu(Uuid::new_v4().to_string(), result.payload, target_domain)
+            }
+        };
+        Some(KvHint::new(Uuid::new_v4().to_string(), vec![action]))
     }
 }
 
@@ -359,6 +450,31 @@ mod integration_tests {
             dynamo_kv_router::protocols::KvTransferEnforcement,
         )>,
     ) -> (RoutingHost, u64, Arc<HintDispatch>) {
+        host_with_gpu_options(
+            distributed,
+            component_name,
+            role,
+            enabled,
+            topology,
+            false,
+            0.0,
+        )
+        .await
+    }
+
+    async fn host_with_gpu_options(
+        distributed: &DistributedRuntime,
+        component_name: &str,
+        role: WorkerType,
+        enabled: bool,
+        topology: Option<(
+            &str,
+            Option<&str>,
+            dynamo_kv_router::protocols::KvTransferEnforcement,
+        )>,
+        gpu: bool,
+        minimum_saving_ms: f64,
+    ) -> (RoutingHost, u64, Arc<HintDispatch>) {
         // Discovery instance IDs belong to a DRT, not to an endpoint. Model
         // distinct serving processes so the donor is not rejected as the target.
         let distributed = DistributedRuntime::new(
@@ -388,7 +504,7 @@ mod integration_tests {
         }
         runtime_config
             .runtime_data
-            .insert("router_hint".to_string(), serde_json::json!(true));
+            .insert("router_hint".to_string(), serde_json::json!(!gpu));
         runtime_config.runtime_data.insert(
             "router_hint_worker_type".to_string(),
             serde_json::json!(role.as_str()),
@@ -401,6 +517,15 @@ mod integration_tests {
             "router_hint_source_control_endpoints".to_string(),
             serde_json::json!({"0": format!("tcp://{component_name}:9000")}),
         );
+        if gpu {
+            runtime_config
+                .runtime_data
+                .insert("router_hint_gpu_direct".into(), serde_json::json!(true));
+            runtime_config.runtime_data.insert(
+                "router_hint_gpu_source_control_endpoints".into(),
+                serde_json::json!({"0": format!("tcp://{component_name}:9010")}),
+            );
+        }
         let (_workers_tx, workers) = watch::channel(HashMap::from([(worker_id, runtime_config)]));
         let membership = KvSourceMembershipCoordinator::start(
             endpoint.id(),
@@ -409,10 +534,13 @@ mod integration_tests {
         )
         .subscribe();
         let config = KvRouterConfig {
-            enable_decode_to_prefill_reuse: enabled,
+            enable_decode_to_prefill_reuse: enabled && !gpu,
+            enable_decode_to_prefill_gpu_reuse: enabled && gpu,
+            transfer_source_gpu_estimated_block_us: gpu.then_some(1.0),
+            minimum_estimated_ttft_saving_ms: minimum_saving_ms,
             transfer_source_lookup_budget_ms: 200,
             transfer_source_estimated_block_us: Some(1.0),
-            transfer_source_prefill_token_us: Some(1_000.0),
+            transfer_source_prefill_token_us: Some(if gpu { 100_000.0 } else { 1_000.0 }),
             skip_initial_worker_wait: true,
             overlap_score_credit: 0.0,
             host_cache_hit_weight: 0.0,
@@ -473,6 +601,16 @@ mod integration_tests {
         tokens: &[u32],
         blocks: usize,
     ) -> Vec<ExternalSequenceBlockHash> {
+        seed_prefix(host, worker_id, tokens, blocks, StorageTier::HostPinned).await
+    }
+
+    async fn seed_prefix(
+        host: &RoutingHost,
+        worker_id: u64,
+        tokens: &[u32],
+        blocks: usize,
+        tier: StorageTier,
+    ) -> Vec<ExternalSequenceBlockHash> {
         let local = compute_block_hash_for_seq(tokens, 16, BlockHashOptions::default());
         let external = compute_seq_hash_for_block(&local);
         let hashes = external[..blocks]
@@ -499,7 +637,7 @@ mod integration_tests {
                         .collect(),
                 }),
             },
-            StorageTier::HostPinned,
+            tier,
         );
         host.kv_router()
             .indexer()
@@ -728,6 +866,172 @@ mod integration_tests {
             drop(target);
         }
         assert_no_decode_bookings(&source).await;
+        drop(source);
+        runtime.shutdown();
+    }
+    #[test]
+    fn gpu_cost_never_uses_cpu_estimate_or_nonfinite_derived_savings() {
+        let mut config = calibrated_config();
+        assert!(!transfer_is_profitable_for_kind(
+            &config,
+            TransferSourceMemoryKind::Gpu,
+            16,
+            1,
+            1,
+            3,
+            0.0
+        ));
+        config.transfer_source_gpu_estimated_block_us = Some(1.0);
+        assert!(transfer_is_profitable_for_kind(
+            &config,
+            TransferSourceMemoryKind::Gpu,
+            16,
+            1,
+            1,
+            3,
+            0.0
+        ));
+        config.transfer_source_gpu_estimated_block_us = Some(1000.0);
+        assert!(!transfer_is_profitable_for_kind(
+            &config,
+            TransferSourceMemoryKind::Gpu,
+            16,
+            1,
+            1,
+            3,
+            0.0
+        ));
+        config.transfer_source_gpu_estimated_block_us = Some(1.0);
+        config.transfer_source_prefill_token_us = Some(f64::MAX);
+        assert!(!transfer_is_profitable_for_kind(
+            &config,
+            TransferSourceMemoryKind::Gpu,
+            16,
+            1,
+            1,
+            3,
+            0.0
+        ));
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gpu_retained_hint_reaches_opted_in_prefill_dispatch_without_decode_booking() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let (target, target_id, dispatch) = Box::pin(host_with_gpu_options(
+            &distributed,
+            "gpu-prefill",
+            WorkerType::Prefill,
+            true,
+            None,
+            true,
+            0.0,
+        ))
+        .await;
+        let (source, source_id, _) = Box::pin(host_with_gpu_options(
+            &distributed,
+            "gpu-decode",
+            WorkerType::Decode,
+            true,
+            None,
+            true,
+            0.0,
+        ))
+        .await;
+        let request = request();
+        let expected = seed_prefix(
+            &source,
+            source_id,
+            &request.token_ids,
+            3,
+            StorageTier::GpuDirect,
+        )
+        .await;
+        let (_, mut stream) =
+            Box::pin(
+                target.select_and_dispatch_prefill(request, Some(&source), |_, target| Ok(target)),
+            )
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        {
+            let calls = dispatch.0.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, target_id);
+            let action = &calls[0].1.as_ref().expect("explicit GPU hint").actions[0];
+            assert_eq!(action.action_type, "kv.fetch_gpu");
+            let payload: dynamo_kv_router::kv_hints::KvGpuSourceLocationsPayload =
+                serde_json::from_value(serde_json::to_value(&action.payload).unwrap()).unwrap();
+            assert_eq!(payload.block_hashes, expected);
+            assert_eq!(payload.source_control_endpoint, "tcp://gpu-decode:9010");
+            assert_eq!(payload.compatibility_domain, "certified-test-layout");
+        }
+        assert_no_decode_bookings(&source).await;
+        drop(target);
+        drop(source);
+        runtime.shutdown();
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gpu_local_retained_baseline_prevents_false_prefill_savings_after_native_eviction() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let (target, target_id, dispatch) = Box::pin(host_with_gpu_options(
+            &distributed,
+            "retained-prefill",
+            WorkerType::Prefill,
+            true,
+            None,
+            true,
+            3000.0,
+        ))
+        .await;
+        let (source, source_id, _) = Box::pin(host_with_gpu_options(
+            &distributed,
+            "retained-decode",
+            WorkerType::Decode,
+            true,
+            None,
+            true,
+            0.0,
+        ))
+        .await;
+        let request = request();
+        seed_prefix(
+            &target,
+            target_id,
+            &request.token_ids,
+            2,
+            StorageTier::GpuDirect,
+        )
+        .await;
+        seed_prefix(
+            &source,
+            source_id,
+            &request.token_ids,
+            3,
+            StorageTier::GpuDirect,
+        )
+        .await;
+        // The target has no native Device blocks but already retains two GPU
+        // rows. Only one new row is saved: 1600ms < the fixture's 3000ms margin.
+        // Incorrectly crediting all three donor rows would admit this hint.
+        let (_, mut stream) =
+            Box::pin(
+                target.select_and_dispatch_prefill(request, Some(&source), |_, target| Ok(target)),
+            )
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert!(dispatch.0.lock().unwrap()[0].1.is_none());
+        assert_no_decode_bookings(&source).await;
+        drop(target);
         drop(source);
         runtime.shutdown();
     }

@@ -194,7 +194,7 @@ impl ZmqEventNormalizer {
         //    an engine drop -- the same trap the locality gate above avoids.
         if let Some(m) = raw.medium() {
             match StorageTier::from_kv_medium(m) {
-                Some(StorageTier::Device | StorageTier::HostPinned) => {}
+                Some(StorageTier::Device | StorageTier::GpuDirect | StorageTier::HostPinned) => {}
                 Some(_) => return Ok(raw),
                 None => return Err(ZmqEventFilterReason::UnknownMedium),
             }

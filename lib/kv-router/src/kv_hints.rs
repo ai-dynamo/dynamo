@@ -20,6 +20,38 @@ pub const KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: &str = "router_hint_worker_t
 pub const KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
     "router_hint_source_control_endpoints";
 
+/// Separate, opt-in direct GPU endpoint capability. It never authorizes the
+/// legacy CPU `kv.fetch` action. Sources must hold eviction-safe GPU leases
+/// until transport completion; event inventory alone is not a lease.
+pub const KV_HINT_GPU_DIRECT_CAPABILITY_KEY: &str = "router_hint_gpu_direct";
+pub const KV_HINT_GPU_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
+    "router_hint_gpu_source_control_endpoints";
+
+/// A GPU-only source/target protocol. The single variants prevent a typed GPU
+/// action from accidentally requesting CPU landing slots or a staged transport.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KvGpuMemoryKind {
+    Gpu,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KvGpuTransport {
+    NixlGpuDirect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KvGpuSourceLocationsPayload {
+    pub source_control_endpoint: String,
+    /// Root-aligned complete GPU blocks; the target fetches only its missing suffix.
+    pub block_hashes: Vec<ExternalSequenceBlockHash>,
+    pub source_memory_kind: KvGpuMemoryKind,
+    pub target_memory_kind: KvGpuMemoryKind,
+    pub transport: KvGpuTransport,
+    pub compatibility_domain: String,
+}
+
 const KV_HINT_PROTOCOL_VERSION: &str = "0.1";
 const KV_FETCH_ACTION_TYPE: &str = "kv.fetch";
 const KV_FETCH_ACTION_VERSION: &str = "1.0";
@@ -55,6 +87,46 @@ impl KvHintAction {
             action_version: action_version.into(),
             payload,
         }
+    }
+
+    /// The separate action is emitted only to an explicitly GPU-capable target.
+    /// Legacy readers continue receiving exactly `kv.fetch@1.0` CPU payloads.
+    pub fn fetch_gpu(
+        action_id: impl Into<String>,
+        payload: KvSourceLocationsPayload,
+        compatibility_domain: String,
+    ) -> Self {
+        Self::new(
+            action_id,
+            "kv.fetch_gpu",
+            "1.0",
+            BTreeMap::from([
+                (
+                    "source_control_endpoint".into(),
+                    serde_json::json!(payload.source_control_endpoint),
+                ),
+                (
+                    "block_hashes".into(),
+                    serde_json::json!(payload.block_hashes),
+                ),
+                (
+                    "source_memory_kind".into(),
+                    serde_json::json!(KvGpuMemoryKind::Gpu),
+                ),
+                (
+                    "target_memory_kind".into(),
+                    serde_json::json!(KvGpuMemoryKind::Gpu),
+                ),
+                (
+                    "transport".into(),
+                    serde_json::json!(KvGpuTransport::NixlGpuDirect),
+                ),
+                (
+                    "compatibility_domain".into(),
+                    serde_json::json!(compatibility_domain),
+                ),
+            ]),
+        )
     }
 
     pub fn fetch(action_id: impl Into<String>, payload: KvSourceLocationsPayload) -> Self {
@@ -327,5 +399,29 @@ mod tests {
                 ],
             ))
         );
+    }
+    #[test]
+    fn gpu_fetch_is_explicit_and_does_not_change_legacy_cpu_wire() {
+        let action = KvHintAction::fetch_gpu(
+            "gpu",
+            KvSourceLocationsPayload {
+                source_control_endpoint: "tcp://gpu:23290".into(),
+                block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
+            },
+            "weights-layout-tp2-v1".into(),
+        );
+        assert_eq!(action.action_type, "kv.fetch_gpu");
+        assert_eq!(action.action_version, "1.0");
+        assert_eq!(
+            serde_json::to_value(&action.payload).unwrap(),
+            serde_json::json!({
+                "source_control_endpoint": "tcp://gpu:23290", "block_hashes": [11, 22],
+                "source_memory_kind": "gpu", "target_memory_kind": "gpu",
+                "transport": "nixl_gpu_direct", "compatibility_domain": "weights-layout-tp2-v1"
+            })
+        );
+        let mut payload = serde_json::to_value(action.payload).unwrap();
+        payload["target_memory_kind"] = serde_json::json!("cpu");
+        assert!(serde_json::from_value::<KvGpuSourceLocationsPayload>(payload).is_err());
     }
 }

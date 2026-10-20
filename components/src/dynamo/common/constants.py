@@ -12,6 +12,10 @@ KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY = "router_hint_worker_type"
 KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY = (
     "router_hint_source_control_endpoints"
 )
+KV_HINT_GPU_DIRECT_CAPABILITY_KEY = "router_hint_gpu_direct"
+KV_HINT_GPU_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY = (
+    "router_hint_gpu_source_control_endpoints"
+)
 
 
 class DisaggregationMode(Enum):

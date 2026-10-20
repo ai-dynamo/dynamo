@@ -17,7 +17,9 @@ use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{
+    KvGpuTransferWorkerConfig, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
     NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, QueueLimitKind, QueueRejection,
@@ -413,6 +415,16 @@ impl EmbeddedSelection {
         run
     }
 
+    pub(crate) async fn query_local_gpu_direct_prefix(
+        &self,
+        query: &dynamo_kv_router::services::selection::TransferSourceQuery<'_>,
+    ) -> Result<Option<usize>, dynamo_kv_router::services::selection::SelectionError> {
+        self.service
+            .core()
+            .query_local_gpu_direct_prefix(query)
+            .await
+    }
+
     pub(crate) async fn query_transfer_sources(
         &self,
         query: dynamo_kv_router::services::selection::TransferSourceQuery<'_>,
@@ -481,7 +493,19 @@ pub(crate) fn worker_request_from_runtime_config(
     let dp_size = config.data_parallel_size();
     let mut router_hint_worker_type = None;
     let mut router_hint_source_control_endpoints = HashMap::new();
+    let mut router_hint_gpu_transfer: Option<KvGpuTransferWorkerConfig> = None;
     for dp_rank in dp_start..dp_start.saturating_add(dp_size) {
+        if let Some(metadata) = config.kv_hint_gpu_transfer_metadata_for_dp_rank(dp_rank) {
+            let gpu = router_hint_gpu_transfer.get_or_insert_with(|| KvGpuTransferWorkerConfig {
+                enabled: true,
+                worker_type: metadata.worker_type.to_owned(),
+                source_control_endpoints: HashMap::new(),
+            });
+            if let Some(endpoint) = metadata.source_control_endpoint {
+                gpu.source_control_endpoints
+                    .insert(dp_rank, endpoint.to_owned());
+            }
+        }
         if let Some(metadata) = config.kv_hint_transfer_metadata_for_dp_rank(dp_rank) {
             router_hint_worker_type.get_or_insert_with(|| metadata.worker_type.to_string());
             if let Some(endpoint) = metadata.source_control_endpoint {
@@ -513,6 +537,7 @@ pub(crate) fn worker_request_from_runtime_config(
         kv_transfer_enforcement: config.kv_transfer_enforcement,
         kv_transfer_preferred_weight: config.kv_transfer_preferred_weight,
         router_hint_worker_type,
+        router_hint_gpu_transfer,
         router_hint_transfer_domain: config.router_hint_transfer_domain().map(str::to_owned),
         router_hint_source_control_endpoints,
         kv_event_source_mode: config.kv_event_source_mode.clone(),
@@ -673,5 +698,45 @@ mod tests {
         assert_eq!(per_class[1].raw_isl_limit_rejections.get(), 1);
         assert_eq!(per_class[0].raw_isl_limit_rejections.get(), 0);
         assert_eq!(per_class[1].request_limit_rejections.get(), 0);
+    }
+    #[test]
+    fn gpu_only_runtime_card_stays_gpu_only_across_catalog_bridge() {
+        let mut config = ModelRuntimeConfig {
+            data_parallel_start_rank: 2,
+            data_parallel_size: 2,
+            ..Default::default()
+        };
+        config
+            .runtime_data
+            .insert("router_hint_gpu_direct".into(), serde_json::json!(true));
+        config.runtime_data.insert(
+            "router_hint_worker_type".into(),
+            serde_json::json!("decode"),
+        );
+        config.runtime_data.insert(
+            "router_hint_transfer_domain".into(),
+            serde_json::json!("certified-gpu"),
+        );
+        config.runtime_data.insert(
+            "router_hint_gpu_source_control_endpoints".into(),
+            serde_json::json!({"2":"tcp://gpu:9002","3":"tcp://gpu:9003"}),
+        );
+        let request = worker_request_from_runtime_config(
+            7,
+            &config,
+            &RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP),
+            16,
+            false,
+        );
+        assert!(request.router_hint_worker_type.is_none());
+        assert!(request.router_hint_source_control_endpoints.is_empty());
+        let gpu = request.router_hint_gpu_transfer.unwrap();
+        assert!(gpu.enabled);
+        assert_eq!(gpu.worker_type, "decode");
+        assert_eq!(gpu.source_control_endpoints.len(), 2);
+        assert_eq!(
+            gpu.source_control_endpoints.get(&3).map(String::as_str),
+            Some("tcp://gpu:9003")
+        );
     }
 }

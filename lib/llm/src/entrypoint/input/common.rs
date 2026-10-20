@@ -309,7 +309,11 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
             || routing_host
                 .kv_router()
                 .kv_router_config()
-                .enable_decode_to_prefill_reuse)
+                .enable_decode_to_prefill_reuse
+            || routing_host
+                .kv_router()
+                .kv_router_config()
+                .enable_decode_to_prefill_gpu_reuse)
     {
         prefill_router
             .set_decode_routing_host(routing_host.clone())

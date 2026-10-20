@@ -347,6 +347,9 @@ fn kv_router_config_from_lookup(
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_DECODE_TO_PREFILL_REUSE") {
         config.enable_decode_to_prefill_reuse = value;
     }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_DECODE_TO_PREFILL_GPU_REUSE") {
+        config.enable_decode_to_prefill_gpu_reuse = value;
+    }
     if let Some(value) = get_env("DYN_ROUTER_TRANSFER_SOURCE_LOOKUP_BUDGET_MS") {
         config.transfer_source_lookup_budget_ms = value.parse().map_err(|_| {
             "DYN_ROUTER_TRANSFER_SOURCE_LOOKUP_BUDGET_MS must be an unsigned integer".to_string()
@@ -360,6 +363,12 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TRANSFER_SOURCE_ESTIMATED_BLOCK_US") {
         config.transfer_source_estimated_block_us = Some(value);
+    }
+    if let Some(value) = parse_f64(
+        &get_env,
+        "DYN_ROUTER_TRANSFER_SOURCE_GPU_ESTIMATED_BLOCK_US",
+    ) {
+        config.transfer_source_gpu_estimated_block_us = Some(value);
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TRANSFER_SOURCE_PREFILL_TOKEN_US") {
         config.transfer_source_prefill_token_us = Some(value);
@@ -755,10 +764,12 @@ struct KvRouterConfigSerde {
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
     enable_decode_to_prefill_reuse: bool,
+    enable_decode_to_prefill_gpu_reuse: bool,
     transfer_source_lookup_budget_ms: u64,
     minimum_transfer_prefix_blocks: usize,
     minimum_estimated_ttft_saving_ms: f64,
     transfer_source_estimated_block_us: Option<f64>,
+    transfer_source_gpu_estimated_block_us: Option<f64>,
     transfer_source_prefill_token_us: Option<f64>,
     conditional_disagg_enabled: bool,
     conditional_disagg_policy: ConditionalDisaggPolicyKind,
@@ -806,10 +817,12 @@ impl Default for KvRouterConfigSerde {
             shared_cache_type: config.shared_cache_type,
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
             enable_decode_to_prefill_reuse: config.enable_decode_to_prefill_reuse,
+            enable_decode_to_prefill_gpu_reuse: config.enable_decode_to_prefill_gpu_reuse,
             transfer_source_lookup_budget_ms: config.transfer_source_lookup_budget_ms,
             minimum_transfer_prefix_blocks: config.minimum_transfer_prefix_blocks,
             minimum_estimated_ttft_saving_ms: config.minimum_estimated_ttft_saving_ms,
             transfer_source_estimated_block_us: config.transfer_source_estimated_block_us,
+            transfer_source_gpu_estimated_block_us: config.transfer_source_gpu_estimated_block_us,
             transfer_source_prefill_token_us: config.transfer_source_prefill_token_us,
             conditional_disagg_enabled: config.conditional_disagg_enabled,
             conditional_disagg_policy: config.conditional_disagg_policy,
@@ -832,6 +845,9 @@ pub struct KvRouterConfig {
     /// certified transfer domain and calibrated transfer/prefill cost estimates.
     #[serde(default, skip_serializing_if = "is_default")]
     pub enable_decode_to_prefill_reuse: bool,
+    /// Opt-in direct GPU source hints; never inferred from CPU reuse.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub enable_decode_to_prefill_gpu_reuse: bool,
     /// Maximum advisory source lookup time, in milliseconds.
     #[serde(
         default = "default_transfer_source_lookup_budget_ms",
@@ -850,6 +866,10 @@ pub struct KvRouterConfig {
     /// Calibrated end-to-end transfer/onboarding cost per block, in microseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_source_estimated_block_us: Option<f64>,
+    /// Separately calibrated direct GPU acquisition cost per missing block.
+    /// CPU transfer/onboarding measurements do not qualify this coefficient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_source_gpu_estimated_block_us: Option<f64>,
     /// Calibrated marginal prefill cost per token, in microseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_source_prefill_token_us: Option<f64>,
@@ -1105,10 +1125,12 @@ impl Default for KvRouterConfig {
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
             enable_decode_to_prefill_reuse: false,
+            enable_decode_to_prefill_gpu_reuse: false,
             transfer_source_lookup_budget_ms: 5,
             minimum_transfer_prefix_blocks: 1,
             minimum_estimated_ttft_saving_ms: 0.0,
             transfer_source_estimated_block_us: None,
+            transfer_source_gpu_estimated_block_us: None,
             transfer_source_prefill_token_us: None,
             conditional_disagg_enabled: false,
             conditional_disagg_policy: ConditionalDisaggPolicyKind::default(),
@@ -1176,10 +1198,12 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
             enable_decode_to_prefill_reuse: compat.enable_decode_to_prefill_reuse,
+            enable_decode_to_prefill_gpu_reuse: compat.enable_decode_to_prefill_gpu_reuse,
             transfer_source_lookup_budget_ms: compat.transfer_source_lookup_budget_ms,
             minimum_transfer_prefix_blocks: compat.minimum_transfer_prefix_blocks,
             minimum_estimated_ttft_saving_ms: compat.minimum_estimated_ttft_saving_ms,
             transfer_source_estimated_block_us: compat.transfer_source_estimated_block_us,
+            transfer_source_gpu_estimated_block_us: compat.transfer_source_gpu_estimated_block_us,
             transfer_source_prefill_token_us: compat.transfer_source_prefill_token_us,
             conditional_disagg_enabled: compat.conditional_disagg_enabled,
             conditional_disagg_policy: compat.conditional_disagg_policy,
@@ -1534,29 +1558,36 @@ impl KvRouterConfig {
             "minimum_estimated_ttft_saving_ms",
             self.minimum_estimated_ttft_saving_ms,
         )?;
-        for (name, value) in [
+        for (name, value, required) in [
             (
                 "transfer_source_estimated_block_us",
                 self.transfer_source_estimated_block_us,
+                self.enable_decode_to_prefill_reuse,
+            ),
+            (
+                "transfer_source_gpu_estimated_block_us",
+                self.transfer_source_gpu_estimated_block_us,
+                self.enable_decode_to_prefill_gpu_reuse,
             ),
             (
                 "transfer_source_prefill_token_us",
                 self.transfer_source_prefill_token_us,
+                self.enable_decode_to_prefill_reuse || self.enable_decode_to_prefill_gpu_reuse,
             ),
         ] {
             if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
                 return Err(format!("{name} must be finite and positive"));
             }
-            if self.enable_decode_to_prefill_reuse && value.is_none() {
+            if required && value.is_none() {
                 return Err(format!(
-                    "enable_decode_to_prefill_reuse requires calibrated {name}"
+                    "decode-to-prefill reuse requires calibrated {name}"
                 ));
             }
         }
-        if self.enable_decode_to_prefill_reuse && (!self.use_kv_events || self.use_remote_indexer) {
-            return Err(
-                "enable_decode_to_prefill_reuse requires local KV event inventory".to_string(),
-            );
+        if (self.enable_decode_to_prefill_reuse || self.enable_decode_to_prefill_gpu_reuse)
+            && (!self.use_kv_events || self.use_remote_indexer)
+        {
+            return Err("decode-to-prefill reuse requires local KV event inventory".to_string());
         }
 
         validate_overlap_score_credit(self.overlap_score_credit)?;
@@ -3135,5 +3166,52 @@ models:
         };
         // With a threshold set, queueing is enabled
         assert!(with_threshold.queueing_enabled(None).unwrap());
+    }
+    #[test]
+    fn gpu_reuse_has_independent_opt_in_costs_and_legacy_defaults() {
+        let defaults = serde_json::to_value(KvRouterConfig::default()).unwrap();
+        assert!(defaults.get("enable_decode_to_prefill_gpu_reuse").is_none());
+        assert!(
+            defaults
+                .get("transfer_source_gpu_estimated_block_us")
+                .is_none()
+        );
+        let mut config = KvRouterConfig {
+            enable_decode_to_prefill_gpu_reuse: true,
+            transfer_source_prefill_token_us: Some(1.0),
+            ..Default::default()
+        };
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .contains("transfer_source_gpu_estimated_block_us")
+        );
+        config.transfer_source_estimated_block_us = Some(1.0);
+        assert!(
+            config.validate().is_err(),
+            "CPU costs must not qualify GPU transport"
+        );
+        config.transfer_source_estimated_block_us = None;
+        config.transfer_source_gpu_estimated_block_us = Some(2.0);
+        assert!(config.validate().is_ok());
+        let decoded: KvRouterConfig =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert!(
+            decoded.enable_decode_to_prefill_gpu_reuse && !decoded.enable_decode_to_prefill_reuse
+        );
+        assert_eq!(decoded.transfer_source_gpu_estimated_block_us, Some(2.0));
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            config.transfer_source_gpu_estimated_block_us = Some(invalid);
+            assert!(config.validate().is_err());
+        }
+        let env = config_from_values(&[
+            ("DYN_ROUTER_DECODE_TO_PREFILL_GPU_REUSE", "true"),
+            ("DYN_ROUTER_TRANSFER_SOURCE_GPU_ESTIMATED_BLOCK_US", "3"),
+            ("DYN_ROUTER_TRANSFER_SOURCE_PREFILL_TOKEN_US", "1"),
+        ]);
+        assert!(env.enable_decode_to_prefill_gpu_reuse && !env.enable_decode_to_prefill_reuse);
+        assert_eq!(env.transfer_source_gpu_estimated_block_us, Some(3.0));
+        assert!(env.validate().is_ok());
     }
 }

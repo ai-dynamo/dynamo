@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::identity::{RoutingPartitionId, default_routing_group};
 use crate::kv_hints::KvHint;
 use crate::protocols::{
-    DpRank, KvHintTransferWorkerMetadata, KvTransferEnforcement, RoutingConstraints,
-    WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    DpRank, KvGpuTransferWorkerConfig, KvHintTransferWorkerMetadata, KvTransferEnforcement,
+    RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
 pub use crate::scheduling::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
@@ -58,6 +58,9 @@ pub struct SelectionWorkerConfig {
     /// Explicit certification of identical model weights, tokenizer and KV layout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_hint_transfer_domain: Option<String>,
+    /// GPU capability is separate from legacy CPU hint support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_gpu_transfer: Option<KvGpuTransferWorkerConfig>,
     /// Per-global-DP-rank KV control endpoints a hint target fetches from.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
@@ -114,6 +117,24 @@ impl WorkerConfigLike for SelectionWorkerConfig {
             .filter(|domain| !domain.trim().is_empty())
     }
 
+    fn kv_hint_gpu_transfer_metadata_for_dp_rank(
+        &self,
+        dp_rank: DpRank,
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+        let metadata = self.router_hint_gpu_transfer.as_ref()?;
+        if !metadata.enabled || metadata.worker_type.trim().is_empty() {
+            return None;
+        }
+        Some(KvHintTransferWorkerMetadata {
+            worker_type: &metadata.worker_type,
+            source_control_endpoint: metadata
+                .source_control_endpoints
+                .get(&dp_rank)
+                .map(String::as_str)
+                .filter(|endpoint| !endpoint.trim().is_empty()),
+        })
+    }
+
     fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         dp_rank: DpRank,
@@ -163,6 +184,9 @@ pub struct WorkerCatalogRecord {
     /// Explicit certification of identical model weights, tokenizer and KV layout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_hint_transfer_domain: Option<String>,
+    /// GPU capability is separate from legacy CPU hint support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_gpu_transfer: Option<KvGpuTransferWorkerConfig>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -196,6 +220,7 @@ impl WorkerCatalogRecord {
             kv_transfer_preferred_weight: req.kv_transfer_preferred_weight,
             router_hint_worker_type: req.router_hint_worker_type,
             router_hint_transfer_domain: req.router_hint_transfer_domain,
+            router_hint_gpu_transfer: req.router_hint_gpu_transfer,
             router_hint_source_control_endpoints: req.router_hint_source_control_endpoints,
             kv_event_source_mode: req.kv_event_source_mode,
             not_schedulable_reasons: Vec::new(),
@@ -236,6 +261,7 @@ impl WorkerCatalogRecord {
             kv_transfer_preferred_weight: self.kv_transfer_preferred_weight,
             router_hint_worker_type: self.router_hint_worker_type.clone(),
             router_hint_transfer_domain: self.router_hint_transfer_domain.clone(),
+            router_hint_gpu_transfer: self.router_hint_gpu_transfer.clone(),
             router_hint_source_control_endpoints: self.router_hint_source_control_endpoints.clone(),
             kv_event_source_mode: self.kv_event_source_mode.clone(),
         })
@@ -297,6 +323,7 @@ impl Default for WorkerRequest {
             kv_transfer_enforcement: None,
             kv_transfer_preferred_weight: None,
             router_hint_worker_type: None,
+            router_hint_gpu_transfer: None,
             router_hint_transfer_domain: None,
             router_hint_source_control_endpoints: HashMap::new(),
             kv_event_source_mode: None,
@@ -337,6 +364,9 @@ pub struct WorkerRequest {
     /// Explicit certification of identical model weights, tokenizer and KV layout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_hint_transfer_domain: Option<String>,
+    /// GPU capability is separate from legacy CPU hint support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_gpu_transfer: Option<KvGpuTransferWorkerConfig>,
     /// Per-global-DP-rank KV control endpoints this worker can serve hints from.
     #[serde(default)]
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
@@ -367,6 +397,9 @@ pub struct WorkerPatchRequest {
     /// Explicit certification of identical model weights, tokenizer and KV layout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_hint_transfer_domain: Option<String>,
+    /// GPU capability is separate from legacy CPU hint support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_gpu_transfer: Option<KvGpuTransferWorkerConfig>,
     #[serde(default)]
     pub router_hint_source_control_endpoints: Option<HashMap<u32, String>>,
     #[serde(default)]
@@ -425,6 +458,9 @@ impl WorkerCatalogRecord {
         }
         if patch.kv_transfer_preferred_weight.is_some() {
             self.kv_transfer_preferred_weight = patch.kv_transfer_preferred_weight;
+        }
+        if let Some(metadata) = patch.router_hint_gpu_transfer {
+            self.router_hint_gpu_transfer = Some(metadata);
         }
         if patch.router_hint_transfer_domain.is_some() {
             self.router_hint_transfer_domain = patch.router_hint_transfer_domain;
@@ -781,5 +817,40 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "token_ids": [1, 2, 3, 4] }))
                 .expect("valid reserve request");
         assert!(request.take_session_context().is_none());
+    }
+}
+
+#[cfg(test)]
+mod gpu_compatibility_tests {
+    use super::*;
+    #[test]
+    fn legacy_cards_have_no_gpu_capability_and_explicit_disable_revokes_it() {
+        let old: WorkerRequest =
+            serde_json::from_value(serde_json::json!({"worker_id":7})).unwrap();
+        assert!(old.router_hint_gpu_transfer.is_none());
+        let mut request = old;
+        request.endpoint = Some("dyn://7".into());
+        request.router_hint_gpu_transfer = Some(KvGpuTransferWorkerConfig {
+            enabled: true,
+            worker_type: "decode".into(),
+            source_control_endpoints: HashMap::from([(0, "tcp://gpu:9010".into())]),
+        });
+        let mut record = WorkerCatalogRecord::new(request);
+        assert!(
+            record
+                .scheduler_config()
+                .unwrap()
+                .kv_hint_gpu_transfer_metadata_for_dp_rank(0)
+                .is_some()
+        );
+        let patch: WorkerPatchRequest = serde_json::from_value(serde_json::json!({"router_hint_gpu_transfer":{"enabled":false,"worker_type":"decode"}})).unwrap();
+        record.apply_patch(patch);
+        assert!(
+            record
+                .scheduler_config()
+                .unwrap()
+                .kv_hint_gpu_transfer_metadata_for_dp_rank(0)
+                .is_none()
+        );
     }
 }

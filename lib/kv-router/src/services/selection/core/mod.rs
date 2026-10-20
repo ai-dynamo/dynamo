@@ -67,7 +67,7 @@ pub use operation::{
     LookupTimings, Selected, SelectionAdmission, SelectionOperation, SelectionOutcome,
     SelectionRun, SessionBinding,
 };
-pub use transfer_sources::{TransferSourceQuery, TransferSourceResult};
+pub use transfer_sources::{TransferSourceMemoryKind, TransferSourceQuery, TransferSourceResult};
 
 use super::affinity::{
     AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,

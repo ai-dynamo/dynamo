@@ -55,10 +55,12 @@ _ROUTER_SETTINGS = (
     "shared_cache_type",
     "router_predicted_ttl_secs",
     "enable_decode_to_prefill_reuse",
+    "enable_decode_to_prefill_gpu_reuse",
     "transfer_source_lookup_budget_ms",
     "minimum_transfer_prefix_blocks",
     "minimum_estimated_ttft_saving_ms",
     "transfer_source_estimated_block_us",
+    "transfer_source_gpu_estimated_block_us",
     "transfer_source_prefill_token_us",
 )
 
@@ -220,10 +222,12 @@ class KvRouterConfigBase(ConfigBase):
     conditional_disagg_decode_busy_threshold: Optional[float] = None
     router_predicted_ttl_secs: Optional[float] = None
     enable_decode_to_prefill_reuse: bool = False
+    enable_decode_to_prefill_gpu_reuse: bool = False
     transfer_source_lookup_budget_ms: int = 5
     minimum_transfer_prefix_blocks: int = 1
     minimum_estimated_ttft_saving_ms: float = 0.0
     transfer_source_estimated_block_us: Optional[float] = None
+    transfer_source_gpu_estimated_block_us: Optional[float] = None
     transfer_source_prefill_token_us: Optional[float] = None
     load_aware: bool = False
 
@@ -627,6 +631,19 @@ class KvRouterArgGroup(ArgGroup):
                 "transfer-source cost bounds."
             ),
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-decode-to-prefill-gpu-reuse",
+            env_var="DYN_ROUTER_DECODE_TO_PREFILL_GPU_REUSE",
+            dest="enable_decode_to_prefill_gpu_reuse",
+            default=False,
+            help=(
+                "Experimental direct decode-GPU to prefill-GPU KV reuse. "
+                "Requires GPU-only pin/transport endpoints, certified layout, "
+                "local Device KV events, and separately calibrated GPU costs. "
+                "Does not enable the CPU offload transfer path."
+            ),
+        )
         for name, arg_type, default, help_text in (
             (
                 "transfer_source_lookup_budget_ms",
@@ -651,6 +668,12 @@ class KvRouterArgGroup(ArgGroup):
                 float,
                 None,
                 "Measured upper bound per missing block, including acquisition, copy, onboarding, donor contention, and incremental P-to-D cost.",
+            ),
+            (
+                "transfer_source_gpu_estimated_block_us",
+                float,
+                None,
+                "Separately measured direct GPU acquisition/transfer cost per missing block in microseconds; CPU copy/onboarding costs do not qualify it.",
             ),
             (
                 "transfer_source_prefill_token_us",

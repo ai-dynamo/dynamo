@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-
 from dynamo.common.constants import (
     KV_HINT_TRANSFER_CAPABILITY_KEY,
     KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
@@ -538,3 +537,86 @@ def test_invalid_transfer_domain_fails_before_any_publication(domain):
             (0, 2),
         )
     runtime_config.set_engine_specific.assert_not_called()
+
+
+def _gpu_connector(**tier_changes):
+    tier = {
+        "type": "GPUKVCRSecondaryTierManager",
+        "router_capabilities": ["router_hint_gpu_direct"],
+        "compatibility_domain": "gpu-certified-layout-v1",
+        "control_advertise_host": "worker-a",
+        "control_ports": [24123],
+    }
+    tier.update(tier_changes)
+    return {
+        "kv_connector": "GPUOffloadingConnector",
+        "kv_connector_extra_config": {"secondary_tiers": [tier]},
+    }
+
+
+def test_gpu_hint_capability_is_separate_from_cpu_and_keeps_global_rank():
+    runtime = MagicMock()
+    publish_kv_hint_capabilities(
+        runtime,
+        _wrapped_engine_args(
+            "PdConnector",
+            [_gpu_connector()],
+            router_hint_transfer_domain="gpu-certified-layout-v1",
+        ),
+        WorkerType.Decode,
+        (3, 1),
+    )
+    fields = {
+        call.args[0]: json.loads(call.args[1])
+        for call in runtime.set_engine_specific.call_args_list
+    }
+    assert fields["router_hint_gpu_direct"] is True
+    assert fields["router_hint_gpu_source_control_endpoints"] == {
+        "3": "tcp://worker-a:24123"
+    }
+    assert fields["router_hint_worker_type"] == "decode"
+    assert fields["router_hint_transfer_domain"] == "gpu-certified-layout-v1"
+    assert KV_HINT_TRANSFER_CAPABILITY_KEY not in fields
+    assert KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY not in fields
+
+
+@pytest.mark.parametrize(
+    "tier_changes",
+    [
+        {"type": "kvcr"},
+        {"compatibility_domain": "different-layout"},
+        {"control_ports": [True]},
+        {"control_advertise_host": "0.0.0.0"},
+    ],
+)
+def test_gpu_hint_rejects_wrong_memory_provider_domain_or_endpoint(tier_changes):
+    runtime = MagicMock()
+    with pytest.raises(ValueError):
+        publish_kv_hint_capabilities(
+            runtime,
+            _wrapped_engine_args(
+                "PdConnector",
+                [_gpu_connector(**tier_changes)],
+                router_hint_transfer_domain="gpu-certified-layout-v1",
+            ),
+            WorkerType.Decode,
+            (0, 1),
+        )
+    runtime.set_engine_specific.assert_not_called()
+
+
+def test_gpu_hint_does_not_advertise_an_unsupported_cache_owner_source():
+    runtime = MagicMock()
+    with pytest.raises(ValueError, match="CacheOwner"):
+        publish_kv_hint_capabilities(
+            runtime,
+            _wrapped_engine_args(
+                "PdConnector",
+                [_gpu_connector()],
+                router_hint_transfer_domain="gpu-certified-layout-v1",
+                dynamo_state_agent={"raw_advertise_host": "worker-a"},
+            ),
+            WorkerType.Decode,
+            (0, 1),
+        )
+    runtime.set_engine_specific.assert_not_called()

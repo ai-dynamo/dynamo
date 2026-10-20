@@ -27,6 +27,7 @@ fn config() -> SelectionWorkerConfig {
         kv_transfer_enforcement: None,
         kv_transfer_preferred_weight: None,
         router_hint_worker_type: Some("decode".to_string()),
+        router_hint_gpu_transfer: None,
         router_hint_transfer_domain: Some("certified-layout-v1".to_string()),
         router_hint_source_control_endpoints: HashMap::from([
             (0, "tcp://donor:9000".to_string()),
@@ -43,6 +44,8 @@ fn query(prompt: &PromptRequest) -> TransferSourceQuery<'_> {
         prompt: prompt.view(),
         target: WorkerWithDpRank::new(99, 0),
         target_worker_type: "prefill",
+        memory_kind: crate::services::selection::TransferSourceMemoryKind::Host,
+        target_gpu_direct: false,
         target_transfer_domain: Some("certified-layout-v1"),
         target_topology_domains: None,
         target_kv_transfer_domain: None,
@@ -304,6 +307,82 @@ fn persistent_topology_overrides_attachment_and_only_empty_metadata_inherits() {
             transfer_source_for_target(&HashMap::from([(7, donor)]), &target, &candidates)
                 .is_some(),
             expected
+        );
+    }
+}
+
+fn gpu_config() -> SelectionWorkerConfig {
+    let mut config = config();
+    config.router_hint_worker_type = None;
+    config.router_hint_source_control_endpoints.clear();
+    config.router_hint_gpu_transfer = Some(crate::protocols::KvGpuTransferWorkerConfig {
+        enabled: true,
+        worker_type: "decode".into(),
+        source_control_endpoints: HashMap::from([(1, "tcp://gpu-only:9011".into())]),
+    });
+    config
+}
+
+fn gpu_query(prompt: &PromptRequest) -> TransferSourceQuery<'_> {
+    let mut query = query(prompt);
+    query.memory_kind = TransferSourceMemoryKind::Gpu;
+    query.target_gpu_direct = true;
+    query
+}
+
+#[test]
+fn gpu_donor_requires_separate_source_target_capabilities_and_dp_endpoint() {
+    let prompt = PromptRequest::default();
+    let candidates = candidates(WorkerWithDpRank::new(7, 1).into());
+    let gpu = HashMap::from([(7, gpu_config())]);
+    let result = transfer_source_for_target(&gpu, &gpu_query(&prompt), &candidates).unwrap();
+    assert_eq!(result.memory_kind, TransferSourceMemoryKind::Gpu);
+    assert_eq!(
+        result.payload.source_control_endpoint,
+        "tcp://gpu-only:9011"
+    );
+    assert_eq!(result.payload.block_hashes.len(), 3);
+    // A CPU endpoint can never certify GPU memory, and GPU-only cards cannot
+    // be silently interpreted as legacy CPU donors.
+    assert!(
+        transfer_source_for_target(
+            &HashMap::from([(7, config())]),
+            &gpu_query(&prompt),
+            &candidates
+        )
+        .is_none()
+    );
+    assert!(transfer_source_for_target(&gpu, &query(&prompt), &candidates).is_none());
+    let mut old_target = gpu_query(&prompt);
+    old_target.target_gpu_direct = false;
+    assert!(transfer_source_for_target(&gpu, &old_target, &candidates).is_none());
+    for change in 0..5 {
+        let mut config = gpu_config();
+        match change {
+            0 => config.router_hint_gpu_transfer.as_mut().unwrap().enabled = false,
+            1 => config
+                .router_hint_gpu_transfer
+                .as_mut()
+                .unwrap()
+                .source_control_endpoints
+                .clear(),
+            2 => {
+                config
+                    .router_hint_gpu_transfer
+                    .as_mut()
+                    .unwrap()
+                    .worker_type = "prefill".into()
+            }
+            3 => config.router_hint_transfer_domain = Some("foreign-layout".into()),
+            _ => config.data_parallel_size = 1,
+        }
+        assert!(
+            transfer_source_for_target(
+                &HashMap::from([(7, config)]),
+                &gpu_query(&prompt),
+                &candidates
+            )
+            .is_none()
         );
     }
 }

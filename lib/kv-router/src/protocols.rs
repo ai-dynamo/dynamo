@@ -291,6 +291,18 @@ pub struct KvHintTransferWorkerMetadata<'a> {
     pub source_control_endpoint: Option<&'a str>,
 }
 
+/// Optional GPU-only router-hint metadata carried by the standalone catalog.
+/// Missing/disabled metadata never upgrades a legacy CPU worker. A source must
+/// expose a GPU-only endpoint that atomically pins the requested keys and holds
+/// allocations until native completion or confirmed cancellation quiescence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvGpuTransferWorkerConfig {
+    pub enabled: bool,
+    pub worker_type: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub source_control_endpoints: HashMap<DpRank, String>,
+}
+
 /// Trait abstracting the worker configuration fields needed by the scheduling layer.
 ///
 /// `ModelRuntimeConfig` (in `lib/llm`) implements this directly so no adapter type is needed.
@@ -306,6 +318,14 @@ pub trait WorkerConfigLike {
     /// support TRANSFER but cannot serve as a source may return `Some` with
     /// `source_control_endpoint: None`.
     fn kv_hint_transfer_metadata_for_dp_rank(
+        &self,
+        _dp_rank: DpRank,
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+        None
+    }
+
+    /// Separate direct GPU capability; absence is the N-2-compatible default.
+    fn kv_hint_gpu_transfer_metadata_for_dp_rank(
         &self,
         _dp_rank: DpRank,
     ) -> Option<KvHintTransferWorkerMetadata<'_>> {
@@ -499,6 +519,9 @@ pub enum StorageTier {
     HostPinned,
     Disk,
     External,
+    /// Retained VRAM served by a GPU-only transfer endpoint, not native execution KV.
+    /// Appended to preserve the discriminants of pre-existing tiers.
+    GpuDirect,
 }
 
 /// Logical lifetime that owns a cache residency independently of its physical tier.
@@ -888,6 +911,7 @@ impl StorageTier {
     pub fn from_kv_medium(medium: &str) -> Option<Self> {
         match medium {
             "GPU" | "DEVICE" => Some(Self::Device),
+            "gpu_direct" | "GPU_DIRECT" => Some(Self::GpuDirect),
             "CPU" | "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
             "CPU_TIER2" | "DISK" | "NVME" | "STORAGE" => Some(Self::Disk),
             "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
@@ -900,6 +924,7 @@ impl StorageTier {
     pub fn to_kv_medium(self) -> Option<&'static str> {
         match self {
             Self::Device => None,
+            Self::GpuDirect => Some("gpu_direct"),
             Self::HostPinned => Some("CPU_PINNED"),
             Self::Disk => Some("DISK"),
             Self::External => Some("EXTERNAL"),
@@ -907,7 +932,7 @@ impl StorageTier {
     }
 
     pub fn is_gpu(self) -> bool {
-        matches!(self, Self::Device)
+        matches!(self, Self::Device | Self::GpuDirect)
     }
 }
 
@@ -1680,7 +1705,7 @@ impl RouterEvent {
             ));
         }
         self.resolved_residency_domain()?;
-        Ok(self.storage_tier.is_gpu())
+        Ok(self.storage_tier == StorageTier::Device)
     }
 }
 

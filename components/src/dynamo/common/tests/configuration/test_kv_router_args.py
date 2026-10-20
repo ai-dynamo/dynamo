@@ -1341,3 +1341,145 @@ def test_decode_to_prefill_frontend_rejects_invalid_admission_margin(option, val
     config = FrontendConfig.from_cli_args(parser.parse_args([f"{option}={value}"]))
     with pytest.raises(ValueError, match=option):
         config.validate()
+
+
+def test_direct_gpu_cli_is_independent_from_cpu_and_flows_to_binding_kwargs():
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                "--router-mode",
+                "kv",
+                "--router-decode-to-prefill-gpu-reuse",
+                "--router-transfer-source-gpu-estimated-block-us",
+                "4",
+                "--router-transfer-source-prefill-token-us",
+                "2",
+            ]
+        )
+    )
+    config.validate()
+    kwargs = config.kv_router_kwargs()
+    assert kwargs["enable_decode_to_prefill_gpu_reuse"] is True
+    assert kwargs["transfer_source_gpu_estimated_block_us"] == 4.0
+    assert kwargs["enable_decode_to_prefill_reuse"] is False
+    assert kwargs["transfer_source_estimated_block_us"] is None
+
+
+def test_direct_gpu_defaults_off_and_env_overrides_are_explicit(monkeypatch):
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+    kwargs = KvRouterConfigBase.from_cli_args(parser.parse_args([])).kv_router_kwargs()
+    assert kwargs["enable_decode_to_prefill_gpu_reuse"] is False
+    assert kwargs["transfer_source_gpu_estimated_block_us"] is None
+    monkeypatch.setenv("DYN_ROUTER_DECODE_TO_PREFILL_GPU_REUSE", "true")
+    monkeypatch.setenv("DYN_ROUTER_TRANSFER_SOURCE_GPU_ESTIMATED_BLOCK_US", "5")
+    monkeypatch.setenv("DYN_ROUTER_TRANSFER_SOURCE_PREFILL_TOKEN_US", "2")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+    env_kwargs = KvRouterConfigBase.from_cli_args(
+        parser.parse_args([])
+    ).kv_router_kwargs()
+    assert env_kwargs["enable_decode_to_prefill_gpu_reuse"] is True
+    assert env_kwargs["transfer_source_gpu_estimated_block_us"] == 5.0
+    config = KvRouterConfigBase.from_cli_args(
+        parser.parse_args(
+            [
+                "--no-router-decode-to-prefill-gpu-reuse",
+                "--router-transfer-source-gpu-estimated-block-us",
+                "6",
+            ]
+        )
+    )
+    kwargs = config.kv_router_kwargs()
+    assert kwargs["enable_decode_to_prefill_gpu_reuse"] is False
+    assert kwargs["transfer_source_gpu_estimated_block_us"] == 6.0
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--router-mode", "random"],
+        ["--router-mode", "kv", "--no-router-kv-events"],
+        ["--router-mode", "kv", "--use-remote-indexer"],
+    ],
+)
+def test_direct_gpu_requires_kv_mode_and_confirmed_local_events(extra):
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            extra
+            + [
+                "--router-decode-to-prefill-gpu-reuse",
+                "--router-transfer-source-gpu-estimated-block-us",
+                "4",
+                "--router-transfer-source-prefill-token-us",
+                "2",
+            ]
+        )
+    )
+    with pytest.raises(ValueError, match="decode-to-prefill-gpu-reuse requires"):
+        config.validate()
+
+
+def test_direct_gpu_never_accepts_cpu_calibration_as_gpu_cost():
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                "--router-mode",
+                "kv",
+                "--router-decode-to-prefill-gpu-reuse",
+                "--router-transfer-source-estimated-block-us",
+                "4",
+                "--router-transfer-source-prefill-token-us",
+                "2",
+            ]
+        )
+    )
+    with pytest.raises(ValueError, match="requires measured.*gpu-estimated-block-us"):
+        config.validate()
+
+
+@pytest.mark.parametrize("invalid", ["0", "-1", "nan", "inf"])
+def test_direct_gpu_cost_must_be_finite_positive(invalid):
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                f"--router-transfer-source-gpu-estimated-block-us={invalid}",
+            ]
+        )
+    )
+    with pytest.raises(ValueError, match="gpu-estimated-block-us must be finite"):
+        config.validate()
+
+
+def test_gpu_router_yaml_overrides_cli_with_independent_gpu_cost(tmp_path):
+    path = tmp_path / "gpu-router.yaml"
+    path.write_text(
+        "router:\n  enable_decode_to_prefill_gpu_reuse: true\n  transfer_source_gpu_estimated_block_us: 8\n  transfer_source_prefill_token_us: 2\n"
+    )
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                "--router-mode",
+                "kv",
+                "--router-policy-config",
+                str(path),
+                "--router-transfer-source-gpu-estimated-block-us",
+                "4",
+            ]
+        )
+    )
+    kwargs = config.kv_router_kwargs()
+    assert kwargs["enable_decode_to_prefill_gpu_reuse"] is True
+    assert kwargs["transfer_source_gpu_estimated_block_us"] == 8.0
+    assert kwargs["enable_decode_to_prefill_reuse"] is False
+    config.validate()

@@ -85,7 +85,7 @@ impl LowerTierIndexers {
         &self,
         storage_tier: StorageTier,
     ) -> Arc<ThreadPoolIndexer<LowerTierIndexer>> {
-        debug_assert!(!storage_tier.is_gpu());
+        debug_assert_ne!(storage_tier, StorageTier::Device);
         if let Some(indexer) = self.indexers.read().unwrap().get(&storage_tier).cloned() {
             return indexer;
         }
@@ -140,7 +140,25 @@ impl LowerTierIndexers {
         &self,
         sequence: &[LocalBlockHash],
     ) -> Option<KvTransferCandidates> {
-        let indexer = self.get(StorageTier::HostPinned)?;
+        self.transfer_candidates_for_tier(StorageTier::HostPinned, sequence)
+    }
+
+    /// GPU-only retained-cache inventory, independently published after its
+    /// producer copy completes. Native Device, host and disk blocks cannot
+    /// satisfy this lookup, and it is not part of ordinary cache-hit scoring.
+    pub(crate) fn gpu_direct_transfer_candidates(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Option<KvTransferCandidates> {
+        self.transfer_candidates_for_tier(StorageTier::GpuDirect, sequence)
+    }
+
+    fn transfer_candidates_for_tier(
+        &self,
+        tier: StorageTier,
+        sequence: &[LocalBlockHash],
+    ) -> Option<KvTransferCandidates> {
+        let indexer = self.get(tier)?;
         let snapshot = self.routing_snapshot.load_full();
         let first_hash = *sequence.first()?;
         let continuations: FxHashMap<_, _> = indexer

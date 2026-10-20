@@ -1328,6 +1328,7 @@ fn test_convert_event_gates_on_locality_and_storage_tier() {
     let accepted = [
         (None, None, StorageTier::Device),
         (Some("GPU"), None, StorageTier::Device),
+        (Some("gpu_direct"), None, StorageTier::GpuDirect),
         (Some("CPU"), None, StorageTier::HostPinned),
         (Some("STORAGE"), None, StorageTier::Disk),
         (Some("STORAGE"), Some(Locality::Local), StorageTier::Disk),
@@ -1625,4 +1626,22 @@ fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
         panic!("expected BlockStored");
     };
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+#[test]
+fn gpu_direct_medium_is_separate_from_execution_and_preserves_salted_root() {
+    let worker = WorkerWithDpRank::new(3, 0);
+    let raw = namespaced_block_stored(11, None, Some("gpu-tenant"), "gpu_direct");
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    let event = normalizer
+        .normalize(raw, 1, worker)
+        .expect("retained GPU event");
+    assert_eq!(event.placement.tier, StorageTier::GpuDirect);
+    let routed = event.into_router_event().unwrap();
+    assert!(!routed.targets_primary().unwrap());
+    assert_eq!(StorageTier::GpuDirect.to_kv_medium(), Some("gpu_direct"));
+    assert_eq!(
+        serde_json::to_value(StorageTier::GpuDirect).unwrap(),
+        "gpu_direct"
+    );
 }

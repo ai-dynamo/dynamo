@@ -13,6 +13,7 @@ use validator::{Validate, ValidationError};
 
 use dynamo_kv_router::{
     kv_hints::{
+        KV_HINT_GPU_DIRECT_CAPABILITY_KEY, KV_HINT_GPU_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
         KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
         KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
     },
@@ -566,6 +567,34 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         })
     }
 
+    fn kv_hint_gpu_transfer_metadata_for_dp_rank(
+        &self,
+        dp_rank: u32,
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+        if !self.supports_runtime_capability(KV_HINT_GPU_DIRECT_CAPABILITY_KEY) {
+            return None;
+        }
+        let worker_type = self
+            .runtime_data
+            .get(KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY)?
+            .as_str()?;
+        if worker_type.trim().is_empty() {
+            return None;
+        }
+        let rank = dp_rank.to_string();
+        let source_control_endpoint = self
+            .runtime_data
+            .get(KV_HINT_GPU_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|endpoints| endpoints.get(&rank))
+            .and_then(serde_json::Value::as_str)
+            .filter(|endpoint| !endpoint.trim().is_empty());
+        Some(KvHintTransferWorkerMetadata {
+            worker_type,
+            source_control_endpoint,
+        })
+    }
+
     fn native_offloading_capacity_tokens(&self) -> Option<u64> {
         self.runtime_data
             .get("native_offloading_capacity")?
@@ -574,7 +603,9 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
     }
 
     fn router_hint_transfer_domain(&self) -> Option<&str> {
-        if !self.supports_runtime_capability(KV_HINT_TRANSFER_CAPABILITY_KEY) {
+        if !self.supports_runtime_capability(KV_HINT_TRANSFER_CAPABILITY_KEY)
+            && !self.supports_runtime_capability(KV_HINT_GPU_DIRECT_CAPABILITY_KEY)
+        {
             return None;
         }
         let domain = self
@@ -1569,5 +1600,57 @@ mod tests {
         let error = validate("not_registered").unwrap_err();
         assert!(error.contains("not_registered"));
         assert!(error.contains("muse_glimmer"));
+    }
+    #[test]
+    fn gpu_capability_is_explicit_rank_scoped_and_not_legacy_cpu_support() {
+        let mut config = ModelRuntimeConfig::default();
+        config
+            .set_engine_specific(KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, "decode")
+            .unwrap();
+        config
+            .set_engine_specific("router_hint_transfer_domain", "certified-gpu-layout")
+            .unwrap();
+        config
+            .set_engine_specific(
+                KV_HINT_GPU_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+                serde_json::json!({"2": "tcp://gpu:23290"}),
+            )
+            .unwrap();
+        assert!(
+            config
+                .kv_hint_gpu_transfer_metadata_for_dp_rank(2)
+                .is_none()
+        );
+        config
+            .set_engine_specific(KV_HINT_GPU_DIRECT_CAPABILITY_KEY, true)
+            .unwrap();
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(2).is_none());
+        assert_eq!(
+            config
+                .kv_hint_gpu_transfer_metadata_for_dp_rank(2)
+                .unwrap()
+                .source_control_endpoint,
+            Some("tcp://gpu:23290")
+        );
+        assert!(
+            config
+                .kv_hint_gpu_transfer_metadata_for_dp_rank(0)
+                .unwrap()
+                .source_control_endpoint
+                .is_none()
+        );
+        assert_eq!(
+            config.router_hint_transfer_domain(),
+            Some("certified-gpu-layout")
+        );
+        config
+            .set_engine_specific(KV_HINT_GPU_DIRECT_CAPABILITY_KEY, false)
+            .unwrap();
+        assert!(
+            config
+                .kv_hint_gpu_transfer_metadata_for_dp_rank(2)
+                .is_none()
+        );
+        assert!(config.router_hint_transfer_domain().is_none());
     }
 }

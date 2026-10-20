@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from vllm.engine.arg_utils import AsyncEngineArgs
 
 from dynamo.common.constants import (
+    KV_HINT_GPU_DIRECT_CAPABILITY_KEY,
+    KV_HINT_GPU_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     KV_HINT_TRANSFER_CAPABILITY_KEY,
     KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY,
     KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
@@ -193,7 +195,7 @@ def _transfer_hint_source_control_endpoints(
         return None
     control_ports = tier.get("control_ports")
     if not isinstance(control_ports, list):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 - preserve the config-validation contract
             "P2P KV transfer hint support requires control_ports to be a list"
         )
     if len(control_ports) != dp_size:
@@ -326,3 +328,58 @@ def publish_kv_hint_capabilities(
         dp_range,
         publish_source_endpoints=publish_source_endpoints,
     )
+    _publish_gpu_transfer_hint_capability(
+        runtime_config,
+        engine_args,
+        worker_type,
+        dp_range,
+        publish_source_endpoints=publish_source_endpoints,
+    )
+
+
+def _publish_gpu_transfer_hint_capability(
+    runtime_config: ModelRuntimeConfig,
+    engine_args: AsyncEngineArgs,
+    worker_type: WorkerType,
+    dp_range: tuple[int, int],
+    *,
+    publish_source_endpoints: bool,
+) -> None:
+    tiers = [
+        tier
+        for tier in _secondary_tiers(engine_args)
+        if KV_HINT_GPU_DIRECT_CAPABILITY_KEY in (tier.get("router_capabilities") or ())
+    ]
+    if not tiers:
+        return
+    if len(tiers) != 1 or dp_range[1] != 1:
+        raise ValueError(
+            "Direct GPU KV transfer currently requires one TP1 GPU tier/rank"
+        )
+    tier = tiers[0]
+    if tier.get("type") != "GPUKVCRSecondaryTierManager":
+        raise ValueError("Direct GPU capability requires the GPU-only KVCR tier")
+    domain = _transfer_hint_domain(engine_args)
+    if domain is None or tier.get("compatibility_domain") != domain:
+        raise ValueError("Direct GPU capability requires one certified layout domain")
+    role = _transfer_hint_worker_type(worker_type)
+    endpoints = _transfer_hint_source_control_endpoints(tier, dp_range)
+    if role is None or endpoints is None or not publish_source_endpoints:
+        raise ValueError(
+            "Direct GPU transfer requires native worker-owned source endpoints"
+        )
+    # CacheOwner/state-agent sources use a different ownership contract; they
+    # must not advertise this worker-owned retained-GPU inventory as CPU RAM.
+    kv_config = getattr(engine_args, "kv_transfer_config", None)
+    extra = getattr(kv_config, "kv_connector_extra_config", None) or {}
+    if extra.get("dynamo_state_agent") is not None:
+        raise ValueError(
+            "Direct GPU KV transfer does not support CacheOwner attachments"
+        )
+    for key, value in (
+        (KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, role),
+        (KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY, domain),
+        (KV_HINT_GPU_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, endpoints),
+        (KV_HINT_GPU_DIRECT_CAPABILITY_KEY, True),
+    ):
+        runtime_config.set_engine_specific(key, json.dumps(value))

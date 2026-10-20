@@ -1871,6 +1871,8 @@ class KvRouterConfig:
         minimum_estimated_ttft_saving_ms: float = 0.0,
         transfer_source_estimated_block_us: Optional[float] = None,
         transfer_source_prefill_token_us: Optional[float] = None,
+        enable_decode_to_prefill_gpu_reuse: bool = False,
+        transfer_source_gpu_estimated_block_us: Optional[float] = None,
         conditional_disagg_enabled: bool = False,
         conditional_disagg_policy: str = "isl_bounding",
         conditional_disagg_eff_isl_threshold: int = 2048,

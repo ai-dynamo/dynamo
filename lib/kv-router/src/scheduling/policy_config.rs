@@ -249,10 +249,12 @@ impl RouterSettings {
             shared_cache_type,
             router_predicted_ttl_secs,
             enable_decode_to_prefill_reuse,
+            enable_decode_to_prefill_gpu_reuse,
             transfer_source_lookup_budget_ms,
             minimum_transfer_prefix_blocks,
             minimum_estimated_ttft_saving_ms,
             transfer_source_estimated_block_us,
+            transfer_source_gpu_estimated_block_us,
             transfer_source_prefill_token_us,
         );
         Ok(())

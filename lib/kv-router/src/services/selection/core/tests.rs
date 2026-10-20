@@ -136,6 +136,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         kv_transfer_enforcement: None,
         kv_transfer_preferred_weight: None,
         router_hint_worker_type: None,
+        router_hint_gpu_transfer: None,
         router_hint_transfer_domain: None,
         router_hint_source_control_endpoints: HashMap::new(),
         kv_event_source_mode: None,
@@ -552,6 +553,8 @@ fn transfer_query(prompt: &PromptRequest) -> TransferSourceQuery<'_> {
         prompt: prompt.view(),
         target: WorkerWithDpRank::new(99, 0),
         target_worker_type: "prefill",
+        memory_kind: crate::services::selection::TransferSourceMemoryKind::Host,
+        target_gpu_direct: false,
         target_transfer_domain: Some("certified-layout-v1"),
         target_topology_domains: None,
         target_kv_transfer_domain: None,
@@ -3670,6 +3673,7 @@ fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerC
         kv_transfer_enforcement: None,
         kv_transfer_preferred_weight: None,
         router_hint_worker_type: Some(worker_type.to_string()),
+        router_hint_gpu_transfer: None,
         router_hint_transfer_domain: None,
         router_hint_source_control_endpoints: endpoints
             .iter()
@@ -4140,4 +4144,156 @@ async fn overflowing_worker_dp_range_patch_preserves_live_worker() {
     })
     .await
     .expect("invalid worker patch deadline");
+}
+
+#[tokio::test]
+async fn gpu_transfer_inventory_is_retained_only_and_never_books_decode_capacity() {
+    let (core, entry, tokens) = hint_fixture(|request| {
+        request.router_hint_transfer_domain = Some("certified-layout-v1".into());
+        request.router_hint_gpu_transfer = Some(crate::protocols::KvGpuTransferWorkerConfig {
+            enabled: true,
+            worker_type: "decode".into(),
+            source_control_endpoints: HashMap::from([(
+                0,
+                format!("tcp://gpu-{}:9010", request.worker_id),
+            )]),
+        });
+    })
+    .await;
+    let prompt = PromptRequest {
+        token_ids: Some(tokens.clone()),
+        ..Default::default()
+    };
+    let mut query = transfer_query(&prompt);
+    query.memory_kind = TransferSourceMemoryKind::Gpu;
+    query.target_gpu_direct = true;
+    let before = serde_json::to_value(core.loads(None, None)).unwrap();
+    // Native execution GPU blocks alone are not readiness of the separate
+    // retained GPU endpoint, even though that endpoint is explicitly capable.
+    assert!(core.query_transfer_sources(query).await.unwrap().is_none());
+    let hashes: Vec<_> = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
+        .into_iter()
+        .map(|hash| hash.0)
+        .collect();
+    entry
+        .indexer
+        .apply_event_routed(store_event(1, 0, 2, &[], &hashes, StorageTier::GpuDirect))
+        .await
+        .unwrap();
+    entry.indexer.dump_events().await.unwrap();
+    let mut query = transfer_query(&prompt);
+    query.memory_kind = TransferSourceMemoryKind::Gpu;
+    query.target_gpu_direct = true;
+    let result = core
+        .query_transfer_sources(query)
+        .await
+        .unwrap()
+        .expect("confirmed GPU donor");
+    assert_eq!(result.payload.source_control_endpoint, "tcp://gpu-1:9010");
+    assert_eq!(result.payload.block_hashes.len(), 2);
+    // Host inventory at another worker must not extend a GPU-resident prefix.
+    entry
+        .indexer
+        .apply_event_routed(store_event(2, 0, 4, &[], &hashes, StorageTier::HostPinned))
+        .await
+        .unwrap();
+    entry.indexer.dump_events().await.unwrap();
+    entry
+        .indexer
+        .apply_event_routed(crate::protocols::RouterEvent::with_storage_tier(
+            1,
+            crate::protocols::KvCacheEvent {
+                event_id: 5,
+                dp_rank: 0,
+                data: crate::protocols::KvCacheEventData::Removed(
+                    crate::protocols::KvCacheRemoveData {
+                        block_hashes: result.payload.block_hashes.clone(),
+                    },
+                ),
+            },
+            StorageTier::GpuDirect,
+        ))
+        .await
+        .unwrap();
+    entry.indexer.dump_events().await.unwrap();
+    let mut query = transfer_query(&prompt);
+    query.memory_kind = TransferSourceMemoryKind::Gpu;
+    query.target_gpu_direct = true;
+    assert!(core.query_transfer_sources(query).await.unwrap().is_none());
+    assert_eq!(
+        serde_json::to_value(core.loads(None, None)).unwrap(),
+        before
+    );
+    assert!(core.reservation_index.read().is_empty());
+}
+
+#[tokio::test]
+async fn retained_gpu_local_baseline_survives_native_eviction_without_execution_credit() {
+    let (core, entry, tokens) = hint_fixture(|request| {
+        request.router_hint_transfer_domain = Some("certified-layout-v1".into());
+        request.router_hint_gpu_transfer = Some(crate::protocols::KvGpuTransferWorkerConfig {
+            enabled: true,
+            worker_type: "prefill".into(),
+            source_control_endpoints: HashMap::new(),
+        });
+    })
+    .await;
+    let prompt = PromptRequest {
+        token_ids: Some(tokens.clone()),
+        ..Default::default()
+    };
+    let mut query = transfer_query(&prompt);
+    query.target = WorkerWithDpRank::new(1, 0);
+    query.memory_kind = TransferSourceMemoryKind::Gpu;
+    query.target_gpu_direct = true;
+    assert_eq!(
+        core.query_local_gpu_direct_prefix(&query).await.unwrap(),
+        Some(0)
+    );
+    let hashes: Vec<_> = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
+        .into_iter()
+        .map(|hash| hash.0)
+        .collect();
+    let stored = store_event(1, 0, 2, &[], &hashes, StorageTier::GpuDirect);
+    let external = match &stored.event.data {
+        crate::protocols::KvCacheEventData::Stored(data) => {
+            data.blocks.iter().map(|block| block.block_hash).collect()
+        }
+        _ => unreachable!(),
+    };
+    entry.indexer.apply_event_routed(stored).await.unwrap();
+    entry
+        .indexer
+        .apply_event_routed(crate::protocols::RouterEvent::with_storage_tier(
+            1,
+            crate::protocols::KvCacheEvent {
+                event_id: 3,
+                dp_rank: 0,
+                data: crate::protocols::KvCacheEventData::Removed(
+                    crate::protocols::KvCacheRemoveData {
+                        block_hashes: external,
+                    },
+                ),
+            },
+            StorageTier::Device,
+        ))
+        .await
+        .unwrap();
+    entry.indexer.dump_events().await.unwrap();
+    assert_eq!(
+        core.query_local_gpu_direct_prefix(&query).await.unwrap(),
+        Some(2)
+    );
+    let device = entry
+        .indexer
+        .find_primary_match_details(hashes.into_iter().map(LocalBlockHash).collect())
+        .await
+        .unwrap();
+    assert!(!device.overlap_scores.scores.contains_key(&query.target));
+    query.deadline = Instant::now();
+    assert_eq!(
+        core.query_local_gpu_direct_prefix(&query).await.unwrap(),
+        None
+    );
+    assert!(core.reservation_index.read().is_empty());
 }
