@@ -47,6 +47,7 @@ def test_native_scoring_stream_is_not_token_generation(tmp_path):
         {"duration": 1801},
         {"duration": float("nan")},
         {"concurrency": 0},
+        {"concurrency": 129},
         {"rate": 0},
         {"warmup": -1},
         {"requests": 0},
@@ -58,6 +59,12 @@ def test_unsafe_specs_rejected(kwargs):
     values = {"dialect": "oai", "url": "http://localhost:8000", "model": "m", **kwargs}
     with pytest.raises(ValueError):
         RunSpec(**values)
+
+
+@pytest.mark.parametrize("concurrency", [16, 32, 64, 128])
+def test_authorized_extended_screening_concurrency(concurrency):
+    spec = RunSpec("oai", "http://localhost:8000", "m", concurrency=concurrency)
+    assert spec.concurrency == concurrency
 
 
 def test_sustained_load_is_open_loop(tmp_path):

@@ -56,10 +56,10 @@ class RunSpec:
             raise ValueError("use a local HTTP base URL without credentials or path")
         if self.dialect not in ENDPOINTS or not self.model.strip():
             raise ValueError("unsupported dialect or empty model")
-        if not 1 <= self.concurrency <= 8 or (
+        if not 1 <= self.concurrency <= 128 or (
             self.requests is not None and self.requests < 1
         ):
-            raise ValueError("concurrency must be 1..8 and request count positive")
+            raise ValueError("concurrency must be 1..128 and request count positive")
         for name, value, low, high in (
             ("duration", self.duration, 0.01, 1800),
             ("warmup", self.warmup, 0, 30),

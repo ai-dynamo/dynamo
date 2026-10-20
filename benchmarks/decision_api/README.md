@@ -9,7 +9,7 @@ This external AIPerf plugin measures structured decision requests without treati
 
 Accuracy evaluation, Decision Index campaigns, Kubernetes, replica scaling, and additional models are outside this instrument's initial campaign. CPU tests establish instrument behavior; they do not establish GPU performance or fresh numerical parity.
 
-This is a Dynamo-owned external-plugin prototype for [AIPerf issue #1536](https://github.com/ai-dynamo/aiperf/issues/1536), tracked with the [Decision API umbrella](https://github.com/ai-dynamo/dynamo/issues/15843); it does not modify upstream AIPerf core. Unit tests and synthetic HTTP/SSE integration run independently of Dynamo's serving APIs. Actual Dynamo `/v1/decisions`, `/v1/systemone`, and scoring `/generate` integration requires the unmerged serving implementation stack ending at [qualification PR #15857](https://github.com/ai-dynamo/dynamo/pull/15857). Until that stack lands, use its serving checkout rather than expecting those routes on `main`.
+This is a Dynamo-owned external-plugin prototype for [AIPerf issue #1536](https://github.com/ai-dynamo/aiperf/issues/1536), tracked with the [Decision API roadmap #15961](https://github.com/ai-dynamo/dynamo/issues/15961); it does not modify upstream AIPerf core. Unit tests and synthetic HTTP/SSE integration run independently of Dynamo's serving APIs. Actual Dynamo `/v1/decisions`, `/v1/systemone`, and scoring `/generate` integration requires the unmerged serving implementation stack ending at [qualification PR #15857](https://github.com/ai-dynamo/dynamo/pull/15857). Until that stack lands, use its serving checkout rather than expecting those routes on `main`.
 
 ## Contracts
 
@@ -125,10 +125,10 @@ For native scoring use `base.native_score.json` and `--dialect native_score`. Th
 
 ## Campaign order and stop gates
 
-Run configurations sequentially. Audit every point before advancing. The campaign module emits a schedule but deliberately does not launch an unattended GPU sweep or infer live safety observations.
+Run configurations sequentially. Audit every point before advancing. The campaign module emits a schedule but deliberately does not launch an unattended GPU sweep or infer live safety observations. The runner also permits explicitly selected concurrency up to 128; this does not extend the default screening plan or authorize a GPU campaign.
 
 1. Verify CPU instrumentation and fresh GPU schema/numerical parity.
-2. Run the single-question serial baseline against direct SGLang `/generate`, Dynamo `/generate`, and all three public contracts. Store cold-start observations separately from warmed-runtime samples.
+2. Run the single-question serial baseline against direct SGLang `/generate`, Dynamo `/generate`, and both public contracts. Store cold-start observations separately from warmed-runtime samples.
 3. Run supported shape variations one factor at a time.
 4. Screen concurrency 1, 2, 4, and 8 with at most four requests per concurrency slot. These are screening observations, not tail-latency evidence.
 5. Select screened capacity only from audited, error-free points using `screen_capacity`. Supply the resulting screening report to `campaign --screening-report REPORT.json` to produce 25%, 50%, 75%, 100%, and 125% open-loop rate points. Each has 30 seconds of excluded warmup and 300 seconds of profiling.
