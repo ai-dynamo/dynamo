@@ -453,12 +453,16 @@ fn otlp_tls_material_for(
     })
 }
 
-/// Returns `None` when nothing needs to be overridden — the exporter still
-/// negotiates TLS against the embedded webpki roots on its own.
+/// Returns a `ClientTlsConfig` backed by webpki roots (with any custom CA or
+/// client identity layered on top) for `https://` endpoints, and `None` for
+/// plaintext `http://`. The OTLP tonic builder only installs TLS when a
+/// config is explicitly supplied, so we attach one even when the user has
+/// provided no overrides; otherwise an `https://` endpoint fails to connect.
 fn build_tonic_tls_config(
+    endpoint: &str,
     material: &OtlpTlsMaterial,
 ) -> Result<Option<tonic::transport::ClientTlsConfig>, OtlpTlsError> {
-    if material.ca_pem.is_none() && material.client_identity.is_none() {
+    if !endpoint.starts_with("https://") {
         return Ok(None);
     }
     let mut config = tonic::transport::ClientTlsConfig::new().with_webpki_roots();
@@ -533,8 +537,6 @@ fn build_otlp_http_client(
         })
 }
 
-/// Build the OTLP span exporter for the selected protocol, with any TLS or
-/// mTLS overrides from `OTEL_EXPORTER_OTLP_{,TRACES_}*` applied.
 fn build_span_exporter(
     protocol: OtlpProtocol,
     endpoint: &str,
@@ -553,7 +555,7 @@ fn build_span_exporter(
                 .with_metadata(otlp_metadata_for(
                     env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_HEADERS,
                 ));
-            if let Some(tls) = build_tonic_tls_config(&tls_material)? {
+            if let Some(tls) = build_tonic_tls_config(endpoint, &tls_material)? {
                 builder = builder.with_tls_config(tls);
             }
             builder.build()
@@ -573,8 +575,6 @@ fn build_span_exporter(
     }
 }
 
-/// Build the OTLP log exporter for the selected protocol, with any TLS or
-/// mTLS overrides from `OTEL_EXPORTER_OTLP_{,LOGS_}*` applied.
 fn build_log_exporter(
     protocol: OtlpProtocol,
     endpoint: &str,
@@ -593,7 +593,7 @@ fn build_log_exporter(
                 .with_metadata(otlp_metadata_for(
                     env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_HEADERS,
                 ));
-            if let Some(tls) = build_tonic_tls_config(&tls_material)? {
+            if let Some(tls) = build_tonic_tls_config(endpoint, &tls_material)? {
                 builder = builder.with_tls_config(tls);
             }
             builder.build()
@@ -3777,7 +3777,18 @@ pub mod tests {
             .unwrap();
             assert!(traces.ca_pem.is_none());
             assert!(traces.client_identity.is_none());
-            assert!(build_tonic_tls_config(&traces).unwrap().is_none());
+            // Plain http:// stays plaintext — no TLS override.
+            assert!(
+                build_tonic_tls_config("http://localhost:4317", &traces)
+                    .unwrap()
+                    .is_none()
+            );
+            // But https:// always gets webpki-root TLS even without user material.
+            assert!(
+                build_tonic_tls_config("https://collector:4317", &traces)
+                    .unwrap()
+                    .is_some()
+            );
             assert!(
                 build_otlp_http_client(&traces, env_logging::otlp::OTEL_EXPORTER_OTLP_TIMEOUT)
                     .unwrap()
@@ -3913,15 +3924,21 @@ pub mod tests {
                 )
                 .unwrap();
 
-                let tls = build_tonic_tls_config(&material)
+                let tls = build_tonic_tls_config("https://collector:4317", &material)
                     .unwrap()
-                    .expect("ClientTlsConfig expected when CA and identity are present");
+                    .expect("ClientTlsConfig expected for https:// endpoint");
                 // Smoke test via Debug formatting because tonic does not expose
                 // identity/cert fields publicly.
                 let debug = format!("{tls:?}");
+                // Both halves must be observable — dropping either ca_certificate
+                // or identity from build_tonic_tls_config must fail this test.
                 assert!(
                     debug.contains("identity: Some"),
                     "expect a set identity in {debug}"
+                );
+                assert!(
+                    debug.contains("certs: [Certificate"),
+                    "expect a non-empty CA bundle in {debug}"
                 );
             },
         );
