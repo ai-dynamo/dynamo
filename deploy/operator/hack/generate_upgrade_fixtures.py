@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Validate rolling history or capture the current operator before its minor bump."""
+"""Validate rolling history or capture a pinned release operator."""
 
 import argparse
 import hashlib
@@ -18,6 +18,94 @@ ROOT = OPERATOR.parents[1]
 FIXTURES = OPERATOR / "internal/controller/testdata/upgrade"
 CHART = "deploy/helm/charts/platform/components/operator/Chart.yaml"
 MARKER = "deploy/operator/internal/controller/testdata/upgrade/RECONCILED_VERSION"
+
+
+# The reviewed harness may be carried to a release checkout; production inputs may not.
+CAPTURE_PATHS = [
+    "deploy/operator",
+    "deploy/helm/charts/platform",
+    ":(exclude)deploy/operator/hack",
+    ":(exclude)deploy/operator/Makefile",
+    ":(exclude)deploy/operator/internal/testing",
+    ":(exclude)deploy/operator/internal/controller/testdata",
+    ":(exclude,glob)**/*_test.go",
+    ":(exclude,glob)**/README*",
+    ":(exclude,glob)**/AGENTS.md",
+    ":(exclude,glob)**/CLAUDE.md",
+]
+
+
+def capture_source(current, release_tag=None, candidate_sha=None):
+    if bool(release_tag) == bool(candidate_sha):
+        raise ValueError(
+            "Select exactly one released --release-tag or provisional --candidate-sha"
+        )
+    if release_tag:
+        if not re.fullmatch(r"v\d+\.\d+\.\d+", release_tag):
+            raise ValueError("Use a published stable release tag such as v1.6.0")
+        ref = f"refs/tags/{release_tag}"
+    else:
+        if not re.fullmatch(r"[0-9a-f]{40}", candidate_sha):
+            raise ValueError("--candidate-sha requires a full immutable commit SHA")
+        ref = candidate_sha
+    revision = subprocess.check_output(
+        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=ROOT, text=True
+    ).strip()
+    version = app_version(
+        subprocess.check_output(
+            ["git", "show", f"{revision}:{CHART}"], cwd=ROOT, text=True
+        )
+    )
+    if version != current or (release_tag and release_tag != f"v{version}"):
+        raise ValueError("Capture source must match the checkout's operator appVersion")
+    changed = subprocess.check_output(
+        ["git", "diff", "--name-only", revision, "--", *CAPTURE_PATHS],
+        cwd=ROOT,
+        text=True,
+    )
+    untracked = subprocess.check_output(
+        ["git", "ls-files", "--others", "--exclude-standard", "--", *CAPTURE_PATHS],
+        cwd=ROOT,
+        text=True,
+    )
+    if changed.strip() or untracked.strip():
+        raise ValueError(
+            "Capture production tree differs from the selected release source: "
+            + changed
+            + untracked
+        )
+    if release_tag:
+        release = json.loads(
+            subprocess.check_output(
+                ["gh", "api", f"repos/ai-dynamo/dynamo/releases/tags/{release_tag}"],
+                cwd=ROOT,
+                text=True,
+                timeout=30,
+            )
+        )
+        official = json.loads(
+            subprocess.check_output(
+                ["gh", "api", f"repos/ai-dynamo/dynamo/commits/{release_tag}"],
+                cwd=ROOT,
+                text=True,
+                timeout=30,
+            )
+        )
+        if (
+            release["draft"]
+            or release["prerelease"]
+            or not release["published_at"]
+            or release["tag_name"] != release_tag
+            or official["sha"] != revision
+        ):
+            raise ValueError(
+                "The tag must identify a published stable upstream release"
+            )
+    return {
+        "sourceKind": "release-tag" if release_tag else "release-candidate",
+        "sourceRef": release_tag or candidate_sha,
+        "sourceRevision": revision,
+    }
 
 
 def app_version(chart):
@@ -39,7 +127,7 @@ def validate_versions(current, reconciled, previous=None):
     old_major, old_number = minor(reconciled)
     if major != old_major or number - old_number not in (0, 1):
         raise ValueError(
-            "Revert the premature appVersion bump, run clustertest-upgrade-fixtures-regen with the previous operator, commit the history, then reapply the bump"
+            "Revert the premature appVersion bump, run clustertest-upgrade-fixtures-regen UPGRADE_RELEASE_TAG=vN.x.y in the selected released operator tree, commit the history, then reapply the bump"
         )
     if (
         previous
@@ -50,7 +138,7 @@ def validate_versions(current, reconciled, previous=None):
         )
     ):
         raise ValueError(
-            "A minor bump requires history captured by the immediately previous operator; revert the bump and run clustertest-upgrade-fixtures-regen first. Skipped-minor and major bumps are unsupported"
+            "A minor bump requires history captured by the immediately previous operator; revert the bump and capture the published predecessor tag with clustertest-upgrade-fixtures-regen first. Skipped-minor and major bumps are unsupported"
         )
 
 
@@ -91,6 +179,23 @@ def check(base=None):
     if previous and minor(previous) != minor(current):
         require_complete_matrix()
     lock = json.loads((FIXTURES / "history.lock.json").read_text())
+    # The original bootstrap predates sourceKind; only its exact pinned inventory is exempt.
+    if "sourceKind" not in lock:
+        bootstrap = json.loads((FIXTURES / "bootstrap.json").read_text())
+        if lock["inputs"] != bootstrap["inputs"] or lock["sourceRevision"] != bootstrap[
+            "releases"
+        ].get(reconciled):
+            raise ValueError(
+                "Non-bootstrap history requires explicit released-tag provenance"
+            )
+    if "sourceKind" in lock and (
+        lock["sourceKind"] != "release-tag"
+        or lock.get("sourceRef") != f"v{reconciled}"
+        or not re.fullmatch(r"[0-9a-f]{40}", lock.get("sourceRevision", ""))
+    ):
+        raise ValueError(
+            "Published history requires released-tag provenance, not a candidate capture"
+        )
     if lock["reconciledVersion"] != reconciled:
         raise ValueError("History provenance and RECONCILED_VERSION disagree")
     inputs = {
@@ -174,7 +279,7 @@ def write_golden(path, objects, latest=False):
     )
 
 
-def regenerate():
+def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
     import yaml
 
     current, reconciled = check()
@@ -183,9 +288,21 @@ def regenerate():
         raise ValueError(
             "History is already reconciled by this minor; do not advance it twice"
         )
+    source = capture_source(current, release_tag, candidate_sha)
+    if candidate_sha:
+        if (
+            candidate_output is None
+            or Path(candidate_output).exists()
+            or Path(candidate_output).resolve().is_relative_to(FIXTURES.resolve())
+        ):
+            raise ValueError(
+                "Candidate capture requires a new --candidate-output directory outside the fixture tree"
+            )
+    elif candidate_output is not None:
+        raise ValueError("--candidate-output is only valid with --candidate-sha")
     with tempfile.TemporaryDirectory(prefix="upgrade-capture-") as temporary:
         capture = Path(temporary)
-        env = dict(os.environ, DYNAMO_UPGRADE_CAPTURE_DIR=str(capture))
+        env = dict(os.environ, GOWORK="off", DYNAMO_UPGRADE_CAPTURE_DIR=str(capture))
         subprocess.run(
             [
                 "go",
@@ -216,6 +333,18 @@ def regenerate():
             if not captured.is_file():
                 raise ValueError(f"Capture incomplete: {relative}")
             captures[relative] = captured
+        if candidate_sha:
+            (capture / "capture-source.json").write_text(
+                json.dumps(
+                    {"operatorVersion": current, **source}, indent=2, sort_keys=True
+                )
+                + "\n"
+            )
+            shutil.copytree(capture, candidate_output)
+            print(
+                "Provisional candidate capture saved; history and RECONCILED_VERSION are unchanged"
+            )
+            return
         # Publish only after every scenario, golden and independent safety check passed.
         backup = FIXTURES.with_name(".upgrade-backup")
         if backup.exists():
@@ -236,16 +365,7 @@ def regenerate():
                     destination.with_name("output.yaml"),
                     list(yaml.safe_load_all(captured.read_text())),
                 )
-            for original in fixture_inputs("latest"):
-                write_golden(
-                    stage / original.relative_to(FIXTURES).with_name("output.yaml"),
-                    list(
-                        yaml.safe_load_all(
-                            (capture / original.relative_to(FIXTURES)).read_text()
-                        )
-                    ),
-                    latest=True,
-                )
+            # Latest describes the development tree; release capture never rewrites it.
             namespaces = set()
             for historical in list((stage / "history").rglob("input.yaml")) + list(
                 (stage / "latest").rglob("input.yaml")
@@ -263,9 +383,7 @@ def regenerate():
                     raise ValueError(f"Non-concrete capture: {historical}")
             lock = {
                 "reconciledVersion": current,
-                "sourceRevision": subprocess.check_output(
-                    ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-                ).strip(),
+                **source,
                 "inputs": {
                     str(p.relative_to(stage)): digest(p)
                     for p in (stage / "history").rglob("input.yaml")
@@ -295,14 +413,30 @@ if __name__ == "__main__":
     parser.add_argument(
         "--base", help="Base git revision for the minor-bump smoke check"
     )
+    sources = parser.add_mutually_exclusive_group()
+    sources.add_argument(
+        "--release-tag", help="Published stable upstream tag for formal history"
+    )
+    sources.add_argument(
+        "--candidate-sha",
+        help="Full provisional release-candidate SHA; does not publish history",
+    )
+    parser.add_argument(
+        "--candidate-output", type=Path, help="New directory for provisional captures"
+    )
     args = parser.parse_args()
     try:
         if args.regenerate:
-            regenerate()
+            regenerate(args.release_tag, args.candidate_sha, args.candidate_output)
         elif args.check_release_matrix:
             check(args.base)
             require_complete_matrix()
         else:
             check(args.base)
-    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+    except (
+        ValueError,
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ) as error:
         raise SystemExit(str(error)) from error

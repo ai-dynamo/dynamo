@@ -23,7 +23,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-const upgradePodCliqueSetKind = "PodCliqueSet"
+// Keep fixture kind names independent of helpers added after the release cut.
+const (
+	upgradePodCliqueSetKind          = "PodCliqueSet"
+	upgradeDynamoGraphDeploymentKind = "DynamoGraphDeployment"
+)
 
 // Output-only metadata can be reviewed in goldens; generation selection and the
 // effective Grove pod templates are checked independently against historical state.
@@ -50,7 +54,7 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 		return fmt.Errorf("active workload inventory changed")
 	}
 	for _, old := range before {
-		if old.GetKind() != upgradePodCliqueSetKind && old.GetKind() != dynamoGraphDeploymentKind {
+		if old.GetKind() != upgradePodCliqueSetKind && old.GetKind() != upgradeDynamoGraphDeploymentKind {
 			continue
 		}
 		current, ok := index[old.GetKind()+"/"+old.GetName()]
@@ -58,7 +62,7 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 			return fmt.Errorf("active identity changed: %s/%s", old.GetKind(), old.GetName())
 		}
 		switch old.GetKind() {
-		case dynamoGraphDeploymentKind:
+		case upgradeDynamoGraphDeploymentKind:
 			const origin = "nvidia.com/dynamo-operator-origin-version"
 			oldOrigin, oldExists := old.GetAnnotations()[origin]
 			newOrigin, newExists := current.GetAnnotations()[origin]
@@ -184,7 +188,7 @@ func upgradeLatestVariables(t *testing.T, path, version string) golden.Variables
 	// Bind the version-dependent worker identity using the reviewed DGD input.
 	found := false
 	for _, object := range objects {
-		if object.GetKind() != dynamoGraphDeploymentKind {
+		if object.GetKind() != upgradeDynamoGraphDeploymentKind {
 			continue
 		}
 		dgd := api.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{

@@ -12,6 +12,9 @@ CLUSTERTEST_TIMEOUT ?= 30m
 CLUSTERTEST_KIND_NAME ?= dynamo-clustertest-v136
 CLUSTERTEST_CONTEXT = kind-$(CLUSTERTEST_KIND_NAME)
 CLUSTERTEST_REUSE ?= true
+UPGRADE_RELEASE_TAG ?=
+UPGRADE_CANDIDATE_SHA ?=
+UPGRADE_CANDIDATE_OUTPUT ?=
 CLUSTERTEST_OWNERSHIP_FILE ?=
 CLUSTERTEST_KUBECONFIG ?= $(LOCALBIN)/clustertest.kubeconfig
 CLUSTERTEST_NODE_IMAGE ?= kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
@@ -711,10 +714,10 @@ clustertest-upgrade-contract-in-cluster: ## Replay in an explicitly selected, ex
 	go test -tags='clustertest upgradecontract' ./internal/controller -run '^TestClusterOperatorUpgrade$$' -count=1 -v -timeout=15m
 
 .PHONY: clustertest-upgrade-fixtures-regen clustertest-upgrade-fixtures-regen-in-cluster
-clustertest-upgrade-fixtures-regen: kind kubectl ## Capture before a minor bump, using a fresh exclusive Kind cluster.
+clustertest-upgrade-fixtures-regen: kind kubectl ## Capture a pinned release tree in a fresh exclusive Kind cluster.
 	python3 hack/generate_upgrade_fixtures.py --check-release-matrix
 	KIND_BIN='$(KIND)' bash hack/run_upgrade_clustertest.sh clustertest-upgrade-fixtures-regen-in-cluster
 
-clustertest-upgrade-fixtures-regen-in-cluster: ## Capture fixtures with the explicitly selected current operator.
+clustertest-upgrade-fixtures-regen-in-cluster: ## Capture the selected released tag, or save provisional candidate evidence.
 	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "DYNAMO_CLUSTERTEST_CONTEXT is required"; exit 1; }
-	python3 hack/generate_upgrade_fixtures.py --regenerate
+	python3 hack/generate_upgrade_fixtures.py --regenerate $(if $(UPGRADE_RELEASE_TAG),--release-tag "$(UPGRADE_RELEASE_TAG)") $(if $(UPGRADE_CANDIDATE_SHA),--candidate-sha "$(UPGRADE_CANDIDATE_SHA)") $(if $(UPGRADE_CANDIDATE_OUTPUT),--candidate-output "$(UPGRADE_CANDIDATE_OUTPUT)")

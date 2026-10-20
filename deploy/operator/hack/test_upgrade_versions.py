@@ -32,6 +32,7 @@ class UpgradeVersionTest(unittest.TestCase):
     def test_premature_skipped_and_major_bumps_fail(self):
         for current, reconciled, previous in [
             ("1.7.0", "1.5.0", "1.6.0"),
+            ("1.7.0", "1.5.0", None),
             ("1.8.0", "1.7.0", "1.6.0"),
             ("2.0.0", "1.9.0", "1.9.0"),
         ]:
@@ -151,7 +152,11 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                     }
                 )
             )
-            path.with_name("output.yaml").write_text("placeholder\n")
+            fixtures.write_golden(
+                path.with_name("output.yaml"),
+                [yaml.safe_load(path.read_text())],
+                latest=True,
+            )
 
         # Exercise publication and revalidation across two versions, including every required path.
         with (
@@ -159,7 +164,13 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                 fixtures.subprocess, "run", side_effect=self.capture_api_outputs
             ),
             patch.object(
-                fixtures.subprocess, "check_output", return_value="source-sha"
+                fixtures,
+                "capture_source",
+                side_effect=lambda current, *args: {
+                    "sourceKind": "release-tag",
+                    "sourceRef": f"v{current}",
+                    "sourceRevision": "a" * 40,
+                },
             ),
         ):
             fixtures.regenerate()
@@ -206,6 +217,42 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                 "1.6.0",
             )
 
+    def test_candidate_capture_does_not_publish_history(self):
+        (self.tree / "required-matrix.json").write_text(
+            json.dumps({"requiredScenarios": ["sglang-1.5"]})
+        )
+        before = {
+            p.relative_to(self.tree): p.read_bytes()
+            for p in self.tree.rglob("*")
+            if p.is_file()
+        }
+        source = {
+            "sourceKind": "release-candidate",
+            "sourceRef": "a" * 40,
+            "sourceRevision": "a" * 40,
+        }
+        with (
+            patch.object(fixtures, "capture_source", return_value=source),
+            patch.object(
+                fixtures.subprocess, "run", side_effect=self.capture_api_outputs
+            ),
+        ):
+            output = self.root / "candidate"
+            fixtures.regenerate(candidate_sha="a" * 40, candidate_output=output)
+        self.assertEqual(
+            before,
+            {
+                p.relative_to(self.tree): p.read_bytes()
+                for p in self.tree.rglob("*")
+                if p.is_file()
+            },
+        )
+        self.assertEqual(
+            json.loads((output / "capture-source.json").read_text())["sourceKind"],
+            "release-candidate",
+        )
+        self.assertTrue((output / "history/1.6.0/sglang-1.5/input.yaml").is_file())
+
     def test_failed_capture_does_not_publish_history(self):
         (self.tree / "required-matrix.json").write_text(
             json.dumps({"requiredScenarios": ["sglang-1.5"]})
@@ -216,6 +263,7 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
             if p.is_file()
         }
         with (
+            patch.object(fixtures, "capture_source", return_value={}),
             patch.object(
                 fixtures.subprocess,
                 "run",

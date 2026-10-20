@@ -122,17 +122,70 @@ graph after 1.5 has persisted it. Normal CI does not fetch or compile old operat
 
 ## Release boundary
 
-While the chart still reports version N, run:
+`history/N` must come from an actual published stable upstream tag for operator N,
+not from `main` merely because its chart still reports N. `main` may already contain
+post-cut changes that no N user runs. The next-minor bump on `main` remains blocked
+until the released predecessor history has been captured and committed.
+
+Use a dedicated checkout of the selected release tag. Fetch the tag from upstream,
+and carry only the reviewed test harness and fixture inventory into that checkout;
+keep its production operator code, API types, CRDs, chart and Go dependencies at
+the selected release revision. For example, after `v1.6.0` is published:
 
 ```bash
-make -C deploy/operator clustertest-upgrade-fixtures-regen
+harness=$(git rev-parse HEAD)  # reviewed fixture/harness commit, including the complete matrix
+release_tree=../dynamo-release-capture
+git fetch origin tag v1.6.0
+git worktree add --detach "$release_tree" v1.6.0
+git -C "$release_tree" restore --source="$harness" -- \
+  deploy/operator/Makefile deploy/operator/hack \
+  deploy/operator/internal/controller/clusterenv_helpers_test.go \
+  deploy/operator/internal/controller/clusterenv_test.go \
+  deploy/operator/internal/controller/clusterenv_main_test.go \
+  deploy/operator/internal/controller/upgrade_clustertest_test.go \
+  deploy/operator/internal/controller/upgrade_contract_test.go \
+  deploy/operator/internal/controller/testdata/upgrade \
+  deploy/operator/internal/testing/clusterenv \
+  deploy/operator/internal/testing/golden
+make -C "$release_tree/deploy/operator" clustertest-upgrade-fixtures-regen \
+  UPGRADE_RELEASE_TAG=v1.6.0
 ```
 
-The command validates the predecessor marker, reconciles every historical and
-latest scenario with the current checkout, requires both checks to pass, stages
-concrete API captures, promotes latest to history/N, and publishes the new fixture
-tree with `RECONCILED_VERSION=N`. Failure leaves the committed history and marker
-unchanged. Regeneration at the same minor is rejected.
+Formal capture requires `gh` access to the upstream GitHub repository. It verifies
+that the tag is a published, non-draft, non-prerelease GitHub release and resolves
+to the same commit as the local tag. Before running Go, it rejects a mismatched
+chart version, tracked production changes (including committed post-cut main
+changes), and untracked production files. Only test/harness paths and documentation
+are excluded from this source comparison; there are no production lowering adapters.
+The selected module runs with `GOWORK=off`.
+
+The command reconciles history and admits/promotes the latest scenario inputs using
+the selected release's production controllers. All goldens and independent safety
+assertions must pass. If a release differs from the development goldens, review
+those differences in the capture checkout; never relax the historical safety assertions.
+On success, commit/copy back **only** `history/`, `history.lock.json` and
+`RECONCILED_VERSION` to the development tree, then run its ordinary replay against
+the new history. Review any candidate-output golden differences there separately.
+`latest` inputs and goldens continue to describe development lowering and are not
+rewritten by release capture. The lock records `sourceKind=release-tag`, the tag
+and its full commit SHA. Failure does not publish history or advance the marker.
+Regeneration at the same minor is rejected.
+
+During release testing, a fixed full candidate SHA may be used instead of a tag.
+Prepare the checkout and reviewed harness in the same way, then run:
+
+```bash
+make -C "$release_tree/deploy/operator" clustertest-upgrade-fixtures-regen \
+  UPGRADE_CANDIDATE_SHA=<full-40-character-candidate-sha> \
+  UPGRADE_CANDIDATE_OUTPUT=/absolute/path/to/new-candidate-evidence
+```
+
+Candidate evidence is provisional: `capture-source.json` explicitly records
+`sourceKind=release-candidate` and the SHA. This mode writes to a new directory
+outside the fixture tree and never changes committed history or
+`RECONCILED_VERSION`. Once the stable tag is published, capture it from the same
+unchanged predecessor inputs for the formal release boundary. Candidates cannot
+silently become the published baseline. Ordinary checks require no GitHub access.
 
 Ordinary checks discover every available scenario recursively. The required
 release matrix is declared in `required-matrix.json`: 24 component/Grove cases
@@ -144,7 +197,7 @@ broader coverage, but cannot advance the release boundary alone. Keep #16650
 open for the complete matrix, missing-origin history and rollout safety across
 all workload programs.
 
-After that commit, bump the operator subchart's **appVersion** to N+1. The check
+After the released-source capture commit is brought back to `main`, bump the operator subchart's **appVersion** to N+1. The check
 rejects premature, skipped-minor and major bumps. CI checks the PR/merge-group base
 version as well as current consistency; pre-commit runs the inexpensive local
 consistency check. Patch/prerelease changes do not add history generations.
