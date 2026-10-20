@@ -3075,6 +3075,16 @@ def test_parallel_tool_calls_survive_split_start_marker(tokenizer):
     )
 
 
+@pytest.mark.parametrize("opener_chars", range(1, len("<tool_call>")))
+def test_tool_call_opener_split_at_reasoning_end(tokenizer, opener_chars):
+    """The step that ends reasoning can stop partway through the opener."""
+    split = _GLM_TWO_CALLS.index("</think>") + len("</think>") + opener_chars
+    _assert_two_glm_calls_streamed(
+        tokenizer,
+        [(_GLM_TWO_CALLS[:split], []), (_GLM_TWO_CALLS[split:], [])],
+    )
+
+
 class TestControlMarkerStrip:
     """Unconsumed special tokens must not reach the client.
 
