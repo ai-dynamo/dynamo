@@ -29,6 +29,7 @@ from tests.utils.managed_process import ManagedProcess
 from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.port_utils import (
     ServicePorts,
+    allocate_contiguous_ports,
     allocate_port,
     allocate_ports,
     deallocate_port,
@@ -1319,7 +1320,10 @@ def dynamo_dynamic_ports(
         all_ports.append(frontend_port)
         system_port_list = allocate_ports(num_system_ports, DynamoPortRange.SERVE.value)
         all_ports.extend(system_port_list)
-        kv_event_ports = allocate_ports(num_system_ports, DynamoPortRange.SERVE.value)
+        # One block, so a data-parallel engine can publish on the first port + rank.
+        kv_event_ports = allocate_contiguous_ports(
+            1, num_system_ports, DynamoPortRange.SERVE.value
+        )
         all_ports.extend(kv_event_ports)
         fpm_port = allocate_port(DynamoPortRange.FPM.value)
         all_ports.append(fpm_port)
