@@ -31,7 +31,7 @@ gRPC server. See the [sidecar overview](../README.md) for installation.
 |---------|-----------|
 | Aggregated | Yes |
 | Disaggregated | Yes |
-| KV routing | yes |
+| KV routing | Yes |
 
 For child-agent context affinity, enable frontend session affinity and
 TensorRT-LLM conversation affinity, then set the same private

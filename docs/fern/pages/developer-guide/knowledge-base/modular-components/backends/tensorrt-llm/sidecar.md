@@ -30,7 +30,7 @@ for the architecture.
 |---|---|
 | Aggregated | Yes |
 | Disaggregated | Yes |
-| KV routing | yes |
+| KV routing | Yes |
 
 ## Launch Locally
 
