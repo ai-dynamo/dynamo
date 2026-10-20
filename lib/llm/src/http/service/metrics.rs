@@ -594,8 +594,6 @@ fn parse_bucket_list(value: &str) -> Option<Vec<f64>> {
     Some(buckets)
 }
 
-/// Request duration buckets, configurable via `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}`.
-///
 /// Factor-of-two edges from 0.031 s to 4100 s. The 2 s to 510 s edges are the ones
 /// earlier releases exported, so existing `le` series continue.
 fn request_duration_buckets(env: EnvLookup<'_>) -> Vec<f64> {
@@ -2959,8 +2957,6 @@ mod tests {
 
     #[test]
     fn request_duration_default_buckets_resolve_fast_and_slow_requests() {
-        // The default used to start at 2s and stop at 510s. Requests averaging 150ms read
-        // p50 1.0s and p90 1.8s, and requests longer than 510s read p99 510s.
         let registry = Registry::new();
         let metrics = Metrics::build(None, &fake_env(&[]));
         metrics.register(&registry).unwrap();
@@ -3023,9 +3019,7 @@ mod tests {
 
     #[test]
     fn sequence_length_default_buckets_cover_long_contexts() {
-        // Input stopped at 130000 tokens, so every prompt to a 1M-context model above that
-        // read as 130000. Output stopped at 32000, below long reasoning outputs.
-        // Input keeps every previous edge; output now shares input's edges up to 130000.
+        // Input keeps every edge earlier releases exported; output shares input's edges.
         assert_eq!(
             input_sequence_buckets(&fake_env(&[])),
             vec![

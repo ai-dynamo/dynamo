@@ -602,7 +602,7 @@ export DYN_METRICS_OUTPUT_SEQUENCE_MAX=262144
 export DYN_METRICS_OUTPUT_SEQUENCE_COUNT=13
 ```
 
-Rounding can move the top edge either way, so pick a `MAX` that is already two significant figures if you need an exact ceiling. Prometheus buckets are inclusive, so `MAX=123` exports `le=120` and only observations *greater than* 120 and up to 123 fall into `+Inf` — a value of exactly 120 still lands in the `le=120` bucket. `MAX=262144` exports `le=260000`. Two of the defaults above are affected: request duration is set to `4096` but exports `4100`, and output sequence is set to `128000` but exports `130000`.
+Rounding can move the top edge either way, so pick a `MAX` that is already two significant figures if you need an exact ceiling. Prometheus buckets are inclusive, so `MAX=123` exports `le=120`: a value of exactly 120 still lands in the `le=120` bucket, and every observation above 120, including those up to 123, falls into `+Inf`. `MAX=262144` exports `le=260000`. Two of the defaults above are affected: request duration is set to `4096` but exports `4100`, and output sequence is set to `128000` but exports `130000`.
 
 `dynamo_frontend_cached_tokens` shares the input sequence buckets, so `DYN_METRICS_INPUT_SEQUENCE_*` changes both histograms.
 
