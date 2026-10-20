@@ -890,6 +890,12 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
     @pytest.mark.parametrize("chunk_size", [None, 1, 7])
     @pytest.mark.parametrize("answer_kind", ["tool", "quoted", "plain"])
     def test_muse_channel_handoff(self, answer_kind, chunk_size):
+        """Check Muse channel boundaries for complete responses and stream chunks.
+
+        A tool call after an answer preamble must produce a structured call.
+        Quoted tool syntax and plain answers must remain answer content.
+        The reasoning text must remain separate in each case.
+        """
         tool_header = "<|start|>assistant to=get_weather<|message|>"
         body = (
             '<atem:function_calls><atem:invoke name="get_weather">'
@@ -957,6 +963,7 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
         ] == expected_calls
 
     def test_no_parsers(self):
+        """Check that unset parser names produce no parsers."""
         tcp, rp = create_parsers(
             {}, tool_call_parser_name=None, reasoning_parser_name=None
         )

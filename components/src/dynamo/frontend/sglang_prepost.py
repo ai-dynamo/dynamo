@@ -315,6 +315,10 @@ def create_parsers(
     Required and named choices use the model-specific :class:`FunctionCallParser`
     when the effective guidance is a structural tag. Their JSON fallback keeps
     :class:`JsonArrayParser`. Automatic choices use :class:`FunctionCallParser`.
+
+    When the reasoning parser supports ``tool_call_parser_active``, set it
+    from the presence of a tool parser. This preserves Muse channel boundaries
+    for the tool parser.
     """
     if sglang_tools is None:
         sglang_tools = convert_tools(request.get("tools"))
