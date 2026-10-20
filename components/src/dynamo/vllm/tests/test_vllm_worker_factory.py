@@ -22,13 +22,13 @@ from dynamo.vllm.worker_factory import (
     SnapshotEngineSetupResult,
     WorkerFactory,
     _await_benchmark_then_restore_workers,
-    _DecodeWorkerLifecycle,
     _merge_benchmark_rank_results,
     _register_request_cache_metrics,
     _stop_worker_gc_policy,
     _sync_fpm_worker_id,
     _sync_fpm_worker_id_or_shutdown,
     _wait_and_load_benchmark,
+    _WorkerLifecycle,
 )
 
 pytestmark = [
@@ -114,14 +114,14 @@ def test_register_request_cache_metrics_includes_multimodal_image_loader():
     )
 
 
-def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
+def test_worker_lifecycle_cleanup_in_reverse_construction_order():
     calls = []
     shutdown_event = asyncio.Event()
     handler = Mock()
     handler.cleanup.side_effect = lambda: calls.append("handler")
     engine_client = Mock()
     engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
-    resources = _DecodeWorkerLifecycle(
+    resources = _WorkerLifecycle(
         engine_client=engine_client,
         vllm_config=SimpleNamespace(shutdown_timeout=7.0),
         handler=handler,
@@ -135,11 +135,11 @@ def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
     engine_client.shutdown.assert_called_once_with(timeout=7.0)
 
 
-def test_decode_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
+def test_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
     handler = Mock()
     handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
     engine_client = Mock()
-    resources = _DecodeWorkerLifecycle(
+    resources = _WorkerLifecycle(
         engine_client=engine_client,
         vllm_config=SimpleNamespace(shutdown_timeout=5.0),
         handler=handler,
@@ -151,14 +151,14 @@ def test_decode_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
 
 
-def test_decode_worker_lifecycle_chains_handler_and_engine_cleanup_failures():
+def test_worker_lifecycle_chains_handler_and_engine_cleanup_failures():
     handler_error = RuntimeError("handler cleanup failed")
     engine_error = RuntimeError("engine shutdown failed")
     handler = Mock()
     handler.cleanup.side_effect = handler_error
     engine_client = Mock()
     engine_client.shutdown.side_effect = engine_error
-    lifecycle = _DecodeWorkerLifecycle(
+    lifecycle = _WorkerLifecycle(
         engine_client=engine_client,
         vllm_config=SimpleNamespace(shutdown_timeout=5.0),
         handler=handler,
@@ -195,7 +195,7 @@ async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog)
 
     assert exc_info.value is startup_error
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
-    assert "Failed to clean up decode worker after an earlier failure" in caplog.text
+    assert "Failed to clean up worker after an earlier failure" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1294,7 +1294,7 @@ async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
 def _snapshot_config(scheduler_cls=InstrumentedScheduler) -> SimpleNamespace:
     """A restored ``VllmConfig`` whose snapshot captured ``scheduler_cls``.
 
-    ``shutdown_timeout`` is read by ``_DecodeWorkerLifecycle.cleanup()`` when a
+    ``shutdown_timeout`` is read by ``_WorkerLifecycle.cleanup()`` when a
     restore fails, so it has to be present on the decode path.
     """
     return SimpleNamespace(
@@ -1694,6 +1694,71 @@ async def test_failed_sync_fails_the_restore_before_registration_and_shuts_down_
 
     register.assert_not_awaited()
     _assert_not_served(endpoint)
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["serve_returns", "register_raises"])
+async def test_prefill_exit_shuts_down_the_engine_after_withdrawing_state_agent(
+    outcome: str, restore_path_stubs, monkeypatch
+):
+    """Every prefill exit shuts EngineCore down explicitly.
+
+    ``serve_returns`` is the SIGINT/SIGTERM path: ``runtime.shutdown()`` makes
+    the serve tasks return. EngineCore is a non-daemon child, so without the
+    explicit shutdown the process blocks at interpreter exit joining it.
+    """
+    calls: list[str] = []
+    state_agent_lifecycle = SimpleNamespace(
+        close=AsyncMock(side_effect=lambda: calls.append("state-agent"))
+    )
+    (engine_setup, _stat_logger), engine_client = _restore_snapshot_engine()
+    engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
+    handler = Mock(embedding_cache_manager=None)
+    handler.cleanup.side_effect = lambda: calls.append("handler")
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.PrefillWorkerHandler", Mock(return_value=handler)
+    )
+    startup_error = RuntimeError("prefill registration failed")
+    register = AsyncMock(
+        side_effect=startup_error if outcome == "register_raises" else None
+    )
+    factory = _make_factory(
+        state_agent_lifecycle=state_agent_lifecycle,
+        setup_vllm_engine_fn=Mock(return_value=engine_setup),
+        register_vllm_model_fn=register,
+    )
+    factory._maybe_create_failover_metrics = Mock(return_value=None)  # type: ignore[method-assign]
+    endpoint = _restored_endpoint()
+    endpoint.serve_endpoint = AsyncMock(return_value=None)
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+    config = _make_config(
+        disaggregation_mode=DisaggregationMode.PREFILL,
+        namespace="dyn",
+        component="prefill",
+        endpoint="generate",
+        model="m",
+        served_model_name="m",
+        enable_rl=False,
+        enable_multimodal=False,
+        frontend_decoding=False,
+        use_vllm_tokenizer=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+    )
+    shutdown_event = asyncio.Event()
+
+    if outcome == "register_raises":
+        with pytest.raises(RuntimeError) as exc_info:
+            await factory._create_prefill_worker(runtime, config, shutdown_event, [])
+        assert exc_info.value is startup_error
+        endpoint.serve_endpoint.assert_not_called()
+    else:
+        await factory._create_prefill_worker(runtime, config, shutdown_event, [])
+        endpoint.serve_endpoint.assert_awaited()
+
+    assert calls == ["state-agent", "handler", "engine"]
+    assert shutdown_event.is_set()
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
 
 
