@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 )
 
@@ -83,6 +84,8 @@ func projectSpec(in corev1.PodSpec) corev1.PodSpec {
 	return corev1.PodSpec{
 		// Topology and snapshot controllers require the assigned node.
 		NodeName: in.NodeName,
+		// Engine Group bootstrap rejects automatic, unfenced process restarts.
+		RestartPolicy: in.RestartPolicy,
 		// Model endpoint classification requires the main container's command
 		// and arguments.
 		Containers: projectContainers(in.Containers),
@@ -103,6 +106,11 @@ func projectContainers(in []corev1.Container) []corev1.Container {
 			Name:    in[i].Name,
 			Command: in[i].Command,
 			Args:    in[i].Args,
+		}
+
+		// Engine Group geometry needs only the GPU limit, not the complete resource specification.
+		if gpu, found := in[i].Resources.Limits[consts.KubeResourceGPUNvidia]; found {
+			out[i].Resources.Limits = corev1.ResourceList{consts.KubeResourceGPUNvidia: gpu}
 		}
 	}
 	return out
@@ -165,13 +173,15 @@ func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 		// Failover, DGDR diagnostics, and Recreate drain barriers require the
 		// lifecycle phase.
 		Phase: in.Phase,
+		// Engine Group control and verification calls address the primary Pod.
+		PodIP: in.PodIP,
 		// Model endpoint classification requires Ready; Snapshot-aware GMS
 		// replacement requires the public restore outcome.
 		Conditions: projectConditions(in.Conditions),
 		// DGDR diagnostics inspect container failures.
 		ContainerStatuses: projectContainerStatuses(in.ContainerStatuses),
 		// GMS Pod replacement also requires init-sidecar restart counts.
-		InitContainerStatuses: projectInitContainerStatuses(in.InitContainerStatuses),
+		InitContainerStatuses: projectContainerStatuses(in.InitContainerStatuses),
 	}
 }
 
@@ -201,18 +211,9 @@ func projectContainerStatuses(in []corev1.ContainerStatus) []corev1.ContainerSta
 	out := make([]corev1.ContainerStatus, len(in))
 	for i := range in {
 		out[i] = corev1.ContainerStatus{
-			Name:  in[i].Name,
-			State: projectContainerState(in[i].State),
-		}
-	}
-	return out
-}
-
-func projectInitContainerStatuses(in []corev1.ContainerStatus) []corev1.ContainerStatus {
-	out := projectContainerStatuses(in)
-	for i := range out {
-		if in[i].Name == gms.ServerContainerName {
-			out[i].RestartCount = in[i].RestartCount
+			Name:         in[i].Name,
+			State:        projectContainerState(in[i].State),
+			RestartCount: in[i].RestartCount,
 		}
 	}
 	return out
