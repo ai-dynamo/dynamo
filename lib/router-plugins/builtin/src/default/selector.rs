@@ -46,7 +46,6 @@ impl DefaultWorkerSelector {
                 super::PolicyParameters::from(&config),
                 worker_type,
                 rng.clone(),
-                false,
             )),
             kv_router_config: config,
             worker_type,

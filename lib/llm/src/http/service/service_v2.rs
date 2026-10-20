@@ -1481,6 +1481,7 @@ impl HttpServiceConfigBuilder {
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
+        // TODO: Revisit admin write exposure: listener separation, authentication, and default enablement.
         if admin_api_enabled {
             system_routes.push(super::router_policy::router_policy_router(
                 state.manager_clone(),

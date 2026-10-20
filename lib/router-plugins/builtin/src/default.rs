@@ -23,23 +23,16 @@ use std::sync::Arc;
 /// Per-request score overrides are not used. Request load-tracking remains host-owned.
 pub fn default_policy(config: KvRouterConfig, worker_label: &'static str) -> WorkerSelectionPolicy {
     let parameters = PolicyParameters::from(&config);
-    runtime_policy(config, parameters, worker_label, false)
+    runtime_policy(config, parameters, worker_label)
 }
 
 fn runtime_policy(
     config: KvRouterConfig,
     parameters: PolicyParameters,
     worker_label: &'static str,
-    is_plain_decode: bool,
 ) -> WorkerSelectionPolicy {
     let initial = parameters.snapshot();
-    let policy = policy_with_rng(
-        config.clone(),
-        parameters,
-        worker_label,
-        None,
-        is_plain_decode,
-    );
+    let policy = policy_with_rng(config.clone(), parameters, worker_label, None);
     policy.with_runtime_config(
         initial,
         Arc::new(move |values| {
@@ -49,7 +42,6 @@ fn runtime_policy(
                 parameters,
                 worker_label,
                 None,
-                is_plain_decode,
             ))
         }),
     )
@@ -60,9 +52,8 @@ fn policy_with_rng(
     parameters: PolicyParameters,
     worker_label: &'static str,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
-    is_plain_decode: bool,
 ) -> WorkerSelectionPolicy {
-    let scorer = scorer::build(&parameters, worker_label, is_plain_decode);
+    let scorer = scorer::build(&parameters, worker_label);
     let picker = picker::DefaultPicker::new(parameters.router_temperature, rng);
     WorkerSelectionPolicy::new(config, worker_label, vec![scorer], Box::new(picker))
         .with_exclusive_affinity(true)
@@ -95,10 +86,5 @@ fn policy_for_role(
     } else {
         parameters
     };
-    runtime_policy(
-        config,
-        parameters,
-        role.default_selector_label(),
-        is_plain_decode,
-    )
+    runtime_policy(config, parameters, role.default_selector_label())
 }

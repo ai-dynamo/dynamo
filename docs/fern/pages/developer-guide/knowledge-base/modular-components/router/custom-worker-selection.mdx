@@ -607,7 +607,21 @@ worker_selection:
         router_temperature: 0.0
 ```
 
-The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. Omitted parameters inherit router configuration. If no shared-cache multiplier is set, the default policy uses `0.5` when shared cache is enabled. Values must be finite and non-negative. Per-request score and temperature overrides do not apply to this policy. The builtin skips cache inputs at zero overlap credit and for plain disaggregated decode.
+The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`,
+`host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. Values must be
+finite and non-negative. Per-request score and temperature overrides do not apply to this policy.
+
+Omitted parameters normally inherit router configuration. When the resolved
+`overlap_score_credit` is nonzero, an omitted shared-cache multiplier uses the router's value,
+or `0.5` if shared cache is enabled and no value is configured. When device credit is zero,
+omitted host, disk, and shared-cache weights instead resolve to zero.
+
+For cache-capable roles, any nonzero cache-scoring weight requires cache inputs. An explicit
+nonzero host, disk, or shared-cache weight therefore enables cache inputs even when
+`overlap_score_credit: 0`. This changes startup behavior for existing policy YAML that
+previously used zero device credit to suppress all cache inputs despite explicit nonzero tier
+weights. Set all four cache-scoring weights to zero to keep such a policy load-only. Plain
+disaggregated decode always resolves all four weights to zero and skips cache inputs.
 
 ## Runtime Configuration
 
