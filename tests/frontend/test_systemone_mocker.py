@@ -287,7 +287,9 @@ def test_decisions_preserves_typed_choices_and_unnamed_order(systemone_server):
     assert type(values[1]) is str and values[1] == "true"
 
 
-def test_systemone_question_names_preserve_answer_keys_and_token_usage(systemone_server):
+def test_systemone_question_names_preserve_answer_keys_and_token_usage(
+    systemone_server,
+):
     payload = decision_payload(QWEN, "systemone")
     url = f"{systemone_server}/v1/systemone"
     question = payload["questions"]["route"]
