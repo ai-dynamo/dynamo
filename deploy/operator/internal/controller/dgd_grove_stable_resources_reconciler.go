@@ -326,8 +326,6 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	return resource, nil
 }
 
-// deleteOwnedService removes the named Service, but only if this DGD controls it.
-// See deleteIfControlledBy for the shared ownership-safe delete protocol.
 func (r *groveStableResourcesReconciler) deleteOwnedService(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,

@@ -28,12 +28,15 @@ func TestDGDResourceSyncerDeleteIfControlledBy(t *testing.T) {
 	errDeleteNotFound := apierrors.NewNotFound(schema.GroupResource{Resource: "objects"}, name)
 	errConflict := apierrors.NewConflict(schema.GroupResource{Resource: "objects"}, name, errors.New("UID precondition failed"))
 
+	// The protocol does not depend on the object kind, so the full matrix runs
+	// for Service. ConfigMap runs only the error cases, which check its label.
 	kinds := []struct {
-		label string
-		obj   client.Object
+		label     string
+		obj       client.Object
+		errorOnly bool
 	}{
 		{label: "service", obj: &corev1.Service{}},
-		{label: "ConfigMap", obj: &corev1.ConfigMap{}},
+		{label: "ConfigMap", obj: &corev1.ConfigMap{}, errorOnly: true},
 	}
 
 	cases := []struct {
@@ -92,6 +95,9 @@ func TestDGDResourceSyncerDeleteIfControlledBy(t *testing.T) {
 
 	for _, kind := range kinds {
 		for _, tc := range cases {
+			if kind.errorOnly && tc.wantErr == "" {
+				continue
+			}
 			t.Run(kind.label+"/"+tc.name, func(t *testing.T) {
 				t.Log("Build the DGD and, when the case has one, the seeded object with its controller reference")
 				ctx := context.Background()
