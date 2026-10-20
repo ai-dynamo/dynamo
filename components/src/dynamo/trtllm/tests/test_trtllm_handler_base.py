@@ -3,7 +3,9 @@
 
 import asyncio
 import logging
+import os
 import re as re_mod
+import threading
 from copy import deepcopy
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -1191,6 +1193,52 @@ class TestGenerateLocally:
             }
         ]
         handler._initiate_shutdown.assert_awaited_once_with(error)
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
+    async def test_engine_dead_error_exits_without_engine_teardown(self, monkeypatch):
+        """After an MPI rank dies, TRT-LLM teardown can block forever on IPC to
+        the dead rank. The fatal path must skip it and exit promptly."""
+        from tensorrt_llm.executor.utils import EngineDeadError
+
+        from dynamo.trtllm import engine_monitor as engine_monitor_module
+
+        exit_calls = []
+        monkeypatch.setattr(os, "_exit", exit_calls.append)
+        monkeypatch.setattr(
+            engine_monitor_module, "_fatal_exit_lock", threading.Lock(), raising=False
+        )
+
+        handler = self._make_handler()
+        error = EngineDeadError(RuntimeError("MPI worker rank 0 exited unexpectedly"))
+        release = threading.Event()
+        engine = MagicMock()
+        engine.get_health_check_fatal_error.return_value = error
+        engine.shutdown.side_effect = lambda: release.wait()
+        engine.cleanup = mock.AsyncMock(side_effect=lambda: release.wait())
+        engine.llm.generate_async = MagicMock(side_effect=error)
+        handler.engine = engine
+        handler.runtime = MagicMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        try:
+            chunks = [
+                chunk
+                async for chunk in handler.generate_locally(
+                    request, self._make_context()
+                )
+            ]
+        finally:
+            release.set()
+
+        assert chunks == [{"finish_reason": {"error": str(error)}, "token_ids": []}]
+        assert exit_calls == [1]
+        handler.runtime.shutdown.assert_called_once()
+        engine.shutdown.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_zero_prompt_logprobs_is_forwarded_and_returned(self):
