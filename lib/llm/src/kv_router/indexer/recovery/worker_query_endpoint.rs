@@ -41,6 +41,7 @@ const MAX_CONCURRENT_TREE_DUMP_RESPONSES: usize = 8;
 /// walks all threads' debt lists, which is costly at one store per chunk.
 pub(crate) struct KvStateAgentStatusCell {
     snapshot: ArcSwap<KvStateAgentStatus>,
+    /// Supersedes the snapshot's `outbound_cursor`, which `load` always overwrites.
     outbound_cursor: AtomicU64,
 }
 

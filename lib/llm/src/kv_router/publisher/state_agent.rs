@@ -768,10 +768,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             },
         )])
         .await?;
-        Ok(self
-            .next_outbound_id
-            .checked_sub(1)
-            .expect("outbound IDs start at one"))
+        Ok(self.outbound_cursor())
     }
 
     fn fail_domain(&mut self, generation: u64, domain: ResidencyDomain, reason: &'static str) {
@@ -999,8 +996,8 @@ impl KvStateAgent {
         &self.identity
     }
 
-    pub fn status(&self) -> KvStateAgentStatus {
-        self.status.load()
+    pub fn status(&self) -> Arc<KvStateAgentStatus> {
+        Arc::new(self.status.load())
     }
 
     pub async fn quarantine_vllm(&self, generation: u64, reason: &'static str) -> Result<()> {
