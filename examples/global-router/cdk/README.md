@@ -97,7 +97,7 @@ Global Router.
 The example places the Global Router in Ohio. Ohio and West use non-overlapping VPC ranges
 `10.42.0.0/16` and `10.43.0.0/16`. Deploy the regional stacks separately with
 `deployment=ohio` and `deployment=west`. The `-c deployment=both` mode then creates only a single
-inter-Region VPC peering connection and private routes in both directions. The peering connection
+inter-Region VPC peering connection and routes in both directions. The peering connection
 and routes do not create public ingress. Public regional ingress addresses are client entry points;
 the Global Router uses a separate private endpoint for each DGD Frontend.
 
@@ -294,10 +294,11 @@ pnpm exec cdk deploy --all -c deployment=both
 
 ### Let the bastions reach the other VPC
 
-The peering routes cover only the private subnets, so a bastion in a public subnet cannot reach
-the other VPC, including the Karmada API load balancer. Add each VPC's public route tables to
-`publicRouteTableIds` in `POC_PEERING_OHIO` and `POC_PEERING_WEST`, then deploy
-`deployment=both` again. Existing private routes keep their logical IDs. To find the IDs:
+Each bastion sits in a public subnet. `publicRouteTableIds` in `POC_PEERING_OHIO` and
+`POC_PEERING_WEST` lists the public subnets' route tables, so `deployment=both` routes them over
+the peering as well, and each bastion can reach the other VPC, including the Karmada API load
+balancer. The private routes keep their logical IDs. If a regional VPC is rebuilt, find its
+public route tables again (the ones with an internet gateway route):
 
 ```bash
 aws ec2 describe-route-tables --region us-east-2 \
@@ -359,8 +360,8 @@ The running clusters have a Karmada control plane that was installed by hand wit
 `karmadactl init`. Helm cannot install over it, and the CDK-managed CRDs take over the ones that
 Karmada propagated. Before deploying `deployment=ohio` with `multiCluster`:
 
-1. Add the public route tables (above) and deploy `deployment=both`, so both bastions reach the
-   Karmada API.
+1. Deploy `deployment=both` to add the public routes (above), so both bastions reach the Karmada
+   API.
 2. On each bastion, remove that cluster's agent. `karmadactl` reads the hub address from the
    agent's own kubeconfig: `karmadactl unregister aws-west --cluster-kubeconfig ~/.kube/config`
    on West, and the same with `aws-ohio` on Ohio.

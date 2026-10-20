@@ -21,7 +21,7 @@ import type { Construct } from "constructs";
 import type { PeeringRegionConfig } from "./config";
 
 /**
- * Add inter-Region peering and private routes in dedicated stacks. Keeping the
+ * Add inter-Region peering and its routes in dedicated stacks. Keeping the
  * routes outside the VPC stacks avoids a cross-Region CloudFormation cycle.
  */
 export function addInterRegionPeering(

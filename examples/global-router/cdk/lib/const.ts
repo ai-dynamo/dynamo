@@ -207,7 +207,7 @@ export const DEPLOYMENTS = {
 } satisfies Record<string, DeploymentConfig>;
 
 // Example network IDs; use local settings populated from your deployed stacks.
-// Include only private route tables in the peering configuration.
+// Public routes enable bastion access to peers without adding internet ingress.
 export const POC_PEERING_OHIO = {
   region: US_EAST_2,
   cidrBlock: MOCKER_VPC_US_EAST_2.cidrBlock,
@@ -218,6 +218,8 @@ export const POC_PEERING_OHIO = {
     "rtb-00000000000000004", // dgd-pool-slot-1Subnet1
     "rtb-00000000000000005", // dgd-pool-slot-1Subnet2
   ],
+  // publicSubnet1 and publicSubnet2: the only route tables with an internet gateway route.
+  publicRouteTableIds: ["rtb-0000000000000000b", "rtb-0000000000000000c"],
 } satisfies PeeringRegionConfig;
 
 export const POC_PEERING_WEST = {
@@ -230,6 +232,8 @@ export const POC_PEERING_WEST = {
     "rtb-00000000000000009", // dgd-pool-slot-1Subnet1
     "rtb-0000000000000000a", // dgd-pool-slot-1Subnet2
   ],
+  // publicSubnet1 and publicSubnet2: the only route tables with an internet gateway route.
+  publicRouteTableIds: ["rtb-0000000000000000d", "rtb-0000000000000000e"],
 } satisfies PeeringRegionConfig;
 
 export type DeploymentName = keyof typeof DEPLOYMENTS;

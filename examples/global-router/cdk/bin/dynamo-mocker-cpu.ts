@@ -36,7 +36,7 @@ if (deploymentName === "both") {
     throw new Error("Deploy the Global Router with -c deployment=ohio after peering.");
   }
   // Existing regional stacks are deployed separately. This mode changes only
-  // the connection and private routes between their VPCs.
+  // the connection and routes between their VPCs.
   addInterRegionPeering(
     app,
     settings.peering.ohio,
