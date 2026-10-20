@@ -342,6 +342,8 @@ spec:
                   rule: has(self.v1beta2) || (has(self.backend) && has(self.profilingConfig))
                 - message: v1beta2 is mutually exclusive with native v1alpha1 fields
                   rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.useMocker) || has(self.profilingConfig) || has(self.runtimeVersionOverride) || has(self.enableGpuDiscovery) || has(self.autoApply) || has(self.deploymentOverrides))'
+                - message: request representation is immutable
+                  rule: has(self.v1beta2) == has(oldSelf.v1beta2)
             status:
               description: Status reflects the current observed state of this deployment request.
               properties:
@@ -482,6 +484,9 @@ spec:
                 - message: v1beta2 is mutually exclusive with native v1alpha1 status fields
                   rule: '!has(self.v1beta2) || !(has(self.state) || has(self.backend) || has(self.observedGeneration) || has(self.conditions) || has(self.profilingResults) || has(self.generatedDeployment) || has(self.deployment))'
           type: object
+          x-kubernetes-validations:
+            - message: nonempty status must use the representation selected by spec
+              rule: '!has(self.status) || !(has(self.status.v1beta2) || has(self.status.state) || has(self.status.backend) || has(self.status.observedGeneration) || has(self.status.conditions) || has(self.status.profilingResults) || has(self.status.generatedDeployment) || has(self.status.deployment)) || has(self.spec.v1beta2) == has(self.status.v1beta2)'
       served: true
       storage: false
       subresources:
@@ -9377,6 +9382,8 @@ spec:
                   rule: has(self.v1beta2) != has(self.model)
                 - message: v1beta2 is mutually exclusive with native v1beta1 fields
                   rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.image) || has(self.runtimeVersionOverride) || has(self.modelCache) || has(self.hardware) || has(self.workload) || has(self.sla) || has(self.overrides) || has(self.features) || has(self.searchStrategy) || has(self.autoApply))'
+                - message: request representation is immutable
+                  rule: has(self.v1beta2) == has(oldSelf.v1beta2)
             status:
               description: Status reflects the current observed state of this deployment request.
               properties:
@@ -9530,6 +9537,9 @@ spec:
                 - message: v1beta2 is mutually exclusive with native v1beta1 status fields
                   rule: '!has(self.v1beta2) || !(has(self.phase) || has(self.profilingPhase) || has(self.dgdName) || has(self.profilingJobName) || has(self.conditions) || has(self.profilingResults) || has(self.deploymentInfo) || has(self.observedGeneration))'
           type: object
+          x-kubernetes-validations:
+            - message: nonempty status must use the representation selected by spec
+              rule: '!has(self.status) || !(has(self.status.v1beta2) || has(self.status.phase) || has(self.status.profilingPhase) || has(self.status.dgdName) || has(self.status.profilingJobName) || has(self.status.conditions) || has(self.status.profilingResults) || has(self.status.deploymentInfo) || has(self.status.observedGeneration)) || has(self.spec.v1beta2) == has(self.status.v1beta2)'
       served: true
       storage: true
       subresources:
@@ -9800,6 +9810,8 @@ spec:
                   rule: has(self.v1beta1) != has(self.model)
                 - message: v1beta1 is mutually exclusive with native v1beta2 fields
                   rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))'
+                - message: request representation is immutable
+                  rule: has(self.v1beta1) == has(oldSelf.v1beta1)
             status:
               description: DynamoGraphDeploymentRequestStatus represents reconciliation of persistent search intent.
               properties:
@@ -9912,6 +9924,9 @@ spec:
           required:
             - spec
           type: object
+          x-kubernetes-validations:
+            - message: nonempty status must use the representation selected by spec
+              rule: '!has(self.status) || !(has(self.status.v1beta1) || has(self.status.observedGeneration) || has(self.status.activeRunRef) || has(self.status.recentRunRefs) || has(self.status.conditions)) || has(self.spec.v1beta1) == has(self.status.v1beta1)'
       served: true
       storage: false
       subresources:

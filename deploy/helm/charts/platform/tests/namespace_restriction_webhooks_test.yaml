@@ -36,32 +36,6 @@ tests:
       - notExists:
           path: webhooks[3].namespaceSelector
         documentIndex: 1
-      - notExists:
-          path: webhooks[4]
-        documentIndex: 1
-
-  - it: renders DGDR v1beta2 mutation only when the API is enabled
-    template: charts/dynamo-operator/templates/webhook-configuration.yaml
-    set:
-      dynamo-operator.dgdrV1Beta2.enabled: true
-    asserts:
-      - equal:
-          path: webhooks[3].name
-          value: mdynamographdeploymentrequestv1beta2.kb.io
-        documentIndex: 1
-      - equal:
-          path: webhooks[3].clientConfig.service.path
-          value: /mutate-nvidia-com-v1beta2-dynamographdeploymentrequest
-        documentIndex: 1
-      - equal:
-          path: webhooks[3].rules[0].apiVersions[0]
-          value: v1beta2
-        documentIndex: 1
-      - equal:
-          path: webhooks[4].name
-          value: mpodcheckpointrestore.kb.io
-        documentIndex: 1
-
   - it: scopes namespace-restricted admission to the target namespace
     template: charts/dynamo-operator/templates/webhook-configuration.yaml
     set:

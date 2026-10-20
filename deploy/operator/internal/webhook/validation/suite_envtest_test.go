@@ -18,6 +18,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
@@ -284,6 +285,8 @@ func admissionGVK(t *testing.T, object runtime.Object) schema.GroupVersionKind {
 		return nvidiacomv1alpha1.DynamoGraphDeploymentRequestGVK
 	case *nvidiacomv1beta1.DynamoGraphDeploymentRequest:
 		return nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK
+	case *nvidiacomv1beta2.DynamoGraphDeploymentRequest:
+		return nvidiacomv1beta2.DynamoGraphDeploymentRequestGVK
 	default:
 		t.Fatalf("unsupported admission object type %T", object)
 		return schema.GroupVersionKind{}

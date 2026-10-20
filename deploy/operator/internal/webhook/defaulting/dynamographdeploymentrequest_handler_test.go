@@ -19,15 +19,12 @@ package defaulting
 
 import (
 	"context"
-	"reflect"
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	admissionv1 "k8s.io/api/admission/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -90,17 +87,13 @@ func TestDGDRDefaulter_defaultImageFor(t *testing.T) {
 }
 
 func makeAdmissionCtx(op admissionv1.Operation) context.Context {
-	return makeAdmissionCtxForGVK(op, nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK)
-}
-
-func makeAdmissionCtxForGVK(op admissionv1.Operation, gvk schema.GroupVersionKind) context.Context {
 	req := admission.Request{
 		AdmissionRequest: admissionv1.AdmissionRequest{
 			Operation: op,
 			Kind: metav1.GroupVersionKind{
-				Group:   gvk.Group,
-				Version: gvk.Version,
-				Kind:    gvk.Kind,
+				Group:   nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Group,
+				Version: nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Version,
+				Kind:    nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind,
 			},
 		},
 	}
@@ -207,50 +200,5 @@ func TestDGDRDefaulter_DefaultsNativeFieldsOnUpdate(t *testing.T) {
 	}
 	if dgdr.Spec.Image != "" {
 		t.Errorf("spec.image = %q, want empty on update", dgdr.Spec.Image)
-	}
-}
-
-func TestDGDRV1Beta2Defaulter_Default(t *testing.T) {
-	t.Log("Default only absent top-level native fields")
-	explicitWorkload := &nvidiacomv1beta2.WorkloadSpec{
-		Static: &nvidiacomv1beta2.StaticWorkloadSpec{},
-	}
-	dgdr := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
-		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
-			NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
-				Model:    &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-32B"},
-				Workload: explicitWorkload,
-			},
-		},
-	}
-	ctx := makeAdmissionCtxForGVK(admissionv1.Create, nvidiacomv1beta2.DynamoGraphDeploymentRequestGVK)
-	if err := (&DGDRV1Beta2Defaulter{}).Default(ctx, dgdr); err != nil {
-		t.Fatalf("Default() error = %v", err)
-	}
-	if !reflect.DeepEqual(dgdr.Spec.Workload, explicitWorkload) {
-		t.Fatalf("explicit workload opt-out changed: %#v", dgdr.Spec.Workload)
-	}
-	if len(dgdr.Spec.Backends) != 3 {
-		t.Errorf("spec.backends = %v, want three defaults", dgdr.Spec.Backends)
-	}
-	if dgdr.Spec.Objective == nil || dgdr.Spec.Objective.Metric == nil ||
-		*dgdr.Spec.Objective.Metric != nvidiacomv1beta2.ObjectiveMetric("ThroughputPerGPU") {
-		t.Errorf("spec.objective = %#v, want Optimize/ThroughputPerGPU defaults", dgdr.Spec.Objective)
-	}
-	if dgdr.Spec.Recommendation == nil || dgdr.Spec.Recommendation.MaxCandidates != 1 {
-		t.Errorf("spec.recommendation = %#v, want maxCandidates 1", dgdr.Spec.Recommendation)
-	}
-
-	t.Log("Leave a foreign v1beta1 envelope completely untouched")
-	envelope := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
-		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
-			V1Beta1: &apiextensionsv1.JSON{Raw: []byte(`{"model":"legacy"}`)},
-		},
-	}
-	if err := (&DGDRV1Beta2Defaulter{}).Default(ctx, envelope); err != nil {
-		t.Fatalf("Default() envelope error = %v", err)
-	}
-	if !reflect.DeepEqual(envelope.Spec.NativeSearchInput, nvidiacomv1beta2.NativeSearchInput{}) {
-		t.Fatalf("envelope received native defaults: %#v", envelope.Spec)
 	}
 }

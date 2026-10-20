@@ -193,6 +193,89 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(&restored.Spec).To(Equal(nativeSpec))
 		})
 
+		It("Should preserve empty native v1beta2 status through its first status update", func() {
+			ctx := context.Background()
+			dgdr := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "v1beta2-empty-status",
+					Namespace: envtestNamespace,
+				},
+				Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
+					NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
+						Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-32B"},
+					},
+				},
+			}
+
+			By("Creating a native v1beta2 request with status omitted")
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			By("Reading an empty native status without a foreign envelope")
+			live := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), live)).Should(Succeed())
+			Expect(live.Status.V1Beta1).To(BeNil())
+			Expect(live.Status).To(Equal(nvidiacomv1beta2.DynamoGraphDeploymentRequestStatus{}))
+
+			By("Writing the first native status through the status subresource")
+			live.Status.ObservedGeneration = live.Generation
+			Expect(k8sClient.Status().Update(ctx, live)).Should(Succeed())
+
+			By("Verifying the native status remains readable and envelope-free")
+			updated := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), updated)).Should(Succeed())
+			Expect(updated.Status.ObservedGeneration).To(Equal(updated.Generation))
+			Expect(updated.Status.V1Beta1).To(BeNil())
+		})
+
+		It("Should reject changing the API representation of an existing request", func() {
+			ctx := context.Background()
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "immutable-request-representation",
+					Namespace:  envtestNamespace,
+					Finalizers: []string{"test.nvidia.com/cleanup"},
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "Qwen/Qwen3-32B",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "test-profiler:1.1.0",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](8),
+					},
+				},
+			}
+
+			By("Creating a native v1beta1 request with cleanup state")
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() {
+				current := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), current); err == nil {
+					current.Finalizers = nil
+					_ = k8sClient.Update(ctx, current)
+					_ = k8sClient.Delete(ctx, current)
+				}
+			}()
+
+			By("Reading the v1beta1 request as its v1beta2 carrier")
+			spoke := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), spoke)).Should(Succeed())
+			Expect(spoke.Spec.V1Beta1).NotTo(BeNil())
+
+			By("Attempting to replace the carrier with native v1beta2 fields")
+			spoke.Spec = nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
+				NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
+					Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-32B"},
+				},
+			}
+			err := k8sClient.Update(ctx, spoke)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("request representation is immutable"))
+		})
+
 		It("Should leave the carrier and child resources untouched", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{

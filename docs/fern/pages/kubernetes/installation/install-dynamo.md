@@ -165,10 +165,6 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 > Kubernetes persists Run and Candidate objects in etcd. Because the schemas are not finalized,
 > later schema changes can make stored objects unreadable or prevent a CRD upgrade. Do not enable
 > this API on production or shared clusters.
->
-> Disabling the flag on a later Helm upgrade stops updating the experimental schemas but does not
-> delete CRDs that were previously installed. Remove those CRDs manually only after confirming
-> that they contain no resources.
 
 > [!TIP]
 > **Shared/Multi-Tenant Clusters**: If a cluster-wide Dynamo operator is already running, do **not** install another one. Check with:

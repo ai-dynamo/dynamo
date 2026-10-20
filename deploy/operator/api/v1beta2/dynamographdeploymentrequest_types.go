@@ -256,6 +256,7 @@ type NativeSearchInput struct {
 // Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) != has(self.model)",message="exactly one of native v1beta2 fields or v1beta1 must be specified"
 // +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta1) == has(oldSelf.v1beta1)",message="request representation is immutable"
 type DynamoGraphDeploymentRequestSpec struct {
 	NativeSearchInput `json:",inline"`
 
@@ -303,6 +304,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:printcolumn:name="Active Run",type=string,JSONPath=`.status.activeRunRef.name`
 // +kubebuilder:printcolumn:name="Accepted",type=string,JSONPath=`.status.conditions[?(@.type=="Accepted")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !(has(self.status.v1beta1) || has(self.status.observedGeneration) || has(self.status.activeRunRef) || has(self.status.recentRunRefs) || has(self.status.conditions)) || has(self.spec.v1beta1) == has(self.status.v1beta1)",message="nonempty status must use the representation selected by spec"
 
 // DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
 type DynamoGraphDeploymentRequest struct {

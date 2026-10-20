@@ -103,7 +103,25 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 	}
 
 	var spokeStatusSave DynamoGraphDeploymentRequestStatus
-	ConvertFromDynamoGraphDeploymentRequestStatus(&src.Status, &dst.Status, restoredHubStatus, &spokeStatusSave)
+	hasNativeStatus := hasNativeV1Alpha1Status(src.Status)
+	statusIsEmpty := src.Status.V1Beta2 == nil && !hasNativeStatus
+	legacyV1Beta2 := src.Spec.V1Beta2 == nil && !hasNativeV1Alpha1Spec(src.Spec) &&
+		restoredHubSpec != nil && restoredHubSpec.V1Beta2 != nil
+	switch {
+	case dst.Spec.V1Beta2 != nil && hasNativeStatus:
+		return fmt.Errorf("v1alpha1 status uses native fields while spec uses the v1beta2 envelope")
+	case dst.Spec.V1Beta2 == nil && src.Status.V1Beta2 != nil:
+		return fmt.Errorf("v1alpha1 status uses the v1beta2 envelope while spec uses native fields")
+	case dst.Spec.V1Beta2 != nil && statusIsEmpty && legacyV1Beta2 && restoredHubStatus != nil && restoredHubStatus.V1Beta2 != nil:
+		// Migrate the annotation-backed carrier only when the spec selected the
+		// same legacy representation.
+		dst.Status.V1Beta2 = restoredHubStatus.V1Beta2.DeepCopy()
+	case statusIsEmpty && (dst.Spec.V1Beta2 != nil || restoredHubStatus != nil && restoredHubStatus.V1Beta2 != nil):
+		// An empty live status follows the live spec. In particular, a stale
+		// status annotation must not select a different representation.
+	default:
+		ConvertFromDynamoGraphDeploymentRequestStatus(&src.Status, &dst.Status, restoredHubStatus, &spokeStatusSave)
+	}
 	if err := saveDGDRSpokeAnnotations(&spokeSpecSave, &spokeStatusSave, dst); err != nil {
 		return err
 	}
@@ -127,7 +145,19 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 	ConvertToDynamoGraphDeploymentRequestSpec(&src.Spec, &dst.Spec, restoredSpokeSpec, &hubSpecSave)
 
 	var hubStatusSave v1beta1.DynamoGraphDeploymentRequestStatus
-	ConvertToDynamoGraphDeploymentRequestStatus(&src.Status, &dst.Status, restoredSpokeStatus, &hubStatusSave)
+	hasNativeStatus := hasNativeV1Beta1Status(src.Status)
+	statusIsEmpty := src.Status.V1Beta2 == nil && !hasNativeStatus
+	switch {
+	case src.Spec.V1Beta2 != nil && hasNativeStatus:
+		return fmt.Errorf("v1beta1 status uses native fields while spec uses the v1beta2 envelope")
+	case src.Spec.V1Beta2 == nil && src.Status.V1Beta2 != nil:
+		return fmt.Errorf("v1beta1 status uses the v1beta2 envelope while spec uses native fields")
+	case src.Spec.V1Beta2 != nil && statusIsEmpty:
+		// Preserve an empty status across the v1alpha1 bridge instead of
+		// manufacturing the native v1alpha1 Pending state.
+	default:
+		ConvertToDynamoGraphDeploymentRequestStatus(&src.Status, &dst.Status, restoredSpokeStatus, &hubStatusSave)
+	}
 	if err := saveDGDRHubAnnotations(&hubSpecSave, &hubStatusSave, dst); err != nil {
 		return err
 	}
@@ -282,7 +312,7 @@ func ConvertFromDynamoGraphDeploymentRequestSpec(src *DynamoGraphDeploymentReque
 
 	// Accept the annotation-backed representation emitted before v1alpha1
 	// gained its public structural carrier, then migrate it on the next read.
-	if restored != nil && restored.V1Beta2 != nil {
+	if restored != nil && restored.V1Beta2 != nil && !hasNativeV1Alpha1Spec(*src) {
 		dst.V1Beta2 = restored.V1Beta2.DeepCopy()
 		return nil
 	}
@@ -1070,7 +1100,7 @@ func ConvertFromDynamoGraphDeploymentRequestStatus(src *DynamoGraphDeploymentReq
 	}
 
 	// Accept and migrate the legacy annotation-backed envelope representation.
-	if restored != nil && restored.V1Beta2 != nil {
+	if restored != nil && restored.V1Beta2 != nil && !hasNativeV1Alpha1Status(*src) {
 		dst.V1Beta2 = restored.V1Beta2.DeepCopy()
 		return
 	}
@@ -1196,6 +1226,11 @@ func hasNativeV1Alpha1Spec(spec DynamoGraphDeploymentRequestSpec) bool {
 func hasNativeV1Alpha1Status(status DynamoGraphDeploymentRequestStatus) bool {
 	status.V1Beta2 = nil
 	return !reflect.DeepEqual(status, DynamoGraphDeploymentRequestStatus{})
+}
+
+func hasNativeV1Beta1Status(status v1beta1.DynamoGraphDeploymentRequestStatus) bool {
+	status.V1Beta2 = nil
+	return !reflect.DeepEqual(status, v1beta1.DynamoGraphDeploymentRequestStatus{})
 }
 
 func restoreDGDRHubOnlyStatus(restored *v1beta1.DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequestStatus, src *DynamoGraphDeploymentRequestStatus) {
