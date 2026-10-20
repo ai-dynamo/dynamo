@@ -18,7 +18,7 @@ use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, ModelInfoResponse, ModelMetadata, SupportedMedia, TrtllmClient};
+use crate::client::{self, ModelInfoResponse, ModelLimits, SupportedMedia, TrtllmClient};
 use crate::convert::{ResponseState, build_generate_request};
 use crate::model::ConfiguredModel;
 
@@ -37,12 +37,10 @@ pub struct TrtllmSidecarEngine {
     /// Disaggregation role this worker plays. Selects the `context_only` /
     /// `kv.session` divergence in `convert`.
     mode: DisaggregationMode,
-    client: OnceCell<TrtllmClient>,
-    /// Engine limits resolved at `start` from `--context-length` and
-    /// `Control.GetModelInfo`, so `generate` can derive a default `max_tokens`
-    /// for requests that omit one.
-    limits: OnceCell<ModelMetadata>,
-    rediscovered_metadata: OnceCell<ModelMetadata>,
+    /// Connection and limits may be discovered in the cancellable sidecar bootstrap.
+    connection: OnceCell<(TrtllmClient, ModelLimits)>,
+    started: OnceCell<()>,
+    rediscovered_limits: OnceCell<ModelLimits>,
     cancel: CancellationToken,
 }
 
@@ -58,9 +56,9 @@ impl TrtllmSidecarEngine {
             transport,
             model,
             mode,
-            client: OnceCell::new(),
-            limits: OnceCell::new(),
-            rediscovered_metadata: OnceCell::new(),
+            connection: OnceCell::new(),
+            started: OnceCell::new(),
+            rediscovered_limits: OnceCell::new(),
             cancel: CancellationToken::new(),
         }
     }
@@ -91,7 +89,7 @@ impl TrtllmSidecarEngine {
         DynamoError,
     > {
         let parsed = Self::from_parsed(<Args as clap::Parser>::parse())?;
-        Ok((parsed.1.runtime.clone(), std::future::ready(Ok(parsed))))
+        Ok((parsed.1.runtime.clone(), Self::bootstrap(parsed)))
     }
 
     /// Parse embedded launcher arguments now, then discover metadata after the
@@ -107,10 +105,7 @@ impl TrtllmSidecarEngine {
     > {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
         let initialized = Self::from_parsed(args)?;
-        Ok((
-            initialized.1.runtime.clone(),
-            std::future::ready(Ok(initialized)),
-        ))
+        Ok((initialized.1.runtime.clone(), Self::bootstrap(initialized)))
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -138,6 +133,8 @@ impl TrtllmSidecarEngine {
             context_length: args.context_length,
         };
         let engine = Self::new(endpoint, transport, model.clone(), mode);
+        // Off by default: TensorRT-LLM's xgrammar rejects several tag formats (NVIDIA/TensorRT-LLM#19913).
+        let structural_tag = args.sidecar.common.structural_tag(false);
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -156,6 +153,7 @@ impl TrtllmSidecarEngine {
             served_model_name: None,
             tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
             reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
+            structural_tag,
             exclude_tools_when_tool_choice_none: args
                 .sidecar
                 .common
@@ -169,19 +167,14 @@ impl TrtllmSidecarEngine {
         };
         Ok((engine, config))
     }
-
-    async fn metadata_for_request(
+    async fn limits_for_request(
         &self,
         client: &TrtllmClient,
+        initial: ModelLimits,
         request: &PreprocessedRequest,
-    ) -> Result<ModelMetadata, DynamoError> {
-        let initial = self
-            .limits
-            .get()
-            .copied()
-            .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
-        if let Some(metadata) = self.rediscovered_metadata.get() {
-            return Ok(*metadata);
+    ) -> Result<ModelLimits, DynamoError> {
+        if let Some(limits) = self.rediscovered_limits.get() {
+            return Ok(*limits);
         }
         let has_supported_media = request.multi_modal_data.as_ref().is_some_and(|media| {
             ["image_url", "video_url", "audio_url"]
@@ -192,7 +185,7 @@ impl TrtllmSidecarEngine {
             return Ok(initial);
         }
 
-        self.rediscovered_metadata
+        self.rediscovered_limits
             .get_or_try_init(|| async {
                 match client.model_limits(&self.model.source).await? {
                     ModelInfoResponse::Available(mut reported) => {
@@ -209,7 +202,7 @@ impl TrtllmSidecarEngine {
                         reported.context_length = initial.context_length;
                         Ok(reported)
                     }
-                    ModelInfoResponse::Unsupported(_) => Ok(ModelMetadata {
+                    ModelInfoResponse::Unsupported(_) => Ok(ModelLimits {
                         supported_media: Some(SupportedMedia::default()),
                         ..initial
                     }),
@@ -218,14 +211,22 @@ impl TrtllmSidecarEngine {
             .await
             .copied()
     }
-}
 
-#[async_trait]
-impl LLMEngine for TrtllmSidecarEngine {
-    async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
-        if self.client.initialized() {
-            return Err(client::engine_shutdown(ALREADY_STARTED));
-        }
+    async fn bootstrap(
+        (engine, config): (Self, WorkerConfig),
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
+        // Worker deliberately lets engine.start() finish before cleanup. Discover
+        // here so signals can cancel a stalled remote connection without waiting
+        // for that worker shutdown deadline. Dropping discovery only drops gRPC
+        // clients; it does not leave a partially loaded in-process engine.
+        engine
+            .connection
+            .get_or_try_init(|| engine.connect())
+            .await?;
+        Ok((engine, config))
+    }
+
+    async fn connect(&self) -> Result<(TrtllmClient, ModelLimits), DynamoError> {
         tracing::info!(
             endpoint = %self.endpoint,
             connections = self.transport.connections.get(),
@@ -236,13 +237,12 @@ impl LLMEngine for TrtllmSidecarEngine {
         // connecting is what stops the two stages spending a full budget each.
         let deadline = startup_deadline(self.transport.startup_deadline)?;
         let client = TrtllmClient::connect(&self.endpoint, self.transport).await?;
-        let connection_count = client.connection_count();
 
         // `--context-length` wins over what the engine reports, and is the
         // only source when the engine reports nothing usable. The resolved
         // value backs both the registered window and the default-`max_tokens`
         // path in `convert::max_tokens`.
-        let mut model = self.model.clone();
+        let model = &self.model;
         let limits = match model.context_length {
             // Configured: the engine is consulted once, to cross-check the
             // value and to learn its output cap. It may not answer at all --
@@ -265,7 +265,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                             "Control.GetModelInfo is unavailable; using the configured \
                              --context-length"
                         );
-                        ModelMetadata {
+                        ModelLimits {
                             supported_media: Some(SupportedMedia::default()),
                             ..Default::default()
                         }
@@ -277,7 +277,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                             "Control.GetModelInfo failed transiently; using the configured \
                              --context-length and deferring media capability discovery"
                         );
-                        ModelMetadata::default()
+                        ModelLimits::default()
                     }
                 };
                 if let Some(engine_context_length) = reported.context_length
@@ -290,7 +290,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                          reported; using the configured --context-length"
                     );
                 }
-                ModelMetadata {
+                ModelLimits {
                     context_length: Some(configured),
                     ..reported
                 }
@@ -316,15 +316,27 @@ impl LLMEngine for TrtllmSidecarEngine {
                     })?
             }
         };
-        model.context_length = limits.context_length;
-        let _ = self.limits.set(limits);
+        Ok((client, limits))
+    }
+}
 
-        self.client
-            .set(client)
+#[async_trait]
+impl LLMEngine for TrtllmSidecarEngine {
+    async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+        if self.started.initialized() {
+            return Err(client::engine_shutdown(ALREADY_STARTED));
+        }
+        // Synchronous constructors retain deferred discovery; the CLI and Python
+        // sidecar launcher reuse the connection prepared by their async bootstrap.
+        let (client, limits) = self.connection.get_or_try_init(|| self.connect()).await?;
+        self.started
+            .set(())
             .map_err(|_| client::engine_shutdown(ALREADY_STARTED))?;
+        let mut model = self.model.clone();
+        model.context_length = limits.context_length;
         tracing::info!(
             endpoint = %self.endpoint,
-            connections = connection_count,
+            connections = client.connection_count(),
             model = %model.source,
             context_length = ?limits.context_length,
             max_output_tokens = ?limits.max_output_tokens,
@@ -338,12 +350,13 @@ impl LLMEngine for TrtllmSidecarEngine {
         request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let client = self
-            .client
+        let (client, limits) = self
+            .connection
             .get()
+            .filter(|_| self.started.initialized())
             .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let limits = self.metadata_for_request(client, &request).await?;
+        let limits = self.limits_for_request(client, *limits, &request).await?;
         let mut state = ResponseState::new(&request, self.mode);
         // A decode request that took a handoff has KV transferred into it, and
         // the transceiver releases those blocks when the engine finishes the
@@ -435,7 +448,7 @@ impl LLMEngine for TrtllmSidecarEngine {
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
-        let Some(client) = self.client.get() else {
+        let Some((client, _)) = self.connection.get().filter(|_| self.started.initialized()) else {
             return;
         };
         if let Err(error) = client.abort(ctx.id().to_string()).await {
@@ -456,3 +469,6 @@ impl LLMEngine for TrtllmSidecarEngine {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;
