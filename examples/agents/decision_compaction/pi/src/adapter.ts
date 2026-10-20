@@ -28,7 +28,7 @@ export interface Options {
   mode: "fixture" | "model";
   fixtureSession?: boolean;
   coordinator(request: Request, signal: AbortSignal): Promise<unknown>;
-  countRenderedTokens(projection: Projection): number | Promise<number>;
+  countRenderedTokens(projection: Projection, signal: AbortSignal): number | Promise<number>;
   counterQualification: "fixture" | "model_qualified";
   helperCounterName?: string;
   maxInputTokens: number;
@@ -62,7 +62,11 @@ export function sourceUnits(entries: SessionEntry[]): Unit[] {
     if (entry.type === "model_change" || entry.type === "thinking_level_change") continue;
     if (entry.type !== "message") throw Error("unsupported_history");
     const message = entry.message;
-    if (message.role === "user") {
+    if (message.role === "system") {
+      text(message.content);
+      if (message.toolsAdded?.length || message.toolsRemoved?.length || (message.sections && Object.values(message.sections).some((value) => typeof value !== "string"))) throw Error("unsupported_system_metadata");
+      units.push({ id: entry.id, role: "system", text: canonical(message), protected: true });
+    } else if (message.role === "user") {
       units.push({ id: entry.id, role: "user", text: text(message.content), protected: true });
     } else if (message.role === "assistant") {
       if (message.content.some((p) => p.type !== "text" && p.type !== "toolCall")) throw Error("unsupported_content");
@@ -138,7 +142,7 @@ export function decisionCompaction(options: Options): (pi: ExtensionAPI) => void
         const result = await Promise.race([options.coordinator(request, controller.signal), aborted]);
         if (Buffer.byteLength(JSON.stringify(result)) > request.budget.max_output_bytes) throw Error("output_budget");
         const summary = responseSummary(result, request, options);
-        const tokens = await Promise.race([options.countRenderedTokens({ systemPrompt, summary, tail }), aborted]);
+        const tokens = await Promise.race([options.countRenderedTokens({ systemPrompt, summary, tail }, controller.signal), aborted]);
         if (!Number.isSafeInteger(tokens) || tokens < 0 || tokens > options.maxInputTokens) throw Error("actor_budget");
         if (controller.signal.aborted || ctx.getSystemPrompt() !== systemPrompt || ctx.sessionManager.getSessionId() !== sessionId || ctx.sessionManager.getLeafId() !== leaf || snapshotDigest(ctx.sessionManager.getBranch()) !== branchDigest) throw Error("stale_or_aborted");
         outcome("candidate_validated");

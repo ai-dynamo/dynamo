@@ -5,9 +5,10 @@
   "type": "module",
   "license": "Apache-2.0",
   "scripts": {
-    "test": "c8 --include=src/adapter.ts --include=src/helper.ts --all --check-coverage --lines=80 --branches=80 --functions=80 --statements=80 node --import tsx --test tests/*.test.ts",
+    "test": "c8 --include=src/adapter.ts --include=src/helper.ts --include=src/live-support.ts --all --check-coverage --lines=80 --branches=80 --functions=80 --statements=80 node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "demo": "node --import tsx src/demo.ts"
+    "demo": "node --import tsx src/demo.ts",
+    "live": "node --import tsx src/live.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.1.0",
