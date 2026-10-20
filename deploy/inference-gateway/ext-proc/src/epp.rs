@@ -42,7 +42,7 @@ use crate::picker::{
     ResponseUsage, resolve_cache_namespace,
 };
 use crate::worker_generations::{
-    BuildRequest, GenerationScope, GenerationSet, RoutingGeneration, choose_generation,
+    BuildRequest, GenerationScope, GenerationSet, RoutingGeneration, choose_generation, lock,
     run_generation_controller,
 };
 
@@ -168,30 +168,23 @@ impl Generation {
 impl RoutingGeneration for Generation {
     fn set_topology(&self, ready: bool, prefill: Option<&EndpointId>) {
         self.ready.store(ready, Ordering::Relaxed);
-        let Some(endpoint) = prefill else {
+        let Some(prefill) = prefill else {
             return;
         };
-        let mut activation = self
-            .prefill_activation
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut activation = lock(&self.prefill_activation);
         if activation.is_none() {
             return;
         }
-        let Ok(component) = self
-            .drt
-            .namespace(&endpoint.namespace)
-            .and_then(|namespace| namespace.component(&endpoint.component))
-        else {
+        let Ok(endpoint) = runtime_endpoint(&self.drt, prefill) else {
             return;
         };
         tracing::info!(
             model_name = self.model_name,
-            namespace = endpoint.namespace,
+            namespace = prefill.namespace,
             "Prefill worker discovered, activating PrefillRouter"
         );
         if let Some(activation) = activation.take()
-            && activation.send(component.endpoint(&endpoint.name)).is_err()
+            && activation.send(endpoint).is_err()
         {
             tracing::debug!("PrefillRouter activation channel already closed");
         }
@@ -363,7 +356,7 @@ impl Router {
             |generation| generation.serves(model),
             |generation| generation.ready(),
             workers,
-            |total| rand::random_range(0..total),
+            &mut rand::rng(),
         )
         .cloned()
     }
@@ -910,6 +903,17 @@ async fn prepare_generation(
     .await?
 }
 
+/// The runtime handle for a discovered endpoint.
+fn runtime_endpoint(
+    drt: &DistributedRuntime,
+    id: &EndpointId,
+) -> Result<dynamo_runtime::component::Endpoint> {
+    Ok(drt
+        .namespace(&id.namespace)?
+        .component(&id.component)?
+        .endpoint(&id.name))
+}
+
 /// Create a generation's routers, then wait for its decode workers' runtime
 /// config.
 async fn start_generation(
@@ -925,10 +929,7 @@ async fn start_generation(
     let block_size = card.kv_cache_block_size;
     let model_name = card.display_name.clone();
 
-    let endpoint = drt
-        .namespace(namespace)?
-        .component(&endpoint_id.component)?
-        .endpoint(&endpoint_id.name);
+    let endpoint = runtime_endpoint(drt, endpoint_id)?;
 
     let decode_router = model_manager
         .managed_kv_router_for_with_worker_role(

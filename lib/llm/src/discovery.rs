@@ -38,7 +38,9 @@ mod endpoint_card;
 pub use endpoint_card::wait_for_endpoint_model_card;
 
 mod watcher;
-pub use watcher::{ModelUpdate, ModelWatcher};
+pub use watcher::{
+    ModelUpdate, ModelWatcher, model_card_endpoint_id, model_card_instance_id, worker_set_key,
+};
 
 mod worker_monitor;
 pub use worker_monitor::{

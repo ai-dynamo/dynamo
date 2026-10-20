@@ -24,11 +24,14 @@ use dynamo_llm::discovery::controller::{
 use dynamo_llm::discovery::readiness::{
     ReadinessUnit, evaluate_readiness, normalize_legacy_prefill_topology,
 };
+use dynamo_llm::discovery::{model_card_endpoint_id, model_card_instance_id, worker_set_key};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::worker_type::WorkerType;
-use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryStream, ModelCardInstanceId};
+use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryStream};
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use dynamo_runtime::protocols::EndpointId;
+use rand::Rng;
+use rand::seq::IndexedRandom;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -101,6 +104,13 @@ struct Entry<G> {
     dormant: bool,
 }
 
+impl<G> Entry<G> {
+    /// Published, with workers and a complete topology.
+    fn serving(&self) -> bool {
+        self.published && !self.dormant && self.ready
+    }
+}
+
 struct HostState<G> {
     /// The namespace of the first worker the EPP routes to.
     bound: Option<String>,
@@ -117,8 +127,18 @@ struct GenerationHost<G, B, L> {
     state: Mutex<HostState<G>>,
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+/// Lock `mutex`, recovering it if a panicking holder poisoned it.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether the EPP routes requests to a card's workers: decode or aggregated
+/// workers, as opposed to the prefill and encode workers they pair with.
+fn routes_requests(card: &ModelDeploymentCard) -> bool {
+    matches!(
+        card.effective_worker_type(),
+        WorkerType::Decode | WorkerType::Aggregated
+    )
 }
 
 /// Whether a published generation of `model` other than `key` has workers
@@ -128,9 +148,9 @@ fn has_replacement<G>(
     key: &GroupKey,
     model: &str,
 ) -> bool {
-    generations.iter().any(|(other, entry)| {
-        other != key && entry.model == model && entry.published && !entry.dormant && entry.ready
-    })
+    generations
+        .iter()
+        .any(|(other, entry)| other != key && entry.model == model && entry.serving())
 }
 
 impl<G: RoutingGeneration, B, L> GenerationHost<G, B, L> {
@@ -261,10 +281,7 @@ impl<G: RoutingGeneration, B, L> GenerationHost<G, B, L> {
 
         // A generation is published once its own topology is complete, or at
         // once while no complete generation serves, as at startup.
-        let mut serving = state
-            .generations
-            .values()
-            .any(|entry| entry.published && !entry.dormant && entry.ready);
+        let mut serving = state.generations.values().any(Entry::serving);
         for entry in state.generations.values_mut() {
             if entry.published || (serving && !entry.ready) {
                 continue;
@@ -324,54 +341,33 @@ where
         instance: DiscoveryInstance,
         namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Option<DesiredInstance>> {
-        let DiscoveryInstance::Model {
-            namespace,
-            component,
-            endpoint,
-            instance_id,
-            model_suffix,
-            ..
-        } = &instance
-        else {
-            return Ok(None);
-        };
+        let mcid = model_card_instance_id(&instance)?;
         // A LoRA adapter's card adds to a worker whose base card already
         // counts, and a generation is identified by its base model.
-        if model_suffix.is_some()
-            || !namespace_filter.matches_with_prefix_mode(namespace, self.scope.prefix_mode)
-            || self.follows(namespace) == Some(false)
+        if mcid.model_suffix.is_some()
+            || !namespace_filter.matches_with_prefix_mode(&mcid.namespace, self.scope.prefix_mode)
+            || self.follows(&mcid.namespace) == Some(false)
         {
             return Ok(None);
         }
         let mut card = instance.deserialize_model::<ModelDeploymentCard>()?;
         normalize_legacy_prefill_topology(&mut card);
-        let role = card.effective_worker_type();
         // Requests are routed to the configured component's workers; prefill
         // and encode workers pair from any component.
-        if matches!(role, WorkerType::Decode | WorkerType::Aggregated)
-            && (*component != self.scope.component || !self.bind(namespace))
+        if routes_requests(&card)
+            && (mcid.component != self.scope.component || !self.bind(&mcid.namespace))
         {
             return Ok(None);
         }
-        let mcid = ModelCardInstanceId {
-            namespace: namespace.clone(),
-            component: component.clone(),
-            endpoint: endpoint.clone(),
-            instance_id: *instance_id,
-            model_suffix: None,
-        };
+        let endpoint_id = model_card_endpoint_id(&mcid);
         let group_key = GroupKey {
             model_name: card.name().to_string(),
-            worker_set_key: format!("{namespace}/{component}/{endpoint}/{}", role.as_str()),
+            worker_set_key: worker_set_key(&endpoint_id, card.model_type, card.worker_type),
         };
         Ok(Some(DesiredInstance {
             key: mcid.to_path(),
-            endpoint_id: EndpointId {
-                namespace: namespace.clone(),
-                component: component.clone(),
-                name: endpoint.clone(),
-            },
             mcid,
+            endpoint_id,
             mdc_checksum: card.mdcsum().to_string(),
             card,
             group_key,
@@ -387,10 +383,7 @@ where
         cancellation: CancellationToken,
     ) -> anyhow::Result<Prepared<G>> {
         let card = &spec.representative.card;
-        if !matches!(
-            card.effective_worker_type(),
-            WorkerType::Decode | WorkerType::Aggregated
-        ) {
+        if !routes_requests(card) {
             return Ok(Prepared::Peer);
         }
         let startup = !lock(&self.state)
@@ -462,27 +455,25 @@ where
     fn remove_group(&self, key: &GroupKey) {
         let mut state = lock(&self.state);
         state.groups.remove(key);
-        let keep = state.generations.get(key).is_some_and(|entry| {
-            entry.published && !has_replacement(&state.generations, key, &entry.model)
-        });
-        let mut changed = false;
-        if keep {
-            if let Some(entry) = state.generations.get_mut(key) {
-                // In-flight requests hold their own `Arc`; new ones fail until
-                // the workers return or a replacement is ready.
-                tracing::info!(
-                    namespace = entry.namespace,
-                    "Worker generation has no workers; keeping it until a replacement is ready"
-                );
-                entry.dormant = true;
+        match state.generations.get_mut(key) {
+            // `settle` retires it once a ready replacement exists. Until
+            // then, in-flight requests hold their own `Arc`, and new ones
+            // fail until the workers return.
+            Some(entry) if entry.published => entry.dormant = true,
+            Some(_) => {
+                state.generations.remove(key);
             }
-        } else if let Some(entry) = state.generations.remove(key)
-            && entry.published
-        {
-            tracing::info!(namespace = entry.namespace, "Worker generation retired");
-            changed = true;
+            None => {}
         }
-        self.settle(&mut state, changed);
+        if let Some(entry) = state.generations.get(key)
+            && !has_replacement(&state.generations, key, &entry.model)
+        {
+            tracing::info!(
+                namespace = entry.namespace,
+                "Worker generation has no workers; keeping it until a replacement is ready"
+            );
+        }
+        self.settle(&mut state, false);
     }
 
     fn discard_prepared(&self, _prepared: Prepared<G>) {}
@@ -522,143 +513,101 @@ pub(crate) async fn run_generation_controller<G, B, BF, L, LF>(
 /// list). Among candidates, those that are `ready` (their own topology is
 /// complete) are weighted by `workers`; when none is ready they serve as they
 /// can, and with no workers anywhere the first candidate is chosen so its
-/// router reports why. `roll(total)` returns a value in `0..total`.
-pub(crate) fn choose_generation<T>(
-    generations: &[T],
+/// router reports why.
+pub(crate) fn choose_generation<'a, T>(
+    generations: &'a [T],
     serves: impl Fn(&T) -> bool,
     ready: impl Fn(&T) -> bool,
     workers: impl Fn(&T) -> usize,
-    roll: impl Fn(usize) -> usize,
-) -> Option<&T> {
+    rng: &mut impl Rng,
+) -> Option<&'a T> {
     if generations.len() <= 1 {
         return generations.first();
     }
     let restricted = generations.iter().any(&serves);
     let candidate = |generation: &T| !restricted || serves(generation);
-    let ready_workers = |generation: &T| {
-        if candidate(generation) && ready(generation) {
+    let weight = |generation: &T, ready_only: bool| {
+        if candidate(generation) && (!ready_only || ready(generation)) {
             workers(generation)
         } else {
             0
         }
     };
-    let candidate_workers = |generation: &T| {
-        if candidate(generation) {
-            workers(generation)
-        } else {
-            0
-        }
-    };
-    pick_weighted(generations, ready_workers, &roll)
-        .or_else(|| pick_weighted(generations, candidate_workers, &roll))
+    generations
+        .choose_weighted(rng, |generation| weight(generation, true))
+        .or_else(|_| generations.choose_weighted(rng, |generation| weight(generation, false)))
+        .ok()
         .or_else(|| generations.iter().find(|generation| candidate(generation)))
-}
-
-/// Pick an item with probability proportional to its weight; `roll(total)`
-/// returns a value in `0..total`. Returns `None` when every weight is zero.
-fn pick_weighted<T>(
-    items: &[T],
-    weight: impl Fn(&T) -> usize,
-    roll: impl FnOnce(usize) -> usize,
-) -> Option<&T> {
-    let weights: Vec<usize> = items.iter().map(&weight).collect();
-    let total: usize = weights.iter().sum();
-    if total == 0 {
-        return None;
-    }
-    let mut point = roll(total);
-    for (item, weight) in items.iter().zip(weights) {
-        if point < weight {
-            return Some(item);
-        }
-        point -= weight;
-    }
-    None
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use super::*;
     use dynamo_llm::model_type::ModelType;
-    use dynamo_runtime::discovery::DiscoveryEvent;
-    use tokio::sync::{mpsc, oneshot};
+    use dynamo_runtime::discovery::{DiscoveryEvent, DiscoverySpec};
+    use tokio::sync::mpsc;
     use tokio_stream::wrappers::UnboundedReceiverStream;
 
     const MODEL: &str = "tiny";
-    /// Covers the controller's retry backoff without hanging a failing test.
-    const WAIT: Duration = Duration::from_secs(300);
 
-    fn card(
-        worker_type: Option<WorkerType>,
-        model_type: ModelType,
-        needs: Vec<Vec<WorkerType>>,
-    ) -> ModelDeploymentCard {
-        let mut card = ModelDeploymentCard::with_name_only(MODEL);
-        card.worker_type = worker_type;
-        card.model_type = model_type;
-        card.needs = needs;
+    fn card(model: &str, role: WorkerType, needs: Option<WorkerType>) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only(model);
+        card.worker_type = Some(role);
+        card.needs = needs.map(|peer| vec![vec![peer]]).unwrap_or_default();
         card
     }
 
-    fn chat() -> ModelType {
-        ModelType::Chat | ModelType::Completions
-    }
-
-    /// A worker's card, registered by `component` in `namespace`.
-    fn worker(
+    /// A worker's card, registered by `component` in `namespace`, under
+    /// `adapter` for a LoRA adapter's card.
+    fn registration(
         namespace: &str,
         component: &str,
         instance_id: u64,
         card: &ModelDeploymentCard,
+        adapter: Option<&str>,
     ) -> DiscoveryInstance {
-        DiscoveryInstance::Model {
-            namespace: namespace.to_string(),
-            component: component.to_string(),
-            endpoint: "generate".to_string(),
-            instance_id,
-            card_json: serde_json::to_value(card).unwrap(),
-            model_suffix: None,
-        }
+        DiscoverySpec::from_model_with_suffix(
+            namespace.to_string(),
+            component.to_string(),
+            "generate".to_string(),
+            card,
+            adapter.map(str::to_string),
+        )
+        .unwrap()
+        .into_instance(instance_id)
+    }
+
+    /// An aggregated worker of `model`.
+    fn serving(namespace: &str, instance_id: u64, model: &str) -> DiscoveryInstance {
+        let card = card(model, WorkerType::Aggregated, None);
+        registration(namespace, "backend", instance_id, &card, None)
     }
 
     fn aggregated(namespace: &str, instance_id: u64) -> DiscoveryInstance {
         serving(namespace, instance_id, MODEL)
     }
 
-    /// An aggregated worker of `model`.
-    fn serving(namespace: &str, instance_id: u64, model: &str) -> DiscoveryInstance {
-        let mut card = card(Some(WorkerType::Aggregated), chat(), vec![]);
-        card.display_name = model.to_string();
-        worker(namespace, "backend", instance_id, &card)
-    }
-
     fn decode(namespace: &str, instance_id: u64) -> DiscoveryInstance {
-        let card = card(
-            Some(WorkerType::Decode),
-            chat(),
-            vec![vec![WorkerType::Prefill]],
-        );
-        worker(namespace, "backend", instance_id, &card)
+        let card = card(MODEL, WorkerType::Decode, Some(WorkerType::Prefill));
+        registration(namespace, "backend", instance_id, &card, None)
     }
 
     /// A prefill worker as the mocker registers it: no legacy
     /// `ModelType::Prefill` bit.
     fn prefill(namespace: &str, instance_id: u64) -> DiscoveryInstance {
-        let card = card(
-            Some(WorkerType::Prefill),
-            ModelType::empty(),
-            vec![vec![WorkerType::Decode]],
-        );
-        worker(namespace, "prefill", instance_id, &card)
+        let card = card(MODEL, WorkerType::Prefill, Some(WorkerType::Decode));
+        registration(namespace, "prefill", instance_id, &card, None)
     }
 
     /// A prefill worker from before `worker_type`: the legacy bit only.
     fn legacy_prefill(namespace: &str, instance_id: u64) -> DiscoveryInstance {
-        let card = card(None, ModelType::Prefill, vec![]);
-        worker(namespace, "prefill", instance_id, &card)
+        let mut card = ModelDeploymentCard::with_name_only(MODEL);
+        card.model_type = ModelType::Prefill;
+        registration(namespace, "prefill", instance_id, &card, None)
     }
 
     fn scope(
@@ -708,30 +657,14 @@ mod tests {
         }
     }
 
-    /// A build the test completes.
-    struct Build {
-        namespace: String,
-        startup: bool,
-        reply: oneshot::Sender<anyhow::Result<()>>,
-    }
-
-    impl Build {
-        fn finish(self) {
-            let _ = self.reply.send(Ok(()));
-        }
-
-        fn fail(self) {
-            let _ = self.reply.send(Err(anyhow::anyhow!("router failed")));
-        }
-    }
-
     /// The Frontend's discovery controller with a [`GenerationHost`], over a
-    /// discovery stream the test drives.
+    /// discovery stream the test drives. Builds succeed at once.
     struct Epp {
         events: mpsc::UnboundedSender<anyhow::Result<DiscoveryEvent>>,
         /// What the controller's periodic reconciliation lists.
         registered: Arc<Mutex<Vec<DiscoveryInstance>>>,
-        builds: mpsc::UnboundedReceiver<Build>,
+        /// Each build's namespace, and whether it ran at startup.
+        built: Arc<Mutex<Vec<(String, bool)>>>,
         published: watch::Receiver<GenerationSet<FakeGeneration>>,
         controller: tokio::task::JoinHandle<()>,
     }
@@ -740,33 +673,23 @@ mod tests {
         fn start(scope: GenerationScope) -> Self {
             let (events, stream) = mpsc::unbounded_channel();
             let registered = Arc::new(Mutex::new(Vec::<DiscoveryInstance>::new()));
-            let (build_tx, builds) = mpsc::unbounded_channel();
-            let build = move |request: BuildRequest| {
-                let build_tx = build_tx.clone();
-                async move {
-                    let (reply, outcome) = oneshot::channel();
+            let built = Arc::new(Mutex::new(Vec::new()));
+            let build = {
+                let built = built.clone();
+                move |request: BuildRequest| {
                     let namespace = request.endpoint.namespace;
-                    let model = request.card.name().to_string();
-                    let _ = build_tx.send(Build {
-                        namespace: namespace.clone(),
-                        startup: request.startup,
-                        reply,
-                    });
-                    outcome.await??;
-                    Ok::<_, anyhow::Error>(FakeGeneration {
+                    lock(&built).push((namespace.clone(), request.startup));
+                    std::future::ready(Ok::<_, anyhow::Error>(FakeGeneration {
                         namespace,
-                        model,
+                        model: request.card.name().to_string(),
                         ready: AtomicBool::new(false),
                         prefill: Mutex::new(None),
-                    })
+                    }))
                 }
             };
             let list = {
                 let registered = registered.clone();
-                move || {
-                    let instances = lock(&registered).clone();
-                    async move { Ok::<_, anyhow::Error>(instances) }
-                }
+                move || std::future::ready(Ok::<_, anyhow::Error>(lock(&registered).clone()))
             };
             let (publish, published) =
                 watch::channel::<GenerationSet<FakeGeneration>>(Arc::from([]));
@@ -780,7 +703,7 @@ mod tests {
             Self {
                 events,
                 registered,
-                builds,
+                built,
                 published,
                 controller,
             }
@@ -798,83 +721,73 @@ mod tests {
             self.events.send(Ok(removed)).unwrap();
         }
 
-        async fn next_build(&mut self) -> Build {
-            tokio::time::timeout(WAIT, self.builds.recv())
-                .await
-                .expect("no build started")
-                .unwrap()
-        }
-
-        /// Complete the next build, which must be `namespace`'s.
-        async fn build(&mut self, namespace: &str) {
-            let build = self.next_build().await;
-            assert_eq!(build.namespace, namespace);
-            build.finish();
-        }
-
         /// Let the controller act on everything so far. The clock is paused,
         /// so it advances only once every task is idle.
         async fn settle(&self) {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
 
+        /// The builds since the last call: namespace, and whether at startup.
+        fn built(&self) -> Vec<(String, bool)> {
+            std::mem::take(&mut *lock(&self.built))
+        }
+
+        /// The published generations as `model@namespace`, or by namespace
+        /// alone for [`MODEL`].
         fn published(&self) -> Vec<String> {
             let published = self.published.borrow();
             published
                 .iter()
-                .map(|generation| generation.namespace.clone())
+                .map(|generation| match generation.model.as_str() {
+                    MODEL => generation.namespace.clone(),
+                    model => format!("{model}@{}", generation.namespace),
+                })
                 .collect()
         }
 
-        /// The published generations as `model@namespace`.
-        fn published_models(&self) -> Vec<String> {
+        fn generation(&self, model: &str, namespace: &str) -> Arc<FakeGeneration> {
             let published = self.published.borrow();
             published
                 .iter()
-                .map(|generation| format!("{}@{}", generation.model, generation.namespace))
-                .collect()
-        }
-
-        fn generation(&self, namespace: &str) -> Arc<FakeGeneration> {
-            let published = self.published.borrow();
-            published
-                .iter()
-                .find(|generation| generation.namespace == namespace)
+                .find(|generation| generation.model == model && generation.namespace == namespace)
                 .cloned()
                 .expect("generation is published")
         }
 
-        /// End the discovery stream, which stops the controller, and check
-        /// that no build was left unseen.
+        /// End the discovery stream, which stops the controller.
         async fn stop(self) {
-            let Self {
-                events,
-                mut builds,
-                controller,
-                ..
-            } = self;
-            drop(events);
-            controller.await.unwrap();
-            assert!(builds.try_recv().is_err(), "unexpected build");
+            drop(self.events);
+            self.controller.await.unwrap();
         }
     }
 
+    /// What a fresh EPP publishes once `instances` register.
+    async fn published_after(
+        scope: GenerationScope,
+        instances: &[DiscoveryInstance],
+    ) -> Vec<String> {
+        let epp = Epp::start(scope);
+        for instance in instances {
+            epp.add(instance);
+        }
+        epp.settle().await;
+        let published = epp.published();
+        epp.stop().await;
+        published
+    }
+
     /// The rolling update from #16085: generation `a` serves, `b` starts
-    /// beside it and serves once built, then `a` drains and is retired, with
-    /// no EPP restart.
+    /// beside it and serves once built, then `a` drains and is retired.
     #[tokio::test(start_paused = true)]
     async fn follows_a_rolling_update() {
         let (a, b) = ("dgd-aaaaaaaa", "dgd-bbbbbbbb");
-        let mut epp = Epp::start(dgd());
+        let epp = Epp::start(dgd());
         let old = aggregated(a, 1);
         epp.add(&old);
-        epp.build(a).await;
         epp.settle().await;
-        assert_eq!(epp.published(), [a]);
-
         epp.add(&aggregated(b, 2));
-        epp.build(b).await;
         epp.settle().await;
+        assert_eq!(epp.built(), [(a.into(), true), (b.into(), false)]);
         assert_eq!(epp.published(), [a, b], "generations overlap");
 
         epp.remove(&old);
@@ -883,115 +796,24 @@ mod tests {
         epp.stop().await;
     }
 
-    /// During a rollout a disaggregated generation takes no traffic until its
-    /// own prefill workers register, and each generation's prefill router gets
-    /// its own namespace's prefill workers, legacy or current.
+    /// During a rollout a generation takes no traffic until its own prefill
+    /// workers register, unless no complete generation serves: the operator
+    /// may drain the old decode or prefill workers first. Each generation's
+    /// prefill router gets its own namespace's workers, legacy or current.
     #[tokio::test(start_paused = true)]
     async fn holds_back_a_generation_until_its_topology_is_complete() {
         let (a, b) = ("dgd-aaaaaaaa", "dgd-bbbbbbbb");
-        let mut epp = Epp::start(dgd());
-        epp.add(&legacy_prefill(a, 1));
-        epp.add(&decode(a, 2));
-        epp.build(a).await;
-        epp.settle().await;
-        let old = epp.generation(a);
-        assert!(old.ready());
-        assert_eq!(old.prefill_namespace().as_deref(), Some(a));
-
-        epp.add(&decode(b, 3));
-        epp.build(b).await;
-        epp.settle().await;
-        assert_eq!(epp.published(), [a], "no prefill workers yet");
-
-        epp.add(&prefill(b, 4));
-        epp.settle().await;
-        assert_eq!(epp.published(), [a, b]);
-        let new = epp.generation(b);
-        assert!(new.ready());
-        assert_eq!(new.prefill_namespace().as_deref(), Some(b));
-        assert_eq!(old.prefill_namespace().as_deref(), Some(a));
-        epp.stop().await;
-    }
-
-    /// At startup the first generation serves at once: a disaggregated one
-    /// serves aggregated until its prefill workers register.
-    #[tokio::test(start_paused = true)]
-    async fn publishes_the_first_generation_at_once() {
-        let a = "dgd-aaaaaaaa";
-        let mut epp = Epp::start(dgd());
-        epp.add(&decode(a, 1));
-        let build = epp.next_build().await;
-        assert!(build.startup);
-        build.finish();
-        epp.settle().await;
-        let first = epp.generation(a);
-        assert!(!first.ready());
-        assert_eq!(first.prefill_namespace(), None);
-
-        epp.add(&prefill(a, 2));
-        epp.settle().await;
-        assert!(first.ready());
-        assert_eq!(first.prefill_namespace().as_deref(), Some(a));
-
-        epp.add(&decode("dgd-bbbbbbbb", 3));
-        let build = epp.next_build().await;
-        assert!(!build.startup);
-        build.finish();
-        epp.stop().await;
-    }
-
-    /// A generation whose workers all leave keeps serving until a ready
-    /// replacement exists, so requests fail there rather than finding no
-    /// generation; workers that return are served by a rebuilt generation.
-    #[tokio::test(start_paused = true)]
-    async fn keeps_the_last_generation_until_a_replacement_is_ready() {
-        let (a, b) = ("dgd-aaaaaaaa", "dgd-bbbbbbbb");
-        let mut epp = Epp::start(dgd());
-        let gone = aggregated(a, 1);
-        epp.add(&gone);
-        epp.build(a).await;
-        epp.settle().await;
-        let first = epp.generation(a);
-
-        epp.remove(&gone);
-        epp.settle().await;
-        assert_eq!(epp.published(), [a]);
-
-        let returned = aggregated(a, 2);
-        epp.add(&returned);
-        epp.build(a).await;
-        epp.settle().await;
-        assert_eq!(epp.published(), [a]);
-        assert!(!Arc::ptr_eq(&first, &epp.generation(a)), "rebuilt in place");
-
-        epp.remove(&returned);
-        epp.settle().await;
-        assert_eq!(epp.published(), [a]);
-        epp.add(&aggregated(b, 3));
-        epp.build(b).await;
-        epp.settle().await;
-        assert_eq!(epp.published(), [b]);
-        epp.stop().await;
-    }
-
-    /// Once no complete generation serves, an incomplete one serves as it
-    /// can, as at startup. The operator rolls each role on its own schedule,
-    /// so the old decode or prefill workers may drain before the new prefill
-    /// workers register.
-    #[tokio::test(start_paused = true)]
-    async fn serves_an_incomplete_generation_once_no_complete_one_serves() {
-        let (a, b) = ("dgd-aaaaaaaa", "dgd-bbbbbbbb");
         for drained in ["decode", "prefill"] {
-            let mut epp = Epp::start(dgd());
-            let old_prefill = prefill(a, 1);
-            let old_decode = decode(a, 2);
+            let epp = Epp::start(dgd());
+            let (old_prefill, old_decode) = (legacy_prefill(a, 1), decode(a, 2));
             epp.add(&old_prefill);
             epp.add(&old_decode);
-            epp.build(a).await;
-            epp.add(&decode(b, 3));
-            epp.build(b).await;
             epp.settle().await;
-            assert_eq!(epp.published(), [a]);
+            epp.add(&decode(b, 3));
+            epp.settle().await;
+            assert_eq!(epp.published(), [a], "b has no prefill workers yet");
+            let old = epp.generation(MODEL, a);
+            assert_eq!(old.prefill_namespace().as_deref(), Some(a));
 
             epp.remove(if drained == "decode" {
                 &old_decode
@@ -999,8 +821,7 @@ mod tests {
                 &old_prefill
             });
             epp.settle().await;
-            assert_eq!(epp.published(), [a, b], "old {drained} drained");
-            assert!(!epp.generation(b).ready());
+            assert_eq!(epp.published(), [a, b], "old {drained} drained first");
 
             epp.add(&prefill(b, 4));
             if drained == "prefill" {
@@ -1008,233 +829,139 @@ mod tests {
             }
             epp.settle().await;
             assert_eq!(epp.published(), [b]);
-            assert!(epp.generation(b).ready());
+            let new = epp.generation(MODEL, b);
+            assert!(new.ready());
+            assert_eq!(new.prefill_namespace().as_deref(), Some(b));
             epp.stop().await;
         }
     }
 
-    /// Only a generation of the same model replaces one whose workers are
-    /// gone, so one model's requests never reach another model's workers.
+    /// A generation whose workers all leave keeps its place, so its requests
+    /// fail there rather than reach another model's workers, until a ready
+    /// generation of the same model replaces it. Workers that return are
+    /// served by a rebuilt generation.
     #[tokio::test(start_paused = true)]
-    async fn a_replacement_serves_the_same_model() {
+    async fn keeps_a_generation_until_a_replacement_of_its_model_is_ready() {
         let (a, b) = ("dgd-aaaaaaaa", "dgd-bbbbbbbb");
-        let mut epp = Epp::start(dgd());
-        let x = serving(a, 1, "model-x");
-        epp.add(&x);
-        epp.build(a).await;
-        epp.add(&serving(a, 2, "model-y"));
-        epp.build(a).await;
-        epp.settle().await;
         let both = ["model-x@dgd-aaaaaaaa", "model-y@dgd-aaaaaaaa"];
-        assert_eq!(epp.published_models(), both);
-
-        epp.remove(&x);
+        let epp = Epp::start(dgd());
+        let gone = serving(a, 1, "model-x");
+        epp.add(&gone);
+        epp.add(&serving(a, 2, "model-y"));
         epp.settle().await;
-        assert_eq!(epp.published_models(), both, "model-y is no replacement");
+        let first = epp.generation("model-x", a);
 
-        epp.add(&serving(b, 3, "model-x"));
-        epp.build(b).await;
+        epp.remove(&gone);
+        epp.settle().await;
+        assert_eq!(epp.published(), both, "model-y is no replacement");
+
+        let returned = serving(a, 3, "model-x");
+        epp.add(&returned);
+        epp.settle().await;
+        assert_eq!(epp.published(), both);
+        assert!(!Arc::ptr_eq(&first, &epp.generation("model-x", a)));
+
+        epp.remove(&returned);
+        epp.add(&serving(b, 4, "model-x"));
         epp.settle().await;
         assert_eq!(
-            epp.published_models(),
+            epp.published(),
             ["model-x@dgd-bbbbbbbb", "model-y@dgd-aaaaaaaa"]
         );
         epp.stop().await;
     }
 
-    /// The EPP follows only its own DGD's generations, and builds them only
-    /// from the configured component's base-model cards.
+    /// The EPP follows only its own DGD's generations, built from the
+    /// configured component's base-model workers. Elsewhere it binds to the
+    /// first namespace with a worker it routes to.
     #[tokio::test(start_paused = true)]
-    async fn follows_only_its_own_deployments_workers() {
-        let generation = "default-foo-1a2b3c4d";
-        let mut epp = Epp::start(scope(
-            NamespaceFilter::Prefix("default-foo".into()),
-            NamespacePrefixMode::WorkerGeneration,
-        ));
-        epp.add(&aggregated("default-foo-bar", 1));
-        let mut adapter = aggregated(generation, 2);
-        if let DiscoveryInstance::Model { model_suffix, .. } = &mut adapter {
-            *model_suffix = Some("adapter".into());
-        }
-        epp.add(&adapter);
-        let processor = card(Some(WorkerType::Aggregated), chat(), vec![]);
-        epp.add(&worker(generation, "processor", 3, &processor));
-        let encoder = card(Some(WorkerType::Encode), ModelType::empty(), vec![]);
-        epp.add(&worker(generation, "encoder", 4, &encoder));
-        epp.add(&aggregated(generation, 5));
-        epp.build(generation).await;
-        epp.settle().await;
-        assert_eq!(epp.published(), [generation]);
-        epp.stop().await;
-    }
-
-    /// Without `DYN_NAMESPACE_PREFIX_STRICT` (operators before 1.6) the EPP
-    /// still follows its DGD's generations but not a sibling DGD sharing the
-    /// prefix; bound to the sibling first, it stays there.
-    #[tokio::test(start_paused = true)]
-    async fn follows_generations_under_a_literal_prefix() {
+    async fn follows_only_its_own_deployment() {
+        let (a, b, sibling) = ("dgd-aaaaaaaa", "dgd-bbbbbbbb", "dgd-bar");
         let literal = || {
             scope(
                 NamespaceFilter::Prefix("dgd".into()),
                 NamespacePrefixMode::Literal,
             )
         };
-        let mut epp = Epp::start(literal());
-        epp.add(&aggregated("dgd-aaaaaaaa", 1));
-        epp.build("dgd-aaaaaaaa").await;
-        epp.add(&aggregated("dgd-bar", 2));
-        epp.add(&aggregated("dgd-bbbbbbbb", 3));
-        epp.build("dgd-bbbbbbbb").await;
-        epp.settle().await;
-        assert_eq!(epp.published(), ["dgd-aaaaaaaa", "dgd-bbbbbbbb"]);
-        epp.stop().await;
+        let aggregated_card = card(MODEL, WorkerType::Aggregated, None);
+        let encoder = card(MODEL, WorkerType::Encode, None);
+        let others = [
+            aggregated(sibling, 1),
+            registration(a, "backend", 2, &aggregated_card, Some("adapter")),
+            registration(a, "processor", 3, &aggregated_card, None),
+            registration(a, "encoder", 4, &encoder, None),
+            aggregated(a, 5),
+        ];
+        assert_eq!(published_after(dgd(), &others).await, [a]);
 
-        let mut epp = Epp::start(literal());
-        epp.add(&aggregated("dgd-bar", 1));
-        epp.build("dgd-bar").await;
-        epp.add(&aggregated("dgd-aaaaaaaa", 2));
-        epp.settle().await;
-        assert_eq!(epp.published(), ["dgd-bar"]);
-        epp.stop().await;
-    }
+        // Operators before 1.6 set no strict prefix: generations are still
+        // followed and a sibling DGD is not, unless the EPP bound to it first.
+        let generations = [aggregated(a, 1), aggregated(sibling, 2), aggregated(b, 3)];
+        assert_eq!(published_after(literal(), &generations).await, [a, b]);
+        let sibling_first = [aggregated(sibling, 1), aggregated(a, 2)];
+        assert_eq!(published_after(literal(), &sibling_first).await, [sibling]);
 
-    /// A global or exact scope binds to one namespace for good, and only a
-    /// worker the EPP routes to binds it.
-    #[tokio::test(start_paused = true)]
-    async fn binds_one_namespace_outside_one_deployment() {
-        let mut epp = Epp::start(scope(
+        let global = scope(
             NamespaceFilter::Global,
             NamespacePrefixMode::WorkerGeneration,
-        ));
-        epp.add(&prefill("team-b", 1));
-        epp.add(&decode("team-a", 2));
-        epp.build("team-a").await;
-        epp.add(&aggregated("team-b", 3));
-        epp.settle().await;
-        assert_eq!(epp.published(), ["team-a"]);
-        assert_eq!(epp.generation("team-a").prefill_namespace(), None);
-        epp.stop().await;
-
-        let mut epp = Epp::start(scope(
-            NamespaceFilter::Exact("default-foo".into()),
+        );
+        let teams = [
+            prefill("team-b", 1),
+            decode("team-a", 2),
+            aggregated("team-b", 3),
+        ];
+        assert_eq!(published_after(global, &teams).await, ["team-a"]);
+        let exact = scope(
+            NamespaceFilter::Exact("dgd".into()),
             NamespacePrefixMode::WorkerGeneration,
-        ));
-        epp.add(&aggregated("default-foo-1a2b3c4d", 1));
-        epp.add(&aggregated("default-foo", 2));
-        epp.build("default-foo").await;
-        epp.settle().await;
-        assert_eq!(epp.published(), ["default-foo"]);
-        epp.stop().await;
+        );
+        let exact_first = [aggregated(a, 1), aggregated("dgd", 2)];
+        assert_eq!(published_after(exact, &exact_first).await, ["dgd"]);
     }
 
-    /// The controller retries a failed build.
-    #[tokio::test(start_paused = true)]
-    async fn retries_a_failed_build() {
-        let a = "dgd-aaaaaaaa";
-        let mut epp = Epp::start(dgd());
-        epp.add(&aggregated(a, 1));
-        epp.next_build().await.fail();
-        epp.build(a).await;
-        epp.settle().await;
-        assert_eq!(epp.published(), [a]);
-        epp.stop().await;
+    /// `(name, workers, ready, serves the requested model)`.
+    fn choose(generations: &[(&'static str, usize, bool, bool)]) -> Option<&'static str> {
+        choose_generation(generations, |g| g.3, |g| g.2, |g| g.1, &mut rand::rng()).map(|g| g.0)
     }
 
-    /// `(name, workers, ready, serves the requested model)`, chosen with
-    /// `roll` capped to the weight being rolled over.
-    fn choose(
-        generations: &[(&'static str, usize, bool, bool)],
-        roll: usize,
-    ) -> Option<&'static str> {
-        choose_generation(
-            generations,
-            |g| g.3,
-            |g| g.2,
-            |g| g.1,
-            |total| roll.min(total - 1),
-        )
-        .map(|g| g.0)
-    }
-
+    /// Requests go to candidates that are ready and have workers, weighted by
+    /// workers; else to any candidate with workers; else to the first
+    /// candidate, whose router reports why. Candidates serve the requested
+    /// model when any generation does.
     #[test]
-    fn choose_generation_follows_capacity() {
-        let both = [("old", 3, true, false), ("new", 1, true, false)];
-        assert_eq!(choose(&both, 0), Some("old"));
-        assert_eq!(choose(&both, 2), Some("old"));
-        assert_eq!(choose(&both, 3), Some("new"));
-        assert_eq!(
-            choose(&[("old", 0, true, false), ("new", 4, true, false)], 0),
-            Some("new"),
-            "a drained generation gets no traffic"
-        );
-        assert_eq!(
-            choose(&[("old", 0, true, false), ("new", 0, true, false)], 0),
-            Some("old"),
-            "with no workers anywhere the first generation reports why"
-        );
-        assert_eq!(choose(&[("only", 0, false, false)], 0), Some("only"));
-        assert_eq!(choose(&[], 0), None);
-    }
-
-    /// Each generation's readiness is its own: a disaggregated generation
-    /// waits for its own prefill router, whatever the other generation is.
-    #[test]
-    fn choose_generation_judges_each_generation_on_its_own() {
-        let pending_disagg = [("aggregated", 8, true, false), ("disagg", 2, false, false)];
-        assert_eq!(choose(&pending_disagg, 9), Some("aggregated"));
-        let ready_disagg = [("aggregated", 8, true, false), ("disagg", 2, true, false)];
-        assert_eq!(
-            choose(&ready_disagg, 7),
-            Some("aggregated"),
-            "a ready generation is weighted by capacity, not given every request"
-        );
-        assert_eq!(choose(&ready_disagg, 9), Some("disagg"));
-        assert_eq!(
-            choose(
-                &[("disagg", 2, true, false), ("aggregated", 6, true, false)],
-                7
+    fn choose_generation_prefers_ready_generations_with_workers() {
+        assert_eq!(choose(&[]), None);
+        assert_eq!(choose(&[("only", 0, false, false)]), Some("only"));
+        let overlap = [("old", 3, true, false), ("new", 1, true, false)];
+        let picked: HashSet<_> = (0..1000).filter_map(|_| choose(&overlap)).collect();
+        assert_eq!(picked.len(), 2, "both generations take traffic");
+        for (generations, expected) in [
+            (
+                [("drained", 0, true, false), ("new", 4, true, false)],
+                "new",
             ),
-            Some("aggregated"),
-            "an aggregated generation is not held back by a disaggregated one"
-        );
-        assert_eq!(
-            choose(&[("old", 0, true, false), ("new", 6, false, false)], 5),
-            Some("new"),
-            "serving aggregated beats no route at all"
-        );
-    }
-
-    /// A request goes to a generation serving its model when one does, ready
-    /// or not, and anywhere when none does.
-    #[test]
-    fn choose_generation_routes_by_requested_model() {
-        assert_eq!(
-            choose(
-                &[("model-a", 4, true, false), ("model-b", 1, true, true)],
-                3
+            (
+                [
+                    ("complete", 8, true, false),
+                    ("incomplete", 2, false, false),
+                ],
+                "complete",
             ),
-            Some("model-b")
-        );
-        assert_eq!(
-            choose(
-                &[("model-a", 4, true, false), ("model-b", 1, false, true)],
-                3
+            (
+                [("drained", 0, true, false), ("incomplete", 6, false, false)],
+                "incomplete",
             ),
-            Some("model-b")
-        );
-        assert_eq!(
-            choose(
-                &[("model-a", 4, true, false), ("model-b", 0, true, true)],
-                3
+            ([("old", 0, true, false), ("new", 0, true, false)], "old"),
+            (
+                [("model-a", 4, true, false), ("model-b", 1, false, true)],
+                "model-b",
             ),
-            Some("model-b")
-        );
-        assert_eq!(
-            choose(
-                &[("model-a", 3, true, false), ("model-b", 1, true, false)],
-                3
+            (
+                [("model-a", 4, true, false), ("model-b", 0, true, true)],
+                "model-b",
             ),
-            Some("model-b")
-        );
+        ] {
+            assert_eq!(choose(&generations), Some(expected), "{generations:?}");
+        }
     }
 }
