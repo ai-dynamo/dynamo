@@ -1468,11 +1468,11 @@ mod tests {
         CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
     };
     use dynamo_kv_router::indexer::{
-        WorkerKvQueryResponse,
+        KvIndexerMetrics, LocalKvIndexer, WorkerKvQueryResponse,
         cuckoo::{CkfCommitState, CkfFailureDomain, ConsumerInstanceId},
     };
     use dynamo_kv_router::protocols::{
-        KvCacheEvent, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
+        KvCacheEvent, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
     };
     use dynamo_runtime::{component::Instance, protocols::EndpointId};
     use tokio::sync::watch;
@@ -1834,6 +1834,111 @@ mod tests {
         let delta = subscription.deltas.recv().await.unwrap();
         assert_eq!(delta.base_sequence(), base_sequence);
         assert_eq!(delta.sequence(), base_sequence + 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_accepts_local_indexer_snapshot_with_removed_tail() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let token = CancellationToken::new();
+        let _cancel = token.clone().drop_guard();
+        let indexer = LocalKvIndexer::new(
+            token,
+            16,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            32,
+        );
+        indexer
+            .apply_event_with_buffer(stored(worker, 1, &[11, 12]))
+            .await
+            .unwrap();
+        assert!(matches!(
+            indexer.get_events_in_id_range(None, None).await,
+            WorkerKvQueryResponse::TreeDump { .. }
+        ));
+
+        let remove = RouterEvent::new(
+            worker.worker_id,
+            KvCacheEvent {
+                event_id: 2,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(12 ^ EXTERNAL_MASK)],
+                }),
+                dp_rank: worker.dp_rank,
+            },
+        );
+        indexer.apply_event_with_buffer(remove).await.unwrap();
+        indexer
+            .apply_event_with_buffer(stored(worker, 3, &[21]))
+            .await
+            .unwrap();
+        let WorkerKvQueryResponse::TreeDump {
+            events,
+            last_event_id,
+            ..
+        } = indexer.get_events_in_id_range(None, None).await
+        else {
+            panic!("full recovery must return a tree dump");
+        };
+        assert_eq!(last_event_id, 3);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.event.data, KvCacheEventData::Removed(_)))
+        );
+
+        let (handle, _faults) =
+            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("cached-tail")).unwrap();
+        handle
+            .admit_event(0, stored(worker, 0, &[99]))
+            .await
+            .unwrap();
+        handle.flush().await.unwrap();
+        let mut subscription = handle.subscribe(lease(1)).await.unwrap();
+        let base_sequence = subscription.snapshot.sequence();
+        handle
+            .replace_rank(0, worker.worker_id, worker.dp_rank, events)
+            .await
+            .unwrap();
+        let delta = subscription.deltas.recv().await.unwrap();
+        assert_eq!(delta.base_sequence(), base_sequence);
+        assert_eq!(delta.sequence(), base_sequence + 1);
+        assert!(subscription.deltas.try_recv().is_err());
+        let (stats, _, members) = handle.state_stats().await.unwrap();
+        assert_eq!(stats.aggregation().unique_block_count(), 2);
+        assert_eq!(members, vec![(worker, 2)]);
+
+        // The replacement retains external identities for subsequent live removals.
+        handle
+            .admit_event(
+                0,
+                RouterEvent::new(
+                    worker.worker_id,
+                    KvCacheEvent {
+                        event_id: 4,
+                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                            block_hashes: vec![
+                                ExternalSequenceBlockHash(11 ^ EXTERNAL_MASK),
+                                ExternalSequenceBlockHash(21 ^ EXTERNAL_MASK),
+                            ],
+                        }),
+                        dp_rank: worker.dp_rank,
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+        handle.flush().await.unwrap();
+        assert_eq!(
+            handle
+                .state_stats()
+                .await
+                .unwrap()
+                .0
+                .aggregation()
+                .unique_block_count(),
+            0
+        );
+        handle.shutdown().await.unwrap();
     }
 
     #[tokio::test]
