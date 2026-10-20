@@ -273,6 +273,34 @@ impl RuntimeService {
         self.closed.load(Ordering::Acquire)
     }
 
+    /// Refuses new acquisitions. Callers that already hold the service can
+    /// still register responses, so migration retries work during a drain.
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    /// Keeps the service open for `window`, while a frontend may still admit
+    /// requests that have yet to register, then waits up to `headroom` more
+    /// for its response streams to finish.
+    pub(crate) async fn drain(&self, window: Duration, headroom: Duration) {
+        let Some(service) = self
+            .owner
+            .lock()
+            .await
+            .as_ref()
+            .map(|lease| lease.service.clone())
+        else {
+            return;
+        };
+        tokio::time::sleep(window).await;
+        let _ = tokio::time::timeout(headroom, async {
+            while !service.registrations.lock().requests.is_empty() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+    }
+
     pub(crate) async fn service(&self) -> Result<Arc<VeloResponseService>> {
         let mut owner = self.owner.lock().await;
         ensure!(!self.is_closed(), "Velo response runtime is shut down");
@@ -1039,11 +1067,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_shutdown_closes_only_the_last_owner_after_endpoint_drain() {
+    async fn runtime_shutdown_closes_only_the_last_owner_after_its_streams_drain() {
         temp_env::async_with_vars(
             [
                 ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
                 ("DYN_VELO_RESPONSE_TRANSPORT", Some("tcp")),
+                ("DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", Some("1")),
             ],
             async {
                 // Separate owned Tokio runtimes: the service must remain alive
@@ -1072,7 +1101,7 @@ mod tests {
                 assert!(!service.closed.initialized());
                 tokio::net::TcpStream::connect(address).await.unwrap();
 
-                // Retain both the service and a registration across shutdown.
+                // Retain both the service and an in-flight registration across shutdown.
                 let registration = service
                     .register_response(EngineContext::new(()).context(), false)
                     .unwrap();
@@ -1087,7 +1116,26 @@ mod tests {
                 tokio::time::timeout(Duration::from_secs(10), main.cancelled())
                     .await
                     .unwrap();
-                assert!(service.closed.initialized());
+                // The main token starts the HTTP drain. The service refuses new
+                // owners, but its holders can still register during the drain,
+                // and it stays open past the drain while a response is in flight.
+                assert!(second.velo_response_service().service().await.is_err());
+                drop(
+                    service
+                        .register_response(EngineContext::new(()).context(), false)
+                        .unwrap(),
+                );
+                tokio::time::sleep(Duration::from_millis(1_500)).await;
+                assert!(!service.closed.initialized());
+                tokio::net::TcpStream::connect(address).await.unwrap();
+                drop(registration);
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while !service.closed.initialized() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
                 assert!(tokio::net::TcpStream::connect(address).await.is_err());
                 assert!(service.registrations.lock().requests.is_empty());
                 assert!(
@@ -1095,8 +1143,6 @@ mod tests {
                         .register_response(EngineContext::new(()).context(), false)
                         .is_err()
                 );
-                assert!(second.velo_response_service().service().await.is_err());
-                drop(registration);
 
                 // A later runtime receives a new service, even while callers
                 // still hold handles to the service that was shut down.

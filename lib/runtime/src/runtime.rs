@@ -43,6 +43,23 @@ pub(crate) fn graceful_shutdown_timeout() -> Duration {
     Duration::from_secs(timeout_secs)
 }
 
+/// How long the Velo response service stays open after the main token is
+/// cancelled: the HTTP service's drain, `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`
+/// (default 5, read by dynamo-llm). Requests it admits may still be queued or
+/// tokenizing, and register their responses later.
+fn velo_response_drain_window() -> Duration {
+    let timeout_secs =
+        std::env::var(config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(5);
+
+    Duration::from_secs(timeout_secs)
+}
+
+/// How long Velo responses still open after that window get to finish.
+const VELO_RESPONSE_DRAIN_HEADROOM: Duration = Duration::from_secs(10);
+
 /// Velo bounds its own drain to five seconds; leave headroom for transport close.
 const VELO_RESPONSE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -430,19 +447,26 @@ impl Runtime {
                 }
             }
 
-            // Close the response service after endpoint drain. Other Runtime
-            // owners in this process keep their shared service alive. A hung
-            // transport close must not keep backend connections open.
-            bounded_teardown(
-                "Velo response service",
-                VELO_RESPONSE_SHUTDOWN_TIMEOUT,
-                async move { velo_response_service.shutdown().await },
-            )
-            .await;
-
             // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
             tracing::info!("Phase 3: Connections to backend services will now be disconnected");
+            velo_response_service.close();
             main_token.cancel();
+
+            // The main token also starts the HTTP drain, so close the response
+            // service only after that drain and its streams finish. Other
+            // Runtime owners in this process keep their shared service alive.
+            let window = velo_response_drain_window();
+            bounded_teardown(
+                "Velo response service",
+                window + VELO_RESPONSE_DRAIN_HEADROOM + VELO_RESPONSE_SHUTDOWN_TIMEOUT,
+                async move {
+                    velo_response_service
+                        .drain(window, VELO_RESPONSE_DRAIN_HEADROOM)
+                        .await;
+                    velo_response_service.shutdown().await
+                },
+            )
+            .await;
         });
     }
 }
