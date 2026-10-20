@@ -155,7 +155,6 @@ def add_argument(
     if isinstance(default, list) and (arg_type is None or arg_type is str):
         value_type_for_env = None
     elif isinstance(default, list) and env_value_type is None and callable(arg_type):
-        # A list flag (nargs) converts each token, so split the env value the same way.
         value_type_for_env = _split_env_list(arg_type)
     default_with_env = env_or_default(env_var, default, value_type=value_type_for_env)
 

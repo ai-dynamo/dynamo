@@ -211,9 +211,15 @@ class TestAddArgument:
         args = parser.parse_args([])
         assert args.threshold is None
 
-    def test_list_default_with_typed_items_splits_env(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("env_value", "expected"),
+        [("25 75", [25.0, 75.0]), ("50", [50.0])],
+    )
+    def test_list_default_with_typed_items_splits_env(
+        self, monkeypatch, env_value, expected
+    ):
         """Test a typed nargs flag converts each env item, not the whole string."""
-        monkeypatch.setenv("TEST_PERCENTILES", "25 75")
+        monkeypatch.setenv("TEST_PERCENTILES", env_value)
         parser = argparse.ArgumentParser()
 
         add_argument(
@@ -226,7 +232,7 @@ class TestAddArgument:
             nargs="+",
         )
 
-        assert parser.parse_args([]).percentiles == [25.0, 75.0]
+        assert parser.parse_args([]).percentiles == expected
         assert parser.parse_args(["--percentiles", "10", "90"]).percentiles == [
             10.0,
             90.0,
