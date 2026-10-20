@@ -3,9 +3,15 @@
 
 """Unit tests for the EFA deploy-test helpers (tests/deploy/efa_utils.py)."""
 
+import re
+
 import pytest
 
-from tests.deploy.efa_utils import parse_efa_device_metrics, sum_nixl_agent_samples
+from tests.deploy.efa_utils import (
+    parse_efa_device_metrics,
+    runtime_version_override,
+    sum_nixl_agent_samples,
+)
 
 # Real exporter output, trimmed. Device names are nested on purpose: rdmap16s2
 # is a prefix of rdmap16s27, and rdmap16s27 of rdmap16s270. A substring match on
@@ -107,3 +113,38 @@ def test_sum_nixl_agent_samples_reports_absent() -> None:
     )
     junk = 'agent_tx_bytes{agent="prefill-0"} not_a_number\n'
     assert sum_nixl_agent_samples(junk, "agent_tx_bytes") == ("absent", None)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    "image",
+    [
+        "registry.example/ai-dynamo/dynamo:1.6.0-ci-0123abc-vllm-runtime-nightly",
+        "registry.example/ai-dynamo/vllm-runtime:1.2.0-efa",
+        "registry.example/ai-dynamo/dynamo:v1.5.1",
+        "registry.example/ai-dynamo/dynamo:1.5.1@sha256:" + "0" * 64,
+    ],
+)
+def test_runtime_version_override_leaves_versioned_tags_alone(image: str) -> None:
+    """The operator reads the version from these tags, so none is declared."""
+    assert runtime_version_override(image) is None
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    "image",
+    [
+        "registry.example/ai-dynamo/dynamo:0123abc-vllm-runtime-efa-nightly",
+        "registry.example:5000/ai-dynamo/dynamo",
+        "registry.example/ai-dynamo/dynamo@sha256:" + "0" * 64,
+    ],
+)
+def test_runtime_version_override_for_unversioned_tags(image: str) -> None:
+    """CI's raw build tag gets the workspace version, in the form the CRD accepts."""
+    version = runtime_version_override(image)
+    assert version is not None
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version)

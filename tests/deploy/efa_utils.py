@@ -18,7 +18,9 @@ adapter counters that moved -- are identical and live here.
 
 import json
 import logging
+import re
 import shlex
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -44,6 +46,13 @@ logger = logging.getLogger(__name__)
 EFA_MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 MANIFEST_DIR = Path(__file__).parent / "efa"
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# The operator reads each component's Dynamo version from its image tag and
+# rejects the DGD when the tag has none. CI passes these tests the raw build tag
+# (<sha>-<framework>-runtime-efa-nightly), which has none.
+_VERSIONED_TAG = re.compile(r"[vV]?\d+\.\d+\.\d+(?:[-+]|$)")
 
 # Comfortably under the tests' own pytest timeout, so a deployment that never
 # becomes ready loses the race to _wait_for_condition, which raises with pod
@@ -124,6 +133,21 @@ class EfaFrameworkProfile:
     @property
     def worker_services(self) -> tuple[str, str]:
         return (self.prefill_service, self.decode_service)
+
+
+def runtime_version_override(image: str) -> str | None:
+    """The version to declare for ``image``, or None when its tag carries one.
+
+    Read from the workspace Cargo.toml without its pre-release suffix, which is
+    how CI derives the version it puts in the image tags of the other deploy
+    tests.
+    """
+    tag = image.split("@", 1)[0].rpartition(":")[2]
+    if _VERSIONED_TAG.match(tag):
+        return None
+    with open(REPO_ROOT / "Cargo.toml", "rb") as f:
+        version = tomllib.load(f)["workspace"]["package"]["version"]
+    return re.split(r"[-+]", version, maxsplit=1)[0]
 
 
 def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
@@ -504,11 +528,17 @@ async def run_efa_deployment_check(
     # Single EFA-tagged image for every service (the framework runtime image also
     # provides the frontend entrypoint).
     deployment_spec.set_image(image)
+    runtime_version = runtime_version_override(image)
+    if runtime_version:
+        for service in deployment_spec.services:
+            deployment_spec.set_runtime_version(runtime_version, service.name)
 
     logger.info(
-        "Starting %s EFA deploy test (image: %s, model: %s, namespace: %s)",
+        "Starting %s EFA deploy test (image: %s, runtime version override: %s, "
+        "model: %s, namespace: %s)",
         profile.name,
         image,
+        runtime_version,
         EFA_MODEL_NAME,
         namespace,
     )
