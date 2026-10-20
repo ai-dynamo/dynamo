@@ -13,7 +13,6 @@ use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest
 
 const PAYLOAD_KEY: &str = "sglang_tito";
 const MAX_CANDIDATE_TOKEN_IDS: usize = 255;
-const MAX_OUTPUT_CANDIDATE_ENTRIES: u64 = 65_536;
 
 /// The part of the opaque native payload the mocker has to reproduce. Unknown
 /// fields are ignored, so a newer SGLang control set still parses.
@@ -49,16 +48,9 @@ pub(super) fn response_metadata(
                 "token_ids_logprob must contain at most {MAX_CANDIDATE_TOKEN_IDS} token IDs"
             )));
         }
-        let max_tokens = request.stop_conditions.max_tokens.ok_or_else(|| {
+        request.stop_conditions.max_tokens.ok_or_else(|| {
             invalid_argument("max_tokens is required when requesting token_ids_logprob")
         })?;
-        // Reserve one scored position for an empty terminal frame, including zero-output scoring.
-        let scored_positions = u64::from(max_tokens) + 1;
-        if ids.len() as u64 * scored_positions > MAX_OUTPUT_CANDIDATE_ENTRIES {
-            return Err(invalid_argument(format!(
-                "token_ids_logprob and max_tokens exceed the {MAX_OUTPUT_CANDIDATE_ENTRIES} output candidate-entry budget"
-            )));
-        }
     }
     let logprobs = LogprobOptions::new(
         controls.return_logprob.unwrap_or(false),
@@ -70,10 +62,16 @@ pub(super) fn response_metadata(
         .rid
         .unwrap_or_else(|| fallback_request_id.to_string());
     let metadata = ResponseMetadata::new(request_id, &request.token_ids, logprobs);
-    Ok(Some(match candidate_token_ids {
+    let metadata = match candidate_token_ids {
         Some(token_ids) => metadata.with_candidate_token_ids(token_ids),
         None => metadata,
-    }))
+    };
+    if let Some(max_tokens) = request.stop_conditions.max_tokens {
+        metadata
+            .validate_candidate_output_budget(max_tokens as usize)
+            .map_err(invalid_argument)?;
+    }
+    Ok(Some(metadata))
 }
 
 /// Wrap one canonical chunk in the native response the frontend unwraps.

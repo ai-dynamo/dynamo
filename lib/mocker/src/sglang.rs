@@ -6,6 +6,7 @@
 use serde_json::{Map, Value, json};
 
 pub const MAX_TOP_LOGPROBS: usize = 20;
+const MAX_OUTPUT_CANDIDATE_ENTRIES: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LogprobOptions {
@@ -76,6 +77,26 @@ impl ResponseMetadata {
 
     pub fn request_id(&self) -> &str {
         &self.request_id
+    }
+
+    pub fn validate_candidate_output_budget(&self, max_output_tokens: usize) -> Result<(), String> {
+        let Some(ids) = self
+            .candidate_token_ids
+            .as_ref()
+            .filter(|ids| !ids.is_empty())
+        else {
+            return Ok(());
+        };
+        // Reserve one scored position for an empty terminal frame, including zero-output scoring.
+        let entries = max_output_tokens
+            .checked_add(1)
+            .and_then(|positions| positions.checked_mul(ids.len()));
+        if entries.is_none_or(|entries| entries > MAX_OUTPUT_CANDIDATE_ENTRIES) {
+            return Err(format!(
+                "token_ids_logprob and output length exceed the {MAX_OUTPUT_CANDIDATE_ENTRIES} output candidate-entry budget"
+            ));
+        }
+        Ok(())
     }
 
     pub fn response(
@@ -225,6 +246,30 @@ mod tests {
         assert!(LogprobOptions::new(false, -1, -1).is_err());
         assert!(LogprobOptions::new(false, 21, -1).is_err());
         assert!(LogprobOptions::new(false, 0, -2).is_err());
+    }
+
+    #[test]
+    fn candidate_output_budget_rejects_overflow_without_restricting_ordinary_output() {
+        let metadata = ResponseMetadata::new("bounded", &[], LogprobOptions::default());
+        assert!(
+            metadata
+                .validate_candidate_output_budget(usize::MAX)
+                .is_ok()
+        );
+        let metadata = metadata.with_candidate_token_ids(vec![17]);
+        assert!(metadata.validate_candidate_output_budget(65_535).is_ok());
+        assert!(metadata.validate_candidate_output_budget(65_536).is_err());
+        assert!(
+            metadata
+                .validate_candidate_output_budget(usize::MAX)
+                .is_err()
+        );
+        let metadata = metadata.with_candidate_token_ids(vec![17, 4]);
+        assert!(
+            metadata
+                .validate_candidate_output_budget(usize::MAX / 2)
+                .is_err()
+        );
     }
 
     #[test]
