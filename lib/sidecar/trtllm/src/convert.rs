@@ -862,3 +862,8 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
         _ => client::engine_error(message),
     }
 }
+
+#[cfg(test)]
+mod request_tests;
+#[cfg(test)]
+mod response_tests;

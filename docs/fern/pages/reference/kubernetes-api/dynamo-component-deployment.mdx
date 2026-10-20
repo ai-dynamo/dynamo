@@ -272,6 +272,16 @@ The operator injects Dynamo environment variables, identity, transport TLS, syst
 
 Both containers use the existing environment merge behavior: merged entries are sorted by name and de-duplicated, with container-level values overriding graph-level values and runtime defaults. The operator origin version does not change this behavior. Backend-specific additions retain their existing placement; for example, `VLLM_CACHE_ROOT` is appended to the engine environment after merging.
 
+Backend inference and vLLM prefill LoRA fallback classification inspect the engine in `main`. The operator recognizes a direct `vllm-rs` command or a literal path to that executable. It does not interpret native engine shell wrappers or image entrypoints; set `backendFramework` explicitly for these opaque launches. That setting supplies backend and compilation-cache defaults, but does not enable command-based LoRA fallback classification. Changing the runtime sidecar's launch does not change engine backend inference.
+
+In Kubernetes discovery mode, Planner associates `DynamoWorkerMetadata` registrations with ready, non-terminating Pods by their Pod owner UID and DGD component labels. It reads the registered component, endpoint, model, and worker role instead of reconstructing native sidecar flags or environment variables. Only the active worker revision and runtime namespace are selected during rollout; stale Pod UIDs and LoRA adapter records are excluded. Conflicting registered identities within one active component are reported as an error. Registration-based identity requires permission to list Pods as well as worker metadata. If an older service account cannot list Pods, Planner warns and retains its status/default fallback; grant `list` on `pods` to discover native custom names, registered models, and runtime capabilities. Other API errors still propagate.
+
+The operator leaves native sidecar `servedModelName` and `runtimeComponentName` status absent. Kubernetes Planner obtains those identities from registration, including positional engine models and custom aggregated component names. Without Kubernetes registrations, Planner retains its existing defaults and model-status fallback; discovery of custom native identity through etcd is not implemented by this change.
+
+<Warning>
+Upgrading the operator can roll existing sidecar workers whose backend was previously undetected. Review the [platform upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#native-sidecar-backend-inference) before upgrading.
+</Warning>
+
 This mode supports `worker`, `prefill`, and `decode` components. Multinode, enabled checkpoint, GPU memory service, and failover are rejected because they are not currently supported in this mode. Support for these features is planned for a future release. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
 
 The same convention applies to `v1alpha1` through `spec.extraPodSpec.initContainers[name=runtime]`. Conversion preserves the live init-container list. Adding, renaming, or removing `spec.podTemplate.spec.initContainers[name=runtime]` changes the mode and can trigger a worker rollout. Reserve this name for the Dynamo runtime; rename unrelated init containers before upgrading the operator.

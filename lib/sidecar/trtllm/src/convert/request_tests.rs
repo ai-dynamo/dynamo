@@ -4,6 +4,8 @@
 //! Building an OpenEngine `GenerateRequest` from a Dynamo request.
 
 use super::*;
+use crate::test_fixtures::*;
+use serde_json::json;
 
 #[test]
 fn request_maps_sampling_stop_and_output_fields() {
@@ -254,4 +256,119 @@ fn a_minimum_within_the_derived_budget_is_served() {
     let stopping = proto.stopping.expect("stopping options");
     assert_eq!(stopping.min_tokens, Some(8));
     assert_eq!(stopping.max_tokens, Some(64));
+}
+
+/// Applies `mutate` to a baseline request and asserts `build_generate_request`
+/// rejects it with a message mentioning `expect`.
+fn assert_rejected(mutate: impl FnOnce(&mut PreprocessedRequest), expect: &str) {
+    let mut req = request();
+    mutate(&mut req);
+    let error = build_generate_request(&req, "req", "model", None, AGG)
+        .expect_err("request must be rejected");
+    assert!(
+        error.to_string().contains(expect),
+        "error {error:?} should mention {expect:?}"
+    );
+}
+
+/// The prefill worker marks its request `context_only` and caps generation at
+/// the single token the context phase produces.
+#[test]
+fn prefill_request_is_marked_context_only() {
+    let mut req = request();
+    req.agent_context = Some(
+        serde_json::from_value(json!({"session_id": " agentx-session "}))
+            .expect("valid agent context"),
+    );
+    req.stop_conditions.max_tokens = Some(128);
+    req.stop_conditions.min_tokens = Some(8);
+    req.output_options.logprobs = Some(1);
+    let proto = build_generate_request(&req, "req", "model", None, DisaggregationMode::Prefill)
+        .expect("build prefill request");
+
+    assert!(
+        is_context_only(&proto),
+        "prefill must set extra.request_type"
+    );
+    assert_eq!(
+        proto
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.fields.get("conversation_id"))
+            .and_then(|value| value.kind.as_ref()),
+        Some(&prost_types::value::Kind::StringValue(
+            "agentx-session".to_string()
+        )),
+        "prefill must preserve both its request type and AgentX session"
+    );
+    assert_eq!(
+        proto.extra.as_ref().unwrap().fields["detokenize"].kind,
+        Some(prost_types::value::Kind::BoolValue(false)),
+        "token-only output must coexist with the prefill session extensions"
+    );
+    let stopping = proto.stopping.expect("stopping options");
+    assert_eq!(stopping.max_tokens, Some(1));
+    // The minimum masks EOS rather than extending generation, so it must
+    // survive: without it the context phase can sample EOS on its single token
+    // and terminate with `Stop` instead of the `PrefillReady` handoff.
+    assert_eq!(stopping.min_tokens, Some(8));
+    // The prefill worker surfaces no tokens, but it must still compute
+    // logprobs: the first generated token comes from the context phase and its
+    // logprob only reaches the decode worker through the handoff.
+    assert_eq!(
+        proto
+            .response
+            .expect("response options")
+            .return_output_logprobs,
+        Some(true)
+    );
+    assert!(proto.kv.is_none(), "prefill carries no session to replay");
+}
+
+/// Conditional disaggregation dispatches straight to a decode worker with no
+/// handoff, expecting it to run the context phase itself. Rejecting that would
+/// fail every bypassed request.
+#[test]
+fn decode_without_a_prefill_result_runs_the_whole_request() {
+    let proto = build_generate_request(
+        &request(),
+        "req",
+        "model",
+        limits(4096),
+        DisaggregationMode::Decode,
+    )
+    .expect("a decode request without a handoff is the bypass path");
+    assert!(
+        proto
+            .kv
+            .as_ref()
+            .and_then(|kv| kv.session.as_ref())
+            .is_none(),
+        "no session should be replayed when none was handed off"
+    );
+    assert!(
+        !is_context_only(&proto),
+        "a bypassed request must not be marked context_only"
+    );
+}
+
+/// A handoff on a non-decode worker means the frontend routed the request to
+/// the wrong role - fail loudly rather than silently prefill it again.
+#[test]
+fn prefill_result_on_a_non_decode_worker_is_rejected() {
+    let mut req = request();
+    req.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: json!({"session_id": "1"}),
+        prompt_tokens_details: None,
+    });
+    for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Prefill] {
+        let error = build_generate_request(&req, "req", "model", None, mode)
+            .expect_err("handoff must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("must be routed to a decode worker"),
+            "unexpected error for {mode}: {error}"
+        );
+    }
 }
