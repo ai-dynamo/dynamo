@@ -46,6 +46,7 @@ from dynamo.sglang._compat import (
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
+    effective_max_running_requests,
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
     kv_event_block_size,
@@ -487,6 +488,67 @@ def _get_token_budget(engine: sgl.Engine, server_args: ServerArgs) -> TokenBudge
     )
 
 
+# Bounds the startup read of SGLang's resolved request cap. The scheduler
+# answers a control request between batches, so the reply normally arrives
+# quickly. The bound only keeps a stuck scheduler from blocking registration.
+#
+# The read is shielded, so a timeout abandons the wait but never cancels SGLang's
+# call. SGLang's control communicator does not clean up when its caller is
+# cancelled: on 0.5.21 the late reply attaches to the next get_internal_state
+# caller and hands it stale data, and on 0.5.11 (the XPU pin) the in-flight
+# marker is never cleared, so every later caller waits forever. Dynamo makes no
+# other get_internal_state call, so the exposure is limited to a later
+# Engine.get_server_info() caller; letting the call finish keeps it correct.
+_EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S = 10.0
+
+# Holds an abandoned read until it finishes, so it is not garbage-collected
+# mid-flight and its result or exception is always retrieved.
+_pending_internal_state_reads: set[asyncio.Task] = set()
+
+
+def _finish_abandoned_internal_state_read(task: asyncio.Task) -> None:
+    """Release an abandoned read and retrieve its outcome so none is lost."""
+    _pending_internal_state_reads.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logging.debug(
+            "Abandoned SGLang get_internal_state read failed: %s", task.exception()
+        )
+
+
+async def _get_effective_max_running_requests(engine: Any) -> Optional[int]:
+    """Read SGLang's resolved per-rank request cap, or ``None``.
+
+    SGLang does not put this value in ``scheduler_info``; it is only available
+    from ``get_internal_state``. A timeout is logged and leaves the CLI value in
+    place, so a stuck scheduler cannot block registration. Any other error from
+    SGLang propagates.
+    """
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    get_internal_state = getattr(tokenizer_manager, "get_internal_state", None)
+    if get_internal_state is None:
+        return None
+    read: Optional[asyncio.Task] = None
+    try:
+        read = asyncio.ensure_future(get_internal_state())
+        internal_states = await asyncio.wait_for(
+            asyncio.shield(read), _EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S
+        )
+    except asyncio.TimeoutError:
+        logging.warning(
+            "Timed out after %ss reading SGLang's resolved max_running_requests; "
+            "publishing the configured value instead.",
+            _EFFECTIVE_MAX_RUNNING_REQUESTS_TIMEOUT_S,
+        )
+        return None
+    finally:
+        if read is not None and not read.done():
+            # Abandoned (timeout or caller cancellation): let SGLang's call run
+            # to completion instead of cancelling it (see above).
+            _pending_internal_state_reads.add(read)
+            read.add_done_callback(_finish_abandoned_internal_state_read)
+    return effective_max_running_requests(internal_states)
+
+
 async def get_runtime_config(
     engine: Optional[sgl.Engine],
     server_args: ServerArgs,
@@ -652,6 +714,17 @@ async def get_runtime_config(
 
     if engine is None:
         return runtime_config
+
+    effective_max_seqs = await _get_effective_max_running_requests(engine)
+    if effective_max_seqs is not None:
+        if effective_max_seqs != runtime_config.max_num_seqs:
+            logging.info(
+                "Publishing SGLang's resolved max_running_requests per DP rank "
+                "as max_num_seqs: %s (requested: %s)",
+                effective_max_seqs,
+                runtime_config.max_num_seqs,
+            )
+        runtime_config.max_num_seqs = effective_max_seqs
 
     try:
         # TODO(rank-aware-kv-capacity): scheduler_infos[0] is only a representative rank.
