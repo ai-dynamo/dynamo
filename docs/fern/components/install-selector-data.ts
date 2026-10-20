@@ -58,8 +58,9 @@ function pin(pins: BackendPins | undefined, backend: InstallBackend): string | u
   return pins?.[backend];
 }
 
-function dockerCommand(image: string, tag: string): string {
-  return `docker run --gpus all --network host --ipc host --rm -it nvcr.io/nvidia/ai-dynamo/${image}:${tag}`;
+function dockerCommand(image: string, tag: string, backend: InstallBackend): string {
+  const explicitCommand = backend === "vllm" ? " bash" : "";
+  return `docker run --gpus all --network host --ipc host --rm -it nvcr.io/nvidia/ai-dynamo/${image}:${tag}${explicitCommand}`;
 }
 
 function stableWheelCommand(
@@ -91,7 +92,7 @@ function stableEntries(backend: Backend): InstallEntry[] {
         backend_version: pin(release.pins, backend.id)!,
         dynamo: version,
         commands: {
-          container: dockerCommand(`${backend.image}-runtime`, version),
+          container: dockerCommand(`${backend.image}-runtime`, version, backend.id),
           ...(backend.extra
             ? { wheel: stableWheelCommand(backend, version, release.wheel) }
             : {}),
@@ -116,6 +117,7 @@ function nightlyEntries(backend: Backend): InstallEntry[] {
         container: dockerCommand(
           `${backend.image}-runtime-nightly`,
           build.latest ? "latest" : build.tag,
+          backend.id,
         ),
         ...(backend.extra && build.dynamo
           ? { wheel: nightlyWheelCommand(backend, build.dynamo) }
@@ -130,12 +132,13 @@ function sourceEntries(backend: Backend): InstallEntry[] {
 
   const backendVersion = pin(MAIN_TOT, backend.id) ?? "main";
   const image = `dynamo:latest-${backend.image}-xpu-runtime`;
+  const explicitCommand = backend.id === "vllm" ? " -- bash" : "";
   const command = [
     "git clone https://github.com/ai-dynamo/dynamo.git",
     "cd dynamo",
     `container/render.py --framework=${backend.id} --device=xpu --target=runtime`,
     `docker build -t ${image} \\\n  -f container/${backend.image}-runtime-xpu-amd64-rendered.Dockerfile .`,
-    `container/run.sh --image ${image} --device=xpu -it`,
+    `container/run.sh --image ${image} --device=xpu -it${explicitCommand}`,
   ].join("\n");
 
   return [

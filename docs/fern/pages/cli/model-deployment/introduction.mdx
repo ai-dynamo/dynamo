@@ -33,11 +33,7 @@ docker exec -it <container_id> bash
 
 <Steps toc={true}>
   <Step title="Choose your model">
-    Pick any model from Hugging Face (or a local path). This guide uses `Qwen/Qwen3-0.6B`, which fits comfortably on a single GPU. Note the identifier — you pass it to the worker in **Start the worker** and reference it in your requests.
-
-    ```bash
-    export MODEL="Qwen/Qwen3-0.6B"
-    ```
+    Pick any model from Hugging Face (or a local path). This guide uses `Qwen/Qwen3-0.6B`, which fits comfortably on a single GPU. Each worker command includes the identifier so it remains runnable in a fresh terminal. To use another model, replace the identifier in every worker command and request.
 
     Larger models may need more than one GPU — see **Set parallelism** for how to size that.
   </Step>
@@ -80,7 +76,7 @@ docker exec -it <container_id> bash
 
         ```bash
         # Example: pool 4 GPUs for one worker
-        python -m dynamo.vllm --model $MODEL --tensor-parallel-size 4
+        python -m dynamo.vllm --model Qwen/Qwen3-0.6B --tensor-parallel-size 4
         ```
       </Tab>
       <Tab title="SGLang" language="sglang">
@@ -93,7 +89,7 @@ docker exec -it <container_id> bash
 
         ```bash
         # Example: pool 4 GPUs for one worker
-        python -m dynamo.sglang --model-path $MODEL --tp 4
+        python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --tp 4
         ```
       </Tab>
       <Tab title="TensorRT-LLM" language="trtllm">
@@ -111,7 +107,7 @@ docker exec -it <container_id> bash
         ```
 
         ```bash
-        python -m dynamo.trtllm --model-path $MODEL --extra-engine-args engine_config.yaml
+        python -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --extra-engine-args engine_config.yaml
         ```
       </Tab>
     </Tabs>
@@ -133,19 +129,19 @@ docker exec -it <container_id> bash
     <Tabs>
       <Tab title="vLLM" language="vllm">
         ```bash
-        python -m dynamo.vllm --model $MODEL --enforce-eager --max-model-len 4096
+        python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --max-model-len 4096
         ```
 
         `--enforce-eager` and `--max-model-len 4096` keep startup fast and memory low for this walkthrough; drop them for production.
       </Tab>
       <Tab title="SGLang" language="sglang">
         ```bash
-        python -m dynamo.sglang --model-path $MODEL
+        python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B
         ```
       </Tab>
       <Tab title="TensorRT-LLM" language="trtllm">
         ```bash
-        python -m dynamo.trtllm --model-path $MODEL
+        python -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B
         ```
 
         TensorRT-LLM runs on sensible defaults with no extra configuration. To tune parallelism, batch sizes, or KV cache behavior, pass a YAML file with `--extra-engine-args engine_config.yaml`. See the [TensorRT-LLM guide](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md) for details.

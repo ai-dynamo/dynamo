@@ -50,8 +50,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
     # Frontend
     python -m dynamo.frontend \
         --namespace my-cluster \
-        --discovery-backend etcd \
-        --endpoint-types chat
+        --discovery-backend etcd
 
     # vLLM worker
     python -m dynamo.vllm \
@@ -86,7 +85,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 </ParamField>
 
 <ParamField path="--endpoint-types" type="string" default="chat,completions">
-  Comma-separated list of OpenAI-compatible endpoint types to enable. Use `completions` alone for models that do not have a chat template. The obsolete alias `--dyn-endpoint-types` is accepted for backward compatibility.
+  Backend workers only. Comma-separated list of OpenAI-compatible endpoint types to enable. Use `completions` alone for models that do not have a chat template. The obsolete alias `--dyn-endpoint-types` is accepted for backward compatibility.
 
   Environment variable: `DYN_ENDPOINT_TYPES`
 </ParamField>

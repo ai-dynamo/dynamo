@@ -26,7 +26,7 @@ The vLLM and SGLang presets start two workers and require 2 GPUs. The TensorRT-L
 <Tabs>
   <Tab title="vLLM" language="vllm">
     ```bash
-    cd $DYNAMO_HOME/examples/backends/vllm
+    cd /workspace/examples/backends/vllm
     bash launch/agg_router.sh
     ```
 
@@ -34,7 +34,7 @@ The vLLM and SGLang presets start two workers and require 2 GPUs. The TensorRT-L
   </Tab>
   <Tab title="SGLang" language="sglang">
     ```bash
-    cd $DYNAMO_HOME/examples/backends/sglang
+    cd /workspace/examples/backends/sglang
     ./launch/agg_router.sh
     ```
 
@@ -55,13 +55,13 @@ The vLLM and SGLang presets start 2 prefill and 2 decode workers and require 4 G
 <Tabs>
   <Tab title="vLLM" language="vllm">
     ```bash
-    cd $DYNAMO_HOME/examples/backends/vllm
+    cd /workspace/examples/backends/vllm
     bash launch/disagg_router.sh
     ```
   </Tab>
   <Tab title="SGLang" language="sglang">
     ```bash
-    cd $DYNAMO_HOME/examples/backends/sglang
+    cd /workspace/examples/backends/sglang
     ./launch/disagg_router.sh
     ```
 

@@ -26,8 +26,10 @@ Tune the policy with `--router-conditional-disagg-config`. For example:
 python -m dynamo.frontend \
     --router-mode kv \
     --router-conditional-disagg \
-    --router-conditional-disagg-config '{"policy":"isl_or_load","eff_isl_threshold":4096,"eff_isl_ratio_threshold":0.6}'
+    --router-conditional-disagg-config '{"policy":"isl_or_load","eff_isl_threshold":4096,"eff_isl_ratio_threshold":0.6,"prefill_busy_threshold":0.9}'
 ```
+
+The `prefill_busy_threshold` value is illustrative, not a production recommendation. Tune it against your workload and deployment configuration.
 
 ## Backend Requirements
 

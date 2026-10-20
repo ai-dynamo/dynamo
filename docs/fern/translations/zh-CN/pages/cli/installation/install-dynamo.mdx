@@ -60,7 +60,7 @@ description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynam
     docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0
 
     # vLLM
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0 bash
     ```
 
   </Tab>
@@ -76,7 +76,7 @@ description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynam
     container/render.py --framework=vllm --device=xpu --target=runtime
     docker build -t dynamo:latest-vllm-xpu-runtime \
       -f container/vllm-runtime-xpu-amd64-rendered.Dockerfile .
-    container/run.sh --image dynamo:latest-vllm-xpu-runtime --device=xpu -it
+    container/run.sh --image dynamo:latest-vllm-xpu-runtime --device=xpu -it -- bash
     ```
 
     **SGLang**
@@ -325,7 +325,7 @@ curl localhost:8000/v1/chat/completions \
     使用 `container/run.sh --device=xpu`。该包装脚本会添加 `/dev/dri` 和主机 `render` 组以启用 XPU 访问。
 
     ```bash
-    container/run.sh --image dynamo:latest-vllm-xpu-runtime --device=xpu -it
+    container/run.sh --image dynamo:latest-vllm-xpu-runtime --device=xpu -it -- bash
     ```
 
     检查主机是否暴露 `/dev/dri` 并包含 `render` 组：

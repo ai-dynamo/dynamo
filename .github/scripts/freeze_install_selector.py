@@ -28,7 +28,8 @@ RUNTIMES = [
 def tabs(version: str) -> str:
     nvidia = "\n\n".join(
         f'```bash title="{label}"\n'
-        f"docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/{image}-runtime:{version}\n"
+        f"docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/{image}-runtime:{version}"
+        f"{' bash' if image == 'vllm' else ''}\n"
         f"```"
         for label, image, _language in RUNTIMES
     )
@@ -38,7 +39,7 @@ cd dynamo
 container/render.py --framework=vllm --device=xpu --target=runtime
 docker build -t dynamo:latest-vllm-xpu-runtime \
   -f container/vllm-runtime-xpu-amd64-rendered.Dockerfile .
-container/run.sh --image dynamo:latest-vllm-xpu-runtime --device=xpu -it
+container/run.sh --image dynamo:latest-vllm-xpu-runtime --device=xpu -it -- bash
 ```
 
 ```bash title="SGLang"
