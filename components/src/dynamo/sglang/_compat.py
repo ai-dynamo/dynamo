@@ -312,7 +312,7 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
 def resolved_server_args(server_args: Any) -> Any:
     """Return SGLang's effective configuration for one initialized engine.
 
-    SGLang 0.5.20 and 0.5.21 keep ``ServerArgs`` raw and expose the effective
+    Supported CUDA releases keep ``ServerArgs`` raw and expose the effective
     projection through ``resolved_view()``. The separately pinned XPU release
     and Dynamo's non-LLM argument stubs retain effective values on the object
     itself.

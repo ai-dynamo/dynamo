@@ -86,22 +86,69 @@ def test_stored_event_cache_salt_rejects_conflicting_blocks() -> None:
         stored_event_cache_salt(data)
 
 
-def test_visible_stop_tokens_disable_engine_stopping() -> None:
+def test_visible_stop_tokens_stop_in_engine_and_stay_in_output() -> None:
     sampling_params = SimpleNamespace(
         ignore_eos=False,
         min_tokens=None,
-        stop_token_ids=[200, 300],
+        stop_token_ids=[300],
+        include_stop_str_in_output=False,
     )
 
     apply_stop_conditions_to_sampling_params(
         sampling_params,
         {
             "stop_token_ids_visible": [200],
+            "stop_token_ids_hidden": [100],
+        },
+    )
+
+    assert sampling_params.ignore_eos is False
+    assert sampling_params.include_stop_str_in_output is True
+    assert set(sampling_params.stop_token_ids) == {100, 200, 300}
+
+
+def test_min_tokens_keeps_visible_stop_tokens_on_frontend() -> None:
+    sampling_params = SimpleNamespace(
+        ignore_eos=False,
+        min_tokens=None,
+        stop_token_ids=[200, 300],
+        include_stop_str_in_output=False,
+    )
+
+    apply_stop_conditions_to_sampling_params(
+        sampling_params,
+        {
+            "stop_token_ids_visible": [200],
+            "stop_token_ids_hidden": [100],
+            "min_tokens": 8,
+        },
+    )
+
+    assert sampling_params.ignore_eos is True
+    assert sampling_params.include_stop_str_in_output is False
+    assert sampling_params.min_tokens == 8
+    assert set(sampling_params.stop_token_ids) == {100, 300}
+
+
+def test_ignore_eos_leaves_visible_stop_tokens_to_frontend() -> None:
+    sampling_params = SimpleNamespace(
+        ignore_eos=False,
+        min_tokens=None,
+        stop_token_ids=[200, 300],
+        include_stop_str_in_output=False,
+    )
+
+    apply_stop_conditions_to_sampling_params(
+        sampling_params,
+        {
+            "ignore_eos": True,
+            "stop_token_ids_visible": [200],
             "stop_token_ids_hidden": [100, 200],
         },
     )
 
     assert sampling_params.ignore_eos is True
+    assert sampling_params.include_stop_str_in_output is False
     assert set(sampling_params.stop_token_ids) == {100, 300}
 
 
