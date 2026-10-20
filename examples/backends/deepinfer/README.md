@@ -22,7 +22,7 @@ flowchart LR
     Client[HTTP client] --> Frontend[Dynamo HttpService\nV4.1 rendering and tokenization]
     Frontend -->|Dynamo TCP request plane| Sidecar[Dynamo OpenEngine sidecar]
     Sidecar -->|OpenEngine Generate gRPC| Server[Rust tonic server]
-    Server -->|Private JSON-lines IPC| Driver[Python engine owner]
+    Server -->|PyO3 calls / token callbacks| Driver[Python engine owner thread]
     Driver --> Engine[MockDeepInferEngine\nor native LLMEngine]
     Engine -->|Raw token outputs| Driver
     Driver --> Server
@@ -30,6 +30,15 @@ flowchart LR
     Sidecar --> Frontend
     Frontend -->|Parsed reasoning, tools and content| Client
 ```
+
+Python starts the engine owner and loads `_deepinfer_openengine`, a PyO3 Rust
+extension. The extension runs tonic on its own Tokio threads, retains a Python
+runtime handle, and calls `submit()` / `abort()` directly. The owner returns raw
+tokens through Rust callback objects into bounded response channels. This follows
+[SGLang's native gRPC bridge](https://github.com/sgl-project/sglang/blob/c2e574246485a055c0e51d60d1eae027e5d629c0/python/sglang/srt/entrypoints/grpc_bridge.py).
+The gRPC server and Python engine owner share one process; there is no engine
+subprocess, stdin reader, pipe transport, or JSON serialization between them.
+DeepInfer may still create its own GPU worker processes in native mode.
 
 The OpenEngine client currently lives in `dynamo-trtllm-sidecar`. This example
 reuses that binary and its vendored protocol, without importing or installing
@@ -39,7 +48,8 @@ TensorRT-LLM. Its log messages retain that client name. The server advertises
 ## Prepare the Environment
 
 Run from the Dynamo repository root. Install the repository Rust toolchain,
-the normal CPU build prerequisites, and Python 3.12. The build needs a modern
+the normal CPU build prerequisites, and Python 3.12 with development headers.
+The build needs a modern
 `protoc`; the commands below provide one in the virtual environment.
 
 ```bash
@@ -61,14 +71,18 @@ and links the upstream tokenizer notices.
 bash examples/backends/deepinfer/launch.sh --verify
 ```
 
-The command builds the Rust binaries, starts the engine server, sidecar and
+The command builds the Rust binaries and installs the Rust extension with
+`maturin develop`, then starts the Python engine host, sidecar and
 frontend as separate processes, waits for real gRPC/HTTP readiness, verifies the
 chain, then stops its processes. The check covers streaming and non-streaming
 text, reasoning, tools with thinking enabled/disabled, Unicode, token limits,
-eight concurrent requests, and disconnect cancellation followed by recovery.
+16 concurrent requests, and disconnect cancellation followed by recovery.
 It also checks selected-token logprobs on `/v1/completions` and their deliberate
 suppression by the unified parser on `/v1/chat/completions`.
-Results and all three process logs are retained in the printed run directory.
+Three focused checks also exercise single-thread engine ownership, closed-consumer
+callbacks, initialization failure cleanup, and fatal engine failure propagation
+into the Rust server. Results and all three process logs are retained in the
+printed run directory.
 
 File-backed discovery and TCP request/response planes keep the example local.
 No etcd, NATS, Docker, Python Dynamo bindings or inference-engine packages are
@@ -133,7 +147,7 @@ DYN_HTTP_PORT=8100 DEEPINFER_GRPC_PORT=30101 \
 | `DEEPINFER_PYTHON` | Engine-owner Python executable; default repository `.venv/bin/python` |
 | `DEEPINFER_TOKENIZER_JSON` | Local copy of the pinned official V4.1 tokenizer |
 | `DEEPINFER_TICK_MS` | Mock per-step delay; default `2` ms |
-| `DEEPINFER_SKIP_BUILD=1` | Use already-built binaries |
+| `DEEPINFER_SKIP_BUILD=1` | Use already-built binaries and the installed Rust extension |
 | `DEEPINFER_BIN_DIR` | Override the Cargo debug binary directory |
 
 ## Replace Mock Execution With DeepInfer
@@ -143,7 +157,7 @@ The native adapter targets [DeepInfer revision
 and its `LLMEngine` / `RequestOutput` API. Keep that boundary in sync when
 updating DeepInfer.
 
-`engine_worker.py:NativeDeepInferEngine` calls the real Python APIs:
+`engine.py:NativeDeepInferEngine` calls the real Python APIs:
 
 1. Build `LLMEngine` from `EngineArgs` in a DeepInfer environment.
 2. Convert input IDs to a one-dimensional NumPy int32 array and construct
@@ -152,9 +166,17 @@ updating DeepInfer.
    `RequestOutput` before advancing the engine.
 4. Propagate `abort_request()` and drain inflight outputs before closing.
 
-Native stdout is redirected at the file-descriptor level so C++ diagnostics
-cannot corrupt private IPC. Only the engine owner touches its engine; the Rust
-server multiplexes requests, forwards token deltas and owns gRPC cancellation.
+Only the engine owner thread touches its engine, including construction and
+cleanup. Rust gRPC threads enqueue Python requests and receive typed callbacks;
+blocking engine steps run on the owner. Callback values are copied before the
+next engine step. A full response queue fails that request explicitly and aborts
+its engine work. Request IDs are remapped internally so late cancellation cannot
+cancel a newer request that reused an external ID.
+
+The Python host handles SIGINT/SIGTERM. Rust releases the GIL while joining its
+server thread, and the host stops the engine owner afterwards. Fatal engine
+errors fail active streams and stop the Rust server. Both languages share the
+host process's failure boundary.
 
 After installing/building DeepInfer and obtaining a full checkpoint, use the
 same server/sidecar/frontend path with a separate engine Python environment:

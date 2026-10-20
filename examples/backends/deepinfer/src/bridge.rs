@@ -1,37 +1,38 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! A single Python process owns the engine; Rust owns RPCs and stream lifetimes.
+//! In-process PyO3 calls and callbacks; Python owns engine execution.
 
 use std::collections::HashMap;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::time::Duration;
 
-use anyhow::{Context, bail, ensure};
 use parking_lot::Mutex;
-use serde::Deserialize;
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use pyo3::exceptions::{PyOverflowError, PyRuntimeError};
+use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Deserialize)]
 pub struct Ready {
     pub vocab_size: u32,
     pub eos_token_id: u32,
 }
 
-#[derive(Debug, Deserialize)]
+pub struct Generate {
+    pub token_ids: Vec<u32>,
+    pub stop_token_ids: Vec<u32>,
+    pub temperature: f64,
+    pub top_p: f64,
+    pub top_k: i32,
+    pub max_tokens: u32,
+    pub ignore_eos: bool,
+    pub seed: Option<u64>,
+}
+
 pub struct Output {
-    pub request_id: String,
     pub token_id: Option<u32>,
-    #[serde(default)]
     pub finished: bool,
-    #[serde(default)]
     pub finish_reason: String,
     pub logprob: Option<f64>,
     pub stop_token_id: Option<u32>,
@@ -47,18 +48,20 @@ struct Pending {
     failure: Arc<Mutex<Option<String>>>,
 }
 
+type Requests = Arc<Mutex<HashMap<String, Pending>>>;
+
 pub struct Bridge {
     pub ready: Ready,
     pub failed: CancellationToken,
-    commands: mpsc::UnboundedSender<Value>,
-    pending: Arc<Mutex<HashMap<String, Pending>>>,
+    runtime: Py<PyAny>,
+    pending: Requests,
     next_id: AtomicU64,
     alive: Arc<AtomicBool>,
-    limit: usize,
     engine_active: Arc<AtomicU32>,
+    limit: usize,
 }
 
-/// The guard lives inside the gRPC response stream, including before first poll.
+/// Lives inside the response stream, including before its first poll.
 pub struct Session {
     bridge: Arc<Bridge>,
     id: String,
@@ -72,123 +75,117 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.bridge.pending.lock().remove(&self.id);
         if !self.completed.load(Ordering::Acquire) {
-            // Internal IDs never repeat: a late disconnect cannot abort a new RPC.
-            let _ = self
-                .bridge
-                .commands
-                .send(json!({"type":"abort", "request_id":self.id}));
+            self.bridge.abort_engine(&self.id);
+        }
+    }
+}
+
+#[pyclass]
+struct OutputCallback {
+    id: String,
+    pending: Requests,
+}
+
+#[pymethods]
+impl OutputCallback {
+    #[pyo3(signature = (token_id=None, finished=false, finish_reason="", logprob=None, stop_token_id=None, error=None))]
+    fn __call__(
+        &self,
+        token_id: Option<u32>,
+        finished: bool,
+        finish_reason: &str,
+        logprob: Option<f64>,
+        stop_token_id: Option<u32>,
+        error: Option<String>,
+    ) -> bool {
+        let request = self.pending.lock().get(&self.id).cloned();
+        let Some(request) = request else { return false };
+        let terminal = finished || error.is_some();
+        let output = Output {
+            token_id,
+            finished,
+            finish_reason: finish_reason.to_owned(),
+            logprob,
+            stop_token_id,
+            error,
+        };
+        if request.sender.try_send(output).is_err() {
+            *request.failure.lock() =
+                Some("response consumer exceeded the bounded output queue".into());
+            request.cancelled.cancel();
+            return false;
+        }
+        if terminal {
+            request.completed.store(true, Ordering::Release);
+        }
+        true
+    }
+}
+
+#[pyclass]
+struct StatusCallback {
+    pending: Requests,
+    alive: Arc<AtomicBool>,
+    active: Arc<AtomicU32>,
+    failed: CancellationToken,
+}
+
+#[pymethods]
+impl StatusCallback {
+    #[pyo3(signature = (running_requests, error=None))]
+    fn __call__(&self, running_requests: u32, error: Option<String>) {
+        self.active.store(running_requests, Ordering::Release);
+        if let Some(error) = error {
+            self.alive.store(false, Ordering::Release);
+            for request in self.pending.lock().values() {
+                *request.failure.lock() = Some(error.clone());
+                request.cancelled.cancel();
+            }
+            self.failed.cancel();
         }
     }
 }
 
 impl Bridge {
-    pub async fn spawn(
-        mut command: Command,
+    pub fn new(
+        py: Python<'_>,
+        runtime: Py<PyAny>,
+        ready: Ready,
         limit: usize,
-    ) -> anyhow::Result<(Arc<Self>, JoinHandle<()>)> {
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .context("start DeepInfer engine worker")?;
-        let mut input = child.stdin.take().context("worker stdin")?;
-        let mut lines = BufReader::new(child.stdout.take().context("worker stdout")?).lines();
-        let line = tokio::time::timeout(Duration::from_secs(120), lines.next_line())
-            .await??
-            .context("engine exited before readiness")?;
-        let ready_value: Value = serde_json::from_str(&line).context("worker readiness JSON")?;
-        ensure!(
-            ready_value["type"] == "ready",
-            "worker did not report ready: {ready_value}"
-        );
-        let ready: Ready = serde_json::from_value(ready_value)?;
-        ensure!(
-            ready.vocab_size > 0 && ready.eos_token_id < ready.vocab_size,
-            "invalid tokenizer metadata"
-        );
-        let (commands, mut command_rx) = mpsc::unbounded_channel();
-        let pending: Arc<Mutex<HashMap<String, Pending>>> = Arc::default();
-        let alive = Arc::new(AtomicBool::new(true));
-        let failed = CancellationToken::new();
-        let engine_active = Arc::new(AtomicU32::new(0));
+    ) -> PyResult<Arc<Self>> {
         let bridge = Arc::new(Self {
             ready,
-            failed: failed.clone(),
-            commands,
-            pending: pending.clone(),
+            failed: CancellationToken::new(),
+            runtime,
+            pending: Arc::default(),
             next_id: AtomicU64::new(1),
-            alive: alive.clone(),
+            alive: Arc::new(AtomicBool::new(true)),
+            engine_active: Arc::new(AtomicU32::new(0)),
             limit,
-            engine_active: engine_active.clone(),
         });
-        let task = tokio::spawn(async move {
-            let result: anyhow::Result<()> = async {
-                loop {
-                    tokio::select! {
-                        command = command_rx.recv() => {
-                            let Some(command) = command else { break; };
-                            let mut encoded = serde_json::to_vec(&command)?;
-                            encoded.push(b'\n');
-                            input.write_all(&encoded).await?;
-                            if command["type"] == "shutdown" { break; }
-                        }
-                        line = lines.next_line() => {
-                            let Some(line) = line? else { bail!("engine worker output closed"); };
-                            let value: Value = serde_json::from_str(&line)?;
-                            if value["type"] == "load" {
-                                let count = value["running_requests"].as_u64().context("invalid engine load")?;
-                                engine_active.store(u32::try_from(count)?, Ordering::Release);
-                                continue;
-                            }
-                            ensure!(value["type"] == "output", "unexpected worker message: {value}");
-                            let output: Output = serde_json::from_value(value)?;
-                            let request = pending.lock().get(&output.request_id).cloned();
-                            if let Some(request) = request {
-                                let terminal = output.finished || output.error.is_some();
-                                if request.sender.try_send(output).is_err() {
-                                    *request.failure.lock() = Some("response consumer exceeded the bounded output queue".into());
-                                    request.cancelled.cancel();
-                                } else if terminal {
-                                    request.completed.store(true, Ordering::Release);
-                                }
-                            }
-                        }
-                        status = child.wait() => { bail!("engine worker exited: {:?}", status?); }
-                    }
-                }
-                Ok(())
-            }.await;
-            alive.store(false, Ordering::Release);
-            if let Err(error) = result {
-                tracing::error!(%error, "DeepInfer engine worker failed");
-                for request in pending.lock().values() {
-                    *request.failure.lock() = Some(format!("engine worker failed: {error}"));
-                    request.cancelled.cancel();
-                }
-                failed.cancel();
-            }
-            drop(input);
-            if tokio::time::timeout(Duration::from_secs(5), child.wait())
-                .await
-                .is_err()
-            {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-            }
-        });
-        Ok((bridge, task))
+        let callback = Py::new(
+            py,
+            StatusCallback {
+                pending: bridge.pending.clone(),
+                alive: bridge.alive.clone(),
+                active: bridge.engine_active.clone(),
+                failed: bridge.failed.clone(),
+            },
+        )?;
+        bridge
+            .runtime
+            .call_method1(py, "set_status_callback", (callback,))?;
+        Ok(bridge)
     }
 
     #[allow(clippy::result_large_err)]
     pub fn submit(
         self: &Arc<Self>,
         wire_id: &str,
-        mut command: Value,
+        command: Generate,
     ) -> Result<Session, tonic::Status> {
         if !self.alive() {
-            return Err(tonic::Status::unavailable("engine worker is not alive"));
+            return Err(tonic::Status::unavailable("engine is not alive"));
         }
         let mut pending = self.pending.lock();
         if pending.len() >= self.limit {
@@ -219,30 +216,83 @@ impl Bridge {
             completed: request.completed.clone(),
         };
         pending.insert(id.clone(), request);
-        command["request_id"] = json!(id);
-        if self.commands.send(command).is_err() {
-            pending.remove(&id);
-            // Release the map lock before the Session destructor reacquires it.
-            drop(pending);
-            return Err(tonic::Status::unavailable("engine command channel closed"));
-        }
+        // Python callbacks also lock this map; never hold it while acquiring the GIL.
+        drop(pending);
+        // GIL acquisition can wait behind an engine step; let Tokio hand off this worker.
+        tokio::task::block_in_place(|| {
+            Python::with_gil(|py| -> Result<(), tonic::Status> {
+                let result = (|| -> PyResult<()> {
+                    let sampling = PyDict::new(py);
+                    sampling.set_item("temperature", command.temperature)?;
+                    sampling.set_item("top_p", command.top_p)?;
+                    sampling.set_item("top_k", command.top_k)?;
+                    sampling.set_item("max_tokens", command.max_tokens)?;
+                    sampling.set_item("ignore_eos", command.ignore_eos)?;
+                    sampling.set_item("seq_seed", command.seed)?;
+                    let callback = Py::new(
+                        py,
+                        OutputCallback {
+                            id: id.clone(),
+                            pending: self.pending.clone(),
+                        },
+                    )?;
+                    self.runtime.call_method1(
+                        py,
+                        "submit",
+                        (
+                            id,
+                            command.token_ids,
+                            command.stop_token_ids,
+                            sampling,
+                            callback,
+                        ),
+                    )?;
+                    Ok(())
+                })();
+                result.map_err(|error| {
+                    if error.is_instance_of::<PyOverflowError>(py) {
+                        tonic::Status::resource_exhausted(error.to_string())
+                    } else {
+                        tonic::Status::unavailable(error.to_string())
+                    }
+                })
+            })
+        })?;
         Ok(session)
     }
 
-    pub fn abort(&self, wire_id: Option<&str>) -> bool {
-        let pending = self.pending.lock();
-        let mut aborted = false;
-        for (id, request) in pending.iter() {
-            if wire_id.is_none_or(|wire_id| request.wire_id == wire_id)
-                && !request.completed.load(Ordering::Acquire)
-                && !request.cancelled.is_cancelled()
-            {
-                request.cancelled.cancel();
-                let _ = self.commands.send(json!({"type":"abort", "request_id":id}));
-                aborted = true;
-            }
+    fn abort_engine(&self, id: &str) {
+        let result = tokio::task::block_in_place(|| {
+            Python::with_gil(|py| self.runtime.call_method1(py, "abort", (id,)))
+        });
+        if let Err(error) = result {
+            tracing::error!(%error, "failed to signal engine cancellation");
+            self.alive.store(false, Ordering::Release);
+            self.failed.cancel();
         }
-        aborted
+    }
+
+    pub fn abort(&self, wire_id: Option<&str>) -> bool {
+        let ids: Vec<_> = self
+            .pending
+            .lock()
+            .iter()
+            .filter_map(|(id, request)| {
+                if wire_id.is_none_or(|wire_id| request.wire_id == wire_id)
+                    && !request.completed.load(Ordering::Acquire)
+                    && !request.cancelled.is_cancelled()
+                {
+                    request.cancelled.cancel();
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in &ids {
+            self.abort_engine(id);
+        }
+        !ids.is_empty()
     }
 
     pub fn active(&self) -> u32 {
@@ -251,7 +301,8 @@ impl Bridge {
     pub fn alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
     }
-    pub fn shutdown(&self) {
-        let _ = self.commands.send(json!({"type":"shutdown"}));
-    }
+}
+
+pub fn python_error(error: impl std::fmt::Display) -> PyErr {
+    PyRuntimeError::new_err(error.to_string())
 }

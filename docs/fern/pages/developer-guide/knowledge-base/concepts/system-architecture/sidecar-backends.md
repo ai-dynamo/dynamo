@@ -44,7 +44,7 @@ API and streams responses back.
 
 ## Local Protocol Example
 
-For a CPU example using the existing OpenEngine sidecar with a Rust server and
+For a CPU example using the existing OpenEngine sidecar with a Python-hosted Rust gRPC extension and
 mocked DeepInfer execution, see the
 [DeepInfer OpenEngine example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/deepinfer).
 It exercises the real Dynamo HTTP frontend, V4.1 tokenizer, reasoning parser,

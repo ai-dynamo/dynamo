@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "deepinfer-openengine-example"
+dynamic = ["version"]
+requires-python = ">=3.12"
+
+[tool.maturin]
+bindings = "pyo3"
+features = ["extension-module"]

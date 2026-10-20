@@ -44,8 +44,13 @@ if [[ -z ${PROTOC:-} && -x "$REPO_ROOT/.venv/bin/protoc" ]]; then
     export PROTOC="$REPO_ROOT/.venv/bin/protoc"
 fi
 if [[ ${DEEPINFER_SKIP_BUILD:-0} != 1 ]]; then
-    cargo build --locked -p dynamo-deepinfer-openengine -p dynamo-trtllm-sidecar --bins
+    PYO3_PYTHON="$PYTHON" cargo build --locked -p dynamo-deepinfer-openengine -p dynamo-trtllm-sidecar --bins
+    PATH="$(dirname -- "$PYTHON"):$PATH" \
+        VIRTUAL_ENV=$("$PYTHON" -c 'import sys; print(sys.prefix)') \
+        PYO3_PYTHON="$PYTHON" maturin develop --locked \
+        --manifest-path "$EXAMPLE_DIR/Cargo.toml"
 fi
+"$PYTHON" -c 'import _deepinfer_openengine'
 TARGET_DIR=$(cargo metadata --no-deps --format-version 1 | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 BIN_DIR=${DEEPINFER_BIN_DIR:-$TARGET_DIR/debug}
 SERVER="$BIN_DIR/deepinfer-openengine"
@@ -68,8 +73,8 @@ export RUST_LOG=${RUST_LOG:-info}
 
 engine_args=()
 [[ -z ${DEEPINFER_ENGINE_ARGS:-} ]] || engine_args+=(--engine-args "$DEEPINFER_ENGINE_ARGS")
-"$SERVER" serve --listen "127.0.0.1:$GRPC_PORT" --model-dir "$MODEL_DIR" \
-    --engine "$ENGINE" --python "$PYTHON" --tick-ms "${DEEPINFER_TICK_MS:-2}" \
+"$PYTHON" "$EXAMPLE_DIR/server.py" --listen "127.0.0.1:$GRPC_PORT" --model-dir "$MODEL_DIR" \
+    --engine "$ENGINE" --tick-ms "${DEEPINFER_TICK_MS:-2}" \
     "${engine_args[@]}" >"$RUN_DIR/engine.log" 2>&1 &
 children+=("$!")
 ready=0
@@ -102,6 +107,7 @@ print_launch_banner --no-curl "DeepInfer OpenEngine: CPU mock → sidecar → Dy
     "OpenEngine: http://127.0.0.1:$GRPC_PORT" "Logs: $RUN_DIR" \
     "Verify: $PYTHON $EXAMPLE_DIR/verify.py --url http://127.0.0.1:$HTTP_PORT --engine-endpoint http://127.0.0.1:$GRPC_PORT --server-bin $SERVER"
 if [[ ${1:-} == --verify ]]; then
+    "$PYTHON" "$EXAMPLE_DIR/check_bridge.py" --model-dir "$MODEL_DIR" >"$RUN_DIR/bridge-checks.log" 2>&1
     "$PYTHON" "$EXAMPLE_DIR/verify.py" --url "http://127.0.0.1:$HTTP_PORT" \
         --engine-endpoint "http://127.0.0.1:$GRPC_PORT" --server-bin "$SERVER" \
         --output "$RUN_DIR/results.json"

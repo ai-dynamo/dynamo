@@ -217,14 +217,14 @@ def verify(args, model):
     results.append(
         {"scenario": "completion-selected-token-logprobs", "result": completion}
     )
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
         futures = [
             pool.submit(
                 request,
                 args.url,
                 payload(model, "reasoning" if i % 2 else "plain", bool(i % 2), True),
             )
-            for i in range(8)
+            for i in range(16)
         ]
         for i, future in enumerate(futures):
             result = future.result()
@@ -270,7 +270,7 @@ def verify(args, model):
     summary = {
         "passed": len(results),
         "model": model,
-        "chain": "HTTP frontend → Dynamo sidecar → Rust OpenEngine → Python DeepInfer mock",
+        "chain": "HTTP frontend → Dynamo sidecar → Python-hosted Rust OpenEngine → PyO3 → DeepInfer mock",
         "results": results,
     }
     if args.output:

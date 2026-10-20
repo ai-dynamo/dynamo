@@ -4,11 +4,10 @@
 use dynamo_trtllm_sidecar::proto as pb;
 use futures::Stream;
 use prost_types::value::Kind;
-use serde_json::{Value, json};
 use std::{pin::Pin, sync::Arc};
 use tonic::{Request, Response, Status};
 
-use crate::bridge::Bridge;
+use crate::bridge::{Bridge, Generate};
 
 type RpcStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
 
@@ -29,7 +28,7 @@ impl Service {
     }
 
     #[allow(clippy::result_large_err)]
-    fn prepare(&self, request: &pb::GenerateRequest) -> Result<(Value, u32), Status> {
+    fn prepare(&self, request: &pb::GenerateRequest) -> Result<(Generate, u32), Status> {
         if request.request_id.is_empty() || request.model.is_empty() {
             return Err(Status::invalid_argument(
                 "request_id and model are required",
@@ -143,9 +142,16 @@ impl Service {
             }
         }
         Ok((
-            json!({"type":"generate", "token_ids":input.ids, "stop_token_ids":stop_ids,
-            "sampling":{"temperature":temperature, "top_p":top_p, "top_k":top_k,
-                "max_tokens":max_tokens, "ignore_eos":stopping.ignore_eos.unwrap_or(false), "seq_seed":sampling.seed}}),
+            Generate {
+                token_ids: input.ids.clone(),
+                stop_token_ids: stop_ids,
+                temperature,
+                top_p,
+                top_k,
+                max_tokens,
+                ignore_eos: stopping.ignore_eos.unwrap_or(false),
+                seed: sampling.seed,
+            },
             prompt_tokens,
         ))
     }
