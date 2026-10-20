@@ -3,7 +3,7 @@
 
 //! Shared support for lazily resolved scalar environment configuration.
 
-use std::{env::VarError, str::FromStr};
+use std::{env::VarError, str::FromStr, time::Duration};
 
 /// Parse an environment variable or return `default` when it is unset or invalid.
 #[doc(hidden)]
@@ -34,6 +34,38 @@ where
             );
             default
         }
+    }
+}
+
+/// Parse a positive whole number of seconds read from `name`. Zero or invalid
+/// input warns and returns `default`; an absent value returns `default` silently.
+pub(crate) fn positive_secs_or_default(
+    name: &str,
+    value: Option<&str>,
+    default: Duration,
+) -> Duration {
+    match value {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
+            Ok(_) => {
+                tracing::warn!(
+                    "{} must be >= 1; got 0. Falling back to {}.",
+                    name,
+                    default.as_secs()
+                );
+                default
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "Invalid {}='{}' ({error}). Falling back to {}.",
+                    name,
+                    raw,
+                    default.as_secs()
+                );
+                default
+            }
+        },
+        None => default,
     }
 }
 

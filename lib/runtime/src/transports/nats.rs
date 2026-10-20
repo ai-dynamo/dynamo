@@ -51,6 +51,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use validator::{Validate, ValidationError};
 
+use crate::config::env_config::positive_secs_or_default;
 use crate::config::environment_names::nats as env_nats;
 pub use crate::slug::Slug;
 use tracing as log;
@@ -366,29 +367,11 @@ const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const STARTUP_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn startup_connect_timeout_from_value(value: Option<&str>) -> Duration {
-    match value {
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
-            Ok(_) => {
-                tracing::warn!(
-                    "{} must be >= 1; got 0. Falling back to {}.",
-                    env_nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
-                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
-                );
-                DEFAULT_STARTUP_CONNECT_TIMEOUT
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "Invalid {}='{}' ({error}). Falling back to {}.",
-                    env_nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
-                    raw,
-                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
-                );
-                DEFAULT_STARTUP_CONNECT_TIMEOUT
-            }
-        },
-        None => DEFAULT_STARTUP_CONNECT_TIMEOUT,
-    }
+    positive_secs_or_default(
+        env_nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
+        value,
+        DEFAULT_STARTUP_CONNECT_TIMEOUT,
+    )
 }
 
 fn default_startup_connect_timeout() -> Duration {
