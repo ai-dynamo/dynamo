@@ -67,7 +67,8 @@ func checkpointFromDeploymentV1(manifest deploymentcapnpv1.Deployment) (*Checkpo
 }
 
 // WithoutBuildCheckpoints returns a registry whose builds record no checkpoint,
-// so resolved workloads neither download nor project one. registry is non-nil.
+// valid or not, so resolved workloads neither download, project, nor reject
+// one. registry is non-nil.
 func WithoutBuildCheckpoints(registry ModelRegistry) ModelRegistry {
 	return withoutBuildCheckpoints{ModelRegistry: registry}
 }
@@ -78,11 +79,11 @@ type withoutBuildCheckpoints struct {
 
 func (r withoutBuildCheckpoints) AcquireBuild(ctx context.Context, id string) (*Build, error) {
 	build, err := r.ModelRegistry.AcquireBuild(ctx, id)
-	if err != nil || build.checkpoint == nil {
+	if err != nil || (build.checkpoint == nil && build.checkpointErr == nil) {
 		return build, err
 	}
 	stripped := *build
-	stripped.checkpoint = nil
+	stripped.checkpoint, stripped.checkpointErr = nil, nil
 	return &stripped, nil
 }
 

@@ -73,7 +73,9 @@ type ModelProjection struct {
 	// localPartitionIDs lists the runtime partitions that run on the Cyborg GPU, in build order.
 	localPartitionIDs []int
 	// checkpoint is the build checkpoint projected into the Cyborg conductor, or nil.
-	// It is runtime configuration only and does not contribute to the digest.
+	// Projecting or dropping it leaves the digest unchanged. The build's
+	// contentID still hashes the whole deployment contract, so a rebuild whose
+	// recorded checkpoint differs has a new digest and rolls the workload.
 	checkpoint *Checkpoint
 }
 

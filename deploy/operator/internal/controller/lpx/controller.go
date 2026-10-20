@@ -206,17 +206,10 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return result, err
 	}
 
-	// Resolve and render every workload before deleting the running PCS.
-	workloads, plans, err := r.resolveWorkloads(ctx, deployment, dgd)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	return r.reconcileWorkloads(ctx, deployment, dgd, workloads, plans, pcs, pcsgs, pclqs, requests)
+	return r.reconcileWorkloads(ctx, deployment, dgd, pcs, pcsgs, pclqs, requests)
 }
 
-// reconcileWorkloads consumes resolved workloads, their plans, and owned
-// observations; DGD and deployment are non-nil.
+// reconcileWorkloads consumes owned observations; DGD and deployment are non-nil.
 // A nil pcs means initial creation, with no pcsgs, pclqs or requests. Otherwise
 // pcsgs contains every configured group; pclqs contains owned, non-deleting cliques.
 // On error, Reconcile persists status before applying deadline retries.
@@ -226,25 +219,31 @@ func (r *graphReconciler) reconcileWorkloads(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
 	dgd *v1beta1.DynamoGraphDeployment,
-	workloads map[string]*lpx.Workload,
-	plans map[string]*lpx.MaterializationPlan,
 	pcs *grovev1alpha1.PodCliqueSet,
 	pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup,
 	pclqs map[string]*grovev1alpha1.PodClique,
 	requests map[string]*lpxv1alpha1.LPUPipelineRequest,
 ) (result ctrl.Result, err error) {
+	// Resolve and render every workload before deleting the running PCS.
+	workloads, plans, err := r.resolveWorkloads(ctx, deployment, dgd)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Share the rendered identities with capacity management and request publication.
 	desiredPCS, resources, err := r.renderDesiredPodCliqueSet(ctx, deployment, dgd, workloads, plans, pcs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Check Cyborg checkpoints before any write that replaces or updates the running PCS.
-	checkpointResult, checkpointErr := r.reconcileCheckpointDownloads(ctx, deployment, workloads)
-	checkpointsPending := checkpointErr != nil || checkpointResult.RequeueAfter > 0
+	// Hold every write that replaces or updates the running PCS until Cyborg
+	// checkpoints are downloaded. Release cleanup has already run in Reconcile.
+	if result, err := r.reconcileCheckpointDownloads(ctx, deployment, workloads); err != nil || result.RequeueAfter > 0 {
+		return result, err
+	}
 
 	// Grove rolls compatible layouts; immutable structure changes replace the PCS.
-	if !checkpointsPending && pcs != nil && !podCliqueSetLayoutMatches(pcs, desiredPCS) {
+	if pcs != nil && !podCliqueSetLayoutMatches(pcs, desiredPCS) {
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the previous PodCliqueSet and its requests to be deleted")
 		return ctrl.Result{}, deletePodCliqueSet(ctx, r, pcs)
 	}
@@ -300,14 +299,6 @@ func (r *graphReconciler) reconcileWorkloads(
 	defer func() {
 		result = requeueForPipelineRequestDeadline(deadlineAt, result, err)
 	}()
-
-	// Hold forward publication for pending checkpoints, but keep releasing Agent Pods.
-	if checkpointsPending {
-		if err := r.removeReleasedAgentPods(ctx, pcsgs, desiredRequests); err != nil {
-			return ctrl.Result{}, errors.Join(checkpointErr, err)
-		}
-		return checkpointResult, checkpointErr
-	}
 
 	// Preserve live readiness while configuration and replica changes are pending.
 	var readinessResult ctrl.Result
