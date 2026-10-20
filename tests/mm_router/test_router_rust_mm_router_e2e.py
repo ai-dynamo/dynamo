@@ -38,11 +38,7 @@ from typing import Any, Generator
 import pytest
 import requests
 
-from tests.mm_router.utils import (
-    COMMON_PROCESS_KWARGS,
-    build_vllm_gpu_mem_args,
-    make_png_bytes,
-)
+from tests.mm_router.utils import COMMON_PROCESS_KWARGS, make_png_bytes
 from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import reserved_ports
@@ -54,6 +50,7 @@ from tests.utils.router_logs import (
 VLLM_MM_MODEL = os.getenv("DYN_TEST_VLLM_MM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 BLOCK_SIZE = 16
 NAMESPACE = "router-rust-mm"
+KV_CACHE_BYTES = 1_719_075_000
 
 pytestmark = [
     pytest.mark.post_merge,
@@ -62,12 +59,10 @@ pytestmark = [
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
     pytest.mark.model(VLLM_MM_MODEL),
-    pytest.mark.requested_vllm_kv_cache_bytes(1_719_075_000),
-    # Measured solo peak, which is what profiled_vram_gib means. The KV cap
-    # above pins the footprint, so this matches test_vllm_mm_router_e2e.py --
-    # same model, same cap, same 7.6 GiB. The previous 18.7 exceeded the
-    # multi-process budget, which made every test in this file exclusive.
-    pytest.mark.profiled_vram_gib(7.6),
+    pytest.mark.requested_vllm_kv_cache_bytes(KV_CACHE_BYTES),
+    # No profiled_vram_gib on purpose: this module runs in the sequential GPU
+    # stage, so its tests share one module-scoped worker and frontend instead
+    # of starting them once per test in the parallel stage.
 ]
 
 
@@ -107,7 +102,12 @@ class VLLMWorkerProcess(ManagedProcess):
                 "--block-size",
                 str(BLOCK_SIZE),
                 "--enforce-eager",
-                *build_vllm_gpu_mem_args("0.40"),
+                # Pinned explicitly: the sequential stage does not export the
+                # KV cap from the marker, which would fall back to 0.40.
+                "--kv-cache-memory-bytes",
+                str(KV_CACHE_BYTES),
+                "--gpu-memory-utilization",
+                "0.01",
                 "--max-model-len",
                 "4096",
                 "--kv-events-config",
