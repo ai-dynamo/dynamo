@@ -172,7 +172,7 @@ pub struct WorkerConfig {
     pub model_input: ModelInput,
     /// Comma-separated list, e.g. `"chat,completions"`.
     /// Accepted values: `chat`, `completions`, `embedding`/`embeddings`,
-    /// `tensor`, `prefill` (see `parse_endpoint_types`).
+    /// `classify`, `tensor`, `prefill` (see `parse_endpoint_types`).
     pub endpoint_types: String,
     /// Optional path to a custom Jinja chat template. When `None`, the
     /// template shipped with `model_name` is used.
@@ -2091,6 +2091,7 @@ fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
             "chat" => ModelType::Chat,
             "completions" => ModelType::Completions,
             "embedding" | "embeddings" => ModelType::Embedding,
+            "classify" => ModelType::Classify,
             "tensor" => ModelType::TensorBased,
             // The prefill role is declared via `worker_type` (driven by the
             // disaggregation mode), not as an endpoint type. Reject
@@ -2347,6 +2348,10 @@ mod tests {
         assert_eq!(
             parse_endpoint_types("completions").unwrap(),
             ModelType::Completions
+        );
+        assert_eq!(
+            parse_endpoint_types("classify").unwrap(),
+            ModelType::Classify
         );
         assert_eq!(
             parse_endpoint_types("embedding").unwrap(),

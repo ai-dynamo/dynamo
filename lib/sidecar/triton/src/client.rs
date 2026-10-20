@@ -101,6 +101,24 @@ impl TritonClient {
         })
     }
 
+    /// Client with no transports, for tests that never reach Triton.
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self {
+            transports: Vec::new().into(),
+            next: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Client over one HTTP transport, for tests against a fake Triton.
+    #[cfg(test)]
+    pub(crate) fn from_http(client: HttpClient) -> Self {
+        Self {
+            transports: vec![Transport::Http(client)].into(),
+            next: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
     pub(crate) fn protocols(&self) -> Vec<&'static str> {
         self.transports
             .iter()

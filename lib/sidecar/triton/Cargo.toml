@@ -18,12 +18,14 @@ path = "src/main.rs"
 [dependencies]
 dynamo-backend-common = { workspace = true }
 dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-protocols = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 prost = { workspace = true }
@@ -43,4 +45,5 @@ validator = { workspace = true }
 protox = "0.9"
 
 [dev-dependencies]
+dynamo-backend-common = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }

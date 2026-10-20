@@ -24,6 +24,11 @@ fn executable_exposes_triton_configuration() {
         "--grpc-endpoint",
         "--grpc-connections",
         "--http-endpoint",
+        "--task",
+        "--classify-input-name",
+        "--classify-output-name",
+        "--embeddings-input-name",
+        "--embeddings-output-name",
         "--model-name",
     ] {
         assert!(stdout.contains(flag), "missing {flag} in help output");

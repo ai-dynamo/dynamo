@@ -9,6 +9,7 @@ mod convert;
 mod engine;
 mod grpc;
 mod http;
+mod pooling;
 mod run;
 
 pub use run::from_cli;

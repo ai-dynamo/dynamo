@@ -75,13 +75,79 @@ pub(crate) struct Args {
         value_delimiter = ','
     )]
     pub model_names: Vec<String>,
+
+    /// Endpoint every registered model serves: `tensor` (KServe tensor inference), `classify` (OpenAI `/v1/classify`), or `embeddings` (OpenAI `/v1/embeddings`).
+    #[arg(long, value_enum, default_value_t = Task::Tensor, env = "DYN_TRITON_TASK")]
+    pub task: Task,
+
+    /// Input tensor name for `--task classify`. Omit to use the model's only TYPE_STRING input.
+    #[arg(long, env = "DYN_TRITON_CLASSIFY_INPUT_NAME")]
+    pub classify_input_name: Option<String>,
+
+    /// Output tensor name for `--task classify`. Omit to use the model's only TYPE_FP32 output.
+    #[arg(long, env = "DYN_TRITON_CLASSIFY_OUTPUT_NAME")]
+    pub classify_output_name: Option<String>,
+
+    /// Input tensor name for `--task embeddings`. Omit to use the model's only TYPE_STRING input.
+    #[arg(long, env = "DYN_TRITON_EMBEDDINGS_INPUT_NAME")]
+    pub embeddings_input_name: Option<String>,
+
+    /// Output tensor name for `--task embeddings`. Omit to use the model's only TYPE_FP32 output.
+    #[arg(long, env = "DYN_TRITON_EMBEDDINGS_OUTPUT_NAME")]
+    pub embeddings_output_name: Option<String>,
+}
+
+/// Endpoint the sidecar registers for each Triton model.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Task {
+    Tensor,
+    Classify,
+    Embeddings,
+}
+
+impl Args {
+    /// Reject tensor-name overrides for a task other than the one they configure.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.task != Task::Classify
+            && (self.classify_input_name.is_some() || self.classify_output_name.is_some())
+        {
+            return Err(
+                "--classify-input-name and --classify-output-name are only valid with --task classify"
+                    .to_string(),
+            );
+        }
+        if self.task != Task::Embeddings
+            && (self.embeddings_input_name.is_some() || self.embeddings_output_name.is_some())
+        {
+            return Err(
+                "--embeddings-input-name and --embeddings-output-name are only valid with --task embeddings"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Input and output tensor name overrides for the selected task.
+    pub(crate) fn tensor_name_overrides(&self) -> (Option<&str>, Option<&str>) {
+        match self.task {
+            Task::Tensor => (None, None),
+            Task::Classify => (
+                self.classify_input_name.as_deref(),
+                self.classify_output_name.as_deref(),
+            ),
+            Task::Embeddings => (
+                self.embeddings_input_name.as_deref(),
+                self.embeddings_output_name.as_deref(),
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
-    use super::Args;
+    use super::{Args, Task};
 
     #[test]
     fn parses_explicit_models() {
@@ -141,6 +207,77 @@ mod tests {
                 "dynamo-triton-sidecar",
                 "--http-endpoint",
                 "grpc://localhost:8000"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_tasks_and_overrides() {
+        let args =
+            Args::try_parse_from(["dynamo-triton-sidecar", "--grpc-endpoint", "localhost:8001"])
+                .unwrap();
+        assert_eq!(args.task, Task::Tensor);
+        assert!(args.validate().is_ok());
+
+        let args = Args::try_parse_from([
+            "dynamo-triton-sidecar",
+            "--grpc-endpoint",
+            "localhost:8001",
+            "--task",
+            "classify",
+            "--classify-output-name",
+            "probs",
+        ])
+        .unwrap();
+        assert_eq!(args.task, Task::Classify);
+        assert!(args.validate().is_ok());
+        assert_eq!(args.tensor_name_overrides(), (None, Some("probs")));
+
+        let args = Args::try_parse_from([
+            "dynamo-triton-sidecar",
+            "--grpc-endpoint",
+            "localhost:8001",
+            "--task",
+            "embeddings",
+            "--embeddings-input-name",
+            "TEXT",
+        ])
+        .unwrap();
+        assert_eq!(args.tensor_name_overrides(), (Some("TEXT"), None));
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_overrides_for_another_task() {
+        for (task, flag) in [
+            ("tensor", "--classify-input-name"),
+            ("embeddings", "--classify-output-name"),
+            ("classify", "--embeddings-input-name"),
+            ("tensor", "--embeddings-output-name"),
+        ] {
+            let args = Args::try_parse_from([
+                "dynamo-triton-sidecar",
+                "--grpc-endpoint",
+                "localhost:8001",
+                "--task",
+                task,
+                flag,
+                "name",
+            ])
+            .unwrap();
+            assert!(
+                args.validate().is_err(),
+                "{flag} accepted with --task {task}"
+            );
+        }
+        assert!(
+            Args::try_parse_from([
+                "dynamo-triton-sidecar",
+                "--grpc-endpoint",
+                "x:1",
+                "--task",
+                "embed"
             ])
             .is_err()
         );

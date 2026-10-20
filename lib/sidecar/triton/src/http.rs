@@ -310,7 +310,7 @@ fn error_detail(body: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::time::Duration;
 
     use dynamo_backend_common::{BackendError, ErrorType};
@@ -321,14 +321,14 @@ mod tests {
 
     use super::HttpClient;
 
-    struct Reply {
-        status: &'static str,
-        headers: Vec<(&'static str, String)>,
-        body: Vec<u8>,
+    pub(crate) struct Reply {
+        pub(crate) status: &'static str,
+        pub(crate) headers: Vec<(&'static str, String)>,
+        pub(crate) body: Vec<u8>,
     }
 
     impl Reply {
-        fn json(status: &'static str, body: serde_json::Value) -> Self {
+        pub(crate) fn json(status: &'static str, body: serde_json::Value) -> Self {
             Self {
                 status,
                 headers: Vec::new(),
@@ -338,7 +338,7 @@ mod tests {
     }
 
     /// Serve one canned reply per connection and return each request's request line and body.
-    async fn serve(
+    pub(crate) async fn serve(
         replies: Vec<Reply>,
     ) -> (String, tokio::task::JoinHandle<Vec<(String, Vec<u8>)>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -391,7 +391,7 @@ mod tests {
         (endpoint, task)
     }
 
-    fn transport() -> GrpcTransportConfig {
+    pub(crate) fn transport() -> GrpcTransportConfig {
         GrpcTransportConfig {
             retry_interval: Duration::from_millis(10),
             startup_deadline: Duration::from_secs(5),
