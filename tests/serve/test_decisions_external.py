@@ -35,7 +35,7 @@ from tests.utils.decision_api import (
 )
 
 pytestmark = [
-    pytest.mark.post_merge,
+    pytest.mark.manual,
     pytest.mark.gpu_0,
     pytest.mark.integration,
     pytest.mark.sglang,
