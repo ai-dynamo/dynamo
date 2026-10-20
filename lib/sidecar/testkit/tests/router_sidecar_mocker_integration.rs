@@ -28,7 +28,9 @@ mod process;
 mod support;
 
 use process::{Environment, Frontend, Gate, outputs};
-use support::{FixtureConfig, HandoffFixture, ProcessFixture, SidecarFixture, sglang, vllm};
+use support::{
+    DiscoveryFixture, FixtureConfig, HandoffFixture, ProcessFixture, SidecarFixture, sglang, vllm,
+};
 
 async fn healthy<F: ProcessFixture>(
     env: &Environment,
@@ -707,7 +709,7 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
             .find(|card| card.worker_type == Some(role))
             .unwrap();
         assert_eq!(card.name(), env.model);
-        assert_eq!(card.kv_cache_block_size, 4);
+        assert_eq!(card.kv_cache_block_size, F::KV_BLOCK_SIZE);
         if F::HAS_BOOTSTRAP && role == WorkerType::Prefill {
             let endpoint = card.runtime_config.disaggregated_endpoint.as_ref().unwrap();
             assert!(
@@ -724,7 +726,7 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
         activated,
         Arc::new(ModelManager::new()),
         RouterMode::RoundRobin,
-        4,
+        F::KV_BLOCK_SIZE,
         None,
         None,
         None,
@@ -1050,7 +1052,7 @@ async fn sglang_changed_role_never_registers() {
     .expect("process scenario exceeded its overall deadline");
 }
 
-async fn served_model_alias_is_published<F: ProcessFixture>() {
+async fn served_model_alias_is_published<F: DiscoveryFixture>() {
     let env = Environment::new().await;
     let control = Controller::default();
     let mut peer = F::start(
@@ -1152,7 +1154,7 @@ async fn distinct_model_tokenizer_and_alias_are_published() {
     peer.shutdown().await;
 }
 
-async fn health_readiness_precedes_publication<F: ProcessFixture>() {
+async fn health_readiness_precedes_publication<F: DiscoveryFixture>() {
     let env = Environment::new().await;
     let control = Controller::default();
     let mut peer = F::start(
@@ -1176,7 +1178,7 @@ async fn health_readiness_precedes_publication<F: ProcessFixture>() {
     peer.shutdown().await;
 }
 
-async fn unhealthy_worker_never_registers<F: ProcessFixture>() {
+async fn unhealthy_worker_never_registers<F: DiscoveryFixture>() {
     let env = Environment::new().await;
     let mut peer = F::start(
         Controller::default(),
@@ -1222,4 +1224,74 @@ async fn changed_role_never_registers() {
         child.logs()
     );
     peer.shutdown().await;
+}
+
+#[tokio::test]
+async fn trtllm_registration_and_errors_recover_through_worker_ingress() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        registration_and_errors_recover_through_worker_ingress::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn trtllm_delayed_startup_publishes_only_after_native_readiness() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        delayed_startup_publishes_only_after_native_readiness::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn trtllm_failed_and_interrupted_startup_leave_no_registration() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        failed_and_interrupted_startup_leave_no_registration::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn trtllm_worker_cancel_and_consumer_drop_release_only_the_target() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        worker_cancel_and_consumer_drop_release_only_the_target::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn trtllm_sigterm_withdraws_worker_and_releases_active_native_request() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        sigterm_withdraws_worker_and_releases_active_native_request::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn trtllm_prefill_router_preserves_handoff_failure_and_cancellation() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        prefill_router_preserves_handoff_failure_and_cancellation::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn trtllm_native_errors_reach_http_and_recover() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        native_errors_reach_http_and_recover::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
 }

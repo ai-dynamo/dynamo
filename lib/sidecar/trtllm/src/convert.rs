@@ -20,7 +20,7 @@ use dynamo_backend_common::{
     MultimodalData, PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
 };
 
-use crate::client::{self, ModelMetadata};
+use crate::client::{self, ModelLimits};
 use crate::disagg;
 use crate::proto as pb;
 
@@ -32,7 +32,7 @@ pub(crate) fn build_generate_request(
     mut request: PreprocessedRequest,
     request_id: &str,
     model: &str,
-    limits: Option<ModelMetadata>,
+    limits: Option<ModelLimits>,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(&request, mode)?;
@@ -150,7 +150,7 @@ pub(crate) fn build_generate_request(
 // remains necessary for LlmRegistration.
 fn max_tokens(
     request: &PreprocessedRequest,
-    limits: Option<ModelMetadata>,
+    limits: Option<ModelLimits>,
     has_media: bool,
 ) -> Result<Option<u32>, DynamoError> {
     if let Some(max_tokens) = request.stop_conditions.max_tokens {
@@ -187,7 +187,7 @@ const IMAGE_KEY: &str = "image_url";
 /// Per-modality vectors do not preserve cross-modality order.
 fn image_media(
     request: &mut PreprocessedRequest,
-    limits: Option<ModelMetadata>,
+    limits: Option<ModelLimits>,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
     reject_media_override("mm_processor_kwargs", request.mm_processor_kwargs.as_ref())?;
     reject_media_override("media_io_kwargs", request.media_io_kwargs.as_ref())?;
@@ -980,3 +980,8 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
         _ => client::engine_error(message),
     }
 }
+
+#[cfg(test)]
+mod request_tests;
+#[cfg(test)]
+mod response_tests;

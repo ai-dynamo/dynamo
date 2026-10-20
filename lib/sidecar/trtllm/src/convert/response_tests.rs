@@ -4,6 +4,8 @@
 //! Reducing the server's streamed events into `LLMEngineOutput`s.
 
 use super::*;
+use crate::test_fixtures::*;
+use dynamo_backend_common::ErrorType;
 
 #[test]
 fn token_then_finished_produces_delta_then_terminal_usage() {
@@ -302,4 +304,154 @@ fn a_response_without_an_output_index_is_rejected() {
         usage: None,
     };
     assert!(state.convert(response).is_err());
+}
+
+/// An aggregated worker never asks for a context handoff, so receiving one is
+/// protocol drift rather than a silent no-op.
+#[test]
+fn unexpected_prefill_ready_on_an_aggregated_worker_is_rejected() {
+    let mut state = ResponseState::new(&request(), AGG);
+    let error = state
+        .convert(pb::GenerateResponse {
+            request_id: "req".to_string(),
+            event: Some(pb::generate_response::Event::PrefillReady(
+                pb::PrefillReady {
+                    kv_session: Some(fake_session()),
+                },
+            )),
+            usage: None,
+        })
+        .expect_err("prefill_ready must be rejected");
+    assert!(
+        error.to_string().contains("not running in prefill mode"),
+        "unexpected error: {error}"
+    );
+}
+
+/// The OpenEngine servicer suppresses `finished` on a context request only
+/// when it already sent a `PrefillReady`; otherwise -- a stop condition during
+/// the one-token context phase, or a cancellation before transmission -- it
+/// deliberately emits the real terminal, because there is no decode leg to
+/// answer the caller. Context tokens are held back on the normal path so the
+/// decode leg's replay cannot duplicate them, which makes this terminal the
+/// only place they can surface.
+#[test]
+fn a_prefill_terminal_without_a_handoff_carries_its_tokens() {
+    let mut state = ResponseState::new(&request(), DisaggregationMode::Prefill);
+    let token = pb::GenerateResponse {
+        request_id: "req".to_string(),
+        event: Some(pb::generate_response::Event::Token(pb::TokenOutput {
+            output_index: Some(0),
+            tokens: vec![pb::TokenInfo {
+                token_id: 99,
+                logprob: Some(-0.5),
+                rank: Some(1),
+                candidates: vec![pb::LogProb {
+                    token_id: 100,
+                    logprob: -1.5,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })),
+        usage: None,
+    };
+    assert!(
+        state.convert(token).expect("token converts").is_none(),
+        "a context token is held back, not streamed"
+    );
+
+    let response = pb::GenerateResponse {
+        request_id: "req".to_string(),
+        event: Some(pb::generate_response::Event::Finished(
+            pb::GenerationFinished {
+                output_index: Some(0),
+                reason: pb::FinishReason::Stop as i32,
+                message: String::new(),
+                stop_match: None,
+            },
+        )),
+        usage: None,
+    };
+    let terminal = state
+        .convert(response)
+        .expect("a handoff-less prefill terminal is serviceable")
+        .expect("it yields a terminal");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+    assert_eq!(
+        terminal.token_ids,
+        [99],
+        "the caller gets what the context phase produced"
+    );
+    // The held token is the whole answer here, so dropping to bare IDs would
+    // silently strip logprobs a caller asked for and cannot get anywhere else.
+    assert_eq!(terminal.log_probs.as_deref(), Some(&[-0.5][..]));
+    let candidates = terminal.top_logprobs.expect("candidates");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0][0].token_id, 100);
+}
+
+/// `PrefillReady` is the final response for a context request, so its usage is
+/// authoritative -- the frontend forwards `cached_tokens` from it to the decode
+/// leg and cannot reconstruct it.
+#[test]
+fn prefill_ready_keeps_the_engines_reported_usage() {
+    let mut state = ResponseState::new(&request(), DisaggregationMode::Prefill);
+    let response = pb::GenerateResponse {
+        request_id: "req".to_string(),
+        event: Some(pb::generate_response::Event::PrefillReady(
+            pb::PrefillReady {
+                kv_session: Some(fake_session()),
+            },
+        )),
+        usage: Some(pb::Usage {
+            prompt_tokens: 11,
+            completion_tokens: 0,
+            total_tokens: 11,
+            cached_prompt_tokens: Some(7),
+            reasoning_tokens: None,
+        }),
+    };
+    let output = state
+        .convert(response)
+        .expect("prefill_ready converts")
+        .expect("prefill_ready yields a terminal");
+    let usage = output.completion_usage.expect("usage is set");
+    assert_eq!(usage.prompt_tokens, 11);
+    assert_eq!(
+        usage
+            .prompt_tokens_details
+            .and_then(|details| details.cached_tokens),
+        Some(7),
+        "cached prompt tokens must survive to the decode leg"
+    );
+}
+
+/// A context request that ends at its one-token budget never transmitted its
+/// KV, so there is no decode leg to finish the completion. Returning that
+/// single token would silently truncate the answer, and passing the `Length`
+/// terminal through makes the frontend's prefill router report a missing
+/// handoff instead of the real cause.
+#[test]
+fn a_prefill_terminal_that_ran_out_of_budget_is_rejected() {
+    let mut state = ResponseState::new(&request(), DisaggregationMode::Prefill);
+    let response = pb::GenerateResponse {
+        request_id: "req".to_string(),
+        event: Some(pb::generate_response::Event::Finished(
+            pb::GenerationFinished {
+                output_index: Some(0),
+                reason: pb::FinishReason::Length as i32,
+                ..Default::default()
+            },
+        )),
+        usage: None,
+    };
+    let error = state
+        .convert(response)
+        .expect_err("a budget-exhausted context request has no answer to return");
+    assert!(
+        error.to_string().contains("without a kv_session handoff"),
+        "the error must name the missing handoff: {error}"
+    );
 }
