@@ -41,7 +41,7 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import HttpError
+from dynamo.llm.exceptions import HttpError, WorkerUnavailable
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
@@ -1522,6 +1522,11 @@ class VllmProcessor:
             # Preserve request-side 400/404/422 errors for generator(), which
             # translates them at Dynamo's HTTP boundary. The generic handler
             # below is reserved for genuine internal failures.
+            raise
+        except WorkerUnavailable:
+            # The routed pipeline rejected the request as retryable (for example,
+            # prefill routing is still activating). An error envelope would turn
+            # that 503 into a 500; let the binding restore the class instead.
             raise
         except Exception as e:
             backend_error = backend_invalid_argument_to_http_error(e)

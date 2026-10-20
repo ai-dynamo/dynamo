@@ -2625,6 +2625,7 @@ dependencies = [
 name = "dynamo-kv-hashing"
 version = "1.6.0"
 dependencies = [
+ "criterion",
  "derive_builder",
  "dynamo-tokens",
  "rmp-serde",
@@ -3156,6 +3157,8 @@ dependencies = [
  "dynamo-sglang-mocker",
  "dynamo-sglang-sidecar",
  "dynamo-sidecar-common",
+ "dynamo-trtllm-mocker",
+ "dynamo-trtllm-sidecar",
  "dynamo-vllm-mocker",
  "dynamo-vllm-sidecar",
  "futures",

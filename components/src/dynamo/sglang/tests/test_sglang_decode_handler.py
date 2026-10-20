@@ -140,12 +140,11 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "options, allow_top, wrapped, expected",
+    "options, wrapped, expected",
     [
-        pytest.param({}, False, False, {}, id="default"),
+        pytest.param({}, False, {}, id="default"),
         pytest.param(
             {"logprobs": 0},
-            False,
             False,
             {"return_logprob": True, "top_logprobs_num": 0},
             id="chosen-token",
@@ -153,31 +152,24 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
         pytest.param(
             {"prompt_logprobs": 0},
             False,
-            False,
             {},
             id="prompt-only-excluded",
         ),
-        pytest.param({"logprobs": 3}, False, False, None, id="top-rejected"),
         pytest.param(
             {"logprobs": 3},
-            True,
             False,
             {"return_logprob": True, "top_logprobs_num": 3},
-            id="top-allowed",
+            id="top-allowed-by-default",
         ),
         pytest.param(
             {"logprobs": 0, "prompt_logprobs": 5},
-            True,
             True,
             {"return_logprob": True, "top_logprobs_num": 0},
             id="wrapped-mixed-excludes-prompt",
         ),
     ],
 )
-async def test_prefill_forwards_first_token_logprob_options(
-    monkeypatch, wrapped, allow_top, options, expected
-):
-    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1" if allow_top else "0")
+async def test_prefill_forwards_first_token_logprob_options(wrapped, options, expected):
     calls = []
 
     async def async_generate(**kwargs):
@@ -204,11 +196,6 @@ async def test_prefill_forwards_first_token_logprob_options(
 
     context = SimpleNamespace(id=lambda: "request-id", trace_id="trace-id")
     async with aclosing(handler.generate(request, context)) as stream:
-        if expected is None:
-            with pytest.raises(ValueError, match="DYN_SGL_ALLOW_TOP_LOGPROBS"):
-                await anext(stream)
-            assert not calls
-            return
         await anext(stream)
 
     assert len(calls) == 1
@@ -790,29 +777,15 @@ def test_engine_generate_requires_object_sampling_params_for_prefill_override():
         )
 
 
-def test_engine_generate_rejects_top_logprobs_by_default(monkeypatch):
-    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
-
-    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
-        build_native_generate_request(
-            {"return_logprob": True, "top_logprobs_num": 1},
-            input_ids=[1],
-            request_id="request",
-            priority=None,
-        )
-
-
-def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
-    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
-
+def test_engine_generate_allows_top_logprobs_by_default():
     native = build_native_generate_request(
-        {"return_logprob": True, "top_logprobs_num": 2},
+        {"return_logprob": True, "top_logprobs_num": 1},
         input_ids=[1],
         request_id="request",
         priority=None,
     )
 
-    assert native.top_logprobs_num == 2
+    assert native.top_logprobs_num == 1
 
 
 @pytest.mark.asyncio
@@ -1889,9 +1862,7 @@ class TestMultimodalGuard:
         )
 
 
-def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
-    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
-
+def test_build_logprob_kwargs_allows_chosen_token_logprobs():
     kwargs = DecodeWorkerHandler._build_logprob_kwargs(
         {"output_options": {"logprobs": 0}}
     )
@@ -1899,16 +1870,7 @@ def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
     assert kwargs == {"return_logprob": True, "top_logprobs_num": 0}
 
 
-def test_build_logprob_kwargs_rejects_top_logprobs_by_default(monkeypatch):
-    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
-
-    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
-        DecodeWorkerHandler._build_logprob_kwargs({"output_options": {"logprobs": 1}})
-
-
-def test_build_logprob_kwargs_allows_top_logprobs_with_escape_hatch(monkeypatch):
-    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
-
+def test_build_logprob_kwargs_allows_top_logprobs_by_default():
     kwargs = DecodeWorkerHandler._build_logprob_kwargs(
         {"output_options": {"logprobs": 2}}
     )
