@@ -25,6 +25,7 @@ from .config import (
     apply_worker_engine_args_overrides,
     build_runtime_config,
     load_mocker_engine_args,
+    validate_systemone_serial_config,
 )
 from .utils.kv_cache import compute_kv_bytes_per_token
 
@@ -152,6 +153,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
     - Independent service registration and stats scraping
     - But still sharing the same tokio runtime (efficient)
     """
+    validate_systemone_serial_config(args, base_engine_args)
     futures = []
     runtimes = []
     shutdown_requested = False
@@ -243,9 +245,8 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         kv_cache_block_size, runtime_config = build_runtime_config(worker_engine_args)
         if args.sglang_generate:
             runtime_config.set_engine_specific("sglang_generate", "true")
-            if not args.is_prefill_worker and not args.is_decode_worker:
-                runtime_config.set_engine_specific("sglang_systemone_serial_v1", "true")
-                runtime_config.max_num_seqs = 1
+        if args.systemone_serial:
+            runtime_config.set_engine_specific("sglang_systemone_serial_v1", "true")
 
         # Create EntrypointArgs for this worker
         entrypoint_args = EntrypointArgs(
