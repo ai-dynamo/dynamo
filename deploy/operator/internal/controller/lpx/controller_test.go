@@ -48,6 +48,14 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
+const (
+	releaseDownloadPending     = "download pending"
+	releaseDownloadFailure     = "download failure"
+	releaseSnapshotFailure     = "snapshot failure"
+	releaseConfigurationUpdate = "configuration update"
+	releaseStatusFailure       = "status failure"
+)
+
 func TestLPXControllerRemovesOnlyJournaledAgentPods(t *testing.T) {
 	t.Log("Publish a workload and journal one of its Agent Pods for release")
 	ctx := t.Context()
@@ -85,9 +93,189 @@ func TestLPXControllerRemovesOnlyJournaledAgentPods(t *testing.T) {
 	require.ErrorContains(t, err, "not found")
 }
 
+func TestLPXAgentReleaseBeforeWorkloadResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name, wantError string
+	}{
+		{name: releaseDownloadPending},
+		{name: releaseDownloadFailure, wantError: "download unavailable"},
+		{name: releaseSnapshotFailure, wantError: "snapshot unavailable"},
+		{name: "changed request"},
+		{name: "removed replica"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Publish two replicas and journal the second replica's Agent for release")
+			ctx := t.Context()
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
+			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+			createLPXTestObjects(t, ctx, r.Client, objects...)
+			publishSelectedLPXForTest(t, ctx, r, child, selected)
+			pod, request := journalLPXTestAgent(t, r, child, selected, objects, 1)
+
+			t.Log("Change desired intent or make its acquisition unavailable")
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+			switch tc.name {
+			case releaseDownloadPending, releaseDownloadFailure:
+				dgd.Spec.Components[0].LPX.BuildID = "gs://test-bucket/next-build"
+				downloads := newModelDownloadRegistry(t, nil, nil)
+				if tc.wantError != "" {
+					downloads.err = map[string]error{dgd.Spec.Components[0].LPX.BuildID: errors.New(tc.wantError)}
+				}
+				r.modelRegistry = downloads
+			case releaseSnapshotFailure:
+				r.modelRegistry = &snapshotFailureRegistry{ModelRegistry: registry, err: errors.New(tc.wantError)}
+			case "changed request":
+				request.Annotations[lpx.WorkloadDigestAnnotation] = "previous-build"
+				require.NoError(t, r.Update(ctx, request))
+			case "removed replica":
+				dgd.Spec.Components[0].Replicas = ptr.To(int32(1))
+			}
+			require.NoError(t, r.Update(ctx, dgd))
+			child.Spec.InputRevision = mustLPXInputRevision(t, dgd)
+			require.NoError(t, r.Update(ctx, child))
+
+			t.Log("Remove the observed journaled Pod even when new intent cannot reach cleanup")
+			result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
+			if tc.wantError == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tc.wantError)
+			}
+			if tc.name == releaseDownloadPending {
+				require.Equal(t, modelDownloadRequeueAfter, result.RequeueAfter)
+			}
+			require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})))
+			require.Equal(t, request, getTestPipelineRequest(t, ctx, r, request.Namespace, request.Name), "release remains scheduler-owned, even for retiring requests")
+		})
+	}
+}
+
+func TestLPXAgentReleaseErrorsDoNotBlockReconciliation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deadline int64
+	}{
+		{name: releaseConfigurationUpdate},
+		{name: releaseDownloadPending},
+		{name: releaseSnapshotFailure},
+		{name: "long deadline", deadline: 60},
+		{name: "earlier deadline", deadline: 3},
+		{name: releaseStatusFailure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Observe a releasing replica beside a pending replica in a new child generation")
+			ctx := t.Context()
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			child.Generation, child.Status.ObservedGeneration = 2, 1
+			dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
+			if tc.deadline > 0 {
+				dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To(tc.deadline)}
+			}
+			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+			createLPXTestObjects(t, ctx, r.Client, objects...)
+			publishSelectedLPXForTest(t, ctx, r, child, selected)
+			pod, request := journalLPXTestAgent(t, r, child, selected, objects, 0)
+			pcs := findLPXTestPodCliqueSet(t, objects)
+
+			t.Log("Fail Agent deletion while allowing other reconciliation work to proceed")
+			cleanupErr, workloadErr, statusErr := errors.New("Agent deletion unavailable"), errors.New("build unavailable"), errors.New("status write unavailable")
+			failCleanup, failStatus := true, tc.name == releaseStatusFailure
+			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+					if _, ok := object.(*corev1.Pod); ok && failCleanup {
+						return cleanupErr
+					}
+					return delegated.Delete(ctx, object, opts...)
+				},
+				SubResourceUpdate: func(ctx context.Context, delegated client.Client, subresource string, object client.Object, opts ...client.SubResourceUpdateOption) error {
+					if subresource == "status" && failStatus { //nolint:goconst // Keep API subresource names inline in tests.
+						return statusErr
+					}
+					return delegated.SubResource(subresource).Update(ctx, object, opts...)
+				},
+			})
+			var downloads *fakeModelDownloadRegistry
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+			switch tc.name {
+			case releaseConfigurationUpdate, releaseStatusFailure:
+				if dgd.Spec.Labels == nil {
+					dgd.Spec.Labels = make(map[string]string)
+				}
+				dgd.Spec.Labels["example.com/revision"] = "next"
+			case releaseDownloadPending:
+				dgd.Spec.Components[0].LPX.BuildID = "gs://test-bucket/next-build"
+				downloads = newModelDownloadRegistry(t, nil, nil)
+				r.modelRegistry = downloads
+			case releaseSnapshotFailure:
+				r.modelRegistry = &snapshotFailureRegistry{ModelRegistry: registry, err: workloadErr}
+			}
+			require.NoError(t, r.Update(ctx, dgd))
+			child.Spec.InputRevision = mustLPXInputRevision(t, dgd)
+			require.NoError(t, r.Update(ctx, child))
+			key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+			result, err := r.Reconcile(ctx, key)
+
+			t.Log("Retain cleanup failure, retries and generation accounting despite later progress")
+			if tc.deadline > 0 || tc.name == releaseDownloadPending {
+				require.NoError(t, err, "a persisted failure can use a bounded retry")
+				require.Positive(t, result.RequeueAfter)
+				require.LessOrEqual(t, result.RequeueAfter, pipelineRequestDeadlineRetryInterval)
+				if tc.name == "earlier deadline" {
+					require.LessOrEqual(t, result.RequeueAfter, time.Duration(tc.deadline)*time.Second)
+				}
+			} else {
+				require.ErrorIs(t, err, cleanupErr)
+				require.Zero(t, result)
+			}
+			if tc.name == releaseSnapshotFailure {
+				require.ErrorIs(t, err, workloadErr)
+			}
+			if failStatus {
+				require.ErrorIs(t, err, statusErr)
+			}
+			require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+			require.EqualValues(t, 1, child.Status.ObservedGeneration)
+			if !failStatus {
+				ready := meta.FindStatusCondition(child.Status.Conditions, v1alpha1.LPXReadyCondition)
+				require.NotNil(t, ready)
+				require.Equal(t, metav1.ConditionFalse, ready.Status)
+				require.Equal(t, v1alpha1.LPXReadyReasonFailed, ready.Reason)
+				require.Contains(t, ready.Message, cleanupErr.Error())
+				if tc.name == releaseSnapshotFailure {
+					require.Contains(t, ready.Message, workloadErr.Error())
+				}
+			}
+			require.Equal(t, request, getTestPipelineRequest(t, ctx, r, request.Namespace, request.Name))
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{}))
+			if downloads != nil {
+				require.Equal(t, []string{dgd.Spec.Components[0].LPX.BuildID}, downloads.calls)
+			}
+			if tc.name == releaseConfigurationUpdate || tc.name == releaseStatusFailure {
+				require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+				require.NotEmpty(t, pcs.Spec.Template.Cliques)
+				for _, clique := range pcs.Spec.Template.Cliques {
+					require.Equal(t, "next", clique.Labels["example.com/revision"])
+				}
+
+				t.Log("Recover cleanup without reverting the configuration update or replacing its request")
+				failCleanup, failStatus = false, false
+				_, err = r.Reconcile(ctx, key)
+				require.NoError(t, err)
+				require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})))
+				require.Equal(t, request, getTestPipelineRequest(t, ctx, r, request.Namespace, request.Name))
+				require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+				require.Equal(t, child.Generation, child.Status.ObservedGeneration)
+			}
+		})
+	}
+}
+
 func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 	t.Log("Materialize two hybrid workloads, each with two backbones")
-	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 	dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
 	second := dgd.Spec.Components[0].DeepCopy()
 	second.ComponentName = "second"
@@ -284,7 +472,7 @@ func TestLPXExternalCyborgCapacityValidation(t *testing.T) {
 	}))
 	registry, err := lpx.NewModelRegistry(root, nil)
 	require.NoError(t, err)
-	dgd := loadTestDGD(t, lpx.PipelineLPX, buildID)
+	dgd := loadTestDGD(t, lpx.PipelineHybrid, buildID)
 	dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
 	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = nil
 	child := newLPXTestDeployment(t, dgd)
@@ -855,7 +1043,7 @@ func TestLPXDownloadsBeforePublication(t *testing.T) {
 				}
 				require.Empty(t, observedRegistry.calls)
 			}
-			require.Zero(t, observedRegistry.acquireBuildSnapshotCalls)
+			require.Zero(t, observedRegistry.acquireBuildCalls)
 			pcs := &grovev1alpha1.PodCliqueSetList{}
 			requests := &lpxv1alpha1.LPUPipelineRequestList{}
 			require.NoError(t, r.List(t.Context(), pcs))
@@ -1174,7 +1362,6 @@ func TestLPXRollingEngineHandoff(t *testing.T) {
 		if role == "weights" {
 			dgd.GetComponentByName("draft").LPX.BuildID = "draft-weights"
 		} else {
-			metav1.SetMetaDataAnnotation(&dgd.ObjectMeta, consts.KubeAnnotationGroveUpdateStrategy, "OnDelete")
 			dgd.GetComponentByName("lpx").ComponentRole(role).PodTemplate.Spec.Containers[0].Image = "runtime:new"
 		}
 		updateTestDGD(t, r, child, dgd)
@@ -1186,10 +1373,6 @@ func TestLPXRollingEngineHandoff(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, allocations, current)
 	}
-	dgd.GetComponentByName("draft").LPX.BuildID = "target-build"
-	updateTestDGD(t, r, child, dgd)
-	reconcile()
-	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs)))
 }
 
 func TestLPXFailedScaleOutPreservesServingWorkloads(t *testing.T) {
@@ -1277,7 +1460,7 @@ func TestLPXInvalidReplacementPreservesExistingWorkload(t *testing.T) {
 	agent := draft.ComponentRole(v1beta1.ComponentRoleLPXAgent)
 	mounts := agent.PodTemplate.Spec.Containers[0].VolumeMounts
 	agent.PodTemplate.Spec.Containers[0].VolumeMounts = nil
-	replacement, err := lpx.ResolveWorkload(ctx, dgd, singleGroupComponents(t, dgd), registry)
+	replacement, err := lpx.ResolveWorkload(ctx, fake.NewClientBuilder().Build(), dgd, singleGroupComponents(t, dgd), registry)
 	require.NoError(t, err)
 	require.NotEqual(t, selected.workload.Digest(), replacement.Digest())
 	updateTestDGD(t, r, child, dgd)
@@ -1581,7 +1764,7 @@ func TestLPXInvalidEditsPreserveExistingWorkload(t *testing.T) {
 		{name: "render", message: "model storage volume mount"},
 		{name: "invalid source", message: "source"},
 		{name: "transient snapshot", message: "temporary snapshot timeout", preserve: true},
-		{name: "inconsistent snapshot", message: "immutable LPX build snapshot"},
+		{name: "unavailable snapshot", message: "immutable LPX build snapshot"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			t.Log("Create a PCS, its scaling groups, and a discovery endpoint before publishing requests")
@@ -1617,10 +1800,10 @@ func TestLPXInvalidEditsPreserveExistingWorkload(t *testing.T) {
 				component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].VolumeMounts = nil
 			case "invalid source":
 				child.OwnerReferences[0].UID = "replaced-source"
-			case "transient snapshot", "inconsistent snapshot":
+			case "transient snapshot", "unavailable snapshot":
 				cause := errors.New("temporary snapshot timeout")
 				if !scenario.preserve {
-					cause = lpx.ErrBuildSnapshotInconsistent
+					cause = errors.New("build source unavailable")
 				}
 				r.modelRegistry = &snapshotFailureRegistry{ModelRegistry: registry, err: cause}
 			}
@@ -2149,7 +2332,7 @@ func TestLPXCorrectsTopLevelReplicaDrift(t *testing.T) {
 
 func TestLPXReconcileRejectsForeignPodClique(t *testing.T) {
 	t.Log("Materialize a workload whose workers need scaling")
-	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 	dgd.GetComponentByName("lpx").ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(3))
 	r, desired := newPreparedLPXTestReconciler(t, registry, t.Context(), child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, desired)
@@ -2194,7 +2377,7 @@ func TestLPXScalingWaitsForObservedCapacity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Observe a hybrid workload with group or clique capacity still to apply")
 			ctx := t.Context()
-			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 			dgd.GetComponentByName("lpx").Replicas = ptr.To(int32(2))
 			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
@@ -2724,7 +2907,7 @@ type snapshotFailureRegistry struct {
 	err error
 }
 
-func (r *snapshotFailureRegistry) AcquireBuildSnapshot(context.Context, string) (*lpx.BuildSnapshot, error) {
+func (r *snapshotFailureRegistry) AcquireBuild(context.Context, string) (*lpx.Build, error) {
 	return nil, r.err
 }
 
@@ -2735,15 +2918,15 @@ type downloadOrderedLPXRegistry struct {
 	calls      []string
 }
 
-func (r *downloadOrderedLPXRegistry) AcquireBuildSnapshot(
+func (r *downloadOrderedLPXRegistry) AcquireBuild(
 	ctx context.Context,
 	buildID string,
-) (*lpx.BuildSnapshot, error) {
+) (*lpx.Build, error) {
 	r.calls = append(r.calls, "snapshot")
 	if !r.downloaded {
 		return nil, errors.New("LPX snapshot acquired before Model Express download")
 	}
-	return r.ModelRegistry.AcquireBuildSnapshot(ctx, buildID)
+	return r.ModelRegistry.AcquireBuild(ctx, buildID)
 }
 
 func (r *downloadOrderedLPXRegistry) BuildURL(string) (*url.URL, error) {
@@ -2801,7 +2984,7 @@ func TestLPXPublishedWorkloadCleanupAfterFailure(t *testing.T) {
 		name          string
 		snapshotError error
 	}{
-		{name: "inconsistent snapshot", snapshotError: fmt.Errorf("%w: compiler metadata changed during duplicate reads", lpx.ErrBuildSnapshotInconsistent)},
+		{name: "unavailable snapshot", snapshotError: fmt.Errorf("%w: compiler contract could not be read", errors.New("build source unavailable"))},
 		{name: "transient snapshot", snapshotError: errors.New("temporary object-store timeout")},
 		{name: "render failure"},
 	} {
@@ -2987,7 +3170,7 @@ func resolveLPXTestWorkload(t *testing.T, registry lpx.ModelRegistry, ctx contex
 	deployment *v1alpha1.LPXGraphDeployment, dgd *v1beta1.DynamoGraphDeployment,
 ) *lpxTestWorkload {
 	t.Helper()
-	workload, err := lpx.ResolveWorkload(ctx, dgd, singleGroupComponents(t, dgd), registry)
+	workload, err := lpx.ResolveWorkload(ctx, fake.NewClientBuilder().Build(), dgd, singleGroupComponents(t, dgd), registry)
 	require.NoError(t, err)
 	plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment))
 	require.NoError(t, err)
@@ -3028,7 +3211,7 @@ func findLPXTestPodCliqueSet(t *testing.T, objects []client.Object) *grovev1alph
 func newLPXTestDGD(t *testing.T, pipeline lpx.Pipeline) (*v1alpha1.LPXGraphDeployment, *v1beta1.DynamoGraphDeployment, lpx.ModelRegistry) {
 	t.Helper()
 	compilationMode := manifestcapnpv2.CompilationMode_lpuOnly
-	if pipeline == lpx.PipelineLPX {
+	if pipeline == lpx.PipelineHybrid {
 		compilationMode = manifestcapnpv2.CompilationMode_lpx
 	}
 	const buildID = "build-v2"
@@ -3060,7 +3243,7 @@ func loadTestDGD(t testing.TB, pipeline lpx.Pipeline, buildID string) *v1beta1.D
 	dgd.Spec.Components[0].LPX.BuildID = buildID
 
 	// Hybrid pipelines author a GPU conductor while retaining the same Agent template.
-	if pipeline == lpx.PipelineLPX {
+	if pipeline == lpx.PipelineHybrid {
 		payload, err = os.ReadFile("testdata/hybrid-conductor.yaml")
 		require.NoError(t, err)
 		conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
@@ -3592,6 +3775,7 @@ func TestIndependentLPXWorkloadsScaleAndReportReadiness(t *testing.T) {
 	require.Equal(t, plans, reorderedPlans)
 
 	t.Log("Observe two explicit replicas and three externally managed replicas in Grove")
+	require.NoError(t, r.stampClientIdentity(t.Context(), dgd, pcs))
 	firstPlan, secondPlan := plans["lpx"], plans["second-engine"]
 	secondPlan.Replicas = 3
 	objects := materializeLPXTestPCS(t, child, pcs, firstPlan, secondPlan)
@@ -4171,7 +4355,7 @@ func TestLPXScaleFailureRetainsRetry(t *testing.T) {
 func TestLPXCoherentUpdateDefersCyborgScaleUntilLiveCapacityMatches(t *testing.T) {
 	ctx := t.Context()
 	t.Log("Publish a ready hybrid workload with two backbones and one Cyborg per backbone")
-	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 	dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
 	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
@@ -4569,4 +4753,27 @@ func TestLPXRolloutBudgetEditsPreservePodCliqueSetAndRequests(t *testing.T) {
 			}
 		})
 	}
+}
+
+func journalLPXTestAgent(t *testing.T, r *graphReconciler, child *v1alpha1.LPXGraphDeployment, selected *lpxTestWorkload, objects []client.Object, replica int32) (*corev1.Pod, *lpxv1alpha1.LPUPipelineRequest) {
+	t.Helper()
+	plan := selected.plan.ForReplica(replica)
+	clique := getResource[*grovev1alpha1.PodClique](t, objects, plan.Agents[0].CliqueName)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: child.Namespace, Name: fmt.Sprintf("released-%d", replica), UID: types.UID(fmt.Sprintf("released-%d-uid", replica)),
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(clique, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))},
+	}}
+	require.NoError(t, r.Create(t.Context(), pod))
+	request := getTestPipelineRequest(t, t.Context(), r, child.Namespace, selected.requests[replica].Name)
+	request.Status = newLPXTestReleaseRequest(pod).Status
+	request.Status.ObservedGeneration = ptr.To(request.Generation)
+	require.NoError(t, r.Update(t.Context(), request))
+	return pod, request
+}
+
+func mustLPXInputRevision(t *testing.T, dgd *v1beta1.DynamoGraphDeployment) string {
+	t.Helper()
+	revision, err := dynamo.LPXInputRevision(dgd, "")
+	require.NoError(t, err)
+	return revision
 }
