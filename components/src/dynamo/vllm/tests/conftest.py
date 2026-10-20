@@ -16,6 +16,7 @@ import pytest
 # `None` = not yet attempted, `True` = succeeded, `False` = raised.
 _omni_importable: bool | None = None
 _vllm_importable: bool | None = None
+_gpu_tiering_importable: bool | None = None
 
 
 def _can_import_vllm() -> bool:
@@ -54,14 +55,41 @@ def _can_import_omni() -> bool:
     return _omni_importable
 
 
+def _can_import_gpu_tiering() -> bool:
+    """Omit the optional upstream adapter only when that module is absent.
+
+    Broken transitive dependencies or other API/import failures remain errors.
+    Supported-image qualification separately requires all GPU tests to collect.
+    """
+    global _gpu_tiering_importable
+    if _gpu_tiering_importable is None:
+        try:
+            importlib.import_module("vllm.v1.kv_offload.tiering.kvcr.manager")
+            _gpu_tiering_importable = True
+        except ModuleNotFoundError as error:
+            if error.name not in {
+                "vllm",
+                "vllm.v1",
+                "vllm.v1.kv_offload",
+                "vllm.v1.kv_offload.tiering",
+                "vllm.v1.kv_offload.tiering.kvcr",
+                "vllm.v1.kv_offload.tiering.kvcr.manager",
+            }:
+                raise
+            _gpu_tiering_importable = False
+    return _gpu_tiering_importable
+
+
 def pytest_ignore_collect(collection_path, config):
     """Skip collecting vllm test files if vllm module isn't installed.
-    Checks test file naming pattern: test_vllm_*.py
+    Checks test_vllm_*.py and the retained-GPU framework-dependent module.
     """
     filename = collection_path.name
-    if filename.startswith("test_vllm_"):
+    if filename.startswith("test_vllm_") or filename == "test_gpu_offloading.py":
         if not _can_import_vllm():
             return True  # vllm not available, skip this file
+    if filename == "test_gpu_offloading.py" and not _can_import_gpu_tiering():
+        return True
     # Omni tests import dynamo.vllm.omni.* which transitively imports
     # vllm_omni at module load. On CPU-only sample-runtime runners the
     # import chain reaches vllm._C and raises (NotImplementedError when

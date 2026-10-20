@@ -922,6 +922,7 @@ mod tests {
     use super::*;
 
     use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
+    use dynamo_kv_router::WorkerConfigLike;
 
     #[test]
     fn structural_tag_config_accepts_future_wire_fields_and_rejects_unknown_input_fields() {

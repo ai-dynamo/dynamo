@@ -317,7 +317,7 @@ impl RoutingHost {
 mod tests {
     use super::*;
 
-    fn calibrated_config() -> KvRouterConfig {
+    pub(super) fn calibrated_config() -> KvRouterConfig {
         KvRouterConfig {
             enable_decode_to_prefill_reuse: true,
             transfer_source_estimated_block_us: Some(10.0),
@@ -375,6 +375,7 @@ mod tests {
 
 #[cfg(test)]
 mod integration_tests {
+    use super::tests::calibrated_config;
     use super::*;
     use crate::discovery::KvSourceMembershipCoordinator;
     use crate::kv_router::SelectionPolicySource;
