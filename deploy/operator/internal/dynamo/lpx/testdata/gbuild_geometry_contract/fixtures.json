@@ -1,0 +1,95 @@
+{
+  "fixtures": [
+    {
+      "name": "subnode8",
+      "sha256": "904cd553ab100ffae21ffe2f77b5dc55293871b1a7277714a8ff5d799f20dd81",
+      "partitions": [
+        {
+          "id": 7,
+          "topology": "opaque-v3-topology",
+          "num_chips": 8,
+          "devices_per_node": 16,
+          "source_extent": [
+            8,
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "selected_chain": []
+    },
+    {
+      "name": "cross_hemi32",
+      "sha256": "afad7b3ed003f240110d68fb975b5d3fc77351cf877f0b02ac65df901251afc9",
+      "partitions": [
+        {
+          "id": 7,
+          "topology": "opaque-v3-topology",
+          "num_chips": 32,
+          "devices_per_node": 16,
+          "source_extent": [
+            16,
+            1,
+            2,
+            1
+          ]
+        }
+      ],
+      "selected_chain": []
+    },
+    {
+      "name": "rack256",
+      "sha256": "223423f19dd864331d9cd95c43cad6d42e41ae673519d6f6ff7bd6c876d77147",
+      "partitions": [
+        {
+          "id": 7,
+          "topology": "opaque-v3-topology",
+          "num_chips": 256,
+          "devices_per_node": 16,
+          "source_extent": [
+            16,
+            8,
+            2,
+            1
+          ]
+        }
+      ],
+      "selected_chain": []
+    },
+    {
+      "name": "connected_chain",
+      "sha256": "df4bc04bd1c014bad668a55ce577109274df7b427f5b454600860b3bfc2d80b0",
+      "partitions": [
+        {
+          "id": 7,
+          "topology": "opaque-v3-topology",
+          "num_chips": 32,
+          "devices_per_node": 16,
+          "source_extent": [
+            16,
+            1,
+            2,
+            1
+          ]
+        },
+        {
+          "id": 8,
+          "topology": "opaque-v3-topology",
+          "num_chips": 16,
+          "devices_per_node": 16,
+          "source_extent": [
+            16,
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "selected_chain": [
+        7,
+        8
+      ]
+    }
+  ]
+}

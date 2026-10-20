@@ -26,10 +26,39 @@ mod ports;
 mod scripted_chat_engine;
 
 use http_harness::{
-    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture, parse_json_sse,
+    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture,
+    parse_responses_sse,
 };
 
 const ENV: [(&str, Option<&str>); 1] = [(DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0"))];
+
+#[tokio::test]
+async fn responses_sse_requires_terminal_event_without_trailers() {
+    for terminal in [
+        "response.completed",
+        "response.incomplete",
+        "response.failed",
+    ] {
+        let body = format!("event: {terminal}\ndata: {{\"type\":\"{terminal}\"}}\n\n");
+        assert!(parse_responses_sse(&body).await.is_ok());
+        for trailer in [
+            "data: [DONE]\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+        ] {
+            assert!(
+                parse_responses_sse(&format!("{body}{trailer}"))
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    assert!(parse_responses_sse("").await.is_err());
+    assert!(
+        parse_responses_sse("event: response.created\ndata: {\"type\":\"response.created\"}\n\n")
+            .await
+            .is_err()
+    );
+}
 
 /// Unsupported tool definitions return HTTP 400 before backend dispatch for both
 /// unary and streaming requests, including mixed tools and namespace members.
@@ -187,7 +216,7 @@ async fn disallowed_streamed_function_call_kills_backend_context() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
         assert!(events.iter().any(|event| event.event == "response.failed"));
@@ -251,7 +280,7 @@ async fn colliding_namespace_tools_round_trip_through_http() {
                 let response = post_responses(&svc, &body).await;
                 assert_eq!(response.status(), reqwest::StatusCode::OK);
                 let response_body = if stream {
-                    let events = parse_json_sse(&response.text().await.unwrap()).await.unwrap();
+                    let events = parse_responses_sse(&response.text().await.unwrap()).await.unwrap();
                     for kind in ["response.output_item.added", "response.output_item.done"] {
                         let call = events.iter().find(|event| event.event == kind
                             && event.data["item"]["type"] == "function_call").unwrap();
@@ -371,7 +400,7 @@ async fn request_metadata_is_preserved_for_unary_and_streaming_responses() {
                 let expected_response_metadata =
                     request_metadata.clone().unwrap_or_else(|| json!({}));
                 if stream {
-                    let events = parse_json_sse(&response.text().await.unwrap())
+                    let events = parse_responses_sse(&response.text().await.unwrap())
                         .await
                         .unwrap();
                     assert_streamed_response_metadata(&events, &expected_response_metadata);
@@ -400,6 +429,101 @@ async fn request_metadata_is_preserved_for_unary_and_streaming_responses() {
         }
         assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn refusal_fragments_reach_responses_content_and_events() {
+    temp_env::async_with_vars(ENV, async {
+        for stream in [false, true] {
+            for include_text in [false, true] {
+                let mut script = load_agent_fixture("text.sse").await.unwrap();
+                let chunk = script[1].data.as_mut().unwrap();
+                if !include_text {
+                    chunk.inner.choices[0].delta.content = None;
+                }
+                chunk.inner.choices[0].delta.refusal = Some("I cannot ".into());
+                let mut tail = script[1].clone();
+                let delta = &mut tail.data.as_mut().unwrap().inner.choices[0].delta;
+                delta.content = None;
+                delta.refusal = Some("help with that.".into());
+                script.insert(2, tail);
+                let svc = HarnessService::start([script]).await;
+                let response = post_responses(
+                    &svc,
+                    &json!({
+                        "model": MODEL, "input": "ping", "stream": stream
+                    }),
+                )
+                .await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let body: Value = if stream {
+                    let events = parse_responses_sse(&response.text().await.unwrap())
+                        .await
+                        .unwrap();
+                    let refusal_events: Vec<_> = events
+                        .iter()
+                        .filter(|event| event.event == "response.refusal.delta")
+                        .collect();
+                    assert_eq!(refusal_events.len(), 2);
+                    assert_eq!(
+                        refusal_events
+                            .iter()
+                            .map(|event| event.data["delta"].as_str().unwrap())
+                            .collect::<String>(),
+                        "I cannot help with that."
+                    );
+                    for event in &refusal_events {
+                        assert_eq!(event.data["content_index"], usize::from(include_text));
+                    }
+                    let done = events
+                        .iter()
+                        .find(|event| event.event == "response.refusal.done")
+                        .unwrap();
+                    assert_eq!(done.data["refusal"], "I cannot help with that.");
+                    assert_eq!(done.data["content_index"], usize::from(include_text));
+                    for event in &refusal_events {
+                        assert_eq!(event.data["item_id"], done.data["item_id"]);
+                        assert_eq!(event.data["output_index"], done.data["output_index"]);
+                    }
+                    let part = events
+                        .iter()
+                        .find(|event| {
+                            event.event == "response.content_part.done"
+                                && event.data["part"]["type"] == "refusal"
+                        })
+                        .unwrap();
+                    assert_eq!(part.data["content_index"], done.data["content_index"]);
+                    assert_eq!(
+                        part.data["part"],
+                        json!({"type":"refusal", "refusal":"I cannot help with that."})
+                    );
+                    events
+                        .iter()
+                        .find(|event| event.event == "response.completed")
+                        .unwrap()
+                        .data["response"]
+                        .clone()
+                } else {
+                    response.json().await.unwrap()
+                };
+                let content = body["output"][0]["content"].as_array().unwrap();
+                assert_eq!(content.len(), if include_text { 2 } else { 1 });
+                if include_text {
+                    assert_eq!(content[0]["type"], "output_text");
+                    assert_eq!(content[0]["text"], "Pong.");
+                }
+                assert_eq!(
+                    content.last().unwrap(),
+                    &json!({"type":"refusal", "refusal":"I cannot help with that."})
+                );
+                assert_eq!(body["status"], "completed");
+                assert_eq!(body["usage"]["total_tokens"], 7);
+                svc.shutdown().await;
+            }
+        }
     })
     .await;
 }
@@ -457,8 +581,7 @@ async fn streaming_text_baseline() {
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let raw = response.text().await.unwrap();
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
-        let events = parse_json_sse(&raw).await.unwrap();
+        let events = parse_responses_sse(&raw).await.unwrap();
         insta::assert_json_snapshot!(
             "responses_streaming_text",
             canonicalize(serde_json::to_value(events).unwrap())
@@ -470,13 +593,21 @@ async fn streaming_text_baseline() {
     .await;
 }
 
+#[rstest::rstest]
+#[case::text(false)]
+#[case::refusal(true)]
 #[tokio::test]
 #[serial]
-async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
+async fn streaming_backend_error_closes_partial_output_and_counts_failure(#[case] refusal: bool) {
     temp_env::async_with_vars(ENV, async {
         const ERROR_MESSAGE: &str =
             "ValueError: Received multimodal data but multimodal processing is not enabled. Use --enable-multimodal flag to enable multimodal processing.";
         let mut script = load_agent_fixture("text.sse").await.unwrap();
+        if refusal {
+            let delta = &mut script[1].data.as_mut().unwrap().inner.choices[0].delta;
+            delta.content = None;
+            delta.refusal = Some("I cannot help.".into());
+        }
         let finish_position = script
             .iter()
             .position(|chunk| {
@@ -522,10 +653,10 @@ async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
-        let text_done_position = event_position(&events, "response.output_text.done");
+        let text_done_position = event_position(&events, if refusal { "response.refusal.done" } else { "response.output_text.done" });
         let part_done_position = event_position(&events, "response.content_part.done");
         let item_done_position = event_position(&events, "response.output_item.done");
         let failed_position = event_position(&events, "response.failed");
@@ -536,6 +667,9 @@ async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
         let completed_item = &events[item_done_position].data["item"];
         let failed = &events[failed_position];
         assert_eq!(completed_item["status"], "incomplete");
+        if refusal {
+            assert_eq!(completed_item["content"], json!([{"type":"refusal", "refusal":"I cannot help."}]));
+        }
         assert_eq!(failed.data["response"]["status"], "failed");
         assert_eq!(failed.data["response"]["output"], json!([completed_item]));
         assert_eq!(
@@ -595,7 +729,7 @@ async fn empty_first_arguments_do_not_finish_function_call_early() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
 
@@ -702,8 +836,7 @@ async fn finish_signal_publishes_function_call_before_usage_tail() {
         }
 
         let raw = parser.into_body().expect("response SSE was not UTF-8");
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
-        let events = parse_json_sse(&raw).await.unwrap();
+        let events = parse_responses_sse(&raw).await.unwrap();
         assert_eq!(
             events
                 .iter()
@@ -748,7 +881,7 @@ async fn parallel_function_calls_preserve_identity_and_arguments() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_responses_sse(&response.text().await.unwrap())
             .await
             .unwrap();
 
