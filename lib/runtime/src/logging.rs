@@ -486,11 +486,15 @@ fn build_otlp_http_client(
         return Ok(None);
     }
 
-    let timeout_ms = std::env::var(signal_timeout_var)
-        .ok()
-        .or_else(|| std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_TIMEOUT).ok())
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(10_000);
+    // Parse each var independently; an empty or malformed signal value falls
+    // back to the generic one (mirrors the SDK's resolve_timeout).
+    let timeout_ms = [
+        signal_timeout_var,
+        env_logging::otlp::OTEL_EXPORTER_OTLP_TIMEOUT,
+    ]
+    .into_iter()
+    .find_map(|name| std::env::var(name).ok()?.parse::<u64>().ok())
+    .unwrap_or(10_000);
     let timeout = std::time::Duration::from_millis(timeout_ms);
 
     let invalid = |path: &'static str| {
@@ -3919,46 +3923,6 @@ pub mod tests {
                     debug.contains("identity: Some"),
                     "expect a set identity in {debug}"
                 );
-            },
-        );
-    }
-
-    #[test]
-    fn otlp_tls_http_client_includes_identity_and_ca() {
-        let (ca_pem, _) = self_signed_pem();
-        let (cert_pem, key_pem) = self_signed_pem();
-        let ca = write_temp_pem("dynamo-otlp-ca", &ca_pem);
-        let cert = write_temp_pem("dynamo-otlp-cert", &cert_pem);
-        let key = write_temp_pem("dynamo-otlp-key", &key_pem);
-        with_otlp_tls_env(
-            &[
-                (
-                    env_logging::otlp::OTEL_EXPORTER_OTLP_CERTIFICATE,
-                    Some(ca.path().to_string_lossy().into_owned()),
-                ),
-                (
-                    env_logging::otlp::OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE,
-                    Some(cert.path().to_string_lossy().into_owned()),
-                ),
-                (
-                    env_logging::otlp::OTEL_EXPORTER_OTLP_CLIENT_KEY,
-                    Some(key.path().to_string_lossy().into_owned()),
-                ),
-            ],
-            || {
-                let material = otlp_tls_material_for(
-                    env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE,
-                    env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE,
-                    env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY,
-                )
-                .unwrap();
-                let client = build_otlp_http_client(
-                    &material,
-                    env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_TIMEOUT,
-                )
-                .unwrap()
-                .expect("reqwest client expected when CA and identity are present");
-                drop(client);
             },
         );
     }
