@@ -5,6 +5,7 @@
 
 import asyncio
 import re
+import time
 from pathlib import Path
 
 from .models import Config
@@ -19,6 +20,46 @@ def rank_files(location: str, prefix: str) -> list[tuple[str, Path]]:
         for path in Path(location).iterdir()
         if (match := pattern.fullmatch(path.name))
     )
+
+
+# vLLM stamps a trace while handling stop, before the stop response returns; the
+# allowance covers clock skew between the worker and this host.
+STAMP_ALLOWANCE_NS = 1_000_000_000
+
+
+def adopt_session_traces(
+    location: str, prefix: str, ranks: list[str], window: tuple[int, int]
+) -> list[dict]:
+    """Rename this session's rank traces that vLLM wrote under an earlier prefix.
+
+    vLLM fixes a worker's torch trace name when it builds the profiler on the
+    first profile start, so later sessions on that worker write under the first
+    session's prefix. Only one session holds the lease, so a missing rank's
+    single trace stamped between this session's start request and stop belongs
+    to it; earlier and later sessions' files never qualify. Ambiguous windows are
+    left for validation to reject.
+    """
+    adopted = []
+    for rank in ranks:
+        pattern = re.compile(
+            rf"(.+)_{re.escape(rank)}\.(\d+)(\.pt\.trace\.json(?:\.gz)?)"
+        )
+        candidates = [
+            (path, match)
+            for path in Path(location).iterdir()
+            if (match := pattern.fullmatch(path.name))
+            and match.group(1) != prefix
+            and window[0] <= int(match.group(2)) <= window[1]
+        ]
+        if len(candidates) != 1:
+            continue
+        path, match = candidates[0]
+        target = path.with_name(f"{prefix}_{rank}.{match.group(2)}{match.group(3)}")
+        path.rename(target)
+        adopted.append(
+            {"rank_id": rank, "renamed_from": path.name, "location": str(target)}
+        )
+    return adopted
 
 
 def present(path: Path) -> tuple[int, str | None]:
@@ -55,7 +96,21 @@ class SharedFilesystemValidator:
                 "reason": "artifact_store_not_mounted",
                 "location": location,
             }
+        expected = evidence.get("expected_rank_ids", [])
         try:
+            adopted = []
+            if expected and "start_requested_at_ns" in evidence:
+                prefixed = {rank for rank, _ in rank_files(location, prefix)}
+                adopted = adopt_session_traces(
+                    location,
+                    prefix,
+                    sorted(set(expected) - prefixed),
+                    (
+                        evidence["start_requested_at_ns"],
+                        evidence.get("stopped_at_ns", time.time_ns())
+                        + STAMP_ALLOWANCE_NS,
+                    ),
+                )
             found = rank_files(location, prefix)
             artifacts = []
             for rank, path in found:
@@ -72,7 +127,6 @@ class SharedFilesystemValidator:
         except OSError as exc:
             return {"status": "invalid", "coverage": "partial", "error": str(exc)}
         ranks = [rank for rank, _ in found]
-        expected = evidence.get("expected_rank_ids", [])
         missing = sorted(set(expected) - set(ranks))
         unexpected = sorted(set(ranks) - set(expected)) if expected else []
         duplicate = len(ranks) != len(set(ranks))
@@ -97,7 +151,9 @@ class SharedFilesystemValidator:
             "missing_rank_ids": missing,
             "unexpected_rank_ids": unexpected,
             "duplicate_rank_files": duplicate,
-            "association": "unique_session_prefix",
+            "association": "unique_session_prefix"
+            + ("+session_window" if adopted else ""),
+            **({"adopted": adopted} if adopted else {}),
             "scope": "engine_rank_files",
             "inspection": "deferred_to_bundle",
             "excluded": "AsyncLLM CPU traces lack the native profile prefix",

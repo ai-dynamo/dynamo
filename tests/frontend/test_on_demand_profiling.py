@@ -44,7 +44,7 @@ from dynamo.profiling import (
     nsys,
     nvtxt,
 )
-from dynamo.profiling.artifacts import SharedFilesystemValidator
+from dynamo.profiling.artifacts import STAMP_ALLOWANCE_NS, SharedFilesystemValidator
 from dynamo.profiling.clock import estimate_offset
 from dynamo.profiling.collectors import CollectionError, PerfCollector, TorchCollector
 from dynamo.profiling.errors import Unavailable
@@ -729,6 +729,42 @@ async def test_trace_validation_limits_and_duplicate_rank_files(tmp_path):
     )
     assert all(item["validation"] == "invalid" for item in inspected["artifacts"])
     assert "byte limit" in inspected["artifacts"][0]["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["adopted", "before_start", "after_stop", "ambiguous"])
+async def test_repeat_capture_adopts_trace_under_earlier_prefix(tmp_path, case):
+    """vLLM keeps a worker's first trace name; later sessions write under it."""
+    start, stop = BASE + 10, BASE + 20
+    later = stop + STAMP_ALLOWANCE_NS + 1
+    # Neither the first session's own trace nor a later session's ever counts.
+    trace(tmp_path / f"first_{RANKS[0]}.{BASE}.pt.trace.json.gz")
+    stamps = {
+        "adopted": [start + 1, later],
+        "before_start": [],
+        "after_stop": [later],
+        "ambiguous": [start + 1, start + 2],
+    }
+    for stamp in stamps[case]:
+        trace(tmp_path / f"first_{RANKS[0]}.{stamp}.pt.trace.json.gz")
+    evidence = torch_evidence(tmp_path) | {
+        "start_requested_at_ns": start,
+        "stopped_at_ns": stop,
+    }
+    result = await SharedFilesystemValidator().validate(
+        evidence, Config("unused", str(tmp_path))
+    )
+    if case == "adopted":
+        assert result["status"] == "present"
+        assert result["association"] == "unique_session_prefix+session_window"
+        assert result["adopted"][0]["renamed_from"] == (
+            f"first_{RANKS[0]}.{start + 1}.pt.trace.json.gz"
+        )
+        assert (tmp_path / f"capture_{RANKS[0]}.{start + 1}.pt.trace.json.gz").exists()
+    else:
+        assert result["status"] == "partial"
+        assert "adopted" not in result
+    assert (tmp_path / f"first_{RANKS[0]}.{BASE}.pt.trace.json.gz").exists()
 
 
 @pytest.mark.asyncio
