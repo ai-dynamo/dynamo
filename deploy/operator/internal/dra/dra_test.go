@@ -140,6 +140,41 @@ func TestApplyClaim_AlwaysTargetsFirstContainer(t *testing.T) {
 	assert.Empty(t, ps.Containers[1].Resources.Claims)
 }
 
+func TestApplyPodClaim_LeavesContainersAndMatchingEntriesInPlace(t *testing.T) {
+	t.Log("Build a pod with GPU limits, a GPU toleration using Equal, and the shared claim after another claim")
+	oldTemplate := "old-template"
+	otherTemplate := "other-template"
+	ps := basePodSpec()
+	ps.Tolerations = []corev1.Toleration{{
+		Key:      commonconsts.KubeResourceGPUNvidia,
+		Operator: corev1.TolerationOpEqual,
+		Value:    "present",
+		Effect:   corev1.TaintEffectNoSchedule,
+	}}
+	ps.ResourceClaims = []corev1.PodResourceClaim{
+		{Name: "other", ResourceClaimTemplateName: &otherTemplate},
+		{Name: ClaimName, ResourceClaimTemplateName: &oldTemplate},
+	}
+
+	t.Log("Apply the pod-level claim")
+	ApplyPodClaim(&ps, "new-template")
+
+	t.Log("Container resources are left for the caller to manage")
+	assert.Equal(t, resource.MustParse("2"), ps.Containers[0].Resources.Limits[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)])
+	assert.Empty(t, ps.Containers[0].Resources.Claims)
+
+	t.Log("An existing GPU NoSchedule toleration matches on key and effect only")
+	require.Len(t, ps.Tolerations, 1)
+	assert.Equal(t, corev1.TolerationOpEqual, ps.Tolerations[0].Operator)
+
+	t.Log("The shared claim is replaced in place and other claims keep their position")
+	require.Len(t, ps.ResourceClaims, 2)
+	assert.Equal(t, "other", ps.ResourceClaims[0].Name)
+	assert.Equal(t, otherTemplate, *ps.ResourceClaims[0].ResourceClaimTemplateName)
+	assert.Equal(t, ClaimName, ps.ResourceClaims[1].Name)
+	assert.Equal(t, "new-template", *ps.ResourceClaims[1].ResourceClaimTemplateName)
+}
+
 func TestExtractGPUCountFromResourceRequirements_RejectsMultipleGPUKeys(t *testing.T) {
 	resources := corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
