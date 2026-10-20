@@ -30,6 +30,7 @@ use tokio::sync::{oneshot, watch};
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use crate::admission::WorkerAdmission;
 use crate::disagg::DisaggregationMode;
 use crate::engine::{FirstTokenNotifier, GenerateContext, LLMEngine, RawEngine};
 
@@ -153,6 +154,7 @@ pub(crate) struct EngineAdapter {
     engine: Arc<dyn LLMEngine>,
     mode: DisaggregationMode,
     first_token_source: Option<FirstTokenSource>,
+    admission: Option<WorkerAdmission>,
 }
 
 impl EngineAdapter {
@@ -161,11 +163,17 @@ impl EngineAdapter {
             engine,
             mode,
             first_token_source: None,
+            admission: None,
         }
     }
 
     pub(crate) fn with_first_token_source(mut self, source: FirstTokenSource) -> Self {
         self.first_token_source = Some(source);
+        self
+    }
+
+    pub(crate) fn with_admission(mut self, admission: Option<WorkerAdmission>) -> Self {
+        self.admission = admission;
         self
     }
 }
@@ -228,6 +236,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         &self,
         input: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        if let Some(admission) = &self.admission {
+            admission.ensure_admitted()?;
+        }
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
 
@@ -546,11 +557,20 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 /// `JsonProbeAdapter` wrapper needed.
 pub(crate) struct RawEngineAdapter {
     engine: Arc<dyn RawEngine>,
+    admission: Option<WorkerAdmission>,
 }
 
 impl RawEngineAdapter {
     pub(crate) fn new(engine: Arc<dyn RawEngine>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            admission: None,
+        }
+    }
+
+    pub(crate) fn with_admission(mut self, admission: Option<WorkerAdmission>) -> Self {
+        self.admission = admission;
+        self
     }
 }
 
@@ -562,6 +582,9 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
         &self,
         input: SingleIn<serde_json::Value>,
     ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
+        if let Some(admission) = &self.admission {
+            admission.ensure_admitted()?;
+        }
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
 
@@ -774,6 +797,20 @@ mod tests {
             .output_options(OutputOptions::default())
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn admission_rejects_stale_routed_requests_before_engine_dispatch() {
+        let (engine, _) = MockEngine::new(vec![LLMEngineOutput::length()]);
+        let admission = WorkerAdmission::new("group".into(), "dp-0".into()).unwrap();
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated)
+            .with_admission(Some(admission));
+        let result = adapter.generate(Context::new(make_request(vec![1]))).await;
+        let error = match result {
+            Ok(_) => panic!("unadmitted request reached the engine"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("not admitted"));
     }
 
     #[tokio::test]
