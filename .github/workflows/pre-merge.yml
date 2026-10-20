@@ -454,6 +454,40 @@ jobs:
       run: |
         cargo-deny --version || cargo install cargo-deny@0.19.0
         cargo-deny -L error --all-features check licenses bans --config ${{ github.workspace }}/deny.toml
+    # sccache keys each object by its own compiler inputs, so an older cache is safe to restore after a lockfile change.
+    - name: Restore compiler cache
+      if: matrix.dir == '.'
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+      with:
+        path: ${{ runner.temp }}/sccache-cache
+        key: sccache-rust-tests-root-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.run_id }}
+        restore-keys: |
+          sccache-rust-tests-root-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}-
+          sccache-rust-tests-root-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-
+    - name: Set up sccache
+      if: matrix.dir == '.'
+      run: |
+        set -euo pipefail
+        # The installer runs `rm -rf sccache*` in its working directory, so the binary goes to a separate directory.
+        bin_dir="$RUNNER_TEMP/compiler-cache-bin"
+        mkdir -p "$RUNNER_TEMP/sccache-download" "$bin_dir"
+        (cd "$RUNNER_TEMP/sccache-download" && SCCACHE_BIN_DIR="$bin_dir" "$GITHUB_WORKSPACE/container/use-sccache.sh" install)
+        echo "$bin_dir" >> "$GITHUB_PATH"
+        export SCCACHE_DIR="$RUNNER_TEMP/sccache-cache"
+        export SCCACHE_CACHE_SIZE=4G
+        # Keep one server for the whole job; the default 600s idle timeout can expire during unit tests.
+        export SCCACHE_IDLE_TIMEOUT=0
+        {
+          echo "SCCACHE_DIR=$SCCACHE_DIR"
+          echo "SCCACHE_CACHE_SIZE=$SCCACHE_CACHE_SIZE"
+          echo "SCCACHE_IDLE_TIMEOUT=$SCCACHE_IDLE_TIMEOUT"
+          echo "CARGO_INCREMENTAL=0"
+        } >> "$GITHUB_ENV"
+        if "$bin_dir/sccache" --start-server; then
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        else
+          echo "::warning::sccache server failed to start, building without compiler cache"
+        fi
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
@@ -539,6 +573,19 @@ jobs:
 
         cargo test --locked -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench --no-run
+    - name: Show compiler cache statistics
+      if: ${{ !cancelled() && matrix.dir == '.' }}
+      run: |
+        container/use-sccache.sh show-stats "rust-tests (.)"
+        # Stopping the server flushes pending cache writes before the save step.
+        sccache --stop-server || true
+    # Only push runs save; pull requests restore the base-branch cache without adding multi-GB entries.
+    - name: Save compiler cache
+      if: ${{ !cancelled() && matrix.dir == '.' && github.event_name == 'push' }}
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+      with:
+        path: ${{ runner.temp }}/sccache-cache
+        key: sccache-rust-tests-root-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.run_id }}
 
   rust-clippy:
     needs: changed-files
