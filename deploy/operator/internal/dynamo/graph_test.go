@@ -5740,6 +5740,21 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 		expected    BackendFramework
 		expectError bool
 	}{
+		{name: "engine direct command", command: []string{"vllm-rs"}, expected: BackendFrameworkVLLM},
+		{name: "engine absolute executable", command: []string{"/usr/local/bin/vllm-rs"}, expected: BackendFrameworkVLLM},
+		{name: "engine arguments are not other launches", command: []string{"vllm-rs"}, args: []string{"--component", "python3 -m dynamo.sglang"}, expected: BackendFrameworkVLLM},
+		{name: "engine args do not identify an image entrypoint", args: []string{"vllm-rs"}, expected: BackendFrameworkNoop},
+		{name: "engine shell wrapper is not interpreted", command: []string{"sh", "-c"}, args: []string{"exec vllm-rs"}, expected: BackendFrameworkNoop},
+		{name: "engine quoted shell path is not interpreted", command: []string{"sh", "-c", `exec "/usr/local/bin/vllm-rs"`}, expected: BackendFrameworkNoop},
+		{name: "engine shell statements are not interpreted", command: []string{"bash", "-ec", "set -e\ncd /app; vllm-rs"}, expected: BackendFrameworkNoop},
+		{name: "engine shell conjunction is not interpreted", command: []string{"sh", "-c", "cd /app && vllm-rs"}, expected: BackendFrameworkNoop},
+		{name: "exec is a literal argument", command: []string{"printf"}, args: []string{"exec", "vllm-rs"}, expected: BackendFrameworkNoop},
+		{name: "engine config path is not an executable", command: []string{"python3", "-m", "dynamo.sglang"}, args: []string{"--config-dir", "/etc/vllm-rs"}, expected: BackendFrameworkSGLang},
+		{name: "unresolved executable path", command: []string{"$(BIN_DIR)/vllm-rs"}, expected: BackendFrameworkNoop},
+		{name: "engine executable suffix differs", command: []string{"vllm-rs-helper"}, expected: BackendFrameworkNoop},
+		{name: "engine SGLang remains explicit", command: []string{"dynamo-sglang-sidecar"}, expected: BackendFrameworkNoop},
+		{name: "engine TRTLLM remains explicit", command: []string{"dynamo-trtllm-sidecar"}, expected: BackendFrameworkNoop},
+		{name: "runtime executable is not an engine", command: []string{"dynamo-vllm-sidecar"}, expected: BackendFrameworkNoop},
 		{
 			name:     "detect VLLM from args",
 			command:  []string{"/bin/sh", "-c"},
@@ -6560,6 +6575,21 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				"DYN_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 			},
 		},
+		{
+			name: "frontend with authored command and nil args",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name:    commonconsts.MainContainerName,
+						Command: []string{"python3", "-m", "dynamo.frontend"},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3", "-m", "dynamo.frontend"},
+			wantArgs:         nil,
+		},
 	}
 
 	for _, tt := range tests {
@@ -6766,6 +6796,58 @@ func TestGenerateBasePodSpec_EmptyMainContainerPortsOverrideWorkerDefaults(t *te
 	require.NoError(t, err)
 	require.NotEmpty(t, podSpec.Containers)
 	require.Empty(t, podSpec.Containers[0].Ports)
+}
+
+func TestGenerateBasePodSpec_LegacyEPPAuthoredCommandPreservesDefaultArgs(t *testing.T) {
+	t.Log("Render a legacy EPP with an authored command and no arguments")
+	podSpec, err := GenerateBasePodSpec(
+		&v1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: "epp",
+			ComponentType: v1beta1.ComponentTypeEPP,
+			EPPConfig: &v1beta1.EPPConfig{
+				ConfigMapRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"},
+					Key:                  "epp-config.yaml",
+				},
+			},
+			PodTemplate: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:    commonconsts.MainContainerName,
+							Command: []string{"/epp"},
+						},
+					},
+				},
+			},
+		},
+		BackendFrameworkNoop,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"epp",
+		nil,
+		staticContainerGPUCount(0),
+	)
+
+	t.Log("Check that the authored command keeps the generated legacy EPP launch arguments")
+	require.NoError(t, err)
+	require.NotEmpty(t, podSpec.Containers)
+	require.Equal(t, []string{"/epp"}, podSpec.Containers[0].Command)
+	require.Equal(t, []string{
+		"--pool-name", "test-deployment-pool",
+		"--pool-namespace", "default",
+		"--pool-group", "inference.networking.k8s.io",
+		"-v", "4",
+		"--zap-encoder", "json",
+		"--grpc-port", "9002",
+		"--grpc-health-port", "9003",
+		"--config-file", "/etc/epp/epp-config-dynamo.yaml",
+	}, podSpec.Containers[0].Args)
 }
 
 func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
@@ -10434,6 +10516,20 @@ func TestFrontendSidecarRuntimeDefaults(t *testing.T) {
 	}
 }
 
+func assertFrontendSidecarArgv(t *testing.T, sidecar corev1.Container, wantCommand, wantArgs []string) {
+	t.Helper()
+	if wantCommand != nil {
+		t.Log("Check that an authored sidecar command keeps exactly its authored args")
+		assert.Equal(t, wantCommand, sidecar.Command, "sidecar command")
+		assert.Equal(t, wantArgs, sidecar.Args, "sidecar args")
+		return
+	}
+	if wantArgs != nil {
+		assert.Equal(t, wantArgs, sidecar.Args, "sidecar args")
+	}
+	assert.Equal(t, []string{"python3"}, sidecar.Command, "sidecar command should be python3")
+}
+
 func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	controllerConfig := &configv1alpha1.OperatorConfiguration{
@@ -10453,6 +10549,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 		wantSidecarName         string
 		wantSidecarImage        string
 		wantSidecarArgs         []string
+		wantSidecarCommand      []string
 		wantSidecarEnvVars      map[string]string
 		wantSidecarEnvFrom      int
 		wantSidecarProbes       bool
@@ -10535,6 +10632,27 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			wantSidecarImage:   "my-frontend:latest",
 			wantSidecarArgs:    []string{"-m", "dynamo.frontend"},
 			wantSidecarEnvFrom: 1,
+			wantSidecarProbes:  true,
+			wantSidecarPorts:   true,
+		},
+		{
+			name: "frontendSidecar with authored command and no args",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:   commonconsts.ComponentTypeWorker,
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{Image: "my-frontend:latest"},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{Containers: []corev1.Container{{
+					Name:    commonconsts.FrontendSidecarContainerName,
+					Image:   "my-frontend:latest",
+					Command: []string{"python3", "-m", "dynamo.frontend"},
+				}}}},
+			},
+			parentDGDName:      "test-dgd",
+			namespace:          "test-ns",
+			wantSidecarCount:   2,
+			wantSidecarName:    commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage:   "my-frontend:latest",
+			wantSidecarCommand: []string{"python3", "-m", "dynamo.frontend"},
+			wantSidecarArgs:    nil,
 			wantSidecarProbes:  true,
 			wantSidecarPorts:   true,
 		},
@@ -10700,11 +10818,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			assert.Equal(t, tt.wantSidecarName, sidecar.Name, "sidecar container name")
 			assert.Equal(t, tt.wantSidecarImage, sidecar.Image, "sidecar container image")
 
-			if tt.wantSidecarArgs != nil {
-				assert.Equal(t, tt.wantSidecarArgs, sidecar.Args, "sidecar args")
-			}
-
-			assert.Equal(t, []string{"python3"}, sidecar.Command, "sidecar command should be python3")
+			assertFrontendSidecarArgv(t, sidecar, tt.wantSidecarCommand, tt.wantSidecarArgs)
 
 			if tt.wantSidecarEnvVars != nil {
 				envVars := make(map[string]string)
@@ -12288,4 +12402,18 @@ func TestGroveRolloutOverridePreservesWorkerGeneration(t *testing.T) {
 			assert.Equal(t, oldHash, removedHash)
 		})
 	}
+}
+
+// TestDetectBackendFrameworkDoesNotMutateCommand protects callers that keep
+// additional command data in the same backing array.
+func TestDetectBackendFrameworkDoesNotMutateCommand(t *testing.T) {
+	t.Log("Keep a sentinel beyond the command slice's length")
+	backing := []string{"python3", "unchanged"}
+	command := backing[:1]
+
+	t.Log("Detect the Python launch without overwriting the caller's backing array")
+	backend, err := DetectBackendFrameworkFromArgs(command, []string{"-m", "dynamo.vllm"})
+	require.NoError(t, err)
+	assert.Equal(t, BackendFrameworkVLLM, backend)
+	assert.Equal(t, []string{"python3", "unchanged"}, backing)
 }
