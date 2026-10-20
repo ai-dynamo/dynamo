@@ -228,6 +228,15 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     enable_multimodal,
     capability_expected,
 ):
+    if not hasattr(register.ModelRuntimeConfig, "set_structural_tag"):
+        # The isolated test container may carry an older native binding than
+        # the source tree; provide only the method exercised by this test.
+        monkeypatch.setattr(
+            register.ModelRuntimeConfig,
+            "set_structural_tag",
+            lambda self, value: None,
+            raising=False,
+        )
     server_args = SimpleNamespace(
         allow_auto_truncate=False,
         context_length=4096,
@@ -259,6 +268,11 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     monkeypatch.setattr(register, "runtime_capacity", lambda *_: capacity)
     monkeypatch.setattr(
         register, "supports_disagg_prefill_cancel_anytime", lambda _: runtime_supported
+    )
+    monkeypatch.setattr(
+        register,
+        "supports_full_assistant_ebnf",
+        lambda: not enable_multimodal,
     )
     engine = None
     if runtime_supported:
@@ -295,6 +309,10 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     assert (reasoning_gate in runtime_config.runtime_data) is (
         runtime_supported and not enable_multimodal
     )
+    full_assistant = register.SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY
+    assert (full_assistant in runtime_config.runtime_data) is (not enable_multimodal)
+    if not enable_multimodal:
+        assert json.loads(runtime_config.runtime_data[full_assistant]) is True
     assert "Failed to get runtime config" not in caplog.text
 
 

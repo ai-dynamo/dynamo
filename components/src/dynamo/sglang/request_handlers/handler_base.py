@@ -1158,7 +1158,10 @@ class BaseWorkerHandler(
 
         grammar = guided_decoding.get("grammar")
         if grammar is not None:
-            return {"ebnf": grammar}
+            sampling_params = {"ebnf": grammar}
+            if guided_decoding.get("ebnf_full_assistant") is True:
+                sampling_params["ebnf_full_assistant"] = True
+            return sampling_params
 
         structural_tag = guided_decoding.get("structural_tag")
         if structural_tag is not None:
