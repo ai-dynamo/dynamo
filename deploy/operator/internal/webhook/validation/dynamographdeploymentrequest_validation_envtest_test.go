@@ -18,6 +18,7 @@
 package validation_test
 
 import (
+	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -564,6 +565,135 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDynamoGraphDeploymentRequestStatusRepresentationMatchesSpec(t *testing.T) {
+	nativeV1Beta2 := []byte(`{"model":{"name":"Qwen/Qwen3-0.6B"}}`)
+	nativeV1Beta1 := []byte(`{"model":"Qwen/Qwen3-0.6B"}`)
+	tests := []struct {
+		name   string
+		object runtime.Object
+		status map[string]any
+	}{
+		{
+			name:   "v1alpha1 native spec rejects v1beta2 status",
+			object: alphaDGDRForAdmission(nil),
+			status: map[string]any{"v1beta2": map[string]any{"observedGeneration": int64(1)}},
+		},
+		{
+			name: "v1alpha1 v1beta2 spec rejects native status",
+			object: alphaDGDRForAdmission(func(request *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) {
+				request.Spec = nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					V1Beta2: &apiextensionsv1.JSON{Raw: nativeV1Beta2},
+				}
+			}),
+			status: map[string]any{"state": string(nvidiacomv1alpha1.DGDRStatePending)},
+		},
+		{
+			name:   "v1beta1 native spec rejects v1beta2 status",
+			object: betaDGDRForAdmission(nil),
+			status: map[string]any{"v1beta2": map[string]any{"observedGeneration": int64(1)}},
+		},
+		{
+			name: "v1beta1 v1beta2 spec rejects native status",
+			object: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec = nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					V1Beta2: &apiextensionsv1.JSON{Raw: nativeV1Beta2},
+				}
+			}),
+			status: map[string]any{"phase": string(nvidiacomv1beta1.DGDRPhasePending)},
+		},
+		{
+			name:   "v1beta2 native spec rejects v1beta1 status",
+			object: beta2DGDRForAdmission(nil),
+			status: map[string]any{"v1beta1": map[string]any{"phase": string(nvidiacomv1beta1.DGDRPhasePending)}},
+		},
+		{
+			name: "v1beta2 v1beta1 spec rejects native status",
+			object: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Spec = nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
+					V1Beta1: &apiextensionsv1.JSON{Raw: nativeV1Beta1},
+				}
+			}),
+			status: map[string]any{"observedGeneration": int64(1)},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Create a request through the production API and conversion path")
+			env := admissionEnv.ForTest(t)
+			admissionGate.set(features.Gates{GPUDiscovery: true})
+			warnings := &warningRecorder{}
+			resourceClient := newAdmissionResourceClient(t, env, test.object, "", warnings)
+			object, _ := admissionObject(t, test.object, env.Namespace(), nil)
+			created, err := resourceClient.Create(t.Context(), object, metav1.CreateOptions{})
+			if err != nil {
+				t.Fatalf("create request: %v", err)
+			}
+
+			t.Log("Replace status with the representation opposite to spec")
+			if err := unstructured.SetNestedMap(created.Object, test.status, "status"); err != nil {
+				t.Fatalf("set mismatched status: %v", err)
+			}
+			_, err = resourceClient.UpdateStatus(t.Context(), created, metav1.UpdateOptions{})
+			if err == nil || !strings.Contains(err.Error(), "nonempty status must use the representation selected by spec") {
+				t.Fatalf("status update error = %v, want representation mismatch", err)
+			}
+		})
+	}
+}
+
+func TestDynamoGraphDeploymentRequestV1Beta2EmptyStatusSurvivesV1Alpha1(t *testing.T) {
+	t.Log("Create a native v1beta2 request with empty status")
+	env := admissionEnv.ForTest(t)
+	admissionGate.set(features.Gates{GPUDiscovery: true})
+	warnings := &warningRecorder{}
+	beta2Fixture := beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+		request.Name = "empty-status-alpha-bridge"
+	})
+	beta2Client := newAdmissionResourceClient(t, env, beta2Fixture, "", warnings)
+	object, _ := admissionObject(t, beta2Fixture, env.Namespace(), nil)
+	created, err := beta2Client.Create(t.Context(), object, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create v1beta2 request: %v", err)
+	}
+
+	t.Log("Read and write the empty status through v1alpha1")
+	alphaClient := newAdmissionResourceClient(t, env, alphaDGDRForAdmission(nil), "", warnings)
+	alpha, err := alphaClient.Get(t.Context(), created.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get request as v1alpha1: %v", err)
+	}
+	assertEmptyDGDRStatus(t, alpha)
+	alpha, err = alphaClient.UpdateStatus(t.Context(), alpha, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("write empty v1alpha1 status: %v", err)
+	}
+
+	t.Log("Read the request as v1beta2 and prove native status can still be written")
+	converted, err := beta2Client.Get(t.Context(), alpha.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get request as v1beta2: %v", err)
+	}
+	assertEmptyDGDRStatus(t, converted)
+	if err := unstructured.SetNestedField(converted.Object, int64(1), "status", "observedGeneration"); err != nil {
+		t.Fatalf("set native v1beta2 status: %v", err)
+	}
+	if _, err := beta2Client.UpdateStatus(t.Context(), converted, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("write native v1beta2 status after v1alpha1 round-trip: %v", err)
+	}
+}
+
+func assertEmptyDGDRStatus(t *testing.T, object *unstructured.Unstructured) {
+	t.Helper()
+	status, found, err := unstructured.NestedMap(object.Object, "status")
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if found && len(status) != 0 {
+		t.Fatalf("status = %v, want empty", status)
 	}
 }
 

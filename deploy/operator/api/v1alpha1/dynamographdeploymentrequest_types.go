@@ -311,6 +311,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
 // +kubebuilder:printcolumn:name="DGD-State",type=string,JSONPath=`.status.deployment.state`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !(has(self.status.v1beta2) || has(self.status.state) || has(self.status.backend) || has(self.status.observedGeneration) || has(self.status.conditions) || has(self.status.profilingResults) || has(self.status.generatedDeployment) || has(self.status.deployment)) || has(self.spec.v1beta2) == has(self.status.v1beta2)",message="nonempty status must use the representation selected by spec"
 type DynamoGraphDeploymentRequest struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

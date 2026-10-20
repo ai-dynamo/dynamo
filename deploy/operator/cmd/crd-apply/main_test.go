@@ -127,7 +127,10 @@ func verifyDisabledDGDRV1Beta2(
 		status := version.Schema.OpenAPIV3Schema.Properties["status"]
 		require.NotContains(t, spec.Properties, dgdrV1Beta2Version)
 		require.NotContains(t, status.Properties, dgdrV1Beta2Version)
-		for _, rule := range append(spec.XValidations, status.XValidations...) {
+		rules := append([]apiextensionsv1.ValidationRule{}, version.Schema.OpenAPIV3Schema.XValidations...)
+		rules = append(rules, spec.XValidations...)
+		rules = append(rules, status.XValidations...)
+		for _, rule := range rules {
 			require.NotContains(t, rule.Rule, dgdrV1Beta2Version)
 		}
 		require.Contains(t, spec.Required, "model")

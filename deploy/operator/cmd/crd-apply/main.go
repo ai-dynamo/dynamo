@@ -185,6 +185,12 @@ func removeDGDRV1Beta2Envelope(version *apiextensionsv1.CustomResourceDefinition
 	}
 
 	root := version.Schema.OpenAPIV3Schema
+	root.XValidations = slices.DeleteFunc(
+		root.XValidations,
+		func(rule apiextensionsv1.ValidationRule) bool {
+			return strings.Contains(rule.Rule, dgdrV1Beta2Version)
+		},
+	)
 	spec := root.Properties["spec"]
 	delete(spec.Properties, dgdrV1Beta2Version)
 	spec.XValidations = slices.DeleteFunc(

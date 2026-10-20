@@ -171,3 +171,39 @@ func TestV1Beta2EnvelopeRoundTripsThroughV1Alpha1(t *testing.T) {
 		t.Fatalf("v1beta2 payload changed through v1alpha1\nwant: %#v\n got: %#v", src, dst)
 	}
 }
+
+func TestV1Beta2EmptyStatusRoundTripsThroughV1Alpha1(t *testing.T) {
+	t.Log("Create a native v1beta2 request with an empty status")
+	src := &v1beta2.DynamoGraphDeploymentRequest{
+		Spec: v1beta2.DynamoGraphDeploymentRequestSpec{
+			NativeSearchInput: v1beta2.NativeSearchInput{
+				Model: &v1beta2.ModelSpec{Name: "Qwen/Qwen3-32B"},
+			},
+		},
+	}
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("convert v1beta2 to storage: %v", err)
+	}
+
+	t.Log("Read and write the request through v1alpha1 without manufacturing native status")
+	alpha := &v1alpha1.DynamoGraphDeploymentRequest{}
+	if err := alpha.ConvertFrom(hub); err != nil {
+		t.Fatalf("convert storage to v1alpha1: %v", err)
+	}
+	if !reflect.DeepEqual(alpha.Status, v1alpha1.DynamoGraphDeploymentRequestStatus{}) {
+		t.Fatalf("v1alpha1 status = %#v, want empty", alpha.Status)
+	}
+	roundTripHub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := alpha.ConvertTo(roundTripHub); err != nil {
+		t.Fatalf("convert v1alpha1 to storage: %v", err)
+	}
+
+	dst := &v1beta2.DynamoGraphDeploymentRequest{}
+	if err := dst.ConvertFrom(roundTripHub); err != nil {
+		t.Fatalf("restore v1beta2: %v", err)
+	}
+	if !reflect.DeepEqual(dst.Status, v1beta2.DynamoGraphDeploymentRequestStatus{}) {
+		t.Fatalf("v1beta2 status = %#v, want empty", dst.Status)
+	}
+}

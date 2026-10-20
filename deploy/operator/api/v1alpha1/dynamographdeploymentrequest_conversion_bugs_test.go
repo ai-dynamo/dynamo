@@ -580,6 +580,37 @@ func TestBugDGDRLiveAlphaRepresentationOverridesStaleV1Beta2Annotations(t *testi
 	}
 }
 
+func TestBugDGDREmptyLiveAlphaStatusOverridesStaleV1Beta2Annotation(t *testing.T) {
+	t.Log("Seed a native v1alpha1 spec with an intentionally empty status and stale carrier annotation")
+	spoke := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				annDGDRStatus: mustDGDRHubStatusAnnotation(t, v1beta1.DynamoGraphDeploymentRequestStatus{
+					V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"observedGeneration":99}`)},
+				}),
+			},
+		},
+		Spec: DynamoGraphDeploymentRequestSpec{
+			Model:           "live-model",
+			Backend:         "vllm",
+			ProfilingConfig: &ProfilingConfigSpec{},
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	t.Log("Verify the empty live status follows the native spec and the stale carrier is scrubbed")
+	if hub.Status.V1Beta2 != nil || !reflect.DeepEqual(hub.Status, v1beta1.DynamoGraphDeploymentRequestStatus{}) {
+		t.Fatalf("hub status = %#v, want empty native status", hub.Status)
+	}
+	if _, found := hub.Annotations[annDGDRStatus]; found {
+		t.Fatalf("stale %q annotation survived conversion", annDGDRStatus)
+	}
+}
+
 func TestBugDGDRLiveHubUnnamedProfilerMigratesOnRoundTrip(t *testing.T) {
 	resources := corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},

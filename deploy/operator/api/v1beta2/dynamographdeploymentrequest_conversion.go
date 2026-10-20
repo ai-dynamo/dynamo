@@ -45,8 +45,9 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 		return err
 	}
 
-	// Empty status has no representation discriminator, so inherit it from spec.
-	if src.Spec.V1Beta1 != nil && src.Status.V1Beta1 == nil && !hasNativeV1Beta2Status(src.Status) {
+	// Empty status has no representation discriminator. Keep it empty instead
+	// of manufacturing an empty JSON envelope after status-subresource reset.
+	if src.Status.V1Beta1 == nil && !hasNativeV1Beta2Status(src.Status) {
 		return nil
 	}
 
@@ -73,8 +74,9 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 		return err
 	}
 
-	// Empty status has no representation discriminator, so inherit it from spec.
-	if src.Spec.V1Beta2 != nil && src.Status.V1Beta2 == nil && !hasNativeV1Beta1Status(src.Status) {
+	// Empty status has no representation discriminator. Keep it empty in every
+	// served view and let the spec select the representation for later writes.
+	if src.Status.V1Beta2 == nil && !hasNativeV1Beta1Status(src.Status) {
 		return nil
 	}
 
