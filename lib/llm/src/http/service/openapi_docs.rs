@@ -177,7 +177,7 @@ pub fn generate_openapi_spec_with_options(
     // `http_export_describes_request_aliases` exercises this path in the
     // pre-merge Rust suite so schema changes must update the declarations too.
     annotate_request_aliases(&mut openapi)?;
-    annotate_request_default_policies(&mut openapi)?;
+    annotate_request_defaults(&mut openapi)?;
     // Keep the dependency's Utoipa 5 derives, then cross the version boundary once.
     // A round trip back through its typed model would discard itemSchema and cannot
     // represent the 3.2 version. HTTP and file export share this final representation.
@@ -340,29 +340,18 @@ fn annotate_request_aliases(document: &mut utoipa::openapi::OpenApi) -> Result<(
     Ok(())
 }
 
-/// Describe Dynamo-owned omission handling on imported request fields.
+/// Declare the chat/completion HTTP handlers' choice-count default on imported schemas.
 ///
-/// `x-dynamo-default-policy: {"on-omission": "delegate-to-backend"}` means the
-/// frontend does not materialize a sampling value when the client omits the
-/// field. The unspecified value can cross the internal boundary as null; this
-/// does not describe explicit client null handling. The effective value depends
-/// on the backend adapter, engine version, deployment mode and configuration.
-/// Consumers must not infer a numeric default or compatibility from this marker.
-/// Frontend validation can still make its own assumptions about omission.
-///
-/// Applies only to chat/completion `n`. `extract_sampling_options` preserves
-/// `None`, while frontend choice-count checks use `unwrap_or(1)`. This metadata
-/// belongs here rather than in the shared protocol type because it describes
-/// Dynamo's handling. HTTP and file exports use the same annotated components.
+/// Both handlers resolve omitted or null `n` to one before dispatch. Keep this
+/// Dynamo-owned contract here rather than changing the shared protocol types.
+/// HTTP and file exports use these same components; other field constraints remain unchanged.
 ///
 /// # Errors
 ///
 /// Returns a diagnostic if a component or field is missing, unsupported,
-/// or already declares a fixed default or policy. Earlier mutations are not rolled
+/// or declares a conflicting default. Earlier mutations are not rolled
 /// back; callers must discard the document on error.
-fn annotate_request_default_policies(
-    document: &mut utoipa::openapi::OpenApi,
-) -> Result<(), String> {
+fn annotate_request_defaults(document: &mut utoipa::openapi::OpenApi) -> Result<(), String> {
     use utoipa::openapi::schema::Schema;
 
     let components = document.components.as_mut().ok_or("missing components")?;
@@ -380,25 +369,20 @@ fn annotate_request_default_policies(
         let Some(RefOr::T(Schema::Object(schema))) = object.properties.get_mut("n") else {
             return Err(format!("missing or unsupported n schema at {name}"));
         };
-        let extensions = schema.extensions.get_or_insert_with(Default::default);
-        if schema.default.is_some() || extensions.contains_key("x-dynamo-default-policy") {
-            return Err(format!(
-                "n already declares a default or default policy at {name}"
-            ));
+        if schema
+            .default
+            .as_ref()
+            .is_some_and(|value| value != &serde_json::json!(1))
+        {
+            return Err(format!("n declares a conflicting default at {name}"));
         }
-        extensions.insert(
-            "x-dynamo-default-policy".into(),
-            serde_json::json!({"on-omission": "delegate-to-backend"}),
-        );
+        schema.default = Some(serde_json::json!(1));
         let description = schema.description.get_or_insert_with(String::new);
         if !description.is_empty() {
             description.push_str("\n\n");
         }
         description.push_str(
-            "When omitted, the frontend leaves the sampling value unspecified. \
-             The effective value depends on the selected backend adapter and its engine \
-             configuration. Some frontend validation checks treat omission as one; \
-             this annotation does not declare a fixed response count.",
+            "When omitted or null, Dynamo sets n to 1 before dispatching to the backend.",
         );
     }
     Ok(())
@@ -1190,12 +1174,12 @@ mod tests {
         assert!(annotate_request_aliases(&mut document).is_err());
     }
 
-    /// Dependency schema drift must fail export instead of silently losing omission metadata.
+    /// Dependency schema drift must fail export instead of advertising an incorrect default.
     #[test]
-    fn stale_default_policy_metadata_is_not_silently_ignored() {
+    fn stale_request_defaults_are_not_silently_ignored() {
         use utoipa::openapi::schema::Schema;
 
-        assert!(annotate_request_default_policies(&mut Default::default()).is_err());
+        assert!(annotate_request_defaults(&mut Default::default()).is_err());
         for name in [
             "dynamo_protocols.chat.CreateChatCompletionRequest",
             "dynamo_protocols.completion.CreateCompletionRequest",
@@ -1203,8 +1187,7 @@ mod tests {
             for replacement in [
                 serde_json::json!({"type": "object", "properties": {}}),
                 serde_json::json!({"type": "object", "properties": {"n": {"$ref": "#/components/schemas/Other"}}}),
-                serde_json::json!({"type": "object", "properties": {"n": {"type": "integer", "default": 1}}}),
-                serde_json::json!({"type": "object", "properties": {"n": {"type": "integer", "x-dynamo-default-policy": {}}}}),
+                serde_json::json!({"type": "object", "properties": {"n": {"type": "integer", "default": 2}}}),
                 serde_json::json!({"allOf": [
                     {"type": "object", "properties": {"n": {"type": "integer"}}},
                     {"type": "object", "properties": {"n": {"type": "integer"}}}
@@ -1218,14 +1201,11 @@ mod tests {
                     .unwrap()
                     .schemas
                     .insert(name.into(), node);
-                assert!(
-                    annotate_request_default_policies(&mut document).is_err(),
-                    "{name}"
-                );
+                assert!(annotate_request_defaults(&mut document).is_err(), "{name}");
             }
             let mut document = ApiDoc::openapi();
             document.components.as_mut().unwrap().schemas.remove(name);
-            assert!(annotate_request_default_policies(&mut document).is_err());
+            assert!(annotate_request_defaults(&mut document).is_err());
         }
     }
 

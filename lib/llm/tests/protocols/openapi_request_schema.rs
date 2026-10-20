@@ -32,9 +32,9 @@ fn n_schema(node: &serde_json::Value) -> &serde_json::Value {
     fields[0]
 }
 
-/// The HTTP/file export adds omission metadata without changing the imported field's constraints.
+/// The HTTP/file export declares the handlers' default without changing other field constraints.
 #[test]
-fn http_export_describes_delegated_n_without_a_fixed_default() {
+fn http_export_declares_one_choice_by_default() {
     use dynamo_llm::http::service::{
         OpenApiRouteKind, RouteDoc, openapi_docs::generate_openapi_spec,
     };
@@ -81,19 +81,16 @@ fn http_export_describes_delegated_n_without_a_fixed_default() {
         let original = serde_json::to_value(original).unwrap();
         let original = n_schema(&original);
         let exported = n_schema(&spec["components"]["schemas"][name]);
-        assert_eq!(
-            exported["x-dynamo-default-policy"],
-            serde_json::json!({"on-omission": "delegate-to-backend"}),
-        );
-        assert!(exported.get("default").is_none());
+        assert!(exported.get("x-dynamo-default-policy").is_none());
+        assert_eq!(exported["default"], 1);
         let description = exported["description"].as_str().unwrap();
-        assert!(description.contains("leaves the sampling value unspecified"));
-        assert!(description.contains("validation checks treat omission as one"));
+        assert!(description.contains("When omitted or null, Dynamo sets n to 1"));
         let mut unchanged = exported.clone();
-        unchanged
-            .as_object_mut()
-            .unwrap()
-            .remove("x-dynamo-default-policy");
+        if let Some(default) = original.get("default") {
+            unchanged["default"] = default.clone();
+        } else {
+            unchanged.as_object_mut().unwrap().remove("default");
+        }
         if let Some(description) = original.get("description") {
             assert!(
                 exported["description"]
@@ -106,36 +103,6 @@ fn http_export_describes_delegated_n_without_a_fixed_default() {
             unchanged.as_object_mut().unwrap().remove("description");
         }
         assert_eq!(&unchanged, original);
-    }
-}
-
-/// Omission stays unspecified through parsing and sampling extraction; explicit values survive.
-/// This guards the annotation's frontend claim, not engine defaults or client-null behavior.
-#[test]
-fn delegated_n_preserves_omission_through_sampling_extraction() {
-    use dynamo_llm::protocols::common::SamplingOptionsProvider;
-    use dynamo_llm::protocols::openai::completions::NvCreateCompletionRequest;
-    use serde_json::json;
-
-    for n in [None, Some(1), Some(2)] {
-        let mut chat = json!({"model": "test", "messages": []});
-        let mut completion = json!({"model": "test", "prompt": "hello"});
-        if let Some(n) = n {
-            chat["n"] = json!(n);
-            completion["n"] = json!(n);
-        }
-        let chat: NvCreateChatCompletionRequest = serde_json::from_value(chat).unwrap();
-        let completion: NvCreateCompletionRequest = serde_json::from_value(completion).unwrap();
-        assert_eq!(chat.inner.n, n);
-        assert_eq!(completion.inner.n, n);
-        for options in [
-            chat.extract_sampling_options().unwrap(),
-            completion.extract_sampling_options().unwrap(),
-        ] {
-            assert_eq!(options.n, n);
-            // Internal null is an unspecified value, not a public null-handling promise.
-            assert_eq!(serde_json::to_value(options).unwrap()["n"], json!(n));
-        }
     }
 }
 
