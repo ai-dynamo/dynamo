@@ -156,6 +156,10 @@ pub(crate) struct SystemOneEncodingTooLarge {
     pub(crate) limit: usize,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct SystemOneModelIncompatible(pub(crate) &'static str);
+
 /// Build a private validation diagnostic. Callers may attach structured `PublicDetails` only when every value is safe for clients.
 pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
     DynamoError::builder()
@@ -3063,9 +3067,10 @@ impl OpenAIPreprocessor {
             self.runtime_config.reasoning_parser.as_deref(),
             request.chat_template_args(),
         ) {
-            anyhow::bail!(
-                "/v1/systemone requires a model with reasoning disabled at the answer position"
-            );
+            return Err(SystemOneModelIncompatible(
+                "/v1/systemone requires a model with reasoning disabled at the answer position",
+            )
+            .into());
         }
         let prompt = self
             .apply_template(&request)?
@@ -3074,9 +3079,9 @@ impl OpenAIPreprocessor {
             self.runtime_config.reasoning_parser.as_deref(),
             Some(prompt.as_str()),
         ) {
-            anyhow::bail!(
+            return Err(SystemOneModelIncompatible(
                 "/v1/systemone requires a chat template that closes or disables reasoning before the answer position"
-            );
+            ).into());
         }
         let encoding_bytes = prompt
             .as_str()
@@ -3101,9 +3106,9 @@ impl OpenAIPreprocessor {
         }
         let flat_prompt_ids = self.tokenize(prompt.as_str())?.token_ids().to_vec();
         if flat_prompt_ids != prompt_ids {
-            anyhow::bail!(
+            return Err(SystemOneModelIncompatible(
                 "/v1/systemone requires a chat prompt whose rendered text round-trips to the same token IDs"
-            );
+            ).into());
         }
 
         let mut label_ids = Vec::with_capacity(labels.len());
@@ -3111,15 +3116,17 @@ impl OpenAIPreprocessor {
             let with_label = format!("{}{label}", prompt.as_str());
             let encoded = self.tokenize(&with_label)?.token_ids().to_vec();
             if encoded.len() != prompt_ids.len() + 1 || encoded[..prompt_ids.len()] != prompt_ids {
-                anyhow::bail!(
-                    "answer label {label:?} is not one token after the chat prompt for this tokenizer"
-                );
+                return Err(SystemOneModelIncompatible(
+                    "answer label is not one token after the chat prompt for this tokenizer",
+                )
+                .into());
             }
             let label_id = encoded[prompt_ids.len()];
             if label_ids.contains(&label_id) {
-                anyhow::bail!(
-                    "answer label {label:?} is not a distinct token after the chat prompt"
-                );
+                return Err(SystemOneModelIncompatible(
+                    "answer label is not a distinct token after the chat prompt",
+                )
+                .into());
             }
             label_ids.push(label_id);
         }
