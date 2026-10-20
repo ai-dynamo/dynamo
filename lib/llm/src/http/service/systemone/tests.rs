@@ -18,6 +18,9 @@ use futures::stream;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, Semaphore};
 
+#[path = "tests/preflight.rs"]
+mod preflight;
+
 #[tokio::test]
 async fn empty_canonical_questions_are_rejected_before_admission() {
     let service = super::service_v2::HttpService::builder().build().unwrap();
@@ -303,6 +306,31 @@ async fn finish_branch_stops_when_parent_is_cancelled() {
     .await;
     let Err(error) = result else {
         panic!("cancelled parent should stop branch completion")
+    };
+    assert_eq!(error.status.as_u16(), 499);
+}
+
+#[tokio::test]
+async fn cancelled_stream_completion_is_not_a_malformed_response() {
+    let parent = Context::new(()).context();
+    let stream_parent = parent.clone();
+    let stream = stream::poll_fn(move |_| {
+        stream_parent.kill();
+        std::task::Poll::Ready(None::<Annotated<LLMEngineOutput>>)
+    });
+    let result = finish_branch(
+        StartedBranch {
+            prepared: prepared_noul_branch(0),
+            tracker: Arc::new(RequestTracker::new()),
+            stream: ResponseStream::new(Box::pin(stream), Context::new(()).context()),
+        },
+        0,
+        1,
+        parent,
+    )
+    .await;
+    let Err(error) = result else {
+        panic!("cancelled stream must not produce an answer")
     };
     assert_eq!(error.status.as_u16(), 499);
 }

@@ -424,7 +424,10 @@ fn prepare_branches(
                         format!("question {question_id:?}: {oversized}"),
                     );
                 }
-                tracing::warn!("System One prompt rendering failed");
+                let reason = cause
+                    .downcast_ref::<crate::preprocessor::SystemOneModelIncompatible>()
+                    .map_or("chat template or tokenizer failed", |reason| reason.0);
+                tracing::warn!(reason, "System One prompt rendering failed");
                 (
                     StatusCode::UNPROCESSABLE_ENTITY,
                     format!(
@@ -665,6 +668,25 @@ async fn run_branch(
 }
 
 async fn finish_branch(
+    started: StartedBranch,
+    data_parallel_start_rank: u32,
+    data_parallel_size: u32,
+    parent_context: Arc<dyn AsyncEngineContext>,
+) -> Result<BranchResult, DispatchError> {
+    let result = read_branch(
+        started,
+        data_parallel_start_rank,
+        data_parallel_size,
+        parent_context.clone(),
+    )
+    .await;
+    if parent_context.is_killed() {
+        return Err(DispatchError::cancelled());
+    }
+    result
+}
+
+async fn read_branch(
     started: StartedBranch,
     data_parallel_start_rank: u32,
     data_parallel_size: u32,
