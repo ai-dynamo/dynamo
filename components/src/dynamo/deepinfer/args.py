@@ -23,6 +23,7 @@ class Config(DynamoRuntimeConfig):
     max_model_len: int
     mock: bool
     engine_args: dict
+    rank_worker: bool
 
 
 def parse_args(argv: list[str] | None = None) -> Config:
@@ -47,6 +48,7 @@ def parse_args(argv: list[str] | None = None) -> Config:
     )
     parser.add_argument("--mock-token-delay", type=float, default=0.001)
     parser.add_argument("--max-model-len", type=int, default=4096)
+    parser.add_argument("--rank-worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if not Path(args.model, "tokenizer.json").is_file():
         parser.error(
@@ -73,18 +75,22 @@ def parse_args(argv: list[str] | None = None) -> Config:
         )
     if args.mock and args.engine_args:
         parser.error("--engine-args cannot be used with --mock")
+    dp_size = args.engine_args.get("data_parallel_size", 1)
     cp_size = args.engine_args.get("context_parallel_size", 1)
-    if (
-        args.engine_args.get("data_parallel_size", 1) != 1
-        or args.engine_args.get("engine_rank", 0) != 0
-    ):
-        parser.error(
-            "this adapter supports one data-parallel engine (data_parallel_size=1, engine_rank=0)"
-        )
-    if args.engine_args.get("engram_parallel_size", 0) not in (0, cp_size):
-        parser.error(
-            "engram_parallel_size must be 0 or context_parallel_size for a single engine"
-        )
+    ep_size = args.engine_args.get("expert_parallel_size", 1)
+    enp_size = args.engine_args.get("engram_parallel_size", 0)
+    rank = args.engine_args.get("engine_rank", 0)
+    if any(type(v) is not int or v < 1 for v in (dp_size, cp_size, ep_size)):
+        parser.error("DP, CP and EP sizes must be positive integers")
+    world_size = dp_size * cp_size
+    if world_size % ep_size:
+        parser.error("expert_parallel_size must divide DP * CP")
+    if type(enp_size) is not int or enp_size not in (0, world_size):
+        parser.error("engram_parallel_size must be 0 or DP * CP")
+    if type(rank) is not int or not 0 <= rank < dp_size:
+        parser.error("engine_rank must be in [0, data_parallel_size)")
+    if not args.rank_worker and rank != 0:
+        parser.error("the launcher assigns engine_rank; omit it")
     if args.mock_token_delay < 0 or args.max_model_len <= 0:
         parser.error(
             "--mock-token-delay must be nonnegative and --max-model-len positive"

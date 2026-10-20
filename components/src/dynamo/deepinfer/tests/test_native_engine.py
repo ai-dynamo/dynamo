@@ -209,7 +209,9 @@ async def test_native_worker_flush_failure_isolation_and_owner_cleanup(
     [
         [],
         ["--engine-args", "[]"],
-        ["--engine-args", '{"data_parallel_size":2}'],
+        ["--engine-args", '{"data_parallel_size":0}'],
+        ["--engine-args", '{"data_parallel_size":true}'],
+        ["--engine-args", '{"data_parallel_size":2,"expert_parallel_size":3}'],
         ["--engine-args", '{"engine_rank":1}'],
         ["--engine-args", '{"engram_parallel_size":8}'],
         ["--engine-args", '{"model":"other"}'],
@@ -222,3 +224,39 @@ def test_invalid_native_configuration_rejected(checkpoint, options):
         Path(checkpoint, "config.json").unlink()
     with pytest.raises(SystemExit):
         parse_args(["--model", checkpoint, *options])
+
+
+def test_distributed_topology_and_rank(checkpoint):
+    config = parse_args(
+        [
+            "--model",
+            checkpoint,
+            "--rank-worker",
+            "--engine-args",
+            '{"data_parallel_size":4,"expert_parallel_size":4,"engine_rank":3,"engram_parallel_size":4}',
+        ]
+    )
+    assert config.engine_args["engine_rank"] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_distributed_driver_participates_without_local_requests(
+    checkpoint, native_api
+):
+    engine, _ = await DeepInferLLMEngine.from_args(
+        [
+            "--model",
+            checkpoint,
+            "--engine-args",
+            '{"data_parallel_size":4,"expert_parallel_size":4}',
+        ]
+    )
+    await engine.start(1)
+    try:
+        async with asyncio.timeout(2):
+            while not any(name == "flush" for name, _ in native_api.calls):
+                await asyncio.sleep(0)
+        assert not engine.wake.is_set() and not engine.streams
+    finally:
+        await engine.cleanup()

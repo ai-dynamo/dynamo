@@ -12,8 +12,8 @@ with CPU-only synthetic output for local iteration.
 
 > [!WARNING]
 > Experimental. Native GPU inference has not been qualified by this example's
-> CPU checks. The native adapter supports one data-parallel engine per worker;
-> DeepInfer can spawn context-parallel workers across the visible GPUs.
+> CPU checks. Each data-parallel rank runs in its own Dynamo worker process;
+> DeepInfer can spawn context-parallel workers within each rank's visible GPUs.
 
 ## Build and Run the Container
 
@@ -36,6 +36,18 @@ inference requires DeepInfer's supported SM100 hardware and a compatible driver.
 The image uses Transformers 4.57.6 and tokenizers 0.22.2 to satisfy Dynamo's
 frontend requirements. It also applies DeepInfer's upstream NCCL 2.32.3 override
 of PyTorch's 2.29.7 dependency pin; `pip check` reports that intentional mismatch.
+
+The image patches the pinned DeepInfer indexer's small-prefill candidate selection.
+It removes an invalid candidate-count assertion. DeepSelect already supports
+more requested candidates than valid blocks, filling unused indices with -1.
+Without the patch, short prefills can fail a candidate-count assertion at startup
+or during inference.
+
+With a GPU available, check the patched candidate-selection kernels inside the image:
+
+```bash
+python -m pytest -q examples/backends/deepinfer/test_native_kernels.py
+```
 
 The CUDA 13.2 build also uses upstream's `FLASH_MLA_SKIP_REG_SPILL_CHECK=1`
 override. Four FlashMLA head-64 decode variants compiled with 16-byte stack
@@ -102,12 +114,27 @@ curl -sS http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model":"deepinfer","messages":[{"role":"user","content":"What is six times seven?"}],"max_tokens":256,"stream":true}'
 ```
 
-Native mode requires `CUDA_VISIBLE_DEVICES` to be set before DeepInfer is imported.
-Use distinct `MASTER_PORT` values when running independent engines concurrently;
-DeepInfer uses this value to derive its process-group port. The adapter fixes
-`data_parallel_size=1` and `engine_rank=0`, and allows `engram_parallel_size` only
-when it is zero or equal to `context_parallel_size`. Multi-DP replicas require
-coordinated collective scheduling and are rejected before engine construction.
+For single-node DP4 with EP4, expose four GPUs and run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+MODEL_PATH=/absolute/path/to/DeepSeek-V4.1-Flash-1017 \
+  bash examples/backends/deepinfer/launch/agg.sh \
+    --engine-args '{"data_parallel_size":4,"expert_parallel_size":4,"max_num_seqs":64,"chunked_prefill":true}'
+```
+
+The launcher starts one worker process per DP rank, assigns each rank its CP-sized
+GPU subset before importing DeepInfer, and uses the existing frontend's round-robin
+routing. Idle ranks still enter DeepInfer's global work vote and engine steps.
+All ranks must initialize before registration. A rank failure stops the entire
+group; shutdown escalates to process-group termination if native collectives block.
+Per-rank initialization is limited to one hour. Multi-node launch is not supported.
+
+Native mode requires `CUDA_VISIBLE_DEVICES` before importing DeepInfer. Provide at
+least `DP * CP` distinct devices for DP launch; EP must divide `DP * CP`. Engram
+parallelism must be zero (DeepInfer's default) or `DP * CP`. Omit `engine_rank`;
+the launcher assigns it. DP defaults to one. Use distinct `MASTER_PORT` values
+for independent groups, and the same value for ranks within one group.
 
 ## Run the CPU Mock
 

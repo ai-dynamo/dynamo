@@ -30,11 +30,8 @@ class NativeDeepInfer:
         self.engine.add_request(**kwargs)
 
     def step(self) -> list[RequestOutput]:
-        raw = (
-            self.engine.step()
-            if self.engine.has_unfinished_requests()
-            else self.engine.flush_inflight_reqs()
-        )
+        self.has_work = self.engine.has_unfinished_requests()
+        raw = self.engine.step() if self.has_work else self.engine.flush_inflight_reqs()
         # Read only needed scalar fields; cloning also copies unused logprob vectors.
         return [
             RequestOutput(

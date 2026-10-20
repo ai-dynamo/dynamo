@@ -70,6 +70,8 @@ RUN --mount=type=cache,target=/opt/deepinfer/vendor/DeepEP/build \
 RUN --mount=type=cache,target=/opt/deepinfer/vendor/DeepGEMM/build \
     cd vendor/DeepGEMM && DG_FORCE_BUILD=1 \
     python setup.py bdist_wheel --dist-dir /wheels
+COPY examples/backends/deepinfer/small-prefill-candidates.patch /tmp/
+RUN git apply /tmp/small-prefill-candidates.patch
 RUN --mount=type=cache,target=/opt/deepinfer/build \
     python -m pip install --no-deps /wheels/*.whl \
     && python setup.py bdist_wheel --dist-dir /wheels

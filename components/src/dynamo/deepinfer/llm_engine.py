@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 import os
 from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -29,6 +31,8 @@ from dynamo.deepinfer.args import Config, parse_args
 from dynamo.deepinfer.mock_engine import MockDeepInfer
 from dynamo.llm import ModelInput
 from dynamo.llm.exceptions import InvalidArgument
+
+logger = logging.getLogger(__name__)
 
 
 class DeepInferLLMEngine(LLMEngine):
@@ -66,7 +70,18 @@ class DeepInferLLMEngine(LLMEngine):
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="deepinfer"
         )
-        self.engine = await self._on_owner(create_engine, self.config)
+        try:
+            self.engine = await self._on_owner(create_engine, self.config)
+        except Exception:
+            logger.exception("DeepInfer engine initialization failed")
+            raise
+        ready_dir = os.environ.get("DYN_DEEPINFER_READY_DIR")
+        if ready_dir and self.config.rank_worker:
+            rank = self.config.engine_args.get("engine_rank", 0)
+            Path(ready_dir, str(rank)).touch()
+            ranks = range(self.config.engine_args.get("data_parallel_size", 1))
+            while not all(Path(ready_dir, str(peer)).exists() for peer in ranks):
+                await asyncio.sleep(0.01)
         self.driver = asyncio.create_task(self._drive())
         return EngineConfig(
             model=self.config.model,
@@ -76,9 +91,12 @@ class DeepInferLLMEngine(LLMEngine):
 
     async def _drive(self) -> None:
         assert self.engine is not None
+        distributed = self.config.engine_args.get("data_parallel_size", 1) > 1
         try:
             while True:
-                await self.wake.wait()
+                # Empty DP ranks must still enter the native work-vote/step collectives.
+                if not distributed:
+                    await self.wake.wait()
                 outputs = await self._on_owner(self.engine.step)
                 for output in outputs:
                     stream = self.streams.get(output.request_id)
@@ -109,13 +127,17 @@ class DeepInferLLMEngine(LLMEngine):
                     stream.put_nowait(chunk)
                 if not self.streams:
                     self.wake.clear()
-                await asyncio.sleep(
-                    self.config.mock_token_delay if self.config.mock else 0
-                )
+                delay = self.config.mock_token_delay if self.config.mock else 0
+                if distributed and not self.engine.has_work:
+                    delay = 0.005
+                await asyncio.sleep(delay)
         except Exception as error:
             self.failure = error
             for stream in self.streams.values():
                 stream.put_nowait(error)
+            if distributed:
+                logger.exception("DeepInfer rank failed; stopping its collective group")
+                os._exit(1)
             raise
 
     async def generate(
