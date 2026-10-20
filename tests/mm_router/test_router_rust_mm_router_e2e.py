@@ -90,6 +90,7 @@ class VLLMWorkerProcess(ManagedProcess):
     """vLLM backend that publishes KV events the router can consume."""
 
     def __init__(self, request, *, system_port: int, kv_event_port: int):
+        """Configure the worker with a fixed KV cache and a KV event publisher."""
         super().__init__(
             command=[
                 "python3",
