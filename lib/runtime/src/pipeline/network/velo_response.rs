@@ -26,8 +26,8 @@ use uuid::Uuid;
 use velo::{
     InstanceId, PeerInfo, Velo, WorkerAddress,
     streaming::{
-        AutoFlush, FlushPolicy, MuxConfig, StreamAnchor, StreamAnchorHandle, StreamController,
-        StreamFrame, StreamSender, control::StreamOpenTicket,
+        AnchorConfig, AutoFlush, FlushPolicy, MuxConfig, StreamAnchor, StreamAnchorHandle,
+        StreamController, StreamFrame, StreamSender, control::StreamOpenTicket,
     },
 };
 
@@ -93,6 +93,33 @@ const RESPONSE_TCP_LANES: u16 = 4;
 /// a long-lived worker keeps every frontend it ever served.
 const PEER_IDLE_TTL: Duration = Duration::from_secs(600);
 const PEER_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Heartbeat interval for each response stream, in place of Velo's 5 s.
+///
+/// Velo does not report a closed connection to the streams on it. A frontend
+/// learns that a worker died when that worker's streams miss three to four
+/// heartbeats: 15 to 20 s at Velo's default, 3 to 4 s at this one. Each
+/// heartbeat is one small record per stream.
+const RESPONSE_HEARTBEAT_MS: u64 = 1_000;
+
+fn response_heartbeat() -> Result<Duration> {
+    use crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_HEARTBEAT_MS;
+
+    let heartbeat_ms = match std::env::var(DYN_VELO_RESPONSE_HEARTBEAT_MS) {
+        Err(std::env::VarError::NotPresent) => RESPONSE_HEARTBEAT_MS,
+        Ok(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|ms| *ms > 0)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{DYN_VELO_RESPONSE_HEARTBEAT_MS} must be a positive integer in milliseconds"
+                )
+            })?,
+        Err(error) => bail!("{DYN_VELO_RESPONSE_HEARTBEAT_MS}: {error}"),
+    };
+    Ok(Duration::from_millis(heartbeat_ms))
+}
 
 fn response_mux_config() -> Result<MuxConfig> {
     use crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_BATCH_MS;
@@ -362,6 +389,7 @@ impl Drop for PeerLease {
 pub struct VeloResponseService {
     velo: Arc<Velo>,
     transport: ResponseTransport,
+    heartbeat: Duration,
     /// This service's `ResponseAddress::peer_address`, encoded once.
     peer_address: String,
     registrations: Mutex<Registrations>,
@@ -388,6 +416,7 @@ impl VeloResponseService {
     }
 
     async fn new(transport: ResponseTransport, address: SocketAddr) -> Result<Arc<Self>> {
+        let heartbeat = response_heartbeat()?;
         let mut builder = Velo::builder()
             .metrics(PROCESS_METRICS.1.clone())
             .mux_only()
@@ -412,6 +441,7 @@ impl VeloResponseService {
             peer_address: BASE64.encode(velo.peer_info().worker_address().as_bytes()),
             velo,
             transport,
+            heartbeat,
             registrations: Mutex::new(Registrations::default()),
             prepared_peers: dashmap::DashMap::new(),
             started: tokio::time::Instant::now(),
@@ -496,8 +526,15 @@ impl VeloResponseService {
             "Velo response service is shut down"
         );
         // Item 0 is the JSON prologue and every later item is response data,
-        // both as raw bytes, so neither end runs them through msgpack.
-        let anchor = self.velo.create_anchor::<Bytes>();
+        // both as raw bytes, so neither end runs them through msgpack. The
+        // ticket carries the heartbeat interval to the worker.
+        let anchor = self
+            .velo
+            .anchor_manager()
+            .create_anchor_with_config::<Bytes>(AnchorConfig {
+                heartbeat_interval: Some(self.heartbeat),
+                ..Default::default()
+            });
         let ticket = self
             .velo
             .prebind_anchor(anchor.handle())
@@ -1366,6 +1403,63 @@ mod tests {
             return;
         }
         lifecycle_suite(ResponseTransport::Tcp).await;
+    }
+
+    /// A worker that dies leaves its streams open on the frontend until they
+    /// miss enough heartbeats. The short interval here bounds that wait.
+    #[tokio::test]
+    async fn lost_worker_ends_its_streams_after_missed_heartbeats() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::lost_worker_ends_its_streams_after_missed_heartbeats"
+            ),
+            &[("DYN_VELO_RESPONSE_HEARTBEAT_MS", "200")],
+        ) {
+            return;
+        }
+        let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let consumer = VeloResponseService::new(ResponseTransport::Tcp, address)
+            .await
+            .unwrap();
+        let registered = consumer
+            .register_response(EngineContext::new(()).context(), false)
+            .unwrap();
+        // The worker runs on its own Tokio runtime, so shutting that runtime
+        // down stops its tasks and closes its sockets, as a crash would.
+        let worker = tokio::runtime::Runtime::new().unwrap();
+        let info = registered.connection_info.clone();
+        let (opened_tx, opened_rx) = oneshot::channel();
+        worker.spawn(async move {
+            let producer = VeloResponseService::new(ResponseTransport::Tcp, address)
+                .await
+                .unwrap();
+            let mut sender = producer
+                .sender(EngineContext::new(()).context(), info, None)
+                .await
+                .unwrap();
+            sender.send_prologue(None).await.unwrap();
+            sender.send(Bytes::from_static(b"token")).await.unwrap();
+            opened_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+            drop((producer, sender));
+        });
+        opened_rx.await.unwrap();
+        let (_, provider) = registered.into_parts();
+        let mut receiver = provider.await.unwrap().unwrap();
+        assert_eq!(
+            receiver.rx.next().await.unwrap().unwrap(),
+            Bytes::from_static(b"token")
+        );
+        worker.shutdown_background();
+        // At the 1 s default this takes 3 to 4 s, and at Velo's 5 s 15 to 20 s.
+        let error = tokio::time::timeout(Duration::from_millis(2_500), receiver.rx.next())
+            .await
+            .expect("the frontend did not notice the lost worker")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.error_type(), ErrorType::Disconnected, "{error}");
+        consumer.shutdown().await;
     }
 
     #[cfg(feature = "velo-ucx")]

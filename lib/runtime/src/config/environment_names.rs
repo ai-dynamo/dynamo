@@ -898,6 +898,11 @@ pub mod response_plane {
     /// Set to 0 for greedy flushing after transport admission. Full batches and
     /// lifecycle records can flush sooner. Read once when the service starts.
     pub const DYN_VELO_RESPONSE_BATCH_MS: &str = "DYN_VELO_RESPONSE_BATCH_MS";
+    /// Heartbeat interval of each Velo response stream in milliseconds
+    /// (default: 1000). A frontend ends a stream, as Disconnected, once its
+    /// worker misses three to four heartbeats. Must be positive. Set on the
+    /// frontend; workers follow it. Read once when the service starts.
+    pub const DYN_VELO_RESPONSE_HEARTBEAT_MS: &str = "DYN_VELO_RESPONSE_HEARTBEAT_MS";
 }
 
 /// TCP request callback listener environment variables. Names are retained for compatibility.
@@ -1259,6 +1264,7 @@ mod tests {
             response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS,
             response_plane::DYN_VELO_RESPONSE_TRANSPORT,
             response_plane::DYN_VELO_RESPONSE_BATCH_MS,
+            response_plane::DYN_VELO_RESPONSE_HEARTBEAT_MS,
             request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
             request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE,
             request_plane::DYN_TCP_RPC_HOST,

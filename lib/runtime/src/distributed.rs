@@ -876,37 +876,54 @@ mod parser_env_tests {
         ) {
             return;
         }
+        // Each case sets one variable over a valid TCP configuration.
         let mut cases = vec![
-            ("invalid", "127.0.0.1", None, "DYN_VELO_RESPONSE_TRANSPORT"),
             (
-                "tcp",
-                "127.0.0.1",
-                Some("invalid"),
+                "DYN_VELO_RESPONSE_TRANSPORT",
+                "invalid",
+                "DYN_VELO_RESPONSE_TRANSPORT",
+            ),
+            (
+                "DYN_VELO_RESPONSE_BATCH_MS",
+                "invalid",
                 "DYN_VELO_RESPONSE_BATCH_MS",
             ),
-            ("tcp", "invalid host", None, "invalid host"),
-            ("tcp", "192.0.2.1", None, "Failed to pre-bind TCP listener"), // Valid address, but not assigned to this host.
+            (
+                "DYN_VELO_RESPONSE_HEARTBEAT_MS",
+                "0",
+                "DYN_VELO_RESPONSE_HEARTBEAT_MS",
+            ),
+            (
+                "DYN_TCP_RESPONSE_STREAM_HOST",
+                "invalid host",
+                "invalid host",
+            ),
+            // Valid address, but not assigned to this host.
+            (
+                "DYN_TCP_RESPONSE_STREAM_HOST",
+                "192.0.2.1",
+                "Failed to pre-bind TCP listener",
+            ),
         ];
         if !cfg!(all(target_os = "linux", feature = "velo-ucx")) {
-            cases.push(("ucx", "127.0.0.1", None, "velo-ucx"));
+            cases.push(("DYN_VELO_RESPONSE_TRANSPORT", "ucx", "velo-ucx"));
         }
-        for (transport, host, batch_ms, message) in cases {
-            temp_env::async_with_vars(
-                [
-                    ("DYN_VELO_RESPONSE_TRANSPORT", Some(transport)),
-                    ("DYN_VELO_RESPONSE_BATCH_MS", batch_ms),
-                    ("DYN_TCP_RESPONSE_STREAM_HOST", Some(host)),
-                ],
-                async {
-                    let runtime = Runtime::from_current().unwrap();
-                    let mut config = DistributedConfig::process_local();
-                    config.response_plane = Some(ResponsePlaneMode::Velo);
-                    let error = DistributedRuntime::new(runtime, config)
-                        .await
-                        .expect_err("Velo configuration must fail before serving endpoints");
-                    assert!(error.to_string().contains(message), "{error:#}");
-                },
-            )
+        for (name, value, message) in cases {
+            let mut vars = vec![
+                ("DYN_VELO_RESPONSE_TRANSPORT", Some("tcp")),
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+            ];
+            vars.retain(|(var, _)| *var != name);
+            vars.push((name, Some(value)));
+            temp_env::async_with_vars(vars, async {
+                let runtime = Runtime::from_current().unwrap();
+                let mut config = DistributedConfig::process_local();
+                config.response_plane = Some(ResponsePlaneMode::Velo);
+                let error = DistributedRuntime::new(runtime, config)
+                    .await
+                    .expect_err("Velo configuration must fail before serving endpoints");
+                assert!(error.to_string().contains(message), "{error:#}");
+            })
             .await;
         }
     }
