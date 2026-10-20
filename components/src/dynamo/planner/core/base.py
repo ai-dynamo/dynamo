@@ -161,7 +161,6 @@ class NativePlannerBase:
         self._config_lock = asyncio.Lock()
         self._effect_admission_lock = asyncio.Lock()
         self._config_generation = 0
-        self._throughput_generation = 0
         self.reconfiguration = PlannerReconfiguration(self)
         self._effect_submission_task: Optional[asyncio.Task[None]] = None
         self._effect_submission_outcome_unknown: Optional[str] = None
@@ -412,8 +411,7 @@ class NativePlannerBase:
         predictor: BuiltinLoadPredict | None,
     ) -> None:
         engine = self._reconfigurable_engine()
-        if engine.apply_runtime_configuration(candidate, fields, predictor):
-            self._throughput_generation += 1
+        engine.apply_runtime_configuration(candidate, fields, predictor)
         self._config_generation += 1
         self.prometheus_metrics.sla_target_ttft_ms.set(self.config.ttft_ms)
         self.prometheus_metrics.sla_target_itl_ms.set(self.config.itl_ms)
@@ -1077,7 +1075,6 @@ class NativePlannerBase:
     async def run(self) -> None:
         engine = self._ensure_engine()
         next_tick = engine.initial_tick(time.time())
-        scheduled_generation = self._throughput_generation
         poll_interval = self.config.load_adjustment_interval_seconds / 10
         gpu_shape_retry_interval = min(
             max(poll_interval, _GPU_SHAPE_RETRY_MIN_SECONDS),
@@ -1087,9 +1084,6 @@ class NativePlannerBase:
         try:
             while True:
                 now = time.time()
-                if scheduled_generation != self._throughput_generation:
-                    next_tick = self._reconfigurable_engine().reconfiguration_tick()
-                    scheduled_generation = self._throughput_generation
                 if now < next_tick.at_s:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
                     continue

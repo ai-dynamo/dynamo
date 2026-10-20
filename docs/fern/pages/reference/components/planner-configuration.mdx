@@ -455,12 +455,12 @@ has a 120-second deadline and only one preparation can run at a time. If a backg
 fit outlives its deadline, its result cannot activate and further preparations are
 rejected until that work exits; updates that do not replace the predictor remain available.
 Invalid data, failed fitting, or a changed revision leave the active settings unchanged.
-Successful activation occurs between decisions and increments the revision. Changes to
-SLA targets, `max_throughput_scaling_replicas`, or predictor settings restart the throughput
-observation cycle when throughput scaling is enabled. The next prediction uses a complete
-new observation window. Budget, endpoint-floor, load-only, and no-op updates preserve the
-prediction cadence, as does the legacy localhost API. Performance models, worker state,
-and already-admitted scaling operations are retained. `applied` means the
+Successful activation occurs between decisions and increments the revision. Updates preserve
+the existing prediction and scaling cadence, including changes to SLA targets,
+`max_throughput_scaling_replicas`, and predictor settings. The next scheduled throughput
+decision uses the active settings and the full trailing traffic window; predictor replacement
+does not delay that decision. Performance models, worker state, and already-admitted
+scaling operations are retained. `applied` means the
 configuration is active; it does not mean the deployment has finished scaling.
 
 A successful write through the legacy minimum-endpoint API also changes the revision

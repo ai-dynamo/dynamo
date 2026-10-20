@@ -547,15 +547,12 @@ class OrchestratorEngineAdapter:
                 plugin.registered_at = self._last_tick_monotonic
         return self._compute_next_scheduled_tick()
 
-    def reconfiguration_tick(self) -> ScheduledTick:
-        return self._compute_next_scheduled_tick()
-
     def apply_runtime_configuration(
         self,
         candidate: PlannerConfig,
         fields: Iterable[str],
         predictor: BuiltinLoadPredict | None,
-    ) -> bool:
+    ) -> None:
         active_predictor: BuiltinLoadPredict | None = None
         if predictor is not None:
             active = self._builtins["load_predict"]
@@ -569,17 +566,6 @@ class OrchestratorEngineAdapter:
             for field in fields
             if getattr(self._config, field) != getattr(candidate, field)
         }
-        restart_throughput = self._config.enable_throughput_scaling and (
-            predictor is not None
-            or bool(
-                changed
-                & {
-                    "ttft_ms",
-                    "itl_ms",
-                    "max_throughput_scaling_replicas",
-                }
-            )
-        )
         for field in changed:
             setattr(self._config, field, getattr(candidate, field))
         if active_predictor is not None and predictor is not None:
@@ -589,17 +575,6 @@ class OrchestratorEngineAdapter:
             self._startup_down_candidate = None
             self._startup_down_inventory = None
             self._startup_down_sources = frozenset()
-        if restart_throughput:
-            now = self._clock.monotonic()
-            self._last_throughput_loop_monotonic = now
-            for plugin_id in (
-                BuiltinLoadPredict.plugin_id,
-                BuiltinThroughputPropose.plugin_id,
-            ):
-                plugin = self._orchestrator.registry.get_plugin(plugin_id)
-                if plugin is not None:
-                    plugin.last_call_at = now
-        return restart_throughput
 
     async def tick(
         self,

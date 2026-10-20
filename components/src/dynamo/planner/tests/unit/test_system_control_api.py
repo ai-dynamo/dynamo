@@ -46,6 +46,9 @@ def test_planner_control_uses_the_actual_system_listener():
                 async with client.get(base + "/config") as response:
                     assert response.status == 200
                     current = await response.json()
+                async with client.patch(base + "/config", data="{", headers={"Content-Type": "application/json"}) as response:
+                    assert response.status == 400
+                    assert (await response.json())["error"] == "Invalid JSON"
                 update = {
                     "instance_id": current["instance_id"],
                     "expected_revision": current["revision"],

@@ -61,11 +61,25 @@ async def finish(planner):
 
 
 @pytest.mark.parametrize(
-    "change",
-    ["sla", "throughput_limit", "predictor", "load", "budget", "noop", "legacy"],
+    ("change", "update_at"),
+    [
+        ("sla", 200),
+        ("sla", 355),
+        ("throughput_limit", 355),
+        ("predictor", 355),
+        ("predictor_warmup", 355),
+        ("load", 355),
+        ("budget", 355),
+        ("noop", 355),
+        ("legacy", 355),
+    ],
 )
-async def test_only_throughput_changes_restart_a_complete_prediction_window(change):
-    planner = sla_planner(enable_load_scaling=True)
+async def test_reconfiguration_preserves_complete_prediction_windows(
+    change, update_at, tmp_path
+):
+    planner = sla_planner(
+        enable_load_scaling=True, runtime_warmup_trace_dir=str(tmp_path)
+    )
     clock = VirtualClock()
     engine = OrchestratorEngineAdapter(
         planner.config, planner._build_worker_capabilities(), clock=clock
@@ -95,7 +109,7 @@ async def test_only_throughput_changes_restart_a_complete_prediction_window(chan
         )
         return effects.next_tick
 
-    while tick.at_s <= 200:
+    while tick.at_s <= update_at:
         tick = await advance(tick)
     previous = engine._builtins["load_predict"]._num_req_predictor
     assert len(previous.data_buffer) == 1
@@ -107,28 +121,33 @@ async def test_only_throughput_changes_restart_a_complete_prediction_window(chan
             "sla": {"ttft_ms": 250.0},
             "throughput_limit": {"max_throughput_scaling_replicas": 4},
             "predictor": {"load_predictor": "kalman"},
+            "predictor_warmup": {"load_predictor": "kalman"},
             "load": {"load_scaling_down_sensitivity": 70},
             "budget": {"max_gpu_budget": 24, "prefill_min_endpoint": 2},
             "noop": {"ttft_ms": planner.config.ttft_ms},
         }
         await planner.reconfiguration.submit(
-            request(planner, updates[change], cold_start=change == "predictor")
+            request(
+                planner,
+                updates[change],
+                cold_start=change == "predictor",
+                warmup_trace=trace(tmp_path) if change == "predictor_warmup" else None,
+            )
         )
         assert (await finish(planner))["state"] == "applied"
-    restarting = change in {"sla", "throughput_limit", "predictor"}
-    assert planner._throughput_generation == int(restarting)
-    if restarting:
-        tick = engine.reconfiguration_tick()
     active = engine._builtins["load_predict"]._num_req_predictor
+    assert (active is not previous) == change.startswith("predictor")
     count = len(active.data_buffer)
-    expected_prediction = 380 if restarting else 360
-    while tick.at_s < expected_prediction:
+    for expected_prediction in (360, 540):
+        while tick.at_s < expected_prediction:
+            tick = await advance(tick)
+            assert len(active.data_buffer) == count
+        assert tick.at_s == expected_prediction
+        assert tick.run_throughput_scaling
+        assert tick.need_traffic_metrics and tick.traffic_metrics_duration_s == 180
         tick = await advance(tick)
+        count += 1
         assert len(active.data_buffer) == count
-    assert tick.at_s == expected_prediction
-    assert tick.need_traffic_metrics and tick.traffic_metrics_duration_s == 180
-    await advance(tick)
-    assert len(active.data_buffer) == count + 1
     await planner._shutdown_runtime()
 
 

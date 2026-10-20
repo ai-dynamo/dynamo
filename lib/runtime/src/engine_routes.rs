@@ -125,7 +125,7 @@ fn parse_json(body: &[u8], empty: Value) -> Result<Value, serde_json::Error> {
 fn invalid_json(error: serde_json::Error) -> Response {
     (
         StatusCode::BAD_REQUEST,
-        json!({"error":"Invalid JSON", "message":error.to_string()}).to_string(),
+        Json(json!({"error":"Invalid JSON", "message":error.to_string()})),
     )
         .into_response()
 }
@@ -337,6 +337,13 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status().as_u16(), expected);
+            if expected == 400 {
+                assert_eq!(response.headers()["content-type"], "application/json");
+                let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                let error: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(error["error"], "Invalid JSON");
+                assert!(error["message"].as_str().is_some());
+            }
         }
         let response = app
             .clone()
