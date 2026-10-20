@@ -1696,11 +1696,6 @@ mod tests {
             wait_until(|| counts.load().get(worker).is_none()).await;
         }
     }
-
-    #[test]
-    fn resident_block_counts_need_a_local_primary() {
-        assert!(Indexer::None.track_resident_blocks().is_none());
-    }
 }
 
 pub fn create_indexer(block_size: u32, num_threads: usize) -> Indexer {

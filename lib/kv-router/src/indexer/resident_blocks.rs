@@ -85,6 +85,9 @@ impl ResidentBlockCountsHandle {
     }
 
     fn publish(&self, added: &[(WorkerWithDpRank, Arc<Counter>)]) {
+        if added.is_empty() {
+            return;
+        }
         self.counts.rcu(|current| {
             let mut next = ResidentBlockCounts::clone(current);
             next.counters.extend(
@@ -97,6 +100,9 @@ impl ResidentBlockCountsHandle {
     }
 
     fn unpublish(&self, removed: &[(WorkerWithDpRank, Arc<Counter>)]) {
+        if removed.is_empty() {
+            return;
+        }
         self.counts.rcu(|current| {
             let mut next = ResidentBlockCounts::clone(current);
             for (worker, counter) in removed {
@@ -162,9 +168,7 @@ impl ResidentBlockTracker {
             }
             keep
         });
-        if !gone.is_empty() {
-            self.counts.unpublish(&gone);
-        }
+        self.counts.unpublish(&gone);
     }
 }
 
