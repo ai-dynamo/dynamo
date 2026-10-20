@@ -819,7 +819,7 @@ from dynamo.planner import KubernetesConnector
 KubernetesConnector(dynamo_namespace: str, model_name: Optional[str] = None, k8s_namespace: Optional[str] = None, parent_dgd_name: Optional[str] = None, raise_not_ready: bool = False)
 ```
 
-[`components/src/dynamo/planner/connectors/kubernetes.py#L87`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L87)
+[`components/src/dynamo/planner/connectors/kubernetes.py#L91`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L91)
 
 **Public methods**
 
@@ -831,7 +831,7 @@ __init__(dynamo_namespace: str, model_name: Optional[str] = None, k8s_namespace:
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L88)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L92)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-async-init">async_init</h4>
 
@@ -841,7 +841,7 @@ async_init()
 
 No-op asynchronous lifecycle hook.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L126)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L130)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-worker-runtime-namespace">get_worker_runtime_namespace</h4>
 
@@ -856,7 +856,7 @@ component status. Older operators expose only the active worker hash, so
 the planner falls back to appending that hash only for Deployment-backed
 and LeaderWorkerSet-backed workers.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L130)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L134)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-add-component">add_component</h4>
 
@@ -866,7 +866,7 @@ add_component(sub_component_type: SubComponentType, blocking: bool = True)
 
 Add a component by increasing its replica count by 1
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L199)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L203)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-remove-component">remove_component</h4>
 
@@ -876,7 +876,7 @@ remove_component(sub_component_type: SubComponentType, blocking: bool = True)
 
 Remove a component by decreasing its replica count by 1
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L218)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L222)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-validate-deployment">validate_deployment</h4>
 
@@ -891,7 +891,7 @@ Verify that the deployment contains prefill/decode components and the model name
 - `DynamoGraphDeploymentNotFoundError` — If the deployment is not found
 - `DeploymentValidationError` — If the deployment does not contain required prefill/decode components
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L238)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L242)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-model-name">get_model_name</h4>
 
@@ -901,7 +901,7 @@ get_model_name(require_prefill: bool = True, require_decode: bool = True) -> str
 
 Get the model name from the current deployment.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L292)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L296)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-graph-deployment">get_graph_deployment</h4>
 
@@ -916,7 +916,7 @@ Kubernetes-local and must not expand that ABC. The environment checks
 ``is_power_aware_connector(controller)`` (all four methods present)
 rather than duck-typing via ``getattr``.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L379)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L394)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-gpu-counts">get_gpu_counts</h4>
 
@@ -926,7 +926,7 @@ get_gpu_counts(require_prefill: bool = True, require_decode: bool = True, deploy
 
 Get per-engine GPU counts for prefill and decode components.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L389)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L404)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-gpu-shapes">get_gpu_shapes</h4>
 
@@ -939,7 +939,7 @@ Get per-engine performance width and per-replica GPU cost.
 Pass ``deployment`` to reuse an already-fetched DGD (avoids a second
 GET when the environment also resolves power configs on the same tick).
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L413)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L428)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-component-power-configs">get_component_power_configs</h4>
 
@@ -959,7 +959,7 @@ The typed parser errors (``PowerAnnotationMissingError`` /
 propagate so the environment can apply the startup-fail vs
 runtime-conservative policy rather than the planner guessing a cap.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L499)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L514)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-frontend-metrics-url">get_frontend_metrics_url</h4>
 
@@ -977,7 +977,7 @@ http://&#123;dgd_name&#125;-&#123;component_name_lowercase&#125;:&#123;port&#125
 
 - `Optional[str]` — The metrics URL string, or None if no frontend component is found.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L529)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L544)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-wait-for-deployment-ready">wait_for_deployment_ready</h4>
 
@@ -1000,7 +1000,7 @@ readiness. This lets the planner read MDC from worker pods
 without waiting for itself to be marked ready in the DGD.
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L551)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L566)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-wait-for-settled-graph-deployment">wait_for_settled_graph_deployment</h4>
 
@@ -1030,7 +1030,7 @@ have rolled onto that generation. Active rolling updates
 (``status.rollingUpdate.phase`` Pending/InProgress/Failed) also
 block settlement because old Pods still carry the previous cap.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L570)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L585)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-worker-info">get_worker_info</h4>
 
@@ -1049,7 +1049,7 @@ PREFILL or DECODE
 Backend framework name (for default fallback)
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L725)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L825)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-worker-inventory">get_worker_inventory</h4>
 
@@ -1064,7 +1064,7 @@ the power-aware readiness guarantees. An omitted component name reports
 zero counts for that role; pending counts never include draining workers.
 Return None on a Pod-list 403 so callers can retain legacy behavior.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L879)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L988)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-actual-worker-counts">get_actual_worker_counts</h4>
 
@@ -1074,7 +1074,7 @@ get_actual_worker_counts(prefill_component_name: Optional[str] = None, decode_co
 
 Get worker counts without blocking the Planner event loop.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L940)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1049)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-power-aware-worker-counts">get_power_aware_worker_counts</h4>
 
@@ -1088,7 +1088,7 @@ One thread dispatch contains the synchronous DGD GET and the single
 DGD-scoped Pod LIST. The returned Pod snapshot is partitioned locally by
 component before terminating-Pod checks run.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L965)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1074)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-set-component-replicas">set_component_replicas</h4>
 
@@ -1098,7 +1098,7 @@ set_component_replicas(target_replicas: list[TargetReplica], blocking: bool = Tr
 
 Set the replicas for multiple components at once
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1078)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1187)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-acquire-batch-writer-fence">acquire_batch_writer_fence</h4>
 
@@ -1114,7 +1114,7 @@ old process. This CAS annotation then orders any Scale PATCH already
 fetched by that old process: it either commits before the fence (and is
 visible to the refresh below) or conflicts afterward.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1278)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1387)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-errors-modelnamenotfounderror" title="ModelNameNotFoundError (class)">
