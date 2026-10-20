@@ -34,6 +34,17 @@ class Tokenizer:
         return list(text.encode())
 
 
+@pytest.mark.parametrize("rendered", [None, [], {}, 42])
+def test_non_text_rendering_fails_closed(rendered):
+    class NonTextTokenizer(Tokenizer):
+        def apply_chat_template(self, messages, **kwargs):
+            return rendered
+
+    counter = RenderedCounter(NonTextTokenizer(), "fixture")
+    with pytest.raises(Invalid, match="invalid_rendered_prompt"):
+        counter.render([{"role": "user", "content": "evidence"}])
+
+
 def test_exact_choice_rendering_and_largest_question_context():
     counter = RenderedCounter(Tokenizer(), "fixture")
     payload = {

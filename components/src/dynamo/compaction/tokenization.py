@@ -6,8 +6,9 @@
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, Protocol
 
-from .protocol import canonical, require, strict_json
+from .protocol import Invalid, canonical, require, strict_json
 
 PROFILE_MODEL = "Qwen/Qwen3-0.6B"
 PROFILE_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
@@ -46,18 +47,37 @@ def text_messages(messages):
     return result
 
 
+class TextTokenizer(Protocol):
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        /,
+        *,
+        tokenize: Literal[False],
+        add_generation_prompt: bool,
+        enable_thinking: bool,
+    ) -> object:
+        ...
+
+    def encode(self, text: str, /, *, add_special_tokens: bool) -> list[int]:
+        ...
+
+
 @dataclass(frozen=True)
 class RenderedCounter:
-    tokenizer: object
+    tokenizer: TextTokenizer
     name: str
 
-    def render(self, messages):
-        return self.tokenizer.apply_chat_template(
+    def render(self, messages) -> str:
+        rendered = self.tokenizer.apply_chat_template(
             text_messages(messages),
             tokenize=False,
             add_generation_prompt=True,
             enable_thinking=False,
         )
+        if not isinstance(rendered, str):
+            raise Invalid("invalid_rendered_prompt")
+        return rendered
 
     def __call__(self, serialized):
         return max(self.counts(serialized))
