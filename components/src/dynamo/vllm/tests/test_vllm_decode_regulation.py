@@ -4,6 +4,8 @@
 """Per-step decode regulation: policy, identity plumbing, and the
 skip mixin driven by a fake scheduler with vLLM v0.31.0's running-loop rules."""
 
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -483,6 +485,19 @@ class _ReqWithoutField:
         self.num_computed_tokens = 0
 
 
+class _PluginReq(_Req):
+    """A plugin's Request subclass, as vLLM-Omni's OmniRequest."""
+
+    def __init__(self):
+        super().__init__()
+        self.extra = None
+
+
+class _PluginReqWithoutSuper(_Req):
+    def __init__(self):
+        self.extra = None
+
+
 class _Sched:
     def schedule(self):
         self.current_step += 1
@@ -508,10 +523,15 @@ def test_skip_support_check_accepts_v031_shape():
     assert vllm_skip_unsupported(_Sched, _Req) == ""
 
 
+def test_skip_support_check_accepts_plugin_request_subclass():
+    assert vllm_skip_unsupported(_Sched, _PluginReq) == ""
+
+
 @pytest.mark.parametrize(
     "sched,req,reason",
     [
         (_Sched, _ReqWithoutField, "no next_decode_eligible_step"),
+        (_Sched, _PluginReqWithoutSuper, "does not call super().__init__"),
         (_SchedWithoutCheck, _Req, "no longer checks"),
         (_SchedIncrementsLate, _Req, "after the skip check"),
         (_Sched, dict, "cannot read"),
@@ -521,8 +541,34 @@ def test_skip_support_check_disables_on_changed_vllm(sched, req, reason):
     assert reason in vllm_skip_unsupported(sched, req)
 
 
+def test_requests_without_the_field_disable_regulation():
+    reqs = overloaded()
+    s = Sched(reqs, cfg())
+    for r in reqs:
+        del r.next_decode_eligible_step
+    s._reg_apply()
+    assert not s._reg_cfg.enabled
+
+
+_INSTALLED_CHECK = """
+from vllm.plugins import load_general_plugins
+load_general_plugins()  # as the engine does; vLLM-Omni swaps in a Request subclass
+import vllm.v1.core.sched.scheduler as s, vllm.v1.request as r
+from dynamo.vllm.decode_regulation import vllm_skip_unsupported
+print("RESULT=" + vllm_skip_unsupported(s.Scheduler, r.Request))
+"""
+
+
 def test_installed_vllm_supports_the_skip():
-    """Fails on a vLLM upgrade that changes the internals the skip relies on."""
-    scheduler = pytest.importorskip("vllm.v1.core.sched.scheduler")
-    request = pytest.importorskip("vllm.v1.request")
-    assert vllm_skip_unsupported(scheduler.Scheduler, request.Request) == ""
+    """Fails on a vLLM upgrade, or a vLLM plugin, that changes the internals the
+    skip relies on. Runs in a subprocess so loading plugins leaves this one alone."""
+    pytest.importorskip("vllm.v1.core.sched.scheduler")
+    out = subprocess.run(
+        [sys.executable, "-c", _INSTALLED_CHECK],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert out.returncode == 0, out.stderr[-2000:]
+    result = [ln for ln in out.stdout.splitlines() if ln.startswith("RESULT=")]
+    assert result == ["RESULT="], out.stdout[-2000:]

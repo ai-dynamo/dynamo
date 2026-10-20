@@ -415,13 +415,33 @@ def vllm_skip_unsupported(scheduler_cls: Any, request_cls: Any) -> str:
     The skip relies on vLLM internals that are not a public API: ``Request`` sets
     ``next_decode_eligible_step``, and ``Scheduler.schedule()`` increments
     ``current_step`` before its running loop compares the two. A vLLM upgrade that
-    changes either disables regulation (stock scheduling) instead of failing."""
+    changes either disables regulation (stock scheduling) instead of failing.
+
+    ``request_cls`` may be a plugin's subclass of vLLM's ``Request`` (vLLM-Omni
+    swaps in ``OmniRequest``): the field is checked on the class that sets it, and
+    every subclass ``__init__`` above it must call ``super().__init__``."""
     try:
-        req_src = inspect.getsource(request_cls.__init__)
         sched_src = inspect.getsource(scheduler_cls.schedule)
+        owner = None
+        for cls in request_cls.__mro__:
+            if cls is object:
+                break
+            init = cls.__dict__.get("__init__")
+            if init is None:
+                continue
+            src = inspect.getsource(init)
+            if "self.next_decode_eligible_step" in src:
+                owner = cls
+                break
+            if "super().__init__" not in src and "super(" not in src:
+                return (
+                    "vLLM Request has no next_decode_eligible_step "
+                    f"({cls.__module__}.{cls.__qualname__}.__init__ "
+                    "does not call super().__init__)"
+                )
     except (OSError, TypeError, AttributeError) as e:
         return f"cannot read the vLLM scheduler source to verify the skip ({e})"
-    if "self.next_decode_eligible_step" not in req_src:
+    if owner is None:
         return "vLLM Request has no next_decode_eligible_step"
     inc = sched_src.find("self.current_step += 1")
     cmp = sched_src.find("self.current_step < request.next_decode_eligible_step")
@@ -508,9 +528,14 @@ class DecodeRegulationMixin:
         if d.skip and self._reg_cfg.mode != "observe":
             # schedule() increments current_step first, so this skips exactly one step.
             nxt = self.current_step + 2
-            for rid in d.skip:
-                req = by_id[rid]
-                req.next_decode_eligible_step = max(req.next_decode_eligible_step, nxt)
+            skipped = [by_id[rid] for rid in d.skip]
+            if all(hasattr(req, "next_decode_eligible_step") for req in skipped):
+                for req in skipped:
+                    req.next_decode_eligible_step = max(
+                        req.next_decode_eligible_step, nxt
+                    )
+            else:
+                self._reg_disable("running requests have no next_decode_eligible_step")
         elapsed = time.perf_counter() - t_start
         self._reg_stats.on_overhead(elapsed)
         if self._reg_metrics is not None:
@@ -620,10 +645,16 @@ class DecodeRegulationMixin:
                 b,
                 self._reg_pinned,
             )
-            self._reg_cfg.mode = "off"
-            self._reg_stats.disabled = True
-            if self._reg_metrics is not None:
-                self._reg_metrics.enabled.set(0)
+            self._reg_disable()
+
+    def _reg_disable(self, reason: str = "") -> None:
+        """Turn regulation off until restart; the scheduler behaves as stock vLLM."""
+        if reason:
+            logger.warning("decode_regulation disabled: %s", reason)
+        self._reg_cfg.mode = "off"
+        self._reg_stats.disabled = True
+        if self._reg_metrics is not None:
+            self._reg_metrics.enabled.set(0)
 
     def _reg_close(self) -> None:
         if self._reg_trace is not None:
