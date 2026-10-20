@@ -354,6 +354,19 @@ impl Indexer {
             }
         };
         let is_clear = matches!(&event.event.data, KvCacheEventData::Cleared);
+        if let Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. } = self {
+            // Recurrent-group events never enter the attention tree: they are
+            // per-position state presence. An untagged clear also forgets the
+            // rank's recurrent presence.
+            if lower_tier.group_residency().apply(&event) {
+                return Ok(());
+            }
+            if is_clear {
+                lower_tier
+                    .group_residency()
+                    .clear_worker(WorkerWithDpRank::new(event.worker_id, event.event.dp_rank));
+            }
+        }
         match self {
             Indexer::Single {
                 primary,
@@ -667,6 +680,7 @@ impl Indexer {
                 lower_tier,
                 ..
             } => {
+                lower_tier.group_residency().remove_worker(worker_id);
                 for indexer in lower_tier.all() {
                     indexer.remove_worker(worker_id).await;
                 }
@@ -677,6 +691,7 @@ impl Indexer {
                 lower_tier,
                 ..
             } => {
+                lower_tier.group_residency().remove_worker(worker_id);
                 for indexer in lower_tier.all() {
                     indexer.remove_worker(worker_id).await;
                 }
@@ -702,6 +717,9 @@ impl Indexer {
                 lower_tier,
                 ..
             } => {
+                lower_tier
+                    .group_residency()
+                    .clear_worker(WorkerWithDpRank::new(worker_id, dp_rank));
                 for indexer in lower_tier.all() {
                     indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
                 }
@@ -712,6 +730,9 @@ impl Indexer {
                 lower_tier,
                 ..
             } => {
+                lower_tier
+                    .group_residency()
+                    .clear_worker(WorkerWithDpRank::new(worker_id, dp_rank));
                 for indexer in lower_tier.all() {
                     indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
                 }

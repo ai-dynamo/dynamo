@@ -664,6 +664,12 @@ impl LocalKvIndexer {
     }
 
     async fn apply_event_by_tier(&self, event: &RouterEvent) -> Result<(), KvRouterError> {
+        if event.kv_cache_group.is_some() {
+            // Recurrent-group state presence is a router-side concern
+            // (`KvCacheGroupResidency`); the worker-local attention index must
+            // not file these hashes as reusable attention blocks.
+            return Ok(());
+        }
         let targets_primary = match event.targets_primary() {
             Ok(targets_primary) => targets_primary,
             Err(_) => {

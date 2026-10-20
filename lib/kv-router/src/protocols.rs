@@ -911,12 +911,39 @@ pub enum PlacementOwner {
     Shared,
 }
 
+/// Kind of a non-main-attention KV cache group. Only recurrent state groups
+/// are indexed today; windowed attention groups are still dropped at ingress.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum KvCacheGroupKind {
+    /// Mamba / GDN / linear-attention state (`kv_cache_spec_kind = "mamba"`).
+    Mamba,
+}
+
+/// Which KV cache group a residency event describes when it is not the
+/// main-attention group.
+///
+/// vLLM publishes one `BlockStored` per group at the same positional block
+/// hash. A recurrent group's event announces the state checkpoint at that
+/// hash, not a reusable token range, so these events are kept out of the
+/// attention radix tree and recorded as per-group presence instead
+/// (see `indexer::KvCacheGroupResidency`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct KvCacheGroupTag {
+    pub group_idx: u32,
+    pub kind: KvCacheGroupKind,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Placement {
     pub owner: PlacementOwner,
     pub tier: StorageTier,
     #[serde(default)]
     pub residency_domain: ResidencyDomain,
+    /// Set for events of a non-main-attention KV cache group; `None` is the
+    /// attention group (and every legacy publisher).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_cache_group: Option<KvCacheGroupTag>,
 }
 
 impl Placement {
@@ -925,6 +952,7 @@ impl Placement {
             owner: PlacementOwner::LocalWorker(WorkerWithDpRank::new(worker_id, dp_rank)),
             tier,
             residency_domain: ResidencyDomain::Worker,
+            kv_cache_group: None,
         }
     }
 
@@ -975,6 +1003,7 @@ impl PlacementEvent {
             self.placement.residency_domain,
         );
         event.session_id = self.session_id;
+        event.kv_cache_group = self.placement.kv_cache_group;
         Some(event)
     }
 }
@@ -1533,6 +1562,11 @@ pub struct RouterEvent {
     /// Session that triggered this store or reuse report, if provided by the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Non-main-attention KV cache group this event belongs to. Absent on the
+    /// legacy wire and for attention-group events. Named MessagePack only, as
+    /// for `state_source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_cache_group: Option<KvCacheGroupTag>,
 }
 
 impl RouterEvent {
@@ -1573,7 +1607,13 @@ impl RouterEvent {
             storage_tier,
             residency_domain: WireResidencyDomain::explicit(residency_domain),
             event,
+            kv_cache_group: None,
         }
+    }
+
+    pub fn with_kv_cache_group(mut self, kv_cache_group: KvCacheGroupTag) -> Self {
+        self.kv_cache_group = Some(kv_cache_group);
+        self
     }
 
     /// Create a CacheOwner event with its required stable state source.

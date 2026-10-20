@@ -9,8 +9,8 @@ use serde::Serialize;
 
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, ExternalSequenceBlockHash,
-    KvCacheEventData, PlacementEvent, PlacementOwner, StorageTier, WorkerWithDpRank,
-    compute_block_hash_for_seq,
+    KvCacheEventData, KvCacheGroupKind, KvCacheGroupTag, PlacementEvent, PlacementOwner,
+    StorageTier, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 
 use super::filter::KvCacheSpecKind;
@@ -723,7 +723,7 @@ fn test_normalizer_ignores_non_main_group_idx_without_metadata() {
 }
 
 #[test]
-fn test_normalizer_ignores_map_serialized_non_main_attention_kind() {
+fn test_normalizer_keeps_map_serialized_mamba_kind() {
     #[derive(serde::Serialize)]
     struct MapBlockStoredEvent {
         #[serde(rename = "type")]
@@ -752,6 +752,51 @@ fn test_normalizer_ignores_map_serialized_non_main_attention_kind() {
     let mut normalizer = ZmqEventNormalizer::new(2);
 
     assert_event_metadata(&decoded, Some(1), Some(KvCacheSpecKind::Mamba), None);
+    let worker = WorkerWithDpRank::new(3, 0);
+    let kept = normalizer
+        .preprocess_with_reason(decoded, worker)
+        .expect("recurrent-group stores are kept");
+    let placement = normalizer
+        .normalize_preprocessed(kept, 7, worker)
+        .expect("converts")
+        .placement;
+    assert_eq!(
+        placement.kv_cache_group,
+        Some(KvCacheGroupTag {
+            group_idx: 1,
+            kind: KvCacheGroupKind::Mamba,
+        })
+    );
+}
+
+#[test]
+fn test_normalizer_drops_sliding_window_kind() {
+    #[derive(serde::Serialize)]
+    struct MapBlockStoredEvent {
+        #[serde(rename = "type")]
+        event_type: &'static str,
+        block_hashes: Vec<u64>,
+        parent_block_hash: Option<u64>,
+        token_ids: Vec<u32>,
+        block_size: usize,
+        group_idx: Option<u32>,
+        kv_cache_spec_kind: Option<&'static str>,
+    }
+
+    let event = MapBlockStoredEvent {
+        event_type: "BlockStored",
+        block_hashes: vec![11],
+        parent_block_hash: None,
+        token_ids: vec![10, 11],
+        block_size: 2,
+        group_idx: Some(1),
+        kv_cache_spec_kind: Some("sliding_window"),
+    };
+    let encoded = rmp_serde::to_vec_named(&(0.0, vec![event], Some(0_i32)))
+        .expect("serialize raw event batch");
+    let mut batch = decode_event_batch(&encoded).expect("deserialize raw event batch");
+    let decoded = batch.events.pop().expect("batch should contain event");
+    let mut normalizer = ZmqEventNormalizer::new(2);
     assert_eq!(
         normalizer
             .preprocess_with_reason(decoded, WorkerWithDpRank::new(3, 0))
@@ -996,11 +1041,47 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
 }
 
 #[test]
-fn test_normalizer_ignores_non_main_attention_kind_with_group_idx_zero() {
+fn test_normalizer_tags_mamba_group_store_and_learned_removal() {
     let raw_event: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
         TestEventKind::BlockStored,
         Some(0),
         "mamba",
+    ))
+    .expect("valid raw event");
+    let remove: RawKvEvent =
+        from_slice(&block_removed_sequence(Some(0), None)).expect("valid remove event");
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    let worker = WorkerWithDpRank::new(3, 0);
+    let tag = Some(KvCacheGroupTag {
+        group_idx: 0,
+        kind: KvCacheGroupKind::Mamba,
+    });
+
+    let stored = normalizer.preprocess(raw_event, worker).expect("kept");
+    let stored = normalizer
+        .normalize_preprocessed(stored, 1, worker)
+        .expect("converts");
+    assert_eq!(stored.placement.kv_cache_group, tag);
+    assert_eq!(
+        stored.into_router_event().unwrap().kv_cache_group,
+        tag,
+        "the tag must survive into the RouterEvent"
+    );
+
+    // The removal carries only group_idx; the kind was learned from the store.
+    let removed = normalizer.preprocess(remove, worker).expect("kept");
+    let removed = normalizer
+        .normalize_preprocessed(removed, 2, worker)
+        .expect("converts");
+    assert_eq!(removed.placement.kv_cache_group, tag);
+}
+
+#[test]
+fn test_normalizer_ignores_sliding_window_group_with_group_idx_zero() {
+    let raw_event: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
+        TestEventKind::BlockStored,
+        Some(0),
+        "sliding_window",
     ))
     .expect("valid raw event");
     let remove: RawKvEvent =

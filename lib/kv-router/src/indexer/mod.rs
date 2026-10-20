@@ -62,6 +62,7 @@ fn warn_on_unit_block_size(indexer_type: &'static str, kv_block_size: u32) {
         );
     }
 }
+mod kv_cache_groups;
 mod kv_indexer;
 mod local;
 mod lower_tier;
@@ -88,6 +89,7 @@ mod delegate_tests;
 // Re-export everything that was public in the old single-file module.
 pub use approximate_lru::*;
 pub use branch_sharded::*;
+pub use kv_cache_groups::*;
 pub use kv_indexer::*;
 pub use local::*;
 pub use lower_tier::*;

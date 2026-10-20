@@ -743,6 +743,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             owner: dynamo_kv_router::protocols::PlacementOwner::LocalWorker(worker),
             tier: StorageTier::Device,
             residency_domain: domain,
+            kv_cache_group: None,
         };
         self.apply_and_publish_chunk(vec![PlacementEvent::new(
             placement,
@@ -1899,6 +1900,7 @@ mod tests {
                 owner: PlacementOwner::LocalWorker(worker),
                 tier: StorageTier::HostPinned,
                 residency_domain: domain,
+                kv_cache_group: None,
             },
             KvCacheEvent {
                 event_id: 0,
