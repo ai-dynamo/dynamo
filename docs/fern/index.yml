@@ -1157,6 +1157,10 @@ navigation:
               - page: API Reference (K8s)
                 path: pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 
+      - page: System One API
+        path: pages/reference/api/systemone.md
+        slug: api/systemone
+
       - section: Components
         icon: sliders
         slug: components

@@ -119,6 +119,21 @@ The ratio is defined only when the model has an active L1 cache and observed tok
   Time to first token in seconds.
 </ParamField>
 
+### System One (Experimental)
+
+The [System One API](../api/systemone.md) emits these frontend metrics after request observations. Names below use the default `dynamo_frontend` prefix; `--metrics-prefix` changes that prefix. Every metric has a `model` label resolved from the served model. Question names, candidate names, request IDs, and cache salts are never labels.
+
+| Metric | Type | Observation |
+| --- | --- | --- |
+| `dynamo_frontend_systemone_questions` | histogram | Question count per request accepted for dispatch after preflight. |
+| `dynamo_frontend_systemone_input_tokens` | histogram | Cumulative expanded prompt tokens per accepted request, including repeated shared state. |
+| `dynamo_frontend_systemone_candidate_ids` | histogram | Total requested candidate token IDs across an accepted request's questions. |
+| `dynamo_frontend_systemone_admitted_branches_total` | counter | Cumulative number of question branches accepted for dispatch; not a live concurrency gauge. |
+| `dynamo_frontend_systemone_cached_tokens` | histogram | Cached prompt tokens reported by each completed native branch. Internal accounting only; not added to the public response usage. |
+| `dynamo_frontend_systemone_phase_seconds` | histogram | Duration of `preflight`, `first_branch`, or `fanout`; these three fixed values form the additional `phase` label. |
+
+Histograms expose `_bucket`, `_sum`, and `_count` series. Work and cache histograms use fixed logarithmic bucket ranges; the phase histogram uses fixed buckets from 0.001 through 120 seconds. These buckets are not controlled by the general frontend histogram environment variables. The existing request, active-request, rejection, and cancellation metrics identify this endpoint as `systemone` where an endpoint label is present.
+
 ### Migration
 
 Metrics for [request migration](../../kubernetes/fault-tolerance/request-migration.md), the mechanism that continues in-flight requests on a healthy worker when the original worker fails. See [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md) for the internals.

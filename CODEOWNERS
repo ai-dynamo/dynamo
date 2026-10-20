@@ -61,6 +61,7 @@
 *                                                                                                       @ai-dynamo/dynamo-runtime-codeowners
 
 # === frontend  (@ai-dynamo/dynamo-frontend-codeowners) ===
+/examples/systemone/                                                                                    @ai-dynamo/dynamo-frontend-codeowners
 /examples/chat_templates/                                                                               @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/                                                                        @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/tests/                                                                  @ai-dynamo/dynamo-frontend-codeowners

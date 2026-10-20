@@ -692,6 +692,28 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   Environment variable: `DYN_ENABLE_ANTHROPIC_API`
 </ParamField>
 
+### System One (Experimental)
+
+<ParamField path="--enable-systemone-api" type="boolean" default="false">
+  Enable the experimental typed-decisions endpoint at `/v1/systemone`. Only eligible aggregate SGLang models support this endpoint; request migration must be disabled. The supported SGLang 0.5.19 workers require `--disable-overlap-schedule --max-running-requests 1` and pipeline parallelism of one. Enabling the frontend flag prepares the model tokenizer/chat template and native SGLang Generate dispatch without requiring the public native Generate route to be enabled.
+
+  Environment variable: `DYN_ENABLE_SYSTEMONE_API`
+
+  See [System One API](../api/systemone.md) for the request/response contract and backend restrictions.
+</ParamField>
+
+<ParamField path="DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES" type="integer" default="256">
+  Maximum admitted System One question branches across concurrent requests on this frontend. A request reserves one permit per question before preprocessing and holds it through dispatch. Requests whose question count exceeds this total capacity return HTTP 422 without `Retry-After`. Requests that fit the capacity but encounter insufficient free permits receive `DYN_HTTP_OVERLOAD_STATUS_CODE` (529 by default), with `Retry-After: 1`. Accepts positive integers; values above 256 clamp to 256. Unset, zero, invalid, or unrepresentable values use the default. Read once when the HTTP service is built.
+</ParamField>
+
+<ParamField path="DYN_SYSTEMONE_MAX_INPUT_TOKENS" type="integer" default="65536">
+  Maximum cumulative expanded prompt tokens across all questions in one System One request. Includes repeated state and template tokens. Accepts positive integers; values above 65536 clamp to 65536. Unset, zero, invalid, or unrepresentable values use the default. Each prompt must also be shorter than the model's effective context length when known. Read once when the HTTP service is built.
+</ParamField>
+
+System One also limits concurrent preflight jobs to four per frontend, cumulative tokenizer-validation work to 1,048,576 token-equivalent units per request, cumulative tokenizer encoding bytes to 16 MiB per request, and sibling dispatch to four branches per request after initial placement. The byte budget counts repeated rendered prompts and candidate-label encodings and is checked before each question's first tokenization. These fixed bounds are independent of the configurable admitted-branch and expanded prompt-token limits. See [Limits and Execution](../api/systemone.md#limits-and-execution) for accounting and rejection behavior.
+
+### Chat Processing and Interactive Mode
+
 <ParamField path="--dyn-chat-processor" type="string" default="dynamo">
   Chat processor. See [Chat Processors](../../use-cases/tool-calling-and-reasoning/chat-processors.mdx) for how this combines with the parser flags.
 
@@ -808,6 +830,12 @@ The frontend exposes the following HTTP endpoints.
 | `POST` | `/v1/messages` | Anthropic Messages API (requires `--enable-anthropic-api`) |
 | `POST` | `/v1/messages/count_tokens` | Token counting for the Anthropic API |
 
+### System One Typed Decisions (Experimental)
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `POST` | `/v1/systemone` | Typed `noul`, `choice`, and `score` decisions; requires `--enable-systemone-api`. See [System One API](../api/systemone.md). |
+
 ### Infrastructure
 
 | Method | Path | Description |
@@ -861,9 +889,12 @@ All endpoint paths can be overridden via environment variables:
 | `DYN_HTTP_SVC_RESPONSES_PATH_ENV` | `/v1/responses` |
 | `DYN_HTTP_SVC_MODELS_PATH_ENV` | `/v1/models` |
 | `DYN_HTTP_SVC_ANTHROPIC_PATH_ENV` | `/v1/messages` |
+| `DYN_HTTP_SVC_SYSTEMONE_PATH` | `/v1/systemone` |
 | `DYN_HTTP_SVC_HEALTH_PATH_ENV` | `/health` |
 | `DYN_HTTP_SVC_LIVE_PATH_ENV` | `/live` |
 | `DYN_HTTP_SVC_METRICS_PATH_ENV` | `/metrics` |
+
+`DYN_HTTP_SVC_SYSTEMONE_PATH` must name a nonempty static absolute path with no route parameters or wildcards. It applies only when System One is enabled. A path override replaces the default route; it does not register an additional alias.
 
 ## Deprecated
 
