@@ -29,6 +29,7 @@ from tests.utils.payload_builder import (
     chat_logprobs_and_structured_output_payloads,
     disaggregated_token_count_payload,
     http_cancellation_payloads,
+    streaming_chat_payload_with_logprobs,
 )
 from tests.utils.payloads import (
     ChatPayload,
@@ -193,9 +194,8 @@ sidecar_configs = {
             "TLLM_ALLOW_N_GREEDY_DECODING": "1",
             "PYTHONUNBUFFERED": "1",
         },
-        # OpenEngine exposes output logprobs, but not prompt logprobs.
         request_payloads=[
-            *chat_logprobs_and_structured_output_payloads(prompt_logprobs=None),
+            *chat_logprobs_and_structured_output_payloads(),
             # Public disconnect/recovery only: no native scheduler observations.
             *http_cancellation_payloads(None, max_tokens=CANCELLATION_MAX_TOKENS),
         ],
@@ -244,7 +244,15 @@ sidecar_configs = {
             "PRTE_ALLOW_RUN_AS_ROOT": "1",
             "PRTE_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
         },
-        request_payloads=[disaggregated_token_count_payload(logprobs=True)],
+        request_payloads=[
+            disaggregated_token_count_payload(logprobs=True),
+            streaming_chat_payload_with_logprobs(
+                prompt_logprobs=2,
+                max_tokens=8,
+                expected_response=[],
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            ),
+        ],
     ),
     "vllm_disaggregated": EngineConfig(
         name="vllm_disaggregated",

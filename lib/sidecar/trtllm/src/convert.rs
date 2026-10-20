@@ -116,10 +116,15 @@ pub(crate) fn build_generate_request(
             // the decode worker report that first token as missing its logprob.
             return_output_logprobs: Some(output.logprobs.is_some()),
             output_candidates: output.logprobs.map(output_candidates),
-            // Prompt logprobs are rejected in `validate_request` (no
-            // `LLMEngineOutput` field to surface them).
-            return_prompt_logprobs: None,
-            prompt_candidates: None,
+            // Decode receives prompt data in the prefill handoff.
+            return_prompt_logprobs: output
+                .prompt_logprobs
+                .filter(|_| request.prefill_result.is_none())
+                .map(|_| true),
+            prompt_candidates: output
+                .prompt_logprobs
+                .filter(|_| request.prefill_result.is_none())
+                .map(output_candidates),
             prompt_logprob_start: None,
         }),
         guided: guided_decoding(request)?,
@@ -357,14 +362,6 @@ fn validate_request(
              disaggregated decode requests must be routed to a decode worker"
         )));
     }
-    if request.output_options.prompt_logprobs.is_some() {
-        // TRT-LLM would compute these, but the terminal carries them with no
-        // `LLMEngineOutput` field to surface — reject rather than pay for and
-        // drop them.
-        return Err(client::invalid_argument(
-            "prompt logprobs are not supported by the TensorRT-LLM sidecar",
-        ));
-    }
     if request
         .stop_conditions
         .stop_token_ids_visible
@@ -465,6 +462,9 @@ pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
     output_logprobs: Option<u32>,
+    needs_prompt_data: bool,
+    expected_prompt: Option<std::sync::Arc<Vec<u32>>>,
+    prompt_data: Option<serde_json::Value>,
     phase: Phase,
 }
 
@@ -501,6 +501,16 @@ impl ResponseState {
             prompt_tokens: request.token_ids.len() as u32,
             completion_tokens: 0,
             output_logprobs: request.output_options.logprobs,
+            needs_prompt_data: request.output_options.prompt_logprobs.is_some(),
+            expected_prompt: (request.output_options.prompt_logprobs.is_some()
+                && request.prefill_result.is_none())
+            .then(|| request.token_ids.clone()),
+            prompt_data: request.prefill_result.as_ref().and_then(|prefill| {
+                prefill
+                    .disaggregated_params
+                    .get("prompt_logprobs")
+                    .map(|data| serde_json::json!({"prompt_logprobs": data}))
+            }),
             phase: if mode.is_prefill() {
                 Phase::Prefill { held: Vec::new() }
             } else {
@@ -542,11 +552,62 @@ impl ResponseState {
                 self.convert_prefill_ready(prefill, usage).map(Some)
             }
             pb::generate_response::Event::Error(error) => Err(engine_error(error)),
-            // Prompt logprobs are never requested, so a prompt event is drift.
-            pb::generate_response::Event::Prompt(_) => Err(client::protocol_error(
-                "received an unexpected prompt event; prompt logprobs are not requested",
-            )),
+            pb::generate_response::Event::Prompt(prompt) => {
+                self.convert_prompt(prompt)?;
+                Ok(None)
+            }
         }
+    }
+
+    fn convert_prompt(&mut self, prompt: pb::PromptOutput) -> Result<(), DynamoError> {
+        let expected = self.expected_prompt.as_ref().ok_or_else(|| {
+            client::protocol_error("received an unsolicited or duplicate prompt event")
+        })?;
+        if prompt.tokens.len() != expected.len()
+            || prompt
+                .tokens
+                .iter()
+                .zip(expected.iter())
+                .any(|(token, id)| token.token_id != *id)
+        {
+            return Err(client::protocol_error(
+                "prompt logprobs do not match the requested token IDs",
+            ));
+        }
+        let mut positions = Vec::with_capacity(prompt.tokens.len());
+        for (index, token) in prompt.tokens.into_iter().enumerate() {
+            if index == 0 {
+                positions.push(serde_json::Value::Null);
+                continue;
+            }
+            let logprob = token
+                .logprob
+                .ok_or_else(|| client::protocol_error("prompt token is missing its logprob"))?;
+            let mut entries = serde_json::Map::with_capacity(token.candidates.len() + 1);
+            for candidate in token.candidates {
+                entries.insert(
+                    candidate.token_id.to_string(),
+                    prompt_logprob_entry(candidate.logprob, candidate.rank)?,
+                );
+            }
+            entries.insert(
+                token.token_id.to_string(),
+                prompt_logprob_entry(logprob, token.rank)?,
+            );
+            positions.push(serde_json::Value::Object(entries));
+        }
+        self.prompt_data = Some(serde_json::json!({"prompt_logprobs": positions}));
+        self.expected_prompt = None;
+        Ok(())
+    }
+
+    fn take_prompt_data(&mut self) -> Result<Option<serde_json::Value>, DynamoError> {
+        if self.needs_prompt_data && self.prompt_data.is_none() {
+            return Err(client::protocol_error(
+                "terminal response is missing requested prompt logprobs",
+            ));
+        }
+        Ok(self.prompt_data.take())
     }
 
     /// Terminal chunk for a prefill worker.
@@ -568,6 +629,10 @@ impl ResponseState {
         let session = prefill
             .kv_session
             .ok_or_else(|| client::protocol_error("prefill_ready event carried no kv_session"))?;
+        let mut handoff = disagg::session_to_json(session)?;
+        if let Some(mut data) = self.take_prompt_data()? {
+            handoff["prompt_logprobs"] = data["prompt_logprobs"].take();
+        }
         Ok(LLMEngineOutput {
             // The client sees no tokens from prefill; the decode worker emits
             // the full completion.
@@ -584,7 +649,7 @@ impl ResponseState {
             // which the frontend forwards to the decode leg and which cannot be
             // reconstructed client-side.
             completion_usage: Some(prefill_usage(reported, self.prompt_tokens)),
-            disaggregated_params: Some(disagg::session_to_json(session)?),
+            disaggregated_params: Some(handoff),
             ..Default::default()
         })
     }
@@ -696,7 +761,13 @@ impl ResponseState {
             self.map_tokens(held)?
         };
 
+        let engine_data = if finish_reason == FinishReason::Cancelled {
+            self.prompt_data.take()
+        } else {
+            self.take_prompt_data()?
+        };
         let mut terminal = LLMEngineOutput {
+            engine_data,
             token_ids,
             log_probs,
             top_logprobs,
@@ -773,6 +844,19 @@ impl ResponseState {
             wants_candidates.then_some(top_logprobs),
         ))
     }
+}
+
+fn prompt_logprob_entry(logprob: f64, rank: Option<u32>) -> Result<serde_json::Value, DynamoError> {
+    // JSON cannot represent -infinity, which engines use for impossible tokens.
+    let logprob = if logprob == f64::NEG_INFINITY {
+        -9999.0
+    } else {
+        logprob
+    };
+    if !logprob.is_finite() {
+        return Err(client::protocol_error("invalid prompt logprob"));
+    }
+    Ok(serde_json::json!({"logprob": logprob, "rank": rank}))
 }
 
 /// The OpenEngine contract requires an explicit index even for output zero, and
