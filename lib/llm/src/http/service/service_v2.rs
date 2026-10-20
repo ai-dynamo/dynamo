@@ -991,10 +991,11 @@ impl HttpService {
                     );
                     anyhow::anyhow!("Failed to start {} server on {}: {}", protocol, address, e)
                 })?;
-            let server = axum_server::from_tcp_rustls(std_listener, config)
-                .map(|acceptor| {
-                    super::write_timeout::WriteTimeoutAcceptor::new(acceptor, write_idle_timeout())
-                })
+            let server = axum_server::from_tcp(std_listener)
+                .acceptor(super::write_timeout::https_acceptor(
+                    config,
+                    write_idle_timeout(),
+                ))
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
@@ -1083,9 +1084,7 @@ impl HttpService {
 
             let handle = server_handle.unwrap_or_default();
             let server = axum_server::from_tcp(std_listener)
-                .map(|acceptor| {
-                    super::write_timeout::WriteTimeoutAcceptor::new(acceptor, write_idle_timeout())
-                })
+                .acceptor(super::write_timeout::http_acceptor(write_idle_timeout()))
                 .handle(handle.clone())
                 .serve(router.into_make_service());
             tokio::pin!(server);

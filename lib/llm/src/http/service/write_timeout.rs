@@ -14,7 +14,8 @@ use std::sync::{
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use axum_server::accept::Accept;
+use axum_server::accept::{Accept, NoDelayAcceptor};
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use futures::task::AtomicWaker;
 use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -154,6 +155,29 @@ where
     }
 }
 
+/// Acceptor for the HTTP service's plaintext connections: `TCP_NODELAY`, then
+/// the write-idle timeout.
+///
+/// A streamed response is many small writes. With Nagle's algorithm on, the
+/// first token waits for the client's ACK of the response headers, and a
+/// client that delays that ACK (Linux holds it up to 40 ms), as a gateway in
+/// front of the Frontend can, delays the first token by as much.
+pub(super) fn http_acceptor(timeout: Duration) -> WriteTimeoutAcceptor<NoDelayAcceptor> {
+    WriteTimeoutAcceptor::new(NoDelayAcceptor::new(), timeout)
+}
+
+/// [`http_acceptor`] for TLS: `TCP_NODELAY` applies to the TCP socket, so it
+/// sits below the TLS handshake.
+pub(super) fn https_acceptor(
+    config: RustlsConfig,
+    timeout: Duration,
+) -> WriteTimeoutAcceptor<RustlsAcceptor<NoDelayAcceptor>> {
+    WriteTimeoutAcceptor::new(
+        RustlsAcceptor::new(config).acceptor(NoDelayAcceptor::new()),
+        timeout,
+    )
+}
+
 pub(super) struct WriteTimeoutIo<I> {
     inner: I,
     timeout: Duration,
@@ -289,6 +313,64 @@ mod tests {
         routing::get,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A connected pair: the client end, and the server end as `accept` gets it.
+    async fn accepted_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, accepted) =
+            tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
+        (client.unwrap(), accepted.unwrap().0)
+    }
+
+    #[tokio::test]
+    async fn http_connections_turn_nagle_off() {
+        let (_client, server) = accepted_pair().await;
+        assert!(
+            !server.nodelay().unwrap(),
+            "accepted sockets start with Nagle on"
+        );
+        let (io, _) = http_acceptor(Duration::from_secs(1))
+            .accept(server, ())
+            .await
+            .unwrap();
+        assert!(io.inner.nodelay().unwrap());
+    }
+
+    #[tokio::test]
+    async fn https_connections_turn_nagle_off_below_tls() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let server_config = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.cert.der().clone()],
+                rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()).into(),
+            )
+            .unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert.cert.der().clone()).unwrap();
+        let client_config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+        let (client, server) = accepted_pair().await;
+        let acceptor = https_acceptor(
+            RustlsConfig::from_config(Arc::new(server_config)),
+            Duration::from_secs(1),
+        );
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+        let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        let (accepted, connected) =
+            tokio::join!(acceptor.accept(server, ()), connector.connect(name, client));
+        connected.unwrap();
+        let (io, _) = accepted.unwrap();
+        assert!(io.inner.get_ref().0.nodelay().unwrap());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn completed_transfers_remove_their_connection_deadline() {
