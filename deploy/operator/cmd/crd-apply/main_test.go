@@ -108,9 +108,6 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 	enableDGDRV1Beta2(t, installer, kubeconfig)
 	verifyEnabledDGDRV1Beta2(t, client, config)
 
-	t.Log("Refuse to disable while standalone persisted APIs remain installed")
-	verifyDGDRV1Beta2DisableRefused(t, installer, kubeconfig)
-
 	t.Log("Verify installed schemas preserve DGD placement and keep model downloads on the private child")
 	verifyInstalledCRDSchemas(t, client)
 }
@@ -220,24 +217,6 @@ func verifyEnabledDGDRV1Beta2(
 	} {
 		require.True(t, discovered[resource], "%s is not discoverable", resource)
 	}
-}
-
-func verifyDGDRV1Beta2DisableRefused(t *testing.T, installer, kubeconfig string) {
-	t.Helper()
-	disableDGDRV1Beta2 := exec.CommandContext(t.Context(), installer,
-		"--crds-dir", "../../config/crd/bases",
-		"--version", "schema-test",
-		"--dgdr-v1beta2-enabled=false",
-		"--conversion-webhook-service-name", "dynamo-operator-webhook-service",
-		"--conversion-webhook-service-namespace", "dynamo-system",
-	)
-	disableDGDRV1Beta2.Env = append(os.Environ(), "KUBECONFIG="+kubeconfig)
-	output, err := disableDGDRV1Beta2.CombinedOutput()
-	require.Error(t, err)
-	require.True(t,
-		strings.Contains(string(output), dgdrRunCRDName) ||
-			strings.Contains(string(output), dgdrCandidateCRD),
-		"disable failure must identify an installed standalone CRD:\n%s", output)
 }
 
 func verifyInstalledCRDSchemas(

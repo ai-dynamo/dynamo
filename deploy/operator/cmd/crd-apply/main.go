@@ -17,7 +17,6 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -85,13 +84,6 @@ func main() {
 	}
 
 	ctx := context.Background()
-	if !*dgdrV1Beta2Enabled {
-		if err := requireDGDRV1Beta2StandaloneCRDsAbsent(ctx, client); err != nil {
-			log.Error(err, "refusing to disable experimental DGDR v1beta2 APIs")
-			os.Exit(1)
-		}
-	}
-
 	var applied int
 
 	for _, entry := range entries {
@@ -168,8 +160,7 @@ func main() {
 	log.Info("CRD apply complete", "applied", applied)
 }
 
-// configureDGDRV1Beta2CRD projects the generated CRDs to the complete disabled
-// API shape. Existing standalone CRDs are rejected before this function runs.
+// configureDGDRV1Beta2CRD projects generated CRDs to the disabled API shape.
 func configureDGDRV1Beta2CRD(crd *apiextensionsv1.CustomResourceDefinition) bool {
 	switch crd.Name {
 	case dgdrRunCRDName, dgdrCandidateCRD:
@@ -186,32 +177,6 @@ func configureDGDRV1Beta2CRD(crd *apiextensionsv1.CustomResourceDefinition) bool
 		}
 	}
 	return true
-}
-
-func requireDGDRV1Beta2StandaloneCRDsAbsent(
-	ctx context.Context,
-	client *apiextensionsclient.Clientset,
-) error {
-	for _, name := range []string{dgdrRunCRDName, dgdrCandidateCRD} {
-		_, err := client.ApiextensionsV1().CustomResourceDefinitions().Get(
-			ctx,
-			name,
-			metav1.GetOptions{},
-		)
-		switch {
-		case apierrors.IsNotFound(err):
-			continue
-		case err != nil:
-			return fmt.Errorf("check %s: %w", name, err)
-		default:
-			return fmt.Errorf(
-				"%s is still installed; delete its objects and CRD before disabling %s",
-				name,
-				dgdrV1Beta2Flag,
-			)
-		}
-	}
-	return nil
 }
 
 func removeDGDRV1Beta2Envelope(version *apiextensionsv1.CustomResourceDefinitionVersion) {
