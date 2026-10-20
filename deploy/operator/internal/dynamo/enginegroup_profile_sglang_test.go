@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -495,6 +496,56 @@ func newTestSGLangProfileGeometrySource() SGLangProfileGeometrySource {
 		MainContainerGPUs:          1,
 		DedicatedMainGPUAllocation: true,
 		WorkloadRevisionDigest:     "sha256:test-workload-revision",
+	}
+}
+
+func TestResolveSGLangProfileGeometryGroveBootstrap(t *testing.T) {
+	cases := []struct {
+		name          string
+		initial       int32
+		maximum       int32
+		deriveInitial bool
+		option        string
+		value         string
+		unsupported   bool
+	}{
+		{name: "one-GPU-per-pod EP2 to EP3", initial: 2, maximum: 3},
+		{name: "EP4 with successive growth up to EP8", initial: 4, maximum: 8},
+		{name: "EP8 with successive growth up to EP16", initial: 8, maximum: 16},
+		{name: "derive seed from immutable engine arguments", initial: 4, maximum: 8, deriveInitial: true},
+		{name: "EP1 seed disables DP attention upstream", initial: 1, maximum: 2, unsupported: true},
+		{name: "more than one initial rank per pod", initial: 4, maximum: 8, option: sglangNodesOption, value: "2", unsupported: true},
+		{name: "dense TP spans allocations", initial: 4, maximum: 8, option: sglangMoEDenseTensorSizeOption, value: "2", unsupported: true},
+		{name: "native node rank conflicts with slot identity", initial: 4, maximum: 8, option: sglangNodeRankOption, value: "0", unsupported: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("construct the shared Grove bootstrap template from configured initial and maximum sizes")
+			source := newTestSGLangProfileGeometrySource()
+			source.Command = []string{"python3", "-m", SGLangElasticEPBootstrapModule}
+			source.InitialReplicas = tc.initial
+			for _, option := range []string{sglangTensorParallelSizeOption, sglangDataParallelSizeOption,
+				sglangNodesOption, sglangElasticInitialSizeOption} {
+				source.Args = setTestSGLangOption(source.Args, option, strconv.Itoa(int(tc.initial)))
+			}
+			source.Args = setTestSGLangOption(source.Args, sglangMaximumEPSizeOption, strconv.Itoa(int(tc.maximum)))
+			if tc.option != "" {
+				source.Args = setTestSGLangOption(source.Args, tc.option, tc.value)
+			}
+			if tc.deriveInitial {
+				source.InitialReplicas = 0
+			}
+
+			t.Log("resolve only geometry that the actual typed launcher implements")
+			resolved, err := ResolveSGLangElasticEPProfile(source)
+			if tc.unsupported {
+				require.ErrorIs(t, err, ErrUnsupportedSGLangProfileSource)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.initial, resolved.InitialReplicas)
+			assert.Equal(t, tc.maximum, resolved.MaximumReplicas)
+		})
 	}
 }
 

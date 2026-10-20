@@ -37,6 +37,14 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	if err := reserveNixlExporterPorts(container, containerGPUCount); err != nil {
 		return err
 	}
+	// Bootstrap participants and joiners share a template but only slot zero exposes Dynamo HTTP.
+	// Allocation availability is process-level here; the Engine Group separately verifies serving.
+	if component.EngineGroup != nil {
+		container.LivenessProbe = nil
+		container.ReadinessProbe = nil
+		container.StartupProbe = nil
+		return nil
+	}
 
 	if component.CompilationCache != nil {
 		logger := log.Log.WithName("sglang-backend")

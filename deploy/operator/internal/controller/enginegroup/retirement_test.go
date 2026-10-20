@@ -197,11 +197,9 @@ func TestEngineGroupUnsupportedRetirementPreservesWorld(t *testing.T) {
 	require.NoError(t, kube.Delete(t.Context(), group))
 	runtime, err := controller.RuntimeProvider.Resolve(t.Context(), group)
 	require.NoError(t, err)
-	runtime.Planner = &engineGroupControllerTestPlanResolver{resolution: ScalePlanResolution{
-		Rejection: &domain.Failure{Classification: domain.FailureClassificationTerminal, Reason: "RetirementUnsupported"},
-	}}
+	runtime.Planner = sglangGrowthPlanner{profileFingerprint: runtime.Profile.Fingerprint}
 
-	t.Log("repeated deletion reconciliation reports the backend retirement limitation without releasing healthy capacity")
+	t.Log("repeated deletion reconciliation reports the real growth-only limitation without releasing healthy capacity")
 	for step := 0; step < 3; step++ {
 		require.NoError(t, kube.Get(t.Context(), request.NamespacedName, group))
 		result, err := controller.reconcileDeletion(t.Context(), group, runtime)
@@ -212,7 +210,7 @@ func TestEngineGroupUnsupportedRetirementPreservesWorld(t *testing.T) {
 	assert.Contains(t, group.Finalizers, engineGroupFinalizer)
 	condition := meta.FindStatusCondition(group.Status.Conditions, engineGroupConditionProgressing)
 	require.NotNil(t, condition)
-	assert.Equal(t, "RetirementUnsupported", condition.Reason)
+	assert.Equal(t, "SGLangRetirementUnsupported", condition.Reason)
 	assert.Len(t, backend.capacity.Allocations, 1)
 	assert.Len(t, backend.traffic.Admitted, 1)
 	assert.Equal(t, 0, backend.membershipApplyCount())
