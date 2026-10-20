@@ -52,7 +52,6 @@ def set_chart_versions(path: Path, new: str, expect_operator_pin: bool = False) 
             f"expected exactly one dynamo-operator dependency pin in {path}, found {n_dep}"
         )
 
-    # Deliberately no generic indented-version rewrite: dynamo-operator is the
-    # only first-party dep pin, and a keyed catch-all would clobber a foreign
-    # pin that equals the workspace version (nats is pinned 1.3.2).
+    # No generic indented-version rewrite: it would clobber a third-party pin
+    # equal to the workspace version (nats is pinned 1.3.2).
     path.write_text(text)
