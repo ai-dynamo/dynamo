@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Populate approved test model caches
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/approved-test-models.json
+      - .github/scripts/model-cache.py
+      - .github/model-cache-requirements.txt
+      - .github/model-publisher-requirements.txt
+      - .github/workflows/populate-test-model-caches.yml
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: populate-approved-test-models
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'ai-dynamo/dynamo' && github.ref == 'refs/heads/main'
+    runs-on: [model-cache-publisher]
+    timeout-minutes: 360
+    container:
+      image: 210086341041.dkr.ecr.us-west-2.amazonaws.com/dynamo-ci/aws/dynamo/actions-runner/builder:0.2.0
+    steps:
+      # The infrastructure hook admits only this workflow at current main.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - run: |
+          python3 -m venv "$RUNNER_TEMP/model-publisher"
+          "$RUNNER_TEMP/model-publisher/bin/pip" install -r .github/model-publisher-requirements.txt
+      - name: Publish each approved revision into both model stores
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HUB_DISABLE_TELEMETRY: '1'
+        run: |
+          "$RUNNER_TEMP/model-publisher/bin/python" .github/scripts/model-cache.py publish \
+            --bucket dynamo-ci-210086341041-us-west-2-pr-models \
+            --bucket dynamo-ci-210086341041-us-west-2-approved-test-models \
+            --work-dir /models

@@ -102,7 +102,11 @@ fi
 
 # Prefer the shared model cache at /models when this job container can
 # write it; mkdir errors are expected on runners without that mount.
-if mkdir -p /models 2>/dev/null && [[ -w /models ]]; then
+if [[ -n "${MODELS_DIR:-}" ]]; then
+  [[ -d "$MODELS_DIR" ]] || { echo "Model cache directory does not exist" >&2; exit 1; }
+  export HF_HOME="$MODELS_DIR"
+  export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+elif mkdir -p /models 2>/dev/null && [[ -w /models ]]; then
   export HF_HOME=/models
   echo "✅ HF cache available at ${HF_HOME}"
 else
@@ -175,6 +179,9 @@ if [[ "${ENABLE_COVERAGE:-}" == "true" ]]; then
   export PYTHONPATH="${CONTAINER_WORKSPACE}/components/src:${CONTAINER_WORKSPACE}/lib/bindings/python/src${PYTHONPATH:+:${PYTHONPATH}}"
 fi
 
+if [[ -n "${MODELS_DIR:-}" ]]; then
+  pytest_args+=("--models-dir=${MODELS_DIR}")
+fi
 pytest_args+=(-m "${PYTEST_MARKS}")
 
 echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): python -m pytest ${pytest_args[*]}"
