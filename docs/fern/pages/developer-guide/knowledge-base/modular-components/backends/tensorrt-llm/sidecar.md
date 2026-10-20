@@ -30,7 +30,7 @@ for the architecture.
 |---|---|
 | Aggregated | Yes |
 | Disaggregated | Yes |
-| KV routing | Yes, with a compatible OpenEngine server and KVCM2 |
+| KV routing | yes |
 
 ## Launch Locally
 
