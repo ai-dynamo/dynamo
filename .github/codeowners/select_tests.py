@@ -191,10 +191,6 @@ def classify_paths(
         if _matches_any(path, smoke_only):
             classifications[path] = "smoke_only"
             continue
-        if _matches_any(path, shared_full):
-            classifications[path] = "shared_full"
-            globally_full.add(f"shared_full:{path}")
-            continue
 
         framework_matches = {
             framework
@@ -206,6 +202,11 @@ def classify_paths(
             full_frameworks.update(framework_matches)
             for framework in framework_matches:
                 reasons[framework].add(f"framework:{path}")
+            continue
+
+        if _matches_any(path, shared_full):
+            classifications[path] = "shared_full"
+            globally_full.add(f"shared_full:{path}")
             continue
 
         if _is_test_file(path):

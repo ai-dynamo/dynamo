@@ -1547,10 +1547,13 @@ test_selection:
   frameworks:
     vllm:
     - components/src/dynamo/vllm/**
+    - lib/sidecar/vllm/**
     sglang:
     - components/src/dynamo/sglang/**
+    - lib/sidecar/sglang/**
     trtllm:
     - components/src/dynamo/trtllm/**
+    - lib/sidecar/trtllm/**
   features:
     frontend:
       markers: [frontend]
