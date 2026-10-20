@@ -99,7 +99,7 @@ Global Router.
 The agreed first POC places the Global Router in Ohio. Ohio and West use non-overlapping VPC ranges
 `10.42.0.0/16` and `10.43.0.0/16`. Deploy the regional stacks separately with
 `deployment=ohio` and `deployment=west`. The `-c deployment=both` mode then creates only a single
-inter-Region VPC peering connection and private routes in both directions. The peering connection
+inter-Region VPC peering connection and routes in both directions. The peering connection
 and routes do not create public ingress. Public regional ingress addresses are client entry points;
 the Global Router uses a separate private endpoint for each DGD Frontend.
 
@@ -283,10 +283,11 @@ pnpm exec cdk deploy --all -c deployment=both
 
 ### Let the bastions reach the other VPC
 
-The peering routes cover only the private subnets, so a bastion in a public subnet cannot reach
-the other VPC, including the Karmada API load balancer. Add each VPC's public route tables to
-`publicRouteTableIds` in `POC_PEERING_OHIO` and `POC_PEERING_WEST`, then deploy
-`deployment=both` again. Existing private routes keep their logical IDs. To find the IDs:
+Each bastion sits in a public subnet. `publicRouteTableIds` in `POC_PEERING_OHIO` and
+`POC_PEERING_WEST` lists the public subnets' route tables, so `deployment=both` routes them over
+the peering as well, and each bastion can reach the other VPC, including the Karmada API load
+balancer. The private routes keep their logical IDs. If a regional VPC is rebuilt, find its
+public route tables again (the ones with an internet gateway route):
 
 ```bash
 aws ec2 describe-route-tables --region us-east-2 \
@@ -348,8 +349,8 @@ The running clusters have a Karmada control plane that was installed by hand wit
 `karmadactl init`. Helm cannot install over it, and the CDK-managed CRDs take over the ones that
 Karmada propagated. Before deploying `deployment=ohio` with `multiCluster`:
 
-1. Add the public route tables (above) and deploy `deployment=both`, so both bastions reach the
-   Karmada API.
+1. Deploy `deployment=both` to add the public routes (above), so both bastions reach the Karmada
+   API.
 2. On each bastion, remove that cluster's agent. `karmadactl` reads the hub address from the
    agent's own kubeconfig: `karmadactl unregister aws-west --cluster-kubeconfig ~/.kube/config`
    on West, and the same with `aws-ohio` on Ohio.
@@ -391,12 +392,12 @@ pnpm exec cdk synth -c deployment=both
 
 An unknown deployment name fails with the available names. Use `-c deployment=west` for
 us-west-2. After deploying both regional VPC/EKS stacks separately, `deployment=both` synthesizes
-only two network stacks: one owns the peering connection and Ohio private routes, and the other owns
-West private routes. `POC_PEERING_OHIO` and `POC_PEERING_WEST` in `lib/const.ts` pin the VPC and
-private route table IDs from the deployed stacks; refresh them if a regional VPC is rebuilt.
+only two network stacks: one owns the peering connection and Ohio routes, and the other owns
+West routes. `POC_PEERING_OHIO` and `POC_PEERING_WEST` in `lib/const.ts` pin the VPC and
+route table IDs from the deployed stacks; refresh them if a regional VPC is rebuilt.
 Deploy these two stacks with `pnpm exec cdk deploy --all -c deployment=both` after bootstrapping
-both Regions. Each private subnet route table gets a native CloudFormation route to the opposite VPC CIDR. Public
-subnet route tables are not changed. The regional load balancer controller applies security group
+both Regions. Each private and public subnet route table gets a native CloudFormation route to the
+opposite VPC CIDR. The regional load balancer controller applies security group
 ingress from the NLB Service source ranges: West allows the Ohio VPC CIDR, so no broad worker
 ingress rule is added. The private NLB DNS hostname resolves to its private node addresses; VPC
 peering DNS-resolution options for EC2 public hostnames are not needed for that NLB name. Verify DNS

@@ -24,7 +24,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { POC_PEERING_OHIO, POC_PEERING_WEST } from "../lib/const";
 import { addInterRegionPeering } from "../lib/inter-region-peering";
 
-test("both mode creates one Ohio peering connection and private routes both ways", () => {
+test("both mode creates one Ohio peering connection and routes both ways", () => {
   const app = new App();
   addInterRegionPeering(
     app,
@@ -50,8 +50,14 @@ test("both mode creates one Ohio peering connection and private routes both ways
       { Key: "Project", Value: "dynamo-mocker-cpu" },
     ],
   });
-  assertPrivateRoutes(peeringTemplate, "10.43.0.0/16", POC_PEERING_OHIO.privateRouteTableIds);
-  assertPrivateRoutes(westRoutesTemplate, "10.42.0.0/16", POC_PEERING_WEST.privateRouteTableIds);
+  assertPeeringRoutes(peeringTemplate, "10.43.0.0/16", [
+    ...POC_PEERING_OHIO.privateRouteTableIds,
+    ...POC_PEERING_OHIO.publicRouteTableIds,
+  ]);
+  assertPeeringRoutes(westRoutesTemplate, "10.42.0.0/16", [
+    ...POC_PEERING_WEST.privateRouteTableIds,
+    ...POC_PEERING_WEST.publicRouteTableIds,
+  ]);
 });
 
 test("keeps private route IDs and adds public routes only when configured", () => {
@@ -59,7 +65,7 @@ test("keeps private route IDs and adds public routes only when configured", () =
   addInterRegionPeering(
     app,
     { ...POC_PEERING_OHIO, publicRouteTableIds: ["rtb-0hiopublic1", "rtb-0hiopublic2"] },
-    POC_PEERING_WEST,
+    { ...POC_PEERING_WEST, publicRouteTableIds: [] },
     "111111111111",
   );
   const peeringStack = app.node.tryFindChild("OhioWestPeeringRoutes") as Stack;
@@ -101,7 +107,7 @@ test("rejects a route table listed as both private and public", () => {
   );
 });
 
-function assertPrivateRoutes(
+function assertPeeringRoutes(
   template: Template,
   destinationCidr: string,
   expectedRouteTableIds: readonly string[],
