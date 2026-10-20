@@ -175,6 +175,13 @@ They do not use semantic field conversion. Each version instead exposes an
 explicit, complete foreign-version payload under `spec.v1beta1` or
 `spec.v1beta2`, and likewise under `status`.
 
+- Each served version defines carrier-free `DynamoGraphDeploymentRequestNativeSpec`
+  and `DynamoGraphDeploymentRequestNativeStatus` types. The public `Spec` and
+  `Status` types embed those native payloads and add only the opposite-version
+  envelope.
+- Marshal and unmarshal only the carrier-free native types. Never serialize a
+  public outer `Spec` or `Status` into an envelope, because that would permit
+  recursive foreign-version envelopes.
 - Native fields and a foreign-version envelope are mutually exclusive.
 - Conversion unwraps the matching envelope when returning to its native version.
 - Otherwise conversion moves the complete native spec and status into the

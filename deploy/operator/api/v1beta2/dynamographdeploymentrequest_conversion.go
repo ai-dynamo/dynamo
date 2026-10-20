@@ -29,6 +29,14 @@ import (
 
 var _ conversion.Convertible = &DynamoGraphDeploymentRequest{}
 
+// nativePayload excludes public outer types from conversion envelopes at compile time.
+type nativePayload interface {
+	DynamoGraphDeploymentRequestNativeSpec |
+		DynamoGraphDeploymentRequestNativeStatus |
+		v1beta1.DynamoGraphDeploymentRequestNativeSpec |
+		v1beta1.DynamoGraphDeploymentRequestNativeStatus
+}
+
 // ConvertTo converts this v1beta2 spoke to the v1beta1 hub.
 func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error {
 	dst, ok := dstRaw.(*v1beta1.DynamoGraphDeploymentRequest)
@@ -38,7 +46,8 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 	if err := convertPayload(
-		src.Spec, src.Spec.V1Beta1, hasNativeV1Beta2Spec, &dst.Spec,
+		src.Spec.DynamoGraphDeploymentRequestNativeSpec, src.Spec.V1Beta1,
+		&dst.Spec.DynamoGraphDeploymentRequestNativeSpec,
 		func(envelope *apiextensionsv1.JSON) { dst.Spec.V1Beta2 = envelope },
 		"v1beta2", "v1beta1", "spec",
 	); err != nil {
@@ -47,12 +56,13 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 
 	// Empty status has no representation discriminator. Keep it empty instead
 	// of manufacturing an empty JSON envelope after status-subresource reset.
-	if src.Status.V1Beta1 == nil && !hasNativeV1Beta2Status(src.Status) {
+	if src.Status.V1Beta1 == nil && !hasNativeV1Beta2Status(src.Status.DynamoGraphDeploymentRequestNativeStatus) {
 		return nil
 	}
 
 	return convertPayload(
-		src.Status, src.Status.V1Beta1, hasNativeV1Beta2Status, &dst.Status,
+		src.Status.DynamoGraphDeploymentRequestNativeStatus, src.Status.V1Beta1,
+		&dst.Status.DynamoGraphDeploymentRequestNativeStatus,
 		func(envelope *apiextensionsv1.JSON) { dst.Status.V1Beta2 = envelope },
 		"v1beta2", "v1beta1", "status",
 	)
@@ -67,7 +77,8 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 	if err := convertPayload(
-		src.Spec, src.Spec.V1Beta2, hasNativeV1Beta1Spec, &dst.Spec,
+		src.Spec.DynamoGraphDeploymentRequestNativeSpec, src.Spec.V1Beta2,
+		&dst.Spec.DynamoGraphDeploymentRequestNativeSpec,
 		func(envelope *apiextensionsv1.JSON) { dst.Spec.V1Beta1 = envelope },
 		"v1beta1", "v1beta2", "spec",
 	); err != nil {
@@ -76,21 +87,21 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 
 	// Empty status has no representation discriminator. Keep it empty in every
 	// served view and let the spec select the representation for later writes.
-	if src.Status.V1Beta2 == nil && !hasNativeV1Beta1Status(src.Status) {
+	if src.Status.V1Beta2 == nil && !hasNativeV1Beta1Status(src.Status.DynamoGraphDeploymentRequestNativeStatus) {
 		return nil
 	}
 
 	return convertPayload(
-		src.Status, src.Status.V1Beta2, hasNativeV1Beta1Status, &dst.Status,
+		src.Status.DynamoGraphDeploymentRequestNativeStatus, src.Status.V1Beta2,
+		&dst.Status.DynamoGraphDeploymentRequestNativeStatus,
 		func(envelope *apiextensionsv1.JSON) { dst.Status.V1Beta1 = envelope },
 		"v1beta1", "v1beta2", "status",
 	)
 }
 
-func convertPayload[S, D any](
+func convertPayload[S, D nativePayload](
 	src S,
 	foreignEnvelope *apiextensionsv1.JSON,
-	hasNativeFields func(S) bool,
 	dst *D,
 	setNativeEnvelope func(*apiextensionsv1.JSON),
 	srcVersion, foreignVersion, field string,
@@ -117,7 +128,7 @@ func convertPayload[S, D any](
 	return nil
 }
 
-func marshalEnvelope(value any) (*apiextensionsv1.JSON, error) {
+func marshalEnvelope[T nativePayload](value T) (*apiextensionsv1.JSON, error) {
 	// Encode the complete native payload as a public JSON envelope.
 	raw, err := json.Marshal(value)
 	if err != nil {
@@ -126,7 +137,7 @@ func marshalEnvelope(value any) (*apiextensionsv1.JSON, error) {
 	return &apiextensionsv1.JSON{Raw: raw}, nil
 }
 
-func unmarshalEnvelope(envelope *apiextensionsv1.JSON, dst any, field string) error {
+func unmarshalEnvelope[T nativePayload](envelope *apiextensionsv1.JSON, dst *T, field string) error {
 	// Reject envelopes without a JSON payload.
 	if len(envelope.Raw) == 0 {
 		return fmt.Errorf("%s envelope is empty", field)
@@ -139,22 +150,23 @@ func unmarshalEnvelope(envelope *apiextensionsv1.JSON, dst any, field string) er
 	return nil
 }
 
-func hasNativeV1Beta2Spec(spec DynamoGraphDeploymentRequestSpec) bool {
-	spec.V1Beta1 = nil
-	return !reflect.DeepEqual(spec, DynamoGraphDeploymentRequestSpec{})
+func hasNativeFields[T nativePayload](value T) bool {
+	var zero T
+	return !reflect.DeepEqual(value, zero)
 }
 
-func hasNativeV1Beta2Status(status DynamoGraphDeploymentRequestStatus) bool {
-	status.V1Beta1 = nil
-	return !reflect.DeepEqual(status, DynamoGraphDeploymentRequestStatus{})
+func hasNativeV1Beta2Spec(spec DynamoGraphDeploymentRequestNativeSpec) bool {
+	return hasNativeFields(spec)
 }
 
-func hasNativeV1Beta1Spec(spec v1beta1.DynamoGraphDeploymentRequestSpec) bool {
-	spec.V1Beta2 = nil
-	return !reflect.DeepEqual(spec, v1beta1.DynamoGraphDeploymentRequestSpec{})
+func hasNativeV1Beta2Status(status DynamoGraphDeploymentRequestNativeStatus) bool {
+	return hasNativeFields(status)
 }
 
-func hasNativeV1Beta1Status(status v1beta1.DynamoGraphDeploymentRequestStatus) bool {
-	status.V1Beta2 = nil
-	return !reflect.DeepEqual(status, v1beta1.DynamoGraphDeploymentRequestStatus{})
+func hasNativeV1Beta1Spec(spec v1beta1.DynamoGraphDeploymentRequestNativeSpec) bool {
+	return hasNativeFields(spec)
+}
+
+func hasNativeV1Beta1Status(status v1beta1.DynamoGraphDeploymentRequestNativeStatus) bool {
+	return hasNativeFields(status)
 }

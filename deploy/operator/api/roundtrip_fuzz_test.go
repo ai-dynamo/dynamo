@@ -178,12 +178,19 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		func(v *v1beta1.OptimizationType, c randfill.Continue) {
 			*v = oneOf(c, v1beta1.OptimizationTypeLatency, v1beta1.OptimizationTypeThroughput)
 		},
+		fuzzAlphaDGDRNativeSpec,
+		fuzzAlphaDGDRNativeStatus,
 		fuzzAlphaDGDRSpec,
 		fuzzAlphaDGDRStatus,
+		fuzzBetaDGDRNativeSpec,
+		fuzzBetaDGDRNativeStatus,
 		fuzzBetaDGDRSpec,
 		fuzzBetaDGDRStatus,
+		fuzzBeta2DGDRNativeSpec,
+		fuzzBeta2DGDRNativeStatus,
 		fuzzBeta2DGDRSpec,
 		fuzzBeta2DGDRStatus,
+		fuzzAISimulateSpec,
 		fuzzBetaDGDROverrides,
 		// PlacementStatus (v1alpha1 + v1beta1): pick admissible values so the
 		// round-trip fuzzer exercises Placement without producing shapes the CRD
@@ -223,12 +230,17 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 }
 
 func fuzzAlphaDGDRSpec(s *v1alpha1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
-	c.FillNoCustom(s)
+	c.Fill(&s.DynamoGraphDeploymentRequestNativeSpec)
 	s.V1Beta2 = nil
+}
+
+func fuzzAlphaDGDRNativeSpec(s *v1alpha1.DynamoGraphDeploymentRequestNativeSpec, c randfill.Continue) {
+	c.FillNoCustom(s)
 	if s.ProfilingConfig == nil {
 		s.ProfilingConfig = &v1alpha1.ProfilingConfigSpec{}
 	}
 
+	s.Model = fmt.Sprintf("model-%d", c.Uint32())
 	s.Backend = oneOf(c, "auto", "vllm", "sglang", "trtllm")
 
 	// Empty resources do not survive the alpha resources to beta profiling job projection.
@@ -260,8 +272,12 @@ func fuzzAlphaDGDRSpec(s *v1alpha1.DynamoGraphDeploymentRequestSpec, c randfill.
 }
 
 func fuzzAlphaDGDRStatus(s *v1alpha1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
-	c.FillNoCustom(s)
+	c.Fill(&s.DynamoGraphDeploymentRequestNativeStatus)
 	s.V1Beta2 = nil
+}
+
+func fuzzAlphaDGDRNativeStatus(s *v1alpha1.DynamoGraphDeploymentRequestNativeStatus, c randfill.Continue) {
+	c.FillNoCustom(s)
 
 	s.State = oneOf(c,
 		v1alpha1.DGDRStateInitializing,
@@ -275,9 +291,14 @@ func fuzzAlphaDGDRStatus(s *v1alpha1.DynamoGraphDeploymentRequestStatus, c randf
 }
 
 func fuzzBetaDGDRSpec(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
-	c.FillNoCustom(s)
+	c.Fill(&s.DynamoGraphDeploymentRequestNativeSpec)
 	s.V1Beta2 = nil
+}
 
+func fuzzBetaDGDRNativeSpec(s *v1beta1.DynamoGraphDeploymentRequestNativeSpec, c randfill.Continue) {
+	c.FillNoCustom(s)
+
+	s.Model = fmt.Sprintf("model-%d", c.Uint32())
 	s.Backend = oneOf(c, v1beta1.BackendTypeAuto, v1beta1.BackendTypeVllm, v1beta1.BackendTypeSglang, v1beta1.BackendTypeTrtllm)
 
 	if s.Workload != nil && s.SLA == nil && (s.Workload.ISL != nil || s.Workload.OSL != nil) {
@@ -398,8 +419,12 @@ func fuzzDGDRProfilingContainerNames(c randfill.Continue) []string {
 }
 
 func fuzzBetaDGDRStatus(s *v1beta1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
-	c.FillNoCustom(s)
+	c.Fill(&s.DynamoGraphDeploymentRequestNativeStatus)
 	s.V1Beta2 = nil
+}
+
+func fuzzBetaDGDRNativeStatus(s *v1beta1.DynamoGraphDeploymentRequestNativeStatus, c randfill.Continue) {
+	c.FillNoCustom(s)
 
 	s.Phase = oneOf(c, v1beta1.DGDRPhasePending, v1beta1.DGDRPhaseProfiling, v1beta1.DGDRPhaseReady, v1beta1.DGDRPhaseDeploying, v1beta1.DGDRPhaseDeployed, v1beta1.DGDRPhaseFailed)
 
@@ -418,13 +443,65 @@ func fuzzBetaDGDRStatus(s *v1beta1.DynamoGraphDeploymentRequestStatus, c randfil
 }
 
 func fuzzBeta2DGDRSpec(s *v1beta2.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
-	c.FillNoCustom(s)
+	c.Fill(&s.DynamoGraphDeploymentRequestNativeSpec)
 	s.V1Beta1 = nil
 }
 
 func fuzzBeta2DGDRStatus(s *v1beta2.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
-	c.FillNoCustom(s)
+	c.Fill(&s.DynamoGraphDeploymentRequestNativeStatus)
 	s.V1Beta1 = nil
+}
+
+func fuzzBeta2DGDRNativeSpec(s *v1beta2.DynamoGraphDeploymentRequestNativeSpec, c randfill.Continue) {
+	c.FillNoCustom(&s.NativeSearchInput)
+
+	// Keep required model and backend values inside their admitted domains.
+	s.Model = &v1beta2.ModelSpec{Name: fmt.Sprintf("model-%d", c.Uint32())}
+	backendCount := 1 + c.Intn(3)
+	s.Backends = []v1beta2.Backend{v1beta2.BackendVLLM, v1beta2.BackendSGLang, v1beta2.BackendTRTLLM}[:backendCount]
+
+	// Keep the optional candidate bound inside its admitted range.
+	if s.Recommendation != nil {
+		s.Recommendation.MaxCandidates = int32(1 + c.Intn(100))
+	}
+}
+
+func fuzzBeta2DGDRNativeStatus(s *v1beta2.DynamoGraphDeploymentRequestNativeStatus, c randfill.Continue) {
+	c.FillNoCustom(s)
+}
+
+type fuzzAISimulateParameters struct {
+	Search   *fuzzAISimulateSearch   `json:"search,omitempty"`
+	Workload *fuzzAISimulateWorkload `json:"workload,omitempty"`
+}
+
+type fuzzAISimulateSearch struct {
+	MaxTrials int32 `json:"max_trials,omitempty"`
+	StrictSLA bool  `json:"strict_sla,omitempty"`
+}
+
+type fuzzAISimulateWorkload struct {
+	RequestCount int32             `json:"request_count,omitempty"`
+	Custom       map[string]string `json:"custom,omitempty"`
+}
+
+func fuzzAISimulateSpec(s *v1beta2.AISimulateSpec, c randfill.Continue) {
+	c.FillNoCustom(s)
+
+	// Exercise both absent and typed object parameter payloads.
+	if c.Bool() {
+		s.Parameters = nil
+		return
+	}
+
+	// Marshal a typed test input instead of generating arbitrary RawExtension bytes.
+	parameters := &fuzzAISimulateParameters{}
+	c.Fill(parameters)
+	raw, err := json.Marshal(parameters)
+	if err != nil {
+		panic(err)
+	}
+	s.Parameters = &runtime.RawExtension{Raw: raw}
 }
 
 func newRoundTripFiller(seed int64) *randfill.Filler {

@@ -479,12 +479,8 @@ type HardwareSpec struct {
 	RDMA *bool `json:"rdma,omitempty"`
 }
 
-// DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
-// Native v1beta1 fields and the V1Beta2 conversion envelope are mutually exclusive.
-// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) != has(self.model)",message="exactly one of native v1beta1 fields or v1beta2 must be specified"
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.backend) || has(self.image) || has(self.runtimeVersionOverride) || has(self.modelCache) || has(self.hardware) || has(self.workload) || has(self.sla) || has(self.overrides) || has(self.features) || has(self.searchStrategy) || has(self.autoApply))",message="v1beta2 is mutually exclusive with native v1beta1 fields"
-// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) == has(oldSelf.v1beta2)",message="request representation is immutable"
-type DynamoGraphDeploymentRequestSpec struct {
+// DynamoGraphDeploymentRequestNativeSpec contains the native v1beta1 request fields.
+type DynamoGraphDeploymentRequestNativeSpec struct {
 	// Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
 	// Can be a HuggingFace ID or a private model name.
 	// +kubebuilder:validation:MinLength=1
@@ -551,6 +547,15 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +optional
 	// +python-default=true
 	AutoApply *bool `json:"autoApply,omitempty"`
+}
+
+// DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
+// Native v1beta1 fields and the V1Beta2 conversion envelope are mutually exclusive.
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) != has(self.model)",message="exactly one of native v1beta1 fields or v1beta2 must be specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.backend) || has(self.image) || has(self.runtimeVersionOverride) || has(self.modelCache) || has(self.hardware) || has(self.workload) || has(self.sla) || has(self.overrides) || has(self.features) || has(self.searchStrategy) || has(self.autoApply))",message="v1beta2 is mutually exclusive with native v1beta1 fields"
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) == has(oldSelf.v1beta2)",message="request representation is immutable"
+type DynamoGraphDeploymentRequestSpec struct {
+	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`
 
 	// V1Beta2 losslessly preserves a native v1beta2 spec while this object is
 	// represented through v1beta1. It is mutually exclusive with native fields.
@@ -597,9 +602,8 @@ type DeploymentInfoStatus struct {
 	AvailableReplicas *int32 `json:"availableReplicas,omitempty"`
 }
 
-// DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.phase) || has(self.profilingPhase) || has(self.dgdName) || has(self.profilingJobName) || has(self.conditions) || has(self.profilingResults) || has(self.deploymentInfo) || has(self.observedGeneration))",message="v1beta2 is mutually exclusive with native v1beta1 status fields"
-type DynamoGraphDeploymentRequestStatus struct {
+// DynamoGraphDeploymentRequestNativeStatus contains the native v1beta1 status fields.
+type DynamoGraphDeploymentRequestNativeStatus struct {
 	// Phase is the high-level lifecycle phase of the deployment request.
 	// +optional
 	Phase DGDRPhase `json:"phase,omitempty"`
@@ -637,6 +641,12 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// ObservedGeneration is the most recent generation observed by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+}
+
+// DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.phase) || has(self.profilingPhase) || has(self.dgdName) || has(self.profilingJobName) || has(self.conditions) || has(self.profilingResults) || has(self.deploymentInfo) || has(self.observedGeneration))",message="v1beta2 is mutually exclusive with native v1beta1 status fields"
+type DynamoGraphDeploymentRequestStatus struct {
+	DynamoGraphDeploymentRequestNativeStatus `json:",inline"`
 
 	// V1Beta2 losslessly preserves a native v1beta2 status while this object is
 	// represented through v1beta1.

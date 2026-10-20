@@ -64,7 +64,8 @@ func TestV1Beta1RoundTripUsesEnvelope(t *testing.T) {
 	if spoke.Spec.V1Beta1 == nil || spoke.Status.V1Beta1 == nil {
 		t.Fatal("ConvertFrom() did not create complete v1beta1 envelopes")
 	}
-	if hasNativeV1Beta2Spec(spoke.Spec) || hasNativeV1Beta2Status(spoke.Status) {
+	if hasNativeV1Beta2Spec(spoke.Spec.DynamoGraphDeploymentRequestNativeSpec) ||
+		hasNativeV1Beta2Status(spoke.Status.DynamoGraphDeploymentRequestNativeStatus) {
 		t.Fatal("converted object contains native v1beta2 fields alongside envelopes")
 	}
 
@@ -133,7 +134,8 @@ func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 	if hub.Spec.V1Beta2 == nil || hub.Status.V1Beta2 == nil {
 		t.Fatal("ConvertTo() did not create complete v1beta2 envelopes")
 	}
-	if hasNativeV1Beta1Spec(hub.Spec) || hasNativeV1Beta1Status(hub.Status) {
+	if hasNativeV1Beta1Spec(hub.Spec.DynamoGraphDeploymentRequestNativeSpec) ||
+		hasNativeV1Beta1Status(hub.Status.DynamoGraphDeploymentRequestNativeStatus) {
 		t.Fatal("converted object contains native v1beta1 fields alongside envelopes")
 	}
 
@@ -323,14 +325,18 @@ func TestNativeV1Beta2SpecFields(t *testing.T) {
 		t.Fatalf("native search input fields = %v, want %v", gotNative, wantNative)
 	}
 
-	t.Log("Verify only Request wraps native input with conversion state.")
+	t.Log("Verify Request separates native input from conversion state.")
+	nativeSpecType := reflect.TypeOf(DynamoGraphDeploymentRequestNativeSpec{})
+	if nativeSpecType.NumField() != 1 || nativeSpecType.Field(0).Name != "NativeSearchInput" {
+		t.Fatalf("native request spec does not exclusively embed native search input: %v", nativeSpecType)
+	}
 	requestType := reflect.TypeOf(DynamoGraphDeploymentRequestSpec{})
 	gotRequest := make([]string, requestType.NumField())
 	for i := range requestType.NumField() {
 		gotRequest[i] = requestType.Field(i).Name
 	}
 	wantRequest := []string{
-		"NativeSearchInput",
+		"DynamoGraphDeploymentRequestNativeSpec",
 		"V1Beta1",
 	}
 	if !reflect.DeepEqual(gotRequest, wantRequest) {
@@ -341,8 +347,8 @@ func TestNativeV1Beta2SpecFields(t *testing.T) {
 		t.Fatalf("run spec exposes request-only fields: %v", runType)
 	}
 
-	t.Log("Verify every native field is recognized and the envelope itself is not.")
-	tests := map[string]DynamoGraphDeploymentRequestSpec{
+	t.Log("Verify every native field is recognized and an empty native payload is not.")
+	tests := map[string]DynamoGraphDeploymentRequestNativeSpec{
 		"model":          {NativeSearchInput: NativeSearchInput{Model: &ModelSpec{}}},
 		"backends":       {NativeSearchInput: NativeSearchInput{Backends: []Backend{BackendVLLM}}},
 		"hardware":       {NativeSearchInput: NativeSearchInput{Hardware: &HardwareSpec{}}},
@@ -358,13 +364,8 @@ func TestNativeV1Beta2SpecFields(t *testing.T) {
 			}
 		})
 	}
-	if hasNativeV1Beta2Spec(DynamoGraphDeploymentRequestSpec{}) {
+	if hasNativeV1Beta2Spec(DynamoGraphDeploymentRequestNativeSpec{}) {
 		t.Fatal("empty spec was recognized as native v1beta2 data")
-	}
-	if hasNativeV1Beta2Spec(DynamoGraphDeploymentRequestSpec{
-		V1Beta1: &apiextensionsv1.JSON{Raw: []byte(`{}`)},
-	}) {
-		t.Fatal("v1beta1 envelope was recognized as native v1beta2 data")
 	}
 }
 

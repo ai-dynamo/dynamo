@@ -252,13 +252,18 @@ type NativeSearchInput struct {
 	Recommendation *RecommendationSpec `json:"recommendation,omitempty"`
 }
 
+// DynamoGraphDeploymentRequestNativeSpec contains the native v1beta2 request fields.
+type DynamoGraphDeploymentRequestNativeSpec struct {
+	NativeSearchInput `json:",inline"`
+}
+
 // DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
 // Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) != has(self.model)",message="exactly one of native v1beta2 fields or v1beta1 must be specified"
 // +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) == has(oldSelf.v1beta1)",message="request representation is immutable"
 type DynamoGraphDeploymentRequestSpec struct {
-	NativeSearchInput `json:",inline"`
+	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`
 
 	// V1Beta1 losslessly preserves a native v1beta1 spec while this object is
 	// represented through v1beta2. It is mutually exclusive with native fields.
@@ -268,9 +273,8 @@ type DynamoGraphDeploymentRequestSpec struct {
 	V1Beta1 *apiextensionsv1.JSON `json:"v1beta1,omitempty"`
 }
 
-// DynamoGraphDeploymentRequestStatus represents reconciliation of persistent search intent.
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.observedGeneration) || has(self.activeRunRef) || has(self.recentRunRefs) || has(self.conditions))",message="v1beta1 is mutually exclusive with native v1beta2 status fields"
-type DynamoGraphDeploymentRequestStatus struct {
+// DynamoGraphDeploymentRequestNativeStatus contains the native v1beta2 status fields.
+type DynamoGraphDeploymentRequestNativeStatus struct {
 	// ObservedGeneration is the most recent DGDR generation accepted by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -288,6 +292,12 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// DynamoGraphDeploymentRequestStatus represents reconciliation of persistent search intent.
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.observedGeneration) || has(self.activeRunRef) || has(self.recentRunRefs) || has(self.conditions))",message="v1beta1 is mutually exclusive with native v1beta2 status fields"
+type DynamoGraphDeploymentRequestStatus struct {
+	DynamoGraphDeploymentRequestNativeStatus `json:",inline"`
 
 	// V1Beta1 losslessly preserves a native v1beta1 status while this object is
 	// represented through v1beta2.

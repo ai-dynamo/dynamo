@@ -216,8 +216,18 @@ func (ops v1Beta2SpokeEnvelopeMutationOps) mutateCarrier(carrier *v1beta2.Dynamo
 	patch := &v1beta1.DynamoGraphDeploymentRequest{}
 	ops.f.Fill(patch)
 	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
-	mutateJSONEnvelope(ops.t, carrier.Spec.V1Beta1, &v1beta1.DynamoGraphDeploymentRequestSpec{}, &patch.Spec)
-	mutateJSONEnvelope(ops.t, carrier.Status.V1Beta1, &v1beta1.DynamoGraphDeploymentRequestStatus{}, &patch.Status)
+	mutateJSONEnvelope(
+		ops.t,
+		carrier.Spec.V1Beta1,
+		&v1beta1.DynamoGraphDeploymentRequestNativeSpec{},
+		&patch.Spec.DynamoGraphDeploymentRequestNativeSpec,
+	)
+	mutateJSONEnvelope(
+		ops.t,
+		carrier.Status.V1Beta1,
+		&v1beta1.DynamoGraphDeploymentRequestNativeStatus{},
+		&patch.Status.DynamoGraphDeploymentRequestNativeStatus,
+	)
 }
 
 func (v1Beta2SpokeEnvelopeMutationOps) convertAway(
@@ -250,8 +260,18 @@ func (ops v1Beta1HubEnvelopeMutationOps) mutateCarrier(carrier *v1beta1.DynamoGr
 	patch := &v1beta2.DynamoGraphDeploymentRequest{}
 	ops.f.Fill(patch)
 	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
-	mutateJSONEnvelope(ops.t, carrier.Spec.V1Beta2, &v1beta2.DynamoGraphDeploymentRequestSpec{}, &patch.Spec)
-	mutateJSONEnvelope(ops.t, carrier.Status.V1Beta2, &v1beta2.DynamoGraphDeploymentRequestStatus{}, &patch.Status)
+	mutateJSONEnvelope(
+		ops.t,
+		carrier.Spec.V1Beta2,
+		&v1beta2.DynamoGraphDeploymentRequestNativeSpec{},
+		&patch.Spec.DynamoGraphDeploymentRequestNativeSpec,
+	)
+	mutateJSONEnvelope(
+		ops.t,
+		carrier.Status.V1Beta2,
+		&v1beta2.DynamoGraphDeploymentRequestNativeStatus{},
+		&patch.Status.DynamoGraphDeploymentRequestNativeStatus,
+	)
 }
 
 func (v1Beta1HubEnvelopeMutationOps) convertAway(
