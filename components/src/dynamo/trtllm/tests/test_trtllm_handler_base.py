@@ -14,6 +14,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from dynamo.llm.exceptions import InvalidArgument
+
 if not torch.cuda.is_available():
     pytest.skip(
         "Skipping to avoid errors during collection with '-m gpu_0'. "
@@ -27,7 +29,7 @@ from tensorrt_llm.llmapi.llm import SamplingParams
 from dynamo.common.backend.logprobs import extract_from_completion_output
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
-from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
+from dynamo.trtllm.health_check import HEALTH_CHECK_CACHE_SALT, TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.request_handlers.handler_base import (
     BYPASS_REMOTE_PREFILL_ANNOTATION,
@@ -209,6 +211,31 @@ class TestOverrideSamplingParams:
             HandlerBase._override_sampling_params(sampling_params, request)
 
         mock_post_init.assert_called_once()
+
+
+class TestNormalizeRequestFormat:
+    def test_moves_openai_stop_fields_without_overwriting_internal_values(self):
+        request = {
+            "max_tokens": 64,
+            "min_tokens": 32,
+            "ignore_eos": True,
+            "temperature": 0.5,
+            "stop_conditions": {"min_tokens": 16},
+            "sampling_options": {"temperature": 0.25},
+        }
+
+        HandlerBase._normalize_request_format(request)
+
+        assert request["stop_conditions"] == {
+            "max_tokens": 64,
+            "min_tokens": 16,
+            "ignore_eos": True,
+        }
+        assert "max_tokens" not in request
+        assert "min_tokens" not in request
+        assert "ignore_eos" not in request
+        assert request["sampling_options"] == {"temperature": 0.25}
+        assert "temperature" not in request
 
 
 class TestGuidedDecodingFromToolChoice:
@@ -404,6 +431,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         # Make generation_result iterable (background task will try to read it)
         generation_result.__aiter__ = MagicMock(return_value=generation_result)
         never_resolve = asyncio.get_event_loop().create_future()
@@ -421,6 +449,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         guard = _DeferredAbort(generation_result)
 
         guard.signal_first_token()
@@ -435,6 +464,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         result_queue = asyncio.Queue()
 
         async def mock_anext(self_mock):
@@ -458,10 +488,48 @@ class TestDeferredAbortGuard:
         generation_result.abort.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_deferred_task_skips_abort_when_first_result_finishes(
+        self, monkeypatch
+    ):
+        from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
+
+        generation_result = MagicMock()
+        generation_result.finished = False
+        result_queue = asyncio.Queue()
+
+        async def mock_anext(self_mock):
+            val = await result_queue.get()
+            generation_result.finished = True
+            return val
+
+        generation_result.__aiter__ = MagicMock(return_value=generation_result)
+        generation_result.__anext__ = lambda self: mock_anext(self)
+
+        original_create_task = asyncio.create_task
+        deferred_tasks = []
+
+        def track_deferred_task(coro):
+            task = original_create_task(coro)
+            deferred_tasks.append(task)
+            return task
+
+        monkeypatch.setattr(asyncio, "create_task", track_deferred_task)
+
+        guard = _DeferredAbort(generation_result)
+        guard.abort()
+
+        await result_queue.put("only_token")
+        await deferred_tasks[0]
+
+        generation_result.abort.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_no_guard_in_non_disagg_mode(self):
         """Without _DeferredAbort wrapper, abort fires immediately on cancel."""
         handler = self._make_handler()
         generation_result = MagicMock()
+        generation_result.finished = False
         context = MagicMock()
         killed_future = asyncio.get_event_loop().create_future()
         killed_future.set_result(None)
@@ -473,12 +541,27 @@ class TestDeferredAbortGuard:
         generation_result.abort.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_finished_request_is_not_aborted(self):
+        handler = self._make_handler()
+        generation_result = MagicMock()
+        generation_result.finished = True
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-finished"
+
+        await handler._handle_cancellation(generation_result, context)
+        generation_result.abort.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_cancellation_monitor_cleans_up_waiters_on_normal_completion(
         self, monkeypatch
     ):
         handler = self._make_handler()
         handler.shutdown_event = asyncio.Event()
         generation_result = MagicMock()
+        generation_result.finished = False
         context = MagicMock()
         killed_future = asyncio.get_event_loop().create_future()
         context.async_killed_or_stopped.return_value = killed_future
@@ -514,6 +597,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         guard = _DeferredAbort(generation_result)
 
         context = MagicMock()
@@ -572,7 +656,9 @@ class TestMultimodalGuard:
         handler = self._make_handler(multimodal_processor=None)
         request = request_factory(self.IMAGE_MESSAGE)
 
-        with pytest.raises(RuntimeError, match="--modality multimodal"):
+        # InvalidArgument, not RuntimeError: the type is what makes the
+        # frontend answer 4xx instead of 500.
+        with pytest.raises(InvalidArgument, match="--modality multimodal"):
             await self._prepare(handler, request)
 
     @pytest.mark.asyncio
@@ -817,7 +903,9 @@ class TestGenerateLocally:
             prompt_logprobs = []
         return self._make_mock_generation_result_sequence([prompt_logprobs])
 
-    def _make_mock_generation_result_sequence(self, prompt_logprobs_per_chunk):
+    def _make_mock_generation_result_sequence(
+        self, prompt_logprobs_per_chunk, cached_tokens=mock.sentinel.unset
+    ):
         """Mock GenerationResult with cumulative output across streaming chunks."""
         results = []
         last_index = len(prompt_logprobs_per_chunk) - 1
@@ -832,6 +920,8 @@ class TestGenerateLocally:
             res = MagicMock()
             res.outputs = [output]
             res.finished = index == last_index
+            if cached_tokens is not mock.sentinel.unset:
+                res.cached_tokens = cached_tokens
             results.append(res)
 
         generation_result = MagicMock()
@@ -851,6 +941,73 @@ class TestGenerateLocally:
         context.async_killed_or_stopped.return_value = never_resolve
         context.id.return_value = "test-priority"
         return context
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("mode", "request_type", "multimodal", "cached_tokens", "expected"),
+        [
+            (
+                DisaggregationMode.AGGREGATED,
+                None,
+                False,
+                2,
+                {"prompt_tokens": 3, "reused_tokens": 2},
+            ),
+            (
+                DisaggregationMode.PREFILL,
+                "context_only",
+                False,
+                1,
+                {"prompt_tokens": 3, "reused_tokens": 1},
+            ),
+            (DisaggregationMode.DECODE, "generation_only", False, 3, None),
+            (DisaggregationMode.AGGREGATED, None, True, 2, None),
+            (DisaggregationMode.AGGREGATED, None, False, None, None),
+        ],
+        ids=[
+            "aggregated",
+            "prefill",
+            "generation-only",
+            "multimodal",
+            "missing-counter",
+        ],
+    )
+    async def test_final_chunk_reports_context_attempt_cache_reuse(
+        self, mode, request_type, multimodal, cached_tokens, expected
+    ):
+        handler = self._make_handler()
+        handler.disaggregation_mode = mode
+        if multimodal:
+            # The multimodal processor hands the engine a prompt dict whose
+            # cached count covers expanded image tokens.
+            handler._prepare_input_for_generation = mock.AsyncMock(
+                return_value={"prompt_token_ids": [1, 2, 3], "multi_modal_data": {}}
+            )
+        params = (
+            None
+            if request_type is None
+            else SimpleNamespace(request_type=request_type, disagg_request_id=None)
+        )
+        handler._setup_disaggregated_params_for_mode = MagicMock(
+            return_value=(params, None, {})
+        )
+        handler._encode_and_pack_disaggregated_params = MagicMock(return_value=None)
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result_sequence(
+                [[]], cached_tokens=cached_tokens
+            )
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks[-1].get("engine_data", {}).get("kv_cache_hit") == expected
 
     @pytest.mark.asyncio
     async def test_health_check_gets_priority_1(self):
@@ -1210,6 +1367,29 @@ class TestGenerateLocally:
         assert kwargs["cache_salt"] == "tenant-a"
 
     @pytest.mark.asyncio
+    async def test_health_check_gets_dedicated_cache_salt(self):
+        """Keep the default canary out of the attention-DP dummy's cache namespace."""
+        handler = self._make_handler()
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        # An unsalted canary of [1] collides with TRT-LLM's attention-DP dummy
+        # request prefix, so the canary must use its own salt.
+        request = TrtllmHealthCheckPayload(
+            disaggregation_mode=DisaggregationMode.AGGREGATED,
+        ).to_dict()
+        assert request["token_ids"] == [1]
+
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+        assert len(chunks) > 0
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["cache_salt"] == HEALTH_CHECK_CACHE_SALT
+
+    @pytest.mark.asyncio
     async def test_prefill_applies_stop_conditions_matching_native_context_only(self):
         # PREFILL forces max_tokens=1 (asserted separately below) but must
         # otherwise apply the full stop conditions, matching native TRT-LLM
@@ -1260,11 +1440,8 @@ class TestGenerateLocally:
         assert kwargs["streaming"] is False
 
     @pytest.mark.asyncio
-    async def test_prefill_does_not_force_ignore_eos_when_not_requested(self):
-        # Negative case: a request that doesn't ask to ignore EOS or expose a
-        # visible stop token must not have ignore_eos forced on during
-        # prefill. min_tokens and the hidden stop token are still preserved,
-        # same as the positive case -- only ignore_eos differs here.
+    @pytest.mark.parametrize("no_stop_trim", [False, True])
+    async def test_prefill_stop_consumption_respects_no_stop_trim(self, no_stop_trim):
         handler = self._make_handler()
         handler.disaggregation_mode = DisaggregationMode.PREFILL
         handler.disagg_machine_id = 0
@@ -1287,6 +1464,7 @@ class TestGenerateLocally:
                 "stop_token_ids_hidden": [100],
             },
             "sampling_options": {},
+            "output_options": {"no_stop_trim": no_stop_trim},
         }
 
         chunks = [
@@ -1299,7 +1477,7 @@ class TestGenerateLocally:
         sampling_params = kwargs["sampling_params"]
         assert sampling_params.max_tokens == 1
         assert sampling_params.min_tokens == 8
-        assert sampling_params.ignore_eos is False
+        assert sampling_params.ignore_eos is no_stop_trim
         assert set(sampling_params.stop_token_ids) == {100, 300}
         assert kwargs["streaming"] is False
 
@@ -1415,7 +1593,6 @@ class TestRequestHasImages:
 
 
 class _FakeConversationParams:
-
     """Stand-in for tensorrt_llm.llmapi.ConversationParams. Only ``conversation_id``
     is read back by the assertions."""
 

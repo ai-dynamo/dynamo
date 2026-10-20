@@ -9,32 +9,74 @@ operator binary, exercise Grove, or change worker discovery namespaces by hand.
 
 import asyncio
 import json
+import os
 import re
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 
 import pytest
 
-from scripts.compatibility.rolling_contract import (
+from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
+from tests.deploy.n2.rolling_contract import (
+    Cleanup,
+    PodTracker,
     check_budget,
     check_requests,
+    command,
     converged,
     pod_record,
     request_count,
 )
-from scripts.compatibility.runner import check, command, matrix
-from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
-from tests.utils.test_output import resolve_test_output_path
+from tests.deploy.n2.rolling_http import check
+from tests.deploy.n2_utils import (
+    DEFAULT_RELEASE_LINE,
+    MODELS,
+    runtime_version,
+    version_matrix,
+)
+from tests.utils.output_paths import resolve_test_output_path
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 async def kubectl(namespace, *args, timeout=120):
     return await asyncio.to_thread(
-        command, "kubectl", "--request-timeout=30s", "-n", namespace, *args, timeout=120
+        command,
+        "kubectl",
+        "--request-timeout=30s",
+        "-n",
+        namespace,
+        *args,
+        timeout=timeout,
     )
+
+
+async def watch_pods(api, namespace, name, resource_version, tracker, output):
+    from kubernetes_asyncio.watch import Watch
+
+    # Reconnect from the last event RV. A 410 or transport error fails the case;
+    # relisting would lose the transition history used to prove overlap.
+    while True:
+        async with Watch() as watcher:
+            async for event in watcher.stream(
+                api.list_namespaced_pod,
+                namespace=namespace,
+                label_selector=f"nvidia.com/dynamo-graph-deployment-name={name}",
+                resource_version=resource_version,
+                timeout_seconds=30,
+                _request_timeout=60,
+            ):
+                pod = event["raw_object"]
+                resource_version = pod["metadata"]["resourceVersion"]
+                with (output / "pod-events.jsonl").open("a") as stream:
+                    stream.write(
+                        json.dumps({"type": event["type"], "object": pod}) + "\n"
+                    )
+                if event["type"] != "BOOKMARK":
+                    tracker.apply(event["type"], pod_record(pod))
 
 
 def manifest(name, old, scenario, model, client_image):
@@ -80,25 +122,40 @@ def manifest(name, old, scenario, model, client_image):
             "command": args,
             "workingDir": "/tmp",
             "env": [
-                {"name": "HF_HUB_OFFLINE", "value": "1"},
-                {"name": "TRANSFORMERS_OFFLINE", "value": "1"},
                 {"name": "DYN_REQUEST_PLANE", "value": "tcp"},
-                {"name": "DYN_SYSTEM_PORT", "value": "8081"},
                 # Active canaries would contaminate request-counter evidence.
                 {"name": "DYN_HEALTH_CHECK_ENABLED", "value": "false"},
             ],
-            "volumeMounts": [{"name": "model", "mountPath": "/model"}],
         }
+        pod_spec = {"containers": [container]}
         if kind == "worker":
+            container["env"] += [
+                {"name": "HF_HUB_OFFLINE", "value": "1"},
+                {"name": "TRANSFORMERS_OFFLINE", "value": "1"},
+            ]
+            container["volumeMounts"] = [{"name": "model", "mountPath": "/model"}]
             container["resources"] = {
                 "requests": {"nvidia.com/gpu": "1"},
                 "limits": {"nvidia.com/gpu": "1"},
             }
+            pod_spec.update(
+                initContainers=[
+                    {
+                        "name": "model",
+                        "image": client_image,
+                        "command": ["python3", "-c", download],
+                        "envFrom": [{"secretRef": {"name": "hf-token-secret"}}],
+                        "volumeMounts": [{"name": "model", "mountPath": "/model"}],
+                    }
+                ],
+                volumes=[{"name": "model", "emptyDir": {}}],
+            )
         components.append(
             {
                 "name": role,
                 "type": kind,
                 "replicas": 2,
+                "runtimeVersionOverride": runtime_version(image),
                 "podTemplate": {
                     "metadata": {
                         "annotations": {
@@ -106,21 +163,7 @@ def manifest(name, old, scenario, model, client_image):
                             "nvidia.com/deployment-rolling-update-max-unavailable": "1",
                         }
                     },
-                    "spec": {
-                        "containers": [container],
-                        "initContainers": [
-                            {
-                                "name": "model",
-                                "image": client_image,
-                                "command": ["python3", "-c", download],
-                                "envFrom": [{"secretRef": {"name": "hf-token-secret"}}],
-                                "volumeMounts": [
-                                    {"name": "model", "mountPath": "/model"}
-                                ],
-                            }
-                        ],
-                        "volumes": [{"name": "model", "emptyDir": {}}],
-                    },
+                    "spec": pod_spec,
                 },
             }
         )
@@ -141,6 +184,7 @@ def manifest(name, old, scenario, model, client_image):
 @pytest.mark.k8s
 @pytest.mark.deploy
 @pytest.mark.sglang
+@pytest.mark.framework_agnostic
 @pytest.mark.core
 @pytest.mark.post_merge
 @pytest.mark.e2e
@@ -159,26 +203,31 @@ async def test_n2_rolling_upgrade(request, tmp_path, age, scenario, first):
         "Pass --frontend-image and --image with candidate images",
     )
     namespace = request.config.getoption("--namespace") or "default"
-    config = json.loads((ROOT / "scripts/compatibility/releases.json").read_text())
+    releases = json.loads((ROOT / "tests/deploy/n2/releases.json").read_text())
+    line = os.environ.get("N2_RELEASE_LINE") or DEFAULT_RELEASE_LINE
+    model = {"id": MODELS[scenario][0], "revision": MODELS[scenario][1]}
     version = re.search(
         r'^version = "(\d+\.\d+\.\d+)', (ROOT / "Cargo.toml").read_text(), re.M
     )[1]
-    pairs = matrix(config["releases"], version.rsplit(".", 1)[0], frontend, worker)
-    old = {"frontend": pairs[2 * age - 1][1], "worker": pairs[2 * age][2]}
+    pairs = {
+        pair.name: pair for pair in version_matrix(releases, line, frontend, worker)
+    }
+    old = {
+        "frontend": pairs[f"old-frontend-{age}"].frontend,
+        "worker": pairs[f"old-worker-{age}"].worker,
+    }
     name = "n2-" + uuid.uuid4().hex[:10]
     output = Path(resolve_test_output_path(name))
     output.mkdir(parents=True, exist_ok=True)
     source = tmp_path / "dgd.json"
-    source.write_text(
-        json.dumps(manifest(name, old, scenario, config["models"][scenario], worker))
-    )
+    source.write_text(json.dumps(manifest(name, old, scenario, model, worker)))
     (output / "initial-dgd.json").write_text(source.read_text())
-    spec = DeploymentSpec(str(source), system_port=8081)
+    spec = DeploymentSpec(str(source))
     candidates = {"Frontend": frontend, "decode": worker}
     report = {
         "old": old,
         "candidate": candidates,
-        "model": config["models"][scenario],
+        "model": model,
         "order": first,
         "status": "failed",
         "stages": [],
@@ -187,7 +236,6 @@ async def test_n2_rolling_upgrade(request, tmp_path, age, scenario, first):
     quota_name = name + "-budget"
     config_name = name + "-client-code"
     resources = tmp_path / "resources.json"
-    model = config["models"][scenario]
     resources.write_text(
         json.dumps(
             {
@@ -205,8 +253,8 @@ async def test_n2_rolling_upgrade(request, tmp_path, age, scenario, first):
                         "kind": "ConfigMap",
                         "metadata": {"name": config_name},
                         "data": {
-                            p: (ROOT / "scripts/compatibility" / p).read_text()
-                            for p in ("runner.py", "rolling_client.py")
+                            p: (ROOT / "tests/deploy/n2" / p).read_text()
+                            for p in ("rolling_http.py", "rolling_client.py")
                         },
                     },
                 ],
@@ -240,8 +288,8 @@ async def test_n2_rolling_upgrade(request, tmp_path, age, scenario, first):
             )
         )
 
-    async def observe():
-        raw = json.loads(
+    async def list_pods():
+        return json.loads(
             await kubectl(
                 namespace,
                 "get",
@@ -252,6 +300,10 @@ async def test_n2_rolling_upgrade(request, tmp_path, age, scenario, first):
                 "json",
             )
         )
+
+    async def observe(raw=None):
+        if raw is None:
+            raw = await list_pods()
         pods = [pod_record(p) for p in raw["items"]]
         with (output / "pods.jsonl").open("a") as f:
             f.write(json.dumps({"time": time.time(), "pods": pods}) + "\n")
@@ -274,7 +326,7 @@ async def test_n2_rolling_upgrade(request, tmp_path, age, scenario, first):
 
     async def counters(pods):
         endpoints = {
-            p["uid"]: f"http://{p['ip']}:8081/metrics"
+            p["uid"]: f"http://{p['ip']}:9090/metrics"
             for p in pods
             if p["component"] == "decode" and p["ready"] and p["ip"]
         }
@@ -318,7 +370,9 @@ print(json.dumps(result))
             await asyncio.sleep(2)
         raise TimeoutError(f"Insufficient successful traffic during {phase}")
 
+    cleanup = Cleanup()
     client_created = False
+    managed = None
     client_stopped = False
 
     async def stop_client():
@@ -336,13 +390,14 @@ print(json.dumps(result))
 
     try:
         await kubectl(namespace, "apply", "-f", str(resources))
-        async with ManagedDeployment(
+        managed = ManagedDeployment(
             log_dir=name,
             deployment_spec=spec,
             namespace=namespace,
             skip_service_restart=True,
             readiness_timeout=1800,
-        ) as deployment:
+        )
+        async with managed as deployment:
             pods = await observe()
             for role in candidates:
                 check(
@@ -407,40 +462,52 @@ print(json.dumps(result))
                 await hold("before")
                 phases = ["before"]
                 for role in [first, "Frontend" if first == "decode" else "decode"]:
-                    before = await observe()
+                    baseline = await list_pods()
+                    before = await observe(baseline)
                     old_uids = {p["uid"] for p in before if p["component"] == role}
                     initial_counts = await counters(before) if role == "decode" else {}
                     observed_counts = dict(initial_counts)
                     phase = "upgrade-" + role.lower()
                     phases.append(phase)
                     await control(phase)
-                    await deployment.update_component_images(
-                        {role: candidates[role]}, version
-                    )
-                    deadline = time.monotonic() + 1200
-                    overlap = False
-                    while time.monotonic() < deadline:
-                        pods = await observe()
-                        ready = [
-                            p for p in pods if p["component"] == role and p["ready"]
-                        ]
-                        overlap |= any(p["uid"] in old_uids for p in ready) and any(
-                            p["uid"] not in old_uids for p in ready
+                    tracker = PodTracker(before, old_uids, role, candidates[role])
+                    async with asyncio.TaskGroup() as tasks:
+                        watching = tasks.create_task(
+                            watch_pods(
+                                deployment._core_api,
+                                namespace,
+                                name,
+                                baseline["metadata"]["resourceVersion"],
+                                tracker,
+                                output,
+                            )
                         )
-                        if role == "decode":
-                            observed_counts.update(await counters(pods))
-                        current = await summary()
-                        check(
-                            current.get("failures", 0) == 0,
-                            "Request failed during image rollout",
+                        await asyncio.sleep(0)
+                        await deployment.update_component_images(
+                            {role: candidates[role]}, version
                         )
-                        if converged(pods, role, candidates[role], old_uids):
-                            break
-                        await asyncio.sleep(2)
-                    else:
-                        raise TimeoutError(
-                            f"{role} did not converge to candidate in 1200s"
-                        )
+                        deadline = time.monotonic() + 1200
+                        while time.monotonic() < deadline:
+                            if watching.done():
+                                await watching
+                            await observe()
+                            pods = list(tracker.pods.values())
+                            if role == "decode":
+                                observed_counts.update(await counters(pods))
+                            current = await summary()
+                            check(
+                                current.get("failures", 0) == 0,
+                                "Request failed during image rollout",
+                            )
+                            if converged(pods, role, candidates[role], old_uids):
+                                break
+                            await asyncio.sleep(2)
+                        else:
+                            raise TimeoutError(
+                                f"{role} did not converge to candidate in 1200s"
+                            )
+                        watching.cancel()
+                    overlap = tracker.ready_overlap_seen
                     report["stages"].append(
                         {
                             "component": role,
@@ -485,48 +552,82 @@ print(json.dumps(result))
                 report["status"] = "passed"
             finally:
                 if not client_stopped:
-                    await stop_client()
-                    client_stopped = True
+                    try:
+                        await cleanup.attempt("stop client", stop_client)
+                    finally:
+                        client_stopped = True
 
     finally:
-        try:
-            if client_created:
+        primary_failure = sys.exc_info()[0] is not None
+        if client_created:
+
+            async def save_client_logs():
                 logs = await kubectl(namespace, "logs", client_name)
                 (output / "client.jsonl").write_text(logs)
-        finally:
-            (output / "report.json").write_text(json.dumps(report, indent=2))
-            await kubectl(
-                namespace,
-                "delete",
-                "pod",
-                client_name,
-                "--ignore-not-found",
-                "--wait=true",
-                "--timeout=120s",
+
+            await cleanup.attempt("client logs", save_client_logs)
+        if managed is not None:
+            cleanup.errors.extend(managed.cleanup_errors)
+        operations = [
+            (
+                "delete client",
+                (
+                    "delete",
+                    "pod",
+                    client_name,
+                    "--ignore-not-found",
+                    "--wait=true",
+                    "--timeout=120s",
+                ),
+                150,
+            ),
+            (
+                "delete deployment",
+                (
+                    "delete",
+                    "dynamographdeployment",
+                    name,
+                    "--ignore-not-found",
+                    "--cascade=foreground",
+                    "--wait=true",
+                    "--timeout=300s",
+                ),
+                330,
+            ),
+            (
+                "delete remaining pods",
+                (
+                    "delete",
+                    "pods",
+                    "-l",
+                    f"nvidia.com/dynamo-graph-deployment-name={name}",
+                    "--ignore-not-found",
+                    "--wait=true",
+                    "--timeout=180s",
+                ),
+                210,
+            ),
+            (
+                "delete quota and config",
+                ("delete", "-f", str(resources), "--ignore-not-found"),
+                120,
+            ),
+        ]
+        for label, args, timeout in operations:
+            await cleanup.attempt(
+                label,
+                lambda args=args, timeout=timeout: kubectl(
+                    namespace, *args, timeout=timeout
+                ),
             )
-            await kubectl(
-                namespace,
-                "delete",
-                "dynamographdeployment",
-                name,
-                "--ignore-not-found",
-                "--cascade=foreground",
-                "--wait=true",
-                "--timeout=300s",
-                timeout=330,
+        report["cleanup_errors"] = [str(error) for error in cleanup.errors]
+        if cleanup.errors:
+            request.session.shouldstop = (
+                "Rolling-upgrade cleanup failed; resource isolation is not established"
             )
-            # Wait for GPU Pods to be gone before the next parameterized path.
-            await kubectl(
-                namespace,
-                "delete",
-                "pods",
-                "-l",
-                f"nvidia.com/dynamo-graph-deployment-name={name}",
-                "--ignore-not-found",
-                "--wait=true",
-                "--timeout=180s",
-                timeout=210,
+            (output / "cleanup-errors.txt").write_text(
+                "\n".join(report["cleanup_errors"])
             )
-            await kubectl(
-                namespace, "delete", "-f", str(resources), "--ignore-not-found"
-            )
+            report["status"] = "failed"
+        (output / "report.json").write_text(json.dumps(report, indent=2))
+        cleanup.finish(primary_failure)

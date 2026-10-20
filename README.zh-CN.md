@@ -113,7 +113,7 @@ limitations under the License.
 
 ```bash
 # 拉取预构建容器（SGLang 示例）
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
 
 # 在容器内启动 frontend 和 worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -127,7 +127,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-另有 [`tensorrtllm-runtime:1.4.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) 和 [`vllm-runtime:1.4.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) 可用。
+另有 [`tensorrtllm-runtime:1.5.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) 和 [`vllm-runtime:1.5.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) 可用。
 
 ### 选项 B：从 PyPI 安装
 
@@ -198,7 +198,7 @@ Dynamo 采用 OSS 优先的开放开发模式。我们欢迎各种形式的贡�
 - **[贡献指南](docs/fern/pages/community/contributing/overview.md)** — 如何贡献代码、文档和配方
 - **[设计提案](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** — 重大功能的 RFC，以带 `dep:*` 标签的 GitHub issue 形式跟踪
 - **[Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)** — 双周会议
-- **[社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view)** ([Youtube](https://www.youtube.com/@ai-dynamo-community)) – 每周（Wed 10:30 AM PT）开发者社区会议
+- **[社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view)** ([Youtube](https://www.youtube.com/@ai-dynamo-community)) – 每周（Tue 9:00 AM PT）开发者社区会议
 - **[Discord](https://discord.gg/D92uqZRjCZ)** — 与团队和社区交流
 - **[Dynamo Day 录像](https://nvevents.nvidia.com/dynamoday)** — 来自生产用户的深入分享
 

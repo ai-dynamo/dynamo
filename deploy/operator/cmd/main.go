@@ -66,6 +66,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -125,6 +126,8 @@ func initCRDSchemes() {
 	// PodSnapshot/PodSnapshotContent are owned by github.com/ai-dynamo/snapshot; the
 	// operator only consumes them (creates/reads), it does not reconcile them.
 	utilruntime.Must(snapshotv1alpha1.AddToScheme(crdScheme))
+
+	utilruntime.Must(lpxv1alpha1.AddToScheme(crdScheme))
 
 	utilruntime.Must(apiextensionsv1.AddToScheme(crdScheme))
 
@@ -251,7 +254,6 @@ func main() {
 	}
 
 	restrictedNamespace := operatorCfg.Namespace.Restricted
-	isClusterWide := restrictedNamespace == ""
 	if restrictedNamespace != "" {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
@@ -506,31 +508,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS secrets.
-	// Auto mode patches admission and, for cluster-wide operators, conversion CAs.
-	// Manual mode patches only cluster-wide conversion CAs; admission stays out-of-band.
 	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create CA bundle injector")
 		os.Exit(1)
 	}
-	if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-		if isClusterWide {
-			err = caInjector.InjectAll(mainCtx)
-		} else {
-			err = caInjector.InjectAdmission(mainCtx)
-		}
-		if err != nil {
-			setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
-			os.Exit(1)
-		}
-	} else if isClusterWide {
-		// Manual mode gets webhook CA material out-of-band. Missing ca.crt
-		// blocks startup instead of running with unauthenticated conversion.
-		if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
-			setupLog.Error(err, "failed to inject CRD conversion CA bundle")
-			os.Exit(1)
-		}
+	if err := caInjector.Inject(mainCtx); err != nil {
+		setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
+		os.Exit(1)
 	}
 
 	// mgr.Start reads tls.crt and tls.key from the projected Secret volume

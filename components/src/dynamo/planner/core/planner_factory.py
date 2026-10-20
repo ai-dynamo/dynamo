@@ -85,6 +85,7 @@ def construct_environment(
             backend=config.backend,
             model_name=config.model_name,
             runtime=runtime,
+            max_fpm_age_seconds=3.0 * config.load_adjustment_interval_seconds,
         )
         connector = construct_connector(
             config,
@@ -117,6 +118,7 @@ def construct_environment(
                 backend=config.backend,
                 model_name=config.model_name,
                 runtime=runtime,
+                max_fpm_age_seconds=3.0 * config.load_adjustment_interval_seconds,
                 state_source=environment,
                 namespace_source=namespace_binding,
             )

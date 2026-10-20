@@ -6,9 +6,28 @@
 import argparse
 import os
 import re
+import warnings
+from dataclasses import dataclass
 from typing import Any, Callable, Optional, TypeVar, Union
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class Deprecated:
+    """Opt-in CLI/env deprecation; declare the replacement and removal release once."""
+
+    replacement: str
+    remove_in: str
+
+    def message(self, name: str) -> str:
+        return (
+            f"{name} is deprecated and will be removed in {self.remove_in}; "
+            f"use {self.replacement}."
+        )
+
+    def warn(self, name: str) -> None:
+        warnings.warn(self.message(name), FutureWarning, stacklevel=3)
 
 
 def parse_bool(value: str) -> bool:
@@ -109,6 +128,7 @@ def add_argument(
     obsolete_flag: Optional[str] = None,
     arg_type: Optional[Union[type, Callable[..., Any]]] = str,
     env_value_type: Optional[Union[type, Callable[..., Any]]] = None,
+    deprecated: Optional[Deprecated] = None,
     **kwargs: Any,
 ) -> None:
     """
@@ -126,6 +146,7 @@ def add_argument(
         choices: Optional list of valid values for the argument.
         arg_type: Type for the argument (default: str)
         env_value_type: Optional parser used only for the environment value
+        deprecated: Warn on explicit CLI/env use and show the migration in help.
     """
     arg_dest = _get_dest_name(flag_name, kwargs.get("dest"))
     value_type_for_env = env_value_type
@@ -141,7 +162,11 @@ def add_argument(
         # Accept obsolete flag as an alias (still show deprecation note in help)
         names.append(obsolete_flag)
 
-    env_help = _build_help_message(help, env_var, default, obsolete_flag)
+    env_help = (
+        argparse.SUPPRESS
+        if help == argparse.SUPPRESS
+        else _build_help_message(help, env_var, default, obsolete_flag)
+    )
 
     add_arg_opts = {
         "dest": arg_dest,
@@ -152,6 +177,25 @@ def add_argument(
         add_arg_opts["type"] = arg_type
     kwargs.update(add_arg_opts)
 
+    if deprecated is not None:
+        if env_var in os.environ:
+            deprecated.warn(env_var)
+        if help != argparse.SUPPRESS:
+            kwargs["help"] = deprecated.message(flag_name) + " " + env_help
+        # Resolve registered actions as argparse does, preserving boolean negative
+        # forms, aliases, append/count actions, and custom action behavior.
+        action = kwargs.get("action", "store")
+        action_type = parser._registry_get("action", action, action)
+        warn = deprecated.warn
+
+        def warn_and_call(self, parser, namespace, values, option_string=None):
+            warn(option_string or self.dest)
+            action_type.__call__(self, parser, namespace, values, option_string)
+
+        kwargs["action"] = type(
+            "DeprecatedAction", (action_type,), {"__call__": warn_and_call}
+        )
+
     parser.add_argument(*names, **kwargs)
 
 
@@ -160,11 +204,12 @@ def add_negatable_bool_argument(
     *,
     flag_name: str,
     env_var: str,
-    default: bool,
+    default: Optional[bool],
     help: str,
     dest: Optional[str] = None,
     obsolete_flag: Optional[str] = None,
     env_value_type: Optional[Callable[..., bool]] = None,
+    deprecated: Optional[Deprecated] = None,
 ) -> None:
     """
     Add negatable boolean flag (--foo / --no-foo).
@@ -173,7 +218,7 @@ def add_negatable_bool_argument(
         parser: ArgumentParser or argument group
         flag_name: Primary flag (must start with '--', e.g. "--enable-feature")
         env_var: Environment variable name (e.g., "DYN_ENABLE_FEATURE")
-        default: Default value
+        default: Default value. Use None when an omitted flag must remain unset.
         help: Help text
         dest: Optional destination name for the parsed value
         obsolete_flag: Optional obsolete/legacy flag (for help msg only, must start with '--')
@@ -190,6 +235,7 @@ def add_negatable_bool_argument(
         arg_type=None,
         env_value_type=env_value_type,
         action=argparse.BooleanOptionalAction,
+        deprecated=deprecated,
     )
 
 

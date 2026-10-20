@@ -2,12 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from unittest.mock import AsyncMock
+import re
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 from kubernetes_asyncio.client.exceptions import ApiException
 
+from tests.deploy import test_n2_rolling_upgrade as suite
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
+from tests.deploy.n2.rolling_contract import Cleanup, require_executed_cases
+from tests.deploy.n2.rolling_http import ContractError
 from tests.deploy.test_n2_rolling_upgrade import manifest
 
 pytestmark = [
@@ -49,7 +57,22 @@ def test_manifest_enforces_fixed_capacity_without_changing_discovery(tmp_path):
         assert any(
             e == {"name": "DYN_HEALTH_CHECK_ENABLED", "value": "false"} for e in env
         )
-    worker = components[1]["podTemplate"]["spec"]["containers"][0]
+    frontend_spec = components[0]["podTemplate"]["spec"]
+    frontend = frontend_spec["containers"][0]
+    assert "initContainers" not in frontend_spec
+    assert "volumes" not in frontend_spec
+    assert "volumeMounts" not in frontend
+    assert all(
+        e["name"] not in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "DYN_SYSTEM_PORT")
+        for e in frontend["env"]
+    )
+    worker_spec = components[1]["podTemplate"]["spec"]
+    assert worker_spec["initContainers"][0]["name"] == "model"
+    assert worker_spec["volumes"] == [{"name": "model", "emptyDir": {}}]
+    assert all(c["runtimeVersionOverride"] == "1.4.2" for c in components)
+    worker = worker_spec["containers"][0]
+    assert not any(e["name"] == "DYN_SYSTEM_PORT" for e in worker["env"])
+    assert worker["volumeMounts"] == [{"name": "model", "mountPath": "/model"}]
     assert worker["resources"]["limits"]["nvidia.com/gpu"] == "1"
     assert "--embedding-worker" in worker["command"]
 
@@ -89,3 +112,116 @@ async def test_rejected_patch_does_not_update_local_spec(tmp_path):
     with pytest.raises(ApiException):
         await managed.update_component_images({"decode": "new"}, "1.5.0")
     assert managed.deployment_spec["decode"].image == "worker:1.4.2"
+
+
+@pytest.mark.parametrize("timeout", [None, 330])
+async def test_kubectl_honors_default_and_explicit_timeout(timeout):
+    with patch.object(suite, "command", return_value="") as command:
+        await suite.kubectl(
+            "ns", "get", "pods", **({} if timeout is None else {"timeout": timeout})
+        )
+    assert command.call_args.kwargs["timeout"] == (120 if timeout is None else timeout)
+
+
+@pytest.mark.parametrize("primary_failure", [False, True])
+async def test_cleanup_preserves_primary_error_and_runs_remaining_operations(
+    primary_failure,
+):
+    cleanup = Cleanup()
+    completed = []
+
+    async def failed_delete():
+        raise subprocess.TimeoutExpired("kubectl delete", 330)
+
+    async def next_delete():
+        completed.append("remaining resources")
+
+    with pytest.raises(ContractError if primary_failure else ExceptionGroup):
+        try:
+            if primary_failure:
+                raise ContractError("request failed")
+        finally:
+            active_failure = sys.exc_info()[0] is not None
+            await cleanup.attempt("delete deployment", failed_delete)
+            await cleanup.attempt("delete quota", next_delete)
+            cleanup.finish(active_failure)
+    assert completed == ["remaining resources"]
+    assert len(cleanup.errors) == 1
+    assert "delete deployment" in str(cleanup.errors[0])
+    assert isinstance(cleanup.errors[0].__cause__, subprocess.TimeoutExpired)
+
+
+@pytest.mark.parametrize(
+    "count,skipped", [(0, False), (7, False), (8, True), (8, False)]
+)
+def test_execution_guard_rejects_missing_incomplete_or_skipped_cases(
+    tmp_path, count, skipped
+):
+    root = ET.Element("testsuites")
+    for index in range(count):
+        case = ET.SubElement(root, "testcase", name=f"test_n2_rolling_upgrade[{index}]")
+        if skipped:
+            ET.SubElement(case, "skipped")
+    path = tmp_path / "junit.xml"
+    ET.ElementTree(root).write(path)
+    if count == 8 and not skipped:
+        require_executed_cases([path])
+    else:
+        with pytest.raises(ContractError):
+            require_executed_cases([path])
+
+
+@pytest.mark.parametrize("change", ["sglang", "core", "frontend"])
+def test_rolling_pr_lane_builds_all_required_candidate_images(change):
+    workflow = yaml.safe_load((suite.ROOT / ".github/workflows/pr.yaml").read_text())
+    outcomes = {}
+    for name in (
+        "operator",
+        "frontend-build",
+        "sglang-build",
+        "frontend-copy-to-acr",
+        "sglang-copy-to-acr",
+        "rolling-upgrade-compatibility",
+    ):
+        condition = workflow["jobs"][name]["if"]
+        condition = re.sub(
+            r"needs\.changed-files\.outputs\.(\w+) == 'true'",
+            lambda match: str(match[1] in (change, "run_deploy_tests")),
+            condition,
+        )
+        condition = re.sub(
+            r"needs\.([\w-]+)\.result == 'success'",
+            lambda match: str(outcomes.get(match[1], False)),
+            condition,
+        )
+        condition = (
+            condition.replace("always()", "True")
+            .replace("!cancelled()", "True")
+            .replace("&&", " and ")
+            .replace("||", " or ")
+        )
+        outcomes[name] = eval(" ".join(condition.split()), {"__builtins__": {}})
+    assert all(outcomes.values()), outcomes
+
+
+async def test_watch_resumes_from_last_resource_version_and_fails_on_expired_history(
+    tmp_path,
+):
+    versions = []
+
+    async def events(*args, **kwargs):
+        versions.append(kwargs["resource_version"])
+        if len(versions) == 2:
+            raise ApiException(status=410, reason="expired history")
+        yield {
+            "type": "BOOKMARK",
+            "raw_object": {"metadata": {"resourceVersion": "102"}},
+        }
+
+    with patch("kubernetes_asyncio.watch.Watch") as watch:
+        watcher = watch.return_value.__aenter__.return_value
+        watcher.stream = MagicMock(side_effect=events)
+        with pytest.raises(ApiException) as error:
+            await suite.watch_pods(AsyncMock(), "ns", "dgd", "100", None, tmp_path)
+    assert error.value.status == 410
+    assert versions == ["100", "102"]

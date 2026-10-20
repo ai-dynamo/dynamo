@@ -6,11 +6,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -18,11 +19,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
 )
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams, merge_kwargs
@@ -33,10 +29,24 @@ from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
+from dynamo.frontend.vllm_protocol import DeltaFunctionCall, DeltaMessage, DeltaToolCall
 from dynamo.llm.exceptions import InvalidArgument
 
+from .structural_tag_policy import (
+    ToolChoiceKind,
+    effective_tool_strict,
+    should_attempt_structural_tag,
+)
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import legacy_guided_decoding
+
+get_model_structural_tag: Any
+try:
+    from vllm.tool_parsers import structural_tag_registry
+except ImportError:  # Older supported vLLM releases do not expose this registry.
+    get_model_structural_tag = None
+else:
+    get_model_structural_tag = structural_tag_registry.get_model_structural_tag
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -69,8 +79,33 @@ class PreprocessResult:
     uses_dynamo_json_tool_call_fallback: bool = False
 
 
-_ASYNC_TOKENIZER_POOL: dict[int, Callable[..., Awaitable[Any]]] = {}
+# One executor per live tokenizer. The id-keyed registry stores only a weak
+# reference to the tokenizer, and every lookup verifies object identity. This
+# avoids both id reuse and WeakKeyDictionary's referent-based equality.
+_ASYNC_TOKENIZER_EXECUTORS: dict[
+    int, tuple[weakref.ReferenceType[TokenizerLike], ThreadPoolExecutor]
+] = {}
+# Fallback for tokenizers that do not support weak references; retains
+# entries for the process lifetime (the previous behavior for all tokenizers).
+# The tokenizer is stored alongside its executor so its id() cannot be
+# recycled by a different tokenizer while the entry lives.
+_STRONG_ASYNC_TOKENIZER_EXECUTORS: dict[
+    int, tuple[TokenizerLike, ThreadPoolExecutor]
+] = {}
 SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
+
+
+def _evict_async_tokenizer_executor(
+    key: int,
+    executor: ThreadPoolExecutor,
+    tokenizer_ref: weakref.ReferenceType[TokenizerLike],
+) -> None:
+    entry = _ASYNC_TOKENIZER_EXECUTORS.get(key)
+    if entry is not None and entry[0] is tokenizer_ref:
+        del _ASYNC_TOKENIZER_EXECUTORS[key]
+    # The tokenizer's last reference may be released by this executor's own
+    # worker, so shutdown must not try to join the current thread.
+    executor.shutdown(wait=False)
 
 
 def _reject_non_finite_json(value: str) -> Any:
@@ -182,21 +217,32 @@ def _should_build_tool_call_guidance(
     # enforced guarantee. sglang_prepost.py has the same gap.
     if tool_choice == "none":
         return False
-    if _is_forced_tool_choice(tool_choice):
-        return True
-    if structural_tag_mode != "on":
-        return False
-    if tool_choice != "auto":
-        return False
-    if structural_tag_scope == "always":
-        return True
     # An explicit single-call request is enough to attempt structural-tag
     # guidance. Forced-choice JSON guidance also bounds its array schema below.
     explicit_single_call = (
         "parallel_tool_calls" in request.model_fields_set
         and request.parallel_tool_calls is False
     )
-    return explicit_single_call or any(_tool_is_strict(tool) for tool in request.tools)
+    tool_choice_kind: ToolChoiceKind = (
+        "required"
+        if tool_choice == "required"
+        else "named"
+        if _is_named_tool_choice(tool_choice)
+        else "auto"
+        if tool_choice == "auto"
+        else "other"
+    )
+    attempt_structural_tag = should_attempt_structural_tag(
+        mode=structural_tag_mode,
+        scope=structural_tag_scope,
+        tool_choice_kind=tool_choice_kind,
+        has_tools=True,
+        any_explicit_strict=any(_tool_is_strict(tool) for tool in request.tools),
+        parallel_tool_calls_explicitly_false=explicit_single_call,
+    )
+    # Forced choices retain the generic JSON fallback when structural tags are
+    # disabled or unavailable.
+    return attempt_structural_tag or _is_forced_tool_choice(tool_choice)
 
 
 def _request_for_vllm_structural_tag(
@@ -204,13 +250,14 @@ def _request_for_vllm_structural_tag(
     *,
     structural_tag_schema: str,
 ) -> ChatCompletionRequest:
-    strict_schema = structural_tag_schema == "strict"
     tools = [
         tool.model_copy(
             update={
                 "function": tool.function.model_copy(
                     update={
-                        "strict": True if strict_schema else tool.function.strict,
+                        "strict": effective_tool_strict(
+                            tool.function.strict, structural_tag_schema
+                        ),
                     }
                 )
             }
@@ -228,8 +275,15 @@ def build_tool_call_guided_decoding(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    starts_in_reasoning: bool = False,
 ) -> dict[str, Any] | None:
-    """Build tool-call guidance through vLLM's configured tool parser."""
+    """Build tool-call guidance through vLLM's configured tool parser.
+
+    ``starts_in_reasoning`` is true when generation begins inside a reasoning
+    block the prompt opened and the engine does not hold the grammar back until
+    that block ends. The structural tag must then accept the reasoning text and
+    its end marker before the tool-call section.
+    """
     if not _should_build_tool_call_guidance(
         request,
         structural_tag_mode=structural_tag_mode,
@@ -242,7 +296,43 @@ def build_tool_call_guided_decoding(
             request,
             structural_tag_schema=structural_tag_schema,
         )
-        structural_tag = tool_parser.get_structural_tag(request_for_tag)
+        try:
+            structural_tag_model = getattr(tool_parser, "structural_tag_model", None)
+            structural_tag_kwargs = {}
+            if structural_tag_model == "hy_v4" and get_model_structural_tag is not None:
+                # HYV4's parser detects checkpoint-specific tokens at construction.
+                # Keep its suffix while Dynamo owns activation of the registry path.
+                structural_tag_kwargs["token_suffix"] = getattr(
+                    tool_parser, "_extractor"
+                ).token_suffix
+            structural_tag = (
+                get_model_structural_tag(
+                    model=structural_tag_model,
+                    tools=request_for_tag.tools,
+                    tool_choice=request_for_tag.tool_choice,
+                    reasoning=starts_in_reasoning,
+                    **structural_tag_kwargs,
+                )
+                if structural_tag_model is not None
+                and get_model_structural_tag is not None
+                # Older parser hooks may not take ``reasoning``; keep their
+                # call unchanged unless the reasoning prefix is needed.
+                else tool_parser.get_structural_tag(request_for_tag, reasoning=True)
+                if starts_in_reasoning
+                else tool_parser.get_structural_tag(request_for_tag)
+            )
+        except (
+            AttributeError,
+            KeyError,
+            NotImplementedError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            # Parser implementations are third-party capability providers. A
+            # failed structural-tag build must preserve the pre-existing JSON
+            # or unconstrained compatibility path for the request.
+            structural_tag = None
         if structural_tag is not None:
             tag_value = (
                 structural_tag.model_dump()
@@ -275,6 +365,7 @@ def build_tool_call_guided_decoding(
                 return {"regex": r"\{\}"}
             if (
                 request.parallel_tool_calls is False
+                and tool_choice == "required"
                 and json_schema.get("type") == "array"
             ):
                 json_schema["maxItems"] = 1
@@ -331,14 +422,30 @@ def _build_assistant_guided_decoding(
 
 
 def _get_async_tokenizer(tokenizer: TokenizerLike) -> Callable[..., Awaitable[Any]]:
-    key = id(tokenizer)
-    async_tokenizer = _ASYNC_TOKENIZER_POOL.get(key)
-    if async_tokenizer is None:
-        async_tokenizer = make_async(
-            tokenizer, executor=ThreadPoolExecutor(max_workers=1)
-        )
-        _ASYNC_TOKENIZER_POOL[key] = async_tokenizer
-    return async_tokenizer
+    try:
+        tokenizer_ref = weakref.ref(tokenizer)
+    except TypeError:
+        # Tokenizer does not support weak references.
+        key = id(tokenizer)
+        entry = _STRONG_ASYNC_TOKENIZER_EXECUTORS.get(key)
+        if entry is None:
+            executor = ThreadPoolExecutor(max_workers=1)
+            _STRONG_ASYNC_TOKENIZER_EXECUTORS[key] = (tokenizer, executor)
+        else:
+            executor = entry[1]
+    else:
+        key = id(tokenizer)
+        entry = _ASYNC_TOKENIZER_EXECUTORS.get(key)
+        if entry is None or entry[0]() is not tokenizer:
+            executor = ThreadPoolExecutor(max_workers=1)
+            tokenizer_ref = weakref.ref(
+                tokenizer,
+                partial(_evict_async_tokenizer_executor, key, executor),
+            )
+            _ASYNC_TOKENIZER_EXECUTORS[key] = (tokenizer_ref, executor)
+        else:
+            executor = entry[1]
+    return make_async(tokenizer, executor=executor)
 
 
 def _materialize_assistant_tool_calls(
@@ -421,6 +528,44 @@ def _reasoning_parser_enabled(
     return reasoning_parser_class is not None and (
         chat_template_kwargs.get("enable_thinking") is not False
     )
+
+
+# Enough trailing prompt tokens to contain any reasoning opener.
+_REASONING_START_TAIL_TOKENS = 16
+
+
+def _prompt_leaves_reasoning_open(
+    prompt_token_ids: Sequence[int],
+    *,
+    tokenizer: TokenizerLike,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    chat_template_kwargs: dict[str, Any],
+    model_config: ModelConfig | None,
+) -> bool:
+    """Whether the rendered prompt ends with an opened reasoning block.
+
+    Mirrors ``prompt_injected_reasoning_start`` in the Rust preprocessor: the
+    prompt (trailing whitespace ignored) must end with the reasoning parser's
+    opening marker. A prompt without that marker, e.g. for models that emit
+    their own opener, does not start in reasoning.
+    """
+    if not prompt_token_ids or not _reasoning_parser_enabled(
+        reasoning_parser_class, chat_template_kwargs
+    ):
+        return False
+    parser = reasoning_parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    start = getattr(parser, "reasoning_start_str", None)
+    if not isinstance(start, str) or not start:
+        return False
+    tail = tokenizer.decode(
+        list(prompt_token_ids[-_REASONING_START_TAIL_TOKENS:]),
+        skip_special_tokens=False,
+    )
+    return tail.rstrip().endswith(start)
 
 
 def _prepare_request(
@@ -601,6 +746,7 @@ async def preprocess_chat_request(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    structural_tag_excludes_reasoning: bool = False,
 ) -> PreprocessResult:
     validated_request = _validate_chat_completion_request(request)
     assistant_guided_decoding = _build_assistant_guided_decoding(validated_request)
@@ -654,6 +800,21 @@ async def preprocess_chat_request(
         and adjusted_structured_guidance != client_structured_guidance
         else None
     )
+    # Render first: whether generation starts inside a reasoning block depends
+    # on the rendered prompt (e.g. a template that ends the generation prompt
+    # with an open think tag), and the tool-call grammar must match it.
+    _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
+
+    if "prompt_token_ids" in engine_prompt:
+        tokens = list(engine_prompt["prompt_token_ids"])
+    else:
+        async_tokenizer = _get_async_tokenizer(tokenizer)
+        encoded = await async_tokenizer(
+            engine_prompt["prompt"],
+            add_special_tokens=request_for_sampling.add_special_tokens,
+        )
+        tokens = list(encoded.input_ids)
+
     tool_guided_decoding = build_tool_call_guided_decoding(
         request_for_sampling,
         tool_parser,
@@ -661,6 +822,19 @@ async def preprocess_chat_request(
         structural_tag_mode=structural_tag_mode,
         structural_tag_scope=structural_tag_scope,
         structural_tag_schema=structural_tag_schema,
+        starts_in_reasoning=(
+            structural_tag_mode == "on"
+            and tool_parser is not None
+            and bool(request_for_sampling.tools)
+            and not structural_tag_excludes_reasoning
+            and _prompt_leaves_reasoning_open(
+                tokens,
+                tokenizer=tokenizer,
+                reasoning_parser_class=reasoning_parser_class,
+                chat_template_kwargs=chat_template_kwargs,
+                model_config=model_config,
+            )
+        ),
     )
     # A forced tool choice already claims the decoder's single grammar slot, so a
     # caller-set guided_*/structured_outputs constraint over the same token stream
@@ -731,18 +905,6 @@ async def preprocess_chat_request(
         and isinstance(tool_guided_decoding, dict)
         and ("json" in tool_guided_decoding or "regex" in tool_guided_decoding)
     )
-
-    _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
-
-    if "prompt_token_ids" in engine_prompt:
-        tokens = list(engine_prompt["prompt_token_ids"])
-    else:
-        async_tokenizer = _get_async_tokenizer(tokenizer)
-        encoded = await async_tokenizer(
-            engine_prompt["prompt"],
-            add_special_tokens=request_for_sampling.add_special_tokens,
-        )
-        tokens = list(encoded.input_ids)
 
     return PreprocessResult(
         request_for_sampling=request_for_sampling,
@@ -1331,13 +1493,11 @@ class StreamingPostProcessor:
         # ------------------------------------------------------------------
         if self._tool_text_buffer is not None:
             self._tool_text_buffer += delta_text
-            buffer_complete = (
-                any(
-                    marker in self._tool_text_buffer
-                    for marker in self._tool_end_markers()
-                )
-            ) or output.finish_reason
-            if buffer_complete:
+            # Parse once at the end: with multi-token steps (e.g. MTP) a chunk
+            # can close one call and open the next, and splitting the response
+            # between this parse and the streaming parser drops or re-indexes
+            # the later calls.
+            if output.finish_reason:
                 buffered_text = self._tool_text_buffer
                 self._tool_text_buffer = None
                 delta_message = self._extract_tool_calls_from_text(buffered_text)

@@ -189,7 +189,7 @@ impl<T: 'static> Drop for DemandDrivenOwner<T> {
 
         // Python can release the stream outside Tokio. Keep the final Arc alive
         // until the PyO3 runtime drops it so nested router guards can spawn cleanup.
-        drop(pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+        drop(crate::bridge_runtime().spawn(async move {
             drop(state);
         }));
     }
@@ -218,7 +218,7 @@ impl DemandDrivenResponseStream {
     #[pyo3(name = "__anext__")]
     fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let source = self.source.state();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             loop {
                 let response = source
                     .next()
@@ -239,7 +239,7 @@ pub(super) fn process_request_to_stream<'p>(
     request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
     tracker: Option<Arc<RequestTracker>>,
 ) -> PyResult<Bound<'p, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::future_into_py(py, async move {
         let single_in = SingleIn::new(request);
         let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
         // Zero capacity is genuinely demand-driven only for direct Python

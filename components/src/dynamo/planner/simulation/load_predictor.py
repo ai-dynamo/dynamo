@@ -5,13 +5,15 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from statistics import mean
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
 
 from tqdm import tqdm  # type: ignore[import-untyped]
 
+from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.offline.trace_data import (
     extract_metrics_from_mooncake,
     extract_metrics_from_trace_paths,
@@ -19,8 +21,11 @@ from dynamo.planner.offline.trace_data import (
 
 from .presets import throughput_intervals
 
-if TYPE_CHECKING:
-    from dynamo.planner.config.planner_config import PlannerConfig
+logger = logging.getLogger(__name__)
+
+# Exception classes a predictor is allowed to raise from predict_next(); mirrors
+# BuiltinLoadPredict._predict_load, which logs them and yields no forecast.
+_PREDICTOR_ERRORS = (ArithmeticError, IndexError, RuntimeError, TypeError, ValueError)
 
 LOAD_PREDICTOR_PRESETS: dict[str, dict[str, Any]] = {
     "constant_last": {"family": "constant", "log1p": False},
@@ -81,11 +86,14 @@ LOAD_PREDICTOR_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 _DEFAULTS = {
-    "prophet_window_size": 50,
-    "q_level": 1.0,
-    "q_trend": 0.1,
-    "r": 10.0,
-    "min_points": 5,
+    name: PlannerConfig.model_fields[field].default
+    for name, field in {
+        "prophet_window_size": "prophet_window_size",
+        "q_level": "kalman_q_level",
+        "q_trend": "kalman_q_trend",
+        "r": "kalman_r",
+        "min_points": "kalman_min_points",
+    }.items()
 }
 _DEFAULT_PRESET = "constant_last"
 _VALID_FAMILIES = frozenset(
@@ -262,6 +270,11 @@ def window_loss(
 ) -> float:
     """Compute the existing weighted one-step-ahead forecast loss."""
 
+    # Clamp forecasts before forming the token products: two negative
+    # forecasts would otherwise multiply into a positive product that the
+    # clamp inside _error() never sees, scoring a doubly-wrong forecast
+    # better than a singly-wrong one.
+    n_hat, i_hat, o_hat = max(n_hat, 0.0), max(i_hat, 0.0), max(o_hat, 0.0)
     return (
         0.4 * _error(n_hat * i_hat, num_req * isl)
         + 0.4 * _error(n_hat * o_hat, num_req * osl)
@@ -313,12 +326,18 @@ def evaluate_preset(
                 isl_predictor.predict_next(),
                 osl_predictor.predict_next(),
             )
-        except Exception:
-            n_hat, i_hat, o_hat = (
-                request_predictor.get_last_value(),
-                isl_predictor.get_last_value(),
-                osl_predictor.get_last_value(),
+        except _PREDICTOR_ERRORS as exc:
+            # In production this predictor would yield no forecast for the
+            # interval, so it must not be scored as if it had forecast the
+            # last value (ConstantPredictor's behaviour). Disqualify it;
+            # to_state() renders the inf loss as null.
+            logger.warning(
+                "load-predictor preset %s failed at window %d: %r; scoring as inf",
+                preset,
+                index,
+                exc,
             )
+            return math.inf
         if index >= warmup:
             losses.append(
                 window_loss(

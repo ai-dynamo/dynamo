@@ -26,15 +26,17 @@ pub mod generate;
 pub mod images;
 pub mod models;
 pub mod pooling;
+pub mod rerank;
 pub mod responses;
 pub mod stream_aggregator;
+mod strict_schema;
 pub mod tools;
 pub mod validate;
 pub mod videos;
 
 use validate::{
-    BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
-    TEMPERATURE_RANGE, validate_range, validate_top_p,
+    BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MAX_STOP_SEQUENCES, MIN_P_RANGE, N_RANGE,
+    PRESENCE_PENALTY_RANGE, TEMPERATURE_RANGE, validate_range, validate_top_p,
 };
 
 /// Key under `extra_args` where media handlers nest a request's captured
@@ -118,9 +120,13 @@ pub(crate) trait OpenAIStopConditionsProvider {
     }
 
     /// Get max_thinking_tokens from nvext
-    /// NOTE: This is currently a passthrough for future thinking budget implementation
+    /// NOTE: This is a legacy passthrough; prefer root-level `thinking_token_budget`.
     fn get_max_thinking_tokens(&self) -> Option<u32> {
         self.nvext().and_then(|nv| nv.max_thinking_tokens)
+    }
+
+    fn get_thinking_token_budget(&self) -> Option<u32> {
+        None
     }
 }
 
@@ -134,6 +140,10 @@ pub(crate) trait OpenAIOutputOptionsProvider {
     fn get_formatted_prompt(&self) -> Option<bool>;
 
     fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
+        None
+    }
+
+    fn get_no_stop_trim(&self) -> Option<bool> {
         None
     }
 }
@@ -217,17 +227,27 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
         let stop_token_ids = self.get_stop_token_ids();
-        let max_thinking_tokens = self.get_max_thinking_tokens();
+        let max_thinking_tokens = self
+            .get_thinking_token_budget()
+            .or_else(|| self.get_max_thinking_tokens());
 
         if let Some(stop) = &stop
-            && stop.len() > 4
+            && stop.len() > MAX_STOP_SEQUENCES
         {
-            anyhow::bail!("stop conditions must be less than 4")
+            return Err(common::invalid_argument_error(format!(
+                "Maximum of {} stop sequences allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                stop.len()
+            )));
         }
         if let Some(stop_token_ids) = &stop_token_ids
-            && stop_token_ids.len() > 4
+            && stop_token_ids.len() > MAX_STOP_SEQUENCES
         {
-            anyhow::bail!("stop token IDs must be less than 4")
+            return Err(common::invalid_argument_error(format!(
+                "Maximum of {} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                stop_token_ids.len()
+            )));
         }
 
         // Use the trait method to get ignore_eos, which handles precedence
@@ -260,6 +280,7 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
             skip_special_tokens,
             formatted_prompt,
             return_tokens_as_token_ids,
+            no_stop_trim: self.get_no_stop_trim(),
         })
     }
 }
@@ -385,9 +406,23 @@ impl GuidedToolConstraint {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParsingOptions {
+    /// Request mode retained so stream and batch use the same native-family eligibility.
+    #[serde(default)]
+    pub tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
+
+    /// A disabled thinking request must not regain a reasoning channel during raw batch recovery.
+    #[serde(default)]
+    pub reasoning_disabled: bool,
+
+    /// JSON response formatting is a content contract, separate from guided tool JSON.
+    #[serde(default)]
+    pub structured_response: bool,
+
+    #[serde(default)]
+    pub default_thinking_mode: Option<String>,
 
     /// Final request policy for tool output. Some model parsers (currently
     /// Harmony) must still run during non-streaming aggregation to remove
@@ -418,16 +453,11 @@ pub struct ParsingOptions {
     #[serde(default)]
     pub move_reasoning_to_content_when_empty: bool,
 
-    /// The worker's operator-configured structural-tag policy. Carried through so
-    /// the HTTP-layer tool-call-gate reconstruction
-    /// (`http::service::apply_request_tool_call_parsing_options`) can consult the
-    /// same structural-tag contract the real preprocessing path uses, instead of
-    /// only recognizing intrinsically-forced model families.
-    #[serde(default)]
-    pub structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode,
-
-    #[serde(default)]
-    pub structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope,
+    /// The worker's structural-tag policy. Carried through so the HTTP-layer
+    /// tool-call-gate reconstruction consults the same configuration as the
+    /// request preprocessor. Presence enables operator-controlled tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_tag: Option<crate::local_model::runtime_config::StructuralTagConfig>,
 
     #[serde(
         default = "crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none"
@@ -457,12 +487,15 @@ impl ParsingOptions {
         Self {
             tool_call_parser,
             reasoning_parser,
+            reasoning_disabled: false,
+            structured_response: false,
+            default_thinking_mode: None,
+            tool_choice: None,
             suppress_tool_calls: false,
             guided_tool_constraint: GuidedToolConstraint::None,
             parallel_tool_calls: None,
             move_reasoning_to_content_when_empty: false,
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::default(),
-            structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope::default(),
+            structural_tag: None,
             exclude_tools_when_tool_choice_none:
                 crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
             tools: Vec::new(),
@@ -493,13 +526,11 @@ impl ParsingOptions {
             let whole_response_decoder = matches!(
                 self.tool_call_parser.as_deref(),
                 Some("harmony" | "kimi_k3" | "kimi-k3")
-            )
-                || chat_completions::unified_parser::selected_batch_family(
-                    self.tool_call_parser.as_deref(),
-                    self.reasoning_parser.as_deref(),
-                )
-                .is_some()
-                || chat_completions::tool_parser_v2::unified_family(
+            ) || chat_completions::unified_parser::configured_family(
+                self.tool_call_parser.as_deref(),
+                self.reasoning_parser.as_deref(),
+            ) == Some("muse_glimmer")
+                || chat_completions::unified_parser::selected_content_decoder_family(
                     self.tool_call_parser.as_deref(),
                     self.reasoning_parser.as_deref(),
                 )

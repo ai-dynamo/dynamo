@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Test Execution Times (Last Run: 2025-12-09):
+Test Execution Times (Last Run: 2026-08-28):
 - test_request_cancellation_vllm_aggregated: ~55s (gpu_1)
-- test_request_cancellation_vllm_decode_cancel: ~53s (gpu_2)
-- test_request_cancellation_vllm_prefill_cancel: ~53s (gpu_2)
-- Total: 161.65s (0:02:41)
+- test_request_cancellation_vllm_decode_cancel: ~130s (gpu_2)
+- test_request_cancellation_vllm_prefill_cancel: ~108s [nats] / ~123s [tcp] (gpu_2)
 """
 
 import json
@@ -33,7 +32,7 @@ from tests.utils.device import (
     get_default_vllm_block_size,
 )
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
@@ -52,9 +51,8 @@ XPU_CANCELLATION_MAX_TOKENS = 2096
 DECODE_CANCEL_TEST_TIMEOUT_S = 900
 
 # The streaming read had no bound. STREAM_READ is the per-read socket timeout
-# between chunks; BEHAVIORAL bounds the wait for the next chunk while the
-# chunk-count goal is unmet. Neither caps total read time -- a late final chunk
-# that completes the count still counts. See read_streaming_responses.
+# between chunks; BEHAVIORAL caps total time spent reaching the chunk-count goal.
+# See read_streaming_responses.
 DECODE_CANCEL_STREAM_READ_TIMEOUT_S = 30
 DECODE_CANCEL_BEHAVIORAL_ALLOWANCE_S = 90
 
@@ -121,28 +119,28 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    build_nixl_kv_transfer_config_json(),
+                    build_nixl_kv_transfer_config_json("kv_producer"),
                 ]
             )
             health_check_urls = [
-                (f"http://localhost:{self.system_port}/health", self.is_ready)
+                (f"http://localhost:{self.system_port}/health", check_health_ready)
             ]
         elif mode == WorkerMode.DECODE:
             command.extend(["--disaggregation-mode", "decode"])
             command.extend(
                 [
                     "--kv-transfer-config",
-                    build_nixl_kv_transfer_config_json(),
+                    build_nixl_kv_transfer_config_json("kv_consumer"),
                 ]
             )
             health_check_urls = [
-                (f"http://localhost:{self.system_port}/health", self.is_ready),
+                (f"http://localhost:{self.system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
                 (f"http://localhost:{frontend_port}/health", check_health_generate),
             ]
         else:
             health_check_urls = [
-                (f"http://localhost:{self.system_port}/health", self.is_ready),
+                (f"http://localhost:{self.system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
                 (f"http://localhost:{frontend_port}/health", check_health_generate),
             ]
@@ -155,9 +153,15 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
 
+        # Every worker launched with --kv-transfer-config opens a NIXL listener,
+        # so each needs its own port; unset means vLLM's host-wide default 5600.
+        if mode != WorkerMode.AGGREGATED:
+            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
+
+        # Only the prefill worker publishes KV events.
         if mode == WorkerMode.PREFILL:
             self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
-            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
             command.extend(
                 [
                     "--kv-events-config",
@@ -171,7 +175,6 @@ class DynamoWorkerProcess(ManagedProcess):
                     ),
                 ]
             )
-            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
         if mode == WorkerMode.PREFILL:
             worker_type = "prefill_worker"
@@ -225,27 +228,6 @@ class DynamoWorkerProcess(ManagedProcess):
 
         if cleanup_errors:
             raise cleanup_errors[0]
-
-    def is_ready(self, response) -> bool:
-        """Check the health of the worker process"""
-        try:
-            data = response.json()
-            if data.get("status") == "ready":
-                worker_type = (
-                    "Prefill worker" if self.mode == WorkerMode.PREFILL else "Worker"
-                )
-                logger.info(f"{worker_type} status is ready")
-                return True
-            worker_type = (
-                "Prefill worker" if self.mode == WorkerMode.PREFILL else "Worker"
-            )
-            logger.warning(f"{worker_type} status is not ready: {data.get('status')}")
-        except ValueError:
-            worker_type = (
-                "Prefill worker" if self.mode == WorkerMode.PREFILL else "Worker"
-            )
-            logger.warning(f"{worker_type} health response is not valid JSON")
-        return False
 
 
 @pytest.mark.timeout(
@@ -497,7 +479,7 @@ def test_request_cancellation_vllm_prefill_cancel(
 
     Reference: PR ai-dynamo/dynamo#7489
 
-    Timing (Last Run: 2026-05-26): ~219s total (requires 2 GPUs)
+    Timing (Last Run: 2026-08-28): ~108s [nats] / ~123s [tcp] (requires 2 GPUs)
     - Engine initialization: ~23s (decode + prefill workers)
     - Testing graceful disconnect during prefill: ~83s
     - Teardown: ~2s

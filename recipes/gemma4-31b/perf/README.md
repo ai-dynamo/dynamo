@@ -75,9 +75,10 @@ git lfs pull --include='recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_nos
 
 kubectl run pvc-helper -n ${NAMESPACE} \
   --image=busybox:1.36 --restart=Never \
-  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"shared-model-cache"}}]}}' \
-  --command -- sleep 3600
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sh","-c","while sleep 3600; do :; done"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"shared-model-cache"}}]}}'
 
+kubectl wait --for=condition=Ready pod/pvc-helper \
+  -n "${NAMESPACE}" --timeout=120s
 TRACE_SOURCE="$(git rev-parse --show-toplevel)/recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
 kubectl exec -n "${NAMESPACE}" pvc-helper -- mkdir -p /model-cache/traces
 kubectl cp "${TRACE_SOURCE}" \
