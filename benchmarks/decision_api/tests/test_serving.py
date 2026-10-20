@@ -77,6 +77,7 @@ def test_mocker_owns_only_its_processes_and_cleans_on_failure(tmp_path, fake_run
     assert all(not p.terminate_all_matching_process_names for p in starts)
     workers = [p for p in starts if "dynamo.mocker" in p.command]
     assert len(workers) == 2
+    assert all("--systemone-serial" in p.command for p in workers)
     assert all(p.env["CUDA_VISIBLE_DEVICES"] == "" for p in workers)
     assert all(p.env["HF_HUB_OFFLINE"] == "1" for p in workers)
 
@@ -144,6 +145,7 @@ def test_gpu_commands_preserve_serial_profile(tmp_path, fake_runtime, monkeypatc
     processes = [p for action, p in fake_runtime if action == "start"]
     assert len(processes) == 1
     command = processes[0].command
+    assert "--systemone-serial" not in command
     for flag, expected in (
         ("--tp", "1"),
         ("--pp-size", "1"),

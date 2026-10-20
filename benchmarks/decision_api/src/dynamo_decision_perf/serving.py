@@ -258,6 +258,7 @@ def serve(config: ServingConfig):
                     "--engine-type",
                     "sglang",
                     "--sglang-generate",
+                    "--systemone-serial",
                     "--speedup-ratio",
                     "100",
                 ]
