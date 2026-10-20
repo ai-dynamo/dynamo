@@ -160,9 +160,6 @@ func (r *dgdEPPReconciler) Reconcile(
 // metav1.IsControlledBy first ensures only a ConfigMap this operator actually
 // generated for this DGD is ever removed; a same-named but foreign ConfigMap
 // is left untouched.
-//
-// See deleteIfControlledBy: an absent ConfigMap is success, and the delete is
-// pinned to the UID the ownership check read.
 func (r *dgdEPPReconciler) deleteOwnedLegacyEPPConfigMap(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
