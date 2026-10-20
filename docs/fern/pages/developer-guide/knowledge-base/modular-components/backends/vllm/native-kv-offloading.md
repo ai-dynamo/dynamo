@@ -134,6 +134,34 @@ Canonical layouts, replicated layouts, cross-node transport, CPU/disk payload
 pools and the versioned state-agent ingress are unsupported. Use the native
 worker event publisher and a compatible vLLM offloading/tiering API.
 
+Configure the GPU secondary tier with both
+`"type": "GPUKVCRSecondaryTierManager"` and
+`"module_path": "kvbm.vllm_integration.gpu_offloading"`. The module path is
+required by the tier factory when building Prometheus metric definitions.
+The connector and spec also use the out-of-tree module
+`kvbm.vllm_integration.gpu_offloading`.
+
+On vLLM versions whose `MultiConnector` reconstructs statistics by connector
+name, register the out-of-tree connector in each application/engine process
+before statistics are reconstructed. A connector's `kv_connector_module_path`
+alone does not populate that process-local registry. Use vLLM's public factory
+API in the application bootstrap:
+
+```python
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+
+KVConnectorFactory.register_connector(
+    "GPUOffloadingConnector",
+    "kvbm.vllm_integration.gpu_offloading",
+    "GPUOffloadingConnector",
+)
+```
+
+Run this once per process. If the name is already registered, verify that
+`get_connector_class_by_name("GPUOffloadingConnector")` resolves to the same
+class; reject a conflicting registration. Spawned processes need the same
+bootstrap registration. Keep statistics enabled during validation.
+
 The retained tier publishes `gpu_direct` events and has an independent lifetime
 from the model's normal GPU cache. Native cache clears preserve retained
 inventory; retained-cache removals revoke it explicitly. The router requires
