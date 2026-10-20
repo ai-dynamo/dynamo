@@ -160,14 +160,9 @@ launch_joiner() {
   echo "--- launching joining group: rank_offset=$rank_offset gpus=$visible ---"
   # Detached joiner: shares --dist-init-addr with the primary. Its own HTTP port
   # is never used for serving; the primary keeps serving throughout.
-  # The joiner must match the primary (sglang_elastic_ep.yaml): the two
-  # SGLANG_*_BF16_DISPATCH envs and --moe-runner-backend deep_gemm (unquantized
-  # experts over nixl only work on the BF16 DeepGEMM path), the NIXL-EP dispatch
-  # budget with --chunked-prefill-size, --page-size, and --skip-tokenizer-init
-  # (Dynamo detokenizes on the primary; a joiner without it makes the primary's
-  # detokenizer crash on the first request routed to a new rank). SGLang asserts
-  # --node-rank 1 for --elastic-ep-join-mode scale, so the joiner runs as node 1
-  # of a 2-node world, like SGLang's own test/manual/ep/test_elastic_scale.py.
+  # The joiner mirrors the primary's MoE, dispatch, page-size and tokenizer
+  # settings (see sglang_elastic_ep.yaml); a mismatch surfaces only after the
+  # scale. SGLang requires --node-rank 1 for --elastic-ep-join-mode scale.
   kubectl exec "$pod" -n "$NS" -- bash -lc "
     SGLANG_DEEPEP_BF16_DISPATCH=1 SGLANG_NIXL_EP_BF16_DISPATCH=1 \
     SGLANG_NIXL_EP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=1024 \
