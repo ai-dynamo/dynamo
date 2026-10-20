@@ -17,6 +17,8 @@
 # PR title, description, or branch name, or a GitHub issue reference in the
 # title or description. Referenced issues are verified to exist. The check is
 # advisory today; the failure message carries the date it becomes required.
+# From that date a pull request that fails the check is also moved back to
+# draft, so it leaves the review queue until an issue is linked.
 
 name: PR Issue Link
 
@@ -39,6 +41,14 @@ on:
       - ".github/workflows/pr-issue-link.yml"
       - ".github/workflows/pr_issue_link.py"
       - ".github/workflows/test_pr_issue_link.py"
+
+# A newer edit supersedes an older run. Without this, a run that started
+# before the author added the link could still finish by drafting the pull
+# request the newer run passed. The event name keeps the unit-test run and
+# the check run from cancelling each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   # Referenced in the failure message; on this date the check is added to the
@@ -66,12 +76,15 @@ jobs:
       contents: read
       issues: read
       pull-requests: read
+    outputs:
+      draft: ${{ steps.check.outputs.draft }}
     steps:
       - name: Checkout base repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           sparse-checkout: .github/workflows
       - name: Check for a linked issue
+        id: check
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -84,6 +97,31 @@ jobs:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           REPO: ${{ github.repository }}
         run: python3 .github/workflows/pr_issue_link.py
+
+  # The write token lives in its own job so the check above, which reads PR
+  # text, never holds it, and this job checks nothing out. The check asks for
+  # draft only on a missing link once the blocking date has passed, never on
+  # an API outage. Draft pull requests skip the check and `ready_for_review`
+  # re-runs it, so a pull request marked ready without a link comes back here.
+  move-to-draft:
+    name: Move to draft without an issue link
+    needs: check-issue-link
+    # always(): the check job fails when it asks for draft.
+    if: ${{ always() && needs.check-issue-link.outputs.draft == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # convertPullRequestToDraft is refused to GITHUB_TOKEN without contents: write.
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Convert the pull request to draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NODE_ID: ${{ github.event.pull_request.node_id }}
+          QUERY: >-
+            mutation($id: ID!) {
+            convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }
+        run: gh api graphql -f query="$QUERY" -f id="$PR_NODE_ID"
 
   unit-tests:
     name: Unit tests

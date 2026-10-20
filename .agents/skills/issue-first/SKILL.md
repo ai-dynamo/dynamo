@@ -84,7 +84,9 @@ The `PR Issue Link` check failing means no verifiable reference was found.
 Add one using the table above and edit the PR description; editing re-triggers
 the check. If no issue exists yet, create one first (see Start From an Issue).
 While the check is advisory it does not block merges; its failure message
-names the date it becomes required.
+names the date it becomes required. From that date a failing PR is also moved
+to draft. Link the issue, then mark the PR ready for review, which re-runs the
+check.
 
 ## Related
 
