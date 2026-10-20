@@ -302,7 +302,12 @@ mod tests {
         request.mdc_sum = Some("sum".to_string());
         request.bootstrap_info = None;
         request.encoder_result = Some(serde_json::json!({"x": 1}));
-        request.jail_seed = Some("seed".to_string());
+        request.jail_seed = Some(
+            crate::protocols::common::llm_backend::DecoderCheckpoint::new(
+                "seed".to_string(),
+                vec![7],
+            ),
+        );
         request.routing = Some(RoutingHints {
             backend_instance_id: Some(7),
             decode_worker_id: Some(8),

@@ -106,7 +106,7 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
     handler._priority_kwargs = lambda priority: {}
     monkeypatch.setattr(
         "dynamo.sglang.request_handlers.llm.prefill_handler.require_reasoning_kwargs",
-        lambda engine, request: {},
+        lambda *args, **kwargs: {},
     )
     monkeypatch.setattr(
         cancellation, "resolved_server_args", lambda server_args: server_args
@@ -241,6 +241,7 @@ def _kv_hit_prefill_handler(monkeypatch, responses, *, cancelled):
 
     handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
     handler.engine = _Engine()
+    handler.config = SimpleNamespace(server_args=SimpleNamespace())
     handler.shutdown_event = None
     handler.bootstrap_host = "127.0.0.1"
     handler.bootstrap_port = 1234
@@ -269,7 +270,7 @@ def _kv_hit_prefill_handler(monkeypatch, responses, *, cancelled):
     handler._cancellation_monitor = cancellation_monitor
     monkeypatch.setattr(
         "dynamo.sglang.request_handlers.llm.prefill_handler.require_reasoning_kwargs",
-        lambda engine, request: {},
+        lambda engine, request, **kwargs: {},
     )
     return handler
 

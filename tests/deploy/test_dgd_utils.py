@@ -5,7 +5,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
 import aiohttp
 import httpx
@@ -127,12 +127,17 @@ async def test_context_enter_preserves_setup_error_when_cleanup_times_out(
         await deployment.__aenter__()
 
 
-async def test_context_exit_reraises_unexpected_cleanup_error(tmp_path) -> None:
+async def test_context_exit_preserves_primary_error_for_cleanup_defect(
+    tmp_path,
+) -> None:
     deployment = managed_deployment(tmp_path)
-    deployment._cleanup = AsyncMock(side_effect=RuntimeError("cleanup defect"))
+    cleanup_error = RuntimeError("cleanup defect")
+    deployment._cleanup = AsyncMock(side_effect=cleanup_error)
 
-    with pytest.raises(RuntimeError, match="cleanup defect"):
-        await deployment.__aexit__(ValueError, ValueError("test failed"), None)
+    result = await deployment.__aexit__(ValueError, ValueError("test failed"), None)
+
+    assert result is False
+    assert deployment.cleanup_errors == [cleanup_error]
 
 
 @pytest.mark.parametrize(
@@ -150,11 +155,11 @@ def test_request_rebuilds_port_forward_after_transport_failure(
     replacement_port_forward = MagicMock(local_port=31002)
     deployment.port_forward = MagicMock(return_value=replacement_port_forward)
     response = MagicMock(spec=requests.Response)
-    request_sender = MagicMock(side_effect=[transport_error, response])
+    request_sender = MagicMock(side_effect=[transport_error, response, response])
     sleep = MagicMock()
     monkeypatch.setattr("tests.deploy.dgd_utils.time.sleep", sleep)
 
-    result = deployment.send_request_with_port_forward_retry(
+    result, active_port_forward = deployment.send_request_with_port_forward_retry(
         pod=MagicMock(),
         remote_port=8000,
         endpoint="/v1/chat/completions",
@@ -171,9 +176,58 @@ def test_request_rebuilds_port_forward_after_transport_failure(
     assert (
         request_sender.call_args_list[1].args[0].startswith("http://localhost:31002/")
     )
+    assert active_port_forward is replacement_port_forward
+    next_result, next_port_forward = deployment.send_request_with_port_forward_retry(
+        pod=MagicMock(),
+        remote_port=8000,
+        endpoint="/v1/chat/completions",
+        payload={"model": "test"},
+        timeout=120,
+        port_forward=active_port_forward,
+        request_sender=request_sender,
+    )
+    assert next_result is response
+    assert next_port_forward is replacement_port_forward
+    assert request_sender.call_count == 3
+    assert (
+        request_sender.call_args_list[2].args[0].startswith("http://localhost:31002/")
+    )
     original_port_forward.stop.assert_called_once_with()
     deployment.port_forward.assert_called_once()
     sleep.assert_called_once_with(5)
+
+
+def test_request_rebuilds_port_forward_after_stream_body_failure(
+    monkeypatch, tmp_path
+) -> None:
+    deployment = managed_deployment(tmp_path)
+    original_port_forward = MagicMock(local_port=31001)
+    replacement_port_forward = MagicMock(local_port=31002)
+    deployment.port_forward = MagicMock(return_value=replacement_port_forward)
+    dropped_response = MagicMock(spec=requests.Response)
+    type(dropped_response).content = PropertyMock(
+        side_effect=requests.ConnectionError("stream dropped after headers")
+    )
+    response = MagicMock(spec=requests.Response)
+    type(response).content = PropertyMock(return_value=b"data: [DONE]\n")
+    request_sender = MagicMock(side_effect=[dropped_response, response])
+    monkeypatch.setattr("tests.deploy.dgd_utils.time.sleep", MagicMock())
+
+    result, active_port_forward = deployment.send_request_with_port_forward_retry(
+        pod=MagicMock(),
+        remote_port=8000,
+        endpoint="/v1/chat/completions",
+        payload={"model": "test", "stream": True},
+        timeout=120,
+        port_forward=original_port_forward,
+        request_sender=request_sender,
+    )
+
+    assert result is response
+    assert active_port_forward is replacement_port_forward
+    dropped_response.close.assert_called_once_with()
+    original_port_forward.stop.assert_called_once_with()
+    deployment.port_forward.assert_called_once()
 
 
 def test_request_reraises_unexpected_port_forward_stop_error(tmp_path) -> None:
@@ -272,7 +326,7 @@ async def test_discovery_capture_and_cleanup(
         await asyncio.sleep(0)
         events.append("capture-done")
 
-    async def delete():
+    async def delete(*, fail_on_timeout=True):
         events.append("delete")
 
     deployment._capture_discovery_state = capture

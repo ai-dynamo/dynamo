@@ -55,6 +55,10 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 		return ctrlBuilder.Complete(r)
 	}
 
+	// Do not add ResourceClaim, ResourceClaimTemplate or DeviceClass watches for Cyborg GPU
+	// validation: the resolved count does not affect the rendered workload. Lookup failures
+	// use ordinary error retries, and DGD edits already trigger reconciliation.
+
 	// Active integration observes its workload and scheduling dependencies.
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &lpxv1alpha1.LPUPipelineRequest{}, pipelineRequestPCSOwnerUIDIndex, pipelineRequestOwnerUID); err != nil {
 		return fmt.Errorf("register LPR owner UID index: %w", err)
@@ -172,6 +176,8 @@ func podCliquePredicate() predicate.Funcs {
 				return false
 			}
 			return commoncontroller.PodCliqueStatusChangeIsSignificant(oldClique, newClique) ||
+				(oldClique.Status.UpdateProgress == nil || oldClique.Status.UpdateProgress.UpdateEndedAt != nil) !=
+					(newClique.Status.UpdateProgress == nil || newClique.Status.UpdateProgress.UpdateEndedAt != nil) ||
 				oldClique.Generation != newClique.Generation ||
 				!maps.Equal(oldClique.Annotations, newClique.Annotations) ||
 				!maps.Equal(oldClique.Labels, newClique.Labels) ||

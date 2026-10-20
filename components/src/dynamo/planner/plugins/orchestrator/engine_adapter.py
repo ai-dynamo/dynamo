@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from dynamo.common.forward_pass_metrics import encode as _encode_fpm_record
 from dynamo.planner.config.planner_config import resolve_min_endpoint
+from dynamo.planner.monitoring.signal_health import PlannerSignalHealth
 
 if TYPE_CHECKING:
     import grpc.aio
@@ -77,6 +78,7 @@ from dynamo.planner.core.budget import (
 )
 from dynamo.planner.core.state_machine import PlannerScalingState
 from dynamo.planner.core.types import (
+    BatchSchedulingObservation,
     FpmObservations,
     PlannerEffects,
     ScalingDecision,
@@ -106,15 +108,20 @@ from dynamo.planner.plugins.registry.server import PluginRegistryServer
 from dynamo.planner.plugins.scheduler import PluginScheduler
 from dynamo.planner.plugins.transport.config import make_transport_for_endpoint
 from dynamo.planner.plugins.types import (
+    BatchDispatcherFeedback as BatchDispatcherFeedbackData,
+)
+from dynamo.planner.plugins.types import BatchJobDemand as BatchJobDemandData
+from dynamo.planner.plugins.types import (
+    BatchSchedulingData,
     ComponentTarget,
     FpmData,
     ObservationData,
     OverrideResult,
     OverrideType,
     PipelineContext,
-    TrafficMetrics,
-    WorkerState,
 )
+from dynamo.planner.plugins.types import PoolTrafficDemand as PoolTrafficDemandData
+from dynamo.planner.plugins.types import TrafficMetrics, WorkerState
 
 log = logging.getLogger(__name__)
 
@@ -213,6 +220,10 @@ class OrchestratorEngineAdapter:
             # init in one process) — metrics emission disabled, but
             # the adapter still runs normally.
             self._plugin_framework_metrics = None
+
+        self._signal_health = PlannerSignalHealth(
+            config, self._plugin_framework_metrics
+        )
 
         # Build orchestrator + scheduler + circuit_breaker + registry.
         # All transport-shaped knobs (timeouts + wire security) live under
@@ -643,6 +654,10 @@ class OrchestratorEngineAdapter:
         diagnostics.short_circuit_reason = outcome.short_circuit_reason
         diagnostics.audit_events = list(outcome.audit_events)
 
+        self._signal_health.observe(
+            scheduled_tick, tick_input, self._capabilities, diagnostics
+        )
+
         return PlannerEffects(
             scale_to=scale_to,
             next_tick=self._compute_next_scheduled_tick(),
@@ -854,10 +869,62 @@ class OrchestratorEngineAdapter:
         # and could not implement load-based decisions through
         # the public PipelineContext API.
         fpm = self._encode_fpm(ti.fpm_observations)
+        batch = self._encode_batch(ti.batch)
         return PipelineContext(
             request_id=f"tick-{ti.now_s}",
             decision_id=f"d-{ti.now_s}",
-            observations=ObservationData(traffic=traffic, fpm=fpm, workers=workers),
+            observations=ObservationData(
+                traffic=traffic,
+                fpm=fpm,
+                workers=workers,
+                batch=batch,
+            ),
+        )
+
+    @staticmethod
+    def _encode_batch(
+        obs: Optional[BatchSchedulingObservation],
+    ) -> Optional[BatchSchedulingData]:
+        """Project generic core batch observations onto the plugin contract."""
+
+        if obs is None:
+            return None
+        return BatchSchedulingData(
+            job_demands=[
+                BatchJobDemandData(
+                    observed_at_s=job.observed_at_s,
+                    pool_id=job.pool_id,
+                    job_id=job.job_id,
+                    status=job.status,
+                    total_requests=job.total_requests,
+                    completed_requests=job.completed_requests,
+                    failed_requests=job.failed_requests,
+                    deadline_at_s=job.deadline_at_s,
+                    work_class=job.work_class,
+                    remaining_requests=job.remaining_requests,
+                )
+                for job in obs.job_demands
+            ],
+            pool_traffic=[
+                PoolTrafficDemandData(
+                    observed_at_s=pool.observed_at_s,
+                    pool_id=pool.pool_id,
+                    online_offered_rps=pool.online_offered_rps,
+                )
+                for pool in obs.pool_traffic
+            ],
+            dispatcher_feedback=[
+                BatchDispatcherFeedbackData(
+                    observed_at_s=feedback.observed_at_s,
+                    pool_id=feedback.pool_id,
+                    observation_window_s=feedback.observation_window_s,
+                    queued_requests=feedback.queued_requests,
+                    inflight_requests=feedback.inflight_requests,
+                    actual_dispatch_rps=feedback.actual_dispatch_rps,
+                    applied_max_admission_rps=feedback.applied_max_admission_rps,
+                )
+                for feedback in obs.dispatcher_feedback
+            ],
         )
 
     @staticmethod

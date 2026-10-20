@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, LLMEngine, PreprocessedRequest};
 use dynamo_llm::model_card::ModelDeploymentCard;
-use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs};
+use dynamo_mocker::common::protocols::{EngineType, MockerConfig};
 use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 
 pub mod sglang;
+pub mod trtllm;
 pub mod vllm;
 
 pub struct FixtureConfig {
@@ -61,24 +62,30 @@ pub trait WireFixture: SidecarFixture {
     async fn scheduler_active(&self);
 }
 
-fn fast_engine_args(engine_type: EngineType) -> MockEngineArgs {
-    MockEngineArgs::builder()
-        .engine_type(engine_type)
-        .block_size(4)
-        .num_gpu_blocks(4_096)
-        .max_num_seqs(Some(64))
-        .max_num_batched_tokens(Some(1_024))
-        .speedup_ratio(0.0)
-        .dp_size(1)
-        .build()
-        .unwrap()
+fn fast_engine_args(engine_type: EngineType) -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "backend": engine_type,
+            "block_size": 4,
+            "num_gpu_blocks": 4_096,
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 1_024,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap()
 }
 
 pub trait ProcessFixture: WireFixture {
     fn endpoint(&self) -> String;
-    fn command() -> Command;
+    fn command(model: &str) -> Command;
     fn configure_request(request: &mut PreprocessedRequest);
     fn assert_registration(card: &ModelDeploymentCard);
+}
+
+/// Backends that discover served aliases and gate publication on native health.
+pub trait DiscoveryFixture: ProcessFixture {
     fn set_served_model_name(&self, name: &str);
     fn set_health(&self, is_healthy: Option<bool>);
     async fn health_check_received(&self);
@@ -87,6 +94,7 @@ pub trait ProcessFixture: WireFixture {
 
 pub trait HandoffFixture: ProcessFixture {
     const HAS_BOOTSTRAP: bool;
+    const KV_BLOCK_SIZE: u32;
     fn assert_handoff(
         prefill: &RequestHandle<Self::Protocol>,
         decode: &RequestHandle<Self::Protocol>,

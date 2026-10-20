@@ -90,6 +90,13 @@ RUN apt-get update && \
     fi && \
     rm -f /tmp/xpu-smi.deb && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# _sycl_vmm requires DPC++ for its -fsycl compilation.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        intel-oneapi-compiler-dpcpp-cpp-2026.0 && \
+    ln -s "$(find /opt/intel/oneapi/compiler -type f -name icpx -print -quit)" /usr/local/bin/icpx && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
 {% if device == "xpu" or device == "cpu" %}
@@ -235,7 +242,9 @@ ENV VIRTUAL_ENV=/workspace/.venv
 # imports yaml at module scope); the system python3 doesn't ship it.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION --seed && \
+    uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION --seed{% if framework == "vllm" and device == "xpu" %} && \
+    echo "/opt/venv/lib/python${PYTHON_VERSION}/site-packages" > \
+        "${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/vllm-xpu-base.pth"{% endif %} && \
     uv pip install --upgrade auditwheel meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
 ARG NIXL_UCX_REF
@@ -317,12 +326,14 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # the media formats we actually build and use, not ffmpeg's full default decoder
 # set. A blanket --disable-decoders/--disable-demuxers/--disable-parsers plus a
 # narrow allowlist keeps the shipped libav*.so limited to that set. The allowlist
-# covers exactly two paths: (1) the encode CLI ingesting rawvideo frames from
+# covers three paths: (1) the encode CLI ingesting rawvideo frames from
 # imageio over a pipe and encoding with libvpx_vp9, and (2) the Rust media-ffmpeg
 # VideoDecoder decoding VP8/VP9 in mp4/webm/mkv (test fixtures are VP9-in-mp4).
 # No H.264 parser/decoder/encoder is enabled — H.264 is not built at all. Image
 # decode does not use ffmpeg (it goes through the Rust `image` crate), so no
 # still-image decoders are enabled here.
+# (3) vLLM's `vllm-rs` video decode runs `ffprobe`, then image2pipe/ppm (or
+# rawvideo) output: uncompressed, no royalty-bearing codec. Do not add --disable-ffprobe.
 # The `fd` protocol is enabled alongside `pipe`: `ffmpeg -i -` reads stdin via
 # the `fd:` protocol on ffmpeg 8.x and 9.x (not `pipe:`), so omitting it breaks
 # the imageio encode path with "Protocol not found. Did you mean file:fd:?".
@@ -351,7 +362,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # libvpx: BSD-licensed VP9 encoder needed for the WebM output path. Built from
     # source so we don't need to track distro package names (libvpx-dev on Debian
     # vs libvpx-devel via EPEL on RHEL/manylinux).
-    git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git && \
+    # Fall back to the GitHub mirror if googlesource is unavailable (transient 503s).
+    git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git || git clone --depth 1 --branch ${LIBVPX_REF} https://github.com/webmproject/libvpx.git && \
     cd libvpx && \
     ./configure --prefix=/usr/local --enable-shared --disable-static --disable-examples --disable-unit-tests --disable-tools --disable-docs && \
     make -j$(nproc) && \
@@ -388,11 +400,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --enable-shared \
         --enable-libvpx \
         --disable-encoders \
-        --enable-encoder=libvpx_vp9 \
+        --enable-encoder=libvpx_vp9,ppm,rawvideo \
         --disable-decoders \
         --enable-decoder=vp8,vp9,rawvideo \
         --disable-muxers \
-        --enable-muxer=mov,mp4,matroska,webm \
+        --enable-muxer=mov,mp4,matroska,webm,image2pipe,rawvideo \
         --disable-demuxers \
         --enable-demuxer=mov,matroska,rawvideo \
         --disable-parsers \
@@ -422,6 +434,14 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
       || { echo "ERROR: the in-tree ffmpeg does not list its VP9 encoder; it is" >&2; \
            echo "       either broken or unable to start, and the codec guard" >&2; \
            echo "       below would then pass without checking anything." >&2; \
+           exit 1; }; } && \
+    # The vllm-rs video decode path needs ffprobe, the image2pipe muxer and the
+    # ppm encoder; without them every sidecar video request fails with HTTP 500.
+    { /usr/local/bin/ffmpeg -hide_banner -muxers 2>/dev/null | grep -qE '^ *E +image2pipe ' \
+      && /usr/local/bin/ffmpeg -hide_banner -encoders 2>/dev/null | grep -qE '^ *V[^ ]* +ppm ' \
+      && /usr/local/bin/ffprobe -hide_banner -version >/dev/null 2>&1 \
+      || { echo "ERROR: the in-tree ffmpeg lacks the image2pipe muxer, the ppm" >&2; \
+           echo "       encoder or the ffprobe CLI that vLLM's video decode needs." >&2; \
            exit 1; }; } && \
     # Compliance guard: fail the build if any royalty-bearing / HW codec surface
     # leaked into the in-tree ffmpeg. By construction this build is VP9-only, so a
@@ -748,14 +768,21 @@ RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
 COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
 {% endif %}
 
-# Build gpu-memory-service wheel → /opt/dynamo/dist/gpu_memory_service*.whl (small C++ extension, fast build -- all targets, all frameworks)
-{% if device == "cuda" %}
-# Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
+{% if device in ("cuda", "xpu") %}
+# Build gpu_memory_service wheel with the device-specific native extension.
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         export UV_CACHE_DIR=/root/.cache/uv && \
         source ${VIRTUAL_ENV}/bin/activate && \
+{% if framework == "vllm" and device == "xpu" %}
+        cmake -S /opt/dynamo/lib/gpu_memory_service/common/vmm/_sycl_vmm \
+            -B /tmp/gpu_memory_service_sycl_vmm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=icpx && \
+        cmake --build /tmp/gpu_memory_service_sycl_vmm --parallel && \
+        cmake --install /tmp/gpu_memory_service_sycl_vmm --prefix /opt/dynamo/lib && \
+{% endif %}
         uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
     fi
 {% endif %}

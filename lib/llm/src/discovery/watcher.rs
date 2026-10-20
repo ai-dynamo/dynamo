@@ -56,7 +56,7 @@ use crate::{
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
-    types::generic::realtime::{RealtimeClientEvent, RealtimeServerEvent},
+    types::generic::realtime::{DynamoRealtimeClientEvent, RealtimeServerEvent},
     worker_type::WorkerType,
 };
 
@@ -65,7 +65,7 @@ use super::{
     ModelManager,
     controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
 };
-use crate::namespace::NamespaceFilter;
+use crate::namespace::{NamespaceFilter, NamespacePrefixMode};
 use tokio_util::sync::CancellationToken;
 
 /// Constructs a collision-free WorkerSet storage key from its exact endpoint,
@@ -182,6 +182,7 @@ pub enum ModelUpdate {
 }
 
 pub struct ModelWatcher {
+    namespace_prefix_mode: NamespacePrefixMode,
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
     router_config: RouterConfig,
@@ -301,6 +302,7 @@ impl ModelWatcher {
     ) -> Self {
         Self {
             manager: model_manager,
+            namespace_prefix_mode: NamespacePrefixMode::from_env(),
             drt: runtime,
             router_config,
             migration_limit,
@@ -325,6 +327,10 @@ impl ModelWatcher {
 
     pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
         self.local_model_path = path;
+    }
+
+    pub fn set_namespace_prefix_mode(&mut self, mode: NamespacePrefixMode) {
+        self.namespace_prefix_mode = mode;
     }
 
     pub fn set_tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) {
@@ -412,6 +418,8 @@ impl ModelWatcher {
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
+        validate_card_parser_version(card)?;
+
         validate_policy_worker_role(card, &self.plugins)?;
 
         // Prepare without exact video routing unless the cohort agreed on a contract.
@@ -433,7 +441,6 @@ impl ModelWatcher {
                  exact video routing disabled for this group"
             );
         }
-
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
         // are process-local, so preserve them when the MDC supplies the base config.
@@ -918,7 +925,7 @@ impl ModelWatcher {
             if card.model_type.supports_realtime() {
                 // `Text` is overloaded for Realtime; its I/O passes through.
                 let realtime_router = PushRouter::<
-                    RealtimeClientEvent,
+                    DynamoRealtimeClientEvent,
                     Annotated<RealtimeServerEvent>,
                 >::from_client_with_monitor(
                     client.clone(), router_config.router_mode, None
@@ -1030,14 +1037,24 @@ impl ControllerHost for ModelWatcher {
         namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Option<DesiredInstance>> {
         let mcid = model_card_instance_id(&instance)?;
-        if !namespace_filter.matches(&mcid.namespace) {
+        if !namespace_filter.matches_with_prefix_mode(&mcid.namespace, self.namespace_prefix_mode) {
             return Ok(None);
         }
 
         let mut card = instance.deserialize_model::<ModelDeploymentCard>()?;
         normalize_legacy_prefill_topology(&mut card);
+        card.runtime_config.normalize_structural_tag_compatibility();
         self.apply_tokenizer_overrides(&mut card);
         validate_card_shape(&card)?;
+        let router_mode =
+            effective_router_config(card.router_config.as_ref(), &self.router_config).router_mode;
+        anyhow::ensure!(
+            card.model_input != ModelInput::Text || !router_mode.is_kv_routing(),
+            "model '{}': KV routing is incompatible with text-input workers (e.g. vLLM \
+             --use-vllm-tokenizer) because it requires frontend tokenization; enable frontend \
+             tokenization or explicitly configure a non-KV router mode",
+            card.name()
+        );
         anyhow::ensure!(
             mcid.model_suffix.is_some() == card.lora.is_some(),
             "LoRA discovery identity and card metadata disagree"
@@ -1300,6 +1317,15 @@ impl ControllerHost for ModelWatcher {
         );
     }
 
+    fn publish_group_observation(
+        &self,
+        key: &GroupKey,
+        observation: Option<super::worker_inventory::WorkerGroupObservation>,
+    ) {
+        self.manager
+            .publish_worker_group_observation(key.id(), observation);
+    }
+
     fn discard_prepared(&self, prepared: Self::Prepared) {
         drop(prepared);
     }
@@ -1341,6 +1367,21 @@ fn validate_card_shape(card: &ModelDeploymentCard) -> anyhow::Result<()> {
         card.model_input.as_str()
     );
     Ok(())
+}
+
+fn validate_card_parser_version(card: &ModelDeploymentCard) -> anyhow::Result<()> {
+    if should_validate_parser_version(card) {
+        crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
+            card.runtime_config.tool_call_parser.as_deref(),
+            card.runtime_config.reasoning_parser.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
+    card.model_type.supports_chat()
+        && effective_worker_type(card.worker_type, card.model_type) != WorkerType::Prefill
 }
 
 fn effective_router_config<'a>(
@@ -1651,6 +1692,68 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn operator_namespace_scope_filters_model_discovery() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let make_watcher = || {
+            ModelWatcher::new(
+                drt.clone(),
+                Arc::new(ModelManager::new()),
+                RouterConfig::default(),
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new()),
+            )
+        };
+        temp_env::with_var("DYN_NAMESPACE_PREFIX_STRICT", None::<&str>, || {
+            assert_eq!(
+                make_watcher().namespace_prefix_mode,
+                NamespacePrefixMode::Literal
+            );
+        });
+        let mut watcher = temp_env::with_var("DYN_NAMESPACE_PREFIX_STRICT", Some("true"), || {
+            let watcher = make_watcher();
+            assert_eq!(
+                watcher.namespace_prefix_mode,
+                NamespacePrefixMode::WorkerGeneration
+            );
+            watcher
+        });
+        let card = ModelDeploymentCard::with_name_only("isolated-model");
+        let literal = NamespaceFilter::from_namespace_and_prefix(None, Some("default-foo"));
+        for (namespace, admitted) in [
+            ("default-foo", true),
+            ("default-foo-1a2b3c4d", true),
+            ("default-foo-legacy", true),
+            ("default-foo-bar", false),
+            ("default-foo-bar-1a2b3c4d", false),
+        ] {
+            let DiscoveryEvent::Added(instance) = discovered_card(namespace, 1, &card) else {
+                unreachable!();
+            };
+            watcher.set_namespace_prefix_mode(NamespacePrefixMode::WorkerGeneration);
+            assert_eq!(
+                watcher
+                    .normalize(instance.clone(), &literal)
+                    .unwrap()
+                    .is_some(),
+                admitted,
+                "{namespace}"
+            );
+            watcher.set_namespace_prefix_mode(NamespacePrefixMode::Literal);
+            assert!(
+                watcher.normalize(instance, &literal).unwrap().is_some(),
+                "manual scope: {namespace}"
+            );
+        }
+        runtime.shutdown();
+    }
+
     type TestDiscoverySender =
         tokio::sync::mpsc::UnboundedSender<(DiscoveryEvent, tokio::sync::oneshot::Sender<()>)>;
 
@@ -1735,8 +1838,7 @@ mod tests {
         if std::env::var("DYNAMO_ALIAS_TEST").as_deref() != Ok(test_name) {
             let output = tokio::time::timeout(
                 Duration::from_secs(30),
-                tokio::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", test_name, "--nocapture"])
+                tokio::process::Command::from(crate::test_utils::isolated_command(test_name))
                     .env("DYNAMO_ALIAS_TEST", test_name)
                     .env("DYN_TCP_RPC_HOST", "127.0.0.1")
                     .env("DYN_TCP_RPC_PORT", "0")
@@ -1748,19 +1850,7 @@ mod tests {
             .await
             .expect("classify subprocess must finish within its deadline")
             .expect("classify subprocess must start");
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                stdout
-                    .lines()
-                    .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;")),
-                "classify subprocess must run exactly one passing test: {stdout}"
-            );
+            crate::test_utils::assert_isolated_success(&output);
             return;
         }
 
@@ -2094,8 +2184,7 @@ mod tests {
             // more than libtest's default 2 MiB stack, like the prefill routing tests.
             let output = tokio::time::timeout(
                 Duration::from_secs(30),
-                tokio::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", test_name, "--nocapture"])
+                tokio::process::Command::from(crate::test_utils::isolated_command(test_name))
                     .env("DYNAMO_CLASSIFIER_CATALOG_TEST", test_name)
                     .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
                     .env("DYN_TCP_RPC_HOST", "127.0.0.1")
@@ -2108,12 +2197,7 @@ mod tests {
             .await
             .expect("classifier subprocess timed out")
             .unwrap();
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+            crate::test_utils::assert_isolated_success(&output);
             return;
         }
         use dynamo_kv_router::scheduling::{
@@ -2456,6 +2540,142 @@ request_classifier:
                 .active_decode_blocks_threshold,
             Some(0.8)
         );
+    }
+
+    #[tokio::test]
+    async fn discovery_rejects_text_input_with_effective_kv_routing() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        for frontend_mode in [RouterMode::RoundRobin, RouterMode::KV] {
+            let watcher = ModelWatcher::new(
+                drt.clone(),
+                Arc::new(ModelManager::new()),
+                RouterConfig {
+                    router_mode: frontend_mode,
+                    ..Default::default()
+                },
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new()),
+            );
+            for worker_mode in [None, Some(RouterMode::RoundRobin), Some(RouterMode::KV)] {
+                for model_input in [ModelInput::Text, ModelInput::Tokens] {
+                    let mut card = ModelDeploymentCard::with_name_only("kv-text-model");
+                    card.model_input = model_input;
+                    card.model_type = ModelType::Chat;
+                    card.worker_type = Some(WorkerType::Aggregated);
+                    card.router_config = worker_mode.map(|router_mode| RouterConfig {
+                        router_mode,
+                        ..Default::default()
+                    });
+                    let DiscoveryEvent::Added(instance) = discovered_card("kv-text-ns", 1, &card)
+                    else {
+                        unreachable!();
+                    };
+                    let result = watcher.normalize(instance, &NamespaceFilter::Global);
+                    if model_input == ModelInput::Text
+                        && worker_mode.unwrap_or(frontend_mode).is_kv_routing()
+                    {
+                        let error = result.expect_err("text-input KV card must be rejected");
+                        let message = error.to_string();
+                        assert!(message.contains("kv-text-model"), "{message}");
+                        assert!(message.contains("KV routing is incompatible"), "{message}");
+                        assert!(message.contains("frontend tokenization"), "{message}");
+                    } else {
+                        let desired = result.unwrap().expect("valid card must be admitted");
+                        assert_eq!(
+                            desired
+                                .card
+                                .router_config
+                                .as_ref()
+                                .map(|config| config.router_mode),
+                            worker_mode
+                        );
+                        assert_eq!(desired.card.model_input, model_input);
+                    }
+                }
+            }
+        }
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn rejected_kv_text_workers_preserve_valid_models() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("kv-text-preserve")
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate");
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = drt.discovery().instance_id();
+        let manager = Arc::new(ModelManager::new());
+        let (events, task) = watch_test_cards(
+            drt,
+            manager.clone(),
+            RouterConfig {
+                router_mode: RouterMode::KV,
+                ..Default::default()
+            },
+        );
+        let mut valid = ModelDeploymentCard::with_name_only("valid-text-model");
+        valid.model_input = ModelInput::Text;
+        valid.model_type = ModelType::Chat;
+        valid.worker_type = Some(WorkerType::Aggregated);
+        valid.router_config = Some(RouterConfig {
+            router_mode: RouterMode::RoundRobin,
+            ..Default::default()
+        });
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id, &valid),
+        )
+        .await;
+        let original = wait_for_model(&manager, valid.name(), Model::is_ready_to_serve).await;
+
+        let mut invalid = valid.clone();
+        invalid.router_config = None;
+        // A rejected update must not remove the existing worker or replace its pipeline.
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id, &invalid),
+        )
+        .await;
+        // An incompatible newcomer must not join the serving set either.
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id + 1, &invalid),
+        )
+        .await;
+        let mut other = ModelDeploymentCard::with_name_only("invalid-text-model");
+        other.model_input = ModelInput::Text;
+        other.model_type = ModelType::Chat;
+        other.worker_type = Some(WorkerType::Aggregated);
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id + 2, &other),
+        )
+        .await;
+
+        let model = manager.get_committed_model(valid.name()).unwrap();
+        assert!(Arc::ptr_eq(&original, &model));
+        assert!(model.is_ready_to_serve());
+        assert_eq!(model.total_workers(), 1);
+        assert_eq!(manager.get_model_cards().len(), 1);
+        assert_eq!(manager.get_model_cards()[0].mdcsum(), valid.mdcsum());
+        assert!(manager.get_committed_model(other.name()).is_none());
+        assert!(!task.is_finished());
+        drop(events);
+        task.await.unwrap();
+        runtime.shutdown();
     }
 
     #[tokio::test]
@@ -3024,6 +3244,55 @@ request_classifier:
     }
 
     #[test]
+    fn parser_validation_skips_non_chat_and_prefill_workers() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::parser_validation_skips_non_chat_and_prefill_workers"
+            ),
+            &[("DYN_PARSER_VERSION", "2")],
+        ) {
+            return;
+        }
+
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+        card.model_type = ModelType::Embedding;
+        assert!(validate_card_parser_version(&card).is_ok());
+        card.model_type = ModelType::Chat;
+        card.worker_type = Some(WorkerType::Prefill);
+        assert!(validate_card_parser_version(&card).is_ok());
+        for role in [None, Some(WorkerType::Decode), Some(WorkerType::Encode)] {
+            card.worker_type = role;
+            assert!(validate_card_parser_version(&card).is_err());
+        }
+        card.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
+        card.runtime_config.reasoning_parser = Some("qwen3".to_string());
+        assert!(validate_card_parser_version(&card).is_ok());
+    }
+
+    #[test]
+    fn parser_version_validation_applies_only_to_chat_surfaces() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+
+        card.model_type = ModelType::Embedding;
+        assert!(!should_validate_parser_version(&card));
+
+        card.model_type = ModelType::Chat;
+        assert!(should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Encode);
+        assert!(should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Prefill);
+        assert!(!should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Decode);
+        assert!(should_validate_parser_version(&card));
+    }
+
+    #[test]
     fn worker_router_config_preserves_frontend_policy_selections() {
         let mut frontend = RouterConfig::default();
         frontend.kv_router_config.router_prefill_policy = Some("frontend-prefill".to_string());
@@ -3110,6 +3379,64 @@ request_classifier:
         assert_eq!(legacy.card.needs, vec![vec![WorkerType::Decode]]);
         assert_eq!(legacy.group_key, current.group_key);
         assert_eq!(legacy.mdc_checksum, current.mdc_checksum);
+    }
+
+    #[tokio::test]
+    async fn discovery_normalizes_legacy_and_future_structural_tag_fields() {
+        use crate::local_model::runtime_config::{StructuralTagConfig, StructuralTagScope};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        );
+
+        let card = serde_json::to_value(ModelDeploymentCard::with_name_only("model")).unwrap();
+        let mut legacy_card = card.clone();
+        let legacy_runtime = legacy_card["runtime_config"].as_object_mut().unwrap();
+        legacy_runtime.insert("structural_tag_mode".into(), serde_json::json!("on"));
+        legacy_runtime.insert("structural_tag_scope".into(), serde_json::json!("always"));
+
+        let mut future_card = card;
+        future_card["runtime_config"]["structural_tag"] = serde_json::json!({
+            "scope": "always",
+            "future_option": true
+        });
+
+        let normalize = |instance_id, card_json| {
+            watcher
+                .normalize(
+                    DiscoveryInstance::Model {
+                        namespace: "ns1".to_string(),
+                        component: "workers".to_string(),
+                        endpoint: "generate".to_string(),
+                        instance_id,
+                        card_json,
+                        model_suffix: None,
+                    },
+                    &NamespaceFilter::Global,
+                )
+                .unwrap()
+                .unwrap()
+        };
+        let legacy = normalize(1, legacy_card);
+        let future = normalize(2, future_card);
+        let expected = Some(StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            ..Default::default()
+        });
+
+        assert_eq!(legacy.card.runtime_config.structural_tag, expected);
+        assert_eq!(future.card.runtime_config.structural_tag, expected);
     }
 
     #[test]

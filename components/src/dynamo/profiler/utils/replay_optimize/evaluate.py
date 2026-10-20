@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 from dynamo.llm import KvRouterConfig
-from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 from .engine_args import (
@@ -34,8 +33,8 @@ def _run_replay_for_state(
     *,
     state: DenseReplayState,
     workload: WorkloadSpec,
-    prefill_engine_args: MockEngineArgs,
-    decode_engine_args: MockEngineArgs,
+    prefill_engine_args: dict[str, Any],
+    decode_engine_args: dict[str, Any],
     router_config: KvRouterConfig | None,
 ) -> dict[str, Any]:
     if workload.isTraceBased:
@@ -89,7 +88,7 @@ def _run_agg_replay_for_state(
     *,
     state: DenseAggReplayState,
     workload: WorkloadSpec,
-    engine_args: MockEngineArgs,
+    engine_args: dict[str, Any],
     router_config: KvRouterConfig | None,
 ) -> dict[str, Any]:
     if workload.isTraceBased:

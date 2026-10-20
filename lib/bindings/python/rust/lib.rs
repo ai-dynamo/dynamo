@@ -356,9 +356,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::kv::LoadThresholdConfig>()?;
     m.add_class::<llm::replay::ReasoningConfig>()?;
-    m.add_class::<llm::replay::SglangArgs>()?;
-    m.add_class::<llm::replay::TrtllmArgs>()?;
-    m.add_class::<llm::replay::MockEngineArgs>()?;
+    m.add_function(wrap_pyfunction!(llm::replay::_normalize_mocker_config, m)?)?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
@@ -376,6 +374,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::fpm::FpmEventRelay>()?;
     m.add_class::<llm::fpm::FpmDirectPublisher>()?;
     m.add_class::<llm::fpm::FpmEventSubscriber>()?;
+    m.add_class::<llm::fpm::FpmHealthSnapshot>()?;
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
@@ -506,7 +505,9 @@ fn resolve_event_transport_kind(
     match event_plane {
         Some("nats") => Ok(EventTransportKind::Nats),
         Some("zmq") => Ok(EventTransportKind::Zmq),
-        Some("") | None => Ok(discovery_backend.resolve_event_transport_kind()),
+        Some("") | None => discovery_backend
+            .resolve_event_transport_kind()
+            .map_err(to_pyerr),
         Some(other) => Err(PyValueError::new_err(format!(
             "Invalid event_plane value '{other}'. Valid values: 'nats', 'zmq'"
         ))),

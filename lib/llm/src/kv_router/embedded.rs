@@ -23,21 +23,20 @@ use dynamo_kv_router::scheduling::{
     NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, QueueLimitKind, QueueRejection,
     WorkerAvailabilityProvider,
 };
-use dynamo_kv_router::sequences::ReplicaWorkerPolicy;
+use dynamo_kv_router::sequences::{LocalWorkerLoad, ReplicaWorkerPolicy};
 use dynamo_kv_router::services::selection::{
-    CatalogObserver, CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad,
-    HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost,
-    SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
-    SelectionService, SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource,
-    WorkerRequest,
+    CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad, HostReplication,
+    HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost, SelectionOperation,
+    SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler, SelectionService,
+    SelectionServiceBuilder, WorkerCatalogSource, WorkerRequest,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::RuntimeConfigWatch;
 use crate::kv_router::metrics::{
-    ActiveSequenceIngressMetrics, ROUTER_QUEUE_METRICS, RouterQueueMetricHandles,
-    RouterRequestMetrics, WORKER_LOAD_METRICS,
+    ActiveSequenceIngressMetrics, ROUTER_QUEUE_METRICS, RegistrationAvailabilityProvider,
+    RouterQueueMetricHandles, RouterRequestMetrics, WORKER_LOAD_METRICS,
 };
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
@@ -52,6 +51,7 @@ pub(crate) struct EmbeddedSelectionArgs {
     pub prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     pub overloaded_worker_provider: OverloadedWorkerProvider,
     pub available_worker_provider: WorkerAvailabilityProvider,
+    pub registration_availability_provider: RegistrationAvailabilityProvider,
     pub shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>>,
     pub lora_worker_filter: Option<Arc<dyn dynamo_kv_router::scheduling::LoraWorkerFilter>>,
     /// Builds and feeds the router's index from the runtime; the partition
@@ -174,6 +174,7 @@ pub(crate) struct EmbeddedSelection {
     /// Keeps the service (listeners, sweep, replica sync) alive for as long as
     /// the router holds the partition.
     service: Arc<SelectionService>,
+    _worker_registration: Arc<super::metrics::RouterWorkerRegistration>,
     partition: SelectionPartition,
     affinity: OnceLock<crate::session_affinity::AffinityCoordinator>,
     worker_type: &'static str,
@@ -200,14 +201,8 @@ impl dynamo_kv_router::services::selection::SchedulerLoadSink for SenderLoadSink
         self.sender.publish_batch(snapshots);
     }
 
-    fn observe_local_load(&self, worker: &WorkerWithDpRank, blocks: usize, tokens: usize) {
-        WORKER_LOAD_METRICS.observe(
-            worker.worker_id,
-            worker.dp_rank,
-            self.worker_type,
-            blocks,
-            tokens,
-        );
+    fn observe_local_load(&self, worker: &WorkerWithDpRank, load: LocalWorkerLoad) {
+        WORKER_LOAD_METRICS.observe(worker.worker_id, worker.dp_rank, self.worker_type, load);
     }
 }
 
@@ -222,6 +217,14 @@ impl EmbeddedSelection {
         request_leases: Option<Arc<dyn dynamo_kv_router::sequences::ReplicaRequestLeaseObserver>>,
         cancellation_token: CancellationToken,
     ) -> Result<(Self, crate::kv_router::sequence::ReplicaIngress)> {
+        let worker_registration =
+            super::metrics::RouterWorkerStatusMetrics::from_component(args.endpoint.component())
+                .watch_workers(
+                    workers_with_configs.clone(),
+                    args.metric_worker_type,
+                    cancellation_token.clone(),
+                    Some(args.registration_availability_provider),
+                );
         let worker_type = args.worker_role.unwrap_or(WorkerType::Aggregated);
         let key = embedded_partition_key(args.model_name.as_deref());
 
@@ -292,6 +295,11 @@ impl EmbeddedSelection {
             .core()
             .ensure_partition(key.clone(), args.block_size, args.is_eagle)
             .context("failed to create embedded selection partition")?;
+        if let Some(spec) = crate::request_trace::router_selection_spec()
+            && !partition.scheduler().set_selection_trace(spec)
+        {
+            anyhow::bail!("selection trace spec is already installed");
+        }
 
         // Same profile the partition scheduler resolved, so class indices align.
         let profile = args
@@ -333,14 +341,7 @@ impl EmbeddedSelection {
             is_eagle: args.is_eagle,
             primed: false,
         };
-        let mut reconciler = CatalogReconciler::new(Arc::clone(service.core())).with_observer(
-            Arc::new(RegisteredGauge::new(
-                super::metrics::RouterWorkerStatusMetrics::from_component(
-                    args.endpoint.component(),
-                ),
-                args.metric_worker_type,
-            )),
-        );
+        let mut reconciler = CatalogReconciler::new(Arc::clone(service.core()));
         // The current membership is in the catalog before the router serves.
         if let Some(snapshot) = source.next_snapshot().await
             && let Err(error) = reconciler.apply(&snapshot).await
@@ -356,6 +357,7 @@ impl EmbeddedSelection {
         Ok((
             Self {
                 service,
+                _worker_registration: worker_registration,
                 partition,
                 affinity: OnceLock::new(),
                 worker_type: args.metric_worker_type,
@@ -446,65 +448,6 @@ impl WorkerCatalogSource for RuntimeDiscoverySource {
             })
             .collect();
         Some(snapshot)
-    }
-}
-
-/// Keeps the per-worker `router_worker_registered` gauge in step with the catalog.
-struct RegisteredGauge {
-    metrics: Arc<super::metrics::RouterWorkerStatusMetrics>,
-    worker_label: &'static str,
-    /// Last published rank range per worker, so a shrinking or shifted
-    /// `data_parallel_size` clears the ranks that left instead of stranding
-    /// them at 1.
-    ranks: std::sync::Mutex<HashMap<WorkerId, std::ops::Range<u32>>>,
-}
-
-impl RegisteredGauge {
-    fn new(
-        metrics: Arc<super::metrics::RouterWorkerStatusMetrics>,
-        worker_label: &'static str,
-    ) -> Self {
-        Self {
-            metrics,
-            worker_label,
-            ranks: std::sync::Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl CatalogObserver for RegisteredGauge {
-    fn upserted(&self, record: &WorkerCatalogRecord) {
-        let current = record.dp_ranks();
-        let previous = self
-            .ranks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(record.worker_id, current.clone());
-        for dp_rank in previous
-            .into_iter()
-            .flatten()
-            .filter(|dp_rank| !current.contains(dp_rank))
-        {
-            self.metrics
-                .remove_worker(record.worker_id, dp_rank, self.worker_label);
-        }
-        for dp_rank in current {
-            self.metrics
-                .set_registered(record.worker_id, dp_rank, self.worker_label);
-        }
-    }
-
-    fn removed(&self, record: &WorkerCatalogRecord) {
-        let previous = self
-            .ranks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&record.worker_id);
-        // The record's own ranks plus whatever an earlier upsert published.
-        for dp_rank in record.dp_ranks().chain(previous.into_iter().flatten()) {
-            self.metrics
-                .remove_worker(record.worker_id, dp_rank, self.worker_label);
-        }
     }
 }
 
@@ -663,52 +606,6 @@ mod tests {
         );
     }
 
-    /// A data-parallel shrink clears the gauges of the ranks that left; a
-    /// removal clears every rank the worker ever published.
-    #[test]
-    fn registered_gauge_clears_ranks_that_leave_the_worker() {
-        let metrics = Arc::new(super::super::metrics::RouterWorkerStatusMetrics::unregistered());
-        let gauge = RegisteredGauge::new(Arc::clone(&metrics), "decode");
-        let record = |dp_size: u32| {
-            WorkerCatalogRecord::new(WorkerRequest {
-                worker_id: 7,
-                data_parallel_start_rank: Some(0),
-                data_parallel_size: Some(dp_size),
-                ..WorkerRequest::default()
-            })
-        };
-        // `get_metric_with_label_values` creates the child it looks up;
-        // `collect` reports only the children that exist.
-        let registered = |dp_rank: u32| {
-            use prometheus::core::Collector;
-            let dp_rank = dp_rank.to_string();
-            metrics.registered.collect().into_iter().find_map(|family| {
-                family
-                    .get_metric()
-                    .iter()
-                    .find(|metric| {
-                        metric
-                            .get_label()
-                            .iter()
-                            .any(|label| label.name() == "dp_rank" && label.value() == dp_rank)
-                    })
-                    .map(|metric| metric.get_gauge().value() as i64)
-            })
-        };
-
-        gauge.upserted(&record(4));
-        assert!((0..4).all(|dp_rank| registered(dp_rank) == Some(1)));
-
-        gauge.upserted(&record(2));
-        assert_eq!(registered(0), Some(1));
-        assert_eq!(registered(1), Some(1));
-        assert_eq!(registered(2), None, "rank 2 left the worker");
-        assert_eq!(registered(3), None, "rank 3 left the worker");
-
-        gauge.removed(&record(2));
-        assert!((0..4).all(|dp_rank| registered(dp_rank).is_none()));
-    }
-
     #[test]
     fn local_load_observation_sets_worker_gauges() {
         let sink = SenderLoadSink {
@@ -717,28 +614,26 @@ mod tests {
             ),
             worker_type: "decode",
         };
-        sink.observe_local_load(&WorkerWithDpRank::new(3, 1), 5, 7);
+        sink.observe_local_load(
+            &WorkerWithDpRank::new(3, 1),
+            LocalWorkerLoad {
+                active_blocks: 5,
+                active_tokens: 7,
+                active_requests: 4,
+                prefill_requests: 1,
+            },
+        );
+        let m = &*WORKER_LOAD_METRICS;
         let labels = ["3", "1", "decode"];
-        assert_eq!(
-            WORKER_LOAD_METRICS
-                .active_decode_blocks
-                .with_label_values(&labels)
-                .get(),
-            5
-        );
-        assert_eq!(
-            WORKER_LOAD_METRICS
-                .active_prefill_tokens
-                .with_label_values(&labels)
-                .get(),
-            7
-        );
-        let _ = WORKER_LOAD_METRICS
-            .active_decode_blocks
-            .remove_label_values(&labels);
-        let _ = WORKER_LOAD_METRICS
-            .active_prefill_tokens
-            .remove_label_values(&labels);
+        let requests = |phase| {
+            m.active_requests
+                .with_label_values(&["3", "1", "decode", phase])
+                .get()
+        };
+        assert_eq!(m.active_decode_blocks.with_label_values(&labels).get(), 5);
+        assert_eq!(m.active_prefill_tokens.with_label_values(&labels).get(), 7);
+        assert_eq!((requests("prefill"), requests("decode")), (1, 3));
+        m.remove(3, 1, "decode");
     }
 
     #[test]

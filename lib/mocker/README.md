@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # dynamo-mocker
 
 `dynamo-mocker` is a GPU-free simulation crate for Dynamo's LLM scheduling and KV-cache behavior.
@@ -6,7 +11,7 @@ cache behavior without running a real inference engine.
 
 ## What This Crate Provides
 
-- `MockEngineArgs` for configuring a simulated engine
+- `MockerConfig` combining the AISimulate launch configuration with Dynamo runtime options
 - `engine::create_engine` for building a vLLM-style or SGLang-style mock scheduler
 - `KvEventPublishers` hooks for emitting router-visible KV cache events
 - `loadgen` and `replay` modules for synthetic and trace-driven experiments
@@ -14,39 +19,25 @@ cache behavior without running a real inference engine.
 ## Basic Rust Usage
 
 ```rust
-use dynamo_mocker::common::protocols::{
-    DirectRequest, KvEventPublishers, MockEngineArgs,
-};
-use dynamo_mocker::engine::create_engine;
+use dynamo_mocker::config::MockerConfig;
 
-let args = MockEngineArgs::builder()
-    .block_size(16)
-    .num_gpu_blocks(1024)
-    .max_num_seqs(Some(32))
-    .max_num_batched_tokens(Some(4096))
-    .build()
-    .unwrap();
-
-let engine = create_engine(args, 0, None, KvEventPublishers::default(), None);
-
-engine.receive(DirectRequest {
-    tokens: vec![1, 2, 3, 4],
-    max_output_tokens: 16,
-    uuid: None,
-    dp_rank: 0,
-    arrival_timestamp_ms: None,
-});
+let config = MockerConfig::from_value(serde_json::json!({
+    "engine": {
+        "backend": "vllm",
+        "block_size": 16,
+        "num_gpu_blocks": 1024,
+        "max_num_seqs": 32,
+        "max_num_batched_tokens": 4096
+    },
+    "dynamo": {"enable_local_indexer": true}
+}))?;
 ```
 
-This crate is also the foundation for Dynamo's higher-level mocker CLI and replay tooling. In many
-deployments you will interact with it indirectly through the Python entry points rather than
-embedding it directly as a standalone Rust dependency.
+AISimulate supplies the engine configuration, defaults, validation, and scheduling implementation.
+Dynamo supplies transport, event publishing, and Router/Planner adapters. Python replay entry points
+accept the same canonical mapping; no Dynamo engine-argument constructor classes are required.
 
 ## Further Reading
 
-- Mocker guide:
-  [../../docs/fern/pages/kubernetes/operations/dynosim/mocker-live-simulation.mdx](../../docs/fern/pages/kubernetes/operations/dynosim/mocker-live-simulation.mdx)
-- DynoSim runs guide:
-  [../../docs/fern/pages/cli/operations/dynosim/dynosim-replay.mdx](../../docs/fern/pages/cli/operations/dynosim/dynosim-replay.mdx)
-- Python component README:
-  [../../components/src/dynamo/mocker/README.md](../../components/src/dynamo/mocker/README.md)
+- [Mocker CLI reference](../../docs/fern/pages/reference/components/mocker-cli-reference.mdx)
+- [Replay configuration reference](../../docs/fern/pages/reference/components/dynosim-replay-cli-reference.mdx)

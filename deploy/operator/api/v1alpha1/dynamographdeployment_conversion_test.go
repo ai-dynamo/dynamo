@@ -2121,3 +2121,16 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 		}
 	})
 }
+
+func TestDGD_RoundTrip_NativeGroveAvailability(t *testing.T) {
+	for _, fragment := range []string{`{"spec":{"minAvailable":2}}`, `{"minAvailable":2}`} {
+		t.Run(fragment, func(t *testing.T) {
+			t.Log("Represent provider availability without restoring the deprecated typed field")
+			src := &v1beta1.DynamoGraphDeployment{Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, ProviderOverride: &v1beta1.ProviderOverride{APIVersion: "grove.io/v1alpha1", Value: apiextensionsv1.JSON{Raw: []byte(fragment)}}}}}}
+			got := roundTripFromV1beta1(t, src)
+			if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("native round-trip mismatch (-want +got): %s", diff)
+			}
+		})
+	}
+}
