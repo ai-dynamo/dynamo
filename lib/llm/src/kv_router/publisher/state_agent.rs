@@ -31,7 +31,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use arc_swap::ArcSwap;
 use dynamo_kv_router::{
     identity::{CacheOwnerId, CanonicalIdentityMaterial, ExplicitIdentityMap, StableDpSlotId},
     indexer::{
@@ -63,7 +62,8 @@ use crate::{
         attachment_record_id,
     },
     kv_router::{
-        WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint_with_status,
+        WORKER_KV_INDEXER_BUFFER_SIZE,
+        indexer::{KvStateAgentStatusCell, start_worker_kv_query_endpoint_with_status},
         metrics::kv_publisher_metrics,
     },
     utils::zmq::{MultipartMessage, SubSocket, connect_sub_socket, multipart_message},
@@ -246,7 +246,7 @@ struct Coordinator<P> {
     local_indexer: Arc<LocalKvIndexer>,
     identity: KvStateAgentIdentity,
     slot_dp_rank: u32,
-    status: Arc<ArcSwap<KvStateAgentStatus>>,
+    status: Arc<KvStateAgentStatusCell>,
     withdrawal_tx: mpsc::UnboundedSender<u64>,
     control_rx: mpsc::Receiver<ControlCommand>,
     ingress_rx: mpsc::UnboundedReceiver<IngressBatch>,
@@ -740,7 +740,9 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 return Err(error).context("failed to publish reset barrier");
             }
         }
-        self.publish_status();
+        // Lifecycle changes publish the full snapshot; a chunk only advances
+        // the cursor, still after publish_events.
+        self.status.store_outbound_cursor(self.outbound_cursor());
         if let Some(error) = failed_barrier {
             return Err(error);
         }
@@ -794,15 +796,18 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
     }
 
     fn publish_status(&self) {
-        self.status.store(Arc::new(KvStateAgentStatus {
+        self.status.store(KvStateAgentStatus {
             identity: self.identity.clone(),
             attachment: self.attachment.as_ref().map(Attachment::status),
             cache_owner_ready: !self.cache_owner_domain_failed,
-            outbound_cursor: self
-                .next_outbound_id
-                .checked_sub(1)
-                .expect("next outbound ID is initialized to one"),
-        }));
+            outbound_cursor: self.outbound_cursor(),
+        });
+    }
+
+    fn outbound_cursor(&self) -> u64 {
+        self.next_outbound_id
+            .checked_sub(1)
+            .expect("next outbound ID is initialized to one")
     }
 }
 
@@ -818,7 +823,7 @@ pub struct KvStateAgent {
     control_tx: mpsc::Sender<ControlCommand>,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
     raw_pool: Option<DirectZmqSubPool>,
-    status: Arc<ArcSwap<KvStateAgentStatus>>,
+    status: Arc<KvStateAgentStatusCell>,
     cancel: CancellationToken,
     coordinator: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     withdrawal_supervisor: StdMutex<Option<tokio::task::JoinHandle<()>>>,
@@ -872,7 +877,7 @@ impl KvStateAgent {
             publisher_id,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -994,8 +999,8 @@ impl KvStateAgent {
         &self.identity
     }
 
-    pub fn status(&self) -> Arc<KvStateAgentStatus> {
-        self.status.load_full()
+    pub fn status(&self) -> KvStateAgentStatus {
+        self.status.load()
     }
 
     pub async fn quarantine_vllm(&self, generation: u64, reason: &'static str) -> Result<()> {
@@ -1541,7 +1546,7 @@ async fn start_vllm_listener(
     route_id: u64,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
     control_tx: mpsc::Sender<ControlCommand>,
-    status: Arc<ArcSwap<KvStateAgentStatus>>,
+    status: Arc<KvStateAgentStatusCell>,
     cancel: CancellationToken,
 ) -> Result<VllmListener> {
     let socket = match raw_pool.filter(|_| !source.topic.is_empty()) {
@@ -1605,7 +1610,7 @@ struct VllmListenerTask<'a> {
     kv_block_size: u32,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
     socket: RawSubscription,
-    status: Arc<ArcSwap<KvStateAgentStatus>>,
+    status: Arc<KvStateAgentStatusCell>,
     cancel: CancellationToken,
 }
 
@@ -2215,7 +2220,7 @@ mod tests {
             publisher_id: 41,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -2414,7 +2419,7 @@ mod tests {
             publisher_id: 41,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -2571,7 +2576,7 @@ mod tests {
             publisher_id: 41,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -2697,7 +2702,7 @@ mod tests {
             publisher_id: 41,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -2734,6 +2739,7 @@ mod tests {
         };
         let mut attachment = test_attachment(worker, "tcp://framework");
         coordinator.attach(&mut attachment).await.unwrap();
+        let attached_snapshot = status.snapshot();
         let stale_event = store(worker, ResidencyDomain::Worker, None, 99, 9);
         assert!(
             coordinator
@@ -2784,6 +2790,10 @@ mod tests {
             .unwrap();
         assert_eq!(status.load().outbound_cursor, 3);
         assert!(status.load().attachment.as_ref().unwrap().ready);
+        assert!(
+            Arc::ptr_eq(&attached_snapshot, &status.snapshot()),
+            "ingress chunks advance the cursor without swapping the status snapshot"
+        );
 
         // A single event above the chunk block bound is interpretable and must not fail closed.
         coordinator
