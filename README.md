@@ -17,18 +17,18 @@ limitations under the License.
 
 ![Dynamo banner](./docs/fern/assets/img/dynamo-frontpage-banner.png)
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
-[![PyPI](https://img.shields.io/pypi/v/ai-dynamo)](https://pypi.org/project/ai-dynamo/)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
-[![Slack](https://badgen.net/badge/Slack/Join%20ai-dynamo%20workspace/4A154B?icon=slack)](https://ai-dynamo.org/slack)
-![Community Contributors](https://img.shields.io/badge/community_contributors-160%2B-brightgreen)
+[![License](https://img.shields.io/badge/License-Apache_2.0-76B900.svg)](https://opensource.org/licenses/Apache-2.0)
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo?color=76B900)](https://github.com/ai-dynamo/dynamo/releases/latest)
+[![PyPI](https://img.shields.io/pypi/v/ai-dynamo?color=76B900)](https://pypi.org/project/ai-dynamo/)
+[![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-76B900)](https://deepwiki.com/ai-dynamo/dynamo)
+[![Slack](https://img.shields.io/badge/Slack-Join%20ai--dynamo%20workspace-76B900?labelColor=4A154B&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxZW0iIGhlaWdodD0iMWVtIiB2aWV3Qm94PSIwIDAgMjU2IDI1NiI+PHBhdGggZmlsbD0iI2UwMWU1YSIgZD0iTTUzLjg0MSAxNjEuMzJjMCAxNC44MzItMTEuOTg3IDI2LjgyLTI2LjgxOSAyNi44MlMuMjAzIDE3Ni4xNTIuMjAzIDE2MS4zMmMwLTE0LjgzMSAxMS45ODctMjYuODE4IDI2LjgyLTI2LjgxOEg1My44NHptMTMuNDEgMGMwLTE0LjgzMSAxMS45ODctMjYuODE4IDI2LjgxOS0yNi44MThzMjYuODE5IDExLjk4NyAyNi44MTkgMjYuODE5djY3LjA0N2MwIDE0LjgzMi0xMS45ODcgMjYuODItMjYuODIgMjYuODJjLTE0LjgzIDAtMjYuODE4LTExLjk4OC0yNi44MTgtMjYuODJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMCIgZD0iTTk0LjA3IDUzLjYzOGMtMTQuODMyIDAtMjYuODItMTEuOTg3LTI2LjgyLTI2LjgxOVM3OS4yMzkgMCA5NC4wNyAwczI2LjgxOSAxMS45ODcgMjYuODE5IDI2LjgxOXYyNi44MnptMCAxMy42MTNjMTQuODMyIDAgMjYuODE5IDExLjk4NyAyNi44MTkgMjYuODE5cy0xMS45ODcgMjYuODE5LTI2LjgyIDI2LjgxOUgyNi44MkMxMS45ODcgMTIwLjg4OSAwIDEwOC45MDIgMCA5NC4wNjljMC0xNC44MyAxMS45ODctMjYuODE4IDI2LjgxOS0yNi44MTh6Ii8+PHBhdGggZmlsbD0iIzJlYjY3ZCIgZD0iTTIwMS41NSA5NC4wN2MwLTE0LjgzMiAxMS45ODctMjYuODIgMjYuODE4LTI2LjgyczI2LjgyIDExLjk4OCAyNi44MiAyNi44MnMtMTEuOTg4IDI2LjgxOS0yNi44MiAyNi44MTlIMjAxLjU1em0tMTMuNDEgMGMwIDE0LjgzMi0xMS45ODggMjYuODE5LTI2LjgyIDI2LjgxOWMtMTQuODMxIDAtMjYuODE4LTExLjk4Ny0yNi44MTgtMjYuODJWMjYuODJDMTM0LjUwMiAxMS45ODcgMTQ2LjQ4OSAwIDE2MS4zMiAwczI2LjgxOSAxMS45ODcgMjYuODE5IDI2LjgxOXoiLz48cGF0aCBmaWxsPSIjZWNiMjJlIiBkPSJNMTYxLjMyIDIwMS41NWMxNC44MzIgMCAyNi44MiAxMS45ODcgMjYuODIgMjYuODE4cy0xMS45ODggMjYuODItMjYuODIgMjYuODJjLTE0LjgzMSAwLTI2LjgxOC0xMS45ODgtMjYuODE4LTI2LjgyVjIwMS41NXptMC0xMy40MWMtMTQuODMxIDAtMjYuODE4LTExLjk4OC0yNi44MTgtMjYuODJjMC0xNC44MzEgMTEuOTg3LTI2LjgxOCAyNi44MTktMjYuODE4aDY3LjI1YzE0LjgzMiAwIDI2LjgyIDExLjk4NyAyNi44MiAyNi44MTlzLTExLjk4OCAyNi44MTktMjYuODIgMjYuODE5eiIvPjwvc3ZnPg==)](https://ai-dynamo.org/slack)
+![Community Contributors](https://img.shields.io/badge/community_contributors-160%2B-76B900)
 
 | **[Docs](https://docs.nvidia.com/dynamo/)** | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/14124)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Digest](docs/fern/pages/blog/latest.mdx)** | **[Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** | **[How to Contribute](#community-and-contributing)** | **[Slack](https://ai-dynamo.org/slack)** |
 
-<!-- The SVG badge uses systemLanguage so it only draws for Simplified Chinese/China browser language preferences. -->
-<p align="left">
-  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="./docs/fern/assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+<!-- GitHub does not support browser-language negotiation for repository README rendering. Keep explicit alternate-language links in sync. -->
+<p align="right">
+  <strong>English</strong> | <a href="./README.zh-CN.md" hreflang="zh-CN">简体中文</a>
 </p>
 
 # Dynamo
