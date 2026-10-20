@@ -21,24 +21,14 @@ use tokio::sync::{Mutex, oneshot};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
-use crate::client::{ModelLimits, TrtllmClient};
-use crate::convert::{ResponseState, build_generate_request, engine_error};
+use crate::client::TrtllmClient;
 use crate::engine::TrtllmSidecarEngine;
 use crate::model::ConfiguredModel;
 use crate::proto as pb;
 
-/// Most tests exercise aggregated serving; the disaggregation tests name their
-/// mode explicitly.
-const AGG: DisaggregationMode = DisaggregationMode::Aggregated;
-const PREFILL: DisaggregationMode = DisaggregationMode::Prefill;
+use crate::test_fixtures::*;
 
-// The tests themselves live in `tests/`, grouped by the surface they cover;
-// this file holds only the fakes and fixtures they share.
-mod convert_request;
-mod convert_response;
-mod disagg;
 mod e2e;
-mod engine;
 
 // ---------------------------------------------------------------------------
 // Fake TensorRT-LLM OpenEngine services
@@ -49,7 +39,6 @@ struct FakeTrtllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
     aborts: Arc<Mutex<Vec<String>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
-    reject: Arc<AtomicBool>,
     hang: Arc<AtomicBool>,
     /// Simulates a server that has not yet accepted the request, so the RPC
     /// itself is still in flight.
@@ -68,19 +57,6 @@ fn prompt_len(request: &pb::GenerateRequest) -> u32 {
         Some(pb::generate_request::Input::TokenIds(tokens)) => tokens.ids.len() as u32,
         _ => 0,
     }
-}
-
-/// Mirrors the OpenEngine servicer: a request is prefill-only when its `extra`
-/// Struct carries `request_type = "context_only"`.
-fn is_context_only(request: &pb::GenerateRequest) -> bool {
-    request
-        .extra
-        .as_ref()
-        .and_then(|extra| extra.fields.get("request_type"))
-        .and_then(|value| value.kind.as_ref())
-        .is_some_and(|kind| {
-            matches!(kind, prost_types::value::Kind::StringValue(value) if value == "context_only")
-        })
 }
 
 fn wants_logprobs(request: &pb::GenerateRequest) -> bool {
@@ -104,9 +80,6 @@ impl pb::inference_server::Inference for FakeTrtllm {
         }
         let request = request.into_inner();
         self.requests.lock().await.push(request.clone());
-        if self.reject.load(Ordering::SeqCst) {
-            return Err(Status::invalid_argument("rejected by fake TensorRT-LLM"));
-        }
 
         let request_id = request.request_id.clone();
         let prompt_tokens = prompt_len(&request);
@@ -191,48 +164,6 @@ impl pb::inference_server::Inference for FakeTrtllm {
             };
         };
         Ok(Response::new(Box::pin(stream)))
-    }
-}
-
-/// The handoff a context worker returns, shaped like TensorRT-LLM's: the
-/// session id is the context request id and the engine-specific state rides in
-/// `attributes_struct`.
-fn fake_session() -> pb::KvSessionRef {
-    pb::KvSessionRef {
-        session_id: "12345".to_string(),
-        transfer_backend: "NIXL".to_string(),
-        endpoints: vec![pb::KvEndpoint {
-            host: "10.0.0.7".to_string(),
-            port: 5601,
-            protocol: "grpc".to_string(),
-        }],
-        dp_rank: 0,
-        attributes_struct: Some(prost_types::Struct {
-            fields: [
-                (
-                    "opaque_state".to_string(),
-                    prost_types::Value {
-                        kind: Some(prost_types::value::Kind::StringValue(
-                            "c3RhdGU=".to_string(),
-                        )),
-                    },
-                ),
-                (
-                    "first_gen_tokens".to_string(),
-                    prost_types::Value {
-                        kind: Some(prost_types::value::Kind::ListValue(
-                            prost_types::ListValue {
-                                values: vec![prost_types::Value {
-                                    kind: Some(prost_types::value::Kind::NumberValue(42.0)),
-                                }],
-                            },
-                        )),
-                    },
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        }),
     }
 }
 
@@ -383,41 +314,6 @@ impl Drop for FakeServer {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn request() -> PreprocessedRequest {
-    PreprocessedRequest::builder()
-        .model("served-model".to_string())
-        .token_ids(vec![11, 22, 33])
-        .stop_conditions(StopConditions {
-            max_tokens: Some(16),
-            min_tokens: Some(1),
-            stop: Some(vec!["done".to_string()]),
-            stop_token_ids_hidden: Some(vec![2]),
-            ignore_eos: Some(true),
-            ..Default::default()
-        })
-        .sampling_options(SamplingOptions {
-            temperature: Some(0.2),
-            top_p: Some(0.9),
-            top_k: Some(4),
-            min_p: Some(0.1),
-            seed: Some(123),
-            presence_penalty: Some(0.3),
-            frequency_penalty: Some(0.4),
-            repetition_penalty: Some(1.1),
-            guided_decoding: Some(dynamo_backend_common::GuidedDecodingOptions {
-                json: Some(json!({"type": "object"})),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .output_options(OutputOptions {
-            logprobs: Some(1),
-            ..Default::default()
-        })
-        .build()
-        .expect("request")
-}
-
 fn transport(connections: usize) -> GrpcTransportConfig {
     GrpcTransportConfig {
         connections: NonZeroUsize::new(connections).expect("nonzero connections"),
@@ -433,15 +329,6 @@ fn impatient_transport() -> GrpcTransportConfig {
         startup_deadline: Duration::from_millis(200),
         ..transport(1)
     }
-}
-
-/// Engine limits as `Control.GetModelInfo` would report them, with no
-/// separate output cap.
-fn limits(context_length: u32) -> Option<ModelLimits> {
-    Some(ModelLimits {
-        context_length: Some(context_length),
-        max_output_tokens: None,
-    })
 }
 
 fn engine(endpoint: &str, connections: usize) -> TrtllmSidecarEngine {
@@ -490,37 +377,595 @@ async fn collect(
         .await
 }
 
-/// Applies `mutate` to a baseline request and asserts `build_generate_request`
-/// rejects it with a message mentioning `expect`.
-fn assert_rejected(mutate: impl FnOnce(&mut PreprocessedRequest), expect: &str) {
+/// `PrefillReady` is the prefill worker's terminal chunk: no tokens, and the
+/// handoff the decode worker will replay.
+#[tokio::test]
+async fn prefill_ready_is_the_terminal_handoff() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let engine = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Prefill);
+    engine.start(0).await.expect("start");
+
     let mut req = request();
-    mutate(&mut req);
-    let error = build_generate_request(&req, "req", "model", None, AGG)
-        .expect_err("request must be rejected");
+    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        prefill_dp_rank: Some(0),
+        ..Default::default()
+    });
+    let outputs = collect(&engine, req).await;
+    let terminal = outputs
+        .iter()
+        .find(|output| output.finish_reason.is_some())
+        .expect("a terminal chunk");
+    // The frontend's prefill router chains into decode only for `Length`; any
+    // other terminal reason is returned to the caller as a finished request.
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Length));
+
     assert!(
-        error.to_string().contains(expect),
-        "error {error:?} should mention {expect:?}"
+        outputs.iter().all(|output| output.token_ids.is_empty()),
+        "a prefill worker must not stream tokens to the client"
+    );
+    let handoff = terminal
+        .disaggregated_params
+        .as_ref()
+        .expect("terminal carries the prefill handoff");
+    assert_eq!(handoff["session_id"], json!("12345"));
+    assert_eq!(handoff["transfer_backend"], json!("NIXL"));
+    assert_eq!(handoff["endpoints"][0]["port"], json!(5601));
+    assert_eq!(handoff["attributes"]["first_gen_tokens"], json!([42]));
+}
+
+/// The decode worker replays the prefill handoff verbatim in `kv.session`.
+#[tokio::test]
+async fn decode_request_replays_the_prefill_session() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+
+    let mut agent_request = request();
+    agent_request.agent_context = Some(
+        serde_json::from_value(json!({"session_id": "agentx-session"}))
+            .expect("valid agent context"),
+    );
+
+    // Phase 1: prefill produces the handoff.
+    let prefill = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Prefill);
+    prefill.start(0).await.expect("start prefill");
+    let handoff = collect(&prefill, agent_request.clone())
+        .await
+        .into_iter()
+        .find_map(|output| output.disaggregated_params)
+        .expect("prefill handoff");
+
+    // Phase 2: decode replays it.
+    let decode = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Decode);
+    decode.start(0).await.expect("start decode");
+    let mut req = agent_request;
+    req.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: handoff,
+        prompt_tokens_details: None,
+    });
+    let outputs = collect(&decode, req).await;
+    assert!(
+        outputs.iter().any(|output| !output.token_ids.is_empty()),
+        "the decode worker streams the completion"
+    );
+
+    let requests = server.service.requests.lock().await;
+    for request in requests.iter() {
+        let extra = request.extra.as_ref().expect("request extensions");
+        assert_eq!(
+            extra.fields["detokenize"].kind,
+            Some(prost_types::value::Kind::BoolValue(false))
+        );
+        assert_eq!(
+            extra.fields["conversation_id"].kind,
+            Some(prost_types::value::Kind::StringValue(
+                "agentx-session".into()
+            )),
+            "both RPC legs must retain the same conversation identity"
+        );
+    }
+    let session = requests[1]
+        .kv
+        .as_ref()
+        .and_then(|kv| kv.session.as_ref())
+        .expect("decode request carries kv.session")
+        .clone();
+    assert_eq!(
+        session,
+        fake_session(),
+        "the handoff must round-trip intact"
     );
 }
 
-fn token_response(tokens: Vec<pb::TokenInfo>) -> pb::GenerateResponse {
-    pb::GenerateResponse {
-        request_id: "r".to_string(),
-        event: Some(pb::generate_response::Event::Token(pb::TokenOutput {
-            output_index: Some(0),
-            tokens,
-            text: String::new(),
-        })),
-        usage: None,
+#[tokio::test]
+async fn aggregated_generation_streams_delta_then_terminal() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let engine = engine(&server.endpoint, 2);
+    let config = engine.start(0).await.expect("start");
+    assert_eq!(config.model, "model-source");
+    // GetModelInfo reports max_context_length 4096.
+    assert_eq!(config.llm.unwrap().context_length, Some(4096));
+
+    let mut req = request();
+    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        dp_rank: Some(0),
+        ..Default::default()
+    });
+    let outputs = collect(&engine, req).await;
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(outputs[0].token_ids, [42]);
+    assert!(outputs[0].finish_reason.is_none());
+    assert_eq!(outputs[0].log_probs.as_deref(), Some(&[-0.25][..]));
+
+    let terminal = &outputs[1];
+    assert!(terminal.token_ids.is_empty());
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+    assert_eq!(terminal.stop_reason, Some(StopReason::Int(2)));
+    let usage = terminal.completion_usage.as_ref().expect("usage");
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (3, 1));
+
+    let requests = server.service.requests.lock().await;
+    let sent = requests.first().expect("recorded request");
+    assert_eq!(sent.model, "model-source");
+    match sent.input.as_ref().expect("input") {
+        pb::generate_request::Input::TokenIds(tokens) => assert_eq!(tokens.ids, [11, 22, 33]),
+        other => panic!("expected token IDs input, got {other:?}"),
     }
 }
 
-fn logprob_token(token_id: u32, logprob: f64) -> pb::TokenInfo {
-    pb::TokenInfo {
-        token_id,
-        token: String::new(),
-        logprob: Some(logprob),
-        rank: Some(1),
-        candidates: Vec::new(),
+#[tokio::test]
+async fn cancellation_yields_a_cancelled_terminal() {
+    let service = FakeTrtllm::default();
+    service.hang.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut stream = engine
+        .generate(request(), GenerateContext::new(context.clone(), None))
+        .await
+        .expect("generate");
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(first.token_ids, [42]);
+    context.stop_generating();
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("terminal within deadline")
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+}
+
+/// A request cancelled before dispatch must not reach the engine.
+#[tokio::test]
+async fn an_aggregated_request_cancelled_before_dispatch_never_reaches_the_engine() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    context.stop_generating();
+
+    let mut stream = engine
+        .generate(request(), GenerateContext::new(context.clone(), None))
+        .await
+        .expect("generate");
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("terminal within deadline")
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+    assert!(
+        server.service.requests.lock().await.is_empty(),
+        "a request cancelled before dispatch must not be sent to the engine"
+    );
+}
+
+/// Nonzero logical ranks are not advertised and must be rejected before dispatch.
+#[tokio::test]
+async fn a_data_parallel_rank_hint_is_rejected_before_dispatch() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+
+    for (mode, hints) in [
+        (
+            DisaggregationMode::Prefill,
+            dynamo_backend_common::engine::RoutingHints {
+                prefill_dp_rank: Some(7),
+                ..Default::default()
+            },
+        ),
+        (
+            DisaggregationMode::Decode,
+            dynamo_backend_common::engine::RoutingHints {
+                dp_rank: Some(3),
+                ..Default::default()
+            },
+        ),
+        (
+            AGG,
+            dynamo_backend_common::engine::RoutingHints {
+                dp_rank: Some(3),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let engine = engine_in_mode(&server.endpoint, 1, mode);
+        engine.start(0).await.expect("start");
+        let mut req = request();
+        req.routing = Some(hints);
+        let context = dynamo_backend_common::testing::mock_context();
+        let result = engine
+            .generate(req, GenerateContext::new(context, None))
+            .await;
+        assert!(result.is_err(), "{mode:?} must refuse a rank hint");
     }
+    assert!(
+        server.service.requests.lock().await.is_empty(),
+        "nothing may reach the engine"
+    );
+}
+
+/// A decode request holding transferred KV blocks must outlive its client until
+/// the first token proves the transfer landed -- dropping the stream earlier
+/// strands the prefill worker's blocks. It must not outlive it any longer than
+/// that, or a cancelled request generates its whole budget with no consumer.
+#[tokio::test]
+async fn a_cancelled_decode_request_survives_only_until_the_transfer_lands() {
+    let service = FakeTrtllm::default();
+    service.hang.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Decode);
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut req = request();
+    req.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: crate::disagg::session_to_json(fake_session()).expect("handoff"),
+        prompt_tokens_details: None,
+    });
+    let mut stream = engine
+        .generate(req, GenerateContext::new(context.clone(), None))
+        .await
+        .expect("generate");
+
+    context.stop_generating();
+    // Still deferring: nothing has confirmed the KV transfer yet.
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(
+        first.finish_reason, None,
+        "the deferral outlasts the client"
+    );
+    assert!(!first.token_ids.is_empty());
+
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("the deferral lifts once a token lands")
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+}
+
+#[tokio::test]
+async fn abort_sends_the_abort_rpc_to_the_server() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    let request_id = context.id().to_string();
+    engine.abort(context).await;
+
+    // The cancelled generation's ID must reach TensorRT-LLM, not just produce a
+    // local terminal, or the server keeps generating.
+    assert_eq!(server.service.aborts.lock().await.as_slice(), [request_id]);
+}
+
+#[tokio::test]
+async fn unsupported_features_fail_before_rpc_submission() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+
+    let mut multiple = request();
+    multiple.sampling_options.n = Some(2);
+
+    let mut beam = request();
+    beam.sampling_options.use_beam_search = Some(true);
+
+    let mut embeds = request();
+    embeds.prompt_embeds = Some("encoded".to_string());
+
+    let mut prompt_logprobs = request();
+    prompt_logprobs.output_options.prompt_logprobs = Some(1);
+
+    let mut visible_stops = request();
+    visible_stops.stop_conditions.stop_token_ids_visible = Some(vec![7]);
+
+    for unsupported in [multiple, beam, embeds, prompt_logprobs, visible_stops] {
+        let context = dynamo_backend_common::testing::mock_context();
+        let result = engine
+            .generate(unsupported, GenerateContext::new(context, None))
+            .await;
+        assert!(result.is_err());
+    }
+    assert!(server.service.requests.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn pool_uses_each_configured_connection() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let endpoint =
+        GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").expect("valid endpoint");
+    let client = TrtllmClient::connect(&endpoint, transport(2))
+        .await
+        .expect("connect pool");
+    assert_eq!(client.connection_count(), 2);
+
+    for index in 0..4 {
+        let mut stream = client
+            .generate(pb::GenerateRequest {
+                request_id: format!("request-{index}"),
+                model: "model-source".to_string(),
+                input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
+                    ids: vec![1, 2],
+                })),
+                ..Default::default()
+            })
+            .await
+            .expect("start stream");
+        while stream.message().await.expect("message").is_some() {}
+    }
+
+    let ports: BTreeSet<_> = server
+        .service
+        .peers
+        .lock()
+        .await
+        .iter()
+        .map(SocketAddr::port)
+        .collect();
+    assert_eq!(ports.len(), 2);
+}
+
+/// A server with no Control service leaves the window unknown. Registering
+/// anyway would advertise capacity and then reject, with a non-migratable 4xx,
+/// every request that omits `max_tokens` -- most chat traffic. Fail at startup
+/// instead, naming the flag that fixes it.
+#[tokio::test]
+async fn start_without_a_context_length_fails() {
+    let service = FakeTrtllm::default();
+    service.no_control.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine_with(&server.endpoint, impatient_transport(), None, AGG);
+
+    let error = engine
+        .start(0)
+        .await
+        .expect_err("a worker with no window must not register");
+    assert!(
+        error.to_string().contains("--context-length"),
+        "the error must name the flag that supplies a window: {error}"
+    );
+}
+
+/// An engine that answers has finished loading, so an answer carrying no
+/// context length means it was started without `--max_seq_len` and will not
+/// change. Fail on the first answer rather than polling to the deadline and
+/// then blaming a slow load.
+#[tokio::test]
+async fn start_fails_at_once_when_the_server_answers_without_a_context_length() {
+    let service = FakeTrtllm::default();
+    service.empty_model_info.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine_with(&server.endpoint, impatient_transport(), None, AGG);
+
+    let error = engine
+        .start(0)
+        .await
+        .expect_err("a window is required to register");
+    assert!(
+        error.to_string().contains("--max_seq_len"),
+        "the error must name the fix: {error}"
+    );
+    assert_eq!(
+        server.service.model_info_calls.load(Ordering::SeqCst),
+        1,
+        "an answer that cannot change must not be retried"
+    );
+}
+
+/// The wait exists for an engine that is not serving yet: it keeps asking
+/// through transport failures and picks up the window once the engine answers.
+#[tokio::test]
+async fn start_waits_for_a_server_that_is_not_serving_yet() {
+    let service = FakeTrtllm::default();
+    service.unavailable_model_info.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let ready = Arc::clone(&server.service.unavailable_model_info);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        ready.store(false, Ordering::SeqCst);
+    });
+    let engine = engine_with(&server.endpoint, impatient_transport(), None, AGG);
+
+    let config = engine.start(0).await.expect("start once the engine serves");
+    assert_eq!(
+        config.llm.expect("llm registration").context_length,
+        Some(4096)
+    );
+}
+
+/// `--context-length` wins over what the engine reports. The engine is still
+/// asked, so the disagreement can be logged and its output cap picked up, but
+/// its answer does not decide the window.
+#[tokio::test]
+async fn a_configured_context_length_outranks_the_servers() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let engine = engine_with(&server.endpoint, transport(1), Some(8192), AGG);
+
+    let config = engine
+        .start(0)
+        .await
+        .expect("start with a configured window");
+    assert_eq!(
+        config.llm.expect("llm registration").context_length,
+        Some(8192),
+        "the configured window must outrank the server's 4096"
+    );
+    assert_eq!(
+        server.service.model_info_calls.load(Ordering::SeqCst),
+        1,
+        "the engine is still consulted, to cross-check and to learn its output cap"
+    );
+}
+
+/// A configured window also means a server with no Control service is no longer
+/// a startup problem: there is nothing left to ask it for.
+#[tokio::test]
+async fn a_configured_context_length_survives_a_server_without_control() {
+    let service = FakeTrtllm::default();
+    service.no_control.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine_with(&server.endpoint, transport(1), Some(8192), AGG);
+
+    let config = engine
+        .start(0)
+        .await
+        .expect("start with a configured window");
+    assert_eq!(
+        config.llm.expect("llm registration").context_length,
+        Some(8192)
+    );
+}
+
+/// Shutdown has to terminate in-flight requests: the worker cannot drain if a
+/// stream waits forever on an engine that will never answer.
+#[tokio::test]
+async fn cleanup_terminates_an_in_flight_request() {
+    let service = FakeTrtllm::default();
+    service.hang.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = Arc::new(engine(&server.endpoint, 1));
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut stream = engine
+        .generate(request(), GenerateContext::new(context, None))
+        .await
+        .expect("generate");
+    let first = stream.next().await.expect("first item").expect("delta");
+    assert_eq!(first.token_ids, [42]);
+
+    engine.cleanup().await.expect("cleanup");
+    let terminal = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("shutdown must terminate the stream")
+        .expect("terminal item")
+        .expect("terminal");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+}
+
+/// A decode leg's cancellation deferral has to cover the dispatch itself, not
+/// just the streaming loop. `generate` sends the request and then awaits
+/// response headers, so a cancellation that wins that race abandons a request
+/// the engine has already accepted and begun pulling KV for -- stranding the
+/// prefill worker's blocks with no leg left to claim them. Shutdown still wins.
+#[tokio::test]
+async fn a_cancelled_decode_dispatch_is_not_abandoned_mid_flight() {
+    let service = FakeTrtllm::default();
+    service.hang_before_stream.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = Arc::new(engine_in_mode(
+        &server.endpoint,
+        1,
+        DisaggregationMode::Decode,
+    ));
+    engine.start(0).await.expect("start");
+
+    let mut decode_request = request();
+    decode_request.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: crate::disagg::session_to_json(fake_session()).expect("handoff"),
+        prompt_tokens_details: None,
+    });
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut dispatch = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let context = context.clone();
+        async move {
+            engine
+                .generate(decode_request, GenerateContext::new(context, None))
+                .await
+        }
+    });
+
+    // The fake records the request before it withholds response headers, which
+    // is exactly the window this test is about: the engine has the request and
+    // the sidecar does not know it yet.
+    while server.service.requests.lock().await.is_empty() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    context.stop_generating();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut dispatch)
+            .await
+            .is_err(),
+        "the dispatch must outlive the client's cancellation"
+    );
+
+    engine.cleanup().await.expect("cleanup");
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), dispatch)
+        .await
+        .expect("shutdown must release the dispatch")
+        .expect("dispatch task")
+        .expect("generate");
+    let terminal = stream
+        .next()
+        .await
+        .expect("a terminal item")
+        .expect("terminal");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+}
+
+// Regression: eager discovery must neither bypass Worker start nor reconnect
+// during that non-cancellable phase after bootstrap has already succeeded.
+#[tokio::test]
+async fn bootstrap_discovers_once_but_requires_start_before_serving() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let bootstrap = TrtllmSidecarEngine::try_from_args_async(vec![
+        "dynamo-trtllm-sidecar".into(),
+        "--grpc-endpoint".into(),
+        server.endpoint.clone(),
+        "--model-path".into(),
+        "model-source".into(),
+    ])
+    .unwrap();
+    let (engine, _) = bootstrap.1.await.unwrap();
+    assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
+    let context = dynamo_backend_common::testing::mock_context();
+    let result = engine
+        .generate(request(), GenerateContext::new(context, None))
+        .await;
+    let error = result.err().expect("bootstrap must not enable generation");
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(dynamo_backend_common::BackendError::EngineShutdown)
+    );
+    assert!(server.service.requests.lock().await.is_empty());
+
+    // Metadata was resolved already; a transient Control failure cannot make
+    // Worker repeat discovery and hang in its non-cancellable start phase.
+    server
+        .service
+        .unavailable_model_info
+        .store(true, Ordering::SeqCst);
+    let config = engine.start(0).await.unwrap();
+    assert_eq!(config.llm.unwrap().context_length, Some(4096));
+    assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
+    let outputs = collect(&engine, request()).await;
+    assert_eq!(outputs[0].token_ids, [42]);
+    assert_eq!(
+        outputs.last().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
+    engine.cleanup().await.unwrap();
 }
