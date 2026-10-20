@@ -52,6 +52,12 @@ forwards AISimulate stored-block attribution into router events. The adapter nev
 infers a store's session from whichever requests happen to be running.
 Disaggregated decode placement remains load-only; prefill observes the cache events.
 
+Session lineage uses the production indexer's five-minute wall-clock cleanup
+interval, not simulated replay time. Unreferenced nodes can remain until a later
+update triggers cleanup or the replay ends. Cleanup timing can affect lineage
+reconstructed by later requests, but does not affect current placement or eviction
+decisions.
+
 ## Further Reading
 
 - [Mocker CLI reference](../../docs/fern/pages/reference/components/mocker-cli-reference.mdx)
