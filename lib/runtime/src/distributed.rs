@@ -351,6 +351,7 @@ impl DistributedRuntime {
             );
         }
         if response_plane == ResponsePlaneMode::Velo {
+            crate::pipeline::network::velo_response::reject_tls_settings()?;
             distributed_runtime.velo_response_service().await?;
             crate::pipeline::network::velo_response::register_metrics(
                 distributed_runtime.get_metrics_registry(),
@@ -904,6 +905,13 @@ mod parser_env_tests {
                 "192.0.2.1",
                 "Failed to pre-bind TCP listener",
             ),
+            // Velo has no TLS, so TLS settings must not be silently ignored.
+            (
+                "DYN_TCP_TLS_CERT_PATH",
+                "/nonexistent/cert.pem",
+                "DYN_TCP_TLS_CERT_PATH",
+            ),
+            ("DYN_TCP_TLS_INSECURE", "true", "DYN_TCP_TLS_INSECURE"),
         ];
         if !cfg!(all(target_os = "linux", feature = "velo-ucx")) {
             cases.push(("DYN_VELO_RESPONSE_TRANSPORT", "ucx", "velo-ucx"));

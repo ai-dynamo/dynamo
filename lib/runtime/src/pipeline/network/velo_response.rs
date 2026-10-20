@@ -144,6 +144,33 @@ fn response_mux_config() -> Result<MuxConfig> {
     })
 }
 
+/// Velo has no TLS. A runtime configured for Velo refuses to start, rather
+/// than send responses in plaintext while these settings encrypt the TCP
+/// planes. A TCP worker that builds the service only to report a plane
+/// mismatch does not check.
+pub(crate) fn reject_tls_settings() -> Result<()> {
+    use crate::config::environment_names::tcp_response_stream::tls::*;
+
+    let set: Vec<&str> = [
+        DYN_TCP_TLS_CERT_PATH,
+        DYN_TCP_TLS_KEY_PATH,
+        DYN_TCP_TLS_CA_CERT_PATH,
+        DYN_TCP_TLS_CLIENT_CERT_PATH,
+        DYN_TCP_TLS_CLIENT_KEY_PATH,
+        DYN_TCP_TLS_CLIENT_CA_CERT_PATH,
+    ]
+    .into_iter()
+    .filter(|name| std::env::var_os(name).is_some())
+    .chain(crate::config::env_is_truthy(DYN_TCP_TLS_INSECURE).then_some(DYN_TCP_TLS_INSECURE))
+    .collect();
+    ensure!(
+        set.is_empty(),
+        "the Velo response plane has no TLS, but {} is set; unset it or use DYN_RESPONSE_PLANE=tcp",
+        set.join(", ")
+    );
+    Ok(())
+}
+
 fn tcp_transport(address: SocketAddr) -> Result<velo::transports::tcp::TcpTransport> {
     velo::transports::tcp::TcpTransportBuilder::new()
         .bind_addr(address)

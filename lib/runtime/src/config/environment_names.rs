@@ -871,6 +871,9 @@ pub mod request_plane {
 pub mod response_plane {
     /// Response transport used by every runtime in this process: "tcp", "quic"
     /// or "velo". Defaults to "tcp".
+    ///
+    /// Velo has no TLS, so a velo runtime refuses to start while any
+    /// `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is truthy.
     pub const DYN_RESPONSE_PLANE: &str = "DYN_RESPONSE_PLANE";
 
     /// Seconds a frontend waits, after a worker ACKs a unary request, for that
