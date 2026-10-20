@@ -216,6 +216,8 @@ def test_weight_artifact_round_trip_preserves_exact_ids_and_bytes(
     with _server(socket_path, target_vmm):
         weight_artifact.load_weights(str(artifact), socket_path, 0)
         reader = _GMSClientSession(socket_path, RequestedLockType.RO)
+        # A restarted loader must not wait for RW behind the reader's lease.
+        weight_artifact.load_weights(str(artifact), socket_path, 0)
         assert weight_artifact._list_allocations(reader) == records
         restored = [
             _map(reader, record, target_vmm, GrantedLockType.RO) for record in records
