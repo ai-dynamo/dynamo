@@ -39,6 +39,7 @@ areas:
   - lib/llm/tests/test_streaming_tool_parsers.rs
   - tests/frontend/
   - tests/frontend/grpc/
+  - examples/systemone/
 - label: agents
   github_team: '@ai-dynamo/dynamo-agents-codeowners'
   path_globs: []
