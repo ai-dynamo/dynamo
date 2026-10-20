@@ -271,8 +271,11 @@ A deployment with `multiCluster` set in `lib/const.ts` is ready for Karmada and 
 Multicluster (MCS) API. Ohio is the Karmada hub (`aws-ohio`) and West is a member (`aws-west`).
 The member names match the Global Router's `site_id` values. For every such cluster, CDK:
 
-- adds an ingress rule from each peer VPC range to the EKS cluster security group. MCS
-  EndpointSlices list pod addresses, so callers in the other cluster connect to pods directly;
+- adds an ingress rule for all TCP from each peer VPC range to the EKS cluster security group.
+  MCS EndpointSlices list pod addresses, so a caller in the other cluster, such as a Global Router
+  dialing a Relay it found through discovery, connects to the pod directly; without this rule only
+  the Relay's NLB is reachable. Pods use their node's security groups, and the nodes get the
+  cluster security group because their launch templates set none;
 - excludes the peer VPC ranges from source NAT in the VPC CNI (`aws-node`
   `AWS_VPC_K8S_CNI_EXCLUDE_SNAT_CIDRS`), so traffic between the clusters keeps its pod address;
 - installs the MCS `ServiceExport` and `ServiceImport` CRDs (`crds/`, from Karmada 1.19.0);
@@ -457,10 +460,11 @@ pnpm exec cdk deploy --all -c deployment=both \
   -c deploymentConfigPath=config/deployments.local.json
 ```
 
-One stack owns the peering connection and Ohio private routes; the other owns West private routes.
-Each listed private route table receives a native CloudFormation route to the opposite VPC CIDR.
-Public route tables are not changed. The regional load balancer controller applies ingress from
-NLB Service source ranges. The private NLB DNS name resolves to its private node addresses;
+One stack owns the peering connection and Ohio routes; the other owns West routes.
+Each listed private or public route table receives a native CloudFormation route to the opposite VPC CIDR.
+Populate `publicRouteTableIds` to enable private peer access from bastions.
+The regional load balancer controller applies ingress from NLB Service source ranges.
+The `multiCluster` configuration additionally admits peer pod traffic through the cluster security group. The private NLB DNS name resolves to its private node addresses;
 peering DNS-resolution options for EC2 public hostnames are not needed for that name. Verify DNS
 resolution and connectivity from the Router's private network after peering becomes active.
 
