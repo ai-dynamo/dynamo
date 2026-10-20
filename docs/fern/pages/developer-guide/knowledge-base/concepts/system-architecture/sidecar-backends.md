@@ -42,6 +42,14 @@ API and streams responses back.
 | Dynamo sidecar | Engine registration and discovery, request forwarding over native gRPC, and event forwarding |
 | Inference engine | Native gRPC request serving, scheduling, sampling, token generation, KV cache, and GPU execution |
 
+## Local Protocol Example
+
+For a CPU example using the existing OpenEngine sidecar with a Python-hosted Rust gRPC extension and
+mocked DeepInfer execution, see the
+[DeepInfer OpenEngine example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/deepinfer).
+It exercises the real Dynamo HTTP frontend, V4.1 tokenizer, reasoning parser,
+and tool parser without loading model weights.
+
 ## Container Packaging
 
 The sidecar Dockerfile builds all three engine-specific sidecar executables into

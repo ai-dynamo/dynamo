@@ -14,7 +14,7 @@ for arg in "$@"; do
     fi
 done
 if "$MOCK"; then
-    MODEL_PATH="${MODEL_PATH:-$(python3 "$SCRIPT_DIR/../prepare_model.py")}"
+    MODEL_PATH="${MODEL_PATH:-$(python3 "$SCRIPT_DIR/../prepare_wrapper_model.py")}"
     SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-deepinfer-mock}"
 else
     : "${MODEL_PATH:?Set MODEL_PATH to the local DeepInfer model checkpoint, or add --mock}"

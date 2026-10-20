@@ -39,6 +39,7 @@ members = [
     "lib/mocker/servers/sglang",
     "lib/sidecar/trtllm",
     "lib/mocker/servers/trtllm",
+    "examples/backends/deepinfer",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",

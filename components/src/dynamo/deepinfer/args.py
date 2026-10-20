@@ -50,7 +50,7 @@ def parse_args(argv: list[str] | None = None) -> Config:
     args = parser.parse_args(argv)
     if not Path(args.model, "tokenizer.json").is_file():
         parser.error(
-            "--model must contain tokenizer.json; run the example's prepare_model.py"
+            "--model must contain tokenizer.json; run the example's prepare_wrapper_model.py"
         )
     if not args.mock and not Path(args.model, "config.json").is_file():
         parser.error(
