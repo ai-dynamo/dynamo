@@ -67,9 +67,8 @@ func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 	return nil
 }
 
-// ApplyPodClaim ensures the pod tolerates the GPU NoSchedule taint and
-// references the shared DRA ResourceClaim template. It changes only pod-level
-// tolerations and resource claims, never container resources.
+// ApplyPodClaim adds the GPU NoSchedule toleration and the shared DRA claim
+// template to the pod. It never changes container resources.
 func ApplyPodClaim(podSpec *corev1.PodSpec, claimTemplateName string) {
 	// GPU nodes are typically tainted with nvidia.com/gpu=NoSchedule. DRA
 	// bypasses the device-plugin toleration injection, so add it explicitly.
