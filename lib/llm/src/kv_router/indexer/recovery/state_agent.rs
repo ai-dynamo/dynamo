@@ -994,10 +994,33 @@ async fn run_state_agent_router(
             )
             .await
             {
-                Ok((attachment_watch, state_transport, task)) => {
-                    attachment_stream = Some(attachment_watch);
+                Ok((mut attachment_watch, state_transport, task)) => {
                     ingest_task = Some(task);
                     transport = Some(Arc::new(state_transport));
+                    // Otherwise every owner is planned once without its
+                    // attachment and again when the snapshot arrives.
+                    let snapshot_applied = apply_initial_discovery(
+                        &mut attachment_watch,
+                        &endpoint,
+                        KV_STATE_ATTACHMENT_TOPIC_V2,
+                        &mut attachments,
+                        &mut retries,
+                        &mut dirty,
+                        &cancel,
+                    )
+                    .await;
+                    attachment_stream = Some(attachment_watch);
+                    if !snapshot_applied {
+                        fail_closed_until_cancelled(
+                            &endpoint,
+                            WATCH_ENDED,
+                            &fence,
+                            &indexer,
+                            &cancel,
+                        )
+                        .await;
+                        break;
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(%error, %endpoint, "Failed to activate V2 KV state consumers");
@@ -1105,6 +1128,35 @@ fn apply_queued_discovery<T: Advertisement>(
             }
             Some(None) => return false,
             None => return true,
+        }
+    }
+}
+
+/// Applies a new watch's initial snapshot: its `Added` events up to the first
+/// `Resync`. A backend may still be delivering it when the watch is returned.
+/// Returns false if the watch ends or the router is cancelled first.
+#[allow(clippy::too_many_arguments)]
+async fn apply_initial_discovery<T: Advertisement>(
+    stream: &mut DiscoveryStream,
+    endpoint: &EndpointId,
+    topic: &str,
+    advertisements: &mut HashMap<u64, T>,
+    retries: &mut RecoveryRetries,
+    dirty: &mut DirtyOwners,
+    cancel: &CancellationToken,
+) -> bool {
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return false,
+            event = stream.next() => event,
+        };
+        match event {
+            Some(Ok(DiscoveryEvent::Resync(_))) => return true,
+            Some(event) => {
+                apply_discovery_event(event, endpoint, topic, advertisements, retries, dirty)
+            }
+            None => return false,
         }
     }
 }
@@ -3066,6 +3118,62 @@ mod tests {
             index
                 .drain_ready(&mut ended, &mut attachments, Affected::All)
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_discovery_waits_for_the_snapshot() {
+        let owner = owner(4);
+        let record_id = attachment_record_id(41, 7);
+        let added = event_source_added(
+            KV_STATE_ATTACHMENT_TOPIC_V2,
+            record_id,
+            &attachment_advertisement(owner, 7),
+        );
+        // Delivered after the watch is returned, as a backend's spawned task does.
+        let mut stream: DiscoveryStream = Box::pin(
+            futures::stream::once(async move {
+                tokio::task::yield_now().await;
+                added
+            })
+            .chain(futures::stream::iter([Ok(DiscoveryEvent::Resync(
+                Vec::new(),
+            ))]))
+            .chain(futures::stream::pending()),
+        );
+        let endpoint = EndpointId::from("ns.worker.generate");
+        let mut attachments = HashMap::<u64, KvStateAttachmentAdvertisement>::new();
+        let mut retries = RecoveryRetries::default();
+        let mut dirty = DirtyOwners::default();
+        let cancel = CancellationToken::new();
+
+        assert!(
+            apply_initial_discovery(
+                &mut stream,
+                &endpoint,
+                KV_STATE_ATTACHMENT_TOPIC_V2,
+                &mut attachments,
+                &mut retries,
+                &mut dirty,
+                &cancel,
+            )
+            .await
+        );
+        assert!(attachments.contains_key(&record_id));
+        assert!(dirty.owners.contains(&owner));
+
+        let mut ended: DiscoveryStream = Box::pin(futures::stream::empty());
+        assert!(
+            !apply_initial_discovery(
+                &mut ended,
+                &endpoint,
+                KV_STATE_ATTACHMENT_TOPIC_V2,
+                &mut attachments,
+                &mut retries,
+                &mut dirty,
+                &cancel,
+            )
+            .await
         );
     }
 
