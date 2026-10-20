@@ -80,6 +80,9 @@ def parse_prometheus_text(path: Path) -> Optional[PrometheusSnapshot]:
         prev_le, prev_count = 0.0, 0.0
         for le, count in buckets:
             if count >= target:
+                # Prometheus uses the last finite bound for the unbounded bucket.
+                if le == float("inf"):
+                    return prev_le
                 if count == prev_count:
                     return prev_le
                 frac = (target - prev_count) / (count - prev_count)
