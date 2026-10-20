@@ -127,6 +127,42 @@ def byte_fallback_tokenizer():
 class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc construction
     """Test sampling parameter projection from request to Dynamo format."""
 
+    @pytest.mark.parametrize(
+        "request_data,expected",
+        [
+            ({}, None),
+            ({"prompt_logprobs": None}, None),
+            ({"stream": True}, None),
+            ({"stream": True, "prompt_logprobs": None}, None),
+            ({"prompt_logprobs": 0}, 0),
+            ({"stream": False, "prompt_logprobs": 3}, 3),
+            ({"stream": True, "prompt_logprobs": 0}, None),
+            ({"stream": True, "prompt_logprobs": 3}, None),
+            (
+                {
+                    "stream": True,
+                    "prompt_logprobs": 0,
+                    "nvext": {"extra_fields": ["prompt_logprobs"]},
+                },
+                0,
+            ),
+            (
+                {
+                    "stream": True,
+                    "prompt_logprobs": 3,
+                    "nvext": {"extra_fields": ["prompt_logprobs"]},
+                },
+                3,
+            ),
+        ],
+    )
+    def test_prompt_logprobs_projection(self, request_data, expected):
+        request = {"model": "test", "messages": [], **request_data}
+        result = _build_dynamo_preproc(request, [1, 2], "test", None)
+        assert result["output_options"]["prompt_logprobs"] == expected
+        if expected is None:
+            assert build_sglang_logprob_kwargs(result["output_options"]) == {}
+
     def test_defaults(self):
         """Default sampling options when request has minimal fields."""
         result = _build_dynamo_preproc(
@@ -648,14 +684,44 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert result["output_options"]["logprobs"] == 0
 
     def test_logprobs_true_without_top_logprobs(self):
-        """logprobs=True without top_logprobs yields 1."""
+        """logprobs=True without top_logprobs asks for the sampled token only."""
         result = _build_dynamo_preproc(
             {"model": "test", "logprobs": True},
             [1],
             "test",
             None,
         )
-        assert result["output_options"]["logprobs"] == 1
+        assert result["output_options"]["logprobs"] == 0
+
+    @pytest.mark.parametrize("logprobs", [None, False, 3])
+    def test_top_logprobs_without_logprobs_true_is_rejected(self, logprobs):
+        with pytest.raises(PreprocessError, match="`logprobs` must be set to true"):
+            _build_dynamo_preproc(
+                {"model": "test", "logprobs": logprobs, "top_logprobs": 5},
+                [1],
+                "test",
+                None,
+            )
+
+    @pytest.mark.parametrize("logprobs", [False, None])
+    def test_zero_top_logprobs_without_logprobs_disables_logprobs(self, logprobs):
+        result = _build_dynamo_preproc(
+            {"model": "test", "logprobs": logprobs, "top_logprobs": 0},
+            [1],
+            "test",
+            None,
+        )
+        assert result["output_options"]["logprobs"] is None
+
+    @pytest.mark.parametrize("top_logprobs", [-1, True, "2"])
+    def test_invalid_top_logprobs_is_rejected(self, top_logprobs):
+        with pytest.raises(PreprocessError, match="must be an integer >= 0"):
+            _build_dynamo_preproc(
+                {"model": "test", "logprobs": True, "top_logprobs": top_logprobs},
+                [1],
+                "test",
+                None,
+            )
 
     def test_logprobs_integer(self):
         """Integer logprobs pass through."""
@@ -676,6 +742,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
             None,
         )
         assert result["output_options"]["logprobs"] is None
+        assert build_sglang_logprob_kwargs(result["output_options"]) == {}
 
     def test_metadata_upload_nvext_is_forwarded_to_backend(self):
         result = _build_dynamo_preproc(
@@ -4504,6 +4571,85 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             ]
 
         return asyncio.run(collect())
+
+    @pytest.mark.parametrize(
+        "prompt_count,logprobs,top_logprobs,expected_top_count",
+        [
+            (0, None, None, None),
+            (0, False, None, None),
+            (0, True, 0, 0),
+            (3, True, None, 0),
+            (3, True, 1, 1),
+            (0, True, 3, 3),
+            (1, True, 3, 3),
+        ],
+    )
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_prompt_and_completion_logprob_counts_are_independent(
+        self, prompt_count, logprobs, top_logprobs, expected_top_count, stream
+    ):
+        request = {
+            "model": MODEL,
+            "prompt_logprobs": prompt_count,
+            "logprobs": logprobs,
+            "top_logprobs": top_logprobs,
+            "stream": stream,
+            "nvext": {"extra_fields": ["prompt_logprobs"]},
+        }
+        preproc = _build_dynamo_preproc(request, [1, 17], MODEL, None)
+        options = preproc["output_options"]
+        kwargs = build_sglang_logprob_kwargs(options)
+        assert kwargs["top_logprobs_num"] == max(prompt_count, expected_top_count or 0)
+        alternatives = [
+            (-0.1, ord("A"), "A"),
+            (-0.2, ord("B"), "B"),
+            (-0.3, ord("C"), "C"),
+        ][: kwargs["top_logprobs_num"]]
+        meta = {
+            "input_token_logprobs": [(None, 1, None), (-0.5, 17, "p")],
+            "input_top_logprobs": [None, alternatives],
+            "output_token_logprobs": [(-0.1, ord("A"), "A")],
+            "output_top_logprobs": [alternatives],
+        }
+        payload = extract_prompt_logprobs_from_sglang_meta(
+            meta, prompt_logprobs_count=options["prompt_logprobs"]
+        )
+        log_probs, output_top_logprobs = extract_from_sglang_meta(meta)
+        chunks = self._run_logprob_stream(
+            [
+                {
+                    "token_ids": [ord("A")],
+                    "log_probs": log_probs,
+                    "top_logprobs": output_top_logprobs,
+                    "finish_reason": "stop",
+                    "engine_data": {"prompt_logprobs": payload},
+                }
+            ],
+            request=request,
+        )
+        expected_prompt = [
+            None,
+            {
+                "17": {"logprob": -0.5, "decoded_token": "p"},
+                **{
+                    str(token_id): {"logprob": lp, "decoded_token": token}
+                    for lp, token_id, token in alternatives[:prompt_count]
+                },
+            },
+        ]
+        assert len(chunks) == 1
+        assert chunks[0]["nvext"]["prompt_logprobs"] == expected_prompt
+        if stream:
+            assert "prompt_logprobs" not in chunks[0]
+        else:
+            assert chunks[0]["prompt_logprobs"] == expected_prompt
+        completion_logprobs = chunks[0]["choices"][0]["logprobs"]
+        if expected_top_count is None:
+            assert completion_logprobs is None
+        else:
+            content = completion_logprobs["content"]
+            assert content[0]["token"] == "A"
+            assert len(content[0]["top_logprobs"]) == expected_top_count
 
     def test_missing_chunk_logprobs_do_not_drop_adjacent_logprobs(self):
         """A missing-logprob chunk is isolated from adjacent valid chunks."""

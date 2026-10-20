@@ -12,8 +12,6 @@ from uuid import uuid4
 from pydantic import TypeAdapter
 from sglang.srt.managers.io_struct import GenerateReqInput
 
-from dynamo.common.backend import logprobs as _shared_logprobs
-
 SGLANG_GENERATE_CAPABILITY = "sglang_generate"
 DISAGG_PREFILL_CANCEL_ANYTIME_V1 = "disagg_prefill_cancel_anytime_v1"
 _PAYLOAD_KEY = "sglang_tito"
@@ -112,12 +110,7 @@ def build_native_generate_request(
     ):
         payload["disagg_prefill_dp_rank"] = prefill_dp_rank
 
-    native_request = _GENERATE_REQUEST_ADAPTER.validate_python(payload)
-    _shared_logprobs.validate_sglang_top_logprobs(
-        native_request.top_logprobs_num,
-        allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
-    )
-    return native_request
+    return _GENERATE_REQUEST_ADAPTER.validate_python(payload)
 
 
 async def native_generate_stream(
