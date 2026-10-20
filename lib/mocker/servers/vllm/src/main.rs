@@ -21,7 +21,7 @@ use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
 )]
 struct Args {
     /// Address on which to expose the vLLM-compatible gRPC service.
-    #[arg(long, default_value = "127.0.0.1:50051")]
+    #[arg(long, default_value = "127.0.0.1:30001")]
     listen: SocketAddr,
 
     /// Model name exposed by the mock server.

@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{ $grove := dig "grove" dict (.Values.global | default dict) -}}
+{{- $operator := index .Values "dynamo-operator" -}}
+{{- $config := $operator.grovePreflight -}}
+{{- $podSecurityContext := $config.podSecurityContext -}}
+{{- if eq $podSecurityContext nil -}}
+{{- $podSecurityContext = dict "runAsNonRoot" true "runAsUser" 65532 "seccompProfile" (dict "type" "RuntimeDefault") -}}
+{{- end -}}
+{{- if and $operator.enabled ($grove.enabled | default false) (not ($grove.install | default false)) $config.enabled -}}
+{{- $minimum := index .Chart.Annotations "dynamo.nvidia.com/grove-version" | required "Grove version annotation is missing from platform Chart.yaml" -}}
+{{- if and $config.deploymentName (not $config.namespace) -}}
+{{- fail "grovePreflight.namespace is required when grovePreflight.deploymentName is set" -}}
+{{- end -}}
+{{- $name := printf "%s-check-grove-compatibility" (include "dynamo-operator.fullname" (index .Subcharts "dynamo-operator") | trunc 37 | trimSuffix "-") -}}
+{{- $identity := printf "%s/%s" .Release.Namespace .Release.Name | sha256sum | trunc 8 -}}
+{{- $rbac := printf "%s-%s" ($name | trunc 54 | trimSuffix "-") $identity -}}
+{{- $annotations := dict "helm.sh/hook" "pre-install,pre-upgrade" "helm.sh/hook-weight" "-20" "helm.sh/hook-delete-policy" "before-hook-creation" -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $rbac }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $rbac }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $rbac }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-output-log-policy: hook-failed
+spec:
+  activeDeadlineSeconds: {{ $config.activeDeadlineSeconds }}
+  backoffLimit: 2
+  template:
+    spec:
+      serviceAccountName: {{ $name }}
+      restartPolicy: Never
+      {{- with $config.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $operator.controllerManager.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $config.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $podSecurityContext }}
+      securityContext: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: preflight
+          image: {{ $config.image | quote }}
+          command: [python3, -c]
+          args:
+            - |
+              {{- .Files.Get "files/grove-preflight/check.py" | nindent 14 }}
+            - {{ $minimum | quote }}
+            - {{ $config.namespace | quote }}
+            - {{ $config.deploymentName | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+{{- end }}

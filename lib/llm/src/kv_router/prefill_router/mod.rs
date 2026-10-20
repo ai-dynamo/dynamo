@@ -34,6 +34,9 @@ use crate::{
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
     },
+    protocols::response_merge::{
+        PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION, PrefillNeed,
+    },
     session_affinity::{AffinityTarget, SessionAffinityMode},
 };
 
@@ -612,9 +615,18 @@ impl
             self.conditional_disagg_policy.is_enabled(),
         ));
 
+        let annotated = |name| decode_req.annotations.iter().any(|a| a == name);
+        let output = match (
+            annotated(PREFILL_OUTPUT_ANNOTATION),
+            annotated(PREFILL_OUTPUT_FIRST_ANNOTATION),
+        ) {
+            (false, _) => PrefillNeed::None,
+            (true, false) => PrefillNeed::BeforeLast,
+            (true, true) => PrefillNeed::BeforeFirst,
+        };
         let decode = next.generate(context.map(|_| decode_req));
         match prefill_completion {
-            Some(completion) => completion.forward_decode(decode, engine_ctx).await,
+            Some(completion) => completion.forward_decode(decode, engine_ctx, output).await,
             None => decode.await,
         }
     }
@@ -898,7 +910,11 @@ mod tests {
             // Decode can enter its phase even though prefill is still observed.
             let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
             let error = task
-                .forward_decode(std::future::pending(), Context::new(()).context())
+                .forward_decode(
+                    std::future::pending(),
+                    Context::new(()).context(),
+                    PrefillNeed::None,
+                )
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("prefill connection lost"));
