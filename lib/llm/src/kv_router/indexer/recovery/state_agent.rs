@@ -432,6 +432,15 @@ struct FenceIndex {
 }
 
 impl FenceIndex {
+    /// Starts from the membership already in the watch, which `changed()` never
+    /// delivers, so a worker present at startup names its owners when it leaves.
+    fn new(membership: &KvSourceMembershipView) -> Self {
+        Self {
+            live_workers: membership.sources.keys().copied().collect(),
+            ..Self::default()
+        }
+    }
+
     fn source(&mut self, event: Result<DiscoveryEvent>) -> Affected {
         match event {
             Ok(DiscoveryEvent::Added(DiscoveryInstance::EventSource {
@@ -670,7 +679,7 @@ async fn start_observation_fence(
         // snapshot. Temporary loss of KV-aware routing for those owners is
         // intentional; ordinary serving continues without a stale projection.
         // TODO(#13044): share these model-wide watches.
-        let mut index = FenceIndex::default();
+        let mut index = FenceIndex::new(&membership.borrow());
         loop {
             let affected = tokio::select! {
                 biased;
@@ -3086,6 +3095,23 @@ mod tests {
             index.source(event_source_removed(KV_STATE_SOURCE_TOPIC_V2, 99)),
             Affected::All
         ));
+    }
+
+    #[test]
+    fn fence_index_names_owners_of_a_worker_present_at_startup() {
+        let owner = owner(4);
+        let worker = WorkerWithDpRank::new(17, 3);
+        let mut index = FenceIndex::new(&membership_view(&[worker]));
+        index.attachment(event_source_added(
+            KV_STATE_ATTACHMENT_TOPIC_V2,
+            1,
+            &attachment_advertisement(owner, 7),
+        ));
+
+        assert_eq!(
+            owners(index.membership(&membership_view(&[]))),
+            HashSet::from([owner])
+        );
     }
 
     #[test]
