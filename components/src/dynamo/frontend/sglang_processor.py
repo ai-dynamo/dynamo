@@ -42,6 +42,7 @@ from .sglang_prepost import (
 )
 from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
+from .usage import response_usage, update_usage_metadata
 from .utils import (
     PreprocessError,
     as_error_envelope,
@@ -796,7 +797,7 @@ class SglangProcessor:
             pending_token_ids: list[int] = []
             pending_log_probs: list[float] | None = None
             pending_top_logprobs: list[list[dict[str, Any]]] | None = None
-            pending_usage: dict[str, Any] | None = None
+            latest_usage: dict[str, Any] = {}
             first_chunk = True
             input_tokens = len(tokens)
             cumulative_output_tokens = 0
@@ -818,7 +819,7 @@ class SglangProcessor:
                 nonlocal pending_token_ids
                 nonlocal pending_log_probs
                 nonlocal pending_top_logprobs
-                nonlocal pending_usage
+                nonlocal latest_usage
                 nonlocal first_chunk
                 nonlocal post_proc_total_ms
                 nonlocal token_count
@@ -840,13 +841,13 @@ class SglangProcessor:
 
                 choice = post.process_output(mapped_response)
 
-                if post.locally_finished and pending_usage is None:
-                    pending_usage = {
+                if post.locally_finished and not latest_usage:
+                    latest_usage = {
                         "prompt_tokens": input_tokens,
                         "completion_tokens": cumulative_output_tokens,
                         "total_tokens": input_tokens + cumulative_output_tokens,
                     }
-                usage_for_metrics = pending_usage
+                usage_for_metrics = latest_usage
 
                 if self.debug_perf:
                     t_pp1 = time.monotonic()
@@ -862,8 +863,14 @@ class SglangProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    if pending_usage:
-                        dynamo_out["usage"] = pending_usage
+                    if usage := response_usage(
+                        request,
+                        latest_usage,
+                        prompt_tokens=input_tokens,
+                        completion_tokens=cumulative_output_tokens,
+                        finished=bool(finish_reason or post.locally_finished),
+                    ):
+                        dynamo_out["usage"] = usage
                     response_nvext: dict[str, Any] = {}
                     effective_stop_reason = (
                         stop_reason
@@ -909,7 +916,6 @@ class SglangProcessor:
                 pending_token_ids = []
                 pending_log_probs = None
                 pending_top_logprobs = None
-                pending_usage = None
                 first_chunk = False
                 return envelope
 
@@ -939,6 +945,9 @@ class SglangProcessor:
                         handle_engine_error(engine_response, request_id, logger)
                     )
                     break
+
+                if usage := engine_response.get("completion_usage"):
+                    update_usage_metadata(latest_usage, usage)
 
                 new_ids = engine_response["token_ids"]
                 log_probs = engine_response.get("log_probs")
@@ -971,8 +980,6 @@ class SglangProcessor:
                 stop_reason = engine_response.get("stop_reason")
                 stop_terminated = raw_finish_reason in {"eos", "stop"}
 
-                if usage := engine_response.get("completion_usage"):
-                    pending_usage = usage
                 engine_data = engine_response.get("engine_data")
 
                 pending_token_ids.extend(new_ids)
