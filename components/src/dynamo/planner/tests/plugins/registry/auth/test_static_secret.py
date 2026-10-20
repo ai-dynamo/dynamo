@@ -78,6 +78,23 @@ async def test_non_ascii_secret_still_matches_its_token():
         await auth.validate("secret")
 
 
+@pytest.mark.asyncio
+async def test_lone_surrogate_token_rejected_with_auth_error():
+    auth = StaticSecretAuth({"secret-alice": "alice"})
+    with pytest.raises(AuthError, match="not in trusted set"):
+        await auth.validate("secret-alice\ud800")
+
+
+def test_construction_rejects_secret_without_utf8_form():
+    """A JSON config can spell a lone surrogate as "\\ud800". Such a secret
+    could never be compared, so it fails at startup, without its bytes in
+    the message."""
+    secret = "token-\ud800-please-do-not-log-me"
+    with pytest.raises(ValueError, match="index 1 cannot be encoded") as exc_info:
+        StaticSecretAuth({"good-token": "ext-plugins", secret: "alice"})
+    assert "token-" not in str(exc_info.value)
+
+
 def test_construction_rejects_empty_subject():
     """Empty subject is rejected at construction time so the gateway's
     ``authenticated_unregister`` subject-match check cannot be bypassed
