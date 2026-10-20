@@ -33,6 +33,7 @@ from dynamo.sglang.publisher import (
 )
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from dynamo.sglang.state_agent import StateAgentLifecycle
 
 
 async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
@@ -185,7 +186,9 @@ async def init_decode(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
+    state_agent = StateAgentLifecycle()
     try:
+        await state_agent.start(config, generate_endpoint)
         gather_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -227,16 +230,19 @@ async def init_decode(
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
-        metrics_task.cancel()
         try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
-        handler.cleanup()
-        if run_deferred_handlers is not None:
-            logging.info("Running deferred handlers")
-            await run_deferred_handlers()
+            await state_agent.close()
+        finally:
+            metrics_task.cancel()
+            try:
+                await metrics_task
+            except asyncio.CancelledError:
+                logging.info("Metrics task successfully cancelled")
+                pass
+            handler.cleanup()
+            if run_deferred_handlers is not None:
+                logging.info("Running deferred handlers")
+                await run_deferred_handlers()
 
 
 async def init_prefill(

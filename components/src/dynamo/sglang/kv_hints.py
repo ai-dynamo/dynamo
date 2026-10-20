@@ -103,20 +103,22 @@ def kvcr_hint_endpoints(
     }
 
 
-def publish_kvcr_hint_capabilities(
-    runtime_config, engine, server_args, worker_type
-) -> None:
-    """Opt in only for the supported single-host KVCR linker or HiCache path."""
+def kvcr_hint_sources(
+    server_args: Any, worker_type: Any
+) -> tuple[str, dict[str, str]] | None:
+    """The role and per-DP-rank source-control endpoints this worker advertises.
+
+    None when the worker runs no supported single-host KVCR linker or HiCache
+    path with remote hints enabled.
+    """
     server_args = resolved_server_args(server_args)
     mode = kvcr_mode(server_args)
     if (
-        engine is None
-        or mode is None
+        mode is None
         or getattr(server_args, "nnodes", 1) != 1
         or getattr(server_args, "pp_size", 1) != 1
-        or not filter_supported_async_generate_kwargs(engine, {"kv_hints": None})
     ):
-        return
+        return None
     extra = server_args.hicache_storage_backend_extra_config
     if isinstance(extra, str):
         if extra.startswith("@"):
@@ -130,7 +132,7 @@ def publish_kvcr_hint_capabilities(
         raise ValueError("KVCR HiCache extra configuration must be an object")
     # Legacy linker revisions have no switch; newer ones can disable hints.
     if extra.get("enable_remote_hint", True) is not True:
-        return
+        return None
     if (
         mode == "linker"
         and extra.get("advertise_host") is None
@@ -138,7 +140,7 @@ def publish_kvcr_hint_capabilities(
     ):
         # The newer control_advertise_host dialect defaults remote hints off.
         # The legacy advertise_host runtime has no switch and enables peers.
-        return
+        return None
     if mode == "linker" and (
         "control_port" not in extra
         or (
@@ -148,14 +150,14 @@ def publish_kvcr_hint_capabilities(
     ):
         # Local-only/default linkers can still serve, but cannot advertise a
         # guessed source-control endpoint to another worker.
-        return
+        return None
     # WorkerType is a PyO3 enum, not enum.Enum: its wire role is __str__,
     # and accessing .value aborts registration after the model has loaded.
     role = str(worker_type)
     if role == "agg":
         role = "aggregated"
     if role not in ("aggregated", "prefill", "decode"):
-        return
+        return None
     # DP attention partitions TP into independent attention/cache groups.
     dp_size = server_args.attn_dp_size
     attn_cp_size = server_args.attn_cp_size
@@ -168,6 +170,21 @@ def publish_kvcr_hint_capabilities(
         pp_size=server_args.pp_size,
         mode=mode,
     )
+    return role, endpoints
+
+
+def publish_kvcr_hint_capabilities(
+    runtime_config, engine, server_args, worker_type
+) -> None:
+    """Opt in only for the supported single-host KVCR linker or HiCache path."""
+    if engine is None or not filter_supported_async_generate_kwargs(
+        engine, {"kv_hints": None}
+    ):
+        return
+    sources = kvcr_hint_sources(server_args, worker_type)
+    if sources is None:
+        return
+    role, endpoints = sources
     for key, value in (
         (KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, role),
         (KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, endpoints),

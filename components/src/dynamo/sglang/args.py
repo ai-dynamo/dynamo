@@ -42,6 +42,7 @@ from dynamo.sglang._compat import (
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 from dynamo.sglang.capacity import sglang_dp_layout
 from dynamo.sglang.elastic_ep_preflight import check_elastic_ep_backend
+from dynamo.sglang.state_agent import validate_state_agent_worker
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -94,6 +95,7 @@ class Config:
         # SGLang chose the value or the user did.
         self.attention_backend_from_cli = attention_backend_from_cli
         self.serving_mode = self._set_serving_strategy()
+        validate_state_agent_worker(self)
         if getattr(dynamo_args, "freeze_gc_after_init", False) and (
             self.serving_mode == DisaggregationMode.PREFILL
             or any(

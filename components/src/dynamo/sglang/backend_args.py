@@ -56,6 +56,15 @@ class DynamoSGLangArgGroup(ArgGroup):
 
         g = parser.add_argument_group("Dynamo SGLang Options")
 
+        add_argument(
+            g,
+            flag_name="--kvcr-state-agent-owner",
+            env_var="DYN_SGL_KVCR_STATE_AGENT_OWNER",
+            default=None,
+            arg_type=str,
+            help="Attach an aggregated direct KVCR linker to the external KV state agent using this stable CacheOwnerId.",
+        )
+
         add_negatable_bool_argument(
             g,
             flag_name="--use-sglang-tokenizer",
@@ -216,6 +225,7 @@ class DynamoSGLangConfig(ConfigBase):
 
     use_sglang_tokenizer: bool
     gateway_workers: Optional[int] = None
+    kvcr_state_agent_owner: Optional[str] = None
     # Internal roles derived from the canonical multimodal arguments in args.py.
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False

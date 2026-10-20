@@ -510,6 +510,8 @@ async def get_runtime_config(
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
     runtime_config.kv_event_publishing_enabled = dynamo_args.use_kv_events
+    if getattr(dynamo_args, "kvcr_state_agent_owner", None) is not None:
+        runtime_config.kv_event_source_mode = "state_agent_v2"
 
     start_dp_rank, end_dp_rank = model_card_dp_rank_bounds(server_args)
     registered_dp_size = end_dp_rank - start_dp_rank
