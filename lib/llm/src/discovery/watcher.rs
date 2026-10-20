@@ -57,6 +57,7 @@ use crate::{
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
     types::generic::realtime::{DynamoRealtimeClientEvent, RealtimeServerEvent},
+    utils::json::canonicalize_json,
     worker_type::WorkerType,
 };
 
@@ -1439,25 +1440,6 @@ pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<S
     let mut contracts = serde_json::Value::Object(contracts);
     canonicalize_json(&mut contracts);
     Some(blake3::hash(contracts.to_string().as_bytes()).to_string())
-}
-
-fn canonicalize_json(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            let mut entries = std::mem::take(object).into_iter().collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-            for (key, mut value) in entries {
-                canonicalize_json(&mut value);
-                object.insert(key, value);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                canonicalize_json(value);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn worker_set_chat_preprocessor(

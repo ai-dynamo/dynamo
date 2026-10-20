@@ -23,6 +23,7 @@ use crate::local_model::runtime_config::{
 };
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
+use crate::utils::json::canonicalize_json;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_kv_router::identity::{ExplicitIdentityMap, IndexerIdentitySpec};
@@ -48,7 +49,7 @@ fn append_runtime_contract_checksum(
         return;
     };
     let mut value = value.clone();
-    canonicalize_json_object_keys(&mut value);
+    canonicalize_json(&mut value);
     let value = serde_json::to_vec(&value).expect("serializing serde_json::Value cannot fail");
 
     // This contract controls model-visible media prompt expansion. Workers
@@ -59,19 +60,6 @@ fn append_runtime_contract_checksum(
     bytes.extend_from_slice(key.as_bytes());
     bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
     bytes.extend_from_slice(&value);
-}
-
-fn canonicalize_json_object_keys(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(values) => {
-            values.iter_mut().for_each(canonicalize_json_object_keys);
-        }
-        serde_json::Value::Object(map) => {
-            map.values_mut().for_each(canonicalize_json_object_keys);
-            map.sort_keys();
-        }
-        _ => {}
-    }
 }
 
 fn append_indexer_identity_checksum(bytes: &mut Vec<u8>, spec: &IndexerIdentitySpec) {
