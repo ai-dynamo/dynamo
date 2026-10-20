@@ -670,6 +670,9 @@ def test_the_template_and_the_workflow_name_the_same_blocking_branch() -> None:
     )
     assert default, "the script does not default BLOCKING_BRANCH"
     assert default.group(1) == branch
+    recheck = re.search(r"github\.event\.ref == '([^']+)'", workflow)
+    assert recheck, "the recheck-at-cut job does not name a branch"
+    assert recheck.group(1) == branch
 
 
 # ------------------------------------------------------------------
