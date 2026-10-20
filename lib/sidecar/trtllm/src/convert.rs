@@ -434,12 +434,14 @@ fn validate_request(
             "request priority is not supported by the TensorRT-LLM sidecar",
         ));
     }
-    if !allow_dp_rank
-        && request.routing.as_ref().is_some_and(|routing| {
-            routing.dp_rank.is_some_and(|rank| rank != 0)
-                || routing.prefill_dp_rank.is_some_and(|rank| rank != 0)
-        })
-    {
+    let own_rank = request.routing.as_ref().and_then(|routing| {
+        if mode.is_prefill() {
+            routing.prefill_dp_rank.or(routing.dp_rank)
+        } else {
+            routing.dp_rank
+        }
+    });
+    if !allow_dp_rank && own_rank.is_some_and(|rank| rank != 0) {
         return Err(client::invalid_argument(
             "data-parallel rank targeting was not advertised by the OpenEngine server",
         ));

@@ -67,7 +67,14 @@ async fn prefill_ready_is_the_terminal_handoff() {
     let engine = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Prefill);
     engine.start(0).await.expect("start");
 
-    let outputs = collect(&engine, request()).await;
+    let mut req = request();
+    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        prefill_dp_rank: Some(0),
+        dp_rank: Some(7),
+        ..Default::default()
+    });
+    let outputs = collect(&engine, req).await;
+    assert_eq!(server.service.target_dp_ranks.lock().await.as_slice(), [None]);
     let terminal = outputs
         .iter()
         .find(|output| output.finish_reason.is_some())
@@ -114,11 +121,17 @@ async fn decode_request_replays_the_prefill_session() {
     let decode = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Decode);
     decode.start(0).await.expect("start decode");
     let mut req = agent_request;
+    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        dp_rank: Some(0),
+        prefill_dp_rank: Some(7),
+        ..Default::default()
+    });
     req.prefill_result = Some(dynamo_backend_common::PrefillResult {
         disaggregated_params: handoff,
         prompt_tokens_details: None,
     });
     let outputs = collect(&decode, req).await;
+    assert_eq!(server.service.target_dp_ranks.lock().await.as_slice(), [None, None]);
     assert!(
         outputs.iter().any(|output| !output.token_ids.is_empty()),
         "the decode worker streams the completion"
