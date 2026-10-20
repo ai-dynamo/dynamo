@@ -110,7 +110,7 @@ fn image_urls_data_uris_and_uuids_are_mapped_in_order() {
 }
 
 #[test]
-fn mixed_image_and_video_media_follow_prompt_order() {
+fn mixed_media_follow_prompt_order() {
     let mut req = request();
     req.multi_modal_data = Some(HashMap::from([
         (
@@ -127,6 +127,12 @@ fn mixed_image_and_video_media_follow_prompt_order() {
                 MultimodalData::RawUrl("data:video/mp4;base64,dmlkZW8=".to_string()),
             ],
         ),
+        (
+            "audio_url".to_string(),
+            vec![MultimodalData::RawUrl(
+                "data:audio/wav;base64,YXVkaW8=".to_string(),
+            )],
+        ),
     ]));
     req.multi_modal_uuids = Some(HashMap::from([
         (
@@ -137,6 +143,7 @@ fn mixed_image_and_video_media_follow_prompt_order() {
             "video_url".to_string(),
             vec![Some("video-0".to_string()), Some("video-1".to_string())],
         ),
+        ("audio_url".to_string(), vec![Some("audio-0".to_string())]),
     ]));
     req.multi_modal_order = Some(vec![
         MultimodalItemRef {
@@ -145,6 +152,10 @@ fn mixed_image_and_video_media_follow_prompt_order() {
         },
         MultimodalItemRef {
             modality: "image_url".to_string(),
+            index: 0,
+        },
+        MultimodalItemRef {
+            modality: "audio_url".to_string(),
             index: 0,
         },
         MultimodalItemRef {
@@ -157,7 +168,7 @@ fn mixed_image_and_video_media_follow_prompt_order() {
         },
     ]);
 
-    let proto = build_generate_request(req, "req", "model", image_video_limits(4096), AGG)
+    let proto = build_generate_request(req, "req", "model", all_media_limits(4096), AGG)
         .expect("mixed media request");
 
     assert_eq!(
@@ -169,6 +180,7 @@ fn mixed_image_and_video_media_follow_prompt_order() {
         [
             pb::Modality::Video as i32,
             pb::Modality::Image as i32,
+            pb::Modality::Audio as i32,
             pb::Modality::Video as i32,
             pb::Modality::Image as i32,
         ]
@@ -179,7 +191,7 @@ fn mixed_image_and_video_media_follow_prompt_order() {
             .iter()
             .map(|item| item.uuid.as_str())
             .collect::<Vec<_>>(),
-        ["video-0", "image-0", "video-1", ""]
+        ["video-0", "image-0", "audio-0", "video-1", ""]
     );
 }
 
@@ -243,7 +255,7 @@ fn mm_routing_hashes_are_not_used_as_engine_cache_uuids() {
 }
 
 #[test]
-fn image_media_requires_the_loaded_models_advertised_capability() {
+fn media_requires_the_loaded_models_advertised_capability() {
     let mut req = request();
     add_images(&mut req, ["https://example.com/image.png"]);
 
@@ -257,21 +269,36 @@ fn image_media_requires_the_loaded_models_advertised_capability() {
             "unexpected error: {error}"
         );
     }
+
+    req.multi_modal_data = Some(HashMap::from([(
+        "audio_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "https://example.com/audio.wav".to_string(),
+        )],
+    )]));
+    let error = build_generate_request(req, "req", "model", image_video_limits(4096), AGG)
+        .expect_err("a model without audio support must reject audio");
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise audio support"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
 fn unsupported_media_modalities_and_sources_are_rejected() {
     let mut req = request();
     req.multi_modal_data = Some(HashMap::from([(
-        "audio_url".to_string(),
+        "future_media".to_string(),
         vec![MultimodalData::RawUrl(
             "https://example.com/media".to_string(),
         )],
     )]));
-    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
-        .expect_err("audio is not supported yet");
+    let error = build_generate_request(req, "req", "model", all_media_limits(4096), AGG)
+        .expect_err("unsupported modalities must be rejected");
     assert!(
-        error.to_string().contains("audio_url"),
+        error.to_string().contains("future_media"),
         "unexpected error: {error}"
     );
 
@@ -302,6 +329,15 @@ fn unsupported_media_modalities_and_sources_are_rejected() {
     let error = build_generate_request(req, "req", "model", image_video_limits(4096), AGG)
         .expect_err("the engine cannot fetch a local Dynamo path");
     assert!(error.to_string().contains("`video_url` item 0"));
+
+    let mut req = request();
+    req.multi_modal_data = Some(HashMap::from([(
+        "audio_url".to_string(),
+        vec![MultimodalData::RawUrl("file:///tmp/audio.wav".to_string())],
+    )]));
+    let error = build_generate_request(req, "req", "model", all_media_limits(4096), AGG)
+        .expect_err("the engine cannot fetch a local Dynamo path");
+    assert!(error.to_string().contains("`audio_url` item 0"));
 }
 
 #[test]

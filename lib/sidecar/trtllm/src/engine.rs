@@ -184,7 +184,7 @@ impl TrtllmSidecarEngine {
             return Ok(*metadata);
         }
         let has_supported_media = request.multi_modal_data.as_ref().is_some_and(|media| {
-            ["image_url", "video_url"]
+            ["image_url", "video_url", "audio_url"]
                 .iter()
                 .any(|key| media.get(*key).is_some_and(|items| !items.is_empty()))
         });

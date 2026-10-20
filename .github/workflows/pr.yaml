@@ -547,7 +547,7 @@ jobs:
       # the upstream change.
       extra_build_args: |
         TRTLLM_SOURCE_REPOSITORY=https://github.com/krishung5/TensorRT-LLM
-        TRTLLM_SOURCE_COMMIT=b777c5c41c4d077efb03de2325c986d62f383e1c
+        TRTLLM_SOURCE_COMMIT=6844e5a9b026f52fee7e9d18113aeaa05c56267f
     # actions: read lets the build download a prior run's baseline compliance
     # artifact to diff against (a reusable workflow's token can't exceed the
     # caller's). Missing -> the diff soft-degrades, build stays green.

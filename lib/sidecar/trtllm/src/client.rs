@@ -32,6 +32,7 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) struct SupportedMedia {
     pub(crate) image: bool,
     pub(crate) video: bool,
+    pub(crate) audio: bool,
 }
 
 impl SupportedMedia {
@@ -39,6 +40,7 @@ impl SupportedMedia {
         match modality {
             "image" => self.image,
             "video" => self.video,
+            "audio" => self.audio,
             _ => false,
         }
     }
@@ -142,6 +144,7 @@ impl TrtllmClient {
                 match modality.as_str() {
                     "image" => supported_media.image = true,
                     "video" => supported_media.video = true,
+                    "audio" => supported_media.audio = true,
                     _ => {}
                 }
             }
