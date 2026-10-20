@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +16,7 @@ from tests.deploy.n2.rolling_contract import (
     PodTracker,
     check_budget,
     check_requests,
+    command,
     converged,
     pod_record,
     request_count,
@@ -29,6 +32,27 @@ pytestmark = [
 
 
 class RollingContracts(unittest.TestCase):
+    def test_command_json_ignores_stderr_warning(self):
+        with self.assertLogs("tests.deploy.n2.rolling_contract", level="WARNING"):
+            output = command(
+                sys.executable,
+                "-c",
+                'import json, sys; print("warning", file=sys.stderr); print(json.dumps(dict(requests=1)))',
+            )
+        self.assertEqual(json.loads(output), {"requests": 1})
+
+    def test_failed_command_preserves_both_streams(self):
+        with self.assertLogs("tests.deploy.n2.rolling_contract", level="ERROR"):
+            with self.assertRaises(subprocess.CalledProcessError) as caught:
+                command(
+                    sys.executable,
+                    "-c",
+                    'import sys; print("partial"); print("failure", file=sys.stderr); sys.exit(7)',
+                )
+        self.assertEqual(caught.exception.returncode, 7)
+        self.assertEqual(caught.exception.stdout, "partial\n")
+        self.assertEqual(caught.exception.stderr, "failure\n")
+
     def pod(self, uid="old", image="old", terminating=False, phase="Running"):
         return pod_record(
             {

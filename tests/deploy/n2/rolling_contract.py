@@ -3,6 +3,7 @@
 
 """Pure contracts for observing fixed-capacity Kubernetes rollouts."""
 
+import logging
 import subprocess
 import xml.etree.ElementTree as ET
 
@@ -10,9 +11,24 @@ from tests.deploy.n2.rolling_http import check
 
 
 def command(*args, timeout=600):
-    return subprocess.check_output(
-        args, text=True, stderr=subprocess.STDOUT, timeout=timeout
-    )
+    try:
+        result = subprocess.run(
+            args, text=True, capture_output=True, timeout=timeout, check=True
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        logging.getLogger(__name__).error(
+            "Command %r failed: %s; stdout=%r; stderr=%r",
+            args,
+            error,
+            error.stdout,
+            error.stderr,
+        )
+        raise
+    if result.stderr:
+        logging.getLogger(__name__).warning(
+            "Command %r stderr: %s", args, result.stderr
+        )
+    return result.stdout
 
 
 def pod_record(pod):

@@ -303,12 +303,14 @@ async def test_n2_rolling_upgrade(request, tmp_path, age, scenario, first):
         )
 
     async def summary():
-        return json.loads(
-            await client_exec(
-                "from pathlib import Path; p=Path('/state/summary.json'); "
-                "print(p.read_text() if p.exists() else '{}')"
-            )
+        raw = await client_exec(
+            "from pathlib import Path; p=Path('/state/summary.json'); "
+            "print(p.read_text() if p.exists() else '{}')"
         )
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"Invalid client summary stdout: {raw!r}") from error
 
     async def list_pods():
         return json.loads(
