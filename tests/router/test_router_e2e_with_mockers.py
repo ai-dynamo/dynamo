@@ -1015,7 +1015,9 @@ async def _wait_for_frontend_to_commit_single_pd_role(
         while asyncio.get_running_loop().time() < deadline:
             try:
                 async with session.get(readiness_url) as response:
-                    if response.status == 200:
+                    # This startup milestone is discovery of one role, not serving readiness.
+                    # The second role starts only after this wait; incomplete topology returns 503.
+                    if response.status in (200, 503):
                         body = await response.json()
                         last_response = body
                         role = (
