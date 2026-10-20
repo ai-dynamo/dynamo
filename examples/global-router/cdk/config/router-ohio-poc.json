@@ -1,0 +1,45 @@
+{
+  "listen": "0.0.0.0:8080",
+  "freshness": {
+    "catalog_max_age_ms": 60000,
+    "readiness_max_age_ms": 60000,
+    "capacity_max_age_ms": 30000,
+    "load_max_age_ms": 30000,
+    "kv_usage_max_age_ms": 30000,
+    "kv_overlap_max_age_ms": 30000
+  },
+  "overlap_max_age_ms": 30000,
+  "kv_aware_token_id_completions": true,
+  "pools": [
+    {
+      "site_id": "aws-ohio",
+      "namespace": "dynamo",
+      "dgd_name": "mocker-ohio-1",
+      "region": "us-east-2",
+      "availability_zone": "us-east-2a",
+      "cluster": "sachal-mocker-cluster",
+      "runtime_namespace": "dynamo-mocker-ohio-1-27f7037e",
+      "model": "Qwen/Qwen3-32B",
+      "private_frontend_base_url": "http://k8s-dynamo-mockeroh-23ec170a5b-2ec075354905a89f.elb.us-east-2.amazonaws.com:8000",
+      "relay_grpc_url": "http://k8s-dynamo-mockeroh-fc228a7959-dc54115fecfb650c.elb.us-east-2.amazonaws.com:50051",
+      "stats_grpc_url": "http://k8s-dynamo-mockeroh-fc228a7959-dc54115fecfb650c.elb.us-east-2.amazonaws.com:50052",
+      "subscriber_id": "global-router-ohio-mocker-ohio-1",
+      "stats_only_aggregated": false
+    },
+    {
+      "site_id": "aws-west",
+      "namespace": "dynamo",
+      "dgd_name": "mocker-west-1",
+      "region": "us-west-2",
+      "availability_zone": "us-west-2a",
+      "cluster": "sachal-mocker-west-cluster",
+      "runtime_namespace": "dynamo-mocker-west-1-eb50ba2c",
+      "model": "Qwen/Qwen3-32B",
+      "private_frontend_base_url": "http://k8s-dynamo-mockerwe-3322c2f7af-f75279f0afea7f2f.elb.us-west-2.amazonaws.com:8000",
+      "relay_grpc_url": "http://k8s-dynamo-mockerwe-325ad37439-25c0aaa7fc8ebcf6.elb.us-west-2.amazonaws.com:50051",
+      "stats_grpc_url": "http://k8s-dynamo-mockerwe-325ad37439-25c0aaa7fc8ebcf6.elb.us-west-2.amazonaws.com:50052",
+      "subscriber_id": "global-router-ohio-mocker-west-1",
+      "stats_only_aggregated": false
+    }
+  ]
+}
