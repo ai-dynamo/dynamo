@@ -52,42 +52,6 @@ func TestLPXRuntimeConfigNamesMatchPodIdentity(t *testing.T) {
 	}
 }
 
-func TestLPURuntimeBuildRef(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Define runtime build-reference selection contracts")
-	tests := []struct {
-		name     string
-		snapshot string
-		runtime  string
-		want     string
-	}{
-		{name: "relative runtime", snapshot: "file:///snapshot", runtime: "model-build", want: "file:///models/model-build"},
-		{name: "cleaned runtime", snapshot: "file:///snapshot", runtime: " a/../b ", want: "file:///models/b"},
-		{name: "GCS snapshot", snapshot: "gs://bucket/snapshot", runtime: "model-build", want: "gs://bucket/snapshot"},
-		{name: "malformed snapshot", snapshot: "%", runtime: "model-build", want: "%"},
-		{name: "empty runtime", snapshot: "file:///snapshot", want: "file:///snapshot"},
-		{name: "malformed runtime", snapshot: "file:///snapshot", runtime: "%", want: "file:///snapshot"},
-		{name: "runtime URL", snapshot: "file:///snapshot", runtime: "gs://bucket/build", want: "file:///snapshot"},
-		{name: "absolute runtime", snapshot: "file:///snapshot", runtime: "/model-build", want: "file:///snapshot"},
-		{name: "dot runtime", snapshot: "file:///snapshot", runtime: ".", want: "file:///snapshot"},
-		{name: "parent runtime", snapshot: "file:///snapshot", runtime: "..", want: "file:///snapshot"},
-		{name: "escaping runtime", snapshot: "file:///snapshot", runtime: "a/../../b", want: "file:///snapshot"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Select the runtime build reference")
-			got := lpuRuntimeBuildRef(&ModelProjection{
-				runtimeBuildRef: test.runtime,
-				configuredBuild: Build{Path: test.snapshot},
-			}, "/models")
-
-			t.Log("Preserve valid remapping and every fallback byte exactly")
-			require.Equal(t, test.want, got)
-		})
-	}
-}
-
 func TestResolvedPartitionDataUsesModelCount(t *testing.T) {
 	t.Parallel()
 
@@ -102,7 +66,7 @@ func TestResolvedPartitionDataUsesModelCount(t *testing.T) {
 			name: "single model", models: []string{"default"},
 			want: map[string]string{
 				"nodes_per_partition": "2\n1", "partition_ids": "7\n9",
-				"partition_node_offsets": "0\n2", "partition_paths": "part-7\npart-9", "topologies": "topology-7\ntopology-9",
+				"partition_node_offsets": "0\n2", "partition_paths": "part-7\npart-9",
 			},
 		},
 		{
@@ -110,13 +74,13 @@ func TestResolvedPartitionDataUsesModelCount(t *testing.T) {
 			want: map[string]string{
 				"nodes_per_partition": "2\n1\n2\n1", "partition_ids": "7\n9\n7\n9",
 				"partition_indices": "0\n1\n0\n1", "partition_models": "draft0\ndraft0\ntarget\ntarget",
-				"partition_node_offsets": "0\n2\n0\n2", "partition_paths": "part-7\npart-9\npart-7\npart-9", "topologies": "topology-7\ntopology-9\ntopology-7\ntopology-9",
+				"partition_node_offsets": "0\n2\n0\n2", "partition_paths": "part-7\npart-9\npart-7\npart-9",
 			},
 		},
 		{
 			name: "single all-local model", models: []string{"default"}, allLocal: true,
 			want: map[string]string{
-				"nodes_per_partition": "", "partition_ids": "", "partition_node_offsets": "", "partition_paths": "", "topologies": "",
+				"nodes_per_partition": "", "partition_ids": "", "partition_node_offsets": "", "partition_paths": "",
 			},
 		},
 	} {
@@ -128,9 +92,9 @@ func TestResolvedPartitionDataUsesModelCount(t *testing.T) {
 			for index, model := range test.models {
 				projection := &ModelProjection{model: model}
 				if !test.allLocal {
-					projection.configuredBuild.Partitions = []BuildPartition{
-						{SourcePartitionID: 7, PartPath: "part-7", Topology: Topology{ChipCount: 16, Raw: "topology-7"}, DevicesPerNode: 8},
-						{SourcePartitionID: 9, PartPath: "part-9", Topology: Topology{ChipCount: 8, Raw: "topology-9"}, DevicesPerNode: 8},
+					projection.configuredBuild.partitions = []buildPartition{
+						{sourcePartitionID: 7, partPath: "part-7", numChips: 16, topology: "topology-7", devicesPerNode: 8},
+						{sourcePartitionID: 9, partPath: "part-9", numChips: 8, topology: "topology-9", devicesPerNode: 8},
 					}
 				}
 				projections[index] = projection

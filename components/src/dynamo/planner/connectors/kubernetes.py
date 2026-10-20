@@ -28,6 +28,8 @@ from kubernetes.client import ApiException
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.clients.kubernetes_api import (
+    DYNAMO_COMPONENT_LABEL,
+    DYNAMO_DGD_NAME_LABEL,
     DYNAMO_WORKER_METADATA_API_VERSION,
     NVIDIA_API_GROUP,
     PLANNER_WRITER_FENCE_ANNOTATION,
@@ -36,6 +38,7 @@ from dynamo.planner.connectors.clients.kubernetes_api import (
 from dynamo.planner.connectors.mdc import (
     MdcEntry,
     is_model_card,
+    is_prefill_card,
     select_entry,
     worker_info_from_mdc,
 )
@@ -70,6 +73,7 @@ logger = logging.getLogger(__name__)
 
 CURRENT_WORKER_HASH_ANNOTATION = "nvidia.com/current-worker-hash"
 CURRENT_WORKER_HASH_V2_ANNOTATION = "nvidia.com/current-worker-hash-v2"
+WORKER_HASH_LABEL = "nvidia.com/dynamo-worker-hash"
 WORKER_COMPONENT_TYPES = {"worker", "prefill", "decode"}
 WORKER_SUFFIX_COMPONENT_KINDS = {"Deployment", "LeaderWorkerSet"}
 
@@ -321,6 +325,7 @@ class KubernetesConnector(PlannerConnector):
     ) -> str:
         """Get the model name from an already-fetched deployment."""
         try:
+            registrations = self._extract_mdc_entries(deployment)
             # TODO: dynamo/profiler/utils/config.py already contains DGD config parsing
             # and model name logic, should consolidate
             prefill_model_name = None
@@ -331,14 +336,24 @@ class KubernetesConnector(PlannerConnector):
                     SubComponentType.PREFILL,
                     component_name=prefill_component_name,
                 )
-                prefill_model_name = prefill_service.get_model_name(deployment)
+                entry = self._registered_worker_entry(
+                    registrations, prefill_service.name, SubComponentType.PREFILL
+                )
+                prefill_model_name = (
+                    entry.card_json.get("display_name") if entry else None
+                ) or prefill_service.get_model_name(deployment)
             if require_decode:
                 decode_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
                     component_name=decode_component_name,
                 )
-                decode_model_name = decode_service.get_model_name(deployment)
+                entry = self._registered_worker_entry(
+                    registrations, decode_service.name, SubComponentType.DECODE
+                )
+                decode_model_name = (
+                    entry.card_json.get("display_name") if entry else None
+                ) or decode_service.get_model_name(deployment)
 
             if prefill_model_name is None and decode_model_name is None:
                 raise ModelNameNotFoundError()
@@ -629,56 +644,118 @@ class KubernetesConnector(PlannerConnector):
                 return []
             raise
 
-    def _get_dgd_component_names(self) -> list[str]:
-        """Return the Kubernetes component names reported in DGD status.
+    def _extract_mdc_entries(self, deployment: dict) -> dict[str, list[MdcEntry]]:
+        """Read base-model registrations grouped by their owning DGD component.
 
-        Grove may truncate and hash long DGD names when it creates component
-        resources. These status names reflect the names actually used by the
-        worker pods and their DynamoWorkerMetadata CRs.
-        """
-        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-        component_statuses = deployment.get("status", {}).get("components", {}) or {}
-        return [
-            component_name
-            for component_status in component_statuses.values()
-            for component_name in component_status.get("componentNames", []) or []
-        ]
+        One metadata list and one Pod list serve all components in this snapshot.
+        Pod name/UID, readiness, active worker hashes and runtime namespace bind
+        identity to serving workers rather than a candidate or stale registration.
+        Without an active hash, ownership and namespace still apply; conflicting
+        identities are rejected by _registered_worker_entry instead of guessed.
 
-    def _extract_mdc_entries(self) -> list[MdcEntry]:
-        """Extract MDC entries belonging to this DGD.
-
-        CRs are named after the worker pod. Match the DGD name prefix and the
-        actual component names from DGD status because Grove may truncate and
-        hash a long DGD name. LoRA-adapter wrappers are dropped via
-        :func:`is_model_card`.
+        A missing metadata CRD or forbidden Pod list returns no registrations,
+        preserving legacy status/default fallback. Other API errors propagate.
         """
         crs = self._list_worker_metadata_crs()
-        component_names = self._get_dgd_component_names()
-        dgd_prefix = f"{self.graph_deployment_name}-"
-
-        entries: list[MdcEntry] = []
-        for cr in crs:
-            cr_name = cr.get("metadata", {}).get("name", "")
-            belongs_to_dgd = cr_name.startswith(dgd_prefix) or any(
-                cr_name == component_name or cr_name.startswith(f"{component_name}-")
-                for component_name in component_names
+        if not crs:
+            return {}
+        try:
+            pods = self.kube_api.list_pods_for_graph(self.graph_deployment_name)
+        except ApiException as exc:
+            if exc.status != 403:
+                raise
+            # Like startup inventory, legacy accounts can use status/defaults.
+            with self._startup_scale_down_lock:
+                warn = "registration-pods" not in self._startup_read_warnings
+                self._startup_read_warnings.add("registration-pods")
+            if warn:
+                logger.warning(
+                    "Pod list forbidden for %s; registered identity is unavailable. "
+                    "Using status/defaults until pods/list is granted",
+                    self.graph_deployment_name,
+                )
+            return {}
+        with self._startup_scale_down_lock:
+            self._startup_read_warnings.discard("registration-pods")
+        pods = self.kube_api.exclude_checkpoint_capture_pods(pods)
+        components = get_components_by_name(deployment)
+        statuses = deployment.get("status", {}).get("components", {}) or {}
+        annotations = deployment.get("metadata", {}).get("annotations", {}) or {}
+        active_hashes = {
+            annotations[key]
+            for key in (
+                CURRENT_WORKER_HASH_ANNOTATION,
+                CURRENT_WORKER_HASH_V2_ANNOTATION,
             )
-            if not belongs_to_dgd:
+            if annotations.get(key)
+        }
+        serving_pods = {}
+        for pod in pods:
+            labels = pod.metadata.labels or {}
+            service_name = labels.get(DYNAMO_COMPONENT_LABEL)
+            if (
+                labels.get(DYNAMO_DGD_NAME_LABEL) != self.graph_deployment_name
+                or service_name not in components
+                or not pod.metadata.uid
+                or pod.metadata.deletion_timestamp is not None
+                or pod.status is None
+                or pod.status.phase != "Running"
+                or not any(
+                    condition.type == "Ready" and condition.status == "True"
+                    for condition in (pod.status.conditions or [])
+                )
+                or (
+                    active_hashes and labels.get(WORKER_HASH_LABEL) not in active_hashes
+                )
+            ):
                 continue
+            serving_pods[(pod.metadata.name, pod.metadata.uid)] = service_name
 
+        entries: dict[str, list[MdcEntry]] = {}
+        for cr in sorted(
+            crs, key=lambda item: item.get("metadata", {}).get("name", "")
+        ):
+            metadata = cr.get("metadata", {})
+            if metadata.get("deletionTimestamp"):
+                continue
+            service_name = next(
+                (
+                    serving_pods[(owner.get("name"), owner.get("uid"))]
+                    for owner in (metadata.get("ownerReferences") or [])
+                    if owner.get("apiVersion") == "v1"
+                    and owner.get("kind") == "Pod"
+                    and (owner.get("name"), owner.get("uid")) in serving_pods
+                ),
+                None,
+            )
+            if service_name is None:
+                continue
+            namespace = statuses.get(service_name, {}).get("runtimeNamespace")
+            # build_cr in lib/runtime/src/discovery/kube/crd.rs writes this
+            # owner reference for both pod-scoped and container-scoped records.
             data = cr.get("spec", {}).get("data", {})
             if isinstance(data, str):
                 try:
                     data = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-            model_cards = data.get("model_cards", {})
-            for _key, wrapper in model_cards.items():
+            for wrapper in data.get("model_cards", {}).values():
                 if not is_model_card(wrapper):
                     continue
-                entries.append(
+                if namespace and wrapper.get("namespace") != namespace:
+                    continue
+                card = wrapper.get("card_json") or {}
+                # Encoders are not decode workers; legacy cards may omit the role.
+                if card.get("worker_type") not in (
+                    None,
+                    "prefill",
+                    "decode",
+                    "aggregated",
+                ):
+                    continue
+                entries.setdefault(service_name, []).append(
                     MdcEntry(
-                        card_json=wrapper.get("card_json") or {},
+                        card_json=card,
                         component=wrapper.get("component"),
                         endpoint=wrapper.get("endpoint"),
                         instance_id=wrapper.get("instance_id"),
@@ -686,34 +763,57 @@ class KubernetesConnector(PlannerConnector):
                 )
         return entries
 
+    def _registered_worker_entry(
+        self,
+        registrations: dict[str, list[MdcEntry]],
+        service_name: str,
+        sub_component_type: SubComponentType,
+    ) -> Optional[MdcEntry]:
+        """Select a registered worker role within one Kubernetes scaling target.
+
+        Ownership already scopes the supplied base-model records. Never filter by
+        a predicted component name. Replicas must agree on component, endpoint and
+        model identity; disagreement raises PlannerError. Return None when no
+        matching registration exists so the caller can use its legacy fallback.
+        """
+        matching = [
+            candidate
+            for candidate in registrations.get(service_name, [])
+            if is_prefill_card(candidate.card_json)
+            == (sub_component_type == SubComponentType.PREFILL)
+        ]
+        identities = {
+            (
+                candidate.component,
+                candidate.endpoint,
+                candidate.card_json.get("display_name"),
+            )
+            for candidate in matching
+        }
+        if len(identities) > 1:
+            raise PlannerError(
+                f"Conflicting runtime registrations for DGD component {service_name!r}"
+            )
+        return select_entry(matching, sub_component_type)
+
     def _resolve_dgd_service(
-        self, sub_component_type: SubComponentType, backend: str
-    ) -> tuple[Optional[str], str]:
-        """Return (dgd_service_name, component_name_for_filter).
+        self,
+        sub_component_type: SubComponentType,
+        backend: str,
+        deployment: dict | None = None,
+    ) -> tuple[str | None, str]:
+        """Return the scaling target and legacy identity fallback.
 
-        ``dgd_service_name`` is the DGD ``spec.services`` dict key (typically
-        PascalCase, e.g. ``"prefill"``) and is used for Kubernetes
-        operations like patching replica counts.
-
-        ``component_name_for_filter`` is the component name that the Rust
-        runtime registers via ``Endpoint`` and writes into the MDC
-        ``component`` field. Source of truth, in priority order:
-
-        1. The user's ``--endpoint <ns>.<component>.<ep>`` override in the
-           worker's container args (supported by all backends --
-           see vllm/args.py:171-176, sglang/args.py:428, trtllm/args.py:137).
-        2. The backend-specific default from
-           :func:`build_worker_info_from_defaults` (e.g. ``"prefill"`` /
-           ``"backend"``).
-
-        Note: the DGD services dict key (``service.name``) must NOT be used
-        here -- it is typically PascalCase (``"prefill"``) and
-        would never match the lowercase value the worker writes to MDC.
+        Registered identity is resolved separately through Pod ownership. The
+        projected endpoint/default is used only when registration is unavailable.
         """
         defaults = build_worker_info_from_defaults(backend, sub_component_type)
         expected_component = defaults.component_name or ""
         try:
-            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+            if deployment is None:
+                deployment = self.kube_api.get_graph_deployment(
+                    self.graph_deployment_name
+                )
             service = get_component_from_type_or_name(deployment, sub_component_type)
             user_component = service.get_runtime_component_name(deployment)
             if user_component:
@@ -733,16 +833,16 @@ class KubernetesConnector(PlannerConnector):
             sub_component_type: PREFILL or DECODE
             backend: Backend framework name (for default fallback)
         """
-        entries = self._extract_mdc_entries()
+        try:
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        except PlannerError:
+            deployment = {}
         dgd_service_name, expected_component = self._resolve_dgd_service(
-            sub_component_type, backend
+            sub_component_type, backend, deployment
         )
 
-        def _dgd_model_name() -> Optional[str]:
+        def _dgd_model_name() -> str | None:
             try:
-                deployment = self.kube_api.get_graph_deployment(
-                    self.graph_deployment_name
-                )
                 service = get_component_from_type_or_name(
                     deployment, sub_component_type
                 )
@@ -750,7 +850,15 @@ class KubernetesConnector(PlannerConnector):
             except PlannerError:
                 return None
 
-        entry = select_entry(entries, sub_component_type, expected_component)
+        entry = (
+            self._registered_worker_entry(
+                self._extract_mdc_entries(deployment),
+                dgd_service_name,
+                sub_component_type,
+            )
+            if dgd_service_name is not None
+            else None
+        )
         if entry is not None:
             info = worker_info_from_mdc(
                 entry,
@@ -770,14 +878,15 @@ class KubernetesConnector(PlannerConnector):
             )
             return info
 
-        # No MDC entry found -- fall back entirely to defaults + DGD arg parsing.
+        # Registration may be absent or inaccessible under legacy Pod-read RBAC.
         logger.warning(
-            f"No DynamoWorkerMetadata CR found for {sub_component_type.value}. "
-            f"Workers may not be registered yet. Falling back to defaults."
+            "No usable worker registration for %s; using status/defaults",
+            sub_component_type.value,
         )
         info = build_worker_info_from_defaults(backend, sub_component_type)
         if dgd_service_name is not None:
             info.k8s_name = dgd_service_name
+        info.component_name = expected_component or info.component_name
         arg_model = _dgd_model_name()
         if arg_model:
             info.model_name = arg_model
