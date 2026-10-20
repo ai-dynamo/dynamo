@@ -1552,6 +1552,7 @@ class StreamingPostProcessor:
                 if (
                     post_content
                     and self._should_parse_tools()
+                    and self.tool_parser is not None
                     and self.tool_parser.engine_based_streaming
                 ):
                     # An engine-based tool parser holds back an opener split
