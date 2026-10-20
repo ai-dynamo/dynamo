@@ -239,8 +239,8 @@ cargo fmt --all && cargo clippy --workspace
 - PR descriptions must include `Summary` and `Validation`.
 - Every PR references the tracked issue it implements, in the title, description, or
   branch name (`Closes #123`, `Closes DYN-1234`, `user/dyn-1234-description`). The
-  `PR Issue Link` check verifies the reference; it is advisory until 2026-10-21, then
-  required. Reference forms and remediation are in the `issue-first` skill.
+  `PR Issue Link` check verifies the reference; it is advisory until `release/1.7.0` is
+  cut, then required. Reference forms and remediation are in the `issue-first` skill.
 - Sign every commit with DCO: `git commit -s`.
 - For fork PRs that qualify for automatic CI approval, GitHub must report every commit's
   signature as `Verified`. A DCO sign-off alone is not enough. Signing commits does not
