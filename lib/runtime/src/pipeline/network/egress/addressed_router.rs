@@ -737,9 +737,9 @@ impl AddressedPushRouter {
         }
     }
 
-    /// Cancel stream registrations for an instance. The TCP response plane cancels
-    /// pending handshakes and lets established response streams drain; the QUIC
-    /// response plane also cancels active streams.
+    /// Cancel stream registrations for an instance. The TCP and Velo response
+    /// planes cancel pending handshakes and let established response streams
+    /// drain; the QUIC response plane also cancels active streams.
     pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
         match &self.responses {
             ResponseServer::Tcp(responses) => responses.cancel_instance_streams(instance_id).await,

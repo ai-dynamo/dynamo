@@ -168,12 +168,31 @@ impl Registration {
 #[derive(Default)]
 struct Registrations {
     requests: HashMap<Uuid, Registration>,
-    /// Lets `cancel_instance_streams` find an instance's requests without a full scan.
+    /// Requests still waiting for their prologue, so `cancel_instance_streams`
+    /// finds them without a full scan. As on TCP, a request leaves this index
+    /// when its prologue arrives, and worker removal lets it drain.
     instance_requests: HashMap<EndpointInstanceId, HashSet<Uuid>>,
     tombstones: InstanceTombstones,
 }
 
 impl Registrations {
+    /// Unlinks an established request from its instance. Returns false when a
+    /// cancellation already removed it.
+    fn accept(&mut self, id: Uuid) -> bool {
+        let Some(registration) = self.requests.get_mut(&id) else {
+            return false;
+        };
+        if let Some(instance) = registration.instance.take()
+            && let Some(ids) = self.instance_requests.get_mut(&instance)
+        {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.instance_requests.remove(&instance);
+            }
+        }
+        true
+    }
+
     fn take(&mut self, id: Uuid) -> Option<Registration> {
         let registration = self.requests.remove(&id)?;
         if let Some(instance) = &registration.instance
@@ -573,6 +592,9 @@ impl VeloResponseService {
                     ))));
                     return;
                 }
+            }
+            if !lease.service.registrations.lock().accept(lease.id) {
+                return;
             }
             let receiver = VeloResponseReceiver {
                 anchor,
