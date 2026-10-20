@@ -1468,6 +1468,8 @@ def image_request_handler():
     """Exercise real reference loading while replacing GPU generation with a mock."""
     handler = _make_handler()
     handler.config.output_modalities = ["image"]
+    handler._image_loader = ImageLoader()
+    handler._image_loader.load_image = AsyncMock(wraps=handler._image_loader.load_image)
     handler._image_edit_limits = ImageEditLimits()
     handler._image_edit_loader = ImageLoader()
     handler._image_edit_loader.load_image = AsyncMock(
