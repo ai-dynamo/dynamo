@@ -110,6 +110,7 @@ def native_api(monkeypatch):
             self.closed = True
 
     dependencies = {
+        "torch": {},
         "deepinfer._C.engine": {"RequestOutput": OutputAPI},
         "deepinfer.engine.arg_utils": {"EngineArgs": SimpleNamespace},
         "deepinfer.engine.llm_engine": {"LLMEngine": Engine},

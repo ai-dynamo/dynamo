@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+**
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!.cargo/
+!.cargo/config.toml
+!lib/
+!lib/**
+!components/
+!components/src/
+!components/src/dynamo/
+!components/src/dynamo/**
+!pyproject.toml
+!hatch_build.py
+!README.md
+!LICENSE
+!examples/
+!examples/backends/
+!examples/backends/deepinfer/
+!examples/backends/deepinfer/**
+!examples/common/
+!examples/common/launch_utils.sh
+!examples/router/
+!examples/router/custom-policy-example/
+!examples/router/custom-policy-example/**
+!deploy/
+!deploy/inference-gateway/
+!deploy/inference-gateway/**
+**/target
+**/build
+**/dist
+**/__pycache__
+**/*.so
+**/*.pyc

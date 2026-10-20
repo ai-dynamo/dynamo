@@ -3,6 +3,8 @@
 
 """Loaded only for native inference, after the owner thread is started."""
 
+# Load libtorch's shared libraries before importing DeepInfer's extension.
+import torch  # noqa: F401
 from deepinfer._C.engine import RequestOutput as NativeRequestOutput
 from deepinfer.engine.arg_utils import EngineArgs
 from deepinfer.engine.llm_engine import LLMEngine

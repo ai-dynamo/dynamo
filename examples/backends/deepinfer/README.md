@@ -15,6 +15,58 @@ with CPU-only synthetic output for local iteration.
 > CPU checks. The native adapter supports one data-parallel engine per worker;
 > DeepInfer can spawn context-parallel workers across the visible GPUs.
 
+## Build and Run the Container
+
+From this branch's repository root:
+
+```bash
+docker build -f examples/backends/deepinfer/Dockerfile \
+  --build-arg DYNAMO_COMMIT="$(git rev-parse HEAD)" \
+  -t dynamo-deepinfer:latest .
+```
+
+The image builds Dynamo's Rust bindings and Python wheel from the checkout. It
+also builds DeepInfer at `774ce244b87cc0eb8d4b94ab9f5de2ab22049f01`, including
+DeepSelect, FlashMLA, DeepEP, and DeepGEMM. The environment uses Ubuntu 24.04,
+Python 3.12, CUDA 13.2, and PyTorch 2.13. The CUDA development tools remain in the
+image for runtime kernel compilation. Building does not require a GPU; native
+inference requires DeepInfer's supported SM100 hardware and a compatible driver.
+`MAX_JOBS` and `CARGO_BUILD_JOBS` build arguments default to 4.
+
+The image uses Transformers 4.57.6 and tokenizers 0.22.2 to satisfy Dynamo's
+frontend requirements. It also applies DeepInfer's upstream NCCL 2.32.3 override
+of PyTorch's 2.29.7 dependency pin; `pip check` reports that intentional mismatch.
+
+The CUDA 13.2 build also uses upstream's `FLASH_MLA_SKIP_REG_SPILL_CHECK=1`
+override. Four FlashMLA head-64 decode variants compiled with 16-byte stack
+frames, 20 bytes of spill stores, and 28 bytes of spill loads. The override
+allows wheel packaging; native inference correctness and performance still
+need qualification on supported GPUs. DeepSelect's spill check remains enabled.
+
+Launch the native engine with a local checkpoint mounted read-only:
+
+```bash
+docker run --rm --init --name deepinfer --gpus all --ipc=host \
+  -p 127.0.0.1:8000:8000 \
+  -v /absolute/path/to/DeepSeek-V4.1-Flash-1017:/models/deepseek:ro \
+  -e MODEL_PATH=/models/deepseek -e CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+  dynamo-deepinfer:latest \
+    --engine-args '{"context_parallel_size":8,"expert_parallel_size":8,"max_num_seqs":4,"chunked_prefill":true}'
+```
+
+For CPU mock inference, persist the tokenizer cache and add `--mock`:
+
+```bash
+docker run --rm --init --name deepinfer -p 127.0.0.1:8000:8000 \
+  -v deepinfer-hf-cache:/root/.cache/huggingface \
+  dynamo-deepinfer:latest --mock
+```
+
+Run the smoke test from another terminal in the serving container with
+`docker exec deepinfer python examples/backends/deepinfer/smoke_test.py`.
+The image binds the frontend to `0.0.0.0`; the commands above publish it only on
+the host loopback address. Model weights are not included in the image.
+
 ## Run Native DeepInfer
 
 Build and install DeepInfer and its accelerator dependencies in the same Python
