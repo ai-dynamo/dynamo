@@ -10,6 +10,7 @@ from threading import Barrier
 import pytest
 import requests
 
+from dynamo import prometheus_names
 from tests.frontend.conftest import MockerWorkerProcess, wait_for_http_completions_ready
 from tests.utils.constants import QWEN
 from tests.utils.decision_api import (
@@ -19,6 +20,7 @@ from tests.utils.decision_api import (
     post_with_capacity_retry,
 )
 from tests.utils.managed_process import DynamoFrontendProcess
+from tests.utils.prometheus import find_metric_samples
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -141,12 +143,50 @@ def test_systemone_mixed_results_and_existing_apis(systemone_server):
     assert unknown.status_code == 404, unknown.text
 
 
-def test_systemone_validation_and_body_limit(systemone_server):
+@pytest.fixture
+def worker_request_count(dynamo_dynamic_ports):
+    def read():
+        response = requests.get(
+            f"http://localhost:{dynamo_dynamic_ports.system_ports[0]}/metrics",
+            timeout=30,
+        )
+        response.raise_for_status()
+        samples = find_metric_samples(
+            response.text,
+            f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.work_handler.REQUESTS_TOTAL}",
+        )
+        assert samples, "Worker ingress request counter must be registered"
+        return sum(samples)
+
+    return read
+
+
+def test_systemone_validation_and_body_limit(systemone_server, worker_request_count):
     url = f"{systemone_server}/v1/systemone"
     malformed = requests.post(
         url, data='{"model":', headers={"Content-Type": "application/json"}, timeout=30
     )
     assert malformed.status_code == 400, malformed.text
+    before = worker_request_count()
+    for route, dialect in [("decisions", "oai"), ("systemone", "systemone")]:
+        response = requests.post(
+            f"{systemone_server}/v1/{route}",
+            data='{"model":',
+            headers={"Content-Type": "text/plain"},
+            timeout=30,
+        )
+        assert response.status_code == 415, response.text
+        assert_request_headers(response)
+        assert ("error" if dialect == "oai" else "detail") in response.json()
+        payload = {
+            **decision_payload(QWEN, dialect),
+            "questions": [] if dialect == "oai" else {},
+        }
+        response = requests.post(
+            f"{systemone_server}/v1/{route}", json=payload, timeout=30
+        )
+        assert response.status_code == (400 if dialect == "oai" else 422), response.text
+    assert worker_request_count() == before
     nested = _payload()
     nested["questions"]["urgent"]["unknown"] = True
     temperature = {**_payload(), "temperature": 0}
