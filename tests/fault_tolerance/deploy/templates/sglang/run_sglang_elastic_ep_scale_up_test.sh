@@ -157,13 +157,18 @@ launch_joiner() {
   echo "--- launching joining group: rank_offset=$rank_offset gpus=$visible ---"
   # Detached joiner: shares --dist-init-addr with the primary. Its own HTTP port
   # is never used for serving; the primary keeps serving throughout.
+  # The two SGLANG_*_BF16_DISPATCH envs and --moe-runner-backend deep_gemm must
+  # match the primary (see sglang_elastic_ep.yaml): unquantized experts over
+  # nixl only work on the BF16 DeepGEMM path.
   kubectl exec "$pod" -n "$NS" -- bash -lc "
+    SGLANG_DEEPEP_BF16_DISPATCH=1 SGLANG_NIXL_EP_BF16_DISPATCH=1 \
     CUDA_VISIBLE_DEVICES=$visible nohup sglang serve \
       --model-path $MODEL_PATH \
       --trust-remote-code \
       --tp $join_gpus --dp $join_gpus \
       --enable-dp-attention --enable-dp-lm-head \
       --moe-a2a-backend nixl --deepep-mode low_latency \
+      --moe-runner-backend deep_gemm \
       --elastic-ep-backend mooncake --mooncake-ib-device $IB_DEVICE \
       --enable-eplb --ep-num-redundant-experts 24 \
       --elastic-ep-initial-size 4 --max-ep-size 8 \
