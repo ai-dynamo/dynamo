@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import uuid
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,7 @@ from tests.deploy.n2_utils import (
     compatibility_spec,
     version_matrix,
 )
-from tests.utils.client import wait_for_model_availability
+from tests.utils.client import send_request, wait_for_model_availability
 from tests.utils.output_paths import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
@@ -86,11 +87,12 @@ async def mixed_deployment(request, version_pairs, pair_index, scenario, namespa
 
 @pytest.mark.k8s
 @pytest.mark.deploy
-@pytest.mark.sglang
-@pytest.mark.framework_agnostic
 @pytest.mark.core
 @pytest.mark.post_merge
 @pytest.mark.e2e
+# No framework marker: cross-version-compatibility.yml selects this file with
+# -m k8s and supplies --frontend-image and --model-cache-pvc. A sglang marker
+# makes the sglang runtime jobs collect it without those options.
 @pytest.mark.gpu_1
 @pytest.mark.timeout(1500)
 @pytest.mark.parametrize("scenario", ["embedding", "chat"])
@@ -120,4 +122,24 @@ async def test_n2_compatibility(mixed_deployment, scenario):
         payload=payload,
     ), f"Model {model} did not become available"
     check_api = check_embedding_api if scenario == "embedding" else check_chat_api
-    await asyncio.to_thread(check_api, base + endpoint, model, output / "responses")
+
+    def send_with_retry(url, payload, *, timeout, method, stream):
+        nonlocal forward
+        response, forward = deployment.send_request_with_port_forward_retry(
+            pod=pods["Frontend"][0],
+            remote_port=8000,
+            endpoint=endpoint,
+            payload=payload,
+            timeout=timeout,
+            port_forward=forward,
+            request_sender=partial(send_request, stream=stream),
+        )
+        return response
+
+    await asyncio.to_thread(
+        check_api,
+        base + endpoint,
+        model,
+        output / "responses",
+        request_sender=send_with_retry,
+    )

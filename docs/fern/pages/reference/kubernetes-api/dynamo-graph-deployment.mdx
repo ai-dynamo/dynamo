@@ -160,7 +160,7 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 </ParamField>
 
 <ParamField path="backendFramework" type="string">
-  GPU backend framework for worker components. When omitted, the operator infers the framework from each worker's command and arguments. When set, it must match the detected worker framework. LPX components omit this field. Backend-specific defaults apply to `spec.components[*].podTemplate.spec.containers[name=main]`.
+  GPU backend framework for worker components. When omitted, the operator infers the framework from each worker engine in `containers[name=main]`, including a direct `vllm-rs` command or literal path. When set, it must match the detected engine framework. Native engine shell wrappers and image entrypoints require an explicit framework. Runtime sidecar launch wrappers do not affect inference. Newly inferred backends can trigger an operator-upgrade rollout; see [Dynamo Sidecar Mode](dynamo-component-deployment.mdx#dynamo-sidecar-mode). LPX components omit this field. Backend-specific defaults apply to `main`.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
@@ -490,11 +490,11 @@ Replica information for a single component, keyed by component name in `status.c
 </ParamField>
 
 <ParamField path="servedModelName" type="string">
-  Effective primary model identity resolved from the fully rendered serving Pod. The operator checks `--served-model-name`, `--model-name`, `--model`, and `--model-path` in that order. Omitted when the rendered command declares none of those flags. During a rolling update, worker status retains the old active revision's value until cutover completes.
+  Effective primary model identity resolved from model flags on the fully rendered serving Pod in combined mode. Absent in native sidecar mode, where Kubernetes Planner uses the model published in runtime registration. During a rolling update, worker status retains the old active revision's value until cutover completes.
 </ParamField>
 
 <ParamField path="runtimeComponentName" type="string">
-  Explicit Dynamo runtime component identity resolved from the serving Pod's `--endpoint` value. Omitted when the rendered command does not declare a component override. During a rolling update, worker status retains the old active revision's value until cutover completes.
+  Dynamo runtime component identity resolved from a qualified `--endpoint` in combined mode. Absent in native sidecar mode: Kubernetes Planner associates registrations with the active component's serving Pods by owner UID and uses the registered component name. During a rolling update, worker status retains the old active revision's value until cutover completes.
 </ParamField>
 
 <ParamField path="gpuPowerLimitWatts" type="integer">

@@ -221,7 +221,10 @@ def load_weights(
     sharded_ssd_queues_per_root: int = 2,
     posix_backend_params: Mapping[str, str] | None = None,
 ) -> None:
-    """Load exact V1 weight IDs into a fresh server and publish them."""
+    """Load exact V1 weight IDs into a fresh server and publish them.
+
+    Returns without loading if the server already has committed weights.
+    """
     started_at = monotonic()
     if max_workers <= 0:
         raise ValueError("max_workers must be positive")
@@ -246,7 +249,7 @@ def load_weights(
         ),
     )
     try:
-        session = _GMSClientSession(socket_path, RequestedLockType.RW)
+        session = _GMSClientSession(socket_path, RequestedLockType.RW_OR_RO)
     except BaseException:
         try:
             backend.close()
@@ -261,6 +264,9 @@ def load_weights(
         backend_holder = [backend]
         resources.callback(_close_backend, backend_holder)
         _verify_session_device(session, device)
+        if session.lock_type is GrantedLockType.RO:
+            logger.info("GMS V1 weights already committed on device=%d", device)
+            return
 
         mappings: list[tuple[LocalMapping, int]] = []
         targets: dict[str, GMSTransferTarget] = {}
