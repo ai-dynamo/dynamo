@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Kubernetes mode, using SIG Multicluster. Sketch only:
-//! signatures, no bodies.
+//! Kubernetes mode, using SIG Multicluster. The router side ([`hub`],
+//! [`mcs`]) is implemented; the Relay side ([`endpoints`]) is still a
+//! sketch.
 //!
 //! V1 assumes a trusted network where pod addresses are reachable between
 //! clusters (for example Azure CNI with peered VNets, or the AWS VPC CNI with
@@ -14,6 +15,14 @@
 //! router's Service, so each Relay finds every router replica in its own
 //! cluster. No registrar, no announcer, no leases. Router replicas still
 //! register with the hub's Dynamo runtime discovery, as in every mode.
+//!
+//! Create the PoolRelay Service and its `ServiceExport` in the workload
+//! cluster, not through Karmada propagation. Kubernetes copies a Service's
+//! labels onto its EndpointSlices, so a Karmada-propagated Service gives its
+//! slices Karmada's labels. In a test with Karmada v1.19, deleting such a
+//! `ServiceExport` made karmada-agent delete the Service's EndpointSlice
+//! too. Exporting the Service again then found no slice until the Service
+//! changed.
 //!
 //! Router replica in the hub:
 //!
@@ -40,9 +49,6 @@
 //! // run() watches the directory. Added(replica): dialer.dial(&replica, ..).
 //! // Removed(id): close that connection.
 //! ```
-
-// Sketch: fields and parameters are unused until the bodies exist.
-#![allow(dead_code, unused_variables)]
 
 pub mod endpoints;
 pub mod hub;

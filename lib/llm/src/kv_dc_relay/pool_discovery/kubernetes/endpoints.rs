@@ -5,6 +5,9 @@
 //! Relay's cluster. The router itself lists its replicas through the hub's
 //! Dynamo runtime discovery, like every mode.
 
+// Sketch: fields and parameters are unused until the bodies exist.
+#![allow(dead_code, unused_variables)]
+
 use async_trait::async_trait;
 use dynamo_kv_router::pool_discovery::watch::{Directory, Snapshot, WatchStream};
 use dynamo_kv_router::pool_discovery::{

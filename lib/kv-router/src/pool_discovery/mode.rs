@@ -43,14 +43,15 @@ pub enum PoolDiscoveryMode {
     },
 }
 
-/// How the MCS implementation names imported EndpointSlices.
+/// How the MCS implementation names imported EndpointSlices. Not
+/// `non_exhaustive`: the implementations in dynamo-llm must handle every
+/// variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum McsImplementation {
     /// The `multicluster.kubernetes.io` labels (Submariner, Cilium, GKE).
     Standard,
-    /// Karmada's own names: a `derived-<service>` Service, and the source
-    /// cluster in the `work.karmada.io/namespace` annotation.
+    /// Karmada's own names: a `derived-<service>` Service, and slices named
+    /// `imported-<source cluster>-<source slice>`.
     Karmada,
 }
 
