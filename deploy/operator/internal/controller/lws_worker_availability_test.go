@@ -123,7 +123,7 @@ func TestLWSAvailabilityDrivesWorkerGenerationCleanup(t *testing.T) {
 			t.Log("Calculate rollout targets using readiness when LWS availability is absent")
 			r := createTestReconcilerWithStatus(dgd, withObjects(dcds[0], dcds[1]))
 			ctx := context.Background()
-			rollout, err := r.buildRollingUpdateContext(ctx, dgd)
+			rollout, _, err := r.buildRollingUpdateContext(ctx, dgd)
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantOld, rollout.OldWorkerReplicaTargetsByComponent["worker"])
 			assert.Equal(t, tt.desired, rollout.NewWorkerReplicaTargetsByComponent["worker"])
@@ -208,7 +208,7 @@ func TestLWSAvailabilityDrivesWorkerGenerationCleanup(t *testing.T) {
 			t.Log("Keep the old hash and runtime projection until the DCD deletion is observed")
 			require.NoError(t, program.reconcileWorkerRollout(ctx, dgd, &programStatus))
 			assert.Equal(t, expectedCurrentHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-			rollout, err = r.buildRollingUpdateContext(ctx, dgd)
+			rollout, _, err = r.buildRollingUpdateContext(ctx, dgd)
 			require.NoError(t, err)
 			assert.True(t, rollout.InProgress())
 			oldStatuses, err := r.aggregateOldWorkerComponentStatuses(ctx, dgd, rollout)
@@ -224,7 +224,7 @@ func TestLWSAvailabilityDrivesWorkerGenerationCleanup(t *testing.T) {
 			require.NoError(t, program.reconcileWorkerRollout(ctx, dgd, &programStatus))
 			require.NoError(t, program.reconcileWorkerRollout(ctx, dgd, &programStatus))
 			assert.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(oldDCD), oldDCD)))
-			rollout, err = r.buildRollingUpdateContext(ctx, dgd)
+			rollout, _, err = r.buildRollingUpdateContext(ctx, dgd)
 			require.NoError(t, err)
 			assert.False(t, rollout.InProgress())
 			assert.Equal(t, newHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
@@ -346,7 +346,7 @@ func TestLWSCleanupWaitsForEveryReplacementWorker(t *testing.T) {
 			}
 
 			t.Log("Scale old replicas to zero before replacement readiness, respecting the chosen strategy")
-			rollout, err := r.buildRollingUpdateContext(ctx, dgd)
+			rollout, _, err := r.buildRollingUpdateContext(ctx, dgd)
 			require.NoError(t, err)
 			assert.Equal(t, map[string]int32{"prefill": 0, "decode": 0}, rollout.OldWorkerReplicaTargetsByComponent)
 			if tt.recreate {
@@ -363,7 +363,7 @@ func TestLWSCleanupWaitsForEveryReplacementWorker(t *testing.T) {
 			}
 
 			t.Log("Allow replacements to start while retaining the drained old DCD objects and current hash")
-			rollout, err = r.buildRollingUpdateContext(ctx, dgd)
+			rollout, _, err = r.buildRollingUpdateContext(ctx, dgd)
 			require.NoError(t, err)
 			assert.Equal(t, map[string]int32{"prefill": 2, "decode": 2}, rollout.NewWorkerReplicaTargetsByComponent)
 			require.NoError(t, program.reconcileWorkerRollout(ctx, dgd, &status))
@@ -485,7 +485,7 @@ func TestWorkerRecreateIgnoresCheckpointCapturePods(t *testing.T) {
 			assert.Empty(t, mapDGDWorkerPodToRequests(ctx, captureDone))
 
 			t.Log("The real old worker must still block replacement startup")
-			rollout, err := r.buildRollingUpdateContext(ctx, dgd)
+			rollout, _, err := r.buildRollingUpdateContext(ctx, dgd)
 			require.NoError(t, err)
 			assert.Zero(t, rollout.NewWorkerReplicaTargetsByComponent["worker"])
 
@@ -495,7 +495,7 @@ func TestWorkerRecreateIgnoresCheckpointCapturePods(t *testing.T) {
 			workerDone.Status.Phase = corev1.PodSucceeded
 			assert.True(t, dgdWorkerPodEventPredicate().Update(event.UpdateEvent{ObjectOld: worker, ObjectNew: workerDone}))
 			require.NoError(t, r.Status().Update(ctx, workerDone))
-			rollout, err = r.buildRollingUpdateContext(ctx, dgd)
+			rollout, _, err = r.buildRollingUpdateContext(ctx, dgd)
 			require.NoError(t, err)
 			require.Equal(t, int32(1), rollout.NewWorkerReplicaTargetsByComponent["worker"])
 

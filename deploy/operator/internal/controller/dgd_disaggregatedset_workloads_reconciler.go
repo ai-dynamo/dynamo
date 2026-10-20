@@ -75,7 +75,7 @@ func (r *disaggregatedSetWorkloadsReconciler) Reconcile(
 	if err != nil {
 		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
-	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
+	rollingUpdateCtx, _, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
 	}

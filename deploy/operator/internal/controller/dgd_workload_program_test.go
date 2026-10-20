@@ -1133,7 +1133,7 @@ func TestComponentWorkloadsReconciler_FirstGenMultinodeStampsWorkerHash(t *testi
 	assert.Empty(t, dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
 
 	t.Log("Reconcile: every generated worker DCD must carry the computed hash in its label and name")
-	_, err := workloads.Reconcile(context.Background(), dgd, nil, nil)
+	_, _, err := workloads.Reconcile(context.Background(), dgd, nil, nil)
 	require.NoError(t, err)
 
 	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
@@ -1218,7 +1218,7 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
 
 	t.Log("Reconcile: the removed decode component must be targeted at zero replicas")
-	_, err := workloads.Reconcile(context.Background(), reducedDGD, nil, nil)
+	_, _, err := workloads.Reconcile(context.Background(), reducedDGD, nil, nil)
 	require.NoError(t, err)
 
 	t.Log("Verify the decode old DCD has been patched to zero replicas so the rollout can drain and complete")

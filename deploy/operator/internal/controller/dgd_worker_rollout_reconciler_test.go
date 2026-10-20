@@ -571,7 +571,7 @@ func TestCanonicalWorkerHashLifecycle_FirstDeploySpecChangeAndCompletion(t *test
 	require.NoError(t, err)
 	require.True(t, trigger)
 
-	rollingCtx, err := r.buildRollingUpdateContext(ctx, dgd)
+	rollingCtx, _, err := r.buildRollingUpdateContext(ctx, dgd)
 	require.NoError(t, err)
 	require.Equal(t, newV2Hash, rollingCtx.NewWorkerHash)
 	require.NotEqual(t, newLegacyHash, rollingCtx.NewWorkerHash)
@@ -735,7 +735,7 @@ func TestInitializeWorkerHashIfNeeded_PreservesLegacyAlphaHash(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, trigger)
 
-	ctx, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	ctx, _, err := r.buildRollingUpdateContext(context.Background(), dgd)
 	require.NoError(t, err)
 	assert.Equal(t, legacyHash, ctx.NewWorkerHash)
 	assert.False(t, ctx.InProgress())
@@ -782,7 +782,7 @@ func TestLegacyAlphaHashCompatibility_NoOpUpgradeUsesExistingWorkerGeneration(t 
 	require.NoError(t, err)
 	require.False(t, trigger)
 
-	rollingCtx, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	rollingCtx, _, err := r.buildRollingUpdateContext(context.Background(), dgd)
 	require.NoError(t, err)
 	require.Equal(t, legacyHash, rollingCtx.NewWorkerHash)
 	require.False(t, rollingCtx.InProgress())
@@ -831,7 +831,7 @@ func TestLegacyAlphaHashCompatibility_WorkerSpecChangeUsesNewV2Generation(t *tes
 	require.NoError(t, err)
 	require.True(t, trigger)
 
-	rollingCtx, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	rollingCtx, _, err := r.buildRollingUpdateContext(context.Background(), dgd)
 	require.NoError(t, err)
 	require.Equal(t, newV2Hash, rollingCtx.NewWorkerHash)
 	require.NotEqual(t, newLegacyHash, rollingCtx.NewWorkerHash)
@@ -868,7 +868,7 @@ func TestLegacyAlphaHashCompatibility_V2OnlyChangeUsesNewV2Generation(t *testing
 	require.NoError(t, err)
 	require.True(t, trigger)
 
-	rollingCtx, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	rollingCtx, _, err := r.buildRollingUpdateContext(context.Background(), dgd)
 	require.NoError(t, err)
 	require.Equal(t, newV2Hash, rollingCtx.NewWorkerHash)
 	require.NotEqual(t, newLegacyHash, rollingCtx.NewWorkerHash)
@@ -922,7 +922,7 @@ func TestUnsupportedPathwayMigratesV1OnlyAndKeepsV2OnlyGeneration(t *testing.T) 
 	require.Equal(t, newV2Hash, completed.v2)
 
 	r.setCurrentWorkerHashes(dgd, completed)
-	rollingCtx, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	rollingCtx, _, err := r.buildRollingUpdateContext(context.Background(), dgd)
 	require.NoError(t, err)
 	require.Equal(t, newV2Hash, rollingCtx.NewWorkerHash)
 }
@@ -3685,7 +3685,7 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerationsPreservesAvailableReplicas(t *
 	r := createTestReconcilerWithStatus(dgd, withObjects(genADCD, genBDCD))
 	ctx := context.Background()
 
-	rollingUpdateCtx, err := r.buildRollingUpdateContext(ctx, dgd)
+	rollingUpdateCtx, _, err := r.buildRollingUpdateContext(ctx, dgd)
 	require.NoError(t, err)
 	assert.Equal(t, int32(15), rollingUpdateCtx.OldWorkerReplicaTargetsByComponent["worker"])
 	assert.Equal(t, int32(15), rollingUpdateCtx.OldWorkerReplicaTargetsByDCD["test-dgd-worker-hashaaaa"])
@@ -5216,7 +5216,7 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			r := createTestReconcilerWithStatus(dgd, withObjects(objs...))
 			ctx := context.Background()
 
-			result, err := r.buildRollingUpdateContext(ctx, dgd)
+			result, _, err := r.buildRollingUpdateContext(ctx, dgd)
 			assert.NoError(t, err)
 
 			assert.Equal(t, newHash, result.NewWorkerHash)
@@ -5273,7 +5273,7 @@ func TestBuildRollingUpdateContext_NoNewDCDExists(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD))
 	ctx := context.Background()
 
-	result, err := r.buildRollingUpdateContext(ctx, dgd)
+	result, _, err := r.buildRollingUpdateContext(ctx, dgd)
 
 	assert.NoError(t, err, "IsNotFound on the new-hash DCD must not produce an error")
 	assert.Equal(t, newHash, result.NewWorkerHash)
@@ -5324,7 +5324,7 @@ func TestBuildRollingUpdateContext_RollbackToSameHash(t *testing.T) {
 	ctx := context.Background()
 
 	t.Log("Build rolling update context: orphaned B-gen DCD must receive drain targets even though current hash matches desired")
-	result, err := r.buildRollingUpdateContext(ctx, dgd)
+	result, _, err := r.buildRollingUpdateContext(ctx, dgd)
 
 	require.NoError(t, err)
 	assert.Equal(t, hashA, result.NewWorkerHash)
@@ -5357,7 +5357,7 @@ func TestBuildRollingUpdateContext_ListOldDCDsError(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd, withInterceptor(funcs))
 	ctx := context.Background()
 
-	_, err := r.buildRollingUpdateContext(ctx, dgd)
+	_, _, err := r.buildRollingUpdateContext(ctx, dgd)
 
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, injectedErr, "List error must be wrapped and propagated, not swallowed")
@@ -5410,7 +5410,7 @@ func TestBuildRollingUpdateContext_ListPodsError(t *testing.T) {
 	}
 	r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD), withInterceptor(funcs))
 
-	_, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	_, _, err := r.buildRollingUpdateContext(context.Background(), dgd)
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, injectedErr)
@@ -5456,7 +5456,7 @@ func TestBuildRollingUpdateContext_GetNewDCDError(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD), withInterceptor(funcs))
 	ctx := context.Background()
 
-	_, err := r.buildRollingUpdateContext(ctx, dgd)
+	_, _, err := r.buildRollingUpdateContext(ctx, dgd)
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, injectedErr, "non-NotFound Get error must be wrapped and propagated")

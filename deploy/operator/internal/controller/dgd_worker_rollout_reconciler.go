@@ -71,6 +71,7 @@ type dgdWorkerRolloutReconciler struct {
 	inferenceClient  *http.Client
 }
 
+// newDGDWorkerRolloutReconciler wires rollout state access and bounded HTTP inference probes.
 func newDGDWorkerRolloutReconciler(
 	kubeClient client.Client,
 	recorder events.EventRecorder,
@@ -1457,27 +1458,28 @@ func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas i
 	return int32(surge), int32(unavail)
 }
 
-// buildRollingUpdateContext creates a RollingUpdateContext.
+// buildRollingUpdateContext returns replica targets and whether inference withheld final old-worker retirement.
 func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) (dynamo.RollingUpdateContext, error) {
+) (dynamo.RollingUpdateContext, bool, error) {
 	logger := log.FromContext(ctx)
 
 	desiredHashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
-		return dynamo.RollingUpdateContext{}, err
+		return dynamo.RollingUpdateContext{}, false, err
 	}
 	newWorkerHash := r.activeWorkerHashForDCDGeneration(dgd, desiredHashes)
 
 	oldDCDsByComponent, oldStates, err := r.getOldWorkerDCDsByComponent(ctx, dgd, newWorkerHash)
 	if err != nil {
-		return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get old worker component states: %w", err)
+		return dynamo.RollingUpdateContext{}, false, fmt.Errorf("failed to get old worker component states: %w", err)
 	}
 
 	oldWorkerComponentReplicas := make(map[string]int32)
 	oldWorkerDCDReplicas := make(map[string]int32)
 	newWorkerReplicas := make(map[string]int32)
+	inferencePending := false
 
 	for i := range dgd.Spec.Components {
 		spec := &dgd.Spec.Components[i]
@@ -1504,7 +1506,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 				newState = dcdComponentStateFromDCD(newDCD)
 			}
 		} else if !apierrors.IsNotFound(err) {
-			return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get new worker DCD %s: %w", newDCDName, err)
+			return dynamo.RollingUpdateContext{}, false, fmt.Errorf("failed to get new worker DCD %s: %w", newDCDName, err)
 		}
 
 		oldState := oldStates[componentName]
@@ -1521,7 +1523,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			maxUnavailable = desired
 			drained, err := r.oldWorkerComponentDrained(ctx, dgd, componentName, oldDCDs)
 			if err != nil {
-				return dynamo.RollingUpdateContext{}, err
+				return dynamo.RollingUpdateContext{}, false, err
 			}
 			if drained {
 				newTarget = desired
@@ -1544,6 +1546,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 				admitted, probeErr := r.replacementInferenceReady(ctx, dgd, componentName, newDCDName)
 				if !admitted || probeErr != nil {
 					oldTarget = 1
+					inferencePending = true
 					logger.Info("Retaining final old worker while replacement inference is pending",
 						"component", componentName, "newWorkerHash", newWorkerHash, "reason", probeErr)
 				}
@@ -1590,7 +1593,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		OldWorkerReplicaTargetsByComponent: oldWorkerComponentReplicas,
 		OldWorkerReplicaTargetsByDCD:       oldWorkerDCDReplicas,
 		NewWorkerReplicaTargetsByComponent: newWorkerReplicas,
-	}, nil
+	}, inferencePending, nil
 }
 
 // mergeWorkerComponentStatuses merges old worker component statuses into the existing component statuses.

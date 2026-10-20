@@ -49,11 +49,11 @@ func (r *dgdWorkerRolloutReconciler) replacementInferenceReady(ctx context.Conte
 		return true, nil
 	}
 
-	// External frontends are outside the managed DGD rollout contract.
+	// Only desired serving components require a Ready Pod; zero-replica components may be absent.
 	frontendComponents := make(map[string]bool)
 	for _, spec := range dgd.Spec.Components {
 		if string(spec.ComponentType) == consts.ComponentTypeFrontend {
-			frontendComponents[spec.ComponentName] = false
+			frontendComponents[spec.ComponentName] = spec.Replicas != nil && *spec.Replicas == 0
 		}
 	}
 	if len(frontendComponents) == 0 {
@@ -85,6 +85,11 @@ func (r *dgdWorkerRolloutReconciler) replacementInferenceReady(ctx context.Conte
 		if !ready {
 			return false, fmt.Errorf("no ready frontend Pod for component %s", name)
 		}
+	}
+
+	// Scaled-to-zero components need no acknowledgement once their last Ready Pod has left.
+	if len(frontends) == 0 {
+		return true, nil
 	}
 
 	// The cached metadata is emitted by released workers as well as current workers.
@@ -212,6 +217,7 @@ func replacementInferenceTargets(metadata []unstructured.Unstructured, newPods m
 	return targets, found, nil
 }
 
+// rolloutPodReady reports the Pod readiness condition used by serving endpoint selection.
 func rolloutPodReady(pod *corev1.Pod) bool {
 	for _, condition := range pod.Status.Conditions {
 		if condition.Type == corev1.PodReady {
@@ -221,6 +227,7 @@ func rolloutPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
+// rolloutFrontendAddress resolves the frontend Pod IP and named HTTP container port.
 func rolloutFrontendAddress(pod *corev1.Pod) (string, error) {
 	if pod.Status.PodIP == "" {
 		return "", fmt.Errorf("frontend %s has no Pod IP", pod.Name)
@@ -235,6 +242,7 @@ func rolloutFrontendAddress(pod *corev1.Pod) (string, error) {
 	return "", fmt.Errorf("frontend %s has no named HTTP port", pod.Name)
 }
 
+// probeReplacementInference requires completed generation attributed to the requested replacement worker.
 func (r *dgdWorkerRolloutReconciler) probeReplacementInference(ctx context.Context, address, path string, target rolloutInferenceTarget) error {
 	nvext := map[string]any{"extra_fields": []string{"worker_id"}}
 	if target.Prefill {
@@ -308,6 +316,7 @@ func isDGDFrontendPod(object client.Object) bool {
 		object.GetLabels()[consts.KubeLabelDynamoComponentType] == consts.ComponentTypeFrontend
 }
 
+// mapDGDServingPodToRequests enqueues graphs affected by managed worker or frontend Pod changes.
 func mapDGDServingPodToRequests(ctx context.Context, object client.Object) []ctrl.Request {
 	if isDGDFrontendPod(object) {
 		return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: object.GetNamespace(),
@@ -316,6 +325,7 @@ func mapDGDServingPodToRequests(ctx context.Context, object client.Object) []ctr
 	return mapDGDWorkerPodToRequests(ctx, object)
 }
 
+// mapRolloutMetadataToDGDRequests follows the exact live Pod owner back to its graph.
 func (r *DynamoGraphDeploymentReconciler) mapRolloutMetadataToDGDRequests(ctx context.Context, object client.Object) []ctrl.Request {
 	owner := metav1.GetControllerOf(object)
 	if owner == nil || owner.Kind != "Pod" {

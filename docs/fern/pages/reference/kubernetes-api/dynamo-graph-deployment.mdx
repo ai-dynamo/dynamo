@@ -61,8 +61,14 @@ matching worker attribution does not release the old replica.
 The gate reuses the existing nvext API, including the API in frontend 1.5.0. The operator
 must be able to reach each frontend Pod's named `http` port, and frontend nvext must remain
 enabled. Failed requests, timeouts, disabled nvext, missing metadata, or missing attribution
-retain the last old replica and log the pending reason. Reconciliation retries the gate;
-it does not change worker Pod readiness or reuse success from a previous reconciliation.
+retain the last old replica and log the pending reason. Only a blocked inference gate
+schedules a retry after ten seconds; Kubernetes resource changes can trigger earlier
+reconciliation. Other rollout steps do not add periodic inference retries. The gate does
+not change worker Pod readiness or reuse success from a previous reconciliation.
+
+A frontend component with `replicas: 0` does not need to have a Ready Pod. Any Ready Pods
+that still exist for that component remain subject to inference verification until they
+leave service. Frontends with an omitted or positive replica count still require readiness.
 
 Embedding and other non-text models, external frontends, non-Kubernetes discovery,
 `Recreate`, and provider-native Grove updates retain their existing behavior. Replica

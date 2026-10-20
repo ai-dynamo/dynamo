@@ -53,24 +53,25 @@ func newComponentWorkloadsReconciler(
 	}
 }
 
+// Reconcile returns component readiness and whether inference requires a later retry.
 func (r *componentWorkloadsReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-) (ReconcileResult, error) {
+) (ReconcileResult, bool, error) {
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
-	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
+	rollingUpdateCtx, inferencePending, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
 	if err != nil {
-		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
+		return ReconcileResult{}, false, fmt.Errorf("failed to build rolling update context: %w", err)
 	}
 
 	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
 	if err != nil {
 		logger.Error(err, "failed to get existing restart annotations")
-		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
+		return ReconcileResult{}, false, fmt.Errorf("failed to get existing restart annotations: %w", err)
 	}
 	if rollingUpdateCtx.InProgress() {
 		logger.Info("Rolling update in progress",
@@ -86,17 +87,17 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the DynamoComponentsDeployments")
-		return ReconcileResult{}, fmt.Errorf("failed to generate the DynamoComponentsDeployments: %w", err)
+		return ReconcileResult{}, false, fmt.Errorf("failed to generate the DynamoComponentsDeployments: %w", err)
 	}
 
 	for key, dcd := range dcds {
 		if err := r.applyCheckpointStartupPolicy(dcd, checkpointInfos[key]); err != nil {
-			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
+			return ReconcileResult{}, false, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
 		}
 		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)
 		if err := r.preserveExistingDCDState(ctx, dcd); err != nil {
 			logger.Error(err, "failed to preserve existing DynamoComponentDeployment state", "name", dcd.Name)
-			return ReconcileResult{}, fmt.Errorf("failed to preserve existing DynamoComponentDeployment state: %w", err)
+			return ReconcileResult{}, false, fmt.Errorf("failed to preserve existing DynamoComponentDeployment state: %w", err)
 		}
 		_, syncedDCD, err := commoncontroller.SyncResource(
 			ctx,
@@ -108,7 +109,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		)
 		if err != nil {
 			logger.Error(err, "failed to sync the DynamoComponentDeployment", "name", dcd.Name)
-			return ReconcileResult{}, fmt.Errorf("failed to sync the DynamoComponentDeployment: %w", err)
+			return ReconcileResult{}, false, fmt.Errorf("failed to sync the DynamoComponentDeployment: %w", err)
 		}
 		resources = append(resources, syncedDCD)
 	}
@@ -116,7 +117,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	if rollingUpdateCtx.InProgress() {
 		if err := r.rollout.scaleOldWorkerDCDs(ctx, dgd, rollingUpdateCtx); err != nil {
 			logger.Error(err, "failed to scale old worker DCDs")
-			return ReconcileResult{}, fmt.Errorf("failed to scale old worker DCDs: %w", err)
+			return ReconcileResult{}, false, fmt.Errorf("failed to scale old worker DCDs: %w", err)
 		}
 	}
 
@@ -130,7 +131,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	return result, nil
+	return result, inferencePending, nil
 }
 
 func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsDCD(

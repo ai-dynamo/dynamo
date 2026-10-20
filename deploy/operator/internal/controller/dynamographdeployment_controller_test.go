@@ -3384,7 +3384,7 @@ func TestComponentWorkloadsReconciler_Reconcile(t *testing.T) {
 				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
 
-			result, err := reconciler.newComponentProgram().workloads.Reconcile(
+			result, _, err := reconciler.newComponentProgram().workloads.Reconcile(
 				ctx,
 				dgd,
 				nil,

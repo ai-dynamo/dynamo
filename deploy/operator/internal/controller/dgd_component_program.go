@@ -140,7 +140,7 @@ func (p *componentProgram) Reconcile(
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 
-	result, err := p.workloads.Reconcile(
+	result, inferencePending, err := p.workloads.Reconcile(
 		ctx,
 		req.DGD,
 		restart.State,
@@ -163,8 +163,8 @@ func (p *componentProgram) Reconcile(
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 
 	// Frontend-local inference readiness can change without another Kubernetes event.
-	if isRollingUpdateInProgress(&programResult.Status) {
-		programResult.RequeueAfter = 2 * time.Second
+	if inferencePending {
+		programResult.RequeueAfter = 10 * time.Second
 	}
 	return programResult, nil
 }

@@ -15,9 +15,11 @@ import (
 	"strconv"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -86,6 +88,7 @@ func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
 	dgd := createTestDGD("inference-gate", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker":   {ComponentType: consts.ComponentTypeWorker, Replicas: ptr.To(int32(2))},
 		"frontend": {ComponentType: consts.ComponentTypeFrontend},
+		"standby":  {ComponentType: consts.ComponentTypeFrontend, Replicas: ptr.To(int32(0))},
 	})
 	dgd.UID = "graph-uid"
 	dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes"}
@@ -138,27 +141,85 @@ func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
 	t.Log("Withhold final old-worker deletion for 404, missing attribution, and old-worker responses")
 	for _, mode := range []int32{1, 2, 3} {
 		second.mode.Store(mode)
-		rollout, err := r.buildRollingUpdateContext(context.Background(), dgd)
+		rollout, pending, err := r.buildRollingUpdateContext(context.Background(), dgd)
 		require.NoError(t, err)
+		require.True(t, pending)
 		require.Equal(t, int32(1), rollout.OldWorkerReplicaTargetsByDCD[oldDCD.Name], "mode %d", mode)
 		require.Equal(t, int32(1), rollout.NewWorkerReplicaTargetsByComponent["worker"], "must respect maxSurge=0")
 	}
 
 	t.Log("Release the last old replica only when both frontends execute on the replacement")
 	second.mode.Store(0)
-	rollout, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	rollout, pending, err := r.buildRollingUpdateContext(context.Background(), dgd)
 	require.NoError(t, err)
+	require.False(t, pending)
 	require.Equal(t, int32(0), rollout.OldWorkerReplicaTargetsByDCD[oldDCD.Name])
 	require.Positive(t, first.chat.Load())
 	require.Positive(t, first.completions.Load())
 	require.Positive(t, second.chat.Load())
 	require.Positive(t, second.completions.Load())
 
+	t.Log("A zero-replica frontend with a remaining Ready Pod must still prove replacement inference")
+	spare := &rolloutProbeServer{}
+	spare.mode.Store(1)
+	spareServer := httptest.NewServer(spare)
+	defer spareServer.Close()
+	sparePod := rolloutTestFrontendPod(t, dgd, "standby-1", spareServer.URL)
+	sparePod.Labels[consts.KubeLabelDynamoComponent] = "standby"
+	require.NoError(t, r.Create(t.Context(), sparePod))
+	rollout, pending, err = r.buildRollingUpdateContext(t.Context(), dgd)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, int32(1), rollout.OldWorkerReplicaTargetsByDCD[oldDCD.Name])
+	require.Positive(t, spare.chat.Load())
+	require.NoError(t, r.Delete(t.Context(), sparePod))
+
+	t.Log("Absent default-count and positive-count frontends still block retirement")
+	for _, replicas := range []*int32{nil, ptr.To(int32(1))} {
+		requiredDGD := dgd.DeepCopy()
+		for i := range requiredDGD.Spec.Components {
+			if requiredDGD.Spec.Components[i].ComponentName == "standby" {
+				requiredDGD.Spec.Components[i].Replicas = replicas
+			}
+		}
+		rollout, pending, err = r.buildRollingUpdateContext(t.Context(), requiredDGD)
+		require.NoError(t, err)
+		require.True(t, pending)
+		require.Equal(t, int32(1), rollout.OldWorkerReplicaTargetsByDCD[oldDCD.Name])
+	}
+
+	t.Log("A non-Kubernetes rollout never requests inference retries even when a frontend would fail")
+	legacyDGD := dgd.DeepCopy()
+	legacyDGD.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = "etcd"
+	second.mode.Store(1)
+	rollout, pending, err = r.buildRollingUpdateContext(t.Context(), legacyDGD)
+	require.NoError(t, err)
+	require.False(t, pending)
+
+	t.Log("Drive the production program: retry a blocked gate after ten seconds, then stop polling after success")
+	programDGD := dgd.DeepCopy()
+	programDGD.Annotations[consts.AnnotationCurrentWorkerHashV2] = "old"
+	programDGD.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress}
+	programOwner := createTestDGDReconcilerWithStatus(programDGD, withObjects(oldDCD, newDCD, worker, metadata, frontend1, frontend2))
+	programOwner.Config.Namespace.Restricted = dgd.Namespace
+	require.NoError(t, rbacv1.AddToScheme(programOwner.Scheme()))
+	program := programOwner.newComponentProgram()
+	programResult, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: programDGD})
+	require.NoError(t, err)
+	require.Equal(t, 10*time.Second, programResult.RequeueAfter)
+	require.True(t, isRollingUpdateInProgress(&programResult.Status))
+	second.mode.Store(0)
+	programResult, err = program.Reconcile(t.Context(), workloadProgramRequest{DGD: programDGD})
+	require.NoError(t, err)
+	require.Zero(t, programResult.RequeueAfter)
+	require.True(t, isRollingUpdateInProgress(&programResult.Status), "rollout phase alone must not schedule polling")
+
 	t.Log("A recreated worker cannot reuse metadata belonging to the previous Pod UID")
 	worker.UID = "recreated-pod-uid"
 	require.NoError(t, r.Update(context.Background(), worker))
-	rollout, err = r.buildRollingUpdateContext(context.Background(), dgd)
+	rollout, pending, err = r.buildRollingUpdateContext(context.Background(), dgd)
 	require.NoError(t, err)
+	require.True(t, pending)
 	require.Equal(t, int32(1), rollout.OldWorkerReplicaTargetsByDCD[oldDCD.Name])
 
 	t.Log("Route metadata changes back to the owning graph, rejecting stale Pod ownership")
