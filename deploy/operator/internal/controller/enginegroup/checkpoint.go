@@ -17,6 +17,7 @@ import (
 	domain "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 const engineGroupCheckpointVersion = 1
@@ -97,6 +98,25 @@ func validateEngineGroupCheckpoint(checkpoint engineGroupCheckpoint, group *api.
 		return &checkpointBindingChangedError{PreviousUID: checkpoint.BindingUID}
 	}
 	return nil
+}
+
+func (r *Reconciler) reconcileCheckpointLoadFailure(
+	ctx context.Context,
+	group *api.DynamoGraphDeploymentEngineGroup,
+	runtime Runtime,
+	store kubejournal.Store,
+	snapshot kubejournal.Snapshot,
+	loadErr error,
+) (ctrl.Result, error) {
+	// Only an exact, fenced predecessor can authorize replacing valid old-lifetime recovery state.
+	var bindingChanged *checkpointBindingChangedError
+	if !errors.As(loadErr, &bindingChanged) {
+		return r.reconcileCheckpointFailure(ctx, group, loadErr)
+	}
+	if err := r.authorizeGroveCheckpointRestart(ctx, group, bindingChanged.PreviousUID); err != nil {
+		return r.reconcileCheckpointFailure(ctx, group, errors.Join(loadErr, err))
+	}
+	return r.initializeRestartedEngineGroup(ctx, group, runtime, store, snapshot)
 }
 
 func newEngineGroupCheckpoint(group *api.DynamoGraphDeploymentEngineGroup, state domain.GroupStatus) engineGroupCheckpoint {
