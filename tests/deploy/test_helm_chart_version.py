@@ -67,19 +67,25 @@ def test_rewrites_operator_pin_but_not_third_party_pin(tmp_path, set_chart_versi
 def test_missing_expected_operator_pin_raises_before_write(
     tmp_path, set_chart_versions
 ):
+    # An operator entry without a version must not borrow the next entry's pin.
     chart = tmp_path / "Chart.yaml"
-    original = "apiVersion: v2\nname: dynamo-platform\nversion: 1.3.2\n"
+    deps = (
+        "dependencies:\n"
+        "  - name: dynamo-operator\n"
+        "    repository: file://components/operator\n"
+        "  - name: nats\n"
+        "    version: 1.3.2\n"
+    )
+    original = "apiVersion: v2\nversion: 1.3.2\n" + deps
     chart.write_text(original)
 
-    with pytest.raises(RuntimeError, match="exactly one dynamo-operator"):
+    with pytest.raises(RuntimeError, match="found 0"):
         set_chart_versions(chart, "1.4.0", expect_operator_pin=True)
     assert chart.read_text() == original
 
     # Release callers do not require the pin.
     set_chart_versions(chart, "1.4.0")
-    assert (
-        chart.read_text() == "apiVersion: v2\nname: dynamo-platform\nversion: 1.4.0\n"
-    )
+    assert chart.read_text() == "apiVersion: v2\nversion: 1.4.0\n" + deps
 
 
 def test_missing_top_level_version_raises(tmp_path, set_chart_versions):
