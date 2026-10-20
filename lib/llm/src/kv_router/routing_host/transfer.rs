@@ -550,6 +550,10 @@ mod integration_tests {
             router_track_prefill_tokens: false,
             ..Default::default()
         };
+        let execution_inputs = SelectionPolicySource::Registry
+            .prepare(&config, role, role.as_str(), Some("test"))
+            .unwrap()
+            .inputs();
         let chooser = KvRouter::new_with_worker_role(
             endpoint,
             client.clone(),
@@ -568,6 +572,20 @@ mod integration_tests {
         )
         .await
         .unwrap();
+        if enabled && gpu {
+            assert_eq!(
+                chooser.required_worker_inputs(),
+                execution_inputs,
+                "GPU advisory inventory must not change execution selection inputs",
+            );
+            assert!(execution_inputs.contains(dynamo_kv_router::selector::WorkerInputs::LOAD));
+            assert!(!execution_inputs.contains(dynamo_kv_router::selector::WorkerInputs::CACHE));
+            assert!(
+                !matches!(chooser.indexer(), crate::kv_router::Indexer::None),
+                "GPU source and target need actual retained inventory",
+            );
+            assert!(!chooser.kv_router_config().enable_decode_to_prefill_reuse);
+        }
         let dispatch = Arc::new(HintDispatch::default());
         let inner = PushRouter::from_client_with_dispatch(
             client,

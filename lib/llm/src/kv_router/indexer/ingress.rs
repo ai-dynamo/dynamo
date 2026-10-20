@@ -63,7 +63,7 @@ impl RuntimeIngress {
         } = args;
         let component = endpoint.component();
         let cache_required = worker_inputs.contains(WorkerInputs::CACHE)
-            || kv_event_source_requirement == KvEventSourceRequirement::DecodeTransferSource;
+            || kv_event_source_requirement.requires_source();
         let indexer = if cache_required {
             super::build(
                 component,
