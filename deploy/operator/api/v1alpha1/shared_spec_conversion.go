@@ -1491,6 +1491,9 @@ func buildBasePodTemplate(src *DynamoComponentDeploymentSharedSpec) *corev1.PodT
 	return podTpl
 }
 
+// mergeExtraPodSpecMainContainer merges src's main-container fields into mainBase,
+// preserving the v1alpha1 renderer's additive env, envFrom, and volumeMounts rules.
+// Both arguments must be non-nil; mainBase is mutated and src is left unchanged.
 func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, mainBase *corev1.Container) error {
 	if src.ExtraPodSpec == nil || src.ExtraPodSpec.MainContainer == nil {
 		return nil
@@ -2351,6 +2354,9 @@ func extraPodSpecOnlyPreservesMainContainerName(eps *ExtraPodSpec) bool {
 	return containerIsEmpty(main)
 }
 
+// restoreEnvFromSecretFromPreserved restores the dedicated field in dst when its
+// saved Secret exactly matches the trailing current envFrom entry. A saved empty
+// string is restored directly. Nil dst or preserved values require no restoration.
 func restoreEnvFromSecretFromPreserved(dst, preserved *DynamoComponentDeploymentSharedSpec, mainContainerPresent bool) {
 	if dst == nil || preserved == nil || dst.EnvFromSecret != nil || preserved.EnvFromSecret == nil {
 		return
@@ -2409,6 +2415,9 @@ func restoredExtraPodSpec(restored *DynamoComponentDeploymentSharedSpec) *ExtraP
 	return restored.ExtraPodSpec
 }
 
+// restoreMainContainerFieldOrigins restores field placement in dst when current
+// values still match the saved alpha projection. It leaves edited values intact;
+// envFromSecret is handled separately. Nil dst or preserved values are ignored.
 func restoreMainContainerFieldOrigins(dst, preserved *DynamoComponentDeploymentSharedSpec, mainContainerPresent bool) {
 	if !mainContainerPresent ||
 		dst == nil ||
@@ -2707,6 +2716,8 @@ func appendMissingVolumeMounts(dst []VolumeMount, mounts []VolumeMount) []Volume
 	return dst
 }
 
+// envFromSecretMatches checks the complete source against a dedicated Secret
+// reference, including the absence of a prefix or an explicit optional setting.
 func envFromSecretMatches(envFrom corev1.EnvFromSource, name string) bool {
 	return apiequality.Semantic.DeepEqual(envFrom, corev1.EnvFromSource{
 		SecretRef: &corev1.SecretEnvSource{

@@ -1430,6 +1430,7 @@ func TestDGD_FromV1alpha1_EnvFromSecretRoundTrip(t *testing.T) {
 	}
 }
 
+// envFromSecretRef constructs the native source for a dedicated alpha Secret.
 func envFromSecretRef(name string) corev1.EnvFromSource {
 	return corev1.EnvFromSource{SecretRef: &corev1.SecretEnvSource{
 		LocalObjectReference: corev1.LocalObjectReference{Name: name},
