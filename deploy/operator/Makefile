@@ -317,9 +317,12 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+# Extra flags for go test in the test target, e.g. -count=1.
+GO_TEST_ARGS ?=
+
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $$(go list ./... | grep -vE '/cmd($$|/)') ./cmd/crd-apply -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $(GO_TEST_ARGS) $$(go list ./... | grep -vE '/cmd($$|/)') ./cmd/crd-apply -coverprofile cover.out
 
 .PHONY: envtest
 envtest: setup-envtest ## Run envtest-backed operator tests.

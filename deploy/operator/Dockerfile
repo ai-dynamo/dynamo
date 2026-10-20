@@ -30,10 +30,12 @@ COPY . .
 FROM base AS linter
 
 # Install golangci-lint using go install (builds with current Go version)
-RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+RUN --mount=type=cache,id=go-build-${TARGETOS}-${TARGETARCH},target=/root/.cache/go-build,sharing=shared \
+    go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 
 # Run linting
-RUN golangci-lint run --timeout=5m
+RUN --mount=type=cache,id=go-build-${TARGETOS}-${TARGETARCH},target=/root/.cache/go-build,sharing=shared \
+    golangci-lint run --timeout=5m
 
 # Test stage
 FROM base AS tester
@@ -45,8 +47,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends make && apt-get
 COPY --from=operator-chart . /helm/charts/platform/components/operator/
 ENV OPERATOR_CHART_DIR=/helm/charts/platform/components/operator
 
-# Run tests using Makefile
-RUN make test
+# Run tests using Makefile. -count=1 keeps go test from reusing cached
+# results from the shared build cache mount, so every test always runs.
+RUN --mount=type=cache,id=go-build-${TARGETOS}-${TARGETARCH},target=/root/.cache/go-build,sharing=shared \
+    make test GO_TEST_ARGS=-count=1
 
 # Build stage - depends on successful lint and test
 FROM base AS builder
