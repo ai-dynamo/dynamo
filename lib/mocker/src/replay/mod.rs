@@ -9,9 +9,6 @@ mod online;
 mod router_shared;
 mod validate;
 
-#[cfg(feature = "python-replay")]
-pub use offline::run_canonical_replay_json;
-
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -45,8 +42,6 @@ pub enum ReplayArgsMode {
     Aggregated,
     Disagg,
 }
-
-pub use offline::extensions::kv_router::native::{ReplayAffinityConfig, ReplayAffinityMode};
 
 pub type ReplayPrefillLoadEstimator = Arc<dyn PrefillLoadEstimator>;
 

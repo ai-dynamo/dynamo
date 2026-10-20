@@ -9,9 +9,14 @@ subtitle: Install and compose Planner, Router, and Dynamo Replay with AISimulate
 > **Experimental.** The AISimulate CLI, adapter ABI, and replay contracts may change without a
 > standard deprecation period.
 
-AISimulate can run conversation-aware simulation using its bundled native Dynamo policy
-without installing Dynamo's Python packages. Dynamo supplies the optional Planner and Router
-sweep configuration providers and `DynamoReplayRunnerFactory` described here.
+AISimulate's Sweeper core does not depend on Dynamo. Dynamo owns its optional Planner and Router
+sweep configuration providers and `DynamoReplayRunnerFactory`.
+
+AISimulate owns its conversation-aware simulation and calls the independently installed
+Dynamo runtime policy API from [Dynamo #16854](https://github.com/ai-dynamo/dynamo/pull/16854).
+The Dynamo runner described here is an optional downstream
+integration; upgrading its AISimulate dependency is not a prerequisite for AISimulate
+AgentX acceptance. No Dynamo Router implementation is bundled into the AISimulate wheel.
 
 ## Install
 
@@ -55,10 +60,10 @@ aisimulate predict --stack dynamo --config prediction.yaml
 aisimulate recommend --stack dynamo --config recommendation.yaml
 ```
 
-The `--stack` option defaults to `engine`. Its built-in `engine.router` adapter accepts
-fixed routing configuration, including conversation affinity. Select `--stack dynamo`
-for the Planner, router parameter search, or a custom AIS prefill-load estimator.
-Conversation affinity requires static worker pools and the default scoring/load model.
+The `--stack` option defaults to `engine`. Its built-in `engine.router` adapter supports
+fixed routing configuration, including conversation affinity, through the separately installed
+Dynamo policy API. Select `--stack dynamo` for the Planner, router parameter search, or a
+custom AIS prefill-load estimator. The top-level `planner` section requires that Dynamo stack.
 
 The `ai-dynamo` distribution registers:
 
@@ -137,13 +142,9 @@ hook.
 ## Replay Composition
 
 `DynamoReplayRunnerFactory` converts each serializable `ReplaySpec` into an invocation of the
-shared AISimulate Replayer. It resolves Planner hooks into Dynamo scaling callbacks and
-Router hooks into Dynamo's native routing composition. AISimulate owns traffic
-execution, virtual time, engine observations, and report generation. Dynamo owns
-the adapter, native worker selection, admission, and affinity bindings. Select
-`aisimulate predict --stack dynamo` with matching `ai-dynamo` Python and native
-runtime builds installed. No serving process is required. The default AISimulate
-wheel and published core contain no Dynamo routing dependency.
+shared AISimulate Replayer. It resolves materialized Planner and Router hooks into Dynamo-owned
+scaling and placement policies, while the Replayer continues to own traffic execution and report
+generation.
 
 | Load | No Planner hook | Dynamo Planner hook |
 |---|---|---|

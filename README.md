@@ -247,8 +247,9 @@ uv pip install -r container/deps/requirements.aisimulate.txt -e .
 ```
 
 For the optional Dynamo replay integration, add `--features ais-forward-pass`
-to the `maturin develop --uv` command above. Standalone AISimulate conversation
-routing runs directly in the AISimulate wheel.
+to the `maturin develop --uv` command above. Conversation-aware simulation initiated
+by AISimulate uses the separate runtime policy API; it does not require this optional
+Dynamo replay integration.
 
 The source requirements build AISimulate from the same immutable commit as the
 Rust dependency on Python 3.11–3.13, using the Rust tools above. This development

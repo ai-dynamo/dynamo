@@ -2440,5 +2440,3 @@ policy_classes:
         assert_eq!(crate::replay::kv_event_lag_ms(), 0.0);
     }
 }
-
-pub(crate) mod native;

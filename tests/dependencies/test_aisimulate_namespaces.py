@@ -135,10 +135,7 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         with lockfile.open("rb") as handle:
             packages = tomllib.load(handle)["package"]
         assert all(package["name"] != "aiconfigurator-core" for package in packages)
-    assert features["ais-forward-pass"] == [
-        "dep:aisimulate-core",
-        "dynamo-mocker/python-replay",
-    ]
+    assert features["ais-forward-pass"] == ["dep:aisimulate-core"]
     assert "aic-forward-pass" not in features
     canonical_core = workspace_cargo["workspace"]["dependencies"]["aisimulate-core"]
     assert dependencies["aisimulate-core"] == {
