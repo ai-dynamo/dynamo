@@ -177,7 +177,6 @@ pub fn generate_openapi_spec_with_options(
     // `http_export_describes_request_aliases` exercises this path in the
     // pre-merge Rust suite so schema changes must update the declarations too.
     annotate_request_aliases(&mut openapi)?;
-    annotate_request_defaults(&mut openapi)?;
     // Keep the dependency's Utoipa 5 derives, then cross the version boundary once.
     // A round trip back through its typed model would discard itemSchema and cannot
     // represent the 3.2 version. HTTP and file export share this final representation.
@@ -336,54 +335,6 @@ fn annotate_request_aliases(document: &mut utoipa::openapi::OpenApi) -> Result<(
         if annotate(node, field, alias)? != 1 {
             return Err(format!("expected exactly one {field} at {name}"));
         }
-    }
-    Ok(())
-}
-
-/// Declare the chat/completion HTTP handlers' choice-count default on imported schemas.
-///
-/// Both handlers resolve omitted or null `n` to one before dispatch. Keep this
-/// Dynamo-owned contract here rather than changing the shared protocol types.
-/// HTTP and file exports use these same components; other field constraints remain unchanged.
-///
-/// # Errors
-///
-/// Returns a diagnostic if a component or field is missing, unsupported,
-/// or declares a conflicting default. Earlier mutations are not rolled
-/// back; callers must discard the document on error.
-fn annotate_request_defaults(document: &mut utoipa::openapi::OpenApi) -> Result<(), String> {
-    use utoipa::openapi::schema::Schema;
-
-    let components = document.components.as_mut().ok_or("missing components")?;
-    for name in [
-        dynamo_protocols::types::CreateChatCompletionRequest::name(),
-        dynamo_protocols::types::CreateCompletionRequest::name(),
-    ] {
-        let node = components
-            .schemas
-            .get_mut(name.as_ref())
-            .ok_or_else(|| format!("missing {name}"))?;
-        let RefOr::T(Schema::Object(object)) = node else {
-            return Err(format!("expected an object at {name}"));
-        };
-        let Some(RefOr::T(Schema::Object(schema))) = object.properties.get_mut("n") else {
-            return Err(format!("missing or unsupported n schema at {name}"));
-        };
-        if schema
-            .default
-            .as_ref()
-            .is_some_and(|value| value != &serde_json::json!(1))
-        {
-            return Err(format!("n declares a conflicting default at {name}"));
-        }
-        schema.default = Some(serde_json::json!(1));
-        let description = schema.description.get_or_insert_with(String::new);
-        if !description.is_empty() {
-            description.push_str("\n\n");
-        }
-        description.push_str(
-            "When omitted or null, Dynamo sets n to 1 before dispatching to the backend.",
-        );
     }
     Ok(())
 }
@@ -1172,41 +1123,6 @@ mod tests {
     fn stale_alias_metadata_is_not_silently_ignored() {
         let mut document = utoipa::openapi::OpenApi::default();
         assert!(annotate_request_aliases(&mut document).is_err());
-    }
-
-    /// Dependency schema drift must fail export instead of advertising an incorrect default.
-    #[test]
-    fn stale_request_defaults_are_not_silently_ignored() {
-        use utoipa::openapi::schema::Schema;
-
-        assert!(annotate_request_defaults(&mut Default::default()).is_err());
-        for name in [
-            "dynamo_protocols.chat.CreateChatCompletionRequest",
-            "dynamo_protocols.completion.CreateCompletionRequest",
-        ] {
-            for replacement in [
-                serde_json::json!({"type": "object", "properties": {}}),
-                serde_json::json!({"type": "object", "properties": {"n": {"$ref": "#/components/schemas/Other"}}}),
-                serde_json::json!({"type": "object", "properties": {"n": {"type": "integer", "default": 2}}}),
-                serde_json::json!({"allOf": [
-                    {"type": "object", "properties": {"n": {"type": "integer"}}},
-                    {"type": "object", "properties": {"n": {"type": "integer"}}}
-                ]}),
-            ] {
-                let mut document = ApiDoc::openapi();
-                let node: RefOr<Schema> = serde_json::from_value(replacement).unwrap();
-                document
-                    .components
-                    .as_mut()
-                    .unwrap()
-                    .schemas
-                    .insert(name.into(), node);
-                assert!(annotate_request_defaults(&mut document).is_err(), "{name}");
-            }
-            let mut document = ApiDoc::openapi();
-            document.components.as_mut().unwrap().schemas.remove(name);
-            assert!(annotate_request_defaults(&mut document).is_err());
-        }
     }
 
     #[test]
