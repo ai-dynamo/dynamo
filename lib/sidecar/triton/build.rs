@@ -1,9 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compile the KServe protos into a descriptor set so the HTTP transport can
-//! translate Triton's JSON model configuration into the protobuf `ModelConfig`
-//! that the gRPC transport receives natively.
+//! Compile the KServe protos into a descriptor set so the HTTP transport can translate Triton's JSON model configuration into the protobuf `ModelConfig` that the gRPC transport receives natively.
 
 use std::path::PathBuf;
 

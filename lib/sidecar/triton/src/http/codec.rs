@@ -1,13 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Translation between the KServe v2 protobuf messages and Triton's HTTP/REST
-//! JSON encoding with the binary tensor data extension.
+//! Translation between the KServe v2 protobuf messages and Triton's HTTP/REST JSON encoding with the binary tensor data extension.
 //!
-//! The HTTP transport accepts and returns the same protobuf messages as the
-//! gRPC transport so request and response conversion stays shared. Tensor
-//! contents travel as binary data in both directions, matching gRPC's raw
-//! contents, so neither path converts tensors through JSON arrays.
+//! The HTTP transport accepts and returns the same protobuf messages as the gRPC transport so request and response conversion stays shared.
+//! Tensor contents travel as binary data in both directions, matching gRPC's raw contents, so neither path converts tensors through JSON arrays.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -29,6 +26,11 @@ const BINARY_DATA_SIZE: &str = "binary_data_size";
 const BINARY_DATA: &str = "binary_data";
 const BINARY_DATA_OUTPUT: &str = "binary_data_output";
 
+/// Reserved `triton_` request parameters that Triton's gRPC endpoint accepts (`TRITON_RESERVED_REQUEST_PARAMS` in the server).
+/// They control only gRPC streaming, and Triton's HTTP endpoint rejects every `triton_` key, so the HTTP transport drops them.
+/// Other `triton_` keys are still forwarded and rejected by Triton, as they are over gRPC.
+const GRPC_ONLY_PARAMETERS: &[&str] = &["triton_enable_empty_final_response"];
+
 static DESCRIPTORS: LazyLock<DescriptorPool> = LazyLock::new(|| {
     DescriptorPool::decode(
         include_bytes!(concat!(env!("OUT_DIR"), "/model_config_descriptor.bin")).as_slice(),
@@ -47,8 +49,7 @@ impl EncodedRequest {
     }
 }
 
-/// Encode a gRPC infer request as a JSON header followed by its raw inputs,
-/// asking Triton to return every output as binary data.
+/// Encode a gRPC infer request as a JSON header followed by its raw inputs, asking Triton to return every output as binary data.
 pub(super) fn encode_infer_request(
     request: &inference::ModelInferRequest,
 ) -> Result<EncodedRequest, DynamoError> {
@@ -61,6 +62,14 @@ pub(super) fn encode_infer_request(
     }
 
     let mut parameters = parameters_to_json(&request.parameters)?;
+    for parameter in GRPC_ONLY_PARAMETERS {
+        if parameters.remove(*parameter).is_some() {
+            tracing::debug!(
+                parameter,
+                "Dropping gRPC-only parameter from Triton HTTP request"
+            );
+        }
+    }
     parameters.insert(BINARY_DATA_OUTPUT.into(), Value::Bool(true));
     let inputs = request
         .inputs
@@ -142,8 +151,7 @@ struct OutputTensor {
     data: Option<Value>,
 }
 
-/// Decode an HTTP infer response into the gRPC message, with every output in
-/// `raw_output_contents` as Triton's gRPC endpoint returns it.
+/// Decode an HTTP infer response into the gRPC message, with every output in `raw_output_contents` as Triton's gRPC endpoint returns it.
 pub(super) fn decode_infer_response(
     body: &[u8],
     header_length: Option<usize>,
@@ -213,8 +221,7 @@ pub(super) fn decode_infer_response(
     })
 }
 
-/// Convert Triton's JSON model configuration into the protobuf message the
-/// gRPC `ModelConfig` RPC returns.
+/// Convert Triton's JSON model configuration into the protobuf message the gRPC `ModelConfig` RPC returns.
 pub(super) fn model_config_from_json(json: &[u8]) -> Result<inference::ModelConfig, DynamoError> {
     let descriptor = DESCRIPTORS
         .get_message_by_name("inference.ModelConfig")
@@ -436,6 +443,31 @@ mod tests {
             })
         );
         assert_eq!(binary, [1, 1, 1, 1, 1, 1, 1, 1, 7]);
+    }
+
+    #[test]
+    fn request_drops_grpc_only_parameters() {
+        let request = inference::ModelInferRequest {
+            parameters: HashMap::from([
+                (
+                    "triton_enable_empty_final_response".to_string(),
+                    parameter(ParameterChoice::BoolParam(true)),
+                ),
+                (
+                    "triton_unknown".to_string(),
+                    parameter(ParameterChoice::BoolParam(true)),
+                ),
+            ]),
+            ..Default::default()
+        };
+        let encoded = encode_infer_request(&request).unwrap();
+        let header: Value = serde_json::from_slice(&encoded.body).unwrap();
+        // Unknown reserved keys still reach Triton, which rejects them on
+        // either protocol.
+        assert_eq!(
+            header["parameters"],
+            json!({"triton_unknown": true, "binary_data_output": true})
+        );
     }
 
     #[test]

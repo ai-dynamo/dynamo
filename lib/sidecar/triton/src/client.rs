@@ -58,9 +58,8 @@ impl Transport {
 
 /// Triton client spanning every enabled transport.
 ///
-/// Control-plane calls (discovery and model configuration) use the first
-/// transport, preferring gRPC. Inference requests rotate across all enabled
-/// transports, so each one must be ready before a model is served.
+/// Control-plane calls (discovery and model configuration) use the first transport, preferring gRPC.
+/// Inference requests rotate across all enabled transports, so each one must be ready before a model is served.
 #[derive(Clone)]
 pub(crate) struct TritonClient {
     transports: Arc<[Transport]>,
@@ -149,8 +148,7 @@ impl TritonClient {
 
 /// Poll `probe` until it reports ready or the startup deadline passes.
 ///
-/// `probe` returns `Ok(true)` when Triton is ready, `Ok(false)` when Triton
-/// answered but is not yet ready, and `Err` with a description of any failure.
+/// `probe` returns `Ok(true)` when Triton is ready, `Ok(false)` when Triton answered but is not yet ready, and `Err` with a description of any failure.
 pub(crate) async fn wait_until_ready<F, Fut>(
     protocol: &str,
     transport: GrpcTransportConfig,

@@ -44,9 +44,8 @@ pub(crate) struct Args {
 
     /// Triton KServe v2 gRPC endpoint as `host:port` or a plaintext gRPC/HTTP URL.
     ///
-    /// Enables the gRPC transport. At least one of `--grpc-endpoint` and
-    /// `--http-endpoint` is required; when both are set, inference requests
-    /// alternate between the two protocols.
+    /// Enables the gRPC transport.
+    /// At least one of `--grpc-endpoint` and `--http-endpoint` is required; when both are set, inference requests alternate between the two protocols.
     #[arg(
         long,
         env = "DYN_SIDECAR_GRPC_ENDPOINT",
@@ -56,9 +55,7 @@ pub(crate) struct Args {
 
     /// Triton KServe v2 HTTP/REST endpoint as `host:port` or an HTTP(S) URL.
     ///
-    /// Enables the HTTP transport. At least one of `--grpc-endpoint` and
-    /// `--http-endpoint` is required; when both are set, inference requests
-    /// alternate between the two protocols.
+    /// Enables the HTTP transport. At least one of `--grpc-endpoint` and `--http-endpoint` is required; when both are set, inference requests alternate between the two protocols.
     #[arg(
         long,
         env = "DYN_SIDECAR_HTTP_ENDPOINT",
@@ -71,8 +68,7 @@ pub(crate) struct Args {
 
     /// Triton model to expose. Repeat to expose multiple models.
     ///
-    /// With no explicit model names, the sidecar registers every READY model
-    /// returned by Triton's RepositoryIndex API.
+    /// With no explicit model names, the sidecar registers every READY model returned by Triton's RepositoryIndex API.
     #[arg(
         long = "model-name",
         env = "DYN_TRITON_MODEL_NAMES",

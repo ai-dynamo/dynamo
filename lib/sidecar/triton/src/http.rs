@@ -337,8 +337,7 @@ mod tests {
         }
     }
 
-    /// Serve one canned reply per connection and return each request's
-    /// request line and body.
+    /// Serve one canned reply per connection and return each request's request line and body.
     async fn serve(
         replies: Vec<Reply>,
     ) -> (String, tokio::task::JoinHandle<Vec<(String, Vec<u8>)>>) {
