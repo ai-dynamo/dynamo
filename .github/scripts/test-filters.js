@@ -61,6 +61,36 @@ function checkFilter(file, patterns) {
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
   {
+    file: 'scripts/protocol_compatibility/composition/openai.py',
+    expect: { ignore: true, rust: false, core: false, frontend: false },
+    desc: 'protocol tooling is covered without unrelated runtime builds'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/storage.py',
+    expect: { core: true, frontend: true, vllm: false },
+    desc: 'generic artifact transport keeps shared runtime CI'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/tests/test_operations.py',
+    expect: { core: true, frontend: true, vllm: false },
+    desc: 'generic artifact tests keep shared runtime CI'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/vllm/capture.py',
+    expect: { core: false, frontend: false, vllm: true },
+    desc: 'vllm artifact capture triggers its backend CI'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/vllm/tests/test_format.py',
+    expect: { core: false, frontend: false, vllm: true },
+    desc: 'vllm artifact codec tests trigger their backend CI'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/README.md',
+    expect: { core: false, frontend: false, vllm: false, ignore: true },
+    desc: 'artifact documentation alone avoids runtime builds'
+  },
+  {
     file: 'lib/llm/tests/fixtures/openapi/requests.json',
     expect: { rust: true },
     desc: 'native request schema fixtures trigger Rust checks'

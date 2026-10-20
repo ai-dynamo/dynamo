@@ -3512,6 +3512,16 @@ spec:
                         required:
                           - name
                         type: object
+                        x-kubernetes-validations:
+                          - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                            message: startupProbe must define exactly one handler
+                            fieldPath: .startupProbe
+                          - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                            message: livenessProbe must define exactly one handler
+                            fieldPath: .livenessProbe
+                          - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                            message: readinessProbe must define exactly one handler
+                            fieldPath: .readinessProbe
                       type: array
                       x-kubernetes-list-map-keys:
                         - name
@@ -5008,6 +5018,16 @@ spec:
                         required:
                           - name
                         type: object
+                        x-kubernetes-validations:
+                          - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                            message: startupProbe must define exactly one handler
+                            fieldPath: .startupProbe
+                          - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                            message: livenessProbe must define exactly one handler
+                            fieldPath: .livenessProbe
+                          - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                            message: readinessProbe must define exactly one handler
+                            fieldPath: .readinessProbe
                       type: array
                       x-kubernetes-list-map-keys:
                         - name
@@ -6584,6 +6604,16 @@ spec:
                         required:
                           - name
                         type: object
+                        x-kubernetes-validations:
+                          - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                            message: startupProbe must define exactly one handler
+                            fieldPath: .startupProbe
+                          - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                            message: livenessProbe must define exactly one handler
+                            fieldPath: .livenessProbe
+                          - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                            message: readinessProbe must define exactly one handler
+                            fieldPath: .readinessProbe
                       type: array
                       x-kubernetes-list-map-keys:
                         - name
@@ -8047,6 +8077,16 @@ spec:
                           type: string
                       required: []
                       type: object
+                      x-kubernetes-validations:
+                        - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                          message: startupProbe must define exactly one handler
+                          fieldPath: .startupProbe
+                        - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                          message: livenessProbe must define exactly one handler
+                          fieldPath: .livenessProbe
+                        - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                          message: readinessProbe must define exactly one handler
+                          fieldPath: .readinessProbe
                     nodeName:
                       description: |-
                         NodeName indicates in which node this pod is scheduled.
@@ -13872,6 +13912,16 @@ spec:
                                   required:
                                     - name
                                   type: object
+                                  x-kubernetes-validations:
+                                    - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                      message: startupProbe must define exactly one handler
+                                      fieldPath: .startupProbe
+                                    - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                      message: livenessProbe must define exactly one handler
+                                      fieldPath: .livenessProbe
+                                    - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                      message: readinessProbe must define exactly one handler
+                                      fieldPath: .readinessProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -15368,6 +15418,16 @@ spec:
                                   required:
                                     - name
                                   type: object
+                                  x-kubernetes-validations:
+                                    - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                      message: startupProbe must define exactly one handler
+                                      fieldPath: .startupProbe
+                                    - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                      message: livenessProbe must define exactly one handler
+                                      fieldPath: .livenessProbe
+                                    - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                      message: readinessProbe must define exactly one handler
+                                      fieldPath: .readinessProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -16944,6 +17004,16 @@ spec:
                                   required:
                                     - name
                                   type: object
+                                  x-kubernetes-validations:
+                                    - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                      message: startupProbe must define exactly one handler
+                                      fieldPath: .startupProbe
+                                    - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                      message: livenessProbe must define exactly one handler
+                                      fieldPath: .livenessProbe
+                                    - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                      message: readinessProbe must define exactly one handler
+                                      fieldPath: .readinessProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -19734,6 +19804,12 @@ spec:
                   rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.replicas) && self.replicas < 1)'
                 - message: scalingAdapter is not supported when componentType is lpx
                   rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.scalingAdapter) && has(self.scalingAdapter.enabled) && self.scalingAdapter.enabled == true)'
+                - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                  message: livenessProbe must define exactly one handler
+                  fieldPath: .livenessProbe
+                - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                  message: readinessProbe must define exactly one handler
+                  fieldPath: .readinessProbe
             status:
               description: Status reflects the current observed state of the component deployment.
               properties:
@@ -19887,9 +19963,10 @@ spec:
                     runtimeComponentName:
                       description: |-
                         RuntimeComponentName is an explicit Dynamo runtime component identity
-                        resolved from the serving role's endpoint override. Omission means the
-                        backend default applies. During rolling updates, worker status keeps the
-                        old active revision value until cutover completes.
+                        resolved from the serving role's endpoint override in combined mode.
+                        Native sidecars omit this field; Kubernetes Planner reads their registered
+                        component identity. During rolling updates, worker status keeps the old
+                        active revision value until cutover completes.
                       type: string
                     runtimeNamespace:
                       description: |-
@@ -19910,8 +19987,9 @@ spec:
                     servedModelName:
                       description: |-
                         ServedModelName is the effective primary model identity exposed by this
-                        component's serving role. During rolling updates, worker status keeps the
-                        old active revision value until cutover completes.
+                        component's serving role in combined mode. Native sidecars omit this field;
+                        Kubernetes Planner reads their registered model identity. During rolling
+                        updates, worker status keeps the old active revision until cutover completes.
                       type: string
                     updatedReplicas:
                       description: |-
@@ -22944,6 +23022,15 @@ spec:
                             x-kubernetes-validations:
                               - rule: self.name == "main" || (has(self.image) && self.image != "")
                                 message: sidecar containers must specify a non-empty image
+                              - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                message: startupProbe must define exactly one handler
+                                fieldPath: .startupProbe
+                              - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                message: livenessProbe must define exactly one handler
+                                fieldPath: .livenessProbe
+                              - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                message: readinessProbe must define exactly one handler
+                                fieldPath: .readinessProbe
                           type: array
                           x-kubernetes-list-map-keys:
                             - name
@@ -24440,6 +24527,16 @@ spec:
                             required:
                               - name
                             type: object
+                            x-kubernetes-validations:
+                              - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                message: startupProbe must define exactly one handler
+                                fieldPath: .startupProbe
+                              - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                message: livenessProbe must define exactly one handler
+                                fieldPath: .livenessProbe
+                              - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                message: readinessProbe must define exactly one handler
+                                fieldPath: .readinessProbe
                           type: array
                           x-kubernetes-list-map-keys:
                             - name
@@ -26019,6 +26116,15 @@ spec:
                             x-kubernetes-validations:
                               - rule: has(self.image) && self.image != ""
                                 message: init containers must specify a non-empty image
+                              - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                message: startupProbe must define exactly one handler
+                                fieldPath: .startupProbe
+                              - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                message: livenessProbe must define exactly one handler
+                                fieldPath: .livenessProbe
+                              - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                message: readinessProbe must define exactly one handler
+                                fieldPath: .readinessProbe
                           type: array
                           x-kubernetes-list-map-keys:
                             - name
@@ -31106,6 +31212,15 @@ spec:
                                   x-kubernetes-validations:
                                     - rule: self.name == "main" || (has(self.image) && self.image != "")
                                       message: sidecar containers must specify a non-empty image
+                                    - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                      message: startupProbe must define exactly one handler
+                                      fieldPath: .startupProbe
+                                    - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                      message: livenessProbe must define exactly one handler
+                                      fieldPath: .livenessProbe
+                                    - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                      message: readinessProbe must define exactly one handler
+                                      fieldPath: .readinessProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -32602,6 +32717,16 @@ spec:
                                   required:
                                     - name
                                   type: object
+                                  x-kubernetes-validations:
+                                    - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                      message: startupProbe must define exactly one handler
+                                      fieldPath: .startupProbe
+                                    - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                      message: livenessProbe must define exactly one handler
+                                      fieldPath: .livenessProbe
+                                    - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                      message: readinessProbe must define exactly one handler
+                                      fieldPath: .readinessProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -34181,6 +34306,15 @@ spec:
                                   x-kubernetes-validations:
                                     - rule: has(self.image) && self.image != ""
                                       message: init containers must specify a non-empty image
+                                    - rule: '!has(self.startupProbe) || (has(self.startupProbe.exec) ? 1 : 0) + (has(self.startupProbe.httpGet) ? 1 : 0) + (has(self.startupProbe.tcpSocket) ? 1 : 0) + (has(self.startupProbe.grpc) ? 1 : 0) == 1'
+                                      message: startupProbe must define exactly one handler
+                                      fieldPath: .startupProbe
+                                    - rule: '!has(self.livenessProbe) || (has(self.livenessProbe.exec) ? 1 : 0) + (has(self.livenessProbe.httpGet) ? 1 : 0) + (has(self.livenessProbe.tcpSocket) ? 1 : 0) + (has(self.livenessProbe.grpc) ? 1 : 0) == 1'
+                                      message: livenessProbe must define exactly one handler
+                                      fieldPath: .livenessProbe
+                                    - rule: '!has(self.readinessProbe) || (has(self.readinessProbe.exec) ? 1 : 0) + (has(self.readinessProbe.httpGet) ? 1 : 0) + (has(self.readinessProbe.tcpSocket) ? 1 : 0) + (has(self.readinessProbe.grpc) ? 1 : 0) == 1'
+                                      message: readinessProbe must define exactly one handler
+                                      fieldPath: .readinessProbe
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -37024,9 +37158,10 @@ spec:
                     runtimeComponentName:
                       description: |-
                         runtimeComponentName is an explicit Dynamo runtime component identity
-                        resolved from the serving role's endpoint override. Omission means the
-                        backend default applies. During rolling updates, worker status keeps the
-                        old active revision value until cutover completes.
+                        resolved from the serving role's endpoint override in combined mode.
+                        Native sidecars omit this field; Kubernetes Planner reads their registered
+                        component identity. During rolling updates, worker status keeps the old
+                        active revision value until cutover completes.
                       type: string
                     runtimeNamespace:
                       description: |-
@@ -37054,8 +37189,9 @@ spec:
                     servedModelName:
                       description: |-
                         servedModelName is the effective primary model identity exposed by this
-                        component's serving role. During rolling updates, worker status keeps the
-                        old active revision value until cutover completes.
+                        component's serving role in combined mode. Native sidecars omit this field;
+                        Kubernetes Planner reads their registered model identity. During rolling
+                        updates, worker status keeps the old active revision until cutover completes.
                       type: string
                     updatedReplicas:
                       description: updatedReplicas is the number of replicas at the current/desired revision.

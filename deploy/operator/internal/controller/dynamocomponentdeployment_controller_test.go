@@ -2059,6 +2059,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		require.NoError(t, err)
 		assert.Equal(t, commonconsts.KubeLabelValueTrue, podTemplateSpec.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
 		assert.Equal(t, string(snapshot.UID), podTemplateSpec.Annotations[commonconsts.SnapshotCandidateUIDAnnotation])
+		assert.Equal(t, "compatibility-v1", podTemplateSpec.Annotations[commonconsts.SnapshotCandidateCompatibilityHashAnnotation])
 		assert.Equal(t, commonconsts.MainContainerName, podTemplateSpec.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
 	})
 
