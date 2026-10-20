@@ -99,9 +99,31 @@ jobs:
           echo "base=$(jq -r '.base.sha' <<< "$pr")" >> "$GITHUB_OUTPUT"
           echo "author=$(jq -r '.user.login' <<< "$pr")" >> "$GITHUB_OUTPUT"
           echo "current=true" >> "$GITHUB_OUTPUT"
+      - name: Read trusted lane policy from main
+        if: steps.request.outputs.current == 'true' && vars.TRUSTED_CONTRIBUTOR_CI_ENABLED == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ai-dynamo/dynamo
+          ref: main
+          persist-credentials: false
+      - name: Select the isolated contributor lane
+        id: isolated_lane
+        if: steps.request.outputs.current == 'true' && vars.TRUSTED_CONTRIBUTOR_CI_ENABLED == 'true'
+        env:
+          PR_AUTHOR: ${{ steps.request.outputs.author }}
+        run: |
+          npm install --ignore-scripts --no-package-lock --no-audit --no-fund --prefix .github/scripts
+          node <<'JS'
+          const fs = require('node:fs');
+          const yaml = require('./.github/scripts/node_modules/yaml');
+          const {eligibleAuthors} = require('./.github/scripts/contributor-ci/route.cjs');
+          const policy = yaml.parse(fs.readFileSync('contributors.yaml', 'utf8'));
+          const isolated = eligibleAuthors(policy).has(process.env.PR_AUTHOR.toLowerCase());
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `isolated=${isolated}\n`);
+          JS
       - name: Validate approved contributor
         id: author_check
-        if: steps.request.outputs.current == 'true'
+        if: steps.request.outputs.current == 'true' && steps.isolated_lane.outputs.isolated != 'true'
         env:
           APPROVED_EXTERNAL_CONTRIBUTORS: ${{ secrets.APPROVED_EXTERNAL_CONTRIBUTORS }}
           PR_AUTHOR: ${{ steps.request.outputs.author }}
@@ -121,7 +143,7 @@ jobs:
           fi
       - name: Validate PR author permission
         id: author_permission_check
-        if: steps.request.outputs.current == 'true'
+        if: steps.request.outputs.current == 'true' && steps.isolated_lane.outputs.isolated != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -150,7 +172,7 @@ jobs:
           esac
       - name: Validate triggering actor
         id: actor_check
-        if: steps.request.outputs.current == 'true' && github.event_name == 'pull_request_target' && github.event.action == 'synchronize' && steps.author_check.outputs.is_approved != 'true'
+        if: steps.request.outputs.current == 'true' && steps.isolated_lane.outputs.isolated != 'true' && github.event_name == 'pull_request_target' && github.event.action == 'synchronize' && steps.author_check.outputs.is_approved != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -181,7 +203,7 @@ jobs:
           esac
       - name: Determine CI approval
         id: approval_check
-        if: steps.request.outputs.current == 'true'
+        if: steps.request.outputs.current == 'true' && steps.isolated_lane.outputs.isolated != 'true'
         env:
           GLAMR_REQUEST_APPROVED: ${{ steps.request.outputs.glamr_request_approved }}
           AUTHOR_APPROVED: ${{ steps.author_check.outputs.is_approved }}
