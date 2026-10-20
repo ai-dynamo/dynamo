@@ -44,6 +44,8 @@ const MAX_MOONCAKE_INDEX_ENTRIES: usize = 1_000_000;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct SglangHicacheMooncakeConfig {
     backend: String,
+    #[serde(default)]
+    tenant_id: String,
     page_size: u32,
     tp_size: u32,
     pp_size: u32,
@@ -54,6 +56,10 @@ struct SglangHicacheMooncakeConfig {
     should_split_heads: bool,
     #[serde(default)]
     extra_backend_tag: Option<String>,
+    /// Full prefix SGLang's MooncakeStore prepends to stored keys (backend tag and model
+    /// name). Absent from workers that predate it.
+    #[serde(default)]
+    key_prefix: Option<String>,
     #[serde(default)]
     kv_events_endpoint: Option<String>,
 }
@@ -61,6 +67,7 @@ struct SglangHicacheMooncakeConfig {
 impl SglangHicacheMooncakeConfig {
     fn has_same_layout(&self, other: &Self) -> bool {
         self.backend == other.backend
+            && self.tenant_id() == other.tenant_id()
             && self.page_size == other.page_size
             && self.tp_size == other.tp_size
             && self.pp_size == other.pp_size
@@ -69,7 +76,26 @@ impl SglangHicacheMooncakeConfig {
             && self.tp_lcm_size == other.tp_lcm_size
             && self.should_split_heads == other.should_split_heads
             && self.extra_backend_tag == other.extra_backend_tag
+            && self.key_prefix == other.key_prefix
     }
+
+    fn tenant_id(&self) -> &str {
+        tenant_or_default(&self.tenant_id)
+    }
+
+    /// Prefix used for both physical keys and group IDs. Older workers publish only the
+    /// backend tag, so fall back to it when `key_prefix` is absent.
+    fn effective_key_prefix(&self) -> Option<&str> {
+        self.key_prefix.as_deref().or_else(|| {
+            self.extra_backend_tag
+                .as_deref()
+                .filter(|tag| !tag.is_empty())
+        })
+    }
+}
+
+fn tenant_or_default(id: &str) -> &str {
+    if id.is_empty() { "default" } else { id }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -93,12 +119,14 @@ enum QueryToken {
     Bigram(u32, u32),
 }
 
+type TenantKey = (Arc<str>, String);
+
 /// Event-driven shared KV cache index for SGLang HiCache (L3) state.
 #[derive(Clone)]
 pub struct HicacheSharedKvCache {
     runtime_configs: RuntimeConfigWatch,
-    present_keys: Arc<DashSet<String>>,
-    group_states: Arc<DashMap<String, (u64, bool)>>,
+    present_keys: Arc<DashSet<TenantKey>>,
+    group_states: Arc<DashMap<TenantKey, (u64, bool)>>,
     last_sequence: Arc<AtomicU64>,
     has_sequence: Arc<AtomicBool>,
     last_layout: Arc<ArcSwapOption<SglangHicacheMooncakeConfig>>,
@@ -206,12 +234,13 @@ impl HicacheSharedKvCache {
         Some((first.clone(), endpoint.to_string()))
     }
 
+    #[cfg(test)]
     fn kv_events_endpoint(&self) -> Option<String> {
         self.resolve_mooncake_config_and_endpoint()
             .map(|(_, endpoint)| endpoint)
     }
 
-    fn apply_batch(&self, sequence: u64, events: Vec<MooncakeObjectEvent>) {
+    fn apply_batch(&self, tenant: &Arc<str>, sequence: u64, events: Vec<MooncakeObjectEvent>) {
         // SGLang's ZmqEventPublisher increments this sequence once per published batch, so a
         // non-consecutive value means one or more whole batches were missed.
         let has_previous = self.has_sequence.swap(true, Ordering::AcqRel);
@@ -230,15 +259,20 @@ impl HicacheSharedKvCache {
         }
 
         for event in events {
-            // The shared-cache query contract currently has no tenant input and
-            // historically queried Mooncake's default tenant only.
-            if !event.tenant_id.is_empty() && event.tenant_id != "default" {
+            // Legacy publishers omit the tenant for default-tenant objects.
+            if tenant_or_default(&event.tenant_id) != tenant.as_ref() {
                 continue;
             }
             let Some(object_key) = event.object_key else {
                 continue;
             };
-            let group_id = event.group_id.filter(|id| !id.is_empty());
+            // Keep the tenant in the key so a batch racing a runtime-config change
+            // cannot teach the successor tenant about its predecessor's objects.
+            let object_key = (Arc::clone(tenant), object_key);
+            let group_id = event
+                .group_id
+                .filter(|id| !id.is_empty())
+                .map(|id| (Arc::clone(tenant), id));
             match event.event_type.as_str() {
                 "stored" => {
                     self.present_keys.insert(object_key);
@@ -292,9 +326,9 @@ impl HicacheSharedKvCache {
 
     async fn run_subscriber(mut self, cancellation_token: CancellationToken) {
         loop {
-            let endpoint = loop {
-                if let Some(endpoint) = self.kv_events_endpoint() {
-                    break endpoint;
+            let (config, endpoint) = loop {
+                if let Some(resolved) = self.resolve_mooncake_config_and_endpoint() {
+                    break resolved;
                 }
 
                 tokio::select! {
@@ -308,6 +342,7 @@ impl HicacheSharedKvCache {
                 }
             };
 
+            let mut tenant: Arc<str> = config.tenant_id().into();
             self.clear();
             let mut socket = match connect_sub_socket(&endpoint, None).await {
                 Ok(socket) => socket,
@@ -330,9 +365,14 @@ impl HicacheSharedKvCache {
                             self.clear();
                             return;
                         }
-                        let next_endpoint = self.kv_events_endpoint();
-                        if next_endpoint.as_deref() != Some(endpoint.as_str()) {
-                            tracing::info!(%endpoint, next_endpoint = ?next_endpoint, "Mooncake KV event endpoint changed; reconnecting");
+                        let Some((config, next_endpoint)) = self.resolve_mooncake_config_and_endpoint() else {
+                            self.clear();
+                            break;
+                        };
+                        tenant = config.tenant_id().into();
+                        if next_endpoint != endpoint {
+                            self.clear();
+                            tracing::info!(%endpoint, %next_endpoint, "Mooncake KV event endpoint changed; reconnecting");
                             break;
                         }
                     }
@@ -351,7 +391,7 @@ impl HicacheSharedKvCache {
                             }
                         };
                         match parse_mooncake_event_frames(&frames) {
-                            Ok((sequence, events)) => self.apply_batch(sequence, events),
+                            Ok((sequence, events)) => self.apply_batch(&tenant, sequence, events),
                             Err(error) => {
                                 self.record_subscriber_error();
                                 tracing::warn!(%error, "Dropping invalid Mooncake KV event frame");
@@ -434,18 +474,19 @@ impl SharedKvCache for HicacheSharedKvCache {
             return Ok(SharedCacheHits::default());
         }
 
+        let tenant: Arc<str> = config.tenant_id().into();
         let page_hits = page_hashes
             .iter()
             .map(|page_hash| {
-                let group_id = sglang_group_id(page_hash, &config);
+                let group_id = (Arc::clone(&tenant), sglang_group_id(page_hash, &config));
                 let generation = self.group_states.get(&group_id).map(|state| *state);
                 if generation.is_some_and(|(_, verified)| verified) {
                     return true;
                 }
 
                 let hit = expand_actual_query_keys(page_hash, &config)
-                    .iter()
-                    .all(|key| self.present_keys.contains(key));
+                    .into_iter()
+                    .all(|key| self.present_keys.contains(&(Arc::clone(&tenant), key)));
                 if hit
                     && let Some((generation, _)) = generation
                     && let Some(mut state) = self.group_states.get_mut(&group_id)
@@ -551,21 +592,15 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn sglang_group_id(logical_page_hash: &str, config: &SglangHicacheMooncakeConfig) -> String {
-    match config
-        .extra_backend_tag
-        .as_deref()
-        .filter(|tag| !tag.is_empty())
-    {
-        Some(tag) => format!("sglang-hicache:{tag}_{logical_page_hash}"),
-        None => format!("sglang-hicache:{logical_page_hash}"),
-    }
+    let logical_key = maybe_prefix_key(logical_page_hash, config.effective_key_prefix());
+    format!("sglang-hicache:{logical_key}")
 }
 
 fn expand_actual_query_keys(
     logical_page_hash: &str,
     config: &SglangHicacheMooncakeConfig,
 ) -> Vec<String> {
-    let logical_key = maybe_prefix_key(logical_page_hash, config.extra_backend_tag.as_deref());
+    let logical_key = maybe_prefix_key(logical_page_hash, config.effective_key_prefix());
     let pp_size = config.pp_size.max(1);
 
     if config.is_mla_model {
@@ -605,8 +640,9 @@ fn expand_actual_query_keys(
     query_keys
 }
 
-fn maybe_prefix_key(logical_key: &str, extra_backend_tag: Option<&str>) -> String {
-    match extra_backend_tag.filter(|tag| !tag.is_empty()) {
+// SGLang prepends `{prefix}_` whenever the prefix is not None, even when it is empty.
+fn maybe_prefix_key(logical_key: &str, prefix: Option<&str>) -> String {
+    match prefix {
         Some(prefix) => format!("{prefix}_{logical_key}"),
         None => logical_key.to_string(),
     }
@@ -622,6 +658,7 @@ mod tests {
     fn mooncake_config() -> SglangHicacheMooncakeConfig {
         SglangHicacheMooncakeConfig {
             backend: "mooncake".to_string(),
+            tenant_id: String::new(),
             page_size: 4,
             tp_size: 1,
             pp_size: 1,
@@ -630,6 +667,7 @@ mod tests {
             tp_lcm_size: None,
             should_split_heads: false,
             extra_backend_tag: None,
+            key_prefix: None,
             kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
         }
     }
@@ -654,6 +692,14 @@ mod tests {
 
     fn runtime_watch_with_config(config: SglangHicacheMooncakeConfig) -> RuntimeConfigWatch {
         runtime_watch_with_config_and_sender(config).0
+    }
+
+    async fn hits(cache: &HicacheSharedKvCache) -> u32 {
+        cache
+            .check_blocks(&[1, 2, 3, 4], 4, None)
+            .await
+            .unwrap()
+            .total_hits
     }
 
     #[test]
@@ -749,6 +795,27 @@ mod tests {
         };
 
         assert_eq!(sglang_group_id("hash", &config), "sglang-hicache:tag_hash");
+    }
+
+    #[test]
+    fn test_key_prefix_takes_precedence_over_extra_backend_tag() {
+        let config = SglangHicacheMooncakeConfig {
+            extra_backend_tag: Some("tag".to_string()),
+            key_prefix: Some("tag_Qwen-Qwen3-0.6B".to_string()),
+            ..mooncake_config()
+        };
+
+        assert_eq!(
+            sglang_group_id("hash", &config),
+            "sglang-hicache:tag_Qwen-Qwen3-0.6B_hash"
+        );
+        assert_eq!(
+            expand_actual_query_keys("hash", &config),
+            vec![
+                "tag_Qwen-Qwen3-0.6B_hash_0_k",
+                "tag_Qwen-Qwen3-0.6B_hash_0_v"
+            ]
+        );
     }
 
     #[test]
@@ -849,6 +916,7 @@ mod tests {
             .unwrap();
         let group_id = sglang_group_id(&hash, &config);
         cache.apply_batch(
+            &"default".into(),
             1,
             expand_actual_query_keys(&hash, &config)
                 .into_iter()
@@ -895,6 +963,7 @@ mod tests {
         let hash1 = "4ebfa8a1f3c341517621838c6e1b9aa350307e3f00b3cbd1a07ef740f54396d6".to_string();
         let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
         cache.apply_batch(
+            &"default".into(),
             1,
             vec![
                 MooncakeObjectEvent {
@@ -926,6 +995,7 @@ mod tests {
         assert_eq!(hits.total_hits, 1);
 
         cache.apply_batch(
+            &"default".into(),
             2,
             vec![MooncakeObjectEvent {
                 event_type: "removed".to_string(),
@@ -941,12 +1011,159 @@ mod tests {
         assert_eq!(hits.total_hits, 0);
     }
 
+    fn stored_events(object_keys: &[String], group_id: &str) -> Vec<MooncakeObjectEvent> {
+        object_keys
+            .iter()
+            .map(|object_key| MooncakeObjectEvent {
+                event_type: "stored".to_string(),
+                object_key: Some(object_key.clone()),
+                tenant_id: "default".to_string(),
+                group_id: Some(group_id.to_string()),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_mooncake_hits_and_removals_are_tenant_scoped() {
+        let config = SglangHicacheMooncakeConfig {
+            tenant_id: "tenant-a".into(),
+            ..mooncake_config()
+        };
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config.clone()));
+        let hash = logical_page_hashes(&[1, 2, 3, 4], 4, false).pop().unwrap();
+        let keys = expand_actual_query_keys(&hash, &config);
+        let group = sglang_group_id(&hash, &config);
+
+        cache.apply_batch(&"tenant-a".into(), 1, stored_events(&keys, &group));
+        assert_eq!(hits(&cache).await, 0);
+
+        let mut events = stored_events(&keys, &group);
+        for event in &mut events {
+            event.tenant_id = "tenant-a".into();
+        }
+        cache.apply_batch(&"tenant-a".into(), 2, events);
+        assert_eq!(hits(&cache).await, 1);
+
+        let removal = MooncakeObjectEvent {
+            event_type: "removed".into(),
+            object_key: Some(keys[0].clone()),
+            tenant_id: "default".to_string(),
+            group_id: Some(group),
+        };
+        cache.apply_batch(&"tenant-a".into(), 3, vec![removal]);
+        assert_eq!(hits(&cache).await, 1);
+        cache.apply_batch(
+            &"tenant-a".into(),
+            4,
+            vec![MooncakeObjectEvent {
+                event_type: "removed".into(),
+                object_key: Some(keys[0].clone()),
+                tenant_id: "tenant-a".into(),
+                group_id: None,
+            }],
+        );
+        assert_eq!(hits(&cache).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_tenant_change_clears_hits_and_mixed_tenants_skip_lookup() {
+        let config = mooncake_config();
+        let (runtime_configs, tx) = runtime_watch_with_config_and_sender(config.clone());
+        let cache = HicacheSharedKvCache::new(runtime_configs);
+        let hash = logical_page_hashes(&[1, 2, 3, 4], 4, false).pop().unwrap();
+        cache.apply_batch(
+            &"default".into(),
+            1,
+            stored_events(
+                &expand_actual_query_keys(&hash, &config),
+                &sglang_group_id(&hash, &config),
+            ),
+        );
+        assert_eq!(hits(&cache).await, 1);
+
+        let mut runtime = ModelRuntimeConfig::new();
+        runtime
+            .set_engine_specific(
+                SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY,
+                SglangHicacheMooncakeConfig {
+                    tenant_id: "tenant-a".into(),
+                    ..config
+                },
+            )
+            .unwrap();
+        tx.send(HashMap::from([(1, runtime.clone())])).unwrap();
+        assert_eq!(hits(&cache).await, 0);
+
+        // Legacy metadata without tenant_id is compatible with an explicit default tenant.
+        let mut legacy = serde_json::to_value(mooncake_config()).unwrap();
+        legacy.as_object_mut().unwrap().remove("tenant_id");
+        let mut default_runtime = ModelRuntimeConfig::new();
+        default_runtime
+            .set_engine_specific(SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY, legacy)
+            .unwrap();
+        tx.send(HashMap::from([(1, runtime), (2, default_runtime.clone())]))
+            .unwrap();
+        assert!(cache.kv_events_endpoint().is_none());
+        assert_eq!(hits(&cache).await, 0);
+
+        let mut current_runtime = ModelRuntimeConfig::new();
+        current_runtime
+            .set_engine_specific(
+                SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY,
+                SglangHicacheMooncakeConfig {
+                    tenant_id: "default".to_string(),
+                    ..mooncake_config()
+                },
+            )
+            .unwrap();
+        tx.send(HashMap::from([(1, current_runtime), (2, default_runtime)]))
+            .unwrap();
+        assert!(cache.kv_events_endpoint().is_some());
+        assert_eq!(hits(&cache).await, 0);
+    }
+
+    // Key names as stored by an SGLang worker serving `Qwen/Qwen3-0.6B` with no
+    // `extra_backend_tag`.
+    #[tokio::test]
+    async fn test_check_blocks_matches_sglang_model_prefixed_keys() {
+        let hash = "cf97adeedb59e05bfd73a2b4c2a8885708c4f4f70c84c64b27120e72ab733b72";
+        let config = SglangHicacheMooncakeConfig {
+            key_prefix: Some("Qwen-Qwen3-0.6B".to_string()),
+            ..mooncake_config()
+        };
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
+        cache.apply_batch(
+            &"default".into(),
+            1,
+            stored_events(
+                &[
+                    format!("Qwen-Qwen3-0.6B_{hash}_0_k"),
+                    format!("Qwen-Qwen3-0.6B_{hash}_0_v"),
+                ],
+                &format!("sglang-hicache:Qwen-Qwen3-0.6B_{hash}"),
+            ),
+        );
+
+        let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
+        assert_eq!(hits.total_hits, 1);
+        assert!(
+            cache
+                .group_states
+                .get(&(
+                    "default".into(),
+                    format!("sglang-hicache:Qwen-Qwen3-0.6B_{hash}")
+                ))
+                .is_some_and(|v| v.1)
+        );
+    }
+
     #[tokio::test]
     async fn test_check_blocks_invalidates_group_on_unlabeled_removal() {
         let hash = "cf97adeedb59e05bfd73a2b4c2a8885708c4f4f70c84c64b27120e72ab733b72";
         let group_id = format!("sglang-hicache:{hash}");
         let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
         cache.apply_batch(
+            &"default".into(),
             1,
             vec![
                 MooncakeObjectEvent {
@@ -966,9 +1183,15 @@ mod tests {
 
         let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
         assert_eq!(hits.total_hits, 1);
-        assert!(cache.group_states.get(&group_id).is_some_and(|v| v.1));
+        assert!(
+            cache
+                .group_states
+                .get(&("default".into(), group_id.clone()))
+                .is_some_and(|v| v.1)
+        );
 
         cache.apply_batch(
+            &"default".into(),
             2,
             vec![MooncakeObjectEvent {
                 event_type: "removed".to_string(),
@@ -990,6 +1213,7 @@ mod tests {
         let group1 = format!("sglang-hicache:{hash1}");
         let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
         cache.apply_batch(
+            &"default".into(),
             1,
             [(&hash0, &group0), (&hash1, &group1)]
                 .into_iter()
@@ -1013,6 +1237,7 @@ mod tests {
         );
 
         cache.apply_batch(
+            &"default".into(),
             2,
             vec![MooncakeObjectEvent {
                 event_type: "removed".to_string(),
@@ -1022,14 +1247,24 @@ mod tests {
             }],
         );
 
-        assert!(!cache.group_states.contains_key(&group0));
-        assert!(cache.group_states.get(&group1).is_some_and(|state| state.1));
+        assert!(
+            !cache
+                .group_states
+                .contains_key(&("default".into(), group0.clone()))
+        );
+        assert!(
+            cache
+                .group_states
+                .get(&("default".into(), group1.clone()))
+                .is_some_and(|state| state.1)
+        );
     }
 
     #[test]
     fn test_duplicate_sequence_preserves_shared_cache_state() {
         let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
         cache.apply_batch(
+            &"default".into(),
             0,
             vec![MooncakeObjectEvent {
                 event_type: "stored".to_string(),
@@ -1039,6 +1274,7 @@ mod tests {
             }],
         );
         cache.apply_batch(
+            &"default".into(),
             0,
             vec![MooncakeObjectEvent {
                 event_type: "removed".to_string(),
@@ -1048,13 +1284,18 @@ mod tests {
             }],
         );
 
-        assert!(cache.present_keys.contains("key-0"));
+        assert!(
+            cache
+                .present_keys
+                .contains(&("default".into(), "key-0".to_string()))
+        );
     }
 
     #[test]
     fn test_index_size_limit_clears_shared_cache_state() {
         let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
         cache.apply_batch(
+            &"default".into(),
             1,
             vec![MooncakeObjectEvent {
                 event_type: "stored".to_string(),
@@ -1068,6 +1309,83 @@ mod tests {
 
         assert!(cache.present_keys.is_empty());
         assert!(cache.group_states.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_subscriber_updates_tenant_and_clears_unavailable_config() {
+        use crate::utils::zmq::{bind_pub_socket, send_multipart};
+        use tmq::AsZmqSocket;
+
+        let publisher = bind_pub_socket("tcp://127.0.0.1:*").await.unwrap();
+        let endpoint = publisher
+            .lock()
+            .await
+            .get_socket()
+            .get_last_endpoint()
+            .unwrap()
+            .unwrap();
+        let config = SglangHicacheMooncakeConfig {
+            kv_events_endpoint: Some(endpoint),
+            ..mooncake_config()
+        };
+        let (runtime_configs, tx) = runtime_watch_with_config_and_sender(config.clone());
+        let cache = HicacheSharedKvCache::new(runtime_configs);
+        let cancellation = CancellationToken::new();
+        let task = tokio::spawn(cache.clone().run_subscriber(cancellation.clone()));
+        let hash = logical_page_hashes(&[1, 2, 3, 4], 4, false).pop().unwrap();
+        let keys = expand_actual_query_keys(&hash, &config);
+        let group = sglang_group_id(&hash, &config);
+        let mut sequence = 0_u64;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for (step, tenant) in ["default", "tenant-a", "tenant-a"].into_iter().enumerate() {
+                let mut runtime = ModelRuntimeConfig::new();
+                runtime
+                    .set_engine_specific(
+                        SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY,
+                        SglangHicacheMooncakeConfig {
+                            tenant_id: tenant.into(),
+                            ..config.clone()
+                        },
+                    )
+                    .unwrap();
+                tx.send(HashMap::from([(1, runtime)])).unwrap();
+                // A tenant change must take effect even when the endpoint is unchanged.
+                assert_eq!(hits(&cache).await, 0);
+                loop {
+                    sequence += 1;
+                    let mut events = stored_events(&keys, &group);
+                    for event in &mut events {
+                        event.tenant_id = tenant.into();
+                    }
+                    let payload = rmp_serde::to_vec(&(0_i64, events, 0_u32)).unwrap();
+                    send_multipart(
+                        &publisher,
+                        vec![vec![], sequence.to_be_bytes().to_vec(), payload],
+                    )
+                    .await
+                    .unwrap();
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    if hits(&cache).await == 1 {
+                        break;
+                    }
+                }
+                if step == 1 {
+                    tx.send(HashMap::new()).unwrap();
+                    // Cleanup must happen while config is unavailable, before any reconnect.
+                    while !cache.present_keys.is_empty() || !cache.group_states.is_empty() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1090,9 +1408,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscriber_clears_state_when_runtime_config_watch_closes() {
-        let (tx, runtime_configs) = watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
+        let (runtime_configs, tx) = runtime_watch_with_config_and_sender(mooncake_config());
         let cache = HicacheSharedKvCache::new(runtime_configs);
         cache.apply_batch(
+            &"default".into(),
             1,
             vec![MooncakeObjectEvent {
                 event_type: "stored".to_string(),
@@ -1101,8 +1420,10 @@ mod tests {
                 group_id: None,
             }],
         );
+        assert!(!cache.present_keys.is_empty());
         let task = tokio::spawn(cache.clone().run_subscriber(CancellationToken::new()));
 
+        tx.send(HashMap::new()).unwrap();
         drop(tx);
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
@@ -1116,6 +1437,7 @@ mod tests {
     fn test_sequence_gap_clears_stale_keys() {
         let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
         cache.apply_batch(
+            &"default".into(),
             1,
             vec![MooncakeObjectEvent {
                 event_type: "stored".to_string(),
@@ -1124,8 +1446,13 @@ mod tests {
                 group_id: Some("old-group".to_string()),
             }],
         );
-        assert!(cache.group_states.contains_key("old-group"));
+        assert!(
+            cache
+                .group_states
+                .contains_key(&("default".into(), "old-group".to_string()))
+        );
         cache.apply_batch(
+            &"default".into(),
             3,
             vec![MooncakeObjectEvent {
                 event_type: "stored".to_string(),
@@ -1135,9 +1462,17 @@ mod tests {
             }],
         );
 
-        assert!(!cache.present_keys.contains("old_0_k"));
+        assert!(
+            !cache
+                .present_keys
+                .contains(&("default".into(), "old_0_k".to_string()))
+        );
         assert!(cache.group_states.is_empty());
-        assert!(cache.present_keys.contains("new_0_k"));
+        assert!(
+            cache
+                .present_keys
+                .contains(&("default".into(), "new_0_k".to_string()))
+        );
     }
 
     #[tokio::test]

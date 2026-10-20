@@ -47,6 +47,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to both TensorRT-LLM engines."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                     Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  TRTLLM_PYTHON             Python with TensorRT-LLM installed (default: python3)"
             echo "  TRTLLM_PREFILL_GPU        Prefill GPU assignment (default: 0)"
@@ -54,8 +55,8 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_HTTP_PORT             Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT1          Prefill sidecar system port (default: 8081)"
             echo "  DYN_SYSTEM_PORT2          Decode sidecar system port (default: 8082)"
-            echo "  TRTLLM_PREFILL_GRPC_PORT  Prefill TensorRT-LLM gRPC port (default: 50051)"
-            echo "  TRTLLM_DECODE_GRPC_PORT   Decode TensorRT-LLM gRPC port (default: 50052)"
+            echo "  TRTLLM_PREFILL_GRPC_PORT  Prefill TensorRT-LLM gRPC port (default: 30001)"
+            echo "  TRTLLM_DECODE_GRPC_PORT   Decode TensorRT-LLM gRPC port (default: 30011)"
             echo "  TRTLLM_CACHE_TRANSCEIVER_BACKEND  KV transfer backend (default: NIXL)"
             echo "  TRTLLM_CONTEXT_LENGTH     Model context length, applied to both engines and both"
             echo "                            sidecars (default: 4096; unset when --max_seq_len is given)"
@@ -67,6 +68,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_sidecar trtllm SIDECAR_CMD
 
 TRTLLM_EXTRA_CONFIG=""
 trtllm_exit_trap() {
@@ -81,8 +84,9 @@ trap trtllm_exit_trap EXIT
 
 TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
 TRTLLM_HOST="127.0.0.1"
-TRTLLM_PREFILL_GRPC_PORT="${TRTLLM_PREFILL_GRPC_PORT:-50051}"
-TRTLLM_DECODE_GRPC_PORT="${TRTLLM_DECODE_GRPC_PORT:-50052}"
+# Managed ports are indexed like DYN_SYSTEM_PORT{N}: worker 1 is prefill, 2 is decode.
+TRTLLM_PREFILL_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${TRTLLM_PREFILL_GRPC_PORT:-30001}")
+TRTLLM_DECODE_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${TRTLLM_DECODE_GRPC_PORT:-30011}")
 TRTLLM_PREFILL_GPU="${TRTLLM_PREFILL_GPU:-0}"
 TRTLLM_DECODE_GPU="${TRTLLM_DECODE_GPU:-1}"
 TRTLLM_CACHE_TRANSCEIVER_BACKEND="${TRTLLM_CACHE_TRANSCEIVER_BACKEND:-NIXL}"
@@ -153,14 +157,14 @@ CUDA_VISIBLE_DEVICES="$TRTLLM_DECODE_GPU" \
 # `--disaggregation-mode prefill` also registers this worker under the `prefill`
 # component, which is what the frontend's prefill router targets.
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
-    dynamo-trtllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --disaggregation-mode prefill \
     --grpc-endpoint "${TRTLLM_HOST}:${TRTLLM_PREFILL_GRPC_PORT}" \
     --model-path "$MODEL" \
     "${TRTLLM_CONTEXT_LENGTH_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
-    dynamo-trtllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --disaggregation-mode decode \
     --grpc-endpoint "${TRTLLM_HOST}:${TRTLLM_DECODE_GRPC_PORT}" \
     --model-path "$MODEL" \

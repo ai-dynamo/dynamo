@@ -41,8 +41,8 @@ type ModelProjectionInput struct {
 	Models []string
 	// RuntimeBuildRef is the build reference projected into runtime configuration.
 	RuntimeBuildRef string
-	// BuildSnapshot is the normalized immutable build input.
-	BuildSnapshot NormalizedBuildSnapshot
+	// Build is the normalized immutable build input.
+	Build *Build
 	// LocalPartitions selects hybrid runtime partitions that run on the Cyborg GPU.
 	// Nil runs every partition on LPUs.
 	LocalPartitions *dynamov1beta1.LPXLocalPartitions
@@ -59,10 +59,11 @@ type ModelProjection struct {
 	stage                  string
 	pipeline               Pipeline
 	configuredBuild        Build
+	contractFormat         buildContractFormat
 	allocationMetadata     json.RawMessage
 	// partitions describes the partitions requested from LPX. Packing can combine
 	// several configuredBuild.Partitions into one LPX partition.
-	partitions []BuildPartition
+	partitions []buildPartition
 	connectors []lpxv1alpha1.PropSyncConnectorRequest
 	// propSyncEdges lists each position in partitions whose successor continues
 	// a selected prop-sync chain. Only unpacked HX projections set it; XT
@@ -71,6 +72,15 @@ type ModelProjection struct {
 	agentReplicas int
 	// localPartitionIDs lists the runtime partitions that run on the Cyborg GPU, in build order.
 	localPartitionIDs []int
+	// checkpoint is the build checkpoint projected into the Cyborg conductor, or nil.
+	// Projecting or dropping it leaves the digest unchanged. The build's
+	// contentID still hashes the whole deployment contract, so a rebuild whose
+	// recorded checkpoint differs has a new digest and rolls the workload.
+	checkpoint *Checkpoint
+}
+
+func (p *ModelProjection) Checkpoint() *Checkpoint {
+	return p.checkpoint
 }
 
 // AgentReplicas returns the number of LPU Agent Pods that the projection requires.
@@ -115,14 +125,14 @@ func (p *ModelProjection) RequestSpec(
 		request := lpxv1alpha1.PartitionRequest{
 			ID:                  partitionID,
 			Ordinal:             int64(index),
-			CompilerPartitionID: int64(uint32(partition.SourcePartitionID)),
+			CompilerPartitionID: int64(uint32(partition.sourcePartitionID)),
 		}
-		if p.configuredBuild.Family == BuildFamilyXT {
-			shape, _, _ := xtShape(partition)
+		if p.configuredBuild.family == BuildFamilyXT {
+			shape, _ := xtShape(partition)
 			request.XtShape = &shape
 		}
-		if partition.HXExtent != nil {
-			extent := slices.Clone(partition.HXExtent)
+		if partition.hxExtent != nil {
+			extent := slices.Clone(partition.hxExtent)
 			request.Extent = &extent
 		}
 		partitions[index] = request
@@ -141,7 +151,7 @@ func (p *ModelProjection) RequestSpec(
 		},
 		RepairPolicy:       &lpxv1alpha1.RepairPolicy{Mode: lpxv1alpha1.RepairPolicyModeSamePlacement},
 		PropSyncConnectors: connectors,
-		TargetFamily:       lpxv1alpha1.TargetFamily(p.configuredBuild.Family),
+		TargetFamily:       lpxv1alpha1.TargetFamily(p.configuredBuild.family),
 		WorkloadMode:       p.schedulerWorkloadMode(),
 		ExecutionBackend:   lpxv1alpha1.ExecutionBackendNodeLocal,
 		NodeLocal: &lpxv1alpha1.NodeLocalRequest{
@@ -160,13 +170,13 @@ func (p *ModelProjection) RequestSpec(
 // schedulerWorkloadMode translates the normalized build family and pipeline at the LPX wire boundary.
 func (p *ModelProjection) schedulerWorkloadMode() lpxv1alpha1.WorkloadMode {
 	// HX and XT have separate wire values for the same two runtime shapes.
-	if p.configuredBuild.Family == BuildFamilyHX {
-		if p.pipeline == PipelineLPX {
+	if p.configuredBuild.family == BuildFamilyHX {
+		if p.pipeline == PipelineHybrid {
 			return lpxv1alpha1.WorkloadModeV3HxStrictHybrid
 		}
 		return lpxv1alpha1.WorkloadModeV3HxLPUOnly
 	}
-	if p.pipeline == PipelineLPX {
+	if p.pipeline == PipelineHybrid {
 		return lpxv1alpha1.WorkloadModeV2StrictHybrid
 	}
 	return lpxv1alpha1.WorkloadModeV2LPUOnly

@@ -16,8 +16,10 @@ import sys
 import types
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
+from enum import IntEnum
 
 import pytest
+import xgrammar as xgr
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
 from _thinking_parity import RESOLVED_DISABLED, RESOLVED_ENABLED, THINKING_PARITY_CASES
 from _tool_guidance_parity import (
@@ -28,12 +30,22 @@ from _tool_guidance_parity import (
     tool_choice_value,
 )
 from jinja2.exceptions import TemplateError, UndefinedError
+from sglang.srt.constrained.reasoner_grammar_backend import ReasonerGrammarObject
+from sglang.srt.constrained.xgrammar_backend import (
+    XGrammarGrammar,
+    XGrammarGrammarBackend,
+)
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 import dynamo.frontend.sglang_prepost as sglang_prepost_module
 import dynamo.frontend.sglang_processor as sglang_processor_module
+from dynamo.common.backend.logprobs import (
+    build_sglang_logprob_kwargs,
+    extract_from_sglang_meta,
+    extract_prompt_logprobs_from_sglang_meta,
+)
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
@@ -69,7 +81,7 @@ from dynamo.frontend.utils import (
     random_call_id,
     random_uuid,
 )
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 from dynamo.sglang.thinking_budget import apply_thinking_budget
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
@@ -94,6 +106,20 @@ def tokenizer():
 
 
 @pytest.fixture(scope="module")
+def tool_grammar_compiler(tokenizer):
+    return xgr.GrammarCompiler(
+        xgr.TokenizerInfo.from_huggingface(tokenizer), max_threads=1
+    )
+
+
+@pytest.fixture(scope="module")
+def tool_grammar_backend(tokenizer):
+    backend = XGrammarGrammarBackend(tokenizer, vocab_size=len(tokenizer))
+    yield backend
+    backend.executor.shutdown(wait=True)
+
+
+@pytest.fixture(scope="module")
 def byte_fallback_tokenizer():
     return get_tokenizer(BYTE_FALLBACK_MODEL)
 
@@ -105,6 +131,42 @@ def byte_fallback_tokenizer():
 
 class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc construction
     """Test sampling parameter projection from request to Dynamo format."""
+
+    @pytest.mark.parametrize(
+        "request_data,expected",
+        [
+            ({}, None),
+            ({"prompt_logprobs": None}, None),
+            ({"stream": True}, None),
+            ({"stream": True, "prompt_logprobs": None}, None),
+            ({"prompt_logprobs": 0}, 0),
+            ({"stream": False, "prompt_logprobs": 3}, 3),
+            ({"stream": True, "prompt_logprobs": 0}, None),
+            ({"stream": True, "prompt_logprobs": 3}, None),
+            (
+                {
+                    "stream": True,
+                    "prompt_logprobs": 0,
+                    "nvext": {"extra_fields": ["prompt_logprobs"]},
+                },
+                0,
+            ),
+            (
+                {
+                    "stream": True,
+                    "prompt_logprobs": 3,
+                    "nvext": {"extra_fields": ["prompt_logprobs"]},
+                },
+                3,
+            ),
+        ],
+    )
+    def test_prompt_logprobs_projection(self, request_data, expected):
+        request = {"model": "test", "messages": [], **request_data}
+        result = _build_dynamo_preproc(request, [1, 2], "test", None)
+        assert result["output_options"]["prompt_logprobs"] == expected
+        if expected is None:
+            assert build_sglang_logprob_kwargs(result["output_options"]) == {}
 
     def test_defaults(self):
         """Default sampling options when request has minimal fields."""
@@ -627,14 +689,44 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert result["output_options"]["logprobs"] == 0
 
     def test_logprobs_true_without_top_logprobs(self):
-        """logprobs=True without top_logprobs yields 1."""
+        """logprobs=True without top_logprobs asks for the sampled token only."""
         result = _build_dynamo_preproc(
             {"model": "test", "logprobs": True},
             [1],
             "test",
             None,
         )
-        assert result["output_options"]["logprobs"] == 1
+        assert result["output_options"]["logprobs"] == 0
+
+    @pytest.mark.parametrize("logprobs", [None, False, 3])
+    def test_top_logprobs_without_logprobs_true_is_rejected(self, logprobs):
+        with pytest.raises(PreprocessError, match="`logprobs` must be set to true"):
+            _build_dynamo_preproc(
+                {"model": "test", "logprobs": logprobs, "top_logprobs": 5},
+                [1],
+                "test",
+                None,
+            )
+
+    @pytest.mark.parametrize("logprobs", [False, None])
+    def test_zero_top_logprobs_without_logprobs_disables_logprobs(self, logprobs):
+        result = _build_dynamo_preproc(
+            {"model": "test", "logprobs": logprobs, "top_logprobs": 0},
+            [1],
+            "test",
+            None,
+        )
+        assert result["output_options"]["logprobs"] is None
+
+    @pytest.mark.parametrize("top_logprobs", [-1, True, "2"])
+    def test_invalid_top_logprobs_is_rejected(self, top_logprobs):
+        with pytest.raises(PreprocessError, match="must be an integer >= 0"):
+            _build_dynamo_preproc(
+                {"model": "test", "logprobs": True, "top_logprobs": top_logprobs},
+                [1],
+                "test",
+                None,
+            )
 
     def test_logprobs_integer(self):
         """Integer logprobs pass through."""
@@ -646,15 +738,20 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
         assert result["output_options"]["logprobs"] == 3
 
-    def test_logprobs_disabled(self):
-        """No logprobs yields None."""
+    @pytest.mark.parametrize(
+        "request_options",
+        [{}, {"logprobs": None}, {"logprobs": False, "top_logprobs": 0}],
+    )
+    def test_logprobs_disabled(self, request_options):
+        """Disabled logprobs must not enable backend computation."""
         result = _build_dynamo_preproc(
-            {"model": "test"},
+            {"model": "test", **request_options},
             [1],
             "test",
             None,
         )
         assert result["output_options"]["logprobs"] is None
+        assert build_sglang_logprob_kwargs(result["output_options"]) == {}
 
     def test_metadata_upload_nvext_is_forwarded_to_backend(self):
         result = _build_dynamo_preproc(
@@ -1077,6 +1174,42 @@ def _qwen_guided_request_without_separation(tool_choice):
 
 
 @pytest.mark.parametrize(
+    ("routed_error", "expected"),
+    [
+        (WorkerUnavailable("prefill routing is still activating"), WorkerUnavailable),
+        (RuntimeError("worker crashed"), Unknown),
+    ],
+)
+def test_routed_engine_rejection_keeps_worker_unavailable(
+    tokenizer, routed_error, expected
+):
+    class RejectingRoutedEngine(FakeRoutedEngine):
+        async def generate(self, preprocessed, **kwargs):
+            raise routed_error
+
+    processor = SglangProcessor(
+        tokenizer=tokenizer,
+        routed_engine=RejectingRoutedEngine(),
+        tool_call_parser_name="qwen25",
+        reasoning_parser_name="qwen3",
+        eos_token_ids=[tokenizer.eos_token_id],
+    )
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Say hello."}],
+        "max_tokens": 4,
+    }
+
+    async def collect():
+        return [item async for item in processor.generator(request)]
+
+    with pytest.raises(expected) as caught:
+        asyncio.run(collect())
+    if expected is WorkerUnavailable:
+        assert caught.value is routed_error
+
+
+@pytest.mark.parametrize(
     "tool_choice",
     [
         "required",
@@ -1281,6 +1414,10 @@ def test_kimi_k3_auto_tool_sets_reasoning_gate_pool(thinking, monkeypatch):
         sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
     )
     monkeypatch.setattr(sglang_processor_module, "_w_template_force_reasoning", False)
+    # Exercise enabled guidance independently of worker initialization or test order.
+    monkeypatch.setattr(sglang_processor_module, "_w_structural_tag_mode", "on")
+    monkeypatch.setattr(sglang_processor_module, "_w_structural_tag_scope", "always")
+    monkeypatch.setattr(sglang_processor_module, "_w_structural_tag_schema", "auto")
 
     request = {
         "model": "moonshotai/Kimi-K3",
@@ -1770,6 +1907,235 @@ class TestBuildResponseFormatGuidedDecoding:
         ) == {"structural_tag": response_format}
 
 
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        pytest.param("required", id="required"),
+        pytest.param(
+            {"type": "function", "function": {"name": "get_weather"}}, id="named"
+        ),
+    ],
+)
+def test_forced_structural_tag_returns_tool_call(
+    tokenizer, monkeypatch, use_pool, tool_choice
+):
+    """Native forced-tool guidance must be decoded into an API tool call."""
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "chat_template_kwargs": {"enable_thinking": False},
+        "stream": True,
+        "tool_choice": tool_choice,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+    }
+    native_call = (
+        "<tool_call>\n<function=get_weather>\n"
+        "<parameter=city>\nParis\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    engine = FakeRoutedEngine(
+        items=[{"token_ids": tokenizer.encode(native_call), "finish_reason": "stop"}]
+    )
+
+    if use_pool:
+        # Exercise the real worker and parser reconstruction without a subprocess.
+        monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_tool_call_parser_name", "qwen3_coder"
+        )
+        monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", None)
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+        )
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_template_force_reasoning", False
+        )
+        monkeypatch.setattr(sglang_processor_module, "_w_default_thinking_mode", None)
+        monkeypatch.setattr(sglang_processor_module, "_w_structural_tag_mode", "on")
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_structural_tag_scope", "always"
+        )
+        monkeypatch.setattr(sglang_processor_module, "_w_structural_tag_schema", "auto")
+
+    with ThreadPoolExecutor(max_workers=1) if use_pool else nullcontext() as pool:
+        processor = SglangProcessor(
+            tokenizer=tokenizer,
+            routed_engine=engine,
+            tool_call_parser_name="qwen3_coder",
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+            preprocess_pool=pool,
+            preprocess_workers=1 if use_pool else 0,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        async def collect():
+            return [item async for item in processor.generator(request)]
+
+        output = asyncio.run(collect())
+
+    # Check the actual installed guidance, not just the requested policy.
+    assert "structural_tag" in engine.requests[0]["sampling_options"]["guided_decoding"]
+    choices = [choice for item in output for choice in item["data"]["choices"]]
+    calls = [
+        call for choice in choices for call in choice["delta"].get("tool_calls", [])
+    ]
+    assert calls, output
+    assert {call["index"] for call in calls} == {0}
+    assert [
+        call["function"]["name"] for call in calls if call["function"].get("name")
+    ] == ["get_weather"]
+    assert json.loads(
+        "".join(call["function"].get("arguments", "") for call in calls)
+    ) == {"city": "Paris"}
+    assert not any(choice["delta"].get("content") for choice in choices)
+    assert choices[-1]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("tool_choice", ["auto", "required", "named"])
+@pytest.mark.parametrize("thinking", [False, True], ids=["chat", "thinking"])
+def test_tool_structural_tag_enforced_after_one_reasoning_boundary(
+    tokenizer, tool_grammar_compiler, tool_choice, thinking
+):
+    """The backend consumes reasoning; the inner grammar must enforce tools next."""
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "tools": [parity_tool()],
+        "tool_choice": tool_choice_value(tool_choice),
+        "chat_template_kwargs": {"enable_thinking": thinking},
+    }
+    pre = preprocess_chat_request(
+        request,
+        tokenizer=tokenizer,
+        tool_call_parser_name="qwen3_coder",
+        reasoning_parser_name="qwen3",
+        structural_tag_mode="on",
+        structural_tag_scope="always",
+    )
+    assert pre.force_reasoning is thinking
+    require_reasoning = _guided_output_requires_reasoning(
+        request, pre.force_reasoning, "qwen3", pre.guided_decoding
+    )
+    assert require_reasoning is thinking
+    assert pre.guided_decoding is not None
+    compiled = tool_grammar_compiler.compile_structural_tag(
+        pre.guided_decoding["structural_tag"]
+    )
+
+    def grammar_after_reasoning():
+        inner = XGrammarGrammar(
+            matcher=xgr.GrammarMatcher(compiled),
+            vocab_size=compiled.tokenizer_info.vocab_size,
+            ctx=compiled,
+            override_stop_tokens=None,
+        )
+        grammar = ReasonerGrammarObject(
+            inner, think_end_ids=tokenizer.encode("</think>", add_special_tokens=False)
+        )
+        grammar.maybe_init_reasoning(require_reasoning)
+        if thinking:
+            for token in tokenizer.encode(
+                "I should check the weather.</think>", add_special_tokens=False
+            ):
+                grammar.accept_token(token)
+            # The wrapper consumes the prefix, including the end marker.
+            assert inner.accepted_tokens == []
+        return grammar
+
+    native_call = (
+        "<tool_call>\n<function=get_weather>\n"
+        "<parameter=city>\nParis\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    grammar = grammar_after_reasoning()
+    for token in tokenizer.encode(native_call, add_special_tokens=False):
+        grammar.accept_token(token)
+    grammar.accept_token(tokenizer.eos_token_id)
+    assert grammar.is_terminated()
+
+    # A second reasoning prefix must not leave an undeclared tool unconstrained.
+    grammar = grammar_after_reasoning()
+    unknown_call = native_call.replace("get_weather", "undeclared_tool")
+    with pytest.raises(ValueError, match="Tokens not accepted"):
+        for token in tokenizer.encode(unknown_call, add_special_tokens=False):
+            grammar.accept_token(token)
+
+
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.filterwarnings(
+    "ignore:max_rollback_tokens is deprecated.*:DeprecationWarning"
+)
+@pytest.mark.parametrize("parser_name", ["qwen25", "qwen3_coder"])
+@pytest.mark.parametrize("tool_choice", ["auto", "required", "named"])
+def test_structural_tag_respects_named_tool_choice(
+    tool_grammar_backend, parser_name, tool_choice
+):
+    """A named choice excludes other declared tools, including legacy tags."""
+    raw_tools = [parity_tool(), parity_tool()]
+    raw_tools[1]["function"]["name"] = "get_forecast"
+    request = {
+        "tools": raw_tools,
+        "tool_choice": (
+            {"type": "function", "function": {"name": "get_forecast"}}
+            if tool_choice == "named"
+            else tool_choice
+        ),
+    }
+    guided = build_tool_call_guided_decoding(
+        request,
+        tool_call_parser_name=parser_name,
+        sglang_tools=convert_tools(raw_tools),
+        structural_tag_mode="on",
+        structural_tag_scope="always",
+    )
+    assert guided is not None
+    grammar = tool_grammar_backend.dispatch_structural_tag(
+        json.dumps(guided["structural_tag"])
+    )
+    assert isinstance(grammar, XGrammarGrammar)
+
+    def accepts_call(name):
+        if parser_name == "qwen25":
+            call = (
+                '<tool_call>\n{"name":"' + name + '", "arguments":'
+                '{"city":"Paris"}}\n</tool_call>'
+            )
+        else:
+            call = (
+                f"<tool_call>\n<function={name}>\n"
+                "<parameter=city>\nParis\n</parameter>\n"
+                "</function>\n</tool_call>"
+            )
+        return grammar.copy().matcher.accept_string(call)
+
+    assert accepts_call("get_forecast")
+    assert accepts_call("get_weather") is (tool_choice != "named")
+    assert [tool["function"]["name"] for tool in raw_tools] == [
+        "get_weather",
+        "get_forecast",
+    ]
+
+
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
     # Keep SGLang's guidance decisions aligned with the shared backend matrix.
     @pytest.mark.parametrize(
@@ -1798,6 +2164,8 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
             tokenizer=tokenizer,
             tool_call_parser_name="kimi_k2",
             reasoning_parser_name=None,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
         )
 
         assert (
@@ -1843,17 +2211,16 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
     def test_auto_tool_guidance_normalizes_minimax_m3_alias(
         self, monkeypatch, tokenizer
     ):
-        tools = convert_tools(
-            [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                }
-            ]
-        )
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        tools = convert_tools(raw_tools)
         seen = {}
 
         # Test double: capture the parser name used for guided decoding setup.
@@ -1872,13 +2239,68 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         )
 
         guided = build_tool_call_guided_decoding(
-            {"tool_choice": "auto"},
+            {"tool_choice": "auto", "tools": raw_tools},
             tool_call_parser_name="minimax_m3_nom",
             sglang_tools=tools,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
             tokenizer=tokenizer,
         )
 
         assert seen["tool_call_parser"] == "minimax-m3"
+        assert guided == {"structural_tag": {"type": "object"}}
+
+    @pytest.mark.parametrize(
+        "tool_choice_field",
+        [{}, {"tool_choice": None}, {"tool_choice": "auto"}],
+        ids=["omitted", "null", "auto"],
+    )
+    @pytest.mark.parametrize("scope", ["always", "auto"])
+    def test_null_tool_choice_uses_auto_structural_tag_policy(
+        self, monkeypatch, tool_choice_field, scope
+    ):
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ]
+        seen = {}
+
+        class FakeFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                pass
+
+            def get_structure_constraint(self, tool_choice, **kwargs):
+                seen["tool_choice"] = tool_choice
+                return "structural_tag", {"type": "object"}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            FakeFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {
+                **tool_choice_field,
+                "tools": raw_tools,
+                "parallel_tool_calls": False,
+            },
+            tool_call_parser_name="qwen3_coder",
+            sglang_tools=convert_tools(raw_tools),
+            structural_tag_mode="on",
+            structural_tag_scope=scope,
+        )
+
+        assert seen["tool_choice"] == "auto"
         assert guided == {"structural_tag": {"type": "object"}}
 
     def test_required_tool_choice_builds_json_schema_guidance(self):
@@ -1992,21 +2414,20 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
     def test_auto_tool_choice_supports_older_structure_constraint_signature(
         self, monkeypatch
     ):
-        tools = convert_tools(
-            [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "strict": True,
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                        },
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "strict": True,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
                     },
-                }
-            ]
-        )
+                },
+            }
+        ]
+        tools = convert_tools(raw_tools)
 
         class OldFunctionCallParser:
             def __init__(self, *, tools, tool_call_parser):
@@ -2024,39 +2445,164 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         )
 
         guided = build_tool_call_guided_decoding(
-            {"tool_choice": "auto", "parallel_tool_calls": False},
+            {
+                "tool_choice": "auto",
+                "parallel_tool_calls": False,
+                "tools": raw_tools,
+            },
             tool_call_parser_name="kimi_k2",
             sglang_tools=tools,
+            structural_tag_mode="on",
         )
 
         assert guided == {"structural_tag": {"type": "object"}}
 
     def test_auto_strict_tools_can_build_structural_tag_guidance(self):
-        tools = convert_tools(
-            [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "strict": True,
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                            "required": ["city"],
-                        },
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "strict": True,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
                     },
-                }
-            ]
-        )
+                },
+            }
+        ]
+        tools = convert_tools(raw_tools)
 
         guided = build_tool_call_guided_decoding(
-            {"tool_choice": "auto"},
+            {"tool_choice": "auto", "tools": raw_tools},
             tool_call_parser_name="kimi_k2",
             sglang_tools=tools,
+            structural_tag_mode="on",
+            structural_tag_scope="auto",
         )
 
         assert isinstance(guided, dict)
         assert "structural_tag" in guided
+
+    @pytest.mark.parametrize(
+        ("request_strict", "include_strict", "schema_mode", "expected_strict"),
+        [
+            (None, False, "auto", True),
+            (True, True, "auto", True),
+            (False, True, "auto", False),
+            (False, True, "strict", True),
+        ],
+    )
+    def test_structural_tag_guidance_uses_effective_schema_policy(
+        self,
+        monkeypatch,
+        request_strict,
+        include_strict,
+        schema_mode,
+        expected_strict,
+    ):
+        function = {
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            },
+        }
+        if include_strict:
+            function["strict"] = request_strict
+        raw_tools = [{"type": "function", "function": function}]
+        seen = {}
+
+        class FakeToolStrictLevel(IntEnum):
+            AUTO = 0
+            FUNCTION = 1
+
+        class CapturingFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                del tool_call_parser
+                seen["strict"] = tools[0].function.strict
+                self.tool_strict_level = FakeToolStrictLevel.AUTO
+
+            def get_structure_constraint(
+                self, tool_choice, *, parallel_tool_calls=None, thinking_mode=False
+            ):
+                del tool_choice, parallel_tool_calls
+                seen["thinking_mode"] = thinking_mode
+                seen["strict_level"] = self.tool_strict_level.name
+                return "structural_tag", {"type": "object"}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            CapturingFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "auto", "tools": raw_tools},
+            tool_call_parser_name="kimi_k2",
+            sglang_tools=convert_tools(raw_tools),
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema=schema_mode,
+        )
+
+        assert guided == {"structural_tag": {"type": "object"}}
+        assert seen == {
+            "strict": expected_strict,
+            "thinking_mode": False,
+            "strict_level": "FUNCTION",
+        }
+        assert function.get("strict") is request_strict
+
+    def test_mode_off_does_not_probe_auto_structural_tag(self, monkeypatch):
+        raw_tools = [parity_tool()]
+
+        class UnexpectedFunctionCallParser:
+            def __init__(self, **kwargs):
+                raise AssertionError(f"unexpected structural-tag probe: {kwargs}")
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            UnexpectedFunctionCallParser,
+        )
+
+        assert (
+            build_tool_call_guided_decoding(
+                {"tool_choice": "auto", "tools": raw_tools},
+                tool_call_parser_name="kimi_k2",
+                sglang_tools=convert_tools(raw_tools),
+                structural_tag_mode="off",
+                structural_tag_scope="always",
+            )
+            is None
+        )
+
+    def test_builder_error_uses_required_json_fallback(self, monkeypatch):
+        raw_tools = [parity_tool()]
+
+        class RaisingFunctionCallParser:
+            def __init__(self, **kwargs):
+                del kwargs
+                raise ValueError("unsupported schema")
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            RaisingFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "required", "tools": raw_tools},
+            tool_call_parser_name="kimi_k2",
+            sglang_tools=convert_tools(raw_tools),
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        assert guided is not None
+        assert set(guided) == {"json"}
 
     def test_tool_parser_requires_tools(self):
         """Tool parser is not created if no tools in request."""
@@ -2128,7 +2674,7 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         assert rp is not None
 
     def test_required_creates_json_array_parser(self):
-        """tool_choice='required' creates JsonArrayParser, not FunctionCallParser."""
+        """Required choice without structural-tag guidance keeps JsonArrayParser."""
         request = {
             "tools": [
                 {
@@ -2148,7 +2694,7 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         assert isinstance(tcp, JsonArrayParser)
 
     def test_named_tool_choice_creates_json_array_parser(self):
-        """Named tool_choice creates JsonArrayParser."""
+        """Named choice without structural-tag guidance keeps JsonArrayParser."""
         request = {
             "tools": [
                 {
@@ -3055,9 +3601,15 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             exclude_tools_when_tool_choice_none=True,
             chat_template="custom template",
             default_thinking_mode="disabled",
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema="strict",
         )
         assert sglang_processor_module._w_tokenizer.chat_template == "custom template"
         assert sglang_processor_module._w_default_thinking_mode == "disabled"
+        assert sglang_processor_module._w_structural_tag_mode == "on"
+        assert sglang_processor_module._w_structural_tag_scope == "always"
+        assert sglang_processor_module._w_structural_tag_schema == "strict"
 
     def test_with_reasoning_parser(self, tokenizer):
         """Reasoning parser is attached to result."""
@@ -4088,7 +4640,62 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             }
         ]
 
-    def _run_logprob_stream(self, items):
+    @pytest.mark.parametrize("count", [None, 0])
+    @pytest.mark.parametrize("include_nvext", [False, True])
+    def test_prompt_logprobs_survive_batched_output(self, count, include_nvext):
+        payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
+        processor = SglangProcessor(
+            tokenizer=self.ByteTokenizer(),
+            routed_engine=FakeRoutedEngine(
+                items=[
+                    {"token_ids": [ord("A")]},
+                    {
+                        "token_ids": [ord("B")],
+                        "engine_data": {"prompt_logprobs": payload},
+                    },
+                    {"token_ids": [], "finish_reason": "stop", "stop_reason": "END"},
+                ]
+            ),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+            stream_interval=20,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+        )
+        request = {"model": MODEL, "nvext": {"extra_fields": ["stop_reason"]}}
+        if count is not None:
+            request["prompt_logprobs"] = count
+        if include_nvext:
+            request["nvext"]["extra_fields"].append("prompt_logprobs")
+
+        async def collect():
+            return [
+                item["data"]
+                async for item in processor._generate_and_stream(
+                    "prompt-logprobs", request, {}, [], post
+                )
+                if "data" in item
+            ]
+
+        chunks = asyncio.run(collect())
+        assert len(chunks) == 2
+        assert "prompt_logprobs" not in chunks[0]
+        assert chunks[1].get("prompt_logprobs") == (
+            payload if count is not None else None
+        )
+        assert chunks[1]["nvext"].get("prompt_logprobs") == (
+            payload if include_nvext else None
+        )
+        assert chunks[1]["nvext"]["stop_reason"] == "END"
+        assert "prompt_logprobs" not in chunks[1]["choices"][0]
+
+    def _run_logprob_stream(self, items, request=None):
+        if request is None:
+            request = {"model": "test-model", "logprobs": True}
         processor = SglangProcessor(
             tokenizer=self.ByteTokenizer(),
             routed_engine=FakeRoutedEngine(items=items),
@@ -4107,12 +4714,91 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             return [
                 item["data"]
                 async for item in processor._generate_and_stream(
-                    "req-logprobs", {"model": "test-model"}, {}, [], post
+                    "req-logprobs", request, {}, [], post
                 )
                 if "data" in item
             ]
 
         return asyncio.run(collect())
+
+    @pytest.mark.parametrize(
+        "prompt_count,logprobs,top_logprobs,expected_top_count",
+        [
+            (0, None, None, None),
+            (0, False, None, None),
+            (0, True, 0, 0),
+            (3, True, None, 0),
+            (3, True, 1, 1),
+            (0, True, 3, 3),
+            (1, True, 3, 3),
+        ],
+    )
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_prompt_and_completion_logprob_counts_are_independent(
+        self, prompt_count, logprobs, top_logprobs, expected_top_count, stream
+    ):
+        request = {
+            "model": MODEL,
+            "prompt_logprobs": prompt_count,
+            "logprobs": logprobs,
+            "top_logprobs": top_logprobs,
+            "stream": stream,
+            "nvext": {"extra_fields": ["prompt_logprobs"]},
+        }
+        preproc = _build_dynamo_preproc(request, [1, 17], MODEL, None)
+        options = preproc["output_options"]
+        kwargs = build_sglang_logprob_kwargs(options)
+        assert kwargs["top_logprobs_num"] == max(prompt_count, expected_top_count or 0)
+        alternatives = [
+            (-0.1, ord("A"), "A"),
+            (-0.2, ord("B"), "B"),
+            (-0.3, ord("C"), "C"),
+        ][: kwargs["top_logprobs_num"]]
+        meta = {
+            "input_token_logprobs": [(None, 1, None), (-0.5, 17, "p")],
+            "input_top_logprobs": [None, alternatives],
+            "output_token_logprobs": [(-0.1, ord("A"), "A")],
+            "output_top_logprobs": [alternatives],
+        }
+        payload = extract_prompt_logprobs_from_sglang_meta(
+            meta, prompt_logprobs_count=options["prompt_logprobs"]
+        )
+        log_probs, output_top_logprobs = extract_from_sglang_meta(meta)
+        chunks = self._run_logprob_stream(
+            [
+                {
+                    "token_ids": [ord("A")],
+                    "log_probs": log_probs,
+                    "top_logprobs": output_top_logprobs,
+                    "finish_reason": "stop",
+                    "engine_data": {"prompt_logprobs": payload},
+                }
+            ],
+            request=request,
+        )
+        expected_prompt = [
+            None,
+            {
+                "17": {"logprob": -0.5, "decoded_token": "p"},
+                **{
+                    str(token_id): {"logprob": lp, "decoded_token": token}
+                    for lp, token_id, token in alternatives[:prompt_count]
+                },
+            },
+        ]
+        assert len(chunks) == 1
+        assert chunks[0]["nvext"]["prompt_logprobs"] == expected_prompt
+        if stream:
+            assert "prompt_logprobs" not in chunks[0]
+        else:
+            assert chunks[0]["prompt_logprobs"] == expected_prompt
+        completion_logprobs = chunks[0]["choices"][0]["logprobs"]
+        if expected_top_count is None:
+            assert completion_logprobs is None
+        else:
+            content = completion_logprobs["content"]
+            assert content[0]["token"] == "A"
+            assert len(content[0]["top_logprobs"]) == expected_top_count
 
     def test_missing_chunk_logprobs_do_not_drop_adjacent_logprobs(self):
         """A missing-logprob chunk is isolated from adjacent valid chunks."""
@@ -4273,9 +4959,43 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunks[0]["choices"][0]["finish_reason"] == "stop"
 
     @pytest.mark.parametrize("with_tool_parser", [False, True])
+    @pytest.mark.parametrize(
+        "backend_end",
+        [
+            "unrequested",
+            "metadata",
+            "empty",
+            "eof",
+            "error",
+            "error-finish",
+            "cancelled",
+        ],
+    )
+    @pytest.mark.parametrize("usage_mode", ["stream", "unary"])
     def test_processor_finishes_locally_without_stopping_parent_context(
-        self, with_tool_parser
+        self, with_tool_parser, backend_end, usage_mode
     ):
+        payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
+        terminal = {"token_ids": list(b"not-displayed"), "finish_reason": "stop"}
+        if backend_end == "metadata":
+            terminal["engine_data"] = {"prompt_logprobs": payload}
+            terminal["completion_usage"] = {
+                "prompt_tokens": 7,
+                "completion_tokens": 999,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            }
+        elif backend_end == "error":
+            terminal = FakeRoutedItem(
+                None, is_error=True, comments=["backend disconnected"]
+            )
+        elif backend_end == "error-finish":
+            terminal = {
+                "token_ids": [],
+                "finish_reason": "error: backend disconnected",
+                "engine_data": {"prompt_logprobs": payload},
+            }
+        elif backend_end == "cancelled":
+            terminal["finish_reason"] = "cancelled"
         routed_engine = FakeRoutedEngine(
             items=[
                 {
@@ -4288,8 +5008,8 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     "finish_reason": None,
                     "log_probs": [-0.4] * len(b"Dignored"),
                 },
-                {"token_ids": list(b"not-consumed"), "finish_reason": None},
             ]
+            + ([] if backend_end == "eof" else [terminal])
         )
         processor = SglangProcessor(
             tokenizer=self.ByteTokenizer(),
@@ -4322,19 +5042,29 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         async def collect():
             return [
-                item["data"]
+                item.get("data", item)
                 async for item in processor._generate_and_stream(
                     "req-stop",
                     {
                         "model": "test-model",
-                        "stream_options": {"include_usage": True},
+                        "stream": usage_mode == "stream",
+                        "nvext": (
+                            {"extra_fields": ["prompt_logprobs"]}
+                            if usage_mode == "stream" and backend_end != "unrequested"
+                            else {}
+                        ),
+                        "logprobs": True,
+                        "prompt_logprobs": None if backend_end == "unrequested" else 0,
+                        "stream_options": (
+                            {"include_usage": True} if usage_mode == "stream" else None
+                        ),
                     },
                     {},
                     [1, 2],
                     post,
                     context,
                 )
-                if "data" in item
+                if "data" in item or item.get("event") == "error"
             ]
 
         chunks = asyncio.run(collect())
@@ -4345,20 +5075,43 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             entry["token"] for entry in chunks[0]["choices"][0]["logprobs"]["content"]
         ] == ["A"]
         assert "usage" not in chunks[0]
+        assert not context.stopped
+        assert routed_engine.yielded == (
+            2 if backend_end in {"unrequested", "eof"} else 3
+        )
+        assert routed_engine.stream_released
+        assert len(chunks) == 2
+        if backend_end in {"error", "error-finish"}:
+            assert chunks[1]["event"] == "error"
+            assert "backend disconnected" in chunks[1]["comment"][0]
+            return
         assert chunks[1]["choices"][0]["delta"] == {}
         assert chunks[1]["choices"][0]["finish_reason"] == "stop"
         assert chunks[1]["choices"][0]["logprobs"] is None
-        assert chunks[1]["usage"] == {
-            "prompt_tokens": 2,
+        expected_usage = {
+            "prompt_tokens": 7 if backend_end == "metadata" else 2,
             "completion_tokens": 11,
-            "total_tokens": 13,
+            "total_tokens": 18 if backend_end == "metadata" else 13,
         }
-        assert not context.stopped
-        assert routed_engine.yielded == 2
-        assert routed_engine.stream_released
-        assert len(chunks) == 2
+        if backend_end == "metadata":
+            expected_usage["prompt_tokens_details"] = {"cached_tokens": 0}
+        assert chunks[1]["usage"] == expected_usage
+        if backend_end == "metadata":
+            assert chunks[1]["llm_metrics"]["cached_tokens"] == 0
+            assert chunks[1]["llm_metrics"]["input_tokens"] == 2
+            assert chunks[1]["llm_metrics"]["output_tokens"] == 11
+        projected_logprobs = (
+            chunks[1].get("nvext", {}).get("prompt_logprobs")
+            if usage_mode == "stream"
+            else chunks[1].get("prompt_logprobs")
+        )
+        assert projected_logprobs == (payload if backend_end == "metadata" else None)
 
-    def test_logprob_shape_flush_finishes_without_stopping_parent_context(self):
+    @pytest.mark.parametrize("include_prompt_logprobs", [False, True])
+    def test_logprob_shape_flush_finishes_without_stopping_parent_context(
+        self, include_prompt_logprobs
+    ):
+        payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
         routed_engine = FakeRoutedEngine(
             items=[
                 {"token_ids": list(b"A"), "finish_reason": None},
@@ -4368,7 +5121,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     "finish_reason": None,
                     "log_probs": [-0.1],
                 },
-                {"token_ids": list(b"not-consumed"), "finish_reason": None},
+                {
+                    "token_ids": list(b"not-displayed"),
+                    "finish_reason": "stop",
+                    "engine_data": {"prompt_logprobs": payload},
+                },
             ]
         )
         processor = SglangProcessor(
@@ -4401,6 +5158,13 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     "req-stop",
                     {
                         "model": "test-model",
+                        "logprobs": True,
+                        "stream": True,
+                        "nvext": {
+                            "extra_fields": ["prompt_logprobs"]
+                            if include_prompt_logprobs
+                            else []
+                        },
                         "stream_options": {"include_usage": True},
                     },
                     {},
@@ -4422,9 +5186,12 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             "total_tokens": 6,
         }
         assert not context.stopped
-        assert routed_engine.yielded == 3
+        assert routed_engine.yielded == (4 if include_prompt_logprobs else 3)
         assert routed_engine.stream_released
         assert len(chunks) == 2
+        assert chunks[1].get("nvext", {}).get("prompt_logprobs") == (
+            payload if include_prompt_logprobs else None
+        )
 
     def test_split_stop_string_suffix_is_not_emitted(self, tokenizer):
         post = SglangStreamingPostProcessor(
@@ -4932,7 +5699,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             return [
                 item["data"]
                 async for item in processor._generate_and_stream(
-                    "req-length", {"model": "test-model"}, {}, [], post
+                    "req-length",
+                    {"model": "test-model", "logprobs": True},
+                    {},
+                    [],
+                    post,
                 )
                 if "data" in item
             ]
