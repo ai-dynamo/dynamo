@@ -395,6 +395,8 @@ vllm:
   - '!**/*.rst'
 
 sglang:
+  - 'tests/deploy/*rolling*.py'
+  - 'tests/deploy/n2/rolling_*.py'
   - 'container/deps/sglang/**'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang*/**'
@@ -428,6 +430,8 @@ sample:
   - '!**/*.rst'
 
 frontend:
+  - 'tests/deploy/*rolling*.py'
+  - 'tests/deploy/n2/rolling_*.py'
   - *ci
   - '.cargo/config.toml'
   - 'lib/**'

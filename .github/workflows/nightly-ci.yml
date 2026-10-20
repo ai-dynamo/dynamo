@@ -702,6 +702,18 @@ jobs:
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
 
+  rolling-upgrade-compatibility:
+    name: SGLang N-2 rolling upgrade
+    needs: [compute-release-mode, operator-build, sglang-copy-to-acr, frontend-copy-to-acr, resolve-source-sha]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: $/.github/workflows/rolling-upgrade-compatibility.yml
+    with:
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+      worker_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+      operator_tag: ${{ needs.operator-build.outputs.operator_default_tag }}
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+    secrets: inherit
+
   deploy-cleanup:
     name: Nightly Deploy Cleanup
     if: always()
