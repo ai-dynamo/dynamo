@@ -60,7 +60,7 @@ env:
 jobs:
   check-issue-link:
     name: Require an issue link
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: ${{ github.event_name == 'pull_request_target' && !github.event.pull_request.draft }}
     permissions:
       contents: read
@@ -87,7 +87,7 @@ jobs:
 
   unit-tests:
     name: Unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read

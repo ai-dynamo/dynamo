@@ -75,6 +75,7 @@ class FakeApi:
         titles: dict[str, str] | None = None,
         default_github: tuple[bool, bool] = (False, True),
         default_linear: tuple[bool, bool] = (False, True),
+        write_access: bool = False,
     ) -> None:
         self.github = github or {}
         self.deps = set(deps or ())
@@ -83,9 +84,11 @@ class FakeApi:
         self.linear = linear or {}
         self.default_github = default_github
         self.default_linear = default_linear
+        self.write_access = write_access
         self.github_calls: list[str] = []
         self.repo_calls: list[str] = []
         self.linear_calls: list[str] = []
+        self.permission_calls: list[str] = []
 
     def verify_github_issue(
         self, repo: str, number: str, token: str
@@ -103,6 +106,10 @@ class FakeApi:
         self.linear_calls.append(identifier)
         return self.linear.get(identifier, self.default_linear)
 
+    def has_repo_write_permission(self, repo: str, username: str, token: str) -> bool:
+        self.permission_calls.append(f"{repo}:{username}")
+        return self.write_access
+
 
 def run(
     monkeypatch: pytest.MonkeyPatch, api: FakeApi | None = None, **env: str
@@ -112,6 +119,9 @@ def run(
     monkeypatch.setattr(pr_issue_link, "verify_github_issue", api.verify_github_issue)
     monkeypatch.setattr(pr_issue_link, "repo_visible", api.repo_visible)
     monkeypatch.setattr(pr_issue_link, "verify_linear_issue", api.verify_linear_issue)
+    monkeypatch.setattr(
+        pr_issue_link, "has_repo_write_permission", api.has_repo_write_permission
+    )
     # The runner sets GITHUB_STEP_SUMMARY; leaving it set would make these
     # tests append to the real job summary.
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
@@ -457,7 +467,48 @@ def test_untrusted_fork_does_not_verify_linear_identifiers(
     )
     assert code == 1
     assert api.linear_calls == []
+    assert api.permission_calls == [f"{REPO}:someone"]
     assert "cannot be" in capsys.readouterr().out
+
+
+def test_repo_writer_on_a_fork_can_verify_linear_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeApi(linear={"DYN-1234": (True, True)}, write_access=True)
+    code, api = run(
+        monkeypatch,
+        api,
+        PR_BODY="Closes DYN-1234",
+        PR_HEAD_REPO="contributor/dynamo",
+        PR_AUTHOR_ASSOCIATION="CONTRIBUTOR",
+    )
+    assert code == 0
+    assert api.permission_calls == [f"{REPO}:someone"]
+    assert api.linear_calls == ["DYN-1234"]
+
+
+@pytest.mark.parametrize(
+    ("status", "permission", "expected"),
+    [(200, "write", True), (200, "read", False), (0, "write", False)],
+)
+def test_repository_permission_check_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    permission: str,
+    expected: bool,
+) -> None:
+    def fake_http_json(url: str, headers: dict[str, str]) -> tuple[int, dict]:
+        assert (
+            url
+            == f"https://api.github.com/repos/{REPO}/collaborators/someone/permission"
+        )
+        assert headers["Authorization"] == "Bearer gh-token"
+        return status, {"permission": permission}
+
+    monkeypatch.setattr(pr_issue_link, "http_json", fake_http_json)
+    assert (
+        pr_issue_link.has_repo_write_permission(REPO, "someone", "gh-token") is expected
+    )
 
 
 def test_org_author_on_a_fork_still_verifies_linear_identifiers(
