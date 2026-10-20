@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import uuid
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -299,6 +300,7 @@ from kvbm.vllm_integration.gpu_memory import open_region
 region = open_region(__import__('sys').argv[1], (4,256))
 region.fill_(37)
 torch.cuda.synchronize()
+del region
 """
         result = subprocess.run(
             [sys.executable, "-c", script, engine_id],
@@ -309,6 +311,8 @@ torch.cuda.synchronize()
             env=dict(os.environ),
         )
         assert result.returncode == 0, result.stderr
+        assert "shared CUDA tensors released" not in result.stderr
+        assert "could not unlink" not in result.stderr
         assert bool(torch.all(region.tensor == 37).item())
     finally:
         region.cleanup()
@@ -358,6 +362,13 @@ def test_mixed_bank_d2d_roundtrip_preserves_permuted_slots_and_guards():
         assert torch.equal(originals[0][2], expected[0][2])
         assert torch.equal(originals[1][3], expected[1][3])
         assert bool(torch.all(region.tensor[0] == 0).item())
+        handler_refs = [weakref.ref(handler) for handler in worker.handlers]
+        view_ref = weakref.ref(worker.handlers[0].dst_tensors[0])
+        worker.shutdown()
+        # Correct teardown must release CUDA views without a garbage-collection
+        # pass; a retained bound-method cycle otherwise outlives IPC globals.
+        assert all(reference() is None for reference in handler_refs)
+        assert view_ref() is None
     finally:
         worker.shutdown()
         region.cleanup()

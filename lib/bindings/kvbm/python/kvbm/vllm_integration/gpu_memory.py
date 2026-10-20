@@ -229,6 +229,13 @@ class GPUCacheCopyHandler(SingleDirectionOffloadingHandler):
         self._event_pool = []
         self._buffer_pool = []
 
+    def shutdown(self):
+        super().shutdown()
+        # The parent releases CUDA views after successful event synchronization.
+        # Break the remaining bound-method cycle so this handler also retires
+        # deterministically, without a garbage-collection pass.
+        self._fill_group_ops = None
+
 
 class GPUCacheWorker(OffloadingWorker):
     def __init__(self, spec, caches):
