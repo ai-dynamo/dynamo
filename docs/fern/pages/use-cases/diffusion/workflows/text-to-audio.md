@@ -102,6 +102,9 @@ Audex serves a single built-in voice, so it accepts `voice` only when omitted or
 
 ## Parameters
 
+Intermediate engine updates containing only sample-rate metadata do not interrupt
+speech generation. A request that finishes without generating audio still fails.
+
 The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/) API format. TTS-specific parameters are top-level fields, except single-model knobs, which ride in `nvext`:
 
 <ParamField path="input" type="string" required={true}>
