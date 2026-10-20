@@ -13,6 +13,7 @@
 //! See `CLAUDE.md` in this crate for the design contract.
 
 mod adapter;
+pub mod admission;
 pub mod args;
 pub mod disagg;
 pub mod engine;
@@ -30,6 +31,7 @@ mod topology;
 mod validate;
 pub mod worker;
 
+pub use admission::{AdmissionBinding, AdmissionStatus, AdmissionTarget, WorkerAdmission};
 pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
 pub use dynamo_llm::model_type::ModelInput;

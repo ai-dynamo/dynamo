@@ -33,6 +33,7 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
 
 use crate::adapter::{EngineAdapter, RawEngineAdapter};
+use crate::admission::{AdmissionTarget, WorkerAdmission};
 use crate::disagg::DisaggregationMode;
 use crate::engine::{
     EngineConfig, EngineRecovery, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
@@ -302,6 +303,7 @@ struct EngineRouteRecovery {
     generation: tokio::sync::watch::Sender<CancellationToken>,
     resumes: tokio::sync::watch::Sender<CancellationToken>,
     is_routing_enabled: AtomicBool,
+    admission: Option<WorkerAdmission>,
 }
 
 impl Default for EngineRouteRecovery {
@@ -310,6 +312,7 @@ impl Default for EngineRouteRecovery {
             generation: tokio::sync::watch::channel(CancellationToken::new()).0,
             resumes: tokio::sync::watch::channel(CancellationToken::new()).0,
             is_routing_enabled: AtomicBool::new(true),
+            admission: None,
         }
     }
 }
@@ -505,8 +508,8 @@ pub struct Worker {
     engine: EngineKind,
     config: WorkerConfig,
     state: LifecycleState,
-    /// Gates administrative engine routes so they cannot run before the serving
-    /// endpoint is registered or after shutdown begins. Concurrent read guards
+    /// Gates administrative engine routes until the request listener and engine
+    /// are initialized, and after shutdown begins. Concurrent read guards
     /// let independent routes run in parallel while shutdown waits for accepted
     /// Rust route futures to exit.
     engine_route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
@@ -539,6 +542,16 @@ impl Worker {
     /// (image/video/audio generation).
     pub fn new_raw(engine: Arc<dyn RawEngine>, config: WorkerConfig) -> Self {
         Self::with_engine(EngineKind::Raw(engine), config)
+    }
+
+    /// Opt into controller-managed admission. The backend must publish authoritative
+    /// engine/topology bindings through this handle; controller grants cannot create them.
+    pub fn with_admission(mut self, admission: WorkerAdmission) -> Self {
+        self.engine_route_recovery = Arc::new(EngineRouteRecovery {
+            admission: Some(admission),
+            ..Default::default()
+        });
+        self
     }
 
     fn with_engine(engine: EngineKind, config: WorkerConfig) -> Self {
@@ -978,10 +991,124 @@ impl Worker {
         *lifecycle = EngineRouteLifecycle::Running;
     }
 
+    fn register_admission_routes(&self, endpoint: &dynamo_runtime::component::Endpoint) {
+        let Some(admission) = &self.engine_route_recovery.admission else {
+            return;
+        };
+        // These worker-owned controls must remain reachable before discovery and during recovery.
+        let status = admission.clone();
+        endpoint.drt().engine_routes().register(
+            "admission/status",
+            Arc::new(move |_| {
+                let status = status.observe();
+                Box::pin(async move { Ok(serde_json::to_value(status)?) })
+            }),
+        );
+        let admission = admission.clone();
+        let shutdown = self.engine_route_shutdown.clone();
+        endpoint.drt().engine_routes().register(
+            "admission/target",
+            Arc::new(move |body| {
+                let admission = admission.clone();
+                let shutdown = shutdown.clone();
+                Box::pin(async move {
+                    if shutdown.is_cancelled() {
+                        return Ok(engine_route_lifecycle_error(
+                            EngineRouteLifecycle::ShuttingDown,
+                        ));
+                    }
+                    let target = match serde_json::from_value::<AdmissionTarget>(body) {
+                        Ok(target) => target,
+                        Err(error) => return Ok(control_error_response(error.to_string())),
+                    };
+                    if let Err(error) = admission.apply(target) {
+                        return Ok(serde_json::json!({
+                            "status": "error", "message": error.to_string(),
+                            "retryable": matches!(error.error_type(), ErrorType::Backend(BackendError::CannotConnect)),
+                            "admission": admission.observe(),
+                        }));
+                    }
+                    Ok(serde_json::json!({"status": "accepted", "admission": admission.observe()}))
+                })
+            }),
+        );
+    }
+
+    async fn reconcile_admission(
+        &self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        let Some(admission) = &self.engine_route_recovery.admission else {
+            return Ok(());
+        };
+        let _mutation = self.engine_route_mutation.lock().await;
+        let target = if self
+            .engine_route_recovery
+            .is_routing_enabled
+            .load(Ordering::Acquire)
+            && !self.engine_route_shutdown.is_cancelled()
+        {
+            admission.registration_target()
+        } else {
+            None
+        };
+        if target.is_some() {
+            self.engine.on_recovery_complete().await?;
+        }
+        if let Some(target) =
+            target.filter(|candidate| admission.registration_target().as_ref() == Some(candidate))
+        {
+            endpoint
+                .register_endpoint_instance()
+                .await
+                .map_err(|error| {
+                    err(
+                        ErrorType::Backend(BackendError::CannotConnect),
+                        format!("register admitted worker: {error}"),
+                    )
+                })?;
+            // Target/binding changes remain nonblocking while discovery I/O is in flight.
+            let consistent = match self.engine.on_recovery_complete().await {
+                Ok(()) => true,
+                Err(error) => {
+                    admission.invalidate();
+                    tracing::warn!(%error, "Engine changed during admission; withdrawing worker");
+                    false
+                }
+            };
+            if consistent && admission.confirm_registration(&target) {
+                set_worker_health(endpoint, HealthStatus::Ready);
+                return Ok(());
+            }
+        }
+        admission.clear_registration();
+        set_worker_health(endpoint, HealthStatus::NotReady);
+        endpoint
+            .unregister_endpoint_instance()
+            .await
+            .map_err(|error| {
+                err(
+                    ErrorType::Backend(BackendError::CannotConnect),
+                    format!("withdraw unadmitted worker: {error}"),
+                )
+            })?;
+        if let Some(withdrawal) = admission
+            .observe()
+            .accepted
+            .filter(|target| !target.admitted)
+        {
+            admission.confirm_withdrawal(&withdrawal);
+        }
+        Ok(())
+    }
+
     async fn begin_engine_recovery(
         &self,
         endpoint: &dynamo_runtime::component::Endpoint,
     ) -> Result<(), DynamoError> {
+        if let Some(admission) = &self.engine_route_recovery.admission {
+            admission.invalidate();
+        }
         self.engine_route_recovery.generation.borrow().cancel();
         set_worker_health(endpoint, HealthStatus::NotReady);
         let _mutation = self.engine_route_mutation.lock().await;
@@ -1014,6 +1141,7 @@ impl Worker {
             .engine_route_recovery
             .is_routing_enabled
             .load(Ordering::Acquire)
+            && self.engine_route_recovery.admission.is_none()
         {
             endpoint.register_endpoint_instance().await.map_err(|e| {
                 err(
@@ -1024,6 +1152,9 @@ impl Worker {
             set_worker_health(endpoint, HealthStatus::Ready);
         }
         *lifecycle = EngineRouteLifecycle::Running;
+        if let Some(admission) = &self.engine_route_recovery.admission {
+            admission.set_engine_ready(true);
+        }
         self.engine_route_recovery
             .generation
             .send_replace(CancellationToken::new());
@@ -1073,6 +1204,9 @@ impl Worker {
                 Ok(()) => return Ok(config),
                 Err(error) => error,
             };
+            if let Some(admission) = &self.engine_route_recovery.admission {
+                admission.invalidate();
+            }
             self.stop_kv_publishers().await?;
             config = match self.engine.recover_startup().await? {
                 Some(config) => config,
@@ -1134,6 +1268,9 @@ impl Worker {
 
     async fn begin_engine_route_shutdown(&self) {
         self.engine_route_shutdown.cancel();
+        if let Some(admission) = &self.engine_route_recovery.admission {
+            admission.set_engine_ready(false);
+        }
         let _mutation = self.engine_route_mutation.lock().await;
         let mut lifecycle = self.engine_route_lifecycle.write().await;
         *lifecycle = EngineRouteLifecycle::ShuttingDown;
@@ -1240,6 +1377,14 @@ impl Worker {
         endpoint: dynamo_runtime::component::Endpoint,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
+        let admission = self.engine_route_recovery.admission.clone();
+        if admission.is_some() && self.config.enable_rl {
+            return Err(err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                "managed admission currently supports one serving endpoint, without RL discovery",
+            ));
+        }
+        self.register_admission_routes(&endpoint);
         // Initial serving remains gated across failed startup, engine shutdown,
         // and reconnect. Every retry attaches fresh listeners and local indexes.
         let readiness_hold = ReadinessHold::take(endpoint.drt().system_health(), endpoint.name());
@@ -1301,6 +1446,9 @@ impl Worker {
         self.register_engine_updates(&endpoint).await?;
         self.register_model_taint_update_route(&endpoint);
         self.engine.on_recovery_complete().await?;
+        if let Some(admission) = &admission {
+            admission.set_engine_ready(true);
+        }
 
         let served = resolve_served_name(&self.config, engine_config)
             .unwrap_or_else(|| engine_config.model.clone());
@@ -1324,7 +1472,8 @@ impl Worker {
         ) = match &self.engine {
             EngineKind::Llm(engine) => {
                 let mut engine_adapter =
-                    EngineAdapter::new(engine.clone(), self.config.disaggregation_mode);
+                    EngineAdapter::new(engine.clone(), self.config.disaggregation_mode)
+                        .with_admission(admission.clone());
                 if let Some(source) = self
                     .publishers
                     .as_ref()
@@ -1351,7 +1500,9 @@ impl Worker {
                 (ingress, probe)
             }
             EngineKind::Raw(engine) => {
-                let raw_adapter = Arc::new(RawEngineAdapter::new(engine.clone()));
+                let raw_adapter = Arc::new(
+                    RawEngineAdapter::new(engine.clone()).with_admission(admission.clone()),
+                );
                 let ingress = Ingress::for_engine(raw_adapter.clone()).map_err(|e| {
                     err(
                         ErrorType::Backend(BackendError::Unknown),
@@ -1417,7 +1568,13 @@ impl Worker {
                 )
             })?;
         }
-        let start_fut = builder.start_with_registration();
+        let start_fut = async {
+            if admission.is_some() {
+                builder.start_without_registration().await
+            } else {
+                builder.start_with_registration().await
+            }
+        };
         tokio::pin!(start_fut);
         let primary_endpoint = tokio::select! {
             biased;
@@ -1452,8 +1609,7 @@ impl Worker {
             return Ok(());
         }
 
-        // Administrative routes are registered above, but remain gated until
-        // the exact primary discovery instance is callable.
+        // The listener is initialized; managed workers may still be absent from discovery.
         self.activate_engine_routes().await;
 
         let rl_endpoint = if let Some(rl_config) = rl_config {
@@ -1497,26 +1653,65 @@ impl Worker {
             return Ok(());
         }
 
-        // First instant the worker is serviceable: every mandatory endpoint is
-        // registered, the token is uncancelled, and engine routes are open. The
-        // hold taken before registration is what kept the runtime from reporting
-        // ready before this point; drop it here, because the write below
-        // publishes readiness through the very signal it suppresses.
+        // Managed workers publish readiness only after permission and registration converge.
         drop(readiness_hold);
-        set_worker_health(&endpoint, HealthStatus::Ready);
+        set_worker_health(
+            &endpoint,
+            if admission.is_some() {
+                HealthStatus::NotReady
+            } else {
+                HealthStatus::Ready
+            },
+        );
 
         let serve_fut = primary_endpoint.wait();
         tokio::pin!(serve_fut);
 
+        let mut admission_changes = admission.as_ref().map(WorkerAdmission::subscribe);
+        let engine = self.engine.clone();
+        let availability_watch = engine.wait_for_unavailable();
+        tokio::pin!(availability_watch);
         let serve_result = loop {
-            let engine = self.engine.clone();
-            let unavailable = tokio::select! {
+            let mut unavailable = None;
+            if let Some(changes) = &mut admission_changes {
+                changes.borrow_and_update();
+                let reconciled = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break Ok(()),
+                    result = &mut serve_fut => break result.map_err(|error| {
+                        err(ErrorType::Backend(BackendError::Unknown), format!("serve during admission: {error}"))
+                    }),
+                    result = &mut availability_watch => {
+                        unavailable = Some(result);
+                        Ok(())
+                    },
+                    result = self.reconcile_admission(&endpoint) => result,
+                };
+                if let Err(error) = reconciled {
+                    break Err(error);
+                }
+            }
+            let unavailable = match unavailable {
+                Some(result) => result,
+                None => tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => break Ok(()),
                 result = &mut serve_fut => break result.map_err(|e| {
                     err(ErrorType::Backend(BackendError::Unknown), format!("serve: {e}"))
                 }),
-                result = engine.wait_for_unavailable() => result,
+                changed = async {
+                    match &mut admission_changes {
+                        Some(changes) => changes.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Err(error) = changed {
+                        break Err(err(ErrorType::Backend(BackendError::Unknown), format!("admission observation ended: {error}")));
+                    }
+                    continue;
+                },
+                result = &mut availability_watch => result,
+                },
             };
             if let Err(error) = unavailable {
                 tracing::warn!(%error, "engine availability watch failed; withdrawing worker");
@@ -1540,10 +1735,12 @@ impl Worker {
                 .engine_route_recovery
                 .is_routing_enabled
                 .load(Ordering::Acquire)
+                && admission.is_none()
             {
                 set_worker_health(&endpoint, HealthStatus::Ready);
             }
             tracing::info!("Engine recovery complete");
+            availability_watch.set(engine.wait_for_unavailable());
         };
 
         // Cancel accepted Rust route futures, wait for their shared lifecycle
@@ -2132,6 +2329,9 @@ fn wrap_engine_control_callback(
                             Ok(lifecycle) => lifecycle,
                             Err(response) => return Ok(response),
                         };
+                    if let Some(admission) = &route_recovery.admission {
+                        admission.clear_registration();
+                    }
                     let unregister_result = tokio::select! {
                         biased;
                         _ = route_shutdown.cancelled() => {
@@ -2207,6 +2407,14 @@ fn wrap_engine_control_callback(
                                 "engine control completed but the engine is not serving-ready; leaving endpoint unregistered"
                             );
                         }
+                        return Ok(response);
+                    }
+                    if let Some(admission) = &route_recovery.admission {
+                        // Resume changes operator intent, never controller permission.
+                        route_recovery
+                            .is_routing_enabled
+                            .store(true, Ordering::Release);
+                        admission.notify();
                         return Ok(response);
                     }
                     let register_result = tokio::select! {
@@ -3964,6 +4172,413 @@ mod handoff_and_lifecycle_tests {
             .component("lifecycle_comp")
             .unwrap()
             .endpoint("generate")
+    }
+
+    fn admission_target(
+        admission: &WorkerAdmission,
+        revision: i64,
+        admitted: bool,
+    ) -> AdmissionTarget {
+        let status = admission.observe();
+        AdmissionTarget {
+            control_revision: revision,
+            worker_instance_id: status.worker_instance_id,
+            group_id: status.group_id,
+            native_member_id: status.native_member_id,
+            binding: status.binding.unwrap(),
+            admitted,
+        }
+    }
+
+    async fn is_discoverable(endpoint: &dynamo_runtime::component::Endpoint) -> bool {
+        let id = endpoint.id();
+        !endpoint
+            .drt()
+            .discovery()
+            .list(DiscoveryQuery::Endpoint {
+                namespace: id.namespace,
+                component: id.component,
+                endpoint: id.name,
+            })
+            .await
+            .unwrap()
+            .is_empty()
+    }
+
+    async fn wait_for_discovery(endpoint: &dynamo_runtime::component::Endpoint, expected: bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while is_discoverable(endpoint).await != expected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn managed_startup_is_closed_and_exact_replays_repair_discovery_drift() {
+        let endpoint = test_local_endpoint().await;
+        let admission = WorkerAdmission::new("group-1".into(), "dp-0".into()).unwrap();
+        admission
+            .bind(crate::AdmissionBinding {
+                engine_instance_id: "engine-1".into(),
+                topology_generation: 1,
+            })
+            .unwrap();
+        let (engine, _) = HandoffMockEngine::new(false, Vec::new(), Vec::new());
+        let mut worker =
+            Worker::new(engine, WorkerConfig::default()).with_admission(admission.clone());
+        let shutdown = CancellationToken::new();
+        let serve = tokio::spawn({
+            let endpoint = endpoint.clone();
+            let shutdown = shutdown.clone();
+            async move {
+                worker
+                    .serve_with_orchestrator(
+                        &EngineConfig {
+                            model: "managed".into(),
+                            ..Default::default()
+                        },
+                        endpoint,
+                        shutdown,
+                    )
+                    .await
+            }
+        });
+        let mut observation = admission.subscribe();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            observation.wait_for(|status| status.engine_ready),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let routes = endpoint.drt().engine_routes();
+        let status = routes.get("admission/status").unwrap()(serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(status["engine_ready"], true);
+        assert!(status["observed"].is_null());
+        assert!(!is_discoverable(&endpoint).await);
+
+        let grant = admission_target(&admission, 1, true);
+        let response =
+            routes.get("admission/target").unwrap()(serde_json::to_value(&grant).unwrap())
+                .await
+                .unwrap();
+        assert_eq!(response["status"], "accepted");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            observation.wait_for(|status| status.observed.as_ref() == Some(&grant)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(is_discoverable(&endpoint).await);
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        assert!(!is_discoverable(&endpoint).await);
+        routes.get("admission/target").unwrap()(serde_json::to_value(&grant).unwrap())
+            .await
+            .unwrap();
+        wait_for_discovery(&endpoint, true).await;
+
+        let withdrawal = admission_target(&admission, 2, false);
+        routes.get("admission/target").unwrap()(serde_json::to_value(&withdrawal).unwrap())
+            .await
+            .unwrap();
+        assert!(!admission.is_admitted());
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            observation.wait_for(|status| status.observed.as_ref() == Some(&withdrawal)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        wait_for_discovery(&endpoint, false).await;
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(30), serve)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_and_recovery_do_not_override_controller_withdrawal() {
+        let endpoint = test_local_endpoint().await;
+        let admission = WorkerAdmission::new("group-1".into(), "dp-0".into()).unwrap();
+        admission
+            .bind(crate::AdmissionBinding {
+                engine_instance_id: "engine-1".into(),
+                topology_generation: 1,
+            })
+            .unwrap();
+        admission.set_engine_ready(true);
+        let (engine, _) = HandoffMockEngine::new(
+            false,
+            vec!["pause_generation".into(), "wake_up".into()],
+            Vec::new(),
+        );
+        let worker = Worker::new(engine, WorkerConfig::default()).with_admission(admission.clone());
+        worker.register_admission_routes(&endpoint);
+        worker.register_engine_controls(&endpoint).await.unwrap();
+        worker.activate_engine_routes().await;
+        admission
+            .apply(admission_target(&admission, 1, true))
+            .unwrap();
+        worker.reconcile_admission(&endpoint).await.unwrap();
+        assert!(admission.is_admitted());
+        let routes = endpoint.drt().engine_routes();
+        routes.get("control/pause_generation").unwrap()(serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(!admission.is_admitted());
+
+        // Controller submission and observation must not wait for discovery/drain I/O.
+        let mutation = worker.engine_route_mutation.lock().await;
+        let withdrawal = admission_target(&admission, 2, false);
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            routes.get("admission/target").unwrap()(serde_json::to_value(withdrawal).unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response["status"], "accepted");
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            routes.get("admission/status").unwrap()(serde_json::json!({})),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(mutation);
+        routes.get("control/wake_up").unwrap()(serde_json::json!({}))
+            .await
+            .unwrap();
+        worker.reconcile_admission(&endpoint).await.unwrap();
+        assert!(!is_discoverable(&endpoint).await);
+
+        worker.begin_engine_recovery(&endpoint).await.unwrap();
+        let status = routes.get("admission/status").unwrap()(serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(status["binding"].is_null());
+        admission
+            .bind(crate::AdmissionBinding {
+                engine_instance_id: "engine-2".into(),
+                topology_generation: 1,
+            })
+            .unwrap();
+        worker.finish_engine_recovery(&endpoint).await.unwrap();
+        worker.reconcile_admission(&endpoint).await.unwrap();
+        assert!(!is_discoverable(&endpoint).await);
+        admission
+            .apply(admission_target(&admission, 3, true))
+            .unwrap();
+        worker.reconcile_admission(&endpoint).await.unwrap();
+        assert!(is_discoverable(&endpoint).await);
+        assert!(admission.is_admitted());
+        worker.begin_engine_route_shutdown().await;
+        assert!(!admission.is_admitted());
+        let response = routes.get("admission/target").unwrap()(
+            serde_json::to_value(admission_target(&admission, 4, true)).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["status"], "error");
+        endpoint.unregister_endpoint_instance().await.unwrap();
+    }
+
+    struct AdmissionLifecycleEngine {
+        watching: Notify,
+        unavailable: Notify,
+        checking: Notify,
+        completion: tokio::sync::watch::Receiver<bool>,
+        health_delay: Duration,
+    }
+
+    #[async_trait]
+    impl LLMEngine for AdmissionLifecycleEngine {
+        async fn start(&self, _: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig::default())
+        }
+
+        async fn generate(
+            &self,
+            _: PreprocessedRequest,
+            _: crate::GenerateContext,
+        ) -> Result<BoxStream<'static, Result<crate::LLMEngineOutput, DynamoError>>, DynamoError>
+        {
+            unreachable!("health-watch test does not dispatch inference")
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+
+        async fn wait_for_unavailable(&self) -> Result<(), DynamoError> {
+            self.watching.notify_one();
+            tokio::time::sleep(self.health_delay).await;
+            self.unavailable.notify_one();
+            Ok(())
+        }
+
+        async fn recover_serving(&self) -> Result<EngineRecovery, DynamoError> {
+            std::future::pending().await
+        }
+
+        async fn on_recovery_complete(&self) -> Result<(), DynamoError> {
+            self.checking.notify_one();
+            let mut completion = self.completion.clone();
+            completion.wait_for(|ready| *ready).await.map_err(|error| {
+                err(
+                    ErrorType::Backend(BackendError::CannotConnect),
+                    format!("engine consistency observation ended: {error}"),
+                )
+            })?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn permission_updates_do_not_restart_or_starve_engine_health_observation() {
+        let endpoint = test_local_endpoint().await;
+        let admission = WorkerAdmission::new("group-1".into(), "dp-0".into()).unwrap();
+        let (completion, receiver) = tokio::sync::watch::channel(true);
+        let engine = Arc::new(AdmissionLifecycleEngine {
+            watching: Notify::new(),
+            unavailable: Notify::new(),
+            checking: Notify::new(),
+            completion: receiver,
+            health_delay: Duration::from_millis(100),
+        });
+        let mut worker =
+            Worker::new(engine.clone(), WorkerConfig::default()).with_admission(admission.clone());
+        let shutdown = CancellationToken::new();
+        let serve = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                worker
+                    .serve_with_orchestrator(
+                        &EngineConfig {
+                            model: "health-watch".into(),
+                            ..Default::default()
+                        },
+                        endpoint,
+                        shutdown,
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), engine.watching.notified())
+            .await
+            .unwrap();
+        let updates = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                loop {
+                    tokio::select! {
+                        _ = shutdown.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_millis(10)) => admission.notify(),
+                    }
+                }
+            }
+        });
+        let observed =
+            tokio::time::timeout(Duration::from_secs(3), engine.unavailable.notified()).await;
+        shutdown.cancel();
+        updates.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(30), serve)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            observed.is_ok(),
+            "controller refreshes must not cancel a pending engine-health poll"
+        );
+        drop(completion);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn shutdown_and_admission_controls_do_not_wait_for_engine_consistency_io() {
+        let endpoint = test_local_endpoint().await;
+        let admission = WorkerAdmission::new("group-1".into(), "dp-0".into()).unwrap();
+        admission
+            .bind(crate::AdmissionBinding {
+                engine_instance_id: "engine-1".into(),
+                topology_generation: 1,
+            })
+            .unwrap();
+        let (completion, receiver) = tokio::sync::watch::channel(true);
+        let engine = Arc::new(AdmissionLifecycleEngine {
+            watching: Notify::new(),
+            unavailable: Notify::new(),
+            checking: Notify::new(),
+            completion: receiver,
+            health_delay: Duration::from_secs(60),
+        });
+        let mut worker =
+            Worker::new(engine.clone(), WorkerConfig::default()).with_admission(admission.clone());
+        let shutdown = CancellationToken::new();
+        let serve = tokio::spawn({
+            let endpoint = endpoint.clone();
+            let shutdown = shutdown.clone();
+            async move {
+                worker
+                    .serve_with_orchestrator(
+                        &EngineConfig {
+                            model: "slow-consistency".into(),
+                            ..Default::default()
+                        },
+                        endpoint,
+                        shutdown,
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), engine.watching.notified())
+            .await
+            .unwrap();
+        engine.checking.notified().await;
+        completion.send_replace(false);
+        admission
+            .apply(admission_target(&admission, 1, true))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), engine.checking.notified())
+            .await
+            .unwrap();
+        let routes = endpoint.drt().engine_routes();
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            routes.get("admission/target").unwrap()(
+                serde_json::to_value(admission_target(&admission, 2, false)).unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response["status"], "accepted");
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            routes.get("admission/status").unwrap()(serde_json::json!({})),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(30), serve)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!admission.is_admitted());
+        assert!(!is_discoverable(&endpoint).await);
     }
 
     /// Mock engine that records endpoint/control lifecycle calls, lets a test
