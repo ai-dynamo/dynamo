@@ -3,6 +3,10 @@
 
 //! Advisory, bounded decode-source lookup after prefill admission. This path
 //! owns no source bookings, affinity state, buffers, or transport operations.
+//!
+//! TODO: Add direct decode-GPU to prefill-GPU KV transfer without staging KV
+//! payloads in CPU RAM. The current integration uses CPU-offload inventory and
+//! CPU landing slots; the ordinary P-to-D NIXL handoff is a separate path.
 
 use std::time::Instant;
 
