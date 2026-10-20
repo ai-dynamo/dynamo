@@ -51,6 +51,8 @@ const POC_PLANNER_DIGEST =
 const POC_RELAY_DIGEST =
   "sha256:f4199e6f5c2fcd8d058216eb0cb37837eee0e51629aff8553a0d0aad178ec0b2";
 
+const KARMADA_VERSION = "1.19.0";
+
 export const MOCKER_VPC_US_EAST_2 = {
   name: "mocker-vpc-us-east-2",
   availabilityZones: [US_EAST_2A, US_EAST_2B],
@@ -148,6 +150,18 @@ export const US_EAST2_DEPLOYMENT = {
   dynamoPlatformConfig: DYNAMO_PLATFORM_1_4_0,
   dgdPools: [MOCKER_OHIO_1_POOL],
   dgds: [MOCKER_OHIO_1_DGD],
+  // Ohio is the Karmada hub. Member names match the Router's site IDs.
+  multiCluster: {
+    memberName: "aws-ohio",
+    peerCidrs: [MOCKER_VPC_US_WEST_2.cidrBlock],
+    karmadaControlPlane: {
+      version: KARMADA_VERSION,
+      apiSourceCidrs: [
+        MOCKER_VPC_US_EAST_2.cidrBlock,
+        MOCKER_VPC_US_WEST_2.cidrBlock,
+      ],
+    },
+  },
 } satisfies DeploymentConfig;
 
 export const MOCKER_WEST_1_DGD = {
@@ -183,6 +197,10 @@ export const US_WEST2_DEPLOYMENT = {
   dynamoPlatformConfig: DYNAMO_PLATFORM_1_4_0,
   dgdPools: [MOCKER_WEST_1_POOL],
   dgds: [MOCKER_WEST_1_DGD],
+  multiCluster: {
+    memberName: "aws-west",
+    peerCidrs: [MOCKER_VPC_US_EAST_2.cidrBlock],
+  },
 } satisfies DeploymentConfig;
 
 export const DEPLOYMENTS = {

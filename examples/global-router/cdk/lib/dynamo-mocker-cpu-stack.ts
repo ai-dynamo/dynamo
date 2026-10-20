@@ -33,6 +33,7 @@ import * as eks from "aws-cdk-lib/aws-eks-v2";
 import { Construct } from "constructs";
 
 import { EksAdminBastion } from "./bastion";
+import { isValidIpv4Cidr } from "./cidr";
 import type { GlobalRouterDeployment } from "./global-router-deployment";
 import { createGlobalRouterHelmValues } from "./global-router-helm-values";
 import {
@@ -51,6 +52,12 @@ import {
   PURPOSE_LABEL_KEY,
   PURPOSE_LABEL_VALUE,
 } from "./helm-values";
+import {
+  KARMADA_API_SERVICE,
+  KARMADA_KUBECONFIG_SECRET,
+  KARMADA_NAMESPACE,
+  MultiClusterSupport,
+} from "./multi-cluster";
 import { MAX_DGD_POOL_SUBNET_SLOTS, MockerVpc } from "./vpc";
 
 const DYNAMO_PLATFORM_RELEASE = "dynamo-platform";
@@ -344,6 +351,16 @@ export class DynamoMockerCpuStack extends Stack {
       }
     }
 
+    if (config.multiCluster !== undefined) {
+      new MultiClusterSupport(this, "MultiCluster", {
+        cluster,
+        config: config.multiCluster,
+        region: clusterConfig.region,
+        vpcCidr: clusterConfig.vpcConfig.cidrBlock,
+        nodeGroups: poolNodeGroups.map(({ nodeGroup }) => nodeGroup),
+      });
+    }
+
     Tags.of(this).add("ManagedBy", "AWS-CDK");
     Tags.of(this).add("Project", "dynamo-mocker-cpu");
 
@@ -406,6 +423,28 @@ export class DynamoMockerCpuStack extends Stack {
           )
           .join("; "),
       });
+    }
+    if (config.multiCluster !== undefined) {
+      new CfnOutput(this, "KarmadaMemberName", {
+        description: "Use with karmadactl register --cluster-name.",
+        value: config.multiCluster.memberName,
+      });
+      if (config.multiCluster.karmadaControlPlane !== undefined) {
+        new CfnOutput(this, "KarmadaApiEndpointCommand", {
+          description:
+            "Run on the bastion: prints the internal Karmada API load balancer hostname (port 5443).",
+          value:
+            `kubectl get service -n ${KARMADA_NAMESPACE} ${KARMADA_API_SERVICE} ` +
+            "-o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
+        });
+        new CfnOutput(this, "KarmadaKubeconfigCommand", {
+          description:
+            "Run on the bastion: writes the Karmada admin kubeconfig. Point its server at the load balancer.",
+          value:
+            `kubectl get secret -n ${KARMADA_NAMESPACE} ${KARMADA_KUBECONFIG_SECRET} ` +
+            "-o jsonpath='{.data.kubeconfig}' | base64 -d > karmada-apiserver.config",
+        });
+      }
     }
     new CfnOutput(this, "PortForwardFrontends", {
       description: "Semicolon-separated DGD-to-port-forward commands.",
@@ -666,19 +705,6 @@ function isStandardAvailabilityZone(
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function isValidIpv4Cidr(value: string): boolean {
-  const match =
-    /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(
-      value,
-    );
-  if (match === null) {
-    return false;
-  }
-  const octets = match.slice(1, 5).map(Number);
-  const prefix = Number(match[5]);
-  return !octets.some((octet) => octet > 255) && prefix <= 32;
 }
 
 function isValidVpcCidr(value: string): boolean {
