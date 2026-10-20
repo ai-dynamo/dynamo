@@ -1,0 +1,194 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Project contributor standing. Trusted CI reads this policy from main.
+# CI standing only; this declaration grants no repository write or codeownership.
+contributors:
+  - github: alexeldeib
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: ameenp
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: ashnamehrotra
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: bzsuni
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: carlory
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: cmdy
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: devivasudevan
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: dsocek
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: elizabetht
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: erezzarum
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: flpanbin
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: jellysnack
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: jont828
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: jooe0824
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: jorgeantonio21
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: joshuayao
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: kaonael
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: michaelfeil
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: panpan0000
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: qimcis
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: spycsh
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: tthakkal
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: vincyzhang
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: walkoss
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: weizhoublue
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: xianlubird
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
+  - github: yankay
+    membership: external
+    roles:
+      - repo: dynamo
+        role: trusted_contributor
+        codeowner_of: []
+        functional_responsibilities: []
