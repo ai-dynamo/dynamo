@@ -29,10 +29,17 @@ def test_planner_control_uses_the_actual_system_listener():
 
         async def main():
             runtime = DistributedRuntime(asyncio.get_running_loop(), "file", "tcp", event_plane="zmq")
+            async def legacy_echo(body):
+                return body
+            runtime.register_engine_route("legacy/echo", legacy_echo)
             planner = _planner("agg", enable_runtime_reconfiguration=True)
             planner.runtime = runtime
-            base = runtime.system_status_server_url() + "/control/planner"
+            base = runtime.system_status_server_url() + "/engine/planner"
             async with aiohttp.ClientSession() as client:
+                payload = {"status": 418, "body": {"value": 7}}
+                async with client.post(runtime.system_status_server_url() + "/engine/legacy/echo", json=payload) as response:
+                    assert response.status == 200
+                    assert await response.json(content_type=None) == payload
                 async with client.get(base + "/config") as response:
                     assert response.status == 404
                 await planner._async_init()

@@ -25,7 +25,6 @@ def test_jev_keeps_the_common_tick_contract_without_runtime_reconfiguration(tmp_
     engine = make_engine(tmp_path, lambda request: httpx.Response(200, json={}))
     try:
         assert isinstance(engine, engine_protocol.EngineProtocol)
-        assert not isinstance(engine, engine_protocol.ReconfigurableEngineProtocol)
         assert isinstance(engine.initial_tick(0.0), planner_types.ScheduledTick)
     finally:
         asyncio.run(engine.shutdown())

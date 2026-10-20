@@ -119,12 +119,12 @@ class DistributedRuntime:
         """
         ...
 
-    def register_control_handler(
+    def register_engine_http_handler(
         self,
         name: str,
         callback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
     ) -> None:
-        """Register `/control/{name}/...` on an enabled system server.
+        """Register `/engine/{name}/...` on an enabled system server.
 
         The async callback receives `method`, the relative `path`, and JSON
         `body` (None for an empty body), and returns `status` and JSON `body`.
@@ -133,7 +133,7 @@ class DistributedRuntime:
         """
         ...
 
-    def unregister_control_handler(self, name: str) -> None:
+    def unregister_engine_http_handler(self, name: str) -> None:
         """Remove a handler; already dispatched requests may still finish."""
         ...
 

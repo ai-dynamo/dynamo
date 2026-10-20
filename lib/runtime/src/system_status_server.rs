@@ -21,7 +21,7 @@ use axum::{
     body::Bytes,
     extract::{Json, Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{any, delete, get, post},
     serve::Listener,
 };
@@ -247,7 +247,6 @@ fn build_system_status_router(
     server_state: Arc<SystemStatusState>,
     policy: SystemProbePolicy,
 ) -> Router {
-    let control_routes = crate::control_routes::router(server_state.drt().control_routes().clone());
     let system_health = server_state.drt().system_health();
     let (health_path, live_path) = {
         let health = system_health.lock();
@@ -282,7 +281,6 @@ fn build_system_status_router(
                 }),
             ),
     };
-    app = app.merge(control_routes);
     // Check if LoRA feature is enabled
     let lora_enabled =
         crate::config::env_is_truthy(crate::config::environment_names::llm::DYN_LORA_ENABLED);
@@ -306,7 +304,7 @@ fn build_system_status_router(
             "/engine/{*path}",
             any({
                 let state = Arc::clone(&server_state);
-                move |path, body| engine_route_handler(state, path, body)
+                move |path, method, body| engine_route_handler(state, path, method, body)
             }),
         );
 
@@ -912,67 +910,10 @@ fn parse_lora_response(response_data: &serde_json::Value) -> LoraResponse {
 async fn engine_route_handler(
     state: Arc<SystemStatusState>,
     Path(path): Path<String>,
+    method: axum::http::Method,
     body: Bytes,
-) -> impl IntoResponse {
-    tracing::trace!("Engine route request to /engine/{path}");
-
-    // Parse body as JSON (empty object for GET/empty body)
-    let body_json: serde_json::Value = if body.is_empty() {
-        serde_json::json!({})
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(json) => json,
-            Err(e) => {
-                tracing::warn!("Invalid JSON in request body: {e}");
-                return (
-                    StatusCode::BAD_REQUEST,
-                    json!({
-                        "error": "Invalid JSON",
-                        "message": format!("{}", e)
-                    })
-                    .to_string(),
-                )
-                    .into_response();
-            }
-        }
-    };
-
-    // Look up callback
-    let callback = match state.drt().engine_routes().get(&path) {
-        Some(cb) => cb,
-        None => {
-            tracing::debug!("Route /engine/{path} not found");
-            return (
-                StatusCode::NOT_FOUND,
-                json!({
-                    "error": "Route not found",
-                    "message": format!("Route /engine/{} not found", path)
-                })
-                .to_string(),
-            )
-                .into_response();
-        }
-    };
-
-    // Call callback (it's async, so await it)
-    match callback(body_json).await {
-        Ok(response) => {
-            tracing::trace!("Engine route handler succeeded for /engine/{path}");
-            (StatusCode::OK, response.to_string()).into_response()
-        }
-        Err(e) => {
-            tracing::error!("Engine route handler error for /engine/{}: {}", path, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({
-                    "error": "Handler error",
-                    "message": format!("{}", e)
-                })
-                .to_string(),
-            )
-                .into_response()
-        }
-    }
+) -> Response {
+    crate::engine_routes::dispatch(state.drt().engine_routes(), path, method, body).await
 }
 
 // Regular tests: cargo test system_status_server --lib

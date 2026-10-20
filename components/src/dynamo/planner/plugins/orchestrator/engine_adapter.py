@@ -529,7 +529,7 @@ class OrchestratorEngineAdapter:
     # EngineProtocol
     # ------------------------------------------------------------------
 
-    def initial_tick(self, start_s: float, *, force_due: bool = False) -> ScheduledTick:
+    def initial_tick(self, start_s: float) -> ScheduledTick:
         """First scheduled tick under the scale_interval cadence model.
 
         Pipeline fires at ``start_s + scale_interval`` regardless of
@@ -542,49 +542,64 @@ class OrchestratorEngineAdapter:
         self._last_tick_monotonic = self._clock.monotonic()
         self._last_load_loop_monotonic = self._last_tick_monotonic
         self._last_throughput_loop_monotonic = self._last_tick_monotonic
-        if force_due:
-            self._orchestrator.invalidate_runtime_configuration()
-            self._last_load_loop_monotonic -= (
-                self._config.load_adjustment_interval_seconds
-            )
-            self._last_throughput_loop_monotonic -= (
-                self._config.throughput_adjustment_interval_seconds
-            )
         for plugin in self._orchestrator._registry.all_plugins():
             if plugin.is_builtin and plugin.last_call_at == float("-inf"):
                 plugin.registered_at = self._last_tick_monotonic
         return self._compute_next_scheduled_tick()
 
-    def reconfiguration_tick(self, start_s: float) -> ScheduledTick:
-        return self.initial_tick(start_s, force_due=True)
+    def reconfiguration_tick(self) -> ScheduledTick:
+        return self._compute_next_scheduled_tick()
 
     def apply_runtime_configuration(
         self,
         candidate: PlannerConfig,
         fields: Iterable[str],
         predictor: BuiltinLoadPredict | None,
-    ) -> None:
+    ) -> bool:
+        active_predictor: BuiltinLoadPredict | None = None
         if predictor is not None:
             active = self._builtins["load_predict"]
             if not isinstance(active, BuiltinLoadPredict):
                 raise TypeError(
                     "runtime prediction updates require the builtin load predictor"
                 )
-        p_min, d_min = candidate.active_min_endpoints()
-        for field in fields:
+            active_predictor = active
+        changed = {
+            field
+            for field in fields
+            if getattr(self._config, field) != getattr(candidate, field)
+        }
+        restart_throughput = self._config.enable_throughput_scaling and (
+            predictor is not None
+            or bool(
+                changed
+                & {
+                    "ttft_ms",
+                    "itl_ms",
+                    "max_throughput_scaling_replicas",
+                }
+            )
+        )
+        for field in changed:
             setattr(self._config, field, getattr(candidate, field))
-        if predictor is not None:
-            active.install_prepared_predictors(predictor)
-        self._orchestrator.invalidate_runtime_configuration()
-        # Throughput floors were computed under the old SLA. Recompute them
-        # before allowing an old floor to drive a new scaling decision.
-        self._scaling_state._throughput_lower_bound_p = p_min or 0
-        self._scaling_state._throughput_lower_bound_d = d_min or 0
-        self._orchestrator.set_throughput_lower_bound("prefill", p_min or 0)
-        self._orchestrator.set_throughput_lower_bound("decode", d_min or 0)
-        self._startup_down_candidate = None
-        self._startup_down_inventory = None
-        self._startup_down_sources = frozenset()
+        if active_predictor is not None and predictor is not None:
+            active_predictor.install_prepared_predictors(predictor)
+        if changed or predictor is not None:
+            self._orchestrator.invalidate_runtime_configuration()
+            self._startup_down_candidate = None
+            self._startup_down_inventory = None
+            self._startup_down_sources = frozenset()
+        if restart_throughput:
+            now = self._clock.monotonic()
+            self._last_throughput_loop_monotonic = now
+            for plugin_id in (
+                BuiltinLoadPredict.plugin_id,
+                BuiltinThroughputPropose.plugin_id,
+            ):
+                plugin = self._orchestrator.registry.get_plugin(plugin_id)
+                if plugin is not None:
+                    plugin.last_call_at = now
+        return restart_throughput
 
     async def tick(
         self,

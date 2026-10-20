@@ -11,26 +11,24 @@ import gzip
 import io
 import json
 import logging
-import math
 import os
 import stat
 import uuid
 import weakref
 from collections import OrderedDict
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.control_api import _MinimumEndpointUnavailableError
-from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
-from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
+from dynamo.planner.offline.trace_data import extract_traffic_observations_from_bytes
 
 if TYPE_CHECKING:
     from dynamo.planner.core.base import NativePlannerBase
     from dynamo.planner.core.types import TrafficObservation, WorkerCapabilities
+    from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
     from dynamo.runtime import DistributedRuntime
 
 logger = logging.getLogger(__name__)
@@ -114,24 +112,6 @@ def _candidate_config(config: PlannerConfig, updates: dict[str, Any]) -> Planner
         # through the runtime API when a model-level validator rejects a patch.
         messages = [item["msg"] for item in error.errors(include_input=False)]
         raise ValueError("; ".join(messages)) from None
-    for name in ("ttft_ms", "itl_ms", "kalman_q_level", "kalman_q_trend", "kalman_r"):
-        value = getattr(candidate, name)
-        if (
-            not math.isfinite(value)
-            or value < 0
-            or (name in {"ttft_ms", "itl_ms"} and value == 0)
-        ):
-            raise ValueError(
-                f"{name} must be finite and {'positive' if name in {'ttft_ms', 'itl_ms'} else 'nonnegative'}"
-            )
-    if candidate.kalman_min_points < 1:
-        raise ValueError("kalman_min_points must be positive")
-    if candidate.min_gpu_budget < -1 or candidate.max_gpu_budget < -1:
-        raise ValueError("GPU budgets must be -1 (disabled) or nonnegative")
-    for name in ("decode_scale_up_kv_rate", "decode_scale_down_kv_rate"):
-        value = getattr(candidate, name)
-        if value is not None and not math.isfinite(value):
-            raise ValueError(f"{name} must be finite")
     return candidate
 
 
@@ -140,10 +120,15 @@ def _prepare_predictor(
     capabilities: WorkerCapabilities,
     trace: str | None,
 ) -> BuiltinLoadPredict:
+    # Preserve the core's lazy plugin-loading boundary.
+    from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
+
     observations = None
     if trace is not None:
         observations = _load_runtime_warmup(
-            trace, config.throughput_adjustment_interval_seconds
+            trace,
+            config.throughput_adjustment_interval_seconds,
+            config.runtime_warmup_trace_dir,
         )
     predictor = BuiltinLoadPredict(config, capabilities)
     if observations is not None:
@@ -151,18 +136,68 @@ def _prepare_predictor(
     return predictor
 
 
-def _load_runtime_warmup(trace: str, interval: int) -> list[TrafficObservation]:
-    if glob.has_magic(trace):
+def _load_runtime_warmup(
+    trace: str, interval: int, directory: str | None
+) -> list[TrafficObservation]:
+    if directory is None:
         raise ValueError(
-            "runtime warmup requires a single regular file; globs are not supported"
+            "configure runtime_warmup_trace_dir before supplying warmup_trace"
         )
-    # Nonblocking open rejects FIFOs without waiting for a writer. Check the
-    # opened descriptor rather than a path that may be replaced before reading.
-    descriptor = os.open(trace, os.O_RDONLY | os.O_NONBLOCK)
+    root = Path(directory).absolute()
+    relative = Path(trace)
+    if relative.is_absolute():
+        try:
+            relative = relative.relative_to(root)
+        except ValueError:
+            raise ValueError(
+                "warmup_trace must be inside runtime_warmup_trace_dir"
+            ) from None
+    if not relative.parts or ".." in relative.parts or glob.has_magic(str(relative)):
+        raise ValueError(
+            "warmup_trace must name one file inside runtime_warmup_trace_dir"
+        )
+    try:
+        payload = _read_warmup_file(root, relative)
+    except OSError:
+        # Do not turn caller-selected paths into a pod filesystem probe.
+        raise ValueError(
+            "warmup trace is unavailable in the configured directory"
+        ) from None
+    if trace.endswith(".gz"):
+        with gzip.GzipFile(fileobj=io.BytesIO(payload)) as compressed:
+            payload = compressed.read(MAX_WARMUP_TRACE_BYTES + 1)
+        if len(payload) > MAX_WARMUP_TRACE_BYTES:
+            raise ValueError(
+                f"decompressed warmup trace exceeds {MAX_WARMUP_TRACE_BYTES} bytes"
+            )
+    return extract_traffic_observations_from_bytes(
+        payload, interval, max_intervals=MAX_WARMUP_INTERVALS
+    )
+
+
+def _read_warmup_file(root: Path, relative: Path) -> bytes:
+    # Resolve each caller-controlled component relative to an open directory,
+    # without following symlinks. A rename cannot redirect a later open outside
+    # the configured root. Nonblocking open prevents FIFOs from stalling reads.
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in relative.parts[:-1]:
+            child = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=directory,
+            )
+            os.close(directory)
+            directory = child
+        descriptor = os.open(
+            relative.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory
+        )
+    finally:
+        os.close(directory)
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError("runtime warmup requires a single regular file")
+            raise ValueError("warmup_trace must name a regular file")
         if metadata.st_size > MAX_WARMUP_TRACE_BYTES:
             raise ValueError(f"warmup trace exceeds {MAX_WARMUP_TRACE_BYTES} bytes")
         with os.fdopen(descriptor, "rb", closefd=False) as source:
@@ -171,23 +206,7 @@ def _load_runtime_warmup(trace: str, interval: int) -> list[TrafficObservation]:
         os.close(descriptor)
     if len(payload) > MAX_WARMUP_TRACE_BYTES:
         raise ValueError(f"warmup trace exceeds {MAX_WARMUP_TRACE_BYTES} bytes")
-    if trace.endswith(".gz"):
-        with gzip.GzipFile(fileobj=io.BytesIO(payload)) as compressed:
-            payload = compressed.read(MAX_WARMUP_TRACE_BYTES + 1)
-        if len(payload) > MAX_WARMUP_TRACE_BYTES:
-            raise ValueError(
-                f"decompressed warmup trace exceeds {MAX_WARMUP_TRACE_BYTES} bytes"
-            )
-    # Freeze bounded input for the loader's format/origin/aggregation passes;
-    # later appends or path replacement cannot bypass the read limit.
-    with TemporaryDirectory(prefix="dynamo-planner-warmup-") as directory:
-        snapshot = Path(directory) / "trace.jsonl"
-        snapshot.write_bytes(payload)
-        return extract_traffic_observations_from_trace(
-            str(snapshot),
-            interval,
-            max_intervals=MAX_WARMUP_INTERVALS,
-        )
+    return payload
 
 
 class PlannerReconfiguration:
@@ -205,17 +224,13 @@ class PlannerReconfiguration:
             return {
                 "instance_id": self.instance_id,
                 "revision": self.planner._config_generation,
-                "config": self.planner.config.model_dump(include=RUNTIME_FIELDS),
+                "config": self.planner.config.model_dump(include=set(RUNTIME_FIELDS)),
                 "supported_fields": sorted(RUNTIME_FIELDS),
             }
 
     def _check_revision(self, request: ReconfigureRequest) -> None:
-        if self._closed:
-            raise _MinimumEndpointUnavailableError("planner is shutting down")
-        if (
-            request.instance_id != self.instance_id
-            or request.expected_revision != self.planner._config_generation
-        ):
+        self._check_instance(request)
+        if request.expected_revision != self.planner._config_generation:
             raise ConfigurationConflict(
                 "Planner instance or configuration revision changed; read config again"
             )
@@ -224,7 +239,7 @@ class PlannerReconfiguration:
         request = request.model_copy(deep=True)
         fingerprint = json.dumps(request.model_dump(), sort_keys=True, allow_nan=False)
         async with self.planner._bounded_config_lock():
-            self._check_revision_for_retry(request)
+            self._check_instance(request)
             if previous := self._operations.get(request.request_id):
                 if previous["fingerprint"] != fingerprint:
                     raise ConfigurationConflict(
@@ -232,10 +247,7 @@ class PlannerReconfiguration:
                     )
                 return self._public_operation(previous)
             self._check_revision(request)
-            if any(
-                task is not None and not task.done()
-                for task in (self._task, self._preparation)
-            ):
+            if self._task is not None and not self._task.done():
                 raise ConfigurationConflict(
                     "another configuration update is still preparing"
                 )
@@ -252,6 +264,8 @@ class PlannerReconfiguration:
             if request.warmup_trace is not None and request.cold_start:
                 raise ValueError("provide warmup_trace or cold_start, not both")
             if changed_predictor:
+                if self._preparation is not None and not self._preparation.done():
+                    raise ConfigurationConflict("another predictor is still preparing")
                 if (
                     candidate.optimization_target != "sla"
                     or not candidate.enable_throughput_scaling
@@ -279,7 +293,7 @@ class PlannerReconfiguration:
             self._task.add_done_callback(lambda task: self._finish(task, operation))
             return self._public_operation(operation)
 
-    def _check_revision_for_retry(self, request: ReconfigureRequest) -> None:
+    def _check_instance(self, request: ReconfigureRequest) -> None:
         # A completed request remains retryable after its own revision increment.
         if self._closed:
             raise _MinimumEndpointUnavailableError("planner is shutting down")
@@ -336,8 +350,9 @@ class PlannerReconfiguration:
     def _public_operation(operation: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in operation.items() if key != "fingerprint"}
 
-    def get_operation(self, operation_id: str) -> dict[str, Any]:
-        return self._public_operation(self._operations[operation_id])
+    def get_operation(self, operation_id: str) -> dict[str, Any] | None:
+        operation = self._operations.get(operation_id)
+        return self._public_operation(operation) if operation is not None else None
 
     async def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
         method, path = request["method"], request["path"]
@@ -352,39 +367,39 @@ class PlannerReconfiguration:
             if path.startswith("operations/"):
                 if method != "GET":
                     return {"status": 405, "body": {"error": "use GET"}}
-                return {
-                    "status": 200,
-                    "body": self.get_operation(path.removeprefix("operations/")),
-                }
+                operation = self.get_operation(path.removeprefix("operations/"))
+                if operation is None:
+                    return {
+                        "status": 404,
+                        "body": {
+                            "error": "operation not retained; read current config"
+                        },
+                    }
+                return {"status": 200, "body": operation}
             return {"status": 404, "body": {"error": "control resource not found"}}
         except ConfigurationConflict as error:
             return {"status": 409, "body": {"error": str(error)}}
-        except (ValueError, ValidationError) as error:
+        except ValueError as error:
             return {"status": 422, "body": {"error": str(error)}}
         except _MinimumEndpointUnavailableError as error:
             return {"status": 503, "body": {"error": str(error)}}
-        except KeyError:
-            return {
-                "status": 404,
-                "body": {"error": "operation not retained; read current config"},
-            }
 
     def register(self, runtime: DistributedRuntime) -> None:
         reference = weakref.ref(self)
 
         async def handler(request):
             controller = reference()
-            if controller is None or controller._closed:
+            if controller is None:
                 return {"status": 503, "body": {"error": "planner is unavailable"}}
             return await controller.handle_request(request)
 
-        runtime.register_control_handler("planner", handler)
+        runtime.register_engine_http_handler("planner", handler)
         self._registered_runtime = runtime
 
     async def close(self) -> None:
         self._closed = True
         if self._registered_runtime is not None:
-            self._registered_runtime.unregister_control_handler("planner")
+            self._registered_runtime.unregister_engine_http_handler("planner")
             self._registered_runtime = None
         if self._task is not None and not self._task.done():
             self._task.cancel()

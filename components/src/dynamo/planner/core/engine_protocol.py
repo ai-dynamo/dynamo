@@ -47,16 +47,16 @@ class EngineProtocol(Protocol):
 class ReconfigurableEngineProtocol(EngineProtocol, Protocol):
     """Optional configuration activation capability for production engines."""
 
-    def reconfiguration_tick(self, start_s: float) -> ScheduledTick:
-        """Schedule fresh observations and decisions after activation."""
+    def reconfiguration_tick(self) -> ScheduledTick:
+        """Refresh pending observations after a throughput-cycle restart."""
 
     def apply_runtime_configuration(
         self,
         candidate: PlannerConfig,
         fields: Iterable[str],
         predictor: BuiltinLoadPredict | None,
-    ) -> None:
-        """Activate prepared predictor state and invalidate cached decisions."""
+    ) -> bool:
+        """Activate settings and return whether the throughput cycle restarted."""
 
 
 __all__ = ["EngineProtocol", "ReconfigurableEngineProtocol"]

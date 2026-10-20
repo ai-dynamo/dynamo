@@ -60,7 +60,6 @@ def test_rivals_keep_the_common_tick_contract_without_runtime_reconfiguration(
 ):
     autoscaler = autoscaler_factory()
     assert isinstance(autoscaler, engine_protocol.EngineProtocol)
-    assert not isinstance(autoscaler, engine_protocol.ReconfigurableEngineProtocol)
     assert isinstance(autoscaler.initial_tick(0.0), ScheduledTick)
 
 

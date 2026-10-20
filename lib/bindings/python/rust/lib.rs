@@ -1484,9 +1484,9 @@ impl DistributedRuntime {
             .map(|info| format!("http://{}", info.advertised_socket_addr()))
     }
 
-    /// Register a component handler under `/control/{name}/...` on the system listener.
+    /// Register a component handler under `/engine/{name}/...` on the system listener.
     /// The callback receives `{method, path, body}` and returns `{status, body}`.
-    fn register_control_handler(
+    fn register_engine_http_handler(
         &self,
         py: Python<'_>,
         name: String,
@@ -1497,7 +1497,7 @@ impl DistributedRuntime {
         }
         let locals = Arc::new(pyo3_async_runtimes::tokio::get_current_locals(py)?);
         let callback = Arc::new(callback);
-        let handler: rs::control_routes::ControlHandler = Arc::new(move |request| {
+        let handler: rs::engine_routes::EngineHttpCallback = Arc::new(move |request| {
             let callback = Arc::clone(&callback);
             let locals = Arc::clone(&locals);
             Box::pin(async move {
@@ -1508,19 +1508,19 @@ impl DistributedRuntime {
                 })?;
                 let result = future.await?;
                 Python::with_gil(|py| {
-                    pythonize::depythonize::<rs::control_routes::ControlResponse>(result.bind(py))
+                    pythonize::depythonize::<rs::engine_routes::EngineHttpResponse>(result.bind(py))
                         .map_err(anyhow::Error::from)
                 })
             })
         });
         self.inner
-            .control_routes()
-            .register(name, handler)
+            .engine_routes()
+            .register_http(name, handler)
             .map_err(to_pyerr)
     }
 
-    fn unregister_control_handler(&self, name: &str) {
-        self.inner.control_routes().unregister(name);
+    fn unregister_engine_http_handler(&self, name: &str) {
+        self.inner.engine_routes().unregister_http(name);
     }
 
     /// Register an async Python callback for /engine/{route_name}

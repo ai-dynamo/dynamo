@@ -23,7 +23,6 @@ pub use config::RuntimeConfig;
 pub mod admission_gate;
 pub mod component;
 pub mod compute;
-pub mod control_routes;
 pub mod discovery;
 pub mod engine;
 pub mod engine_routes;

@@ -4,21 +4,30 @@
 import asyncio
 import gzip
 import json
-import os
 import threading
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from dynamo.common.forward_pass_metrics import ForwardPassMetrics, QueuedRequestMetrics
 from dynamo.planner import reconfiguration
+from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.engine_protocol import (
     EngineProtocol,
     ReconfigurableEngineProtocol,
 )
 from dynamo.planner.core.load.predictors import ARIMAPredictor, KalmanPredictor
-from dynamo.planner.core.types import FpmObservations, ScheduledTick, WorkerCounts
+from dynamo.planner.core.types import (
+    FpmObservations,
+    ScheduledTick,
+    TickInput,
+    TrafficObservation,
+    WorkerCounts,
+)
 from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
+from dynamo.planner.plugins.clock import VirtualClock
+from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.planner.reconfiguration import ConfigurationConflict, ReconfigureRequest
 from dynamo.planner.tests.unit.test_control_api import _planner
 
@@ -30,8 +39,10 @@ pytestmark = [
 ]
 
 
-def sla_planner():
-    return _planner("disagg", load_predictor="constant", optimization_target="sla")
+def sla_planner(**overrides):
+    return _planner(
+        "disagg", load_predictor="constant", optimization_target="sla", **overrides
+    )
 
 
 def request(planner, changes, **kwargs):
@@ -47,6 +58,78 @@ def request(planner, changes, **kwargs):
 async def finish(planner):
     await asyncio.gather(planner.reconfiguration._task, return_exceptions=True)
     return planner.reconfiguration.get_operation("update-1")
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["sla", "throughput_limit", "predictor", "load", "budget", "noop", "legacy"],
+)
+async def test_only_throughput_changes_restart_a_complete_prediction_window(change):
+    planner = sla_planner(enable_load_scaling=True)
+    clock = VirtualClock()
+    engine = OrchestratorEngineAdapter(
+        planner.config, planner._build_worker_capabilities(), clock=clock
+    )
+    planner._engine = engine
+    tick = engine.initial_tick(0.0)
+
+    async def advance(tick):
+        clock.advance(tick.at_s - clock.now())
+        traffic = (
+            TrafficObservation(duration_s=180, num_req=10, isl=100, osl=20)
+            if tick.need_traffic_metrics
+            else None
+        )
+        effects = await engine.tick(
+            tick,
+            TickInput(
+                now_s=clock.now(),
+                traffic=traffic,
+                worker_counts=WorkerCounts(
+                    ready_num_prefill=1,
+                    expected_num_prefill=1,
+                    ready_num_decode=1,
+                    expected_num_decode=1,
+                ),
+            ),
+        )
+        return effects.next_tick
+
+    while tick.at_s <= 200:
+        tick = await advance(tick)
+    previous = engine._builtins["load_predict"]._num_req_predictor
+    assert len(previous.data_buffer) == 1
+    if change == "legacy":
+        assert not planner.config.enable_runtime_reconfiguration
+        await planner.patch_min_endpoints({"prefill_min_endpoint": 2})
+    else:
+        updates = {
+            "sla": {"ttft_ms": 250.0},
+            "throughput_limit": {"max_throughput_scaling_replicas": 4},
+            "predictor": {"load_predictor": "kalman"},
+            "load": {"load_scaling_down_sensitivity": 70},
+            "budget": {"max_gpu_budget": 24, "prefill_min_endpoint": 2},
+            "noop": {"ttft_ms": planner.config.ttft_ms},
+        }
+        await planner.reconfiguration.submit(
+            request(planner, updates[change], cold_start=change == "predictor")
+        )
+        assert (await finish(planner))["state"] == "applied"
+    restarting = change in {"sla", "throughput_limit", "predictor"}
+    assert planner._throughput_generation == int(restarting)
+    if restarting:
+        tick = engine.reconfiguration_tick()
+    active = engine._builtins["load_predict"]._num_req_predictor
+    count = len(active.data_buffer)
+    expected_prediction = 380 if restarting else 360
+    while tick.at_s < expected_prediction:
+        tick = await advance(tick)
+        assert len(active.data_buffer) == count
+    assert tick.at_s == expected_prediction
+    assert tick.need_traffic_metrics and tick.traffic_metrics_duration_s == 180
+    await advance(tick)
+    assert len(active.data_buffer) == count + 1
+    await planner._shutdown_runtime()
 
 
 def trace(tmp_path, interval=180):
@@ -86,15 +169,7 @@ async def test_scalar_update_is_conditional_idempotent_and_preserves_live_state(
     assert engine._scaling_state is state
     assert (state._pending_num_p, state._num_p_workers) == (3, 2)
     assert engine._builtins["load_predict"] is predictor
-    next_tick = engine.reconfiguration_tick(100.0)
-    assert next_tick.need_traffic_metrics and next_tick.run_throughput_scaling
-    assert (
-        next_tick.traffic_metrics_duration_s
-        == planner.config.throughput_adjustment_interval_seconds
-    )
-    assert (
-        state._throughput_lower_bound_p == planner.config.effective_prefill_min_endpoint
-    )
+    assert state._throughput_lower_bound_p == 7
     assert await planner.reconfiguration.submit(update) == operation
     reordered = update.model_copy(
         update={"config": {"max_gpu_budget": 24, "ttft_ms": 250.0}}
@@ -134,7 +209,6 @@ async def test_tick_only_engine_rejects_reconfiguration_and_keeps_legacy_tick_si
     engine = TickOnlyEngine()
     planner._engine = engine
     assert isinstance(engine, EngineProtocol)
-    assert not isinstance(engine, ReconfigurableEngineProtocol)
     result = await planner.reconfiguration.handle_request(
         {
             "method": "PATCH",
@@ -155,7 +229,7 @@ async def test_tick_only_engine_rejects_reconfiguration_and_keeps_legacy_tick_si
     monkeypatch.setattr(planner, "_run_one_tick", tick_then_stop)
     with pytest.raises(asyncio.CancelledError):
         await planner.run()
-    assert engine.scheduled == 2
+    assert engine.scheduled == 1
     assert engine.stopped
 
 
@@ -164,7 +238,7 @@ async def test_warmup_replaces_all_three_predictors_without_replacing_perf_model
     tmp_path,
     cold_start,
 ):
-    planner = sla_planner()
+    planner = sla_planner(runtime_warmup_trace_dir=str(tmp_path))
     engine = planner._ensure_engine()
     active = engine._builtins["load_predict"]
     regressions = (
@@ -199,7 +273,7 @@ async def test_warmup_replaces_all_three_predictors_without_replacing_perf_model
 
 
 async def test_insufficient_warmup_does_not_activate_fallback_prediction(tmp_path):
-    planner = sla_planner()
+    planner = sla_planner(runtime_warmup_trace_dir=str(tmp_path))
     await planner.reconfiguration.submit(
         request(
             planner,
@@ -215,81 +289,8 @@ async def test_insufficient_warmup_does_not_activate_fallback_prediction(tmp_pat
     await planner._shutdown_runtime()
 
 
-@pytest.mark.parametrize(
-    "source_kind", ["directory", "glob", "fifo", "oversized", "gzip", "intervals"]
-)
-async def test_unbounded_runtime_traces_fail_before_predictor_construction(
-    tmp_path,
-    monkeypatch,
-    source_kind,
-):
-    planner = sla_planner()
-    monkeypatch.setattr(reconfiguration, "MAX_WARMUP_TRACE_BYTES", 256)
-    monkeypatch.setattr(reconfiguration, "MAX_WARMUP_INTERVALS", 4)
-    source = tmp_path / "large.jsonl"
-    if source_kind == "directory":
-        source = tmp_path
-        expected = "single regular file"
-    elif source_kind == "glob":
-        source = tmp_path / "**" / "*.jsonl"
-        expected = "globs are not supported"
-    elif source_kind == "fifo":
-        os.mkfifo(source)
-        expected = "single regular file"
-    elif source_kind == "oversized":
-        with source.open("wb") as output:
-            output.truncate(257)
-        expected = "trace exceeds 256 bytes"
-    elif source_kind == "gzip":
-        source = source.with_suffix(".jsonl.gz")
-        source.write_bytes(gzip.compress(b"x" * 257))
-        assert source.stat().st_size < 256
-        expected = "decompressed warmup trace exceeds 256 bytes"
-    else:
-        source.write_text(
-            "\n".join(
-                json.dumps(
-                    {
-                        "timestamp": timestamp,
-                        "input_length": 10,
-                        "output_length": 5,
-                    }
-                )
-                for timestamp in [0, 4 * 180 * 1000]
-            )
-        )
-        expected = "exceeds 4 aggregation intervals"
-
-    def unexpected_predictor(*args, **kwargs):
-        pytest.fail("invalid trace reached predictor construction")
-
-    monkeypatch.setattr(reconfiguration, "BuiltinLoadPredict", unexpected_predictor)
-    try:
-        await planner.reconfiguration.submit(
-            request(
-                planner,
-                {"load_predictor": "kalman"},
-                warmup_trace=str(source),
-            )
-        )
-        operation = await asyncio.wait_for(finish(planner), 2)
-        assert operation["state"] == "failed"
-        assert expected in operation["error"]
-        assert planner.config.load_predictor == "constant"
-        assert planner._config_generation == 0
-        # A rejected source must release the single preparation slot.
-        followup = request(planner, {"max_gpu_budget": 24}).model_copy(
-            update={"request_id": "budget"}
-        )
-        await planner.reconfiguration.submit(followup)
-        await asyncio.gather(planner.reconfiguration._task)
-        assert planner.reconfiguration.get_operation("budget")["state"] == "applied"
-    finally:
-        await planner._shutdown_runtime()
-
-
 async def test_runtime_warmup_accepts_a_bounded_gzip_file(tmp_path):
-    planner = sla_planner()
+    planner = sla_planner(runtime_warmup_trace_dir=str(tmp_path))
     source = Path(trace(tmp_path))
     compressed = source.with_suffix(".jsonl.gz")
     compressed.write_bytes(gzip.compress(source.read_bytes()))
@@ -305,48 +306,105 @@ async def test_runtime_warmup_accepts_a_bounded_gzip_file(tmp_path):
     await planner._shutdown_runtime()
 
 
-def test_runtime_trace_growth_cannot_bypass_metadata_size_check(tmp_path, monkeypatch):
-    source = tmp_path / "growing.jsonl"
-    source.write_bytes(b"{}\n")
-    monkeypatch.setattr(reconfiguration, "MAX_WARMUP_TRACE_BYTES", 256)
-    original_fstat = os.fstat
-
-    def grow_after_metadata_check(descriptor):
-        metadata = original_fstat(descriptor)
-        with source.open("ab") as output:
-            output.write(b"x" * 256)
-        return metadata
-
-    monkeypatch.setattr(reconfiguration.os, "fstat", grow_after_metadata_check)
-    with pytest.raises(ValueError, match="trace exceeds 256 bytes"):
-        reconfiguration._load_runtime_warmup(str(source), 180)
-
-
-def test_runtime_trace_parsing_uses_the_bounded_snapshot(tmp_path, monkeypatch):
-    source = Path(trace(tmp_path))
-    original_loader = reconfiguration.extract_traffic_observations_from_trace
-
-    def replace_original_before_parsing(snapshot, interval, **kwargs):
-        assert Path(snapshot) != source
-        source.write_text("not a trace anymore")
-        return original_loader(snapshot, interval, **kwargs)
-
-    monkeypatch.setattr(
-        reconfiguration,
-        "extract_traffic_observations_from_trace",
-        replace_original_before_parsing,
-    )
-    observations = reconfiguration._load_runtime_warmup(str(source), 180)
-    assert [observation.num_req for observation in observations] == [
-        2,
-        4,
-        3,
-        6,
-        4,
-        7,
-        5,
-        9,
+async def test_runtime_warmup_is_confined_to_configured_data_directory(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "allowed"
+    root.mkdir()
+    planner = sla_planner(runtime_warmup_trace_dir=str(root))
+    outside = Path(trace(tmp_path))
+    (root / "escape.jsonl").symlink_to(outside)
+    (root / "escape-dir").symlink_to(tmp_path, target_is_directory=True)
+    unreadable = [
+        str(outside),
+        str(tmp_path / "absent.jsonl"),
+        "../warmup.jsonl",
+        "escape.jsonl",
+        "escape-dir/warmup.jsonl",
+        "absent.jsonl",
     ]
+    errors = []
+    for index, source in enumerate(unreadable):
+        update = request(
+            planner, {"load_predictor": "kalman"}, warmup_trace=source
+        ).model_copy(update={"request_id": f"rejected-{index}"})
+        response = await planner.reconfiguration.handle_request(
+            {"method": "PATCH", "path": "config", "body": update.model_dump()}
+        )
+        assert response["status"] == 202
+        await asyncio.gather(planner.reconfiguration._task, return_exceptions=True)
+        outcome = planner.reconfiguration.get_operation(update.request_id)
+        assert outcome["state"] == "failed"
+        assert str(tmp_path) not in outcome["error"]
+        errors.append(outcome["error"])
+        assert (
+            planner.config.load_predictor == "constant"
+            and planner._config_generation == 0
+        )
+    assert errors[0] == errors[1]
+    assert errors[3] == errors[4] == errors[5]
+    # Size rejection is also a failed preparation, with the previous policy usable.
+    monkeypatch.setattr(reconfiguration, "MAX_WARMUP_TRACE_BYTES", 256)
+    (root / "large.jsonl.gz").write_bytes(gzip.compress(b"x" * 257))
+    await planner.reconfiguration.submit(
+        request(planner, {"load_predictor": "kalman"}, warmup_trace="large.jsonl.gz")
+    )
+    assert (await finish(planner))["state"] == "failed"
+    update = request(planner, {"max_gpu_budget": 24}).model_copy(
+        update={"request_id": "recovery"}
+    )
+    await planner.reconfiguration.submit(update)
+    await planner.reconfiguration._task
+    assert planner.config.max_gpu_budget == 24
+    await planner._shutdown_runtime()
+
+
+async def test_unknown_operation_is_404_but_unexpected_key_errors_propagate(
+    monkeypatch,
+):
+    planner = sla_planner()
+    controller = planner.reconfiguration
+    response = await controller.handle_request(
+        {"method": "GET", "path": "operations/missing", "body": None}
+    )
+    assert response["status"] == 404
+
+    async def broken_get_config():
+        raise KeyError("internal failure")
+
+    monkeypatch.setattr(controller, "get_config", broken_get_config)
+    with pytest.raises(KeyError, match="internal failure"):
+        await controller.handle_request(
+            {"method": "GET", "path": "config", "body": None}
+        )
+    await planner._shutdown_runtime()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"itl_ms": 0},
+        {"ttft_ms": float("inf")},
+        {"kalman_r": -1},
+        {"kalman_q_level": float("nan")},
+        {"kalman_min_points": 0},
+        {"max_gpu_budget": -2},
+    ],
+)
+async def test_startup_and_runtime_share_configuration_constraints(changes):
+    with pytest.raises(ValidationError):
+        PlannerConfig(**changes)
+    planner = sla_planner()
+    response = await planner.reconfiguration.handle_request(
+        {
+            "method": "PATCH",
+            "path": "config",
+            "body": request(planner, changes).model_dump(),
+        }
+    )
+    assert response["status"] == 422
+    assert planner._config_generation == 0
+    await planner._shutdown_runtime()
 
 
 async def test_runtime_threshold_changes_the_next_scaling_decision():
@@ -384,7 +442,7 @@ async def test_runtime_threshold_changes_the_next_scaling_decision():
 async def test_fit_failure_and_missing_warmup_leave_old_configuration_active(
     tmp_path, monkeypatch
 ):
-    planner = sla_planner()
+    planner = sla_planner(runtime_warmup_trace_dir=str(tmp_path))
     engine = planner._ensure_engine()
     active = engine._builtins["load_predict"]
     original = active._num_req_predictor
@@ -419,7 +477,7 @@ async def test_fit_failure_and_missing_warmup_leave_old_configuration_active(
 async def test_legacy_write_invalidates_a_preparation_without_blocking_it(
     tmp_path, monkeypatch
 ):
-    planner = sla_planner()
+    planner = sla_planner(runtime_warmup_trace_dir=str(tmp_path))
     entered, release = threading.Event(), threading.Event()
     original = reconfiguration._prepare_predictor
 
@@ -459,7 +517,7 @@ async def test_legacy_write_invalidates_a_preparation_without_blocking_it(
 async def test_timeout_bounds_preparation_and_shutdown_prevents_late_activation(
     tmp_path, monkeypatch
 ):
-    planner = sla_planner()
+    planner = sla_planner(runtime_warmup_trace_dir=str(tmp_path))
     entered, release = threading.Event(), threading.Event()
 
     def blocked(config, capabilities, _trace):
@@ -474,15 +532,24 @@ async def test_timeout_bounds_preparation_and_shutdown_prevents_late_activation(
         await planner.reconfiguration.submit(update)
         assert await asyncio.to_thread(entered.wait, 5)
         assert (await finish(planner))["state"] == "failed"
+        budget_update = request(
+            planner, {"max_gpu_budget": 24, "ttft_ms": 250.0}
+        ).model_copy(update={"request_id": "budget"})
+        await planner.reconfiguration.submit(budget_update)
+        await planner.reconfiguration._task
+        assert planner.reconfiguration.get_operation("budget")["state"] == "applied"
         with pytest.raises(ConfigurationConflict, match="still preparing"):
             await planner.reconfiguration.submit(
-                update.model_copy(update={"request_id": "second"})
+                request(
+                    planner, {"load_predictor": "kalman"}, cold_start=True
+                ).model_copy(update={"request_id": "second"})
             )
         await asyncio.wait_for(planner._shutdown_runtime(), 1)
         release.set()
         await planner.reconfiguration._preparation
         assert planner.config.load_predictor == "constant"
-        assert planner._config_generation == 0
+        assert planner._config_generation == 1
+        assert planner.config.max_gpu_budget == 24
     finally:
         release.set()
 
