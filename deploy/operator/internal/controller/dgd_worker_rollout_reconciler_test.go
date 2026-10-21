@@ -120,10 +120,11 @@ func createTestDGDReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployme
 	}
 
 	return &DynamoGraphDeploymentReconciler{
-		Client:        builder.Build(),
-		Recorder:      events.NewFakeRecorder(10),
-		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &commonController.RuntimeConfig{},
+		Client:          builder.Build(),
+		inferenceClient: newRolloutInferenceClient(),
+		Recorder:        events.NewFakeRecorder(10),
+		Config:          &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig:   &commonController.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -137,7 +138,7 @@ func createTestReconcilerWithStatus(
 	opts ...testReconcilerOption,
 ) *dgdWorkerRolloutReconciler {
 	reconciler := createTestDGDReconcilerWithStatus(dgd, opts...)
-	return newDGDWorkerRolloutReconciler(reconciler.Client, reconciler.Recorder)
+	return newDGDWorkerRolloutReconciler(reconciler.Client, reconciler.Recorder, reconciler.inferenceClient)
 }
 
 func newTestComponentWorkloadsReconciler(
@@ -2911,7 +2912,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 
 		t.Log("Build the reconciler directly, bypassing the auto-ref helper, to keep the DCD ownerless")
 		dgdReconciler := createTestDGDReconcilerWithStatus(dgd, withObjects(ownerlessDCD))
-		r := newDGDWorkerRolloutReconciler(dgdReconciler.Client, dgdReconciler.Recorder)
+		r := newDGDWorkerRolloutReconciler(dgdReconciler.Client, dgdReconciler.Recorder, dgdReconciler.inferenceClient)
 
 		result, err := r.findLegacyWorkerDCDs(context.Background(), dgd)
 		require.NoError(t, err)
@@ -2949,7 +2950,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 		})
 
 		dgdReconciler := createTestDGDReconcilerWithStatus(dgd, withObjects(staleDCD))
-		r := newDGDWorkerRolloutReconciler(dgdReconciler.Client, dgdReconciler.Recorder)
+		r := newDGDWorkerRolloutReconciler(dgdReconciler.Client, dgdReconciler.Recorder, dgdReconciler.inferenceClient)
 
 		result, err := r.findLegacyWorkerDCDs(context.Background(), dgd)
 		require.NoError(t, err)

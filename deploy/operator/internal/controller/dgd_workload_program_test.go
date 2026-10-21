@@ -71,20 +71,29 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build the program composition root")
+			t.Log("Build the program composition root with one controller-owned probe client")
+			inferenceClient := newRolloutInferenceClient()
+			t.Cleanup(inferenceClient.CloseIdleConnections)
 			reconciler := &DynamoGraphDeploymentReconciler{
-				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &commonController.RuntimeConfig{},
+				Config:          &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig:   &commonController.RuntimeConfig{},
+				inferenceClient: inferenceClient,
 			}
 
 			t.Log("Select one complete workload program from the durable provider")
 			got, err := reconciler.selectWorkloadProgram(tt.provider)
 			require.NoError(t, err)
 
+			t.Log("Select another program without creating another probe pool")
+			gotAgain, err := reconciler.selectWorkloadProgram(tt.provider)
+			require.NoError(t, err)
+
 			assert.IsType(t, tt.wantProgram, got)
 			if component, ok := got.(*componentProgram); ok {
 				assert.NotNil(t, component.sharedResources)
 				assert.NotNil(t, component.rollout)
+				assert.Same(t, inferenceClient, component.rollout.inferenceClient)
+				assert.Same(t, inferenceClient, gotAgain.(*componentProgram).rollout.inferenceClient)
 				assert.NotNil(t, component.restart)
 				assert.NotNil(t, component.restartProgress)
 				assert.NotNil(t, component.workloads)
@@ -93,6 +102,8 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 			if grove, ok := got.(*groveProgram); ok {
 				assert.NotNil(t, grove.sharedResources)
 				assert.NotNil(t, grove.rollout)
+				assert.Same(t, inferenceClient, grove.rollout.inferenceClient)
+				assert.Same(t, inferenceClient, gotAgain.(*groveProgram).rollout.inferenceClient)
 				assert.NotNil(t, grove.restart)
 				assert.NotNil(t, grove.restartProgress)
 				assert.NotNil(t, grove.lpxRestartProgress)
@@ -103,6 +114,8 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 			if disaggregatedSet, ok := got.(*disaggregatedSetProgram); ok {
 				assert.NotNil(t, disaggregatedSet.sharedResources)
 				assert.NotNil(t, disaggregatedSet.rollout)
+				assert.Same(t, inferenceClient, disaggregatedSet.rollout.inferenceClient)
+				assert.Same(t, inferenceClient, gotAgain.(*disaggregatedSetProgram).rollout.inferenceClient)
 				assert.NotNil(t, disaggregatedSet.workloads)
 				assert.NotNil(t, disaggregatedSet.scalingAdapters)
 			}
@@ -616,7 +629,7 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 				}).
 				Build()
 			recorder := events.NewFakeRecorder(1)
-			reconciler := newDGDWorkerRolloutReconciler(kubeClient, recorder)
+			reconciler := newDGDWorkerRolloutReconciler(kubeClient, recorder, newRolloutInferenceClient())
 
 			t.Log("Advance the unsupported pathway hash")
 			transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd)
@@ -1123,7 +1136,7 @@ func TestComponentWorkloadsReconciler_FirstGenMultinodeStampsWorkerHash(t *testi
 
 	t.Log("Wire the component workloads reconciler backed by a fake client seeded with only the DGD")
 	r := createTestDGDReconcilerWithStatus(dgd)
-	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
+	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder, newRolloutInferenceClient())
 	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
 
 	t.Log("Do not initialize the current hash before any worker DCD is observed")
@@ -1214,7 +1227,7 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 	})
 
 	r := createTestDGDReconcilerWithStatus(reducedDGD, withObjects(prefillOldDCD, decodeOldDCD))
-	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
+	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder, newRolloutInferenceClient())
 	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
 
 	t.Log("Reconcile: the removed decode component must be targeted at zero replicas")

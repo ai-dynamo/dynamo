@@ -35,6 +35,17 @@ import (
 
 var rolloutWorkerMetadataGVK = schema.GroupVersionKind{Group: "nvidia.com", Version: "v1alpha1", Kind: "DynamoWorkerMetadata"}
 
+// newRolloutInferenceClient dials frontend Pods directly without operator proxy settings.
+func newRolloutInferenceClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{
+		Transport:     transport,
+		Timeout:       5 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
 type rolloutInferenceTarget struct {
 	Model      string
 	InstanceID uint64

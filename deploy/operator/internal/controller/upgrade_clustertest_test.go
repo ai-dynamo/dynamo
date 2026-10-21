@@ -203,7 +203,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				}
 			}
 			dgd := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
-			rollout := newDGDWorkerRolloutReconciler(env.Client(), nil)
+			rollout := newDGDWorkerRolloutReconciler(env.Client(), nil, newRolloutInferenceClient())
 			transition, err := rollout.planUnsupportedWorkerHashTransition(dgd)
 			require.NoError(t, err)
 			// Report independently of the golden and keep observing to emit the full diff.

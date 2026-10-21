@@ -59,7 +59,7 @@ func TestDisaggregatedSetRealLWSCRDValidationAndConvergence(t *testing.T) {
 		RuntimeConfig: runtimeConfig,
 	}
 	workloads := reconciler.newDisaggregatedSetWorkloadsReconciler(
-		newDGDWorkerRolloutReconciler(reconciler.Client, reconciler.Recorder),
+		newDGDWorkerRolloutReconciler(reconciler.Client, reconciler.Recorder, newRolloutInferenceClient()),
 	)
 	components := make(map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, len(dcds))
 	for name, dcd := range dcds {

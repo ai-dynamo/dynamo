@@ -427,7 +427,7 @@ func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFai
 			workloads := newGroveWorkloadsReconciler(
 				kubeClient,
 				events.NewFakeRecorder(10),
-				newDGDWorkerRolloutReconciler(kubeClient, nil),
+				newDGDWorkerRolloutReconciler(kubeClient, nil, newRolloutInferenceClient()),
 				&configv1alpha1.OperatorConfiguration{},
 				&commoncontroller.RuntimeConfig{},
 				&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
@@ -514,7 +514,7 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	workloads := newGroveWorkloadsReconciler(
 		kubeClient,
 		events.NewFakeRecorder(10),
-		newDGDWorkerRolloutReconciler(kubeClient, nil),
+		newDGDWorkerRolloutReconciler(kubeClient, nil, newRolloutInferenceClient()),
 		&configv1alpha1.OperatorConfiguration{},
 		&commoncontroller.RuntimeConfig{},
 		&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
@@ -839,7 +839,7 @@ func TestGroveWorkloadsReconciler_SkipsHashObservationWhenHashIsCurrent(t *testi
 	workloads := newGroveWorkloadsReconciler(
 		kubeClient,
 		events.NewFakeRecorder(10),
-		newDGDWorkerRolloutReconciler(kubeClient, nil),
+		newDGDWorkerRolloutReconciler(kubeClient, nil, newRolloutInferenceClient()),
 		&configv1alpha1.OperatorConfiguration{},
 		&commoncontroller.RuntimeConfig{},
 		&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
@@ -918,7 +918,7 @@ func TestGroveWorkloadsReconciler_DefersHashCommitUntilPCSWriteObserved(t *testi
 			workloads := newGroveWorkloadsReconciler(
 				kubeClient,
 				events.NewFakeRecorder(10),
-				newDGDWorkerRolloutReconciler(kubeClient, nil),
+				newDGDWorkerRolloutReconciler(kubeClient, nil, newRolloutInferenceClient()),
 				&configv1alpha1.OperatorConfiguration{},
 				&commoncontroller.RuntimeConfig{},
 				&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},

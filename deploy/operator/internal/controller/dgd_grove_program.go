@@ -82,7 +82,7 @@ func (r groveReconcileRequest) DelegatedComponents() []nvidiacomv1beta1.DynamoCo
 
 // newGroveProgram wires the Grove pathway at the DGD composition root.
 func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
-	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
+	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder, r.inferenceClient)
 	return &groveProgram{
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,

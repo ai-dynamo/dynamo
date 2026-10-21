@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
@@ -84,6 +85,7 @@ type DynamoGraphDeploymentReconciler struct {
 	DockerSecretRetriever DockerSecretRetriever
 	SSHKeyManager         *secret.SSHKeyManager
 	RBACManager           rbacManager
+	inferenceClient       *http.Client
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamoworkermetadatas,verbs=get;list;watch
@@ -276,6 +278,9 @@ func workloadRoutingAnnotationsChanged(update event.UpdateEvent) bool {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Initialize the shared probe pool before controller workers start reconciling.
+	r.inferenceClient = newRolloutInferenceClient()
+
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&corev1.Pod{},

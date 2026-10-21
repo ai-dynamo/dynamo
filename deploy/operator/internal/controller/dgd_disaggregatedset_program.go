@@ -44,7 +44,7 @@ type disaggregatedSetProgram struct {
 }
 
 func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetProgram() *disaggregatedSetProgram {
-	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
+	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder, r.inferenceClient)
 	rollout.discoveryBackend = r.Config.Discovery.Backend
 	return &disaggregatedSetProgram{
 		sharedResources: newDGDSharedResourcesReconciler(

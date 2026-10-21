@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"slices"
 	"sort"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -74,18 +73,11 @@ type dgdWorkerRolloutReconciler struct {
 func newDGDWorkerRolloutReconciler(
 	kubeClient client.Client,
 	recorder events.EventRecorder,
+	inferenceClient *http.Client,
 ) *dgdWorkerRolloutReconciler {
-	// Pod-IP probes must dial the selected frontend directly, regardless of operator proxy settings.
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-
 	return &dgdWorkerRolloutReconciler{
 		dgdResourceSyncer: newDGDResourceSyncer(kubeClient, recorder),
-		inferenceClient: &http.Client{
-			Transport:     transport,
-			Timeout:       5 * time.Second,
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		inferenceClient:   inferenceClient,
 	}
 }
 
@@ -1462,7 +1454,7 @@ func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas i
 	return int32(surge), int32(unavail)
 }
 
-// buildRollingUpdateContext returns replica targets and whether inference withheld final old-worker retirement.
+// The boolean reports whether inference blocked final old-worker retirement.
 func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,

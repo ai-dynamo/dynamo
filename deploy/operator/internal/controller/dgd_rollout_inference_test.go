@@ -28,9 +28,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
@@ -347,8 +349,13 @@ func TestRolloutInferenceClient_BypassesProxy(t *testing.T) {
 	require.Equal(t, int32(1), proxyRequests.Load())
 
 	t.Log("The production rollout client reaches the frontend without changing the default transport")
-	r := newDGDWorkerRolloutReconciler(nil, nil)
-	defer r.inferenceClient.CloseIdleConnections()
+	owner := &DynamoGraphDeploymentReconciler{
+		Config:          &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig:   &commoncontroller.RuntimeConfig{},
+		inferenceClient: newRolloutInferenceClient(),
+	}
+	defer owner.inferenceClient.CloseIdleConnections()
+	r := owner.newComponentProgram().rollout
 	err = r.probeReplacementInference(t.Context(), frontend.URL+"/v1/chat/completions", "/v1/chat/completions",
 		rolloutInferenceTarget{Model: "test-model", InstanceID: 42})
 	require.NoError(t, err)
