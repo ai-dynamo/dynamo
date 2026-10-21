@@ -20,8 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// PrepareHistory must run on an exclusive test cluster before any admission or
-// controller is active. The returned cleanup is required even when setup fails.
+// PrepareHistory must run on an exclusive test cluster before candidate admission
+// or Dynamo controllers are active. The returned cleanup is required even when setup fails.
 func PrepareHistory(ctx context.Context, c client.Client, snapshots map[string][]unstructured.Unstructured) (func(context.Context) error, error) {
 	// Refuse to rewrite storage underneath an installed admission stack.
 	var mutating admissionv1.MutatingWebhookConfigurationList
@@ -86,6 +86,12 @@ func PrepareHistory(ctx context.Context, c client.Client, snapshots map[string][
 			return cleanup, err
 		}
 		namespaces = append(namespaces, namespace)
+
+		// Native controllers already run while predecessor workloads are reconstructed.
+		if err := blockQuota(ctx, c, workloadBlockQuota(namespace)); err != nil {
+			return cleanup, err
+		}
+
 		for _, object := range objects {
 			gvk := object.GroupVersionKind()
 			for _, crd := range crds.Items {
