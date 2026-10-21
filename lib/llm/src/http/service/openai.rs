@@ -42,7 +42,7 @@ use super::{
     disconnect::{
         ConnectionHandle, StreamErrorSignal, create_connection_monitor,
         monitor_for_disconnects_with_activity_and_error_signal,
-        monitor_for_disconnects_with_error_signal,
+        monitor_for_disconnects_with_error_signal, monitor_for_responses_disconnects,
     },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
@@ -4485,7 +4485,7 @@ async fn responses(
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
-        let stream = monitor_for_disconnects_with_error_signal(
+        let stream = monitor_for_responses_disconnects(
             full_stream,
             ctx,
             inflight_guard,
@@ -8445,7 +8445,7 @@ mod tests {
     // 9. Invalid or Out of range temperature: Done
     // 10.Invalid or out of range top_p: Done
     // 11. Repetition Penalty: Should be a float between 0.0 and 2.0 : Done
-    // 12. Logprobs: Should be a positive integer between 0 and 5 : Done
+    // 12. Logprobs: Should be a positive integer between 0 and 20 : Done
     // invalid or non existing user : Only empty string is not allowed validation is there. How can we check non-extisting user ?
     // Unknown fields : Done (rejected via extra_fields catch-all)
     // guided_whitespace_pattern null or invalid : Not Done
@@ -8579,13 +8579,12 @@ mod tests {
             );
         }
 
-        // Logprobs: Should be a positive integer between 0 and 5
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
-                logprobs: Some(6),
+                logprobs: Some(21),
                 ..Default::default()
             },
             common: Default::default(),
@@ -8600,7 +8599,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Logprobs must be between 0 and 5, got 6")
+                format!("{VALIDATION_PREFIX}Logprobs must be between 0 and 20, got 21")
             );
         }
     }

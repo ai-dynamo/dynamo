@@ -46,11 +46,12 @@ pub(crate) use recovery::{
     DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, KvEventSubscriptionHandle, RecoveryResetReason,
     RecoverySupervisor, RecoveryTarget, TargetFaultDisposition, start_target_subscriber,
 };
+pub(crate) use recovery::{
+    KvStateAgentStatusCell, start_subscriber, start_worker_kv_query_endpoint,
+    start_worker_kv_query_endpoint_with_status,
+};
 #[cfg(test)]
 pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport};
-pub(crate) use recovery::{
-    start_subscriber, start_worker_kv_query_endpoint, start_worker_kv_query_endpoint_with_status,
-};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResolvedApproximatePrimaryPolicy {
