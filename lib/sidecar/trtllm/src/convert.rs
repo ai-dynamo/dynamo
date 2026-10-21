@@ -476,8 +476,12 @@ pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
     output_logprobs: Option<u32>,
-    /// See [`retained_hidden_stop_ids`]. The engine stops on these, so one at
-    /// the end of a delta is held until the terminal says whether it matched.
+    /// Every stop ID when visible stops are set, empty otherwise. The engine
+    /// stops on these, so one at the end of a delta is held for the terminal.
+    /// OpenEngine sends the matched stop before the `finished` event carrying
+    /// usage, and the frontend decoder drops everything after a visible stop.
+    held_stop_ids: BTreeSet<u32>,
+    /// See [`retained_hidden_stop_ids`]. Dropped when the terminal matched it.
     hidden_stop_ids: BTreeSet<u32>,
     pending_stop: Option<pb::TokenInfo>,
     phase: Phase,
@@ -516,6 +520,11 @@ impl ResponseState {
             prompt_tokens: request.token_ids.len() as u32,
             completion_tokens: 0,
             output_logprobs: request.output_options.logprobs,
+            held_stop_ids: if has_visible_stop_tokens(request) {
+                stop_token_ids(request).into_iter().collect()
+            } else {
+                BTreeSet::new()
+            },
             hidden_stop_ids: retained_hidden_stop_ids(request),
             pending_stop: None,
             phase: if mode.is_prefill() {
@@ -628,7 +637,7 @@ impl ResponseState {
         }
         if tokens
             .last()
-            .is_some_and(|info| self.hidden_stop_ids.contains(&info.token_id))
+            .is_some_and(|info| self.held_stop_ids.contains(&info.token_id))
         {
             self.pending_stop = tokens.pop();
         }

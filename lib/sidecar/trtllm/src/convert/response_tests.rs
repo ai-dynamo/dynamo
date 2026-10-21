@@ -498,3 +498,53 @@ fn held_hidden_stop_token_is_released_unless_it_ended_the_sequence() {
     assert!(terminal.token_ids.is_empty());
     assert_eq!(terminal.completion_usage.unwrap().completion_tokens, 4);
 }
+
+#[test]
+fn visible_stop_token_arrives_with_the_terminal_usage() {
+    let mut req = request();
+    req.stop_conditions.stop_token_ids_visible = Some(vec![9]);
+    let mut state = ResponseState::new(&req, AGG);
+    let delta = state
+        .convert(token_response(vec![
+            logprob_token(5, -0.1),
+            logprob_token(9, -0.2),
+        ]))
+        .expect("convert token")
+        .expect("delta");
+    assert_eq!(delta.token_ids, [5]);
+
+    let finished = pb::GenerateResponse {
+        request_id: "r".to_string(),
+        event: Some(pb::generate_response::Event::Finished(
+            pb::GenerationFinished {
+                output_index: Some(0),
+                reason: pb::FinishReason::Stop as i32,
+                message: String::new(),
+                stop_match: Some(pb::StopMatch {
+                    r#match: Some(pb::stop_match::Match::StopTokenId(9)),
+                }),
+            },
+        )),
+        usage: Some(pb::Usage {
+            prompt_tokens: 3,
+            completion_tokens: 2,
+            total_tokens: 5,
+            cached_prompt_tokens: Some(2),
+            reasoning_tokens: None,
+        }),
+    };
+    let terminal = state
+        .convert(finished)
+        .expect("convert finished")
+        .expect("terminal");
+    assert_eq!(terminal.token_ids, [9]);
+    assert_eq!(terminal.log_probs.as_deref(), Some(&[-0.2][..]));
+    assert_eq!(terminal.stop_reason, Some(StopReason::Int(9)));
+    let usage = terminal.completion_usage.expect("usage");
+    assert_eq!(
+        usage
+            .prompt_tokens_details
+            .and_then(|details| details.cached_tokens),
+        Some(2)
+    );
+}

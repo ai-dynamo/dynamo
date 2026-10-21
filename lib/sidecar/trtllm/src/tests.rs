@@ -714,10 +714,10 @@ async fn visible_stop_token_is_returned_and_hidden_stop_token_is_not() {
     visible.stop_conditions.stop_token_ids_visible = Some(vec![42]);
     let outputs = collect(&engine, visible).await;
     assert_eq!(token_ids(&outputs), [42]);
-    assert_eq!(
-        outputs.last().unwrap().stop_reason,
-        Some(StopReason::Int(42))
-    );
+    let terminal = outputs.last().unwrap();
+    assert_eq!(terminal.token_ids, [42], "held for the terminal's usage");
+    assert!(terminal.completion_usage.is_some());
+    assert_eq!(terminal.stop_reason, Some(StopReason::Int(42)));
 
     // Retaining a visible stop makes the engine return hidden stops too.
     let mut hidden = request();
