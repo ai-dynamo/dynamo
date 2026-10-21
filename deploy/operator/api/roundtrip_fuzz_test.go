@@ -178,14 +178,17 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		func(v *v1beta1.OptimizationType, c randfill.Continue) {
 			*v = oneOf(c, v1beta1.OptimizationTypeLatency, v1beta1.OptimizationTypeThroughput)
 		},
+		fuzzAlphaDGDR,
 		fuzzAlphaDGDRNativeSpec,
 		fuzzAlphaDGDRNativeStatus,
 		fuzzAlphaDGDRSpec,
 		fuzzAlphaDGDRStatus,
+		fuzzBetaDGDR,
 		fuzzBetaDGDRNativeSpec,
 		fuzzBetaDGDRNativeStatus,
 		fuzzBetaDGDRSpec,
 		fuzzBetaDGDRStatus,
+		fuzzBeta2DGDR,
 		fuzzBeta2DGDRNativeSpec,
 		fuzzBeta2DGDRNativeStatus,
 		fuzzBeta2DGDRSpec,
@@ -227,6 +230,27 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 			}
 		},
 	}
+}
+
+func fuzzAlphaDGDR(r *v1alpha1.DynamoGraphDeploymentRequest, c randfill.Continue) {
+	c.FillNoCustom(r)
+	if c.Bool() {
+		return
+	}
+
+	var spec v1beta2.DynamoGraphDeploymentRequestNativeSpec
+	c.Fill(&spec)
+	r.Spec = v1alpha1.DynamoGraphDeploymentRequestSpec{
+		V1Beta2: marshalFuzzEnvelope(spec),
+	}
+	r.Status = v1alpha1.DynamoGraphDeploymentRequestStatus{}
+	if c.Bool() {
+		return
+	}
+
+	var status v1beta2.DynamoGraphDeploymentRequestNativeStatus
+	c.Fill(&status)
+	r.Status.V1Beta2 = marshalFuzzEnvelope(status)
 }
 
 func fuzzAlphaDGDRSpec(s *v1alpha1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
@@ -288,6 +312,27 @@ func fuzzAlphaDGDRNativeStatus(s *v1alpha1.DynamoGraphDeploymentRequestNativeSta
 		v1alpha1.DGDRStateDeploymentDeleted,
 		v1alpha1.DGDRStateFailed,
 	)
+}
+
+func fuzzBetaDGDR(r *v1beta1.DynamoGraphDeploymentRequest, c randfill.Continue) {
+	c.FillNoCustom(r)
+	if c.Bool() {
+		return
+	}
+
+	var spec v1beta2.DynamoGraphDeploymentRequestNativeSpec
+	c.Fill(&spec)
+	r.Spec = v1beta1.DynamoGraphDeploymentRequestSpec{
+		V1Beta2: marshalFuzzEnvelope(spec),
+	}
+	r.Status = v1beta1.DynamoGraphDeploymentRequestStatus{}
+	if c.Bool() {
+		return
+	}
+
+	var status v1beta2.DynamoGraphDeploymentRequestNativeStatus
+	c.Fill(&status)
+	r.Status.V1Beta2 = marshalFuzzEnvelope(status)
 }
 
 func fuzzBetaDGDRSpec(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
@@ -442,6 +487,27 @@ func fuzzBetaDGDRNativeStatus(s *v1beta1.DynamoGraphDeploymentRequestNativeStatu
 	}
 }
 
+func fuzzBeta2DGDR(r *v1beta2.DynamoGraphDeploymentRequest, c randfill.Continue) {
+	c.FillNoCustom(r)
+	if c.Bool() {
+		return
+	}
+
+	var spec v1beta1.DynamoGraphDeploymentRequestNativeSpec
+	c.Fill(&spec)
+	r.Spec = v1beta2.DynamoGraphDeploymentRequestSpec{
+		V1Beta1: marshalFuzzEnvelope(spec),
+	}
+	r.Status = v1beta2.DynamoGraphDeploymentRequestStatus{}
+	if c.Bool() {
+		return
+	}
+
+	var status v1beta1.DynamoGraphDeploymentRequestNativeStatus
+	c.Fill(&status)
+	r.Status.V1Beta1 = marshalFuzzEnvelope(status)
+}
+
 func fuzzBeta2DGDRSpec(s *v1beta2.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
 	c.Fill(&s.DynamoGraphDeploymentRequestNativeSpec)
 	s.V1Beta1 = nil
@@ -502,6 +568,14 @@ func fuzzAISimulateSpec(s *v1beta2.AISimulateSpec, c randfill.Continue) {
 		panic(err)
 	}
 	s.Parameters = &runtime.RawExtension{Raw: raw}
+}
+
+func marshalFuzzEnvelope(value any) *apiextensionsv1.JSON {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return &apiextensionsv1.JSON{Raw: raw}
 }
 
 func newRoundTripFiller(seed int64) *randfill.Filler {

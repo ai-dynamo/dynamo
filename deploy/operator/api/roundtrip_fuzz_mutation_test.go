@@ -207,14 +207,14 @@ type v1Beta2SpokeEnvelopeMutationOps struct {
 
 func (ops v1Beta2SpokeEnvelopeMutationOps) buildCarrier() (*v1beta2.DynamoGraphDeploymentRequest, error) {
 	in := &v1beta1.DynamoGraphDeploymentRequest{}
-	ops.f.Fill(in)
+	ops.f.FillNoCustom(in)
 	carrier := &v1beta2.DynamoGraphDeploymentRequest{}
 	return carrier, carrier.ConvertFrom(in)
 }
 
 func (ops v1Beta2SpokeEnvelopeMutationOps) mutateCarrier(carrier *v1beta2.DynamoGraphDeploymentRequest) {
 	patch := &v1beta1.DynamoGraphDeploymentRequest{}
-	ops.f.Fill(patch)
+	ops.f.FillNoCustom(patch)
 	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
 	mutateJSONEnvelope(
 		ops.t,
@@ -251,14 +251,14 @@ type v1Beta1HubEnvelopeMutationOps struct {
 
 func (ops v1Beta1HubEnvelopeMutationOps) buildCarrier() (*v1beta1.DynamoGraphDeploymentRequest, error) {
 	in := &v1beta2.DynamoGraphDeploymentRequest{}
-	ops.f.Fill(in)
+	ops.f.FillNoCustom(in)
 	carrier := &v1beta1.DynamoGraphDeploymentRequest{}
 	return carrier, in.ConvertTo(carrier)
 }
 
 func (ops v1Beta1HubEnvelopeMutationOps) mutateCarrier(carrier *v1beta1.DynamoGraphDeploymentRequest) {
 	patch := &v1beta2.DynamoGraphDeploymentRequest{}
-	ops.f.Fill(patch)
+	ops.f.FillNoCustom(patch)
 	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
 	mutateJSONEnvelope(
 		ops.t,
