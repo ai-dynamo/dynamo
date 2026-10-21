@@ -37,6 +37,9 @@ func (staticModelRegistry) BuildURL(id string) (*url.URL, error) {
 func (staticModelRegistry) EnsureDownloaded(_ context.Context, buildURL url.URL) (bool, error) {
 	return false, fmt.Errorf("unexpected build download for %q", buildURL.String())
 }
+func (staticModelRegistry) EnsureCheckpointDownloaded(_ context.Context, checkpoint *Checkpoint) (bool, error) {
+	return false, fmt.Errorf("unexpected checkpoint download for %q", CheckpointKey(checkpoint))
+}
 
 func (source staticModelRegistry) AcquireBuild(_ context.Context, buildID string) (*Build, error) {
 	snapshot := source[buildID]
