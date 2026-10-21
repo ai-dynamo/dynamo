@@ -12599,7 +12599,6 @@ mod tests {
             None,
             Some("nemotron_v3"),
         ));
-        // `force_nonempty_content` alone keeps reasoning parsing on.
         request.chat_template_args = Some(
             [(
                 "force_nonempty_content".to_string(),

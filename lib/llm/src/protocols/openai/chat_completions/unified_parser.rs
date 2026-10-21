@@ -81,7 +81,6 @@ pub(crate) const NEMOTRON_V3_UNIFIED_FAMILY: &str = "nemotron_v3";
 /// Dynamo's `--dyn-tool-call-parser` name that pairs into [`QWEN3_UNIFIED_FAMILY`].
 const QWEN3_TOOL_CALL_PARSER: &str = "qwen3_coder";
 
-/// Families that emit Qwen3-Coder XML tool calls and share its native lexical state.
 fn uses_qwen_xml_grammar(family: &str) -> bool {
     matches!(family, QWEN3_UNIFIED_FAMILY | NEMOTRON_V3_UNIFIED_FAMILY)
 }
@@ -744,7 +743,12 @@ pub(crate) fn stream_prefill(
 /// Nonterminal empty and whitespace-only chunks are held by `apply_stream` until this
 /// check can classify the first non-whitespace content. A terminal empty stream keeps
 /// the prompt's `Reasoning` state because there is no later payload to classify.
+///
+/// `None` is the family default, and Nemotron 3's default is the implicit thought, so
+/// bare JSON for that family starts in `Response` explicitly; `None` would hand the
+/// payload back to reasoning.
 fn bare_guided_json_prefill(
+    family: &str,
     first_content: Option<&ChatCompletionMessageContent>,
 ) -> UnifiedParserStartingState {
     let Some(ChatCompletionMessageContent::Text(text)) = first_content else {
@@ -755,9 +759,18 @@ fn bare_guided_json_prefill(
         return UnifiedParserStartingState::Reasoning;
     }
     if starts_bare_json(trimmed) {
-        UnifiedParserStartingState::None
+        bare_json_starting_state(family)
     } else {
         UnifiedParserStartingState::Reasoning
+    }
+}
+
+/// The starting state that lets a bare guided JSON payload reach the tool parser.
+fn bare_json_starting_state(family: &str) -> UnifiedParserStartingState {
+    if family == NEMOTRON_V3_UNIFIED_FAMILY {
+        UnifiedParserStartingState::Response
+    } else {
+        UnifiedParserStartingState::None
     }
 }
 
@@ -789,12 +802,11 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
                 // An opener exists (and any closer does not precede it): the model will
                 // open reasoning itself later, currently visible as ordinary text.
                 (Some(_), _) => UnifiedParserStartingState::None,
-                // Nemotron 3 never emits its own opener: a turn with neither marker is a
-                // thought cut off before `</think>`, unless the request disabled
-                // reasoning, which `UnifiedRequestPolicy::starting_state` handles.
-                (None, None) if family == NEMOTRON_V3_UNIFIED_FAMILY => {
-                    UnifiedParserStartingState::Reasoning
-                }
+                // Marker-free text is the visible answer. This also holds for Nemotron
+                // 3, whose implicit thought is split by the streaming path before the
+                // aggregator re-reads a choice's text: starting that text in reasoning
+                // would relabel an already-parsed answer. A raw thought cut off before
+                // `</think>` is indistinguishable here and is read the same way.
                 (None, None) => UnifiedParserStartingState::Response,
             })
         }
@@ -3460,7 +3472,7 @@ where
                                     _ => UnifiedParserStartingState::Reasoning,
                                 }
                             } else {
-                                bare_guided_json_prefill(original.delta.content.as_ref())
+                                bare_guided_json_prefill(family, original.delta.content.as_ref())
                             }
                         } else {
                             detected_prefill
@@ -4059,26 +4071,17 @@ pub(crate) mod tests {
 
     #[test]
     fn nemotron_pairs_qwen3_coder_with_nemotron_v3_reasoning() {
-        // Nemotron 3 model cards keep Qwen's tool parser and name the family through
-        // the reasoning half, in either spelling the released reasoning parser accepts.
-        for reasoning in ["nemotron_v3", "nemotron3"] {
-            assert_eq!(
-                configured_family(Some("qwen3_coder"), Some(reasoning)),
-                Some(NEMOTRON_V3_UNIFIED_FAMILY),
-                "{reasoning}"
-            );
-            assert_eq!(
-                configured_family(None, Some(reasoning)),
-                Some(NEMOTRON_V3_UNIFIED_FAMILY)
-            );
-        }
-        // The shared grammar never pulls Qwen3 into Nemotron, and the reverse pairing
-        // (Nemotron tool half, Qwen reasoning) names no owner.
+        // The released reasoning parser also answers to `nemotron3`; the canonical
+        // spelling is covered by `eight_family_routing_all_modes`.
         assert_eq!(
-            configured_family(Some("qwen3_coder"), Some("qwen3")),
-            Some(QWEN3_UNIFIED_FAMILY)
+            configured_family(Some("qwen3_coder"), Some("nemotron3")),
+            Some(NEMOTRON_V3_UNIFIED_FAMILY)
         );
-        assert_eq!(configured_family(Some("qwen3_coder"), None), Some("qwen3"));
+        assert_eq!(
+            configured_family(None, Some("nemotron3")),
+            Some(NEMOTRON_V3_UNIFIED_FAMILY)
+        );
+        // The reverse pairing (Nemotron tool half, Qwen reasoning) names no owner.
         assert_eq!(configured_family(Some("nemotron_v3"), Some("qwen3")), None);
         assert_eq!(
             configured_family(Some("kimi_k2"), Some("nemotron_v3")),
@@ -4119,15 +4122,15 @@ pub(crate) mod tests {
             ),
             UnifiedParserStartingState::Reasoning
         );
-        // Batch: the prompt pre-opened the thought, so a bare closer or no marker at
-        // all both mean reasoning; only a model-written opener means otherwise.
+        // Batch: a bare closer means the prompt pre-opened the thought; marker-free
+        // text is the answer (the streaming path already split any thought off it).
         assert_eq!(
             detect_prefill(NEMOTRON_V3_UNIFIED_FAMILY, "reason</think>answer").unwrap(),
             UnifiedParserStartingState::Reasoning
         );
         assert_eq!(
-            detect_prefill(NEMOTRON_V3_UNIFIED_FAMILY, "cut off before the closer").unwrap(),
-            UnifiedParserStartingState::Reasoning
+            detect_prefill(NEMOTRON_V3_UNIFIED_FAMILY, "Hello!").unwrap(),
+            UnifiedParserStartingState::Response
         );
         assert_eq!(
             detect_prefill(NEMOTRON_V3_UNIFIED_FAMILY, "<think>reason</think>answer").unwrap(),
@@ -4139,6 +4142,101 @@ pub(crate) mod tests {
                 .unwrap(),
             UnifiedParserStartingState::Response
         );
+        // Bare guided JSON must reach the tool parser: `None` is the family default,
+        // which for Nemotron is the implicit thought, so the state is `Response`.
+        let json = ChatCompletionMessageContent::Text(r#"{"city":"Paris"}"#.into());
+        assert_eq!(
+            bare_guided_json_prefill(NEMOTRON_V3_UNIFIED_FAMILY, Some(&json)),
+            UnifiedParserStartingState::Response
+        );
+        assert_eq!(
+            bare_guided_json_prefill(QWEN3_UNIFIED_FAMILY, Some(&json)),
+            UnifiedParserStartingState::None
+        );
+        let prose = ChatCompletionMessageContent::Text("thinking first".into());
+        assert_eq!(
+            bare_guided_json_prefill(NEMOTRON_V3_UNIFIED_FAMILY, Some(&prose)),
+            UnifiedParserStartingState::Reasoning
+        );
+    }
+
+    #[tokio::test]
+    async fn nemotron_bare_guided_json_becomes_a_tool_call_in_stream_and_batch() {
+        // The prompt pre-opened reasoning (`prefill = Reasoning`) and guided decoding
+        // forbids the closer, so the payload's first byte is JSON. Both paths must
+        // return the forced call instead of consuming the JSON as reasoning.
+        let tools = weather_tools();
+        for (constraint, raw) in [
+            (
+                GuidedToolConstraint::GuidedJsonNamed {
+                    tool_name: "get_weather".into(),
+                },
+                r#"{"city":"Paris"}"#,
+            ),
+            (
+                GuidedToolConstraint::GuidedJsonRequired,
+                r#"[{"name":"get_weather","arguments":{"city":"Paris"}}]"#,
+            ),
+        ] {
+            let batch = parse_complete_with_policy(
+                NEMOTRON_V3_UNIFIED_FAMILY,
+                raw,
+                &constraint,
+                &tools,
+                UnifiedRequestPolicy::default(),
+            )
+            .unwrap();
+            assert!(batch.reasoning.is_empty(), "batch {raw}");
+            assert!(batch.text.is_empty(), "batch {raw}");
+            assert_eq!(batch.tool_calls.len(), 1, "batch {raw}");
+            assert_eq!(batch.tool_calls[0].function.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&batch.tool_calls[0].function.arguments)
+                    .unwrap(),
+                serde_json::json!({"city": "Paris"})
+            );
+            for split in 0..=raw.len() {
+                let outputs: Vec<_> = apply_stream_with_policy(
+                    futures::stream::iter([
+                        chunk(&raw[..split], false),
+                        chunk(&raw[split..], true),
+                    ]),
+                    Some(tools.clone()),
+                    constraint.clone(),
+                    stream_prefill(NEMOTRON_V3_UNIFIED_FAMILY, true),
+                    NEMOTRON_V3_UNIFIED_FAMILY,
+                    true,
+                    UnifiedRequestPolicy::default(),
+                )
+                .collect()
+                .await;
+                let choices = collect_choices(&outputs);
+                assert!(
+                    choices
+                        .iter()
+                        .all(|choice| choice.delta.reasoning_content.is_none()),
+                    "split {split}: {raw}: {choices:?}"
+                );
+                let names: Vec<_> = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.tool_calls.as_ref())
+                    .flatten()
+                    .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                    .collect();
+                assert_eq!(names, ["get_weather"], "split {split}: {raw}");
+                let arguments: String = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.tool_calls.as_ref())
+                    .flatten()
+                    .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                    .collect();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                    serde_json::json!({"city": "Paris"}),
+                    "split {split}: {raw}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
