@@ -99,12 +99,14 @@ jobs:
       contents: read
     outputs:
       dev_suffix: ${{ steps.compute.outputs.dev_suffix }}
+      date_utc: ${{ steps.compute.outputs.date_utc }}
     steps:
       - id: compute
         shell: bash
         run: |
           DATE=$(date -u +%Y%m%d)
           echo "dev_suffix=.dev${DATE}" >> $GITHUB_OUTPUT
+          echo "date_utc=${DATE}" >> $GITHUB_OUTPUT
 
   # ============================================================================
   # COMPUTE RELEASE MODE
@@ -1399,7 +1401,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dir: ['.', 'lib/bindings/python', 'lib/bindings/kvbm']
+        dir: ['.', 'lib/bindings/python']
     permissions:
       contents: read
     steps:
@@ -1470,6 +1472,7 @@ jobs:
     needs:
       - resolve-source-sha
       - compute-release-mode
+      - compute-dev-version
       - notify-slack-start
       - manual-release-approval
       - vllm-build
@@ -1507,6 +1510,7 @@ jobs:
       nightly: true
       skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
       slack_thread_ts:  ${{ needs.notify-slack-start.outputs.thread_ts }}
+      dev_date_utc: ${{ needs.compute-dev-version.outputs.date_utc }}
       # THIS run's build results — release.yml's copy step skips either image
       # when its build here did not succeed, so a failed build can never
       # republish a previous run's image at an unchanged SHA. (A direct
@@ -1525,7 +1529,7 @@ jobs:
   # ============================================================================
   coverage-report:
     name: Generate Coverage Report
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, rust-tests]
     if: always()
     permissions:

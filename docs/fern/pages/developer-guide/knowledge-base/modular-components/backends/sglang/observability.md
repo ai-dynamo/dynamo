@@ -195,7 +195,7 @@ SGLang defines its own `ForwardPassMetrics` struct that must field-for-field mat
 
 ### Design Reference
 
-For the full motivation and design rationale, see the [Forward Pass Metrics RFC](../../../concepts/observability/forward-pass-metrics-rfc.md).
+For the full motivation and design rationale, see the [Forward Pass Metrics RFC](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/concepts/observability/forward-pass-metrics-rfc.md).
 
 ---
 
