@@ -312,7 +312,10 @@ impl SessionPrefixIndexer {
     /// Attributes blocks that a worker tier stored without a session to every session
     /// whose frontier in another tier of the same worker already covers them, such as
     /// device blocks offloaded to host memory or host blocks loaded back to the device.
-    /// Returns the number of frontiers advanced.
+    /// A session advances only to a stored block whose stored ancestors run back to the
+    /// root or to a block the target tier already holds, so a tier frontier keeps
+    /// implying that its ancestors are in the same tier. Returns the number of
+    /// frontiers advanced.
     pub fn inherit_stored_blocks(
         &self,
         worker: WorkerWithDpRank,
@@ -786,35 +789,153 @@ impl IndexState {
             return 0;
         }
 
-        // Each frontier in another tier of this worker passes on its deepest stored block.
         let (worker, tier) = key;
-        let inherited: Vec<(SessionId, NodeId)> = self
+        let source_frontiers = self
             .worker_frontier_to_sessions
             .iter()
             .filter(|((frontier_worker, frontier_tier), _)| {
                 *frontier_worker == worker && *frontier_tier != tier
             })
-            .flat_map(|(_, frontiers)| frontiers.iter())
-            .filter_map(|(&frontier, sessions)| {
-                let path = self.path_to_root(frontier);
-                let deepest_stored = path
-                    .into_iter()
-                    .rev()
-                    .find(|node| stored_nodes.contains(node))?;
-                Some(
-                    sessions
-                        .iter()
-                        .cloned()
-                        .map(move |session_id| (session_id, deepest_stored)),
-                )
+            .map(|(_, frontiers)| frontiers);
+
+        // Each frontier in another tier of this worker passes on the deepest stored
+        // block on its path.
+        let candidates: Vec<(SessionId, NodeId)> = if self.stored_set_is_closed(&stored_nodes) {
+            // No frontier lies strictly below the stored blocks, so only frontiers that
+            // sit on a stored block can inherit: look them up instead of walking paths.
+            source_frontiers
+                .flat_map(|frontiers| {
+                    stored_nodes.iter().filter_map(move |&node| {
+                        frontiers.get(&node).map(|sessions| {
+                            sessions
+                                .iter()
+                                .cloned()
+                                .map(move |session_id| (session_id, node))
+                        })
+                    })
+                })
+                .flatten()
+                .collect()
+        } else {
+            source_frontiers
+                .flat_map(|frontiers| frontiers.iter())
+                .filter_map(|(&frontier, sessions)| {
+                    let deepest = self.deepest_stored_ancestor(frontier, &stored_nodes)?;
+                    Some(
+                        sessions
+                            .iter()
+                            .cloned()
+                            .map(move |session_id| (session_id, deepest)),
+                    )
+                })
+                .flatten()
+                .collect()
+        };
+
+        let inherited: Vec<(SessionId, NodeId)> = candidates
+            .into_iter()
+            .filter_map(|(session_id, deepest)| {
+                self.contiguous_inherited_frontier(&session_id, key, deepest, &stored_nodes)
+                    .map(|node| (session_id, node))
             })
-            .flatten()
             .collect();
 
         inherited
             .into_iter()
             .filter(|(session_id, node)| self.advance_frontier(session_id, key, *node))
             .count()
+    }
+
+    // True when every child of a stored node is itself stored, so no frontier can lie
+    // strictly below the stored set.
+    fn stored_set_is_closed(&self, stored_nodes: &FxHashSet<NodeId>) -> bool {
+        let mut stored_children: FxHashMap<NodeId, u32> = FxHashMap::default();
+        for &node in stored_nodes {
+            if let Some(parent) = self.nodes[node].parent
+                && stored_nodes.contains(&parent)
+            {
+                *stored_children.entry(parent).or_default() += 1;
+            }
+        }
+        stored_nodes.iter().all(|node| {
+            self.nodes[*node].child_count == stored_children.get(node).copied().unwrap_or(0)
+        })
+    }
+
+    // Deepest node on `tail`'s root path that is in `stored_nodes`, without
+    // materializing the path.
+    fn deepest_stored_ancestor(
+        &self,
+        tail: NodeId,
+        stored_nodes: &FxHashSet<NodeId>,
+    ) -> Option<NodeId> {
+        let limit = self.nodes.len();
+        let mut current = Some(tail);
+        let mut steps = 0usize;
+        while let Some(node) = current {
+            if stored_nodes.contains(&node) {
+                return Some(node);
+            }
+            steps += 1;
+            if steps > limit {
+                debug_assert!(false, "parent cycle in session prefix index forest");
+                tracing::error!("session prefix index parent walk exceeded the arena; truncating");
+                return None;
+            }
+            current = self.nodes[node].parent;
+        }
+        None
+    }
+
+    // From the deepest stored node on a session's source path, find the deepest stored
+    // node whose run of stored ancestors reaches the root or a node the target tier
+    // already holds.
+    fn contiguous_inherited_frontier(
+        &self,
+        session_id: &str,
+        key: FrontierKey,
+        deepest: NodeId,
+        stored_nodes: &FxHashSet<NodeId>,
+    ) -> Option<NodeId> {
+        let limit = self.nodes.len();
+        let mut steps = 0usize;
+        let mut run_bottom = deepest;
+        loop {
+            let mut run_top = run_bottom;
+            while let Some(parent) = self.nodes[run_top].parent {
+                steps += 1;
+                if steps > limit {
+                    debug_assert!(false, "parent cycle in session prefix index forest");
+                    tracing::error!(
+                        "session prefix index parent walk exceeded the arena; truncating"
+                    );
+                    return None;
+                }
+                if !stored_nodes.contains(&parent) {
+                    break;
+                }
+                run_top = parent;
+            }
+            let Some(above) = self.nodes[run_top].parent else {
+                return Some(run_bottom);
+            };
+            if self.tier_holds(session_id, key, above) {
+                return Some(run_bottom);
+            }
+            run_bottom = self.deepest_stored_ancestor(above, stored_nodes)?;
+        }
+    }
+
+    // True when the session's frontier in `key` is at or below `node`.
+    fn tier_holds(&self, session_id: &str, key: FrontierKey, node: NodeId) -> bool {
+        self.session_to_worker_frontiers
+            .get(session_id)
+            .and_then(|entry| entry.worker_frontiers.get(&key))
+            .is_some_and(|frontiers| {
+                frontiers
+                    .iter()
+                    .any(|&frontier| self.is_ancestor_or_self(node, frontier))
+            })
     }
 
     fn clear_frontiers(&mut self, key: FrontierKey) -> usize {
@@ -1495,5 +1616,78 @@ mod tests {
             lineage_of(&indexer, "s1").is_empty(),
             "a rejected chain must not create any nodes"
         );
+    }
+
+    #[test]
+    fn inheritance_requires_contiguous_blocks_from_root_or_tier_frontier() {
+        let chain = hashes(vec![1, 2, 3, 4]);
+        let indexer = SessionPrefixIndexer::new();
+        indexer
+            .update_session_from_stored_blocks("s1", worker(1), None, &chain)
+            .unwrap();
+        let host = || {
+            indexer
+                .get_session_block_lineage_in_tier("s1", worker(1), StorageTier::HostPinned, None)
+                .unwrap()
+        };
+        let inherit = |blocks: &[ExternalSequenceBlockHash]| {
+            indexer.inherit_stored_blocks(worker(1), StorageTier::HostPinned, blocks)
+        };
+
+        // Blocks 1 and 3 without 2: only the run from the root counts.
+        assert_eq!(inherit(&[chain[0], chain[2]]), 1);
+        assert_eq!(host(), vec![chain[..1].to_vec()]);
+        // Block 4 without 3 does not extend a frontier that stops at 1.
+        assert_eq!(inherit(&chain[3..]), 0);
+        assert_eq!(host(), vec![chain[..1].to_vec()]);
+        // A later chunk continues from the host frontier.
+        assert_eq!(inherit(&chain[1..3]), 1);
+        assert_eq!(host(), vec![chain[..3].to_vec()]);
+        assert_eq!(inherit(&chain[3..]), 1);
+        assert_eq!(host(), vec![chain.clone()]);
+    }
+
+    #[test]
+    fn shared_prefix_sessions_inherit_from_deeper_and_exact_frontiers() {
+        let short = hashes(vec![1, 2, 3]);
+        let long = hashes(vec![1, 2, 3, 4]);
+        let indexer = SessionPrefixIndexer::new();
+        indexer
+            .update_session_from_stored_blocks("s1", worker(1), None, &short)
+            .unwrap();
+        indexer
+            .update_session_from_stored_blocks("s2", worker(1), None, &long)
+            .unwrap();
+
+        // The stored set has a child outside it, so frontiers below it are found by
+        // walking: s2's frontier at 4 inherits 3.
+        assert_eq!(
+            indexer.inherit_stored_blocks(worker(1), StorageTier::HostPinned, &short),
+            2
+        );
+        // The full chain is closed: both frontiers sit on stored blocks.
+        assert_eq!(
+            indexer.inherit_stored_blocks(worker(1), StorageTier::Disk, &long),
+            2
+        );
+        for (session, chain) in [("s1", &short), ("s2", &long)] {
+            assert_eq!(
+                indexer
+                    .get_session_block_lineage_in_tier(
+                        session,
+                        worker(1),
+                        StorageTier::HostPinned,
+                        None
+                    )
+                    .unwrap(),
+                vec![short.clone()]
+            );
+            assert_eq!(
+                indexer
+                    .get_session_block_lineage_in_tier(session, worker(1), StorageTier::Disk, None)
+                    .unwrap(),
+                vec![chain.clone()]
+            );
+        }
     }
 }
