@@ -49,6 +49,7 @@ func newRolloutInferenceClient() *http.Client {
 type rolloutInferenceTarget struct {
 	Model      string
 	InstanceID uint64
+	DPRank     uint32
 	Prefill    bool
 	Paths      []string
 }
@@ -189,9 +190,13 @@ func (r *dgdWorkerRolloutReconciler) rolloutReplacementCohort(dgd *nvidiacomv1be
 type rolloutModelCard struct {
 	InstanceID uint64 `json:"instance_id"`
 	Card       struct {
-		DisplayName string `json:"display_name"`
-		ModelType   string `json:"model_type"`
-		WorkerType  string `json:"worker_type"`
+		DisplayName   string `json:"display_name"`
+		ModelType     string `json:"model_type"`
+		WorkerType    string `json:"worker_type"`
+		RuntimeConfig struct {
+			DataParallelStartRank uint32  `json:"data_parallel_start_rank"`
+			DataParallelSize      *uint32 `json:"data_parallel_size"`
+		} `json:"runtime_config"`
 	} `json:"card_json"`
 }
 
@@ -206,6 +211,19 @@ func (card rolloutModelCard) inferenceTarget() (rolloutInferenceTarget, error) {
 	}
 	if strings.Contains(card.Card.ModelType, "Completions") {
 		target.Paths = append(target.Paths, "/v1/completions")
+	}
+
+	// Select one advertised global rank; legacy cards default to rank zero and size one.
+	if target.Prefill || len(target.Paths) > 0 {
+		size := uint32(1)
+		if card.Card.RuntimeConfig.DataParallelSize != nil {
+			size = *card.Card.RuntimeConfig.DataParallelSize
+		}
+		start := card.Card.RuntimeConfig.DataParallelStartRank
+		if size == 0 || uint64(start)+uint64(size) > 1<<32-1 {
+			return rolloutInferenceTarget{}, fmt.Errorf("replacement model card has an invalid data-parallel rank range")
+		}
+		target.DPRank = start
 	}
 	return target, nil
 }
@@ -384,8 +402,10 @@ func (r *dgdWorkerRolloutReconciler) probeReplacementInference(ctx context.Conte
 	nvext := map[string]any{"extra_fields": []string{"worker_id"}}
 	if target.Prefill {
 		nvext["prefill_worker_id"] = target.InstanceID
+		nvext["prefill_dp_rank"] = target.DPRank
 	} else {
 		nvext["backend_instance_id"] = target.InstanceID
+		nvext["dp_rank"] = target.DPRank
 	}
 	// A fresh prefill prompt prevents a full-prefix cache hit from skipping the phase being verified.
 	prompt := "Hi"

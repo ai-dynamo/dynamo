@@ -56,7 +56,9 @@ worker component until every Ready frontend Pod completes a one-token inference 
 replacement worker. It probes each advertised Chat and Completions endpoint directly and
 checks the response's actual worker ID against replacement metadata owned by a Ready Pod.
 Prefill workers use the phase-specific prefill worker ID. A successful HTTP status without
-matching worker attribution does not release the old replica.
+matching worker attribution does not release the old replica. For data-parallel workers,
+probes select a rank from the worker's advertised runtime configuration and send `dp_rank`
+for decode or aggregated workers, or `prefill_dp_rank` for prefill workers.
 
 Prefill probes use only the Chat or Completions endpoints advertised by a Ready decode
 or aggregated worker in the same DGD's replacement generation. Missing paired serving

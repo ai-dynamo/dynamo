@@ -41,6 +41,7 @@ import (
 
 // rolloutProbeServer implements the released frontend's worker-attribution response shape.
 type rolloutProbeServer struct {
+	rank        uint32
 	mode        atomic.Int32
 	chat        atomic.Int32
 	completions atomic.Int32
@@ -52,9 +53,11 @@ func (s *rolloutProbeServer) ServeHTTP(w http.ResponseWriter, request *http.Requ
 		MaxTokens int    `json:"max_tokens"`
 		Stream    bool   `json:"stream"`
 		Nvext     struct {
-			InstanceID uint64   `json:"backend_instance_id"`
-			PrefillID  uint64   `json:"prefill_worker_id"`
-			Fields     []string `json:"extra_fields"`
+			InstanceID    uint64   `json:"backend_instance_id"`
+			PrefillID     uint64   `json:"prefill_worker_id"`
+			DPRank        *uint32  `json:"dp_rank"`
+			PrefillDPRank *uint32  `json:"prefill_dp_rank"`
+			Fields        []string `json:"extra_fields"`
 		} `json:"nvext"`
 	}
 	if err := json.NewDecoder(request.Body).Decode(&body); err != nil || request.Method != http.MethodPost ||
@@ -63,6 +66,17 @@ func (s *rolloutProbeServer) ServeHTTP(w http.ResponseWriter, request *http.Requ
 		http.Error(w, "invalid inference probe", http.StatusBadRequest)
 		return
 	}
+
+	// Exact worker targeting must include the rank for only the phase being probed.
+	rank, other := body.Nvext.DPRank, body.Nvext.PrefillDPRank
+	if body.Nvext.PrefillID == 42 {
+		rank, other = body.Nvext.PrefillDPRank, body.Nvext.DPRank
+	}
+	if rank == nil || *rank != s.rank || other != nil {
+		http.Error(w, "invalid probe DP rank", http.StatusBadRequest)
+		return
+	}
+
 	if request.URL.Path == "/v1/chat/completions" {
 		s.chat.Add(1)
 	} else if request.URL.Path == "/v1/completions" {
@@ -130,13 +144,14 @@ func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
 		"spec": map[string]any{"data": map[string]any{"model_cards": map[string]any{
 			"new/backend/generate/42": map[string]any{"instance_id": int64(42), "card_json": map[string]any{
 				"display_name": "test-model", "model_type": "Chat | Completions", "worker_type": "aggregated",
+				"runtime_config": map[string]any{"data_parallel_start_rank": int64(4), "data_parallel_size": int64(2)},
 			}},
 		}}},
 	}}
 	metadata.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: worker.Name, UID: worker.UID, Controller: ptr.To(false)}})
 
 	t.Log("Serve two independent frontend endpoints so a single successful replica cannot release the gate")
-	first, second := &rolloutProbeServer{}, &rolloutProbeServer{}
+	first, second := &rolloutProbeServer{rank: 4}, &rolloutProbeServer{rank: 4}
 	server1, server2 := httptest.NewServer(first), httptest.NewServer(second)
 	defer server1.Close()
 	defer server2.Close()
@@ -166,7 +181,7 @@ func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
 	require.Positive(t, second.completions.Load())
 
 	t.Log("A zero-replica frontend with a remaining Ready Pod must still prove replacement inference")
-	spare := &rolloutProbeServer{}
+	spare := &rolloutProbeServer{rank: 4}
 	spare.mode.Store(1)
 	spareServer := httptest.NewServer(spare)
 	defer spareServer.Close()
@@ -208,9 +223,6 @@ func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
 		{Name: consts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_TLS_CLIENT_CA_CERT_PATH", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "tls"}, Key: "ca"}}}}},
 		{Name: consts.RuntimeContainerName, Args: []string{"--tls-cert-path=/tls/server.crt", "--tls-key-path=/tls/server.key"}},
 		{Name: consts.MainContainerName, EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "frontend-env"}}}}},
-		{Name: consts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_DISABLE_FRONTEND_NVEXT", Value: "1"}}},
-		{Name: consts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_DISABLE_FRONTEND_NVEXT", Value: "true"}}},
-		{Name: consts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_DISABLE_FRONTEND_NVEXT", Value: "on"}}},
 		{Name: consts.RuntimeContainerName, Env: []corev1.EnvVar{{Name: "DYN_DISABLE_FRONTEND_NVEXT", Value: " YES "}}},
 		{Name: consts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_DISABLE_FRONTEND_NVEXT", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "frontend-env"}, Key: "disable-nvext"}}}}},
 	} {
@@ -381,20 +393,25 @@ func rolloutTestFrontendPod(t *testing.T, dgd *nvidiacomv1beta1.DynamoGraphDeplo
 
 func TestReplacementInferenceTargets_ModelRoles(t *testing.T) {
 	tests := []struct {
-		name        string
-		modelType   string
-		workerType  string
-		surface     string
-		prefill     bool
-		wantTargets int
-		wantError   bool
+		name          string
+		modelType     string
+		workerType    string
+		surface       string
+		prefill       bool
+		wantTargets   int
+		wantError     bool
+		runtimeConfig map[string]any
+		wantRank      uint32
 	}{
 		{name: "legacy prefill uses chat only", modelType: "Prefill", surface: "Chat", prefill: true, wantTargets: 1},
-		{name: "surface-less prefill uses completions only", workerType: "prefill", surface: "Completions", prefill: true, wantTargets: 1},
+		{name: "DP prefill uses completions only", workerType: "prefill", surface: "Completions", prefill: true, wantTargets: 1,
+			runtimeConfig: map[string]any{"data_parallel_start_rank": int64(7), "data_parallel_size": int64(2)}, wantRank: 7},
 		{name: "prefill waits for paired serving metadata", workerType: "prefill", prefill: true, wantError: true},
 		{name: "surface-less encoder retains legacy rollout", workerType: "encode"},
 		{name: "embedding retains legacy rollout", modelType: "Embedding"},
 		{name: "incomplete model card cannot bypass gate", wantError: true},
+		{name: "empty DP rank range cannot certify replacement", modelType: "Chat", runtimeConfig: map[string]any{"data_parallel_size": int64(0)}, wantError: true},
+		{name: "overflowing DP rank range cannot certify replacement", modelType: "Chat", runtimeConfig: map[string]any{"data_parallel_start_rank": int64(1<<32 - 1), "data_parallel_size": int64(1)}, wantError: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -406,6 +423,9 @@ func TestReplacementInferenceTargets_ModelRoles(t *testing.T) {
 					}},
 				}}},
 			}}
+			if tt.runtimeConfig != nil {
+				require.NoError(t, unstructured.SetNestedMap(metadata.Object, tt.runtimeConfig, "spec", "data", "model_cards", "new/backend/generate/42", "card_json", "runtime_config"))
+			}
 			metadata.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: "new-worker", UID: "new", Controller: ptr.To(true)}})
 			cards := []unstructured.Unstructured{metadata}
 			if tt.surface != "" {
@@ -427,6 +447,7 @@ func TestReplacementInferenceTargets_ModelRoles(t *testing.T) {
 				return
 			}
 			require.Equal(t, tt.prefill, targets[0].Prefill)
+			require.Equal(t, tt.wantRank, targets[0].DPRank)
 			require.Len(t, targets[0].Paths, 1)
 			path := "/v1/chat/completions"
 			if tt.surface == "Completions" {
@@ -441,7 +462,7 @@ func TestReplacementInferenceTargets_ModelRoles(t *testing.T) {
 			}
 
 			t.Log("Verify that a real HTTP probe sends and checks prefill attribution")
-			server := httptest.NewServer(&rolloutProbeServer{})
+			server := httptest.NewServer(&rolloutProbeServer{rank: tt.wantRank})
 			defer server.Close()
 			r := createTestReconcilerWithStatus(createTestDGD("probe", nil))
 			require.NoError(t, r.probeReplacementInference(context.Background(), server.URL+targets[0].Paths[0], targets[0].Paths[0], targets[0]))
