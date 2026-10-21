@@ -145,10 +145,10 @@ fn get_span_for_direct_context(
 }
 
 // Helper to create request context with proper linking and cancellation handling
-fn create_request_context(
-    request: rmpv::Value,
+fn create_request_context<T: rs::pipeline::Data>(
+    request: T,
     parent_ctx: &Option<context::Context>,
-) -> RsContext<rmpv::Value> {
+) -> RsContext<T> {
     match parent_ctx {
         // If there is a parent context, link the request as a child context of it
         Some(parent_ctx) => {
@@ -158,7 +158,9 @@ fn create_request_context(
                 parent_ctx.metadata_snapshot(),
             );
             parent_ctx.inner().link_child(child_ctx.context());
-            if parent_ctx.inner().is_stopped() || parent_ctx.inner().is_killed() {
+            if parent_ctx.inner().is_killed() {
+                child_ctx.context().kill();
+            } else if parent_ctx.inner().is_stopped() {
                 // Let the server handle the cancellation for now since not all backends are
                 // properly handling request exceptions
                 // TODO: (DIS-830) Return an error if context is cancelled
@@ -168,6 +170,36 @@ fn create_request_context(
         }
         // Otherwise if there is no parent context, use the request as-is
         _ => request.into(),
+    }
+}
+
+#[cfg(test)]
+mod request_context_tests {
+    use super::*;
+    use rs::pipeline::AsyncEngineContext;
+    use rs::pipeline::context::Controller;
+
+    #[test]
+    fn create_request_context_preserves_killed_state() {
+        let parent_controller = Arc::new(Controller::new("parent".to_string()));
+        parent_controller.kill();
+        let parent = context::Context::new(parent_controller, None, None, Default::default());
+
+        let child = create_request_context(rmpv::Value::Nil, &Some(parent));
+
+        assert!(child.context().is_killed());
+    }
+
+    #[test]
+    fn create_request_context_preserves_stopped_state() {
+        let parent_controller = Arc::new(Controller::new("parent".to_string()));
+        parent_controller.stop_generating();
+        let parent = context::Context::new(parent_controller, None, None, Default::default());
+
+        let child = create_request_context(rmpv::Value::Nil, &Some(parent));
+
+        assert!(child.context().is_stopped());
+        assert!(!child.context().is_killed());
     }
 }
 
@@ -1482,6 +1514,45 @@ impl DistributedRuntime {
         self.inner
             .system_status_server_info()
             .map(|info| format!("http://{}", info.advertised_socket_addr()))
+    }
+
+    /// Register a component handler under `/engine/{name}/...` on the system listener.
+    /// The callback receives `{method, path, body}` and returns `{status, body}`.
+    fn register_engine_http_handler(
+        &self,
+        py: Python<'_>,
+        name: String,
+        callback: PyObject,
+    ) -> PyResult<()> {
+        if self.inner.system_status_server_info().is_none() {
+            return Err(to_pyerr("control handlers require DYN_SYSTEM_PORT"));
+        }
+        let locals = Arc::new(pyo3_async_runtimes::tokio::get_current_locals(py)?);
+        let callback = Arc::new(callback);
+        let handler: rs::engine_routes::EngineHttpCallback = Arc::new(move |request| {
+            let callback = Arc::clone(&callback);
+            let locals = Arc::clone(&locals);
+            Box::pin(async move {
+                let future = Python::with_gil(|py| {
+                    let request = pythonize::pythonize(py, &request)?;
+                    let coroutine = callback.call1(py, (request,))?;
+                    pyo3_async_runtimes::into_future_with_locals(&locals, coroutine.into_bound(py))
+                })?;
+                let result = future.await?;
+                Python::with_gil(|py| {
+                    pythonize::depythonize::<rs::engine_routes::EngineHttpResponse>(result.bind(py))
+                        .map_err(anyhow::Error::from)
+                })
+            })
+        });
+        self.inner
+            .engine_routes()
+            .register_http(name, handler)
+            .map_err(to_pyerr)
+    }
+
+    fn unregister_engine_http_handler(&self, name: &str) {
+        self.inner.engine_routes().unregister_http(name);
     }
 
     /// Register an async Python callback for /engine/{route_name}

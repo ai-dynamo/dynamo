@@ -21,13 +21,6 @@ members = [
     "examples/router/custom-policy-example/epp",
     "examples/router/custom-policy-example/simple-stacked-score-pick",
     "lib/memory",
-    "lib/kvbm-common",
-    "lib/kvbm-config",
-    "lib/kvbm-engine",
-    "lib/kvbm-kernels",
-    "lib/kvbm-consolidator",
-    "lib/kvbm-logical",
-    "lib/kvbm-physical",
     "lib/bench",
     "lib/backend-common",
     "lib/backend-common/examples/mocker",
@@ -59,7 +52,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 [workspace.dependencies]
 dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.6.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.13.0-dev.2" }
+aisimulate-core = { version = "=0.13.0-dev.202610160000000073" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.6.0" }
@@ -86,14 +79,6 @@ dynamo-backend-common = { path = "lib/backend-common", version = "1.6.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.6.0" }
 
 
-# kvbm
-kvbm-common = { path = "lib/kvbm-common", version = "1.6.0" }
-kvbm-config = { path = "lib/kvbm-config", version = "1.6.0" }
-kvbm-consolidator = { path = "lib/kvbm-consolidator", version = "1.6.0" }
-kvbm-engine = { path = "lib/kvbm-engine", version = "1.6.0" }
-kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.6.0" }
-kvbm-logical = { path = "lib/kvbm-logical", version = "1.6.0" }
-kvbm-physical = { path = "lib/kvbm-physical", version = "1.6.0" }
 
 # velo
 velo = { version = "0.12.0" }
