@@ -6,7 +6,10 @@ use std::process::Command;
 #[test]
 fn executable_exposes_native_grpc_configuration() {
     let output = Command::new(env!("CARGO_BIN_EXE_dynamo-trtllm-sidecar"))
-        .env("TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY", "test-only-affinity-secret")
+        .env(
+            "TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY",
+            "test-only-affinity-secret",
+        )
         .arg("--help")
         .output()
         .expect("run dynamo-trtllm-sidecar --help");
