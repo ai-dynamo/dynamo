@@ -128,6 +128,53 @@ chart.
 **Action:** Upgrade externally managed Grove and its CRDs to `v0.1.0-alpha.14` or later before
 creating new multinode DGDs.
 
+#### External Grove installation preflight
+
+With `global.grove.enabled=true` and `global.grove.install=false`, a read-only
+`pre-install,pre-upgrade` Job verifies the Grove controller version against the pinned
+dependency and completed rollout before applying the operator Deployment.
+It assumes a compatible, fully rolled out controller has matching Grove CRDs installed;
+CRDs are not inspected. Upgrade Grove and matching CRDs first.
+The minimum version comes from the `grove-charts` dependency in `Chart.yaml`.
+Its YAML scalar is anchored in the chart annotation and referenced by the dependency,
+so Helm can pass the same value directly to the checker even when external Grove disables
+that dependency. No symlink, generator, or synchronization step is required. The
+standalone operator chart does not run this platform preflight.
+Unknown/custom/RC image tags and digest-only images fail rather than claiming compatibility.
+To resolve missing or ambiguous discovery, select the controller explicitly:
+
+```yaml
+dynamo-operator:
+  grovePreflight:
+    namespace: grove-system
+    deploymentName: grove-operator
+```
+
+The preflight uses its own `grovePreflight.affinity` (empty by default), so it can run
+before controller Pods exist. On OpenShift, omit the fixed UID and let admission assign it:
+
+```yaml
+dynamo-operator:
+  grovePreflight:
+    podSecurityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+```
+
+An explicit map replaces the entire pod security context; `null` uses the chart's secure
+defaults (including UID 65532). This does not change the operator's security context.
+
+Helm and Flux execute these hooks; Argo CD maps them to PreSync. Offline rendering does not
+run the check. Disabled hooks, selective sync, and raw `kubectl apply` bypass the gate;
+independent Grove releases must be upgraded first. Set `grovePreflight.enabled=false` only
+with a separate compatibility gate. Override `image`/`imagePullSecrets` for restricted registries.
+The Job has a 120-second deadline and two retries. Failed Jobs retain diagnostic logs.
+Helm 3.18+ also prints them via `helm.sh/hook-output-log-policy: hook-failed`, using the
+installer's Pod/log read permissions. With older Helm, read them with `kubectl logs`.
+Successful Jobs are deleted. Supporting ServiceAccount/ClusterRole/ClusterRoleBinding hooks
+persist until the next attempt and require manual removal when retiring the release.
+
 **Existing deployments:** The operator origin version gates alias injection. An operator-only
 upgrade leaves existing multinode workload pod templates unchanged and does not roll them solely to
 add the aliases.
@@ -341,6 +388,14 @@ Kubernetes: `>=1.30.0-0`
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
 | global.snapshot.install | bool | `false` | Whether this chart should install the bundled Snapshot subchart (github.com/ai-dynamo/snapshot): its operator, node agent, and CRDs. NOTE: For production environments, it is recommended to install Snapshot separately. |
+| dynamo-operator.grovePreflight.enabled | bool | `true` | Validate externally managed Grove before installing/upgrading the operator. Disable only with a separate compatibility gate. |
+| dynamo-operator.grovePreflight.image | string | `"docker.io/library/python:3.12-slim"` | Image containing Python 3 (standard library only). Override for an internal registry. |
+| dynamo-operator.grovePreflight.imagePullSecrets | list | `[]` | Existing pull secrets for the Grove preflight image. |
+| dynamo-operator.grovePreflight.activeDeadlineSeconds | int | `120` | Maximum Job duration in seconds, including retries. |
+| dynamo-operator.grovePreflight.affinity | object | `{}` | Independent preflight affinity. Does not inherit controllerManager.affinity. |
+| dynamo-operator.grovePreflight.podSecurityContext | string | `nil` | Full replacement of the preflight pod security context. Null defaults to runAsNonRoot=true, runAsUser=65532 and seccompProfile.type=RuntimeDefault. On OpenShift, supply a context without runAsUser for admission to assign it. |
+| dynamo-operator.grovePreflight.namespace | string | `""` | Namespace of external Grove. Empty discovers across all namespaces. |
+| dynamo-operator.grovePreflight.deploymentName | string | `""` | External Grove Deployment name. Requires namespace; empty discovers by container name. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.upgradeCRD | bool | `true` | Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container. When false, the chart installs no CRDs; apply them separately before starting a cluster-wide operator. Namespace-restricted installations must set this to false and use the CRDs managed by the cluster-wide operator. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
