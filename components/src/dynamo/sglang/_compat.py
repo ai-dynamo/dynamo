@@ -393,6 +393,12 @@ def supports_external_mm_hashes(engine: Any) -> bool:
         return False
 
     tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    # Kimi K2.5 and K3 derive each image identity from the image bytes and
+    # reject caller hashes with a ValueError (sgl-project/sglang#43043).
+    mm_processor = getattr(tokenizer_manager, "mm_processor", None)
+    if getattr(mm_processor, "uses_wide_image_identity", False):
+        return False
+
     tokenize_one = getattr(tokenizer_manager, "_tokenize_one_request", None)
     if tokenize_one is None or getattr(
         tokenize_one, "_dynamo_rebuilds_external_mm_padding", False

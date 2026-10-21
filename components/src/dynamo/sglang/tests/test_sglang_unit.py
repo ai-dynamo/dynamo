@@ -1112,6 +1112,24 @@ async def test_external_mm_hashes_rebuild_padding_after_hash_override():
     assert engine.tokenizer_manager._tokenize_one_request is patched
 
 
+def test_external_mm_hashes_are_disabled_when_processor_owns_image_identity():
+    class TokenizerManager:
+        mm_processor = SimpleNamespace(uses_wide_image_identity=True)
+
+        async def _tokenize_one_request(self, obj):
+            return obj
+
+    class KimiEngine:
+        tokenizer_manager = TokenizerManager()
+
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    engine = KimiEngine()
+    assert not supports_external_mm_hashes(engine)
+    assert "_tokenize_one_request" not in vars(engine.tokenizer_manager)
+
+
 def test_external_mm_hashes_are_disabled_when_engine_lacks_kwarg():
     class LegacyEngine:
         async def async_generate(self):
