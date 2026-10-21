@@ -15,7 +15,6 @@ description = "SGLang client format for Dynamo /generate"
 tracing = { workspace = true }
 dynamo-protocols = { workspace = true }
 dynamo-llm = { path = "../../llm", default-features = false }
-anyhow = { workspace = true }
 dynamo-runtime = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
