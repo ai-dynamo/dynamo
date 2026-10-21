@@ -274,7 +274,7 @@ endpoint:
 | Engine | Role template | Pods that serve | Sidecar rank |
 |---|---|---|---|
 | Cyborg, hybrid build | `conductor` | Every conductor pod | Not set |
-| LPU-only engine, single model, no `conductor` role | `agent` | Agent pod 0 of one (HX) or several (XT) | Not set on HX; `--node-rank $(GROVE_PCLQ_POD_INDEX)` on XT |
+| LPU-only engine, single model, no `conductor` role | `agent` | Agent pod 0 | Not set with one Agent pod; `--node-rank $(GROVE_PCLQ_POD_INDEX)` with more than one |
 
 On the agent, the operator merges the sidecar environment and discovery
 defaults into `runtime`, adds no default port, probes, or rank, and leaves port
@@ -282,11 +282,11 @@ and probe configuration to the template: Agent pods use host networking, where
 every declared container port reserves a host port and the LPX scheduler
 refuses any Agent pod that declares a port, so declare no `ports` on the Agent
 containers, set `DYN_SYSTEM_PORT` on `runtime` to a free host port, and declare
-the `runtime` readiness probe by that port number. When an XT build
-places several Agent pods, also add `--node-rank $(GROVE_PCLQ_POD_INDEX)` to
-the sidecar's `args`, without the `+ 1` that other backends' multinode worker
-ranks add. Grove sets this zero-based index in every container, so pod 0 of
-each engine replica serves and the others stand by. A single Agent pod (HX)
+the `runtime` readiness probe by that port number. When a build
+places more than one Agent pod, also add `--node-rank $(GROVE_PCLQ_POD_INDEX)`
+to the sidecar's `args`, without the `+ 1` that other backends' multinode
+worker ranks add. Grove sets this zero-based index in every container, so pod
+0 of each engine replica serves and the others stand by. A single Agent pod
 needs no rank, and a conductor's sidecar never takes one: every conductor pod
 serves. The
 [roles reference](../../../../reference/kubernetes-api/dynamo-component-deployment.mdx)
