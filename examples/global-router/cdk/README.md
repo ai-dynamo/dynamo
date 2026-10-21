@@ -375,9 +375,11 @@ EndpointSlice, and exporting it again found no slice until the Service changed.
 
 Karmada collects the EndpointSlices of every exported Service on its control plane as
 `imported-<cluster>-<slice>`. To use a Service from a cluster, create a `ServiceImport` on the
-Karmada control plane and propagate it there with a `PropagationPolicy` that sets
-`propagateDeps: true`: that cluster gets a `derived-<service>` Service whose EndpointSlices list
-the pods of every exporting cluster, its own included.
+Karmada control plane and propagate it there with a `PropagationPolicy`: that cluster gets a
+`derived-<service>` Service whose EndpointSlices list the pods of every exporting cluster, its
+own included. Karmada delivers them as the `ServiceImport`'s dependencies. Its webhook turns on
+`propagateDeps` in any policy that selects a `ServiceImport`, so the policy need not set it, but
+the controller's `PropagateDeps` feature gate must be on, which CDK does.
 
 ### Moving the current clusters to the CDK-managed Karmada
 
