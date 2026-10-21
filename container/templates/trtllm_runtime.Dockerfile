@@ -694,8 +694,8 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
 # one, in range, so a surviving old copy beside the new one fails the build.
 # Version-compared rather than glob-matched: a glob range silently stops matching
 # at the end of the series it was written for.
-RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=3.14.3,<4.0" && \
-    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 3) <= tv(vs[0]) < (4, 0, 0) else 1)'
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=3.14.4,<4.0" && \
+    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 4) <= tv(vs[0]) < (4, 0, 0) else 1)'
 
 # Refresh the base image's certifi CA bundle in system site, for the same
 # inventory reason as aiohttp above. certifi has no dependencies, so this moves
