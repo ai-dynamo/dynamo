@@ -12,7 +12,7 @@ from dynamo.validation import runner
 
 pytestmark = [pytest.mark.gpu_0, pytest.mark.pre_merge, pytest.mark.unit]
 
-REQUEST = {"gate": "publish", "base_url": "http://127.0.0.1:1/v1", "models": ["m"]}
+REQUEST = {"base_url": "http://127.0.0.1:1/v1"}
 
 
 def post(port: int, name: str, body: dict) -> tuple[int, str]:
@@ -46,13 +46,7 @@ def serve():
 def test_status_is_the_verdict_and_stderr_the_reason(serve):
     port = serve(
         {
-            "pass": [
-                "sh",
-                "-c",
-                'test "$DYN_VALIDATION_GATE" = publish '
-                '&& test "$DYN_VALIDATION_MODEL" = m '
-                '&& test "$OPENAI_BASE_URL" = http://127.0.0.1:1/v1',
-            ],
+            "pass": ["sh", "-c", 'test "$OPENAI_BASE_URL" = http://127.0.0.1:1/v1'],
             "fail": ["sh", "-c", "echo no tool call >&2; exit 3"],
         }
     )
@@ -66,7 +60,16 @@ def test_a_hung_check_fails_at_the_timeout(serve):
     assert post(port, "hang", REQUEST) == (500, "no verdict within 0.5s")
 
 
-def test_gate_variables_come_only_from_the_request(serve, monkeypatch):
+def test_the_base_url_comes_only_from_the_request(serve, monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "http://somewhere-else/v1")
-    port = serve({"unset": ["sh", "-c", 'test -z "${OPENAI_BASE_URL+x}"']})
-    assert post(port, "unset", {"gate": "publish", "base_url": None})[0] == 200
+    monkeypatch.setenv("DYN_VALIDATION_MODEL", "m")
+    port = serve(
+        {
+            "unset": [
+                "sh",
+                "-c",
+                'test -z "${OPENAI_BASE_URL+x}" && test "$DYN_VALIDATION_MODEL" = m',
+            ]
+        }
+    )
+    assert post(port, "unset", {"base_url": None})[0] == 200

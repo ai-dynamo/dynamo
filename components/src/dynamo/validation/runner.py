@@ -8,10 +8,10 @@ answers 200 if it exits 0, and otherwise 500 with the end of its stderr. Point
 ``DYN_PUBLISH_GATE`` or ``DYN_READY_GATE`` at these URLs. Run it as a sidecar
 with its own image, or as a helper process in the worker container.
 
-The worker's request body is passed to the command as ``OPENAI_BASE_URL`` (the
-worker's loopback OpenAI endpoint), ``DYN_VALIDATION_MODEL`` and
-``DYN_VALIDATION_GATE`` (``publish`` or ``ready``). The runner keeps no
-state: every request runs the check again, and the worker owns every verdict.
+The request's ``base_url``, the worker's loopback OpenAI endpoint, is passed
+to the command as ``OPENAI_BASE_URL``. Everything else a check needs comes
+from the runner's own environment and arguments. The runner keeps no state:
+every request runs the check again, and the worker owns every verdict.
 
     python3 -m dynamo.validation.runner --port 9100 --timeout 600 \\
         --check smoke='python3 /checks/smoke.py' \\
@@ -25,22 +25,14 @@ import shlex
 import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-GATE_ENV_KEYS = ("OPENAI_BASE_URL", "DYN_VALIDATION_MODEL", "DYN_VALIDATION_GATE")
-
 
 def check_env(body: dict) -> dict[str, str]:
-    """The command's environment: the runner's own, with the gate variables
+    """The command's environment: the runner's own, with ``OPENAI_BASE_URL``
     taken only from the worker's request, so a stale ambient value is never
     checked instead."""
-    env = {key: value for key, value in os.environ.items() if key not in GATE_ENV_KEYS}
-    models = body.get("models") or []
-    for key, value in (
-        ("OPENAI_BASE_URL", body.get("base_url")),
-        ("DYN_VALIDATION_MODEL", models[0] if models else None),
-        ("DYN_VALIDATION_GATE", body.get("gate")),
-    ):
-        if value:
-            env[key] = str(value)
+    env = {key: value for key, value in os.environ.items() if key != "OPENAI_BASE_URL"}
+    if body.get("base_url"):
+        env["OPENAI_BASE_URL"] = str(body["base_url"])
     return env
 
 

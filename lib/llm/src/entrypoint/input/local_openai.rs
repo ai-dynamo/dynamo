@@ -45,10 +45,7 @@ pub async fn serve_if_gated(endpoint: &Endpoint, card: &ModelDeploymentCard) -> 
     if !validation.claim_local_endpoint() {
         return Ok(());
     }
-    let mut env = GateEnv {
-        openai_base_url: None,
-        model: Some(card.display_name.clone()),
-    };
+    let mut env = GateEnv::default();
     let cancel = drt.primary_token().child_token();
     if servable(card) {
         let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
@@ -300,9 +297,6 @@ mod tests {
         .await
         .unwrap_or_else(|_| panic!("{}", validation.status_json()));
         let (_, body) = &checks.requests()[0];
-        assert_eq!(
-            *body,
-            serde_json::json!({"gate": "publish", "base_url": null, "models": ["prefill"]})
-        );
+        assert_eq!(*body, serde_json::json!({"base_url": null}));
     }
 }

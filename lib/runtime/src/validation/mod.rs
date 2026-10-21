@@ -40,22 +40,19 @@ pub type ReleaseHook = Box<dyn FnOnce() -> BoxFuture<'static, anyhow::Result<()>
 /// keeps the worker held.
 pub type PublishHook = ReleaseHook;
 
-/// What the runtime tells every check, as the JSON body of its request.
+/// What the runtime tells every check, as the JSON body of its request. Only
+/// what a check runner can't be configured with ahead of time: anything in
+/// the deployment spec belongs in the runner's own configuration.
 #[derive(Clone, Debug, Default)]
 pub struct GateEnv {
-    /// Loopback OpenAI-compatible endpoint serving this worker's model.
+    /// Loopback OpenAI-compatible endpoint serving this worker's model, on a
+    /// port chosen at startup. Its `/models` lists the model to request.
     pub openai_base_url: Option<String>,
-    /// Model name to request from that endpoint.
-    pub model: Option<String>,
 }
 
 impl GateEnv {
-    fn body(&self, gate: Gate) -> serde_json::Value {
-        json!({
-            "gate": gate.as_str(),
-            "base_url": self.openai_base_url,
-            "models": self.model.iter().collect::<Vec<_>>(),
-        })
+    fn body(&self) -> serde_json::Value {
+        json!({"base_url": self.openai_base_url})
     }
 }
 
@@ -187,7 +184,7 @@ impl WorkerValidation {
 
     /// Call one gate's checks in parallel. True if every one passed.
     async fn run_gate(&self, gate: Gate, env: &GateEnv, cancel: &CancellationToken) -> bool {
-        let body = env.body(gate);
+        let body = env.body();
         let runs = self
             .config
             .gates
@@ -349,12 +346,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_check_is_told_its_gate_endpoint_and_model() {
+    async fn every_check_is_told_the_loopback_endpoint() {
         let checks = CheckServer::start().await;
         let validation = validation(&[&checks.url("pass")], &[&checks.url("pass")]);
         let env = GateEnv {
             openai_base_url: Some("http://127.0.0.1:1234/v1".into()),
-            model: Some("m".into()),
         };
         validation.start(env, CancellationToken::new());
         tokio::time::timeout(Duration::from_secs(10), validation.wait_released())
@@ -365,9 +361,8 @@ mod tests {
             .into_iter()
             .map(|(_, body)| body)
             .collect();
-        let expected =
-            |gate| json!({"gate": gate, "base_url": "http://127.0.0.1:1234/v1", "models": ["m"]});
-        assert_eq!(bodies, [expected("publish"), expected("ready")]);
+        let expected = json!({"base_url": "http://127.0.0.1:1234/v1"});
+        assert_eq!(bodies, [expected.clone(), expected]);
     }
 
     #[tokio::test]

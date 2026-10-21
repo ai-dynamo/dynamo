@@ -54,16 +54,18 @@ traffic off the worker by other means while those checks run.
 
 ## What a check sees
 
-Each request has a JSON body:
+Each request has a JSON body with the one thing a check runner can't be configured with ahead of time:
 
 ```json
-{"gate": "publish", "base_url": "http://127.0.0.1:41813/v1", "models": ["Qwen/Qwen3-0.6B"]}
+{"base_url": "http://127.0.0.1:41813/v1"}
 ```
 
-`base_url` is an OpenAI-compatible endpoint on `127.0.0.1` that serves the worker's model through the
-same preprocessor, chat template, tool-call and reasoning parsers as the frontend, so a check sees what
-a client would get from this worker. It's `null` for workers without a chat or completions surface,
-such as prefill workers. The endpoint stops once the worker is released.
+`base_url` is an OpenAI-compatible endpoint on `127.0.0.1`, on a port chosen when the worker starts. It
+serves the worker's model through the same preprocessor, chat template, tool-call and reasoning
+parsers as the frontend, so a check sees what a client would get from this worker; its `/models` lists
+the model. It's `null` for workers without a chat or completions surface, such as prefill workers. The
+endpoint stops once the worker is released. Anything else a check needs, such as which gate it serves,
+comes from the deployment spec: configure it on the check runner.
 
 ## Run checks
 
@@ -75,8 +77,9 @@ python3 -m dynamo.validation.runner --port 9100 --timeout 600 \
     --check smoke='python3 /checks/smoke.py'
 ```
 
-It answers `POST /checks/<name>` by running that command with `OPENAI_BASE_URL`,
-`DYN_VALIDATION_MODEL` and `DYN_VALIDATION_GATE` set from the request. Exit status 0 is a `200`;
+It answers `POST /checks/<name>` by running that command with `OPENAI_BASE_URL` set from the request
+and the rest of its own environment. The `completion` check requests `DYN_VALIDATION_MODEL` if it's
+set, and otherwise the first model on `/models`. Exit status 0 is a `200`;
 otherwise it answers `500` with the end of stderr. A check that runs past `--timeout` fails. Whether a
 problem fails the check or only logs a warning is up to the check.
 

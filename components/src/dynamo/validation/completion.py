@@ -3,8 +3,9 @@
 
 """Built-in ``completion`` check: one chat completion must return content.
 
-Reads ``OPENAI_BASE_URL`` and ``DYN_VALIDATION_MODEL``, which the check runner
-sets from the worker's request. Exits 0 on a pass; on a failure it exits 1 with the reason on
+Reads ``OPENAI_BASE_URL``, which the check runner sets from the worker's
+request. The model is ``DYN_VALIDATION_MODEL`` if set, and otherwise the first
+one the endpoint lists on ``/models``. Exits 0 on a pass; on a failure it exits 1 with the reason on
 stderr, which the worker reports on ``/health``.
 """
 
@@ -15,11 +16,21 @@ import urllib.error
 import urllib.request
 
 
+def served_model(base_url: str) -> str:
+    """The first model the endpoint lists."""
+    with urllib.request.urlopen(f"{base_url}/models", timeout=30) as response:
+        return json.loads(response.read())["data"][0]["id"]
+
+
 def main() -> int:
-    base_url = os.environ.get("OPENAI_BASE_URL")
-    model = os.environ.get("DYN_VALIDATION_MODEL")
-    if not base_url or not model:
-        print("OPENAI_BASE_URL and DYN_VALIDATION_MODEL must be set", file=sys.stderr)
+    base_url = os.environ.get("OPENAI_BASE_URL", "").rstrip("/")
+    if not base_url:
+        print("OPENAI_BASE_URL must be set", file=sys.stderr)
+        return 1
+    try:
+        model = os.environ.get("DYN_VALIDATION_MODEL") or served_model(base_url)
+    except Exception as error:  # noqa: BLE001 - any failure is the check's reason
+        print(f"listing models failed: {error!r}", file=sys.stderr)
         return 1
     body = {
         "model": model,
@@ -27,7 +38,7 @@ def main() -> int:
         "max_tokens": 32,
     }
     request = urllib.request.Request(
-        f"{base_url.rstrip('/')}/chat/completions",
+        f"{base_url}/chat/completions",
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
     )
