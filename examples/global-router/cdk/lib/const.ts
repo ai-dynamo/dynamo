@@ -30,6 +30,7 @@ import {
   US_EAST_2_BASTION_KEY_PAIR,
   US_WEST_2_BASTION_KEY_PAIR,
 } from "./keypairs";
+import { KARMADA_VERSION } from "./multi-cluster";
 
 const US_EAST_2 = "us-east-2";
 const US_EAST_2A = "us-east-2a";
@@ -148,6 +149,18 @@ export const US_EAST2_DEPLOYMENT = {
   dynamoPlatformConfig: DYNAMO_PLATFORM_1_4_0,
   dgdPools: [MOCKER_OHIO_1_POOL],
   dgds: [MOCKER_OHIO_1_DGD],
+  // Ohio is the Karmada hub. Member names match the Router's site IDs.
+  multiCluster: {
+    memberName: "aws-ohio",
+    peerCidrs: [MOCKER_VPC_US_WEST_2.cidrBlock],
+    karmadaControlPlane: {
+      version: KARMADA_VERSION,
+      apiSourceCidrs: [
+        MOCKER_VPC_US_EAST_2.cidrBlock,
+        MOCKER_VPC_US_WEST_2.cidrBlock,
+      ],
+    },
+  },
 } satisfies DeploymentConfig;
 
 export const MOCKER_WEST_1_DGD = {
@@ -183,6 +196,10 @@ export const US_WEST2_DEPLOYMENT = {
   dynamoPlatformConfig: DYNAMO_PLATFORM_1_4_0,
   dgdPools: [MOCKER_WEST_1_POOL],
   dgds: [MOCKER_WEST_1_DGD],
+  multiCluster: {
+    memberName: "aws-west",
+    peerCidrs: [MOCKER_VPC_US_EAST_2.cidrBlock],
+  },
 } satisfies DeploymentConfig;
 
 export const DEPLOYMENTS = {
@@ -191,7 +208,7 @@ export const DEPLOYMENTS = {
 } satisfies Record<string, DeploymentConfig>;
 
 // From the regional CloudFormation stacks in account 197002356433 on 2026-09-29.
-// Refresh these IDs if either regional VPC is rebuilt; public route tables are excluded.
+// Public route tables added on 2026-10-20. Refresh these IDs if either regional VPC is rebuilt.
 export const POC_PEERING_OHIO = {
   region: US_EAST_2,
   cidrBlock: MOCKER_VPC_US_EAST_2.cidrBlock,
@@ -202,6 +219,8 @@ export const POC_PEERING_OHIO = {
     "rtb-0e8ad0043f450774a", // dgd-pool-slot-1Subnet1
     "rtb-0aaeffd32412af270", // dgd-pool-slot-1Subnet2
   ],
+  // publicSubnet1 and publicSubnet2: the only route tables with an internet gateway route.
+  publicRouteTableIds: ["rtb-087da2b329a497b8b", "rtb-0c9ccaee37e35b64a"],
 } satisfies PeeringRegionConfig;
 
 export const POC_PEERING_WEST = {
@@ -214,6 +233,8 @@ export const POC_PEERING_WEST = {
     "rtb-0755738960722e63b", // dgd-pool-slot-1Subnet1
     "rtb-0c00d24e9c4e92bef", // dgd-pool-slot-1Subnet2
   ],
+  // publicSubnet1 and publicSubnet2: the only route tables with an internet gateway route.
+  publicRouteTableIds: ["rtb-0903883bb4ad61a14", "rtb-0b8371fc3cd38a7f8"],
 } satisfies PeeringRegionConfig;
 
 export type DeploymentName = keyof typeof DEPLOYMENTS;
