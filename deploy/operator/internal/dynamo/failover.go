@@ -531,7 +531,7 @@ func buildFailoverEnginePair(podSpec *corev1.PodSpec) error {
 	// Clone main before applying any path-specific overrides.
 	mainContainer := podSpec.Containers[0]
 	sidecars := podSpec.Containers[1:]
-	engines := make([]corev1.Container, failoverEngineCount)
+	engines := make([]corev1.Container, failoverEngineCount, failoverEngineCount+len(sidecars))
 	for i := range failoverEngineCount {
 		engines[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i)
 	}

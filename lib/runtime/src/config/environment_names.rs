@@ -742,6 +742,12 @@ pub mod llm {
         pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
             "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
 
+        /// Lowest-cost candidates retained per `router_selection` record. `0`
+        /// retains every scored candidate. The selected worker is always
+        /// retained. Default `16`.
+        pub const DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K: &str =
+            "DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K";
+
         /// S3 bucket for the S3 request-trace sink. Required when
         /// `DYN_REQUEST_TRACE_SINKS` includes `s3`.
         pub const DYN_REQUEST_TRACE_S3_BUCKET: &str = "DYN_REQUEST_TRACE_S3_BUCKET";

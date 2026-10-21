@@ -37,7 +37,7 @@ jobs:
   # ============================================================================
   config:
     name: Config
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       run_vllm:   ${{ steps.flags.outputs.run_vllm }}
       run_sglang: ${{ steps.flags.outputs.run_sglang }}
@@ -621,6 +621,9 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       run_gpu_tests: false
+      # prod-tester-amd-v2 does not start the MinIO service, so the MinIO artifact
+      # tests run in vllm-test instead. Re-enable once the CPU runner hook template starts MinIO.
+      minio_service: false
     secrets: inherit
 
   sglang-test:
@@ -1614,7 +1617,7 @@ jobs:
             --image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
 
   deploy-status-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - deploy-operator
       - deploy-test-vllm

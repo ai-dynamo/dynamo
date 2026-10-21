@@ -264,6 +264,7 @@ impl SglangMockerService {
                 "max_prefill_tokens": self.discovery.max_prefill_tokens,
                 "dp_size": 1,
                 "context_length": self.config.context_length,
+                "allow_auto_truncate": false,
                 "served_model_name": self.config.model,
                 "disaggregation_bootstrap_port": self.config.bootstrap_port,
                 "dist_init_addr": format!(
@@ -347,6 +348,7 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
                         signal.completed,
                     ),
                     finished: signal.completed,
+                    text: prepared.output_text(token_id),
                 };
                 if signal.completed {
                     return;

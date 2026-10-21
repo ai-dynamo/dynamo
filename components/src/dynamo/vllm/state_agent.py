@@ -8,11 +8,12 @@ import ipaddress
 import logging
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+from dynamo.common.kv_state_agent import worker_raw_topic
 from dynamo.llm import KvStateAttachmentOwner, WorkerType
 from dynamo.runtime import Endpoint
 
@@ -76,7 +77,13 @@ async def _close_attachment_owner(owner: KvStateAttachmentOwner) -> None:
 
 
 def state_agent_settings(config: Any) -> StateAgentSettings | None:
-    kv_transfer = getattr(config.engine_args, "kv_transfer_config", None)
+    return state_agent_settings_from_engine_args(config.engine_args)
+
+
+def state_agent_settings_from_engine_args(
+    engine_args: Any,
+) -> StateAgentSettings | None:
+    kv_transfer = getattr(engine_args, "kv_transfer_config", None)
     extra = getattr(kv_transfer, "kv_connector_extra_config", None) or {}
     if not isinstance(extra, dict):
         raise ValueError("kv_connector_extra_config must be an object")
@@ -143,6 +150,7 @@ async def start_attachment_owner(
     vllm_config: "VllmConfig",
     image_token_id: int | None,
     video_token_id: int | None = None,
+    topology_domains: Mapping[str, str] | None = None,
 ) -> KvStateAttachmentOwner | None:
     settings = state_agent_settings(config)
     if settings is None:
@@ -163,6 +171,14 @@ async def start_attachment_owner(
         )
 
     events = config.engine_args.kv_events_config
+    # Every rank of this worker publishes one topic, set at startup from its
+    # CacheOwner IDs; advertise exactly what vLLM publishes.
+    raw_topic = worker_raw_topic(settings.cache_owner_ids.values())
+    if getattr(events, "topic", None) != raw_topic:
+        raise ValueError(
+            "kv_events_config.topic must be the state-agent worker topic "
+            f"{raw_topic!r}, got {getattr(events, 'topic', None)!r}"
+        )
     block_size = get_configured_kv_event_block_size(vllm_config)
     kv_transfer_hint_sources = resolve_kv_transfer_hint_sources(
         config.engine_args,
@@ -190,13 +206,16 @@ async def start_attachment_owner(
                 "raw_zmq_endpoint": _advertised_raw_endpoint(
                     events.endpoint, rank, settings.raw_advertise_host
                 ),
-                "raw_topic": "",
+                "raw_topic": raw_topic,
                 "image_token_id": image_token_id,
                 "video_token_id": video_token_id,
                 "router_hint_source": (
                     {
                         "source_control_endpoint": kv_transfer_hint_source.source_control_endpoint,
                         "worker_type": kv_transfer_hint_source.worker_type,
+                        # KVCR runs in this worker's pod, so its cache
+                        # owners share the worker's island.
+                        "topology_domains": dict(topology_domains or {}),
                     }
                     if kv_transfer_hint_source is not None
                     else None
