@@ -29,7 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::discovery::ModelManager;
+use crate::discovery::{ModelManager, UNKNOWN_METRIC_MODEL};
 use crate::frontend_load::{FrontendLoadFrame, FrontendModelLoad, RequestGauges, RequestTotals};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
@@ -227,6 +227,52 @@ impl Collector for ModelReadyCollector {
         family.set_field_type(MetricType::GAUGE);
         family.set_metric(metrics);
         vec![family]
+    }
+}
+
+struct ServingLoadCollector {
+    manager: Option<Arc<ModelManager>>,
+    awaiting_requests: IntGaugeVec,
+    input_tokens: IntGaugeVec,
+    input_tokens_total: IntCounterVec,
+}
+
+fn initialize_model_load(
+    awaiting_requests: &IntGaugeVec,
+    input_tokens: &IntGaugeVec,
+    input_tokens_total: &IntCounterVec,
+    model: &str,
+) {
+    awaiting_requests.with_label_values(&[model]);
+    input_tokens_total.with_label_values(&[model]);
+    for state in [STATE_AWAITING_FIRST_TOKEN, STATE_GENERATING] {
+        input_tokens.with_label_values(&[model, state]);
+    }
+}
+
+impl Collector for ServingLoadCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        let mut descriptions = self.awaiting_requests.desc();
+        descriptions.extend(self.input_tokens.desc());
+        descriptions.extend(self.input_tokens_total.desc());
+        descriptions
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        if let Some(manager) = &self.manager {
+            for view in manager.committed_model_views() {
+                initialize_model_load(
+                    &self.awaiting_requests,
+                    &self.input_tokens,
+                    &self.input_tokens_total,
+                    &view.name,
+                );
+            }
+        }
+        let mut families = self.awaiting_requests.collect();
+        families.extend(self.input_tokens.collect());
+        families.extend(self.input_tokens_total.collect());
+        families
     }
 }
 
@@ -629,9 +675,7 @@ struct MetricsHandlerState {
 pub struct Metrics {
     load_incarnation: u64,
     load_sequence: AtomicU64,
-    requests_awaiting_first_token: IntGaugeVec,
-    requests_generating: IntGaugeVec,
-    awaiting_first_token_input_tokens: IntGaugeVec,
+    awaiting_first_token_requests: IntGaugeVec,
     inflight_input_tokens: IntGaugeVec,
     input_tokens_counter: IntCounterVec,
     request_started_counter: IntCounterVec,
@@ -712,13 +756,15 @@ pub(crate) struct RequestMetrics {
     // Prompt tokens and phase flags transition together; gauge deltas may arrive
     // out of order across pipeline tasks, so gauges are signed and samples clamp.
     state: AtomicU64,
-    requests_awaiting_first_token: prometheus::IntGauge,
-    requests_generating: prometheus::IntGauge,
+    awaiting_first_token_requests: prometheus::IntGauge,
     awaiting_first_token_input_tokens: prometheus::IntGauge,
-    inflight_input_tokens: prometheus::IntGauge,
+    generating_input_tokens: prometheus::IntGauge,
     input_tokens: prometheus::IntCounter,
     output_tokens: prometheus::IntCounter,
 }
+
+const STATE_AWAITING_FIRST_TOKEN: &str = "awaiting_first_token";
+const STATE_GENERATING: &str = "generating";
 
 const REQUEST_METRICS_KEY: &str = "frontend.request_metrics";
 const FINISHED: u64 = 1 << 63;
@@ -728,18 +774,19 @@ const INPUT_TOKENS: u64 = GENERATING - 1;
 impl RequestMetrics {
     fn new(metrics: &Metrics, model: &str) -> Self {
         let labels = &[model];
-        let requests_awaiting_first_token = metrics
-            .requests_awaiting_first_token
+        let awaiting_first_token_requests = metrics
+            .awaiting_first_token_requests
             .with_label_values(labels);
-        requests_awaiting_first_token.inc();
+        awaiting_first_token_requests.inc();
         Self {
             state: AtomicU64::new(0),
-            requests_awaiting_first_token,
-            requests_generating: metrics.requests_generating.with_label_values(labels),
+            awaiting_first_token_requests,
             awaiting_first_token_input_tokens: metrics
-                .awaiting_first_token_input_tokens
-                .with_label_values(labels),
-            inflight_input_tokens: metrics.inflight_input_tokens.with_label_values(labels),
+                .inflight_input_tokens
+                .with_label_values(&[model, STATE_AWAITING_FIRST_TOKEN]),
+            generating_input_tokens: metrics
+                .inflight_input_tokens
+                .with_label_values(&[model, STATE_GENERATING]),
             input_tokens: metrics.input_tokens_counter.with_label_values(labels),
             output_tokens: metrics.output_tokens_counter.with_label_values(labels),
         }
@@ -782,9 +829,10 @@ impl RequestMetrics {
         };
         self.input_tokens.inc_by(added);
         let added = added as i64;
-        self.inflight_input_tokens.add(added);
         if previous & GENERATING == 0 {
             self.awaiting_first_token_input_tokens.add(added);
+        } else {
+            self.generating_input_tokens.add(added);
         }
     }
 
@@ -804,9 +852,9 @@ impl RequestMetrics {
             return;
         }
         let input = (previous & INPUT_TOKENS) as i64;
-        self.requests_awaiting_first_token.dec();
+        self.awaiting_first_token_requests.dec();
         self.awaiting_first_token_input_tokens.sub(input);
-        self.requests_generating.inc();
+        self.generating_input_tokens.add(input);
     }
 
     /// Stop tracking the request. Only the first call on any clone counts.
@@ -816,11 +864,10 @@ impl RequestMetrics {
             return;
         }
         let input = (previous & INPUT_TOKENS) as i64;
-        self.inflight_input_tokens.sub(input);
         if previous & GENERATING != 0 {
-            self.requests_generating.dec();
+            self.generating_input_tokens.sub(input);
         } else {
-            self.requests_awaiting_first_token.dec();
+            self.awaiting_first_token_requests.dec();
             self.awaiting_first_token_input_tokens.sub(input);
         }
     }
@@ -1132,28 +1179,10 @@ impl Metrics {
         }
         let frontend_metric_name = |suffix: &str| format!("{}_{}", &prefix, suffix);
 
-        let requests_awaiting_first_token = IntGaugeVec::new(
+        let awaiting_first_token_requests = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name(frontend_service::REQUESTS_AWAITING_FIRST_TOKEN),
+                frontend_metric_name(frontend_service::AWAITING_FIRST_TOKEN_REQUESTS),
                 "Admitted requests awaiting their first output token; endpoints that do not emit tokens remain here until completion",
-            ),
-            &["model"],
-        )
-        .unwrap();
-
-        let requests_generating = IntGaugeVec::new(
-            Opts::new(
-                frontend_metric_name(frontend_service::REQUESTS_GENERATING),
-                "Inflight requests that have produced output tokens",
-            ),
-            &["model"],
-        )
-        .unwrap();
-
-        let awaiting_first_token_input_tokens = IntGaugeVec::new(
-            Opts::new(
-                frontend_metric_name(frontend_service::AWAITING_FIRST_TOKEN_INPUT_TOKENS),
-                "Known prompt tokens in requests awaiting their first output token; endpoints that do not emit tokens remain here until completion",
             ),
             &["model"],
         )
@@ -1162,9 +1191,9 @@ impl Metrics {
         let inflight_input_tokens = IntGaugeVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::INFLIGHT_INPUT_TOKENS),
-                "Known prompt tokens in all inflight requests",
+                "Known prompt tokens in inflight requests by state; non-token endpoints remain awaiting_first_token until completion",
             ),
-            &["model"],
+            &["model", "state"],
         )
         .unwrap();
 
@@ -1536,12 +1565,10 @@ impl Metrics {
         )
         .unwrap();
 
-        Metrics {
+        let metrics = Metrics {
             load_incarnation: rand::random(),
             load_sequence: AtomicU64::new(0),
-            requests_awaiting_first_token,
-            requests_generating,
-            awaiting_first_token_input_tokens,
+            awaiting_first_token_requests,
             inflight_input_tokens,
             input_tokens_counter,
             request_started_counter,
@@ -1574,7 +1601,14 @@ impl Metrics {
             model_migration_max_seq_len_exceeded_total,
             model_cancellation_total,
             model_rejection_total,
-        }
+        };
+        initialize_model_load(
+            &metrics.awaiting_first_token_requests,
+            &metrics.inflight_input_tokens,
+            &metrics.input_tokens_counter,
+            UNKNOWN_METRIC_MODEL,
+        );
+        metrics
     }
 
     /// Get the number of successful requests for the given dimensions:
@@ -1703,11 +1737,20 @@ impl Metrics {
     }
 
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
-        registry.register(Box::new(self.requests_awaiting_first_token.clone()))?;
-        registry.register(Box::new(self.requests_generating.clone()))?;
-        registry.register(Box::new(self.awaiting_first_token_input_tokens.clone()))?;
-        registry.register(Box::new(self.inflight_input_tokens.clone()))?;
-        registry.register(Box::new(self.input_tokens_counter.clone()))?;
+        self.register_with_model_manager(registry, None)
+    }
+
+    pub(super) fn register_with_model_manager(
+        &self,
+        registry: &Registry,
+        manager: Option<Arc<ModelManager>>,
+    ) -> Result<(), prometheus::Error> {
+        registry.register(Box::new(ServingLoadCollector {
+            manager,
+            awaiting_requests: self.awaiting_first_token_requests.clone(),
+            input_tokens: self.inflight_input_tokens.clone(),
+            input_tokens_total: self.input_tokens_counter.clone(),
+        }))?;
         registry.register(Box::new(self.request_started_counter.clone()))?;
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
@@ -1981,23 +2024,27 @@ impl Metrics {
             totals.entry(model).or_default().output_tokens = value;
         }
         let mut gauges = HashMap::<String, RequestGauges>::new();
-        for (model, value) in model_gauge_values(&self.requests_awaiting_first_token) {
+        for (model, value) in model_gauge_values(&self.awaiting_first_token_requests) {
             gauges
                 .entry(model)
                 .or_default()
                 .requests_awaiting_first_token = value;
         }
-        for (model, value) in model_gauge_values(&self.requests_generating) {
-            gauges.entry(model).or_default().requests_generating = value;
+        for (model, value) in model_gauge_values(&self.active_requests_gauge) {
+            let gauge = gauges.entry(model).or_default();
+            gauge.requests_generating = value.saturating_sub(gauge.requests_awaiting_first_token);
         }
-        for (model, value) in model_gauge_values(&self.awaiting_first_token_input_tokens) {
-            gauges
-                .entry(model)
-                .or_default()
-                .awaiting_first_token_input_tokens = value;
-        }
-        for (model, value) in model_gauge_values(&self.inflight_input_tokens) {
-            gauges.entry(model).or_default().inflight_input_tokens = value;
+        for family in self.inflight_input_tokens.collect() {
+            for metric in family.get_metric() {
+                let gauge = gauges
+                    .entry(metric_label(metric, "model").to_owned())
+                    .or_default();
+                let value = metric.get_gauge().value().max(0.0) as u64;
+                gauge.inflight_input_tokens = gauge.inflight_input_tokens.saturating_add(value);
+                if metric_label(metric, "state") == STATE_AWAITING_FIRST_TOKEN {
+                    gauge.awaiting_first_token_input_tokens = value;
+                }
+            }
         }
         let models = models
             .into_iter()
@@ -3583,7 +3630,24 @@ mod tests {
                 .create_inflight_guard(model, Endpoint::Completions, true, "");
         let mut collector = inflight.response_collector();
 
+        let awaiting_requests = metrics
+            .awaiting_first_token_requests
+            .with_label_values(&[model]);
+        let awaiting_tokens = metrics
+            .inflight_input_tokens
+            .with_label_values(&[model, STATE_AWAITING_FIRST_TOKEN]);
+        let generating_tokens = metrics
+            .inflight_input_tokens
+            .with_label_values(&[model, STATE_GENERATING]);
         collector.observe_response(10, 0);
+        assert_eq!(
+            (
+                awaiting_requests.get(),
+                awaiting_tokens.get(),
+                generating_tokens.get()
+            ),
+            (1, 10, 0)
+        );
         let awaiting = load();
         assert_eq!(awaiting.gauges.requests_awaiting_first_token, 1);
         assert_eq!(awaiting.gauges.awaiting_first_token_input_tokens, 10);
@@ -3591,16 +3655,34 @@ mod tests {
         // Output chunks are deltas; the repeated input count is not re-added.
         collector.observe_response(10, 3);
         collector.observe_response(10, 2);
+        assert_eq!(
+            (
+                awaiting_requests.get(),
+                awaiting_tokens.get(),
+                generating_tokens.get()
+            ),
+            (0, 0, 10)
+        );
+        inflight.request_metrics().add_input_tokens(4);
+        assert_eq!(generating_tokens.get(), 14);
         let generating = load();
         assert_eq!(generating.gauges.requests_generating, 1);
-        assert_eq!(generating.gauges.inflight_input_tokens, 10);
+        assert_eq!(generating.gauges.inflight_input_tokens, 14);
 
         inflight.mark_ok();
         drop(inflight);
+        assert_eq!(
+            (
+                awaiting_requests.get(),
+                awaiting_tokens.get(),
+                generating_tokens.get()
+            ),
+            (0, 0, 0)
+        );
         let finished = load();
         assert_eq!(finished.gauges, Default::default());
         assert_eq!(finished.totals.requests_completed, 1);
-        assert_eq!(finished.totals.input_tokens, 10);
+        assert_eq!(finished.totals.input_tokens, 14);
         assert_eq!(finished.totals.output_tokens, 5);
     }
 
@@ -3614,35 +3696,122 @@ mod tests {
         assert_eq!(first.incarnation, second.incarnation);
     }
 
-    /// Publishing load reads /metrics; it never adds series for idle models or aliases.
+    /// Publishing load only reads /metrics: a snapshot of a model with an
+    /// alias adds no series to any family.
     #[test]
     fn frontend_load_creates_no_prometheus_series() {
         let metrics = Metrics::new();
         let registry = Registry::new();
         metrics.register(&registry).unwrap();
+        let series = || {
+            registry
+                .gather()
+                .iter()
+                .flat_map(|family| {
+                    family
+                        .get_metric()
+                        .iter()
+                        .filter(|metric| {
+                            metric
+                                .get_label()
+                                .iter()
+                                .any(|label| label.name() == "model")
+                        })
+                        .map(move |metric| {
+                            let labels = metric
+                                .get_label()
+                                .iter()
+                                .map(|label| format!("{}={}", label.name(), label.value()))
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            format!("{}{{{labels}}}", family.name())
+                        })
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
 
+        let before = series();
         metrics.frontend_load(
             0,
             true,
             vec![crate::discovery::CommittedModelView {
                 name: "idle-model".into(),
-                is_ready: false,
                 aliases: vec!["idle-alias".into()],
+                is_ready: true,
             }],
         );
+        assert_eq!(series(), before);
+    }
 
-        let created = registry
-            .gather()
-            .iter()
-            .flat_map(|family| family.get_metric())
-            .flat_map(|metric| metric.get_label())
-            .filter(|label| label.name() == "model")
-            .map(|label| label.value().to_owned())
-            .collect::<Vec<_>>();
-        assert!(
-            created.is_empty(),
-            "snapshot created series for {created:?}"
-        );
+    #[test]
+    fn serving_load_metrics_exist_on_the_first_scrape_after_model_registration() {
+        let metrics = Metrics::new();
+        let manager = Arc::new(ModelManager::new());
+        let registry = Registry::new();
+        metrics
+            .register_with_model_manager(&registry, Some(manager.clone()))
+            .unwrap();
+        let children = |model: &str| {
+            registry
+                .gather()
+                .into_iter()
+                .flat_map(|family| {
+                    family
+                        .get_metric()
+                        .iter()
+                        .filter(|sample| {
+                            sample
+                                .get_label()
+                                .iter()
+                                .any(|label| label.name() == "model" && label.value() == model)
+                        })
+                        .map(|sample| {
+                            let state = sample
+                                .get_label()
+                                .iter()
+                                .find(|label| label.name() == "state")
+                                .map(|label| label.value())
+                                .unwrap_or("");
+                            assert_eq!(sample.get_gauge().value(), 0.0);
+                            assert_eq!(sample.get_counter().value(), 0.0);
+                            (family.name().to_string(), state.to_string())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let expected = [
+            (
+                "dynamo_frontend_awaiting_first_token_requests".to_string(),
+                String::new(),
+            ),
+            (
+                "dynamo_frontend_inflight_input_tokens".to_string(),
+                STATE_AWAITING_FIRST_TOKEN.to_string(),
+            ),
+            (
+                "dynamo_frontend_inflight_input_tokens".to_string(),
+                STATE_GENERATING.to_string(),
+            ),
+            (
+                "dynamo_frontend_input_tokens_total".to_string(),
+                String::new(),
+            ),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(children(UNKNOWN_METRIC_MODEL), expected);
+        assert!(children("registered-model").is_empty());
+        manager
+            .add_chat_completions_model(
+                "registered-model",
+                "checksum",
+                Arc::new(crate::engines::StreamingEngineAdapter::new(
+                    crate::engines::make_echo_engine(),
+                )),
+            )
+            .unwrap();
+        assert_eq!(children("registered-model"), expected);
     }
 
     #[test]
@@ -3673,6 +3842,22 @@ mod tests {
             .output_tokens_counter
             .with_label_values(&["alias"])
             .inc_by(large_count);
+        metrics
+            .active_requests_gauge
+            .with_label_values(&["primary"])
+            .set(4);
+        metrics
+            .awaiting_first_token_requests
+            .with_label_values(&["primary"])
+            .set(1);
+        metrics
+            .inflight_input_tokens
+            .with_label_values(&["primary", STATE_AWAITING_FIRST_TOKEN])
+            .set(5);
+        metrics
+            .inflight_input_tokens
+            .with_label_values(&["primary", STATE_GENERATING])
+            .set(8);
         let frame = metrics.frontend_load(
             0,
             true,
@@ -3681,6 +3866,15 @@ mod tests {
                 is_ready: true,
                 aliases: vec!["alias".into()],
             }],
+        );
+        assert_eq!(
+            frame.models[0].gauges,
+            RequestGauges {
+                requests_awaiting_first_token: 1,
+                requests_generating: 3,
+                awaiting_first_token_input_tokens: 5,
+                inflight_input_tokens: 13,
+            }
         );
         assert_eq!(
             frame.models[0].totals,
@@ -3719,6 +3913,13 @@ mod tests {
                 .with_label_values(&["model"])
                 .get(),
             8
+        );
+        assert_eq!(
+            metrics
+                .input_sequence_length
+                .with_label_values(&["model"])
+                .get_sample_sum(),
+            0.0
         );
         guard.mark_error(ErrorType::Cancelled);
         drop(guard);
@@ -3774,13 +3975,28 @@ mod tests {
             ),
             32
         );
-        for gauge in [
-            &metrics.requests_awaiting_first_token,
-            &metrics.requests_generating,
-            &metrics.awaiting_first_token_input_tokens,
-            &metrics.inflight_input_tokens,
-        ] {
-            assert_eq!(gauge.with_label_values(&["model"]).get(), 0);
+        assert_eq!(
+            metrics
+                .awaiting_first_token_requests
+                .with_label_values(&["model"])
+                .get(),
+            0
+        );
+        assert_eq!(
+            metrics
+                .active_requests_gauge
+                .with_label_values(&["model"])
+                .get(),
+            0
+        );
+        for state in [STATE_AWAITING_FIRST_TOKEN, STATE_GENERATING] {
+            assert_eq!(
+                metrics
+                    .inflight_input_tokens
+                    .with_label_values(&["model", state])
+                    .get(),
+                0
+            );
         }
     }
 

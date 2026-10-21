@@ -188,12 +188,8 @@ pub mod frontend_service {
     pub const REQUESTS_STARTED_TOTAL: &str = "requests_started_total";
 
     /// Admitted requests that have not produced an output token.
-    pub const REQUESTS_AWAITING_FIRST_TOKEN: &str = "requests_awaiting_first_token";
-    /// Inflight requests that have produced output tokens.
-    pub const REQUESTS_GENERATING: &str = "requests_generating";
-    /// Known prompt tokens in requests awaiting their first output token.
-    pub const AWAITING_FIRST_TOKEN_INPUT_TOKENS: &str = "awaiting_first_token_input_tokens";
-    /// Known prompt tokens in all inflight requests.
+    pub const AWAITING_FIRST_TOKEN_REQUESTS: &str = "awaiting_first_token_requests";
+    /// Known prompt tokens in inflight requests, labeled by state.
     pub const INFLIGHT_INPUT_TOKENS: &str = "inflight_input_tokens";
     /// Total known input tokens of admitted requests.
     pub const INPUT_TOKENS_TOTAL: &str = "input_tokens_total";

@@ -1350,7 +1350,9 @@ impl HttpServiceConfigBuilder {
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
-        state.metrics_clone().register(&registry)?;
+        state
+            .metrics_clone()
+            .register_with_model_manager(&registry, Some(state.manager_clone()))?;
 
         // Readiness is evaluated from the live routing catalog at scrape time.
         register_model_ready_metric(&registry, state.manager_clone(), model_ready_metrics_prefix)?;
