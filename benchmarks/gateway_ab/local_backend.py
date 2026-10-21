@@ -540,12 +540,14 @@ class LocalBackend:
             ns = namespace(self.cfg, topology, side)
             for ctype, replicas, mode in manifests.worker_roles(self.cfg, topology):
                 for i in range(replicas):
+                    # As in Kubernetes, the command replaces the image's
+                    # entrypoint, so the frontend image can run workers too.
                     start(
                         f"{manifests.TAGS[side]}-{ctype}{i}",
                         self.cfg.worker_image,
                         {"DYN_NAMESPACE": ns},
+                        docker_args=["--entrypoint", "python3"],
                         command=[
-                            "python3",
                             "-m",
                             "dynamo.mocker",
                             *manifests.mocker_args(self.cfg, mode),
