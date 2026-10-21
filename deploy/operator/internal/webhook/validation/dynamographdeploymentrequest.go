@@ -27,7 +27,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdoverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -59,11 +59,6 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate(
 	ctx context.Context,
 	request *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
-	// Legacy v1beta1 rules do not apply to a converted v1beta2 carrier.
-	if request.Spec.V1Beta2 != nil {
-		return nil, nil
-	}
-
 	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
 	allErrs := validation.validateDynamoGraphDeploymentRequest(request)
 	return validation.warnings, invalidDynamoGraphDeploymentRequestError(request, allErrs)
@@ -75,11 +70,6 @@ func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(
 	oldRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 	newRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
-	// Legacy v1beta1 rules do not apply to a converted v1beta2 carrier.
-	if newRequest.Spec.V1Beta2 != nil {
-		return nil, nil
-	}
-
 	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
 	allErrs := validation.validateDynamoGraphDeploymentRequestUpdate(newRequest, oldRequest)
 	validation.warnDeprecatedDGDOverrideTargets(&newRequest.Spec)
@@ -99,6 +89,17 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	spec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
+	// The requested API version decides what spec.v1beta2 means. A native request is
+	// validated; a spec that only conversion may produce is rejected on CREATE.
+	if !v.requestIsNative(spec.V1Beta2 != nil) {
+		return foreignCreateErrors(fldPath, spec.V1Beta2 != nil)
+	}
+	// A v1beta2 Request reaches this webhook as a v1beta1 object carrying spec.v1beta2;
+	// the v1beta1 rules below do not apply to it.
+	if spec.V1Beta2 != nil {
+		return validateDynamoGraphDeploymentRequestEnvelopeV1beta2(spec.V1Beta2, fldPath.Child("v1beta2"))
+	}
+
 	allErrs := field.ErrorList{}
 
 	if !features.MustGateFrom(v.ctx).Enabled(features.GPUDiscovery) && !hasManualDGDRHardware(spec.Hardware) {
@@ -251,6 +252,24 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	fldPath *field.Path,
 	oldPhase nvidiacomv1beta1.DGDRPhase,
 ) field.ErrorList {
+	// A spec viewed through the API version that does not own it is read-only: an unchanged
+	// spec round-trips, any other write is rejected.
+	if !v.requestIsNative(newSpec.V1Beta2 != nil) {
+		if apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
+			return nil
+		}
+		return foreignUpdateErrors(fldPath, newSpec.V1Beta2 != nil)
+	}
+	// A native v1beta2 spec is unconstrained by phase: an unchanged spec is always allowed, so
+	// status-preserving writes and defaulting-only updates pass, and any change is fully
+	// validated as if it were new.
+	if newSpec.V1Beta2 != nil {
+		if apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
+			return nil
+		}
+		return validateDynamoGraphDeploymentRequestEnvelopeV1beta2(newSpec.V1Beta2, fldPath.Child("v1beta2"))
+	}
+
 	allErrs := field.ErrorList{}
 
 	gpuDiscoveryEnabled := features.MustGateFrom(v.ctx).Enabled(features.GPUDiscovery)
@@ -304,7 +323,7 @@ func dgdrRuntimeVersionOverrideRequired(spec *nvidiacomv1beta1.DynamoGraphDeploy
 	if spec.Image == "" || spec.RuntimeVersionOverride != "" {
 		return false
 	}
-	_, err := runtimeversion.ParseImageVersion(spec.Image)
+	_, err := versionoverride.ParseImageVersion(spec.Image)
 	return err != nil
 }
 

@@ -9,10 +9,12 @@
 package controller
 
 import (
+	"context"
 	"os"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
+	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -23,6 +25,16 @@ import (
 )
 
 const admissionBypassUsername = "operatorenv-controller-admission-bypass"
+
+// The controller specs create native v1beta2 Requests without an image or hardware. Admission
+// completes them from the operator's configuration, as it does in production.
+const controllerAISimulateImage = "registry.example/aisimulate:1.2.0"
+
+type fixedHardwareDiscoverer struct{}
+
+func (fixedHardwareDiscoverer) Discover(context.Context, string) (webhookdefaulting.DiscoveredHardware, error) {
+	return webhookdefaulting.DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}, nil
+}
 
 var (
 	sharedEnv = operatorenv.New(operatorenv.Options{
@@ -44,6 +56,10 @@ func setupProductionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOpti
 		RuntimeConfig:     opts.RuntimeConfig,
 		OperatorVersion:   opts.OperatorVersion,
 		OperatorPrincipal: opts.OperatorPrincipal,
+		DGDRV1beta2: webhookdefaulting.DGDRV1beta2Options{
+			AISimulateImage: controllerAISimulateImage,
+			Hardware:        fixedHardwareDiscoverer{},
+		},
 	})
 }
 

@@ -46,12 +46,21 @@ type DGDRDefaulter struct {
 	// dynamo-planner:<operatorVersion> tag does not exist (pre-release charts:
 	// rc, nightly); empty keeps the derived default.
 	DefaultImage string
+	// v1beta2 configures the defaults of Requests submitted as v1beta2, which reach this
+	// handler as a v1beta1 object carrying the spec.v1beta2 envelope.
+	v1beta2 DGDRV1beta2Options
 }
 
 // NewDGDRDefaulter creates a new DGDRDefaulter with the given operator version
 // and optional explicit default profiler image.
 func NewDGDRDefaulter(operatorVersion, defaultImage string) *DGDRDefaulter {
 	return &DGDRDefaulter{OperatorVersion: operatorVersion, DefaultImage: defaultImage}
+}
+
+// WithV1beta2 sets the defaults of v1beta2 Requests and returns the defaulter.
+func (d *DGDRDefaulter) WithV1beta2(options DGDRV1beta2Options) *DGDRDefaulter {
+	d.v1beta2 = options
+	return d
 }
 
 // Default implements admission.CustomDefaulter.
@@ -70,6 +79,17 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
 		return fmt.Errorf("get admission request from context: %w", err)
+	}
+
+	// The original request version decides what spec.v1beta2 means. A native v1beta2 Request
+	// is defaulted from its carrier on CREATE and UPDATE; only CREATE reads the cluster.
+	if internalwebhook.RequestUsesV1Beta2(req) && dgdr.Spec.V1Beta2 != nil {
+		return defaultDynamoGraphDeploymentRequestV1beta2(ctx, dgdr, req.Operation, d.v1beta2)
+	}
+	// A foreign-version view (a carrier written or updated through the wrong API version, or
+	// a v1beta1 payload written through v1beta2) is read-only; validation enforces that.
+	if !internalwebhook.RequestIsNative(req, dgdr.Spec.V1Beta2 != nil) {
+		return nil
 	}
 
 	defaultDynamoGraphDeploymentRequest(dgdr, dynamoGraphDeploymentRequestDefaultOptions{

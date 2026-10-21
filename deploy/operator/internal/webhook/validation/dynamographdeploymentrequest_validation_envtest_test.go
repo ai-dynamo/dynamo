@@ -18,6 +18,9 @@
 package validation_test
 
 import (
+	"encoding/json"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -26,6 +29,7 @@ import (
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -55,18 +59,27 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		"spec":{"components":[{"name":"VllmPrefillWorker"}]}
 	}`
 
+	discoveredH200 := webhookdefaulting.DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}
+
 	tests := []struct {
 		name               string
 		request            runtime.Object
 		oldRequest         runtime.Object
 		gpuDiscovery       bool
 		seedWithoutWebhook bool
-		wantImage          string
-		wantSchemaErr      string
-		wantCELErr         string
-		wantStatusErr      string
-		wantWebhook        []string
-		wantWarnings       []string
+		// discovered and discoveryErr are what cluster GPU discovery reports while the case
+		// runs; beforeUpdate may change them between the seed and the update.
+		discovered   webhookdefaulting.DiscoveredHardware
+		discoveryErr error
+		beforeUpdate func(*testing.T)
+		// check inspects the object the API server returned.
+		check         func(*testing.T, *unstructured.Unstructured)
+		wantImage     string
+		wantSchemaErr string
+		wantCELErr    string
+		wantStatusErr string
+		wantWebhook   []string
+		wantWarnings  []string
 	}{
 		// Source-version schema, CEL, and conversion boundaries.
 		{
@@ -531,10 +544,239 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				`spec.searchStrategy: Invalid value: "thorough": is incompatible with spec.backend "auto"; set spec.backend to a specific backend (sglang, trtllm, or vllm)`,
 			},
 		},
+
+		// v1beta2: the CRD owns the unconditional defaults, admission the environment ones.
+		{
+			name:         "v1beta2 model-only request gets schema and admission defaults",
+			request:      v1beta2DGDRForAdmission(nil, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				expectV1beta2SchemaDefaults(t, result)
+				expectV1beta2AdmissionDefaults(t, result)
+			},
+		},
+		{
+			name: "v1beta2 explicit hardware is kept",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm", "budget": int64(4)}}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if got := v1beta2String(t, result, "spec", "hardware", "gpu", "sku"); got != "h100_sxm" {
+					t.Fatalf("hardware.gpu.sku = %q, want h100_sxm", got)
+				}
+				if got := v1beta2Number(t, result, "spec", "hardware", "gpu", "budget"); got != 4 {
+					t.Fatalf("hardware.gpu.budget = %v, want 4", got)
+				}
+			},
+		},
+		{
+			name:         "v1beta2 failed discovery leaves the hardware absent",
+			request:      v1beta2DGDRForAdmission(nil, nil),
+			gpuDiscovery: true,
+			discoveryErr: errors.New("no GPUs found"),
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				v1beta2Absent(t, result, "spec", "hardware")
+				if got := v1beta2String(t, result, "spec", "aisimulate", "image"); got != admissionAISimulateImage {
+					t.Fatalf("aisimulate.image = %q, want %q", got, admissionAISimulateImage)
+				}
+			},
+		},
+		{
+			name: "v1beta2 empty workload receives the static model-only default",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["workload"] = map[string]any{}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				for key, want := range map[string]float64{"isl": 1024, "osl": 128, "concurrency": 10} {
+					if got := v1beta2Number(t, result, "spec", "workload", "static", key); got != want {
+						t.Fatalf("workload.static.%s = %v, want %v", key, got, want)
+					}
+				}
+				v1beta2Absent(t, result, "spec", "workload", "static", "kvLoadRatio")
+			},
+		},
+		{
+			name: "v1beta2 empty workload static is an opt-out and stays empty",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["workload"] = map[string]any{"static": map[string]any{}}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				v1beta2Empty(t, result, "spec", "workload", "static")
+			},
+		},
+		{
+			name: "v1beta2 empty workload static stays empty beside native parameters",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["workload"] = map[string]any{"static": map[string]any{}}
+				spec["aisimulate"] = map[string]any{"parameters": mustJSONObject(t, `{"workload":{"isl":512,"osl":128,"concurrency":8,"request_count":100}}`)}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				v1beta2Empty(t, result, "spec", "workload", "static")
+				v1beta2Absent(t, result, "spec", "objective", "sla")
+				expectV1beta2AdmissionDefaults(t, result)
+			},
+		},
+		{
+			name: "v1beta2 empty sla is an opt-out and is not refilled",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["objective"] = map[string]any{"sla": map[string]any{}}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				v1beta2Empty(t, result, "spec", "objective", "sla")
+				if got := v1beta2Number(t, result, "spec", "workload", "static", "isl"); got != 1024 {
+					t.Fatalf("workload.static.isl = %v, want the schema default 1024", got)
+				}
+			},
+		},
+		{
+			name: "v1beta2 native parameters win without rewriting the typed spec",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["aisimulate"] = map[string]any{"parameters": mustJSONObject(t, `{"workload":{"isl":256}}`)}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if got := v1beta2Number(t, result, "spec", "workload", "static", "isl"); got != 1024 {
+					t.Fatalf("typed workload.static.isl = %v, want 1024", got)
+				}
+				if got := v1beta2Number(t, result, "spec", "aisimulate", "parameters", "workload", "isl"); got != 256 {
+					t.Fatalf("parameters.workload.isl = %v, want 256", got)
+				}
+			},
+		},
+		{
+			name: "v1beta2 duplicate backends are rejected on create",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["backends"] = []any{"vllm", "vllm"}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			wantWebhook:  []string{`spec.backends[1]: Duplicate value: "vllm"`},
+		},
+		{
+			name: "v1beta2 versionOverride latest is rejected by the schema",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["aisimulate"] = map[string]any{"versionOverride": "latest"}
+			}, nil),
+			gpuDiscovery:  true,
+			discovered:    discoveredH200,
+			wantSchemaErr: `spec.aisimulate.versionOverride: Invalid value: "latest": spec.aisimulate.versionOverride in body should match '^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'`,
+		},
+		{
+			name: "v1beta2 versionOverride with a v prefix is rejected by the schema",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["aisimulate"] = map[string]any{"versionOverride": "v0.13.0"}
+			}, nil),
+			gpuDiscovery:  true,
+			discovered:    discoveredH200,
+			wantSchemaErr: `spec.aisimulate.versionOverride: Invalid value: "v0.13.0": spec.aisimulate.versionOverride in body should match '^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'`,
+		},
+		{
+			name: "v1beta2 versionOverride 0.13.0 is accepted",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["aisimulate"] = map[string]any{"versionOverride": "0.13.0"}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if got := v1beta2String(t, result, "spec", "aisimulate", "versionOverride"); got != "0.13.0" {
+					t.Fatalf("versionOverride = %q, want 0.13.0", got)
+				}
+			},
+		},
+
+		// v1beta2 UPDATE: defaults stay idempotent, hardware is never rediscovered, and any
+		// spec change is fully validated.
+		{
+			name:         "v1beta2 update without a spec change keeps the spec and generation",
+			oldRequest:   v1beta2DGDRForAdmission(nil, nil),
+			request:      v1beta2DGDRForAdmission(nil, map[string]any{"updated": "true"}),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if result.GetGeneration() != 1 {
+					t.Fatalf("generation = %d, want 1: defaulting must not change an unchanged spec", result.GetGeneration())
+				}
+				expectV1beta2SchemaDefaults(t, result)
+				expectV1beta2AdmissionDefaults(t, result)
+			},
+		},
+		{
+			name:         "v1beta2 metadata-only update does not pick up hardware once discovery recovers",
+			oldRequest:   v1beta2DGDRForAdmission(nil, nil),
+			request:      v1beta2DGDRForAdmission(nil, map[string]any{"updated": "true"}),
+			gpuDiscovery: true,
+			discoveryErr: errors.New("no GPUs found"),
+			beforeUpdate: func(*testing.T) { admissionHardware.set(discoveredH200, nil) },
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if result.GetGeneration() != 1 {
+					t.Fatalf("generation = %d, want 1: an update must not rewrite the spec", result.GetGeneration())
+				}
+				v1beta2Absent(t, result, "spec", "hardware")
+			},
+		},
+		{
+			name:         "v1beta2 native-only hardware survives a metadata-only update after discovery recovers",
+			oldRequest:   v1beta2NativeHardwareDGDR(nil),
+			request:      v1beta2NativeHardwareDGDR(map[string]any{"updated": "true"}),
+			gpuDiscovery: true,
+			discoveryErr: errors.New("no GPUs found"),
+			beforeUpdate: func(*testing.T) { admissionHardware.set(discoveredH200, nil) },
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if result.GetGeneration() != 1 {
+					t.Fatalf("generation = %d, want 1", result.GetGeneration())
+				}
+				v1beta2Absent(t, result, "spec", "hardware")
+				if got := v1beta2String(t, result, "spec", "aisimulate", "parameters", "search_space", "hardware_sku"); got != "h100_sxm" {
+					t.Fatalf("parameters.search_space.hardware_sku = %q, want h100_sxm", got)
+				}
+			},
+		},
+		{
+			name:       "v1beta2 spec change is accepted and bumps the generation",
+			oldRequest: v1beta2DGDRForAdmission(nil, nil),
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["model"] = map[string]any{"name": alternateAdmissionModel}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if result.GetGeneration() != 2 {
+					t.Fatalf("generation = %d, want 2", result.GetGeneration())
+				}
+				if got := v1beta2String(t, result, "spec", "model", "name"); got != alternateAdmissionModel {
+					t.Fatalf("model.name = %q, want %q", got, alternateAdmissionModel)
+				}
+			},
+		},
+		{
+			name:       "v1beta2 update to duplicate backends is rejected",
+			oldRequest: v1beta2DGDRForAdmission(nil, nil),
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["backends"] = []any{"sglang", "sglang"}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			wantWebhook:  []string{`spec.backends[1]: Duplicate value: "sglang"`},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			admissionHardware.set(tt.discovered, tt.discoveryErr)
+			t.Cleanup(func() { admissionHardware.set(webhookdefaulting.DiscoveredHardware{}, nil) })
+
 			gates := features.Gates{GPUDiscovery: tt.gpuDiscovery}
 			test := admissionTestCase{
 				object:             tt.request,
@@ -546,6 +788,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				wantStatusError:    tt.wantStatusErr,
 				wantWebhookErrors:  tt.wantWebhook,
 				wantWarnings:       tt.wantWarnings,
+				beforeUpdate:       tt.beforeUpdate,
 			}
 
 			if tt.oldRequest != nil && !tt.gpuDiscovery {
@@ -554,6 +797,9 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				test.seedGates = &seedGates
 			}
 			actual := runAdmissionTest(t, test)
+			if tt.check != nil {
+				tt.check(t, actual)
+			}
 			if tt.wantImage != "" {
 				image, found, err := unstructured.NestedString(actual.Object, "spec", "image")
 				if err != nil || !found {
@@ -756,4 +1002,135 @@ func beta2DGDRForAdmission(
 		mutate(request)
 	}
 	return request
+}
+
+const v1beta2AdmissionModel = "Qwen/Qwen3-0.6B"
+
+// v1beta2NativeHardwareDGDR supplies hardware only through native AISimulate parameters.
+func v1beta2NativeHardwareDGDR(labels map[string]any) *unstructured.Unstructured {
+	return v1beta2DGDRForAdmission(func(spec map[string]any) {
+		spec["aisimulate"] = map[string]any{
+			"image": admissionAISimulateImage,
+			"parameters": map[string]any{
+				"search_space": map[string]any{"hardware_sku": "h100_sxm", "gpu_budget": int64(8)},
+			},
+		}
+	}, labels)
+}
+
+// v1beta2DGDRForAdmission builds a v1beta2 Request as a client sends it, before the CRD
+// defaults. It is unstructured on purpose: an omitted field,
+// an explicit empty object and a null are different requests, and typed Go cannot tell them
+// apart.
+func v1beta2DGDRForAdmission(mutate func(spec map[string]any), labels map[string]any) *unstructured.Unstructured {
+	spec := map[string]any{"model": map[string]any{"name": v1beta2AdmissionModel}}
+	if mutate != nil {
+		mutate(spec)
+	}
+	metadata := map[string]any{"name": "test-v1beta2-dgdr", "namespace": "default"}
+	if labels != nil {
+		metadata["labels"] = labels
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "nvidia.com/v1beta2",
+		"kind":       "DynamoGraphDeploymentRequest",
+		"metadata":   metadata,
+		"spec":       spec,
+	}}
+}
+
+// mustJSONObject decodes a native AISimulate parameters document.
+func mustJSONObject(t *testing.T, document string) map[string]any {
+	t.Helper()
+	var value map[string]any
+	if err := json.Unmarshal([]byte(document), &value); err != nil {
+		t.Fatalf("decode %q: %v", document, err)
+	}
+	return value
+}
+
+func v1beta2Field(t *testing.T, obj *unstructured.Unstructured, path ...string) (any, bool) {
+	t.Helper()
+	value, found, err := unstructured.NestedFieldNoCopy(obj.Object, path...)
+	if err != nil {
+		t.Fatalf("read %v: %v", path, err)
+	}
+	return value, found
+}
+
+func v1beta2Number(t *testing.T, obj *unstructured.Unstructured, path ...string) float64 {
+	t.Helper()
+	value, found := v1beta2Field(t, obj, path...)
+	if !found {
+		t.Fatalf("%v is not set", path)
+	}
+	switch n := value.(type) {
+	case int64:
+		return float64(n)
+	case float64:
+		return n
+	default:
+		t.Fatalf("%v = %#v, want a number", path, value)
+		return 0
+	}
+}
+
+func v1beta2String(t *testing.T, obj *unstructured.Unstructured, path ...string) string {
+	t.Helper()
+	value, found := v1beta2Field(t, obj, path...)
+	if !found {
+		t.Fatalf("%v is not set", path)
+	}
+	text, ok := value.(string)
+	if !ok {
+		t.Fatalf("%v = %#v, want a string", path, value)
+	}
+	return text
+}
+
+func v1beta2Absent(t *testing.T, obj *unstructured.Unstructured, path ...string) {
+	t.Helper()
+	if value, found := v1beta2Field(t, obj, path...); found {
+		t.Fatalf("%v = %#v, want it absent", path, value)
+	}
+}
+
+func v1beta2Empty(t *testing.T, obj *unstructured.Unstructured, path ...string) {
+	t.Helper()
+	value, found := v1beta2Field(t, obj, path...)
+	if !found || !reflect.DeepEqual(value, map[string]any{}) {
+		t.Fatalf("%v = %#v (found=%v), want an empty object", path, value, found)
+	}
+}
+
+// expectV1beta2SchemaDefaults checks what the CRD supplies when workload and sla are omitted.
+func expectV1beta2SchemaDefaults(t *testing.T, obj *unstructured.Unstructured) {
+	t.Helper()
+	for key, want := range map[string]float64{"isl": 1024, "osl": 128, "concurrency": 10} {
+		if got := v1beta2Number(t, obj, "spec", "workload", "static", key); got != want {
+			t.Fatalf("workload.static.%s = %v, want %v", key, got, want)
+		}
+	}
+	v1beta2Absent(t, obj, "spec", "workload", "static", "kvLoadRatio")
+	v1beta2Absent(t, obj, "spec", "objective", "sla")
+	if got := v1beta2String(t, obj, "spec", "objective", "mode"); got != "Optimize" {
+		t.Fatalf("objective.mode = %q, want Optimize", got)
+	}
+}
+
+// expectV1beta2AdmissionDefaults checks what admission supplies from the environment.
+func expectV1beta2AdmissionDefaults(t *testing.T, obj *unstructured.Unstructured) {
+	t.Helper()
+	if got := v1beta2String(t, obj, "spec", "objective", "metric"); got != "Throughput" {
+		t.Fatalf("objective.metric = %q, want Throughput", got)
+	}
+	if got := v1beta2String(t, obj, "spec", "aisimulate", "image"); got != admissionAISimulateImage {
+		t.Fatalf("aisimulate.image = %q, want %q", got, admissionAISimulateImage)
+	}
+	if got := v1beta2String(t, obj, "spec", "hardware", "gpu", "sku"); got != "h200_sxm" {
+		t.Fatalf("hardware.gpu.sku = %q, want h200_sxm", got)
+	}
+	if got := v1beta2Number(t, obj, "spec", "hardware", "gpu", "budget"); got != 8 {
+		t.Fatalf("hardware.gpu.budget = %v, want 8", got)
+	}
 }

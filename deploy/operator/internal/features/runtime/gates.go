@@ -5,22 +5,21 @@
 
 package runtime
 
-import "github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+import "github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
 
 var (
 	// StrictNamespacePrefix gates operator-managed discovery isolation.
 	StrictNamespacePrefix = Gate{
 		Name:              "StrictNamespacePrefix",
-		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 6, Patch: 0},
+		MinRuntimeVersion: versionoverride.Version{Major: 1, Minor: 6, Patch: 0},
 	}
-
 	// CanaryHealthChecks gates the canary health-check rendering defaults.
 	// Runtime 1.5.0 is the first version whose resolved runtime version is
 	// included in the worker hash, so enabling the feature cannot silently
 	// change an existing worker generation.
 	CanaryHealthChecks = Gate{
 		Name:              "CanaryHealthChecks",
-		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 5, Patch: 0},
+		MinRuntimeVersion: versionoverride.Version{Major: 1, Minor: 5, Patch: 0},
 	}
 
 	// IncreasedWorkerFailureThreshold gates the worker liveness default.
@@ -29,7 +28,7 @@ var (
 	// change an existing worker generation.
 	IncreasedWorkerFailureThreshold = Gate{
 		Name:              "IncreasedWorkerFailureThreshold",
-		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 5, Patch: 0},
+		MinRuntimeVersion: versionoverride.Version{Major: 1, Minor: 5, Patch: 0},
 	}
 
 	// NativeRustEPP gates the native Rust EPP requirement: runtime versions at
@@ -38,7 +37,7 @@ var (
 	// 1.5.0, the first release shipping the native Rust EPP image.
 	NativeRustEPP = Gate{
 		Name:              "NativeRustEPP",
-		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 5, Patch: 0},
+		MinRuntimeVersion: versionoverride.Version{Major: 1, Minor: 5, Patch: 0},
 	}
 
 	// PlannerDGDComponentStatus gates Planner discovery of model, runtime,
@@ -48,6 +47,6 @@ var (
 	// PodTemplates.
 	PlannerDGDComponentStatus = Gate{
 		Name:              "PlannerDGDComponentStatus",
-		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 6, Patch: 0},
+		MinRuntimeVersion: versionoverride.Version{Major: 1, Minor: 6, Patch: 0},
 	}
 )
