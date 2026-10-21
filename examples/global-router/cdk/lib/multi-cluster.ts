@@ -22,8 +22,12 @@ import { Duration, RemovalPolicy, aws_ec2 as ec2 } from "aws-cdk-lib";
 import * as eks from "aws-cdk-lib/aws-eks-v2";
 import { Construct, type IDependable } from "constructs";
 
-import { isValidIpv4Cidr } from "./cidr";
-import type { KarmadaControlPlaneConfig, MultiClusterConfig } from "./config";
+import { cidrsOverlap, isValidIpv4Cidr, isValidVpcCidr } from "./cidr";
+import type {
+  DeploymentConfig,
+  KarmadaControlPlaneConfig,
+  MultiClusterConfig,
+} from "./config";
 
 export const KARMADA_NAMESPACE = "karmada-system";
 export const KARMADA_RELEASE = "karmada";
@@ -31,16 +35,24 @@ export const KARMADA_RELEASE = "karmada";
 export const KARMADA_API_SERVICE = `${KARMADA_RELEASE}-apiserver`;
 export const KARMADA_KUBECONFIG_SECRET = `${KARMADA_RELEASE}-kubeconfig`;
 export const KARMADA_API_PORT = 5443;
+/** The release that `crds/` and the setup image pins below come from. */
+export const KARMADA_VERSION = "1.19.0";
 
 /** `karmadactl register` rejects longer member names. */
 const MAX_MEMBER_NAME_LENGTH = 48;
 
-// The chart's setup jobs default to `latest`. cfssl v1.6.5 was current when
-// Karmada 1.19.0 shipped; the kubectl image only publishes `latest`, so it is
-// pinned by digest.
+/**
+ * Helm must finish waiting, and roll back if it has to, well inside the
+ * kubectl Lambda's 15-minute limit.
+ */
+const KARMADA_HELM_TIMEOUT = Duration.minutes(10);
+
+// The release chart pins the Karmada component images, but its setup jobs
+// default to `latest`. cfssl v1.6.5 was current when Karmada 1.19.0 shipped;
+// the kubectl image only publishes `latest`, so it is pinned by digest.
 const CFSSL_IMAGE_TAG = "v1.6.5";
-const KUBECTL_IMAGE_TAG =
-  "latest@sha256:9b58231669c7c371ecd976626a61d72ae7e46326f30932e8934a087f5f26fbd8";
+const KUBECTL_IMAGE_DIGEST =
+  "sha256:9b58231669c7c371ecd976626a61d72ae7e46326f30932e8934a087f5f26fbd8";
 
 // The chart's default certificate names. Setting `certs.auto.hosts` replaces
 // the list, so these are kept next to the load balancer's names.
@@ -53,8 +65,8 @@ const KARMADA_DEFAULT_CERT_HOSTS = [
   "127.0.0.1",
 ];
 
-// From Karmada 1.19.0 `charts/karmada/_crds/bases/multicluster`; see
-// crds/README.md.
+// From Karmada `KARMADA_VERSION`, `charts/karmada/_crds/bases/multicluster`;
+// see crds/README.md.
 const MCS_CRD_FILES = [
   "multicluster.x-k8s.io_serviceexports.json",
   "multicluster.x-k8s.io_serviceimports.json",
@@ -73,7 +85,7 @@ export interface MultiClusterSupportProps {
 }
 
 /**
- * Prepares one cluster for Karmada and SIG Multicluster (MCS):
+ * Prepares one cluster for Karmada and the Multi-Cluster Services (MCS) API:
  *
  * - Pods in peer VPCs may reach this cluster's pods. MCS EndpointSlices list
  *   pod addresses, so callers in other clusters connect to pods directly.
@@ -88,8 +100,6 @@ export interface MultiClusterSupportProps {
  * after deployment rather than a CloudFormation resource.
  */
 export class MultiClusterSupport extends Construct {
-  public readonly karmadaControlPlane?: eks.HelmChart;
-
   constructor(scope: Construct, id: string, props: MultiClusterSupportProps) {
     super(scope, id);
     const { cluster, config } = props;
@@ -100,6 +110,13 @@ export class MultiClusterSupport extends Construct {
         ec2.Peer.ipv4(cidr),
         ec2.Port.allTcp(),
         `MCS pod traffic from peer VPC ${cidr}`,
+      );
+      // Inter-Region peering carries smaller packets than the pods' MTU, and
+      // senders learn the limit from this ICMP message (Path MTU Discovery).
+      cluster.clusterSecurityGroup.addIngressRule(
+        ec2.Peer.ipv4(cidr),
+        ec2.Port.icmpTypeAndCode(3, 4),
+        `Path MTU Discovery from peer VPC ${cidr}`,
       );
     }
 
@@ -118,11 +135,14 @@ export class MultiClusterSupport extends Construct {
     });
 
     // `overwrite` applies instead of creating, so CRDs that already exist
-    // in a running cluster are adopted.
+    // in a running cluster are adopted. They are kept on removal and
+    // rollback: they may predate this stack, and deleting a CRD deletes every
+    // ServiceExport and ServiceImport.
     new eks.KubernetesManifest(this, "McsCrds", {
       cluster,
       manifest: loadMcsCrds(),
       overwrite: true,
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     const karmada = config.karmadaControlPlane;
@@ -139,19 +159,46 @@ export class MultiClusterSupport extends Construct {
         createNamespace: true,
         namespace: KARMADA_NAMESPACE,
         release: KARMADA_RELEASE,
-        removalPolicy: RemovalPolicy.DESTROY,
-        timeout: Duration.minutes(15),
+        // CDK never uninstalls it: the chart's uninstall hook also deletes the
+        // MCS CRDs and its own namespace (see the README).
+        removalPolicy: RemovalPolicy.RETAIN,
+        timeout: KARMADA_HELM_TIMEOUT,
         values: createKarmadaControlPlaneValues(karmada, props.region),
-        // Also waits for the load balancer to get its address.
+        // Waits for the control plane pods, not for the load balancer's
+        // address; the README's join steps check for that.
         wait: true,
       });
       chart.node.addDependency(cluster.albController);
       for (const nodeGroup of props.nodeGroups) {
         chart.node.addDependency(nodeGroup);
       }
-      this.karmadaControlPlane = chart;
     }
   }
+}
+
+/**
+ * Returns `config` without the hub's Karmada control plane unless `install`
+ * is set (`-c karmada=true`). The running clusters still have a Karmada that
+ * was installed by hand, which Helm cannot install over (see the README).
+ */
+export function withKarmadaControlPlane(
+  config: DeploymentConfig,
+  install: boolean,
+): DeploymentConfig {
+  const multiCluster = config.multiCluster;
+  if (install) {
+    if (multiCluster?.karmadaControlPlane === undefined) {
+      throw new Error(
+        "-c karmada=true needs a deployment with a Karmada control plane (Ohio).",
+      );
+    }
+    return config;
+  }
+  if (multiCluster?.karmadaControlPlane === undefined) {
+    return config;
+  }
+  const { karmadaControlPlane: _notInstalled, ...member } = multiCluster;
+  return { ...config, multiCluster: member };
 }
 
 export function validateMultiClusterConfig(
@@ -166,19 +213,21 @@ export function validateMultiClusterConfig(
       `Karmada member name ${config.memberName} must be a lowercase DNS label of at most ${MAX_MEMBER_NAME_LENGTH} characters.`,
     );
   }
-  if (config.peerCidrs.some((cidr) => !isValidIpv4Cidr(cidr))) {
-    throw new Error("Multi-cluster peer CIDRs must be valid IPv4 CIDR ranges.");
+  if (config.peerCidrs.some((cidr) => !isValidVpcCidr(cidr))) {
+    throw new Error(
+      "Multi-cluster peer CIDRs must be private, network-aligned VPC ranges from /16 to /24.",
+    );
   }
-  if (config.peerCidrs.includes(vpcCidr)) {
-    throw new Error("Multi-cluster peer CIDRs must not include the cluster's own VPC.");
+  if (config.peerCidrs.some((cidr) => cidrsOverlap(cidr, vpcCidr))) {
+    throw new Error("Multi-cluster peer CIDRs must not overlap the cluster's own VPC.");
   }
   const karmada = config.karmadaControlPlane;
   if (karmada === undefined) {
     return;
   }
-  if (!/^\d+\.\d+\.\d+$/.test(karmada.version)) {
+  if (karmada.version !== KARMADA_VERSION) {
     throw new Error(
-      `Karmada version ${karmada.version} must be an exact release such as 1.19.0.`,
+      `Karmada ${karmada.version} is not supported: crds/ and the pinned setup images come from ${KARMADA_VERSION}. crds/README.md says how to move them together.`,
     );
   }
   if (karmada.apiSourceCidrs.some((cidr) => !isValidIpv4Cidr(cidr))) {
@@ -198,13 +247,15 @@ export function createKarmadaControlPlaneValues(
   config: KarmadaControlPlaneConfig,
   region: string,
 ): Record<string, unknown> {
-  // The chart's `karmadaImageVersion` is a YAML anchor, so overriding it does
-  // not reach the components; each one is pinned instead.
-  const image = { tag: `v${config.version}` };
   return {
     installMode: "host",
     cfssl: { image: { tag: CFSSL_IMAGE_TAG } },
-    kubectl: { image: { tag: KUBECTL_IMAGE_TAG } },
+    kubectl: { image: { digest: KUBECTL_IMAGE_DIGEST } },
+    // Helm 4 waits until every resource is ready at the same time and counts
+    // a deleted Job as never ready, so the setup Job must outlive the wait.
+    staticResourceJob: {
+      ttlSecondsAfterFinished: KARMADA_HELM_TIMEOUT.toSeconds() + 300,
+    },
     certs: {
       mode: "auto",
       auto: {
@@ -222,10 +273,10 @@ export function createKarmadaControlPlaneValues(
           config.apiSourceCidrs.join(","),
       },
     },
-    scheduler: { image },
-    webhook: { image },
-    controllerManager: { image },
-    aggregatedApiServer: { image },
+    // A propagated ServiceImport brings its derived Service and EndpointSlices
+    // only with this gate on. The chart turns it off; Karmada's own default,
+    // which `karmadactl init` keeps, is on.
+    controllerManager: { featureGates: { PropagateDeps: true } },
   };
 }
 
@@ -243,13 +294,19 @@ function awsNodeEnvPatch(env: Record<string, string>): Record<string, unknown> {
 
 function loadMcsCrds(): Record<string, unknown>[] {
   const directory = resolveCrdDirectory();
-  return MCS_CRD_FILES.map(
-    (file) =>
-      JSON.parse(fs.readFileSync(path.join(directory, file), "utf8")) as Record<
-        string,
-        unknown
-      >,
-  );
+  return MCS_CRD_FILES.map((file) => {
+    const crd: unknown = JSON.parse(
+      fs.readFileSync(path.join(directory, file), "utf8"),
+    );
+    if (
+      crd === null ||
+      typeof crd !== "object" ||
+      (crd as { kind?: unknown }).kind !== "CustomResourceDefinition"
+    ) {
+      throw new Error(`crds/${file} is not a CustomResourceDefinition; see crds/README.md.`);
+    }
+    return crd as Record<string, unknown>;
+  });
 }
 
 function resolveCrdDirectory(): string {

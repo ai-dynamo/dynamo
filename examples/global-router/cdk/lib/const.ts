@@ -30,6 +30,7 @@ import {
   US_EAST_2_BASTION_KEY_PAIR,
   US_WEST_2_BASTION_KEY_PAIR,
 } from "./keypairs";
+import { KARMADA_VERSION } from "./multi-cluster";
 
 const US_EAST_2 = "us-east-2";
 const US_EAST_2A = "us-east-2a";
@@ -50,8 +51,6 @@ const POC_PLANNER_DIGEST =
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const POC_RELAY_DIGEST =
   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-const KARMADA_VERSION = "1.19.0";
 
 export const MOCKER_VPC_US_EAST_2 = {
   name: "mocker-vpc-us-east-2",

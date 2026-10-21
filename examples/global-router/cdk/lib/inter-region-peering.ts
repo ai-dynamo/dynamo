@@ -50,7 +50,7 @@ export function addInterRegionPeering(
 
   const peeringRoutesStack = new Stack(scope, "OhioWestPeeringRoutes", {
     crossRegionReferences: true,
-    description: "Ohio to West VPC peering and Ohio private routes",
+    description: "Ohio to West VPC peering and Ohio routes",
     env: { account, region: ohioVpc.region },
   });
   const peering = new ec2.CfnVPCPeeringConnection(
@@ -81,9 +81,10 @@ export function addInterRegionPeering(
     "OhioToWestPublic",
   );
 
+  // The ID predates the public routes; renaming it would replace the stack.
   const westRoutesStack = new Stack(scope, "WestPrivateRoutes", {
     crossRegionReferences: true,
-    description: "West private routes to the Ohio VPC over peering",
+    description: "West routes to the Ohio VPC over peering",
     env: { account, region: westVpc.region },
   });
   addRoutes(

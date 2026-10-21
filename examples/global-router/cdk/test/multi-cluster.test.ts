@@ -21,6 +21,7 @@ import { test } from "node:test";
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 
+import { cidrsOverlap } from "../lib/cidr";
 import type { DeploymentConfig, MultiClusterConfig } from "../lib/config";
 import {
   MOCKER_VPC_US_EAST_2,
@@ -29,10 +30,15 @@ import {
   US_WEST2_DEPLOYMENT,
 } from "../lib/const";
 import { DynamoMockerCpuStack } from "../lib/dynamo-mocker-cpu-stack";
-import { karmadaChartUrl } from "../lib/multi-cluster";
+import {
+  KARMADA_VERSION,
+  karmadaChartUrl,
+  withKarmadaControlPlane,
+} from "../lib/multi-cluster";
 import { VALID_CONFIG } from "./fixtures";
 
 interface Resource {
+  readonly DeletionPolicy?: string;
   readonly DependsOn?: readonly string[];
   readonly Properties: Record<string, unknown>;
 }
@@ -80,9 +86,9 @@ function mcsCrdManifests(template: Template): Resource[] {
   );
 }
 
-function peerIngress(template: Template): Resource[] {
+function peerIngress(template: Template, description = "MCS pod traffic"): Resource[] {
   return resources(template, "AWS::EC2::SecurityGroupIngress").filter(
-    (rule) => String(rule.Properties.Description).startsWith("MCS pod traffic"),
+    (rule) => String(rule.Properties.Description).startsWith(description),
   );
 }
 
@@ -131,10 +137,19 @@ test("a member admits peer pod traffic, keeps pod addresses and installs the MCS
       assert.equal(data[key], undefined, `node launch template sets ${key}`);
     }
   }
+  // Path MTU Discovery over the peering needs ICMP "fragmentation needed".
+  const icmp = peerIngress(template, "Path MTU Discovery");
+  assert.equal(icmp.length, 1);
+  assert.equal(icmp[0].Properties.CidrIp, "10.43.0.0/16");
+  assert.equal(icmp[0].Properties.IpProtocol, "icmp");
+  assert.deepEqual([icmp[0].Properties.FromPort, icmp[0].Properties.ToPort], [3, 4]);
+  assert.deepEqual(icmp[0].Properties.GroupId, rules[0].Properties.GroupId);
 
   const [patch] = resources(template, "Custom::AWSCDK-EKS-KubernetesPatch");
   assert.equal(patch.Properties.ResourceName, "daemonset/aws-node");
   assert.equal(patch.Properties.ResourceNamespace, "kube-system");
+  // A JSON merge patch would replace the whole container list.
+  assert.equal(patch.Properties.PatchType, "strategic");
   const env = (patch: unknown) =>
     (patch as { spec: { template: { spec: { containers: Array<{ name: string; env: unknown[] }> } } } })
       .spec.template.spec.containers[0];
@@ -149,6 +164,8 @@ test("a member admits peer pod traffic, keeps pod addresses and installs the MCS
 
   const [crds] = mcsCrdManifests(template);
   assert.equal(crds.Properties.Overwrite, true);
+  // Adopted CRDs may predate the stack; deleting one deletes every export.
+  assert.equal(crds.DeletionPolicy, "Retain");
   const names = (JSON.parse(String(crds.Properties.Manifest)) as Array<{
     kind: string;
     metadata: { name: string };
@@ -178,15 +195,29 @@ test("the hub runs a pinned Karmada control plane behind an internal load balanc
   assert.equal(chart.Properties.Namespace, "karmada-system");
   assert.equal(chart.Properties.CreateNamespace, true);
   assert.equal(chart.Properties.Wait, true);
+  // Helm must time out, and roll back, inside the kubectl Lambda's 15 minutes.
+  assert.equal(chart.Properties.Timeout, "600s");
+  // The chart's uninstall hook deletes the MCS CRDs and its namespace.
+  assert.equal(chart.DeletionPolicy, "Retain");
 
   const values = JSON.parse(String(chart.Properties.Values)) as {
     installMode: string;
+    cfssl: { image: { tag: string } };
+    kubectl: { image: { tag?: string; digest: string } };
+    staticResourceJob: { ttlSecondsAfterFinished: number };
     certs: { auto: { hosts: string[] } };
     apiServer: { serviceType: string; serviceAnnotations: Record<string, string> };
-    scheduler: { image: { tag: string } };
-    controllerManager: { image: { tag: string } };
+    controllerManager: { featureGates: Record<string, boolean> };
   };
   assert.equal(values.installMode, "host");
+  // Helm 4 counts a deleted Job as never ready, so the setup Job must
+  // outlive Helm's wait.
+  assert.ok(values.staticResourceJob.ttlSecondsAfterFinished > 600);
+  // A propagated ServiceImport brings its derived Service only with this on.
+  assert.equal(values.controllerManager.featureGates.PropagateDeps, true);
+  assert.equal(values.cfssl.image.tag, "v1.6.5");
+  assert.match(values.kubectl.image.digest, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(values.kubectl.image.tag, undefined);
   assert.equal(values.apiServer.serviceType, "LoadBalancer");
   assert.deepEqual(values.apiServer.serviceAnnotations, {
     "service.beta.kubernetes.io/aws-load-balancer-type": "external",
@@ -199,14 +230,22 @@ test("the hub runs a pinned Karmada control plane behind an internal load balanc
   assert.ok(values.certs.auto.hosts.includes("*.elb.us-west-2.amazonaws.com"));
   assert.ok(values.certs.auto.hosts.includes("*.{{ .Release.Namespace }}.svc"));
   assert.ok(values.certs.auto.hosts.includes("localhost"));
-  assert.equal(values.scheduler.image.tag, "v1.19.0");
-  assert.equal(values.controllerManager.image.tag, "v1.19.0");
   for (const tag of imageTags(values)) {
     assert.ok(tag !== "latest", "every image the chart would pull as latest is pinned");
   }
 
-  // Waits for node groups and the load balancer controller.
-  assert.ok((chart.DependsOn ?? []).length >= 2);
+  // Waits for the node groups and the load balancer controller.
+  const charts = Object.entries(template.findResources("Custom::AWSCDK-EKS-HelmChart"));
+  const controller = charts.find(
+    ([, resource]) => resource.Properties.Release === "aws-load-balancer-controller",
+  );
+  assert.ok(controller);
+  assert.ok(chart.DependsOn?.includes(controller[0]));
+  const nodegroupIds = Object.keys(template.findResources("AWS::EKS::Nodegroup"));
+  assert.ok(nodegroupIds.length > 0);
+  for (const nodegroupId of nodegroupIds) {
+    assert.ok(chart.DependsOn?.includes(nodegroupId), `waits for ${nodegroupId}`);
+  }
   template.hasOutput("KarmadaMemberName", { Value: "test-hub" });
   template.hasOutput("KarmadaApiEndpointCommand", {
     Value:
@@ -224,13 +263,24 @@ test("rejects invalid multi-cluster settings", () => {
   const cases: Array<[string, MultiClusterConfig, RegExp]> = [
     ["upper-case member name", { ...MEMBER, memberName: "West" }, /lowercase DNS label/],
     ["long member name", { ...MEMBER, memberName: "w".repeat(49) }, /at most 48/],
-    ["bad peer range", { ...MEMBER, peerCidrs: ["10.43.0.0"] }, /valid IPv4 CIDR/],
+    ["bad peer range", { ...MEMBER, peerCidrs: ["10.43.0.0"] }, /VPC ranges/],
+    ["peer wider than a VPC", { ...MEMBER, peerCidrs: ["10.0.0.0/8"] }, /VPC ranges/],
+    ["public peer", { ...MEMBER, peerCidrs: ["8.8.0.0/16"] }, /VPC ranges/],
+    ["unaligned peer", { ...MEMBER, peerCidrs: ["10.43.1.0/16"] }, /VPC ranges/],
+    // The VPC CNI skips a zero-padded range, so its traffic would still be NATed.
+    ["zero-padded peer", { ...MEMBER, peerCidrs: ["010.043.000.000/16"] }, /VPC ranges/],
     // VALID_CONFIG's own VPC is 10.42.0.0/16.
     ["own VPC as a peer", { ...MEMBER, peerCidrs: ["10.42.0.0/16"] }, /own VPC/],
+    ["peer inside the own VPC", { ...MEMBER, peerCidrs: ["10.42.128.0/17"] }, /own VPC/],
     [
       "inexact Karmada version",
       { ...HUB, karmadaControlPlane: { ...HUB.karmadaControlPlane!, version: "1.19" } },
-      /exact release/,
+      /not supported/,
+    ],
+    [
+      "Karmada version without matching CRDs",
+      { ...HUB, karmadaControlPlane: { ...HUB.karmadaControlPlane!, version: "1.18.0" } },
+      /not supported/,
     ],
     [
       "bad API source range",
@@ -252,7 +302,28 @@ test("Ohio is the Karmada hub and West a member, each peering with the other", (
     MOCKER_VPC_US_EAST_2.cidrBlock,
     MOCKER_VPC_US_WEST_2.cidrBlock,
   ]);
+  assert.equal(ohio.karmadaControlPlane.version, KARMADA_VERSION);
   assert.equal(west.memberName, "aws-west");
   assert.deepEqual(west.peerCidrs, [MOCKER_VPC_US_EAST_2.cidrBlock]);
   assert.equal("karmadaControlPlane" in west, false);
+});
+
+test("the Karmada control plane is installed only with -c karmada=true", () => {
+  const hub: DeploymentConfig = { ...VALID_CONFIG, multiCluster: HUB };
+  const withoutFlag = withKarmadaControlPlane(hub, false);
+  assert.equal(withoutFlag.multiCluster?.karmadaControlPlane, undefined);
+  assert.deepEqual(withoutFlag.multiCluster?.peerCidrs, HUB.peerCidrs);
+  assert.equal(withKarmadaControlPlane(hub, true), hub);
+
+  const member: DeploymentConfig = { ...VALID_CONFIG, multiCluster: MEMBER };
+  assert.equal(withKarmadaControlPlane(member, false), member);
+  assert.throws(() => withKarmadaControlPlane(member, true), /karmada=true/);
+  assert.throws(() => withKarmadaControlPlane(VALID_CONFIG, true), /karmada=true/);
+});
+
+test("peer ranges overlap only when they share an address", () => {
+  assert.equal(cidrsOverlap("10.42.0.0/16", "10.42.128.0/17"), true);
+  assert.equal(cidrsOverlap("10.0.0.0/8", "10.42.0.0/16"), true);
+  assert.equal(cidrsOverlap("10.42.0.0/16", "10.43.0.0/16"), false);
+  assert.throws(() => cidrsOverlap("10.42.0.0", "10.43.0.0/16"), /not an IPv4 CIDR/);
 });

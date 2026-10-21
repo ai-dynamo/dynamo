@@ -58,6 +58,16 @@ test("both mode creates one Ohio peering connection and routes both ways", () =>
     ...POC_PEERING_WEST.privateRouteTableIds,
     ...POC_PEERING_WEST.publicRouteTableIds,
   ]);
+  // Every route, public ones included, uses this peering connection; West
+  // reads its ID across Regions.
+  for (const route of Object.values(peeringTemplate.findResources("AWS::EC2::Route"))) {
+    assert.deepEqual(route.Properties.VpcPeeringConnectionId, {
+      "Fn::GetAtt": ["OhioWestVpcPeering", "Id"],
+    });
+  }
+  for (const route of Object.values(westRoutesTemplate.findResources("AWS::EC2::Route"))) {
+    assert.match(JSON.stringify(route.Properties.VpcPeeringConnectionId), /OhioWestVpcPeeringId/);
+  }
 });
 
 test("keeps private route IDs and adds public routes only when configured", () => {
