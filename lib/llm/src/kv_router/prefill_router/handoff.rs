@@ -32,7 +32,7 @@ fn output_item(output: PrefillOutput) -> Option<Annotated<LLMEngineOutput>> {
     Some(Annotated {
         event: Some(PREFILL_OUTPUT_ANNOTATION.to_string()),
         ..Annotated::from_data(LLMEngineOutput {
-            engine_data,
+            engine_data: engine_data.map(Box::new),
             ..Default::default()
         })
     })
@@ -434,7 +434,7 @@ mod tests {
             }
             let item = response.next().await.unwrap();
             assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
-            assert_eq!(item.data.unwrap().engine_data, Some(output));
+            assert_eq!(item.data.unwrap().engine_data, Some(Box::new(output)));
             assert!(
                 response
                     .next()
@@ -489,7 +489,7 @@ mod tests {
         tx.send(Ok(Some(output.clone()))).unwrap();
         let item = terminal.await.unwrap();
         assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
-        assert_eq!(item.data.unwrap().engine_data, Some(output));
+        assert_eq!(item.data.unwrap().engine_data, Some(Box::new(output)));
         assert!(
             response
                 .next()

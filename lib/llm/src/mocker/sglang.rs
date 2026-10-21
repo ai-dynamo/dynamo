@@ -66,7 +66,7 @@ pub(super) fn adapt(
         completion_tokens,
         output.finish_reason.as_ref().map(native_finish_reason),
     );
-    output.engine_data = Some(json!({"sglang_response": response}));
+    output.engine_data = Some(Box::new(json!({"sglang_response": response})));
 }
 
 fn native_finish_reason(reason: &FinishReason) -> Value {

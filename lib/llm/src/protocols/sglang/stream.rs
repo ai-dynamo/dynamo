@@ -103,9 +103,9 @@ mod tests {
             token_ids: vec![101],
             text: Some("a".to_string()),
             index: Some(0),
-            engine_data: Some(serde_json::json!({
+            engine_data: Some(Box::new(serde_json::json!({
                 "sglang_response": native_response
-            })),
+            }))),
             ..Default::default()
         })]);
 
@@ -129,7 +129,9 @@ mod tests {
             "meta_info": {"finish_reason": {"type": "abort", "status_code": 400}}
         });
         let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
-            engine_data: Some(serde_json::json!({"sglang_response": native_response})),
+            engine_data: Some(Box::new(
+                serde_json::json!({"sglang_response": native_response}),
+            )),
             ..LLMEngineOutput::error("bad request".to_string())
         })]);
         assert_eq!(
@@ -184,7 +186,7 @@ mod tests {
     async fn unary_joins_prefill_output_and_chunks() {
         let item = |event: Option<&str>, response: Value| Annotated {
             data: Some(LLMEngineOutput {
-                engine_data: Some(serde_json::json!({ "sglang_response": response })),
+                engine_data: Some(Box::new(serde_json::json!({ "sglang_response": response }))),
                 ..Default::default()
             }),
             event: event.map(str::to_string),

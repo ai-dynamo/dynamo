@@ -146,17 +146,19 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             finish_reason: Some(FinishReason::Stop),
             stop_reason: None,
             index: Some(0),
-            completion_usage: cached_tokens.map(|ct| AoaiCompletionUsage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-                prompt_tokens_details: Some(PromptTokensDetails {
-                    audio_tokens: None,
-                    cached_tokens: Some(ct),
-                    ..Default::default()
-                }),
-                completion_tokens_details: None,
-            }),
+            completion_usage: cached_tokens
+                .map(|ct| AoaiCompletionUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                    prompt_tokens_details: Some(PromptTokensDetails {
+                        audio_tokens: None,
+                        cached_tokens: Some(ct),
+                        ..Default::default()
+                    }),
+                    completion_tokens_details: None,
+                })
+                .map(Box::new),
             disaggregated_params: None,
             encoder_result: None,
             worker_trace_link: None,
