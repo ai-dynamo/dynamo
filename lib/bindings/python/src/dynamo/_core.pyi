@@ -813,7 +813,7 @@ class SelectionService:
         """Select the best worker and book its load."""
         ...
 
-    async def create_reservation(self, request: JsonLike) -> JsonLike:
+    async def create_reservation(self, request: JsonLike) -> Optional[JsonLike]:
         """Book a request's load against a worker, keyed by ``selection_id``.
 
         Without a ``worker_id``, replays the matching ``select``'s cached
@@ -821,6 +821,11 @@ class SelectionService:
         other request fields are ignored. With a ``worker_id`` and the prompt,
         books explicitly under ``selection_id`` on that worker and discards any
         cached selection for the id. ``selection_id`` is required.
+
+        Optional ``session_binding`` updates session affinity even if booking fails.
+        Set ``skip_load_booking=True`` for out-of-order delivery (completion
+        before reservation) or requests already tracked locally. This applies
+        only session affinity and returns ``None``.
         """
         ...
 

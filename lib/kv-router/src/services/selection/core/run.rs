@@ -42,6 +42,8 @@
 //!   (`dropped_selection_future_frees_its_booking`,
 //!   `dropped_book_selection_during_routing_record_frees_booking_and_claim`).
 
+use std::collections::HashSet;
+
 use super::super::affinity::{SessionAffinityMode, validate_dispatch_target};
 use super::hint::{hint_capable_partition, transfer_hint_for_selection};
 
@@ -193,6 +195,7 @@ impl SelectionCore {
             sequence_hashes,
             track_prefill_tokens,
             effective_prefill_tokens,
+            session_binding,
             kv_hint,
             routing_hashes: _,
             shared_cache_hits: _,
@@ -217,6 +220,7 @@ impl SelectionCore {
                 .map(|threshold| load.prefill_load_exceeds(threshold)),
         });
         SelectResponse {
+            session_binding,
             selection_id,
             sequence_hashes: sequence_hashes
                 .map(|hashes| hashes.into_iter().map(|hash| hash as i64).collect()),
@@ -306,7 +310,9 @@ impl SelectionCore {
         };
         let affinity_target = match (&session, table) {
             (SessionBinding::Managed { session_id }, Some(table)) => {
-                affinity_hold = self.hold_session(table, session_id, &key).await?;
+                affinity_hold = self
+                    .hold_session(table, session_id, &key, allowed_worker_ids.as_ref())
+                    .await?;
                 affinity_hold.as_ref().and_then(Hold::target)
             }
             (SessionBinding::Query { session_id }, Some(table)) => table
@@ -503,6 +509,7 @@ impl SelectionCore {
         // The routing hashes go to exactly one of: the reservation recorded
         // now, or the replay cache a later reservation records from.
         let mut routing_hashes = routing_hashes;
+        let mut session_binding = None;
         let booking = if let Some(claim) = claim {
             let Some(booking) = booking else {
                 return Err(SelectionError::Internal(
@@ -517,6 +524,7 @@ impl SelectionCore {
                 }
                 _ => None,
             };
+            session_binding = affinity_lease.as_ref().map(|lease| lease.binding(&key));
             if let Some(hashes) = routing_hashes.take() {
                 self.record_routing_decision(&entry, response.best_worker, hashes)
                     .await;
@@ -558,6 +566,7 @@ impl SelectionCore {
             sequence_hashes: booked_sequence_hashes,
             track_prefill_tokens,
             effective_prefill_tokens: effective_prefill,
+            session_binding,
             kv_hint,
             routing_hashes: returned_routing_hashes,
             shared_cache_hits: host_shared_cache_hits,
@@ -566,19 +575,22 @@ impl SelectionCore {
     }
 
     /// Hold `session_id` for a booking, re-initializing a binding whose target
-    /// this partition can no longer schedule. `None` when the table is full: a
+    /// this request can no longer schedule. `None` when the table is full: a
     /// router-side limit, not a client fault, so the request routes unpinned.
     pub(super) async fn hold_session(
         &self,
         table: &SessionAffinity,
         session_id: &str,
         key: &RoutingPartitionId,
+        allowed_worker_ids: Option<&HashSet<WorkerId>>,
     ) -> Result<Option<Hold>, SelectionError> {
         let mut invalidations = 0;
         loop {
             match table.acquire(session_id, None).await {
                 Ok(Hold::Bound { target, mut lease })
-                    if !self.catalog.is_schedulable(target, key) =>
+                    if !self.catalog.is_schedulable(target, key)
+                        || allowed_worker_ids
+                            .is_some_and(|ids| !ids.contains(&target.worker_id)) =>
                 {
                     tracing::debug!(
                         session_id,

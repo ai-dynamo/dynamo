@@ -291,20 +291,181 @@ async def test_selection_service_selects_registered_worker(monkeypatch):
         await service.shutdown_async()
 
 
+@pytest.fixture
+async def session_binding_services(monkeypatch):
+    monkeypatch.setenv("DYN_ROUTER_USE_KV_EVENTS", "false")
+    source = SelectionService(indexer_threads=1, session_affinity_ttl_secs=10)
+    peer = SelectionService(indexer_threads=1, session_affinity_ttl_secs=10)
+    try:
+        # Give both services the same routing partition and worker catalog.
+        for service in (source, peer):
+            for worker_id in (1, 2):
+                await service.upsert_worker(
+                    {
+                        "worker_id": worker_id,
+                        "model_name": "model",
+                        "routing_group": "host",
+                        "endpoint": f"http://worker-{worker_id}",
+                        "block_size": 4,
+                        "max_num_batched_tokens": 1024,
+                    }
+                )
+        yield source, peer
+    finally:
+        await source.shutdown_async()
+        await peer.shutdown_async()
+
+
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
+@pytest.mark.parametrize("competing_score", ["load", "overlap"])
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_selection_service_affinity_scores(
+    session_binding_services, competing_score
+):
+    source, peer = session_binding_services
+    partition = {"model_name": "model", "routing_group": "host"}
+    # Bind the session to worker 1 and replicate its assignment to the peer.
+    origin = await source.select_and_reserve(
+        {
+            **partition,
+            "token_ids": [1, 2, 3, 4],
+            "selection_id": "origin",
+            "session_id": "s",
+            "allowed_worker_ids": [1],
+        }
+    )
+    await source.free_reservation("origin")
+    origin = json.loads(json.dumps(origin))
+    await peer.create_reservation({**origin, "skip_load_booking": True})
+
+    # Make worker 2 preferable by load or cached-prefix overlap.
+    warm_tokens = list(range(100, 132))
+    await peer.select_and_reserve(
+        {
+            **partition,
+            "token_ids": warm_tokens,
+            "selection_id": "background",
+            "allowed_worker_ids": [1 if competing_score == "load" else 2],
+        }
+    )
+    if competing_score == "overlap":
+        await peer.free_reservation("background")
+        await peer.indexer_snapshot()
+
+    # Unpinned requests prefer worker 2; session affinity keeps worker 1.
+    tokens = [5, 6, 7, 8] if competing_score == "load" else warm_tokens
+    request = {**partition, "token_ids": tokens}
+    control = await peer.select(request)
+    assert control["worker_id"] == 2
+    selected = await peer.select_and_reserve(
+        {**request, "selection_id": "next-turn", "session_id": "s"}
+    )
+    assert selected["worker_id"] == 1
+    assert selected["session_binding"] == origin["session_binding"]
+    if competing_score == "overlap":
+        assert control["overlap"]["longest_matched"] == len(tokens)
+        assert selected["overlap"]["longest_matched"] == 0
+
+
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
+@pytest.mark.parametrize("booking", ["book", "skip", "fail"])
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_selection_service_peer_affinity(session_binding_services, booking):
+    source, peer = session_binding_services
+    partition = {"model_name": "model", "routing_group": "host"}
+    # Export the session assignment chosen by the source.
+    origin = await source.select_and_reserve(
+        {
+            **partition,
+            "token_ids": [1, 2, 3, 4],
+            "selection_id": "origin",
+            "session_id": "s",
+            "allowed_worker_ids": [1],
+        }
+    )
+
+    # Import affinity with successful, skipped, or failed load booking.
+    request = {**origin, "skip_load_booking": booking == "skip"}
+    if booking == "fail":
+        request["dp_rank"] = 99
+        with pytest.raises(SelectionServiceError):
+            await peer.create_reservation(request)
+    else:
+        result = await peer.create_reservation(request)
+        if booking == "skip":
+            assert result is None
+        else:
+            assert result["worker_id"] == 1
+
+    # Load reflects the booking outcome; the next turn keeps session affinity.
+    loads = peer.loads(**partition)[0]["loads"]
+    assert sum(row["active_requests"] for row in loads) == int(booking == "book")
+    selected = await peer.select_and_reserve(
+        {
+            **partition,
+            "selection_id": "next-turn",
+            "token_ids": [5, 6, 7, 8],
+            "session_id": "s",
+        }
+    )
+    assert selected["worker_id"] == 1
+    assert selected["session_binding"] == origin["session_binding"]
+
+
 @pytest.mark.skipif(
     SelectionService is None,
     reason="SelectionService requires the select-service Cargo feature",
 )
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
-async def test_selection_service_malformed_payload_raises_value_error(monkeypatch):
+async def test_selection_service_skip_after_shutdown(
+    session_binding_services,
+):
+    _, peer = session_binding_services
+    await peer.shutdown_async()
+
+    # Skipping load booking must still enforce shutdown.
+    with pytest.raises(SelectionServiceError):
+        await peer.create_reservation(
+            {"selection_id": "after-shutdown", "skip_load_booking": True}
+        )
+
+
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
+@pytest.mark.parametrize(
+    "method,payload",
+    [
+        pytest.param("upsert_worker", {"model_name": "model"}, id="worker"),
+        pytest.param(
+            "create_reservation",
+            {"selection_id": "malformed", "session_binding": {"session_id": "s"}},
+            id="session-binding",
+        ),
+    ],
+)
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_selection_service_malformed_payload_raises_value_error(
+    monkeypatch, method, payload
+):
     monkeypatch.setenv("DYN_ROUTER_USE_KV_EVENTS", "false")
     service = SelectionService(indexer_threads=1)
 
     try:
         # Malformed input surfaces as a plain ValueError, not a SelectionServiceError.
         with pytest.raises(ValueError):
-            await service.upsert_worker({"model_name": "model"})
+            await getattr(service, method)(payload)
     finally:
         service.shutdown()
 
