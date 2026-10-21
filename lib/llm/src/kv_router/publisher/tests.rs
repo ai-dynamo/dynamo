@@ -69,13 +69,13 @@ mod test_event_processing {
     fn test_publish_batch_ignores_empty_and_preserves_order() {
         let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
-            kv_block_size: 16,
-            next_event_id: Arc::new(AtomicU64::new(0)),
+            kv_block_size: 1,
             source: None,
-            processor_handle: tokio::sync::Mutex::new(None),
             cancellation_token: CancellationToken::new(),
             worker_id: 7,
             tx,
+            next_event_id: Arc::new(AtomicU64::new(0)),
+            processor_handle: tokio::sync::Mutex::new(None),
         };
 
         publisher.publish_batch(Vec::new()).unwrap();
@@ -110,13 +110,13 @@ mod test_event_processing {
     fn test_publish_batch_closed_channel_returns_original_events_in_order() {
         let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
-            kv_block_size: 16,
-            next_event_id: Arc::new(AtomicU64::new(0)),
+            kv_block_size: 1,
             source: None,
-            processor_handle: tokio::sync::Mutex::new(None),
             cancellation_token: CancellationToken::new(),
             worker_id: 7,
             tx,
+            next_event_id: Arc::new(AtomicU64::new(0)),
+            processor_handle: tokio::sync::Mutex::new(None),
         };
         drop(rx);
 
@@ -146,13 +146,13 @@ mod test_event_processing {
     fn test_publish_wraps_events_in_batches() {
         let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
-            kv_block_size: 16,
-            next_event_id: Arc::new(AtomicU64::new(0)),
+            kv_block_size: 1,
             source: None,
-            processor_handle: tokio::sync::Mutex::new(None),
             cancellation_token: CancellationToken::new(),
             worker_id: 7,
             tx,
+            next_event_id: Arc::new(AtomicU64::new(0)),
+            processor_handle: tokio::sync::Mutex::new(None),
         };
 
         publisher
@@ -2436,7 +2436,7 @@ mod event_processor_tests {
     #[tokio::test]
     async fn recovery_ack_waits_for_local_application_and_propagates_failure() {
         use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer};
-        for fail in [false, true] {
+        for is_failure in [false, true] {
             let indexer = Arc::new(LocalKvIndexer::new(
                 CancellationToken::new(),
                 4,
@@ -2457,7 +2457,7 @@ mod event_processor_tests {
             ));
             let (done, ack) = tokio::sync::oneshot::channel();
             // A missing parent reaches the physical index but cannot be applied.
-            let parent = fail.then_some(999);
+            let parent = is_failure.then_some(999);
             tx.send(PublisherInput::Recovery(
                 local_gpu_batch(vec![stored_event(0, parent, 10, 0)]),
                 done,
@@ -2467,8 +2467,10 @@ mod event_processor_tests {
                 .await
                 .unwrap()
                 .unwrap();
-            if fail {
+            if is_failure {
                 assert!(result.is_err());
+                // The listener must still be able to publish its terminal status.
+                assert!(!cancel.is_cancelled());
             } else {
                 result.unwrap();
                 // No flush/sleep: acknowledgement means physical mutation finished,

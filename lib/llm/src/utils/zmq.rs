@@ -70,6 +70,8 @@ pub(crate) async fn connect_sub_socket_with_monitor(
 ) -> Result<(SubSocket, tmq::pair::Pair)> {
     let ctx = Context::new();
     let monitor_endpoint = "inproc://bootstrap-live-monitor";
+    // Attach the monitor reader before connecting so the handshake event cannot be missed.
+    let monitor = tmq::pair(&ctx).connect(monitor_endpoint)?;
     let socket = configure_receive_builder(subscribe(&ctx))
         .set_ipv6(ipv6_option_for(endpoint)?)
         .monitor(
@@ -78,7 +80,6 @@ pub(crate) async fn connect_sub_socket_with_monitor(
         )
         .connect(endpoint)?
         .subscribe(topic.as_bytes())?;
-    let monitor = tmq::pair(&ctx).connect(monitor_endpoint)?;
     Ok((socket, monitor))
 }
 

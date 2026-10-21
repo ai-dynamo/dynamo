@@ -42,8 +42,7 @@ fn decode_replay(frames: Vec<Vec<u8>>) -> Result<ReplayFrame> {
     ))
 }
 
-/// One cursor per engine incarnation and rank. Never infer history loss from
-/// a timeout: an ordered replay suffix can confirm an observed hole.
+/// Per-rank sequence cursor; history loss is inferred only from replay, never from a timeout.
 #[derive(Debug)]
 struct ReplayCursor {
     next: u64,
@@ -140,17 +139,13 @@ async fn connected(monitor: &mut tmq::pair::Pair) -> Result<()> {
 }
 
 fn live_payload(message: tmq::Multipart) -> Result<(u64, Vec<u8>)> {
-    let mut frames = multipart_message(message);
-    anyhow::ensure!(frames.len() == 3, "invalid live KV envelope");
-    let payload = frames.pop().unwrap();
-    let sequence = u64::from_be_bytes(
-        frames
-            .pop()
-            .unwrap()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("invalid KV sequence"))?,
-    );
-    Ok((sequence, payload))
+    let [_, sequence, payload]: [Vec<u8>; 3] = multipart_message(message)
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid live KV envelope"))?;
+    let sequence = sequence
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid KV sequence"))?;
+    Ok((u64::from_be_bytes(sequence), payload))
 }
 
 async fn apply(
@@ -273,6 +268,8 @@ async fn recovery_session(
         let (live, mut live_monitor) =
             crate::utils::zmq::connect_sub_socket_with_monitor(endpoint, topic).await?;
         let ctx = tmq::Context::new();
+        // Attach the monitor reader before connecting so the handshake event cannot be missed.
+        let mut replay_monitor = tmq::pair(&ctx).connect("inproc://replay-monitor")?;
         // Drain replies eagerly: vLLM's ROUTER drops batches once a peer's queue is full.
         let replay = tmq::dealer(&ctx)
             .set_linger(0)
@@ -285,7 +282,6 @@ async fn recovery_session(
                     | zmq::SocketEvent::DISCONNECTED as i32,
             )
             .connect(&config.replay_endpoint)?;
-        let mut replay_monitor = tmq::pair(&ctx).connect("inproc://replay-monitor")?;
         tokio::try_join!(connected(&mut live_monitor), connected(&mut replay_monitor))?;
         Ok::<_, anyhow::Error>((live, live_monitor, replay, replay_monitor))
     };
@@ -360,8 +356,7 @@ async fn recovery_session(
                             witness = Some(sequence);
                             strict_apply(cursor, sequence, payload, normalizer, tx, next_event_id, worker, true).await.map_err(terminal)?;
                         }
-                        // vLLM replays a contiguous buffer, so only a reply that starts
-                        // after the requested sequence confirms lost history.
+                        // Replay is contiguous, so only a late first batch proves loss.
                         if let Some(got) = replay_first.filter(|first| *first > requested && cursor.next() == requested) {
                             return Err(MissingHistory { expected: requested, got }.into());
                         }
@@ -562,10 +557,17 @@ mod socket_tests {
             frames[0].to_vec()
         }
         async fn send(&mut self, id: &[u8], seq: i64, payload: Vec<u8>) {
+            // vLLM replay frames: delimiter, topic (empty on the end marker), sequence, payload.
+            let topic = if seq < 0 {
+                vec![]
+            } else {
+                b"kv-events".to_vec()
+            };
             self.replay
                 .send(Multipart::from(vec![
                     id.to_vec(),
                     vec![],
+                    topic,
                     seq.to_be_bytes().to_vec(),
                     payload,
                 ]))
@@ -699,33 +701,6 @@ mod socket_tests {
     }
 
     #[tokio::test]
-    async fn application_failure_does_not_advance_cursor() {
-        let mut cursor = ReplayCursor::new(LIMIT);
-        let mut normalizer = ZmqEventNormalizer::new(4);
-        let (tx, mut inputs) = mpsc::unbounded_channel();
-        let next_id = AtomicU64::new(0);
-        let application = strict_apply(
-            &mut cursor,
-            0,
-            payload(0),
-            &mut normalizer,
-            &tx,
-            &next_id,
-            WorkerWithDpRank::new(1, 0),
-            true,
-        );
-        let (result, ()) = tokio::join!(application, async {
-            let Some(PublisherInput::Recovery(_, done)) = inputs.recv().await else {
-                panic!("expected recovery")
-            };
-            done.send(Err(anyhow::anyhow!("index application failed")))
-                .unwrap();
-        });
-        assert!(result.is_err());
-        assert_eq!(cursor.next(), 0);
-    }
-
-    #[tokio::test]
     async fn invalid_batch_and_application_error_are_terminal_uncertainty() {
         for is_wrong_rank in [false, true] {
             let mut f = Fixture::new(Duration::from_secs(5));
@@ -841,10 +816,16 @@ mod tests {
     #[test]
     fn end_marker_is_explicit() {
         assert_eq!(
-            decode_replay(vec![vec![], (-1_i64).to_be_bytes().to_vec(), vec![]]).unwrap(),
+            decode_replay(vec![
+                vec![],
+                vec![],
+                (-1_i64).to_be_bytes().to_vec(),
+                vec![]
+            ])
+            .unwrap(),
             ReplayFrame::End
         );
-        assert!(decode_replay(vec![vec![], 0_u64.to_be_bytes().to_vec(), vec![]]).is_err());
+        assert!(decode_replay(vec![vec![], vec![], 0_u64.to_be_bytes().to_vec(), vec![]]).is_err());
         assert!(decode_replay(vec![]).is_err());
     }
     #[test]

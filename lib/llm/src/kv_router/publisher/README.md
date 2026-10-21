@@ -8,6 +8,8 @@ processor publishes normalized events through the configured event plane.
 
 - `zmq_listener.rs`: receives engine ZMQ batches and converts wire events into
   placement-aware events.
+- `zmq_recovery.rs`: opt-in replay recovery that catches a ZMQ source up from
+  the engine's replay buffer and reports whether the local index is complete.
 - `event_processor.rs`: owns the async receive loop and preserves event ordering.
 - `batching.rs`: coalesces adjacent store/remove events before publish.
 - `dedup.rs`: gates duplicate removes with per-rank, per-tier refcounts.

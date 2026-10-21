@@ -60,8 +60,7 @@ pub(super) async fn run_event_processor_loop<
                         (events, Some(done))
                     }
                 };
-                // Recovery uses the same batching/dedup logic, then applies the
-                // resulting canonical mutations with acknowledgements below.
+                // Recovery reuses batching and dedup, then applies with acknowledgements below.
                 let apply_indexer = if recovery_done.is_some() { None } else { local_indexer.clone() };
                 let mut output = Vec::new();
 
@@ -181,7 +180,7 @@ pub(super) async fn run_event_processor_loop<
                     let has_failed = result.is_err();
                     let _ = done.send(result);
                     if has_failed {
-                        cancellation_token.cancel();
+                        // Keep the shared token alive so the listener can report the failure.
                         break;
                     }
                 }

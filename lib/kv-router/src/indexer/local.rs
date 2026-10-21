@@ -390,8 +390,7 @@ impl LocalKvIndexer {
         drop(unusable_snapshot);
     }
 
-    /// Recovery callers require actual application, including failures, before
-    /// publishing readiness. Ordinary event admission remains asynchronous.
+    /// Applies one recovery event and reports its failure; ordinary admission stays asynchronous.
     pub async fn apply_recovery_event_with_buffer(
         &self,
         event: RouterEvent,
