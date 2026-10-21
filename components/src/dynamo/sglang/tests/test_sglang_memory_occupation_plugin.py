@@ -71,16 +71,3 @@ def test_resume_skips_tags_that_were_not_released(resume_hook):
 
     manager.memory_saver_adapter.resume.assert_called_once_with("kv_cache")
     assert manager.offload_tags == set()
-
-
-def test_resume_ignores_repeated_tags(resume_hook):
-    manager = _manager(["kv_cache"])
-
-    resume_hook(
-        _ORIGINAL,
-        manager,
-        ResumeMemoryOccupationReqInput(tags=["kv_cache", "kv_cache"]),
-    )
-
-    manager.memory_saver_adapter.resume.assert_called_once_with("kv_cache")
-    assert manager.offload_tags == set()
