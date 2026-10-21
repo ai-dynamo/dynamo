@@ -176,7 +176,9 @@ impl AsyncEngine<Input, Output, Error> for FlakyWorker {
         );
         let mut items: Vec<_> = chunks
             .into_iter()
-            .map(|chunk| {
+            .map(|mut chunk| {
+                // Each attempt reports cache hits against its physical prompt.
+                chunk["meta_info"]["cached_tokens"] = request.token_ids.len().into();
                 Annotated::from_data(
                     dynamo_sglang_generate::inspect(chunk, false)
                         .unwrap()
@@ -244,6 +246,8 @@ async fn a_request_migrated_mid_stream_returns_what_an_unbroken_one_does() {
                 .build()
                 .unwrap()
                 .state_clone();
+            let registry = prometheus::Registry::new();
+            state.metrics_clone().register(&registry).unwrap();
             let response = respond(
                 state,
                 sglang(),
@@ -257,6 +261,16 @@ async fn a_request_migrated_mid_stream_returns_what_an_unbroken_one_does() {
                 .await
                 .unwrap();
             let calls = worker.calls.load(std::sync::atomic::Ordering::Relaxed);
+            if max_seq_len.is_none() {
+                let families = registry.gather();
+                let cached = families
+                    .iter()
+                    .find(|family| family.name() == "dynamo_frontend_cached_tokens")
+                    .unwrap();
+                let histogram = cached.get_metric()[0].get_histogram();
+                assert_eq!(histogram.get_sample_count(), 1);
+                assert_eq!(histogram.get_sample_sum(), 3.0);
+            }
             (status, String::from_utf8(body.to_vec()).unwrap(), calls)
         }
     };

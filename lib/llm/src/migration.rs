@@ -25,6 +25,7 @@ use crate::{
 };
 
 use dynamo_kv_router::scheduling::AbortCause;
+use dynamo_protocols::types::CompletionUsage;
 use dynamo_runtime::engine::Data;
 use dynamo_runtime::error::{self, DynamoError, ErrorReason, ErrorType};
 use dynamo_runtime::metrics::prometheus_names::frontend_service;
@@ -39,11 +40,13 @@ use dynamo_runtime::protocols::annotated::Annotated;
 /// `token_ids` lets it replay already-delivered tokens; `worker_trace_link`
 /// lets it stamp the failed worker's span onto the next attempt's
 /// `migration_link`; `decoder_checkpoint` carries the Backend's in-process incremental
-/// decoder state so a retry can restore withheld text and buffered token IDs.
+/// decoder state so a retry can restore withheld text and buffered token IDs;
+/// `completion_usage_mut` lets it remove replayed tokens from a retried prompt.
 pub(crate) trait HasTokenIds: Sized {
     fn token_ids(&self) -> &[TokenIdType];
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink>;
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint>;
+    fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage>;
     /// A response a [`RequestContinuation`] produced instead of a retry.
     fn from_engine_output(output: LLMEngineOutput) -> Option<Self>;
 }
@@ -57,6 +60,9 @@ impl HasTokenIds for BackendOutput {
     }
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
         self.jailed_text.as_ref()
+    }
+    fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage> {
+        self.completion_usage.as_mut()
     }
     fn from_engine_output(_output: LLMEngineOutput) -> Option<Self> {
         None
@@ -72,6 +78,9 @@ impl HasTokenIds for LLMEngineOutput {
     }
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
         self.jailed_text.as_ref()
+    }
+    fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage> {
+        self.completion_usage.as_mut()
     }
     fn from_engine_output(output: LLMEngineOutput) -> Option<Self> {
         Some(output)
@@ -385,6 +394,11 @@ where
     completed_tokens: usize,
     /// Failure that caused the next physical dispatch to be a migration retry.
     pending_migration: Option<MigrationCause>,
+    /// Length of the client's prompt, before any delivered tokens were replayed onto it.
+    prompt_len: usize,
+    /// Delivered tokens replayed in the active attempt's prompt. The worker counts them in its
+    /// `prompt_tokens` although the client received them as completion.
+    replayed_tokens: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -460,6 +474,7 @@ where
         if retries_left > 0 {
             preprocessed_request.migration_state = Some(Default::default());
         }
+        let prompt_len = preprocessed_request.token_ids.len();
         let mut slf = Self {
             context,
             metadata,
@@ -476,6 +491,8 @@ where
             next_attempt: 0,
             completed_tokens: 0,
             pending_migration: None,
+            prompt_len,
+            replayed_tokens: 0,
         };
         slf.new_stream(None).await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
@@ -492,7 +509,7 @@ where
                     return Some(Annotated::from_error("next_stream is None"));
                 }
             };
-            if let Some(response) = response_stream.next().await {
+            if let Some(mut response) = response_stream.next().await {
                 // Check if this is a migratable error that should trigger stream recreation.
                 if let Some(err) = response.error.as_ref() {
                     if is_migratable_for_request(&self.request, err) {
@@ -543,6 +560,7 @@ where
                     }
                 }
                 self.track_response(&response);
+                self.rebase_usage(&mut response);
                 return Some(response);
             }
             return None;
@@ -692,6 +710,7 @@ where
             if !source_guards.is_empty() {
                 attach_first_response_guard(&mut request, Arc::new(source_guards));
             }
+            let replayed_tokens = self.replayed_prompt_tokens();
             let response_stream = self.next_generate.generate(request).await;
             match response_stream {
                 Ok(next_stream) => {
@@ -710,6 +729,7 @@ where
                     self.record_migration_outcome(migration_event.as_ref(), outcome);
                     self.active_route_trace = Some(route_trace);
                     self.next_stream = Some(next_stream);
+                    self.replayed_tokens = replayed_tokens;
                     return Ok(());
                 }
                 Err(err) if is_migratable_for_request(&self.request, err.as_ref()) => {
@@ -875,6 +895,45 @@ where
         if self.retries_left == 0 && !self.request.token_ids.is_empty() {
             self.request.token_ids = Arc::default();
         }
+    }
+
+    /// Delivered tokens the next dispatch carries in its prompt. A prompt-embedding request is
+    /// sized by its embeddings, which take precedence over the replayed token IDs.
+    fn replayed_prompt_tokens(&self) -> u32 {
+        if self.request.prompt_embeds.is_some() {
+            return 0;
+        }
+        let replayed = self.request.token_ids.len().saturating_sub(self.prompt_len);
+        u32::try_from(replayed).unwrap_or(u32::MAX)
+    }
+
+    /// Moves the replayed tokens in a retried attempt's usage from prompt to completion: the
+    /// worker counts them as prompt, and its completion count covers only its own attempt. The
+    /// total is unchanged. Prefix-cache hits are prefixes and the client's prompt is a prefix of
+    /// the replayed one, so the cached count is capped at the client's prompt. The worker's
+    /// completion details cover only its own attempt, so they are dropped; the frontend's
+    /// reasoning estimate, which sees every delivered token, fills `reasoning_tokens` instead.
+    fn rebase_usage(&self, response: &mut Annotated<Resp>) {
+        if self.replayed_tokens == 0 {
+            return;
+        }
+        let Some(usage) = response
+            .data
+            .as_mut()
+            .and_then(HasTokenIds::completion_usage_mut)
+        else {
+            return;
+        };
+        usage.prompt_tokens = usage.prompt_tokens.saturating_sub(self.replayed_tokens);
+        usage.completion_tokens = usage.completion_tokens.saturating_add(self.replayed_tokens);
+        if let Some(cached) = usage
+            .prompt_tokens_details
+            .as_mut()
+            .and_then(|details| details.cached_tokens.as_mut())
+        {
+            *cached = (*cached).min(usage.prompt_tokens);
+        }
+        usage.completion_tokens_details = None;
     }
 
     /// Returns `true` if the tracked request token length plus `new_output_len`
@@ -3135,6 +3194,178 @@ mod tests {
         // error itself is consumed internally to drive the migration, not surfaced.
         assert_eq!(responses.len(), 2);
         assert!(responses.iter().all(|r| r.error.is_none()));
+    }
+
+    /// Reports usage the way a worker does: against the prompt it was sent, counting only the
+    /// tokens this attempt generated, with every prompt token a prefix-cache hit and every
+    /// generated token reported as reasoning. The first `failing_attempts` attempts disconnect
+    /// after `fail_after` tokens.
+    struct UsageMockEngine {
+        calls: Arc<AtomicU32>,
+        prompts: Arc<std::sync::Mutex<Vec<Vec<TokenIdType>>>>,
+        fail_after: usize,
+        failing_attempts: u32,
+        context_id: String,
+    }
+
+    #[async_trait]
+    impl
+        AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, anyhow::Error>
+        for UsageMockEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let (request, _context) = request.transfer(());
+            let prompt = request.token_ids.to_vec();
+            self.prompts.lock().unwrap().push(prompt.clone());
+            let remaining = request.stop_conditions.max_tokens.unwrap_or(0) as usize;
+            let fails = call < self.failing_attempts;
+            let generated = if fails {
+                self.fail_after.min(remaining)
+            } else {
+                remaining
+            };
+            let prompt_tokens = prompt.len() as u32;
+            let mut responses: Vec<_> = (0..generated)
+                .map(|i| create_mock_output(100 + prompt.len() as u32 + i as u32))
+                .collect();
+            if fails {
+                responses.push(Annotated::from_err(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message("worker disconnected mid-stream")
+                        .build(),
+                ));
+            } else if let Some(last) = responses.last_mut().and_then(|r| r.data.as_mut()) {
+                last.completion_usage = Some(CompletionUsage {
+                    prompt_tokens,
+                    completion_tokens: generated as u32,
+                    total_tokens: prompt_tokens + generated as u32,
+                    prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                        cached_tokens: Some(prompt_tokens),
+                        ..Default::default()
+                    }),
+                    completion_tokens_details: Some(
+                        dynamo_protocols::types::CompletionTokensDetails {
+                            reasoning_tokens: Some(generated as u32),
+                            ..Default::default()
+                        },
+                    ),
+                });
+            }
+            let ctx = Arc::new(Controller::new(self.context_id.clone()));
+            Ok(ResponseStream::new(Box::pin(stream::iter(responses)), ctx))
+        }
+    }
+
+    async fn run_usage_request(
+        request: PreprocessedRequest,
+        fail_after: usize,
+        failing_attempts: u32,
+    ) -> (Vec<Vec<TokenIdType>>, CompletionUsage) {
+        dynamo_runtime::logging::init();
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            Arc::new(UsageMockEngine {
+                calls: Arc::new(AtomicU32::new(0)),
+                prompts: prompts.clone(),
+                fail_after,
+                failing_attempts,
+                context_id: context_id.clone(),
+            });
+        let mut retry_manager = RetryManager::build(
+            Arc::new(Controller::new(context_id)),
+            BTreeMap::new(),
+            request,
+            next_generate,
+            failing_attempts.max(1),
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        let mut usage = None;
+        while let Some(response) = retry_manager.next().await {
+            assert!(response.error.is_none());
+            if let Some(reported) = response.data.and_then(|data| data.completion_usage) {
+                usage = Some(reported);
+            }
+        }
+        let prompts = prompts.lock().unwrap().clone();
+        (prompts, usage.expect("the final attempt reports usage"))
+    }
+
+    fn cached_tokens(usage: &CompletionUsage) -> Option<u32> {
+        usage
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cached_tokens)
+    }
+
+    fn reasoning_tokens(usage: &CompletionUsage) -> Option<u32> {
+        usage
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.reasoning_tokens)
+    }
+
+    /// Regression test for #15255: the retried worker counts the replayed tokens as prompt, and
+    /// its completion count covers only its own attempt, so the replayed tokens must move from
+    /// prompt to completion.
+    #[tokio::test]
+    async fn test_retry_manager_reports_client_prompt_usage_after_migration() {
+        let (prompts, usage) = run_usage_request(create_mock_request(4), 2, 1).await;
+
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(
+            prompts[1],
+            vec![1, 2, 3, 103, 104],
+            "retry replays two tokens"
+        );
+        assert_eq!(usage.prompt_tokens, 3);
+        assert_eq!(usage.completion_tokens, 4, "2 delivered before, 2 after");
+        assert_eq!(usage.total_tokens, 7);
+        assert_eq!(
+            cached_tokens(&usage),
+            Some(3),
+            "the replayed prompt's cache hit, capped at the client's prompt"
+        );
+        assert!(
+            usage.completion_tokens_details.is_none(),
+            "the retried attempt's details cover only its own tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_rebases_usage_across_two_migrations() {
+        let (prompts, usage) = run_usage_request(create_mock_request(6), 2, 2).await;
+
+        assert_eq!(prompts.len(), 3);
+        assert_eq!(prompts[2].len(), 7, "the last retry replays four tokens");
+        assert_eq!(usage.prompt_tokens, 3);
+        assert_eq!(usage.completion_tokens, 6);
+        assert_eq!(usage.total_tokens, 9);
+        assert_eq!(cached_tokens(&usage), Some(3));
+        assert!(usage.completion_tokens_details.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_leaves_usage_alone_without_migration() {
+        let (prompts, usage) = run_usage_request(create_mock_request(4), 0, 0).await;
+
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(usage.prompt_tokens, 3);
+        assert_eq!(usage.completion_tokens, 4);
+        assert_eq!(usage.total_tokens, 7);
+        assert_eq!(cached_tokens(&usage), Some(3));
+        assert_eq!(reasoning_tokens(&usage), Some(4));
     }
 
     #[tokio::test]

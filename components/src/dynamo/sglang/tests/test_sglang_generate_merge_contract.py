@@ -37,7 +37,9 @@ RULES_PATH = (
     / "lib/generate-formats/sglang/src/merge_rules.json"
 )
 CATEGORIES = ("append", "take_prefill", "overlay_base64_prefix", "take_last")
-FIX = f"Classify it in {RULES_PATH.name} (see lib/generate-formats/sglang/src/merge.rs)."
+FIX = (
+    f"Classify it in {RULES_PATH.name} (see lib/generate-formats/sglang/src/merge.rs)."
+)
 
 
 @pytest.fixture(scope="module")

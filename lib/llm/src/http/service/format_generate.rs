@@ -236,8 +236,8 @@ impl GenerateMetricCollector {
         let cached_tokens = output
             .completion_usage
             .as_ref()
-            // A migrated attempt includes already-delivered output tokens in
-            // its prompt. Ignore that attempt-local usage for this logical
+            // RetryManager rebases usage onto the client's prompt. Ignore
+            // any usage that still doesn't match this logical
             // request and let the RequestTracker fallback run on drop.
             .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
             .and_then(|usage| usage.prompt_tokens_details.as_ref())
@@ -265,7 +265,7 @@ impl Drop for GenerateMetricCollector {
     fn drop(&mut self) {
         // Matching backend usage is authoritative when present. The response
         // collector latches it during streaming; this logical-request router
-        // estimate fills missing or migration-expanded attempt usage.
+        // estimate fills missing or mismatched usage.
         self.response
             .observe_cached_tokens(self.tracker.cached_tokens());
     }
@@ -424,31 +424,23 @@ fn feed(
 fn events(
     stream: impl Stream<Item = Annotated<LLMEngineOutput>>,
     exchange: SharedExchange,
-) -> impl Stream<Item = Result<Vec<Event>, DynamoError>> {
+) -> impl Stream<Item = Result<Event, DynamoError>> {
     async_stream::try_stream! {
         pin_mut!(stream);
-        // One buffer reused across chunks.
-        let mut buffer = Vec::new();
-        let mut render = move |value: &Value, events: &mut Vec<Event>| {
-            buffer.clear();
-            if serde_json::to_writer(&mut buffer, value).is_ok()
-                && let Ok(json) = std::str::from_utf8(&buffer)
-            {
-                events.push(Event::default().data(json));
-            }
-        };
         while let Some(delta) = stream.next().await {
             let mut out = Vec::new();
-            feed(&exchange, delta, &mut |value| render(value, &mut out))?;
-            yield out;
+            feed(&exchange, delta, &mut |value| {
+                out.push(Event::default().data(value.to_string()));
+            })?;
+            for event in out {
+                yield event;
+            }
         }
-        let mut out = Vec::new();
-        // Release the lock before `?` can yield.
+        // Release the lock before `?` or `yield` can suspend the stream.
         let last = exchange.lock().finish();
         if let Some(last) = last? {
-            render(&last, &mut out);
+            yield Event::default().data(last.to_string());
         }
-        yield out;
     }
 }
 
@@ -563,12 +555,7 @@ impl Dispatch {
                 _ => cancelled(&mut inflight_guard),
             };
         }
-        let stream = events(stream, exchange).flat_map(|result| {
-            futures::stream::iter(match result {
-                Ok(events) => events.into_iter().map(Ok).collect(),
-                Err(error) => vec![Err(axum::Error::new(error))],
-            })
-        });
+        let stream = events(stream, exchange).map(|result| result.map_err(axum::Error::new));
         let stream = monitor_for_disconnects_with_error(
             stream,
             engine_context,

@@ -207,7 +207,7 @@ def _kv_cache_hit_engine_data(meta_info: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _sglang_completion_usage(meta_info: Mapping[str, Any]) -> Dict[str, Any] | None:
-    """Build Dynamo's completion_usage from SGLang's terminal meta_info."""
+    """Build Dynamo's completion_usage from SGLang metadata."""
     prompt_tokens = meta_info.get("prompt_tokens")
     completion_tokens = meta_info.get("completion_tokens")
     if prompt_tokens is None or completion_tokens is None:
@@ -218,7 +218,7 @@ def _sglang_completion_usage(meta_info: Mapping[str, Any]) -> Dict[str, Any] | N
         "total_tokens": prompt_tokens + completion_tokens,
     }
     cached_tokens = meta_info.get("cached_tokens")
-    if cached_tokens is not None and cached_tokens > 0:
+    if cached_tokens is not None:
         usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
     return usage
 
@@ -602,7 +602,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     def _build_logprob_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
         return _shared_logprobs.build_sglang_logprob_kwargs(
             request.get("output_options", {}) or {},
-            allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
         )
 
     @staticmethod
@@ -1066,6 +1065,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id_future: asyncio.Future[str] = asyncio.Future()
         request_ids: set[str] = set()
         first_output_seen = False
+        usage_metadata_by_index: dict[int, tuple[int, int | None]] = {}
         async with self._cancellation_monitor(
             request_id_future,
             context,
@@ -1147,6 +1147,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # the engine's opaque engine_data passthrough (surfaced by the frontend
                     # as nvext.routed_experts); disaggregated_params stays KV-transfer only.
                     engine_data["routed_experts"] = routed_experts
+                # The frontend retains prompt/cache metadata and counts output
+                # tokens itself. Capture changes before metadata upload clears it.
+                usage_metadata = (
+                    meta_info.get("prompt_tokens"),
+                    meta_info.get("cached_tokens"),
+                )
+                changed = (
+                    finish_reason
+                    or usage_metadata_by_index.get(output_idx) != usage_metadata
+                )
+                if changed and (usage := _sglang_completion_usage(meta_info)):
+                    out["completion_usage"] = usage
+                    usage_metadata_by_index[output_idx] = usage_metadata
+
                 if finish_reason:
                     prompt_payload = (
                         _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(
@@ -1163,9 +1177,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
                     if kv_cache_hit:
                         engine_data["kv_cache_hit"] = kv_cache_hit
-                    completion_usage = _sglang_completion_usage(meta_info)
-                    if completion_usage is not None:
-                        out["completion_usage"] = completion_usage
                     if metadata_uploader is not None:
                         try:
                             await metadata_uploader.upload_choice(output_idx, meta_info)

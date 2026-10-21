@@ -26,3 +26,4 @@ futures = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
+prometheus = { workspace = true }

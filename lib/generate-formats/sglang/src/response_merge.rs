@@ -357,6 +357,12 @@ fn is_padded_base64(text: &str) -> bool {
     let body = text.trim_end_matches('=');
     text.len().is_multiple_of(4)
         && text.len() - body.len() <= 2
+        // Check padding and unused bits with the canonical decoder. Only the
+        // final group needs decoding; the bulk overlay remains in place.
+        && (text.is_empty()
+            || text.get(text.len() - 4..).is_some_and(|tail| {
+                STANDARD.decode_slice(tail, &mut [0; 3]).is_ok()
+            }))
         && body
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/')
@@ -516,12 +522,13 @@ mod tests {
         /// overlay leaves the target unchanged.
         #[test]
         fn overlay_of_arbitrary_text_is_safe(
-            prefix in "[A-Za-z0-9+/=!é]{0,12}",
+            prefix in prop_oneof![Just("AB==".to_string()), "[A-Za-z0-9+/=!é]{0,12}"],
             target in "[A-Za-z0-9+/=!é]{0,16}",
         ) {
             let mut result = target.clone();
             if overlay_base64_prefix(&prefix, &mut result) {
-                prop_assert!(is_padded_base64(&prefix) && is_padded_base64(&result));
+                prop_assert!(STANDARD.decode(&prefix).is_ok());
+                prop_assert!(STANDARD.decode(&result).is_ok());
             } else {
                 prop_assert_eq!(result, target);
             }

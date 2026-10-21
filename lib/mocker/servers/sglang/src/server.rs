@@ -264,6 +264,7 @@ impl SglangMockerService {
                 "max_prefill_tokens": self.discovery.max_prefill_tokens,
                 "dp_size": 1,
                 "context_length": self.config.context_length,
+                "allow_auto_truncate": false,
                 "served_model_name": self.config.model,
                 "disaggregation_bootstrap_port": self.config.bootstrap_port,
                 "dist_init_addr": format!(
