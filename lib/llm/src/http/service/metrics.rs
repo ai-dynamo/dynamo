@@ -5175,7 +5175,7 @@ mod tests {
             .iter()
             .flat_map(|mf| mf.get_metric())
             .flat_map(|m| m.get_label())
-            .filter(|l| l.name() == "model")
+            .filter(|l| l.name() == "model" && l.value() != UNKNOWN_METRIC_MODEL)
             .map(|l| l.value().to_string())
             .collect();
 
