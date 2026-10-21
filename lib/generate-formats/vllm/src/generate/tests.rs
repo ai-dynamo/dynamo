@@ -103,11 +103,7 @@ fn generate_request_accepts_disabled_top_k_sentinel() {
 
     request.validate().expect("validate");
     assert_eq!(
-        request
-            .sampling_params
-            .project_sampling_options()
-            .expect("project")
-            .top_k,
+        request.sampling_params.project_sampling_options().top_k,
         Some(-1)
     );
 }
@@ -321,8 +317,8 @@ fn completion_logprobs_match_typed_wire_shape() {
     };
 
     assert_eq!(
-        content,
-        vec![serde_json::to_value(expected).expect("serialize typed logprob")]
+        serde_json::to_value(content).expect("serialize accumulated logprobs"),
+        serde_json::to_value(vec![expected]).expect("serialize typed logprob")
     );
 }
 
@@ -357,7 +353,9 @@ fn completion_logprobs_reject_malformed_output() {
     ];
 
     for (output, expected_error) in cases {
-        let mut content = vec![json!("existing")];
+        let existing =
+            json!({"token": "existing", "logprob": 0.0, "bytes": null, "top_logprobs": []});
+        let mut content = vec![serde_json::from_value(existing.clone()).unwrap()];
 
         let error = append_completion_logprobs_from_output(&output, &mut content)
             .expect_err("malformed output must fail");
@@ -366,7 +364,7 @@ fn completion_logprobs_reject_malformed_output() {
             error.to_string().contains(expected_error),
             "unexpected error: {error}"
         );
-        assert_eq!(content, vec![json!("existing")]);
+        assert_eq!(serde_json::to_value(content).unwrap(), json!([existing]));
     }
 }
 
@@ -377,13 +375,14 @@ fn empty_completion_logprobs_do_not_modify_content() {
         top_logprobs: Some(vec![]),
         ..Default::default()
     };
-    let mut content = vec![json!("existing")];
+    let existing = json!({"token": "existing", "logprob": 0.0, "bytes": null, "top_logprobs": []});
+    let mut content = vec![serde_json::from_value(existing.clone()).unwrap()];
 
     assert!(
         !append_completion_logprobs_from_output(&output, &mut content)
             .expect("empty output is valid")
     );
-    assert_eq!(content, vec![json!("existing")]);
+    assert_eq!(serde_json::to_value(content).unwrap(), json!([existing]));
 }
 
 #[test]

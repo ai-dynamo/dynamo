@@ -345,9 +345,7 @@ fn preprocessed_from_generate(
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
     let stop_conditions = sampling.project_stop_conditions();
-    let sampling_options = sampling
-        .project_sampling_options()
-        .map_err(anyhow::Error::msg)?;
+    let sampling_options = sampling.project_sampling_options();
     let output_options = sampling
         .project_output_options()
         .map_err(anyhow::Error::msg)?;

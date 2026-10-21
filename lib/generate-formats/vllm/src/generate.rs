@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use base64::Engine as _;
+use dynamo_protocols::types::ChatCompletionTokenLogprob;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -116,25 +117,12 @@ impl GenerateRequest {
         }
         validate::validate_min_p(self.sampling_params.min_p).map_err(|error| error.to_string())?;
 
-        if let Some(logprobs) = self.sampling_params.logprobs()
-            && logprobs < 0
-            && logprobs != -1
-        {
-            return Err("sampling_params.logprobs must be non-negative or -1.".to_string());
-        }
-
-        if let Some(prompt_logprobs) = self.sampling_params.prompt_logprobs() {
-            if prompt_logprobs < 0 && prompt_logprobs != -1 {
-                return Err(
-                    "sampling_params.prompt_logprobs must be non-negative or -1.".to_string(),
-                );
-            }
-            if self.stream {
-                return Err(
-                    "sampling_params.prompt_logprobs are not available when stream=true."
-                        .to_string(),
-                );
-            }
+        project_logprob_count(self.sampling_params.logprobs(), "logprobs")?;
+        project_logprob_count(self.sampling_params.prompt_logprobs(), "prompt_logprobs")?;
+        if self.sampling_params.prompt_logprobs().is_some() && self.stream {
+            return Err(
+                "sampling_params.prompt_logprobs are not available when stream=true.".to_string(),
+            );
         }
 
         if let (Some(min_tokens), Some(max_tokens)) = (
@@ -236,8 +224,8 @@ impl SamplingParams {
         &self.raw
     }
 
-    pub(crate) fn project_sampling_options(&self) -> Result<SamplingOptions, String> {
-        Ok(SamplingOptions {
+    pub(crate) fn project_sampling_options(&self) -> SamplingOptions {
+        SamplingOptions {
             n: Some(1),
             presence_penalty: self.presence_penalty,
             frequency_penalty: self.frequency_penalty,
@@ -248,7 +236,7 @@ impl SamplingParams {
             min_p: self.min_p,
             seed: self.seed,
             ..Default::default()
-        })
+        }
     }
 
     pub(crate) fn project_stop_conditions(&self) -> StopConditions {
@@ -276,8 +264,8 @@ fn project_logprob_count(value: Option<i32>, field: &str) -> Result<Option<u32>,
         None => Ok(None),
         Some(-1) => Ok(Some(u32::MAX)),
         Some(value) if value >= 0 => Ok(Some(value as u32)),
-        Some(value) => Err(format!(
-            "sampling_params.{field} must be non-negative or -1, got {value}"
+        Some(_) => Err(format!(
+            "sampling_params.{field} must be non-negative or -1."
         )),
     }
 }
@@ -456,7 +444,7 @@ pub(crate) struct GenerateResponseOptions {
 struct GenerateChoiceAcc {
     index: u32,
     token_ids: Vec<dynamo_llm::protocols::TokenIdType>,
-    logprobs: Option<Vec<Value>>,
+    logprobs: Vec<ChatCompletionTokenLogprob>,
     finish_reason: Option<String>,
     routed_experts: Option<GenerateRoutedExperts>,
     sampling_mask: Option<Vec<Vec<u32>>>,
@@ -484,18 +472,7 @@ impl GenerateChoiceAcc {
             }
         }
         if options.include_logprobs {
-            // Keep `None` until a logprob-bearing delta arrives: `into_response`
-            // distinguishes missing logprobs from an empty content array.
-            let has_logprobs = if let Some(content) = self.logprobs.as_mut() {
-                append_completion_logprobs_from_output(output, content)?
-            } else {
-                let mut content = Vec::new();
-                let has_logprobs = append_completion_logprobs_from_output(output, &mut content)?;
-                if has_logprobs {
-                    self.logprobs = Some(content);
-                }
-                has_logprobs
-            };
+            let has_logprobs = append_completion_logprobs_from_output(output, &mut self.logprobs)?;
             if !has_logprobs && !output.token_ids.is_empty() {
                 anyhow::bail!(
                     "generate choice {} requested logprobs but a token-bearing delta returned none",
@@ -517,18 +494,17 @@ impl GenerateChoiceAcc {
             sampling_mask,
         } = self;
         let logprobs = if options.include_logprobs {
-            let content = logprobs.ok_or_else(|| {
-                anyhow::anyhow!("generate choice {index} requested logprobs but returned none")
-            })?;
             anyhow::ensure!(
-                content.len() == token_ids.len(),
+                !logprobs.is_empty(),
+                "generate choice {index} requested logprobs but returned none"
+            );
+            anyhow::ensure!(
+                logprobs.len() == token_ids.len(),
                 "generate choice {index} returned {} logprob positions for {} tokens",
-                content.len(),
+                logprobs.len(),
                 token_ids.len()
             );
-            let mut logprobs = Map::with_capacity(1);
-            logprobs.insert("content".to_string(), Value::Array(content));
-            Some(Value::Object(logprobs))
+            Some(serde_json::json!({"content": logprobs}))
         } else {
             None
         };
@@ -559,7 +535,7 @@ fn clamp_vllm_logprob(logprob: f32) -> f32 {
 
 fn append_completion_logprobs_from_output(
     output: &LLMEngineOutput,
-    content: &mut Vec<Value>,
+    content: &mut Vec<ChatCompletionTokenLogprob>,
 ) -> Result<bool> {
     let Some(log_probs) = output.log_probs.as_ref() else {
         anyhow::ensure!(
@@ -599,32 +575,15 @@ fn append_completion_logprobs_from_output(
         for entry in &mut top_logprobs {
             entry.logprob = clamp_vllm_logprob(entry.logprob);
         }
-        let bytes = bytes_value(token_to_utf8_bytes(&token));
-        let mut token_logprob = Map::with_capacity(4);
-        token_logprob.insert("token".to_string(), Value::String(token));
-        token_logprob.insert("logprob".to_string(), Value::from(logprob));
-        token_logprob.insert("bytes".to_string(), bytes);
-        token_logprob.insert(
-            "top_logprobs".to_string(),
-            Value::Array(top_logprobs.into_iter().map(top_logprob_value).collect()),
-        );
-        content.push(Value::Object(token_logprob));
+        content.push(ChatCompletionTokenLogprob {
+            bytes: token_to_utf8_bytes(&token),
+            token,
+            logprob,
+            token_id: None,
+            top_logprobs,
+        });
     }
     Ok(true)
-}
-
-fn top_logprob_value(entry: dynamo_protocols::types::TopLogprobs) -> Value {
-    let mut value = Map::with_capacity(3);
-    value.insert("token".to_string(), Value::String(entry.token));
-    value.insert("logprob".to_string(), Value::from(entry.logprob));
-    value.insert("bytes".to_string(), bytes_value(entry.bytes));
-    Value::Object(value)
-}
-
-fn bytes_value(bytes: Option<Vec<u8>>) -> Value {
-    bytes.map_or(Value::Null, |bytes| {
-        Value::Array(bytes.into_iter().map(Value::from).collect())
-    })
 }
 
 fn prompt_logprobs_from_output(output: &LLMEngineOutput) -> Result<Option<PromptLogprobs>> {
@@ -688,7 +647,7 @@ impl GenerateAggregator {
         let choice = self.choices.entry(index).or_insert(GenerateChoiceAcc {
             index,
             token_ids: Vec::new(),
-            logprobs: None,
+            logprobs: Vec::new(),
             finish_reason: None,
             routed_experts: None,
             sampling_mask: None,
