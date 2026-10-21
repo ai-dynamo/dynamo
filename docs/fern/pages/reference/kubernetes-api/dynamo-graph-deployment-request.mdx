@@ -9,7 +9,17 @@ A `DynamoGraphDeploymentRequest` (DGDR) is Dynamo's deploy-by-intent generator f
 
 For the task-oriented walkthrough — authoring a request step by step — see [Auto Deploy with DGDR](../../kubernetes/auto-deployment/auto-deploy-with-dgdr.md). For ready-to-copy manifests, see [DGDR Templates](../../recipes/kubernetes-templates/dgdr.mdx).
 
-This page documents the `nvidia.com/v1beta1` API — the served, storage version.
+This page documents the `nvidia.com/v1beta1` API — the storage version.
+
+## Conversion views
+
+When the `nvidia.com/v1beta2` API is served, the API server represents a native
+`v1beta2` request through `v1alpha1` or `v1beta1` by populating `spec.v1beta2`.
+Conversely, it represents a native `v1beta1` request through `v1beta2` by
+populating `spec.v1beta1`. These fields are read-only conversion views. Create
+and modify a request through the API version that owns its native fields; do not
+set or edit the conversion field directly. An unchanged conversion view can be
+written back without changing the stored request.
 
 ## Spec reference
 
