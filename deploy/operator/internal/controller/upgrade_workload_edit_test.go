@@ -26,9 +26,15 @@ func upgradeWorkerEditError(objects []unstructured.Unstructured, workers []strin
 			if err != nil {
 				return err
 			}
-			for _, value := range roles {
-				role := value.(map[string]any)
-				name := role["name"].(string)
+			for i, value := range roles {
+				role, ok := value.(map[string]any)
+				if !ok {
+					return fmt.Errorf("DisaggregatedSet %s role %d is not an object", object.GetName(), i)
+				}
+				name, ok := role["name"].(string)
+				if !ok {
+					return fmt.Errorf("DisaggregatedSet %s role %d has no string name", object.GetName(), i)
+				}
 				edited[name] = edited[name] || upgradeLWSHasEdit(role)
 			}
 		}
@@ -104,5 +110,26 @@ func TestUpgradeMultinodeWorkerEdit(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestUpgradeWorkerEditMalformedRoles(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		role any
+		want string
+	}{
+		{name: "not-an-object", role: "invalid", want: "role 0 is not an object"},
+		{name: "missing-name", role: map[string]any{}, want: "role 0 has no string name"},
+		{name: "invalid-name", role: map[string]any{"name": int64(1)}, want: "role 0 has no string name"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Malformed DS roles report context instead of panicking during polling")
+			object := unstructured.Unstructured{Object: map[string]any{
+				"kind": "DisaggregatedSet", "metadata": map[string]any{"name": "workers"},
+				"spec": map[string]any{"roles": []any{test.role}},
+			}}
+			require.ErrorContains(t, upgradeWorkerEditError([]unstructured.Unstructured{object}, []string{"prefill"}), test.want)
+		})
 	}
 }

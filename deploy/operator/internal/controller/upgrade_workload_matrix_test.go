@@ -105,6 +105,7 @@ func checkUpgradeWorkloadMatrix(t *testing.T, relative string, dgd *api.DynamoGr
 		require.Equal(t, len(workers)+1, counts["DynamoComponentDeployment"])
 		if parts[3] == "multi" {
 			require.Equal(t, len(workers), counts["LeaderWorkerSet"])
+			require.NoError(t, upgradeLWSSizeError(dgd, objects))
 			require.Equal(t, 1, counts["Deployment"])
 		} else {
 			require.Zero(t, counts["LeaderWorkerSet"])
