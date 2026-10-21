@@ -296,6 +296,9 @@ where
             session_affinity,
         )
         .await?;
+        // Box the state: `unfold` moves it by value on every chunk, and `RetryManager` holds the
+        // whole `PreprocessedRequest` inline.
+        let retry_manager = Box::new(retry_manager);
         let response_stream = stream::unfold(retry_manager, move |mut retry_manager| async move {
             retry_manager
                 .next()
@@ -497,7 +500,8 @@ where
                             MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
                         // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
                         // When no replacement is established, preserve the triggering stream error.
-                        if let Err(err) = self.new_stream(Some(migration_event)).await {
+                        // Boxed so this rare path does not inflate the future built per chunk.
+                        if let Err(err) = Box::pin(self.new_stream(Some(migration_event))).await {
                             tracing::warn!(error = ?err, "Cannot recreate stream");
                         } else {
                             self.release_replay_prompt_if_final();

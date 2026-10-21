@@ -5738,8 +5738,9 @@ impl OpenAIPreprocessor {
         };
 
         // transform the common response stream into a chat response stream
+        // (state is boxed because `unfold` moves it by value on every chunk)
 
-        stream::unfold(state, |mut inner| {
+        stream::unfold(Box::new(state), |mut inner| {
             async move {
                 // Drain the buffered client-facing plain usage chunk first.
                 // This MUST come before the `finished` guard: the stream-end
