@@ -227,9 +227,8 @@ class _PrepostServiceGroup:
         self.frontend_port = allocate_port(DynamoPortRange.FRONTEND.value)
         self._stack.callback(deallocate_port, self.frontend_port)
 
-        # The children copy os.environ when they are constructed, so the group's
-        # environment only has to be in place while they are spawned. Restoring it
-        # right away leaves nothing for the function-scoped monkeypatch to unwind.
+        # Children copy os.environ at construction, so the group env is set only
+        # while they spawn and leaves no lasting change in os.environ.
         with pytest.MonkeyPatch.context() as mp:
             for name, value in self.env.items():
                 if value is None:
