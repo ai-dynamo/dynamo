@@ -72,7 +72,7 @@ Two paths are supported. Pick the one that matches how you plan to develop.
 
 #### Pre-built Dynamo SGLang container (recommended)
 
-Pull and launch the published `sglang-runtime` image from NGC. See [release artifacts](../../../../../reference/general/release-artifacts.mdx) for the current tag and CUDA variants.
+Pull and launch the published `sglang-runtime` image from NGC. See [release artifacts](../../../../../../pages-dev/reference/general/release-artifacts.mdx) for the current tag and CUDA variants.
 
 ```bash
 docker run --gpus all -it --rm \
