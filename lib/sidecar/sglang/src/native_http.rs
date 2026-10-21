@@ -1150,6 +1150,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovered_client_reuses_connections_until_idle_timeout() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::net::TcpStream;
+
+        async fn respond(socket: &mut BufReader<TcpStream>, connection: u8) {
+            loop {
+                let mut line = String::new();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = [0; 2];
+            socket.read_exact(&mut body).await.unwrap();
+            assert_eq!(&body, b"{}");
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n{connection}");
+            socket
+                .get_mut()
+                .write_all(response.as_bytes())
+                .await
+                .unwrap();
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let grpc = GrpcEndpoint::parse("127.0.0.1:30001", "test").unwrap();
+        let native = NativeHttp::discover(
+            &grpc,
+            &discovery(json!({"port": port, "incremental_streaming_output": true})),
+            Duration::from_secs(1),
+            MAX_EVENT_BYTES,
+        )
+        .unwrap()
+        .unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            respond(&mut socket, 0).await;
+            respond(&mut socket, 0).await;
+            // Keep the server connection open until the client retires it.
+            assert_eq!(socket.read(&mut [0]).await.unwrap(), 0);
+            let (socket, _) = listener.accept().await.unwrap();
+            respond(&mut BufReader::new(socket), 1).await;
+        });
+
+        for expected_connection in ["0", "0", "1"] {
+            if expected_connection == "1" {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            let response = tokio::time::timeout(Duration::from_secs(5), async {
+                native
+                    .clone()
+                    .open(json!({}))
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap()
+            })
+            .await
+            .expect("HTTP request did not complete");
+            assert_eq!(response, expected_connection);
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn readiness_probe_accepts_healthy_http_endpoint() {
         let (port, server) = serve_once(String::new(), "200 OK").await;
         native_http(port)
