@@ -181,6 +181,34 @@ def test_image_edits_unknown_unsupported_and_stale_worker(
         assert response.status_code == (400 if limit == 0 else 200), response.text
 
 
+def test_zero_edit_limit_rejects_json_references_but_allows_generation(
+    frontend, request
+):
+    """An explicit zero disables edits on both routes without disabling generation."""
+    with ImageWorkerProcess(request, frontend, limit=0):
+        uri = "data:image/png;base64," + base64.b64encode(references()[0]).decode()
+        for endpoint in ["edits", "generations"]:
+            for reference in [uri, [uri]]:
+                response = requests.post(
+                    f"http://localhost:{frontend}/v1/images/{endpoint}",
+                    json={
+                        "model": MODEL_NAME,
+                        "prompt": "edit",
+                        "input_reference": reference,
+                    },
+                    timeout=20,
+                )
+                assert response.status_code == 400, response.text
+                assert "data" not in response.json()
+        response = requests.post(
+            f"http://localhost:{frontend}/v1/images/generations",
+            json={"model": MODEL_NAME, "prompt": "generate"},
+            timeout=20,
+        )
+        assert response.status_code == 200, response.text
+        assert json.loads(response.json()["data"][0]["revised_prompt"])["digests"] == []
+
+
 def test_image_edits_mixed_worker_join_and_removal(frontend, request):
     """A legacy member lowers the set-wide limit until discovery removes it."""
 

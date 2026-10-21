@@ -57,11 +57,15 @@ These are the vLLM-Omni orchestration flags. The omni worker also accepts the sa
 ## Image Edit Capabilities
 
 **Experimental.** Direct uploads and multiple ordered references are supported
-through the unified Omni entrypoint when its loaded pipeline advertises a
+through an aggregated Omni worker when its loaded pipeline advertises a
 finite image limit in the installed Omni registry. The adapter resolves the
 actual pipeline class, including upstream aliases, independently of the
-client's model name. Dynamo stage-worker deployments without this capability
-advertisement remain limited to one reference.
+client's model name.
+
+Dynamo stage-router deployments advertise a zero image-edit limit and reject
+edit references because their stage workers do not load `input_reference` into
+the image prompt. Use an aggregated Omni worker for image edits. Stage-router
+deployments continue to support text-to-image generation.
 
 | Resolved pipeline | Source-derived maximum | Metadata source |
 |---|---:|---|
