@@ -266,6 +266,8 @@ impl NativeHttp {
         })?;
         let client = reqwest::Client::builder()
             .connect_timeout(connect_timeout)
+            // Retire idle connections before SGLang's default 5s keep-alive closes them.
+            .pool_idle_timeout(Duration::from_secs(2))
             .build()
             .map_err(|error| {
                 client::invalid_arg(format!("could not configure SGLang HTTP client: {error}"))
