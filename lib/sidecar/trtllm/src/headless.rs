@@ -263,7 +263,9 @@ pub(crate) async fn monitor_engine(
                 if !error.downcast_ref::<DynamoError>().is_some_and(|error| {
                     matches!(
                         error.reason().as_str(),
-                        "backend.cannot_connect" | "backend.connection_timeout"
+                        "backend.cannot_connect"
+                            | "backend.connection_timeout"
+                            | "capacity.worker_overloaded"
                     )
                 }) =>
             {

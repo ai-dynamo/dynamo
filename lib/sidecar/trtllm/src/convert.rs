@@ -141,15 +141,25 @@ pub(crate) fn build_generate_request_with_routing(
         kv,
         extra: Some(disagg::request_extra(
             mode.is_prefill(),
-            // Native conversation affinity requires an identity for targeted
-            // requests. Anonymous calls get request-scoped affinity; explicit
-            // sessions keep their identity across turns.
+            // Preserve real sessions independently of rank targeting. The
+            // current OpenEngine affinity contract also requires an ID when
+            // sending a rank hint; synthesize one only for that compatibility
+            // case, since one-shot IDs retain per-conversation cache state.
             request
                 .agent_context
                 .as_ref()
                 .map(|context| context.session_id.trim())
                 .filter(|session_id| !session_id.is_empty())
-                .or(Some(request_id)),
+                .or_else(|| {
+                    let rank = request.routing.as_ref().and_then(|routing| {
+                        if mode.is_prefill() {
+                            routing.prefill_dp_rank.or(routing.dp_rank)
+                        } else {
+                            routing.dp_rank
+                        }
+                    });
+                    (allow_dp_rank && rank.is_some()).then_some(request_id)
+                }),
         )),
     })
 }

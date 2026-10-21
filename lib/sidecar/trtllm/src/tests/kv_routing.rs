@@ -296,25 +296,27 @@ async fn leader_monitor_rejects_restarted_native_engine() {
     let server = FakeServer::start(service.clone()).await;
     let engine = engine_with_kv_routing(&server.endpoint);
     engine.start(0).await.expect("start original engine");
-    // A short RPC outage must not withdraw an otherwise unchanged engine.
-    service
-        .unavailable_server_info
-        .store(true, Ordering::SeqCst);
+    // Either metadata RPC may transiently reject work without withdrawing the
+    // unchanged engine. Recovery must not suppress actual identity changes.
     let monitor = engine.monitor_routing();
     tokio::pin!(monitor);
-    assert!(
-        tokio::time::timeout(Duration::from_secs(1), &mut monitor)
-            .await
-            .is_err()
-    );
-    service
-        .unavailable_server_info
-        .store(false, Ordering::SeqCst);
-    assert!(
-        tokio::time::timeout(Duration::from_secs(6), &mut monitor)
-            .await
-            .is_err()
-    );
+    for failure in [&service.server_info_error, &service.kv_sources_error] {
+        for code in [tonic::Code::Unavailable, tonic::Code::ResourceExhausted] {
+            *failure.lock().await = Some(code);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(6), &mut monitor)
+                    .await
+                    .is_err(),
+                "transient {code:?} must not withdraw the worker"
+            );
+            *failure.lock().await = None;
+            assert!(
+                tokio::time::timeout(Duration::from_secs(6), &mut monitor)
+                    .await
+                    .is_err()
+            );
+        }
+    }
     service
         .node_metadata
         .lock()
@@ -395,9 +397,7 @@ async fn sustained_metadata_outage_withdraws_worker() {
     let server = FakeServer::start(service.clone()).await;
     let engine = engine_with_kv_routing(&server.endpoint);
     engine.start(0).await.expect("start original engine");
-    service
-        .unavailable_server_info
-        .store(true, Ordering::SeqCst);
+    *service.kv_sources_error.lock().await = Some(tonic::Code::ResourceExhausted);
     let error = tokio::time::timeout(Duration::from_secs(35), engine.monitor_routing())
         .await
         .expect("bounded metadata recovery")

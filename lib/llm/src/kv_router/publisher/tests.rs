@@ -1341,8 +1341,11 @@ mod tests_startup_helpers {
     //--------------------------------------------------------------------
     // Test start_zmq_listener with a real ZMQ publisher
     //--------------------------------------------------------------------
+    #[rstest::rstest]
+    #[case::legacy(false)]
+    #[case::heartbeat_source(true)]
     #[tokio::test]
-    async fn test_start_zmq_listener_pushes_to_channel() {
+    async fn test_start_zmq_listener_pushes_to_channel(#[case] heartbeat_source: bool) {
         #[derive(serde::Serialize)]
         #[serde(tag = "type")]
         enum MapKvEvent {
@@ -1388,7 +1391,7 @@ mod tests_startup_helpers {
                 None,
                 None,
                 Some(1),
-                Some((1, std::time::Duration::from_millis(500))),
+                heartbeat_source.then_some((1, std::time::Duration::from_millis(500))),
             )
         });
 
@@ -1477,8 +1480,8 @@ mod tests_startup_helpers {
         };
         assert_eq!(removed.block_hashes, vec![ExternalSequenceBlockHash(42)]);
 
-        // A transport gap may have dropped a removal. The listener must fence
-        // all previously learned residency before applying the later batch.
+        // Heartbeat-aware sources invalidate residency on a transport gap;
+        // legacy advisory streams continue with the received events.
         let gap_frames = vec![
             Bytes::from("").to_vec(),
             Bytes::from((seq + 2).to_be_bytes().to_vec()).to_vec(),
@@ -1491,13 +1494,30 @@ mod tests_startup_helpers {
             .await
             .expect("timed out waiting for gap recovery")
             .expect("listener channel closed");
-        assert!(matches!(recovery[0].event.data, KvCacheEventData::Cleared));
+        let offset = usize::from(heartbeat_source);
+        assert_eq!(recovery.len(), 2 + offset);
+        if heartbeat_source {
+            assert!(matches!(recovery[0].event.data, KvCacheEventData::Cleared));
+        }
+        assert!(matches!(
+            recovery[offset].event.data,
+            KvCacheEventData::Stored(_)
+        ));
+        assert!(matches!(
+            recovery[offset + 1].event.data,
+            KvCacheEventData::Removed(_)
+        ));
+        for (index, event) in recovery.iter().enumerate() {
+            assert_eq!(event.event.event_id, 2 + index as u64);
+        }
 
-        let expired = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("heartbeat expiry must clear residency")
-            .expect("listener channel closed");
-        assert!(matches!(expired[0].event.data, KvCacheEventData::Cleared));
+        if heartbeat_source {
+            let expired = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("heartbeat expiry must clear residency")
+                .expect("listener channel closed");
+            assert!(matches!(expired[0].event.data, KvCacheEventData::Cleared));
+        }
 
         // Stop the listener
         token.cancel();

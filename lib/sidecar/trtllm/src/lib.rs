@@ -39,7 +39,9 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
         let (engine, config) = if metadata.as_ref().is_some_and(|node| !node.leader) {
             (engine, config)
         } else {
-            TrtllmSidecarEngine::bootstrap((engine, config)).await?
+            TrtllmSidecarEngine::bootstrap((engine, config))
+                .await
+                .map_err(SidecarStartupError::from)?
         };
         Ok::<_, anyhow::Error>((args, metadata, engine, config))
     };

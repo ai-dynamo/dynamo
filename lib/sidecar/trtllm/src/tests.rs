@@ -54,7 +54,8 @@ struct FakeTrtllm {
     unavailable_model_info: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
     kv_routing: Arc<AtomicBool>,
-    unavailable_server_info: Arc<AtomicBool>,
+    server_info_error: Arc<Mutex<Option<tonic::Code>>>,
+    kv_sources_error: Arc<Mutex<Option<tonic::Code>>>,
     subagent_affinity: Arc<AtomicBool>,
     disable_events: Arc<AtomicBool>,
     disable_load: Arc<AtomicBool>,
@@ -245,8 +246,8 @@ impl pb::control_server::Control for FakeTrtllm {
         &self,
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
-        if self.unavailable_server_info.load(Ordering::SeqCst) {
-            return Err(Status::unavailable("temporary metadata outage"));
+        if let Some(code) = *self.server_info_error.lock().await {
+            return Err(Status::new(code, "temporary metadata failure"));
         }
         if !self.kv_routing.load(Ordering::SeqCst) {
             return Err(Status::unimplemented("GetServerInfo is not used"));
@@ -365,6 +366,9 @@ impl pb::control_server::Control for FakeTrtllm {
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
+        if let Some(code) = *self.kv_sources_error.lock().await {
+            return Err(Status::new(code, "temporary metadata failure"));
+        }
         if !self.kv_routing.load(Ordering::SeqCst) {
             return Err(Status::unimplemented("GetKvEventSources is not used"));
         }
