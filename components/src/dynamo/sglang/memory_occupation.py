@@ -22,18 +22,19 @@ def register_memory_occupation_plugin() -> None:
 
     SGLang's scheduler resume removes every requested tag from
     ``offload_tags`` without checking it, so resuming a region that is not
-    released raises ``KeyError`` and kills the scheduler.
+    released, or naming a region twice, raises ``KeyError`` and kills the
+    scheduler.
     Only the scheduler knows which regions are released, so the guard runs
     there as a hook rather than in Dynamo's request handlers.
     """
 
     def around_resume_memory_occupation(original, manager, recv_req):
-        requested = recv_req.tags or GPU_MEMORY_ALL_TYPES
+        requested = list(dict.fromkeys(recv_req.tags or GPU_MEMORY_ALL_TYPES))
         released = [tag for tag in requested if tag in manager.offload_tags]
         if len(released) != len(requested):
             logger.warning(
-                "resume_memory_occupation: skipping tags that are not released: %s",
-                [tag for tag in requested if tag not in released],
+                "resume_memory_occupation: skipping %d tags that are not released",
+                len(requested) - len(released),
             )
         if not released:
             return ResumeMemoryOccupationReqOutput()
