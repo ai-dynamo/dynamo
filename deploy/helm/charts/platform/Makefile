@@ -83,7 +83,8 @@ verify-operator-chart-crds: ## Verify operator CRDs are managed from the image, 
 	fi
 
 .PHONY: test
-test: helm-unittest-install charts-prep verify-operator-chart-crds ## Run helm-unittest chart tests
+test: helm-unittest-install charts-prep verify-operator-chart-crds ## Run chart and preflight unit tests
+	@python3 -m unittest discover components/operator/tests -p 'test_*.py'
 	@helm unittest . components/operator
 	@python3 -m unittest discover -s tests -p 'test_*.py'
 
