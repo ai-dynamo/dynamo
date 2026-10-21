@@ -267,6 +267,8 @@ type DynamoGraphDeploymentRequestSpec struct {
 
 	// V1Beta1 losslessly preserves a native v1beta1 spec while this object is
 	// represented through v1beta2. It is mutually exclusive with native fields.
+	// This field is a read-only conversion view; modify the request through the
+	// native v1beta1 API.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object

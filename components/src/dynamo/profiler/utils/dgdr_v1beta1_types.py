@@ -311,7 +311,7 @@ class DynamoGraphDeploymentRequestSpec(DynamoGraphDeploymentRequestNativeSpec):
 
     v1beta2: Optional[Any] = Field(
         default=None,
-        description="V1Beta2 losslessly preserves a native v1beta2 spec while this object is represented through v1beta1. It is mutually exclusive with native fields.",
+        description="V1Beta2 losslessly preserves a native v1beta2 spec while this object is represented through v1beta1. It is mutually exclusive with native fields. This field is a read-only conversion view; modify the request through the native v1beta2 API.",
     )
 
 

@@ -541,7 +541,7 @@ _Appears in:_
 | `enableGpuDiscovery` _boolean_ | EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.<br />DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always<br />attempted automatically. Setting this field has no effect - the operator will always try to discover<br />GPU hardware when node read permissions are available. If discovery is unavailable (e.g., namespace-scoped<br />operator without permissions), manual hardware configuration is required regardless of this setting. |  | Optional: \{\} <br /> |
 | `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated and stored in status.<br />Users can then manually create a DGD using the generated spec. |  |  |
 | `deploymentOverrides` _[DeploymentOverridesSpec](#deploymentoverridesspec)_ | DeploymentOverrides allows customizing metadata for the auto-created DGD.<br />Only applicable when AutoApply is true. |  | Optional: \{\} <br /> |
-| `v1beta2` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | V1Beta2 losslessly preserves a native v1beta2 spec while this object is<br />represented through v1alpha1. It is mutually exclusive with native fields. |  | Type: object <br />Optional: \{\} <br /> |
+| `v1beta2` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | V1Beta2 losslessly preserves a native v1beta2 spec while this object is<br />represented through v1alpha1. It is mutually exclusive with native fields.<br />This field is a read-only conversion view; modify the request through the<br />native v1beta2 API. |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentRequestStatus
@@ -2181,7 +2181,7 @@ _Appears in:_
 | `features` _[FeaturesSpec](#featuresspec)_ | Features controls optional Dynamo platform features in the generated deployment. |  | Optional: \{\} <br /> |
 | `searchStrategy` _[SearchStrategy](#searchstrategy)_ | SearchStrategy controls the profiling search depth.<br />"rapid" performs a fast sweep; "thorough" explores more configurations. |  | Enum: [rapid thorough] <br />Optional: \{\} <br /> |
 | `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, the generated spec is stored in status<br />for manual review and application. |  | Optional: \{\} <br /> |
-| `v1beta2` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | V1Beta2 losslessly preserves a native v1beta2 spec while this object is<br />represented through v1beta1. It is mutually exclusive with native fields. |  | Type: object <br />Optional: \{\} <br /> |
+| `v1beta2` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | V1Beta2 losslessly preserves a native v1beta2 spec while this object is<br />represented through v1beta1. It is mutually exclusive with native fields.<br />This field is a read-only conversion view; modify the request through the<br />native v1beta2 API. |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### v1beta1 DynamoGraphDeploymentRequestStatus
@@ -3484,7 +3484,7 @@ _Appears in:_
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization or a multi-objective Pareto search.<br />When omitted, the schema supplies the default Optimize mode and SLA;<br />admission supplies the conditional scalar metric. |  | Optional: \{\} <br /> |
 | `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate selects the execution artifact and supplies native AISimulate input. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
-| `v1beta1` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | V1Beta1 losslessly preserves a native v1beta1 spec while this object is<br />represented through v1beta2. It is mutually exclusive with native fields. |  | Type: object <br />Optional: \{\} <br /> |
+| `v1beta1` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | V1Beta1 losslessly preserves a native v1beta1 spec while this object is<br />represented through v1beta2. It is mutually exclusive with native fields.<br />This field is a read-only conversion view; modify the request through the<br />native v1beta1 API. |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### v1beta2 DynamoGraphDeploymentRequestStatus
