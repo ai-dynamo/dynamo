@@ -21,7 +21,7 @@ jobs:
   # SETUP & DETECTION JOBS
   # ============================================================================
   changed-files:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       core: ${{ steps.changes.outputs.core }}
       dev_images: ${{ steps.changes.outputs.dev_images }}
@@ -123,7 +123,7 @@ jobs:
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
   backend-status-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - changed-files
       - operator
@@ -167,12 +167,13 @@ jobs:
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   deploy-status-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - changed-files
       - deploy-operator
       - deploy-test-vllm
       - deploy-test-sglang
+      - cross-version-compatibility
       - deploy-test-trtllm
       - deploy-test-dgdr
       - deploy-operator-checkpoint-vllm
@@ -270,7 +271,7 @@ jobs:
     needs: changed-files
     if: needs.changed-files.outputs.operator == 'true'
     name: Helm Chart Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1394,6 +1395,26 @@ jobs:
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  cross-version-compatibility:
+    name: SGLang N-2 compatibility
+    needs: [changed-files, operator, frontend-copy-to-acr, sglang-copy-to-acr, deploy-test-sglang]
+    if: |
+      always() && !cancelled() &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
+      (needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true') &&
+      needs.deploy-test-sglang.result == 'success' &&
+      needs.operator.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success' &&
+      needs.sglang-copy-to-acr.result == 'success'
+    uses: $/.github/workflows/cross-version-compatibility.yml
+    with:
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+      worker_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+      operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
     secrets: inherit
 
   deploy-test-dgdr:

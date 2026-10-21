@@ -267,7 +267,7 @@ func TestGetPipelineRequests(t *testing.T) {
 func TestImplicitV2LPXConductorlessGroveIdentityPublishesRequest(t *testing.T) {
 	t.Log("Publish the implicit hybrid runtime")
 	ctx := t.Context()
-	deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, deployment, dgd)
 	require.Empty(t, desired.plan.ConductorTemplate)
 	require.NotEmpty(t, desired.plan.CyborgClique)
@@ -564,7 +564,7 @@ func TestResolvePipelineRequestsRequestsOnlyRemotePartitions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Resolve a hybrid workload with the selected local partitions")
-			deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+			deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 			dgd.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{LocalPartitions: tc.localPartitions}
 			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
 

@@ -378,6 +378,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::fpm::FpmEventRelay>()?;
     m.add_class::<llm::fpm::FpmDirectPublisher>()?;
     m.add_class::<llm::fpm::FpmEventSubscriber>()?;
+    m.add_class::<llm::fpm::FpmHealthSnapshot>()?;
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
@@ -1509,6 +1510,45 @@ impl DistributedRuntime {
         self.inner
             .system_status_server_info()
             .map(|info| format!("http://{}", info.advertised_socket_addr()))
+    }
+
+    /// Register a component handler under `/engine/{name}/...` on the system listener.
+    /// The callback receives `{method, path, body}` and returns `{status, body}`.
+    fn register_engine_http_handler(
+        &self,
+        py: Python<'_>,
+        name: String,
+        callback: PyObject,
+    ) -> PyResult<()> {
+        if self.inner.system_status_server_info().is_none() {
+            return Err(to_pyerr("control handlers require DYN_SYSTEM_PORT"));
+        }
+        let locals = Arc::new(pyo3_async_runtimes::tokio::get_current_locals(py)?);
+        let callback = Arc::new(callback);
+        let handler: rs::engine_routes::EngineHttpCallback = Arc::new(move |request| {
+            let callback = Arc::clone(&callback);
+            let locals = Arc::clone(&locals);
+            Box::pin(async move {
+                let future = Python::with_gil(|py| {
+                    let request = pythonize::pythonize(py, &request)?;
+                    let coroutine = callback.call1(py, (request,))?;
+                    pyo3_async_runtimes::into_future_with_locals(&locals, coroutine.into_bound(py))
+                })?;
+                let result = future.await?;
+                Python::with_gil(|py| {
+                    pythonize::depythonize::<rs::engine_routes::EngineHttpResponse>(result.bind(py))
+                        .map_err(anyhow::Error::from)
+                })
+            })
+        });
+        self.inner
+            .engine_routes()
+            .register_http(name, handler)
+            .map_err(to_pyerr)
+    }
+
+    fn unregister_engine_http_handler(&self, name: &str) {
+        self.inner.engine_routes().unregister_http(name);
     }
 
     /// Register an async Python callback for /engine/{route_name}

@@ -162,6 +162,13 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 - **TensorRT-LLM** — supported, including attention-DP. Enabled with `--fpm-trace`, `DYN_FORWARDPASS_METRIC_PORT` or `--publish-metrics`, each of which also turns on the engine's `enable_iter_perf_stats`; `--publish-kv-events` does not enable it. Dynamo publishes one FPM channel per attention-DP rank and disables FPM emission if the runtime schema is missing required fields.
 - **SGLang** — supported. Enabled when `DYN_FORWARDPASS_METRIC_PORT` is set; requires the upstream FPM module, which ships in the SGLang runtime as of `sglang==0.5.13.post1` (SGLang >= v0.5.13). See the [SGLang FPM section](../backends/sglang/observability.md#forward-pass-metrics-fpm).
 
+FPM delivery alone does not establish decode scaling support: KV-utilization
+decisions also require the worker's KV capacity metadata. TensorRT-LLM
+deployments that omit `total_kv_blocks` or `kv_cache_block_size` cannot use that
+decode scaling path. When the scaling decision reports `missing_engine_metadata`,
+`dynamo_planner_signal_unavailable{component="decode",signal="load_inputs"}`
+is set. The decision logs identify the missing capacity metadata.
+
 ### General
 
 **In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** For an aggregated deployment, set `min_endpoint`. For a disaggregated deployment, set `min_endpoint` to apply the same floor to prefill and decode, or set `prefill_min_endpoint` and `decode_min_endpoint` when the components need different floors. For a single-component deployment, set the active role's field; when that field is unset, `min_endpoint` supplies the active role. Use a lower `load_scaling_down_sensitivity` value to reduce the frequency of scale-down events.

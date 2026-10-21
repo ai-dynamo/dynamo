@@ -36,7 +36,9 @@ use crate::PyAsyncRequestStream;
 use dynamo_runtime::pipeline::ManyIn;
 
 use super::context::{Context, callable_accepts_kwarg};
-use super::errors::{http_like_error_to_dynamo, py_exception_to_backend_error};
+use super::errors::{
+    http_like_error_to_dynamo, py_exception_to_backend_error, worker_unavailable_to_dynamo,
+};
 use crate::python_payload::{
     EncodedPythonResponse, PythonPayload, PythonResponseItem, WaitClassification,
     encode_python_item,
@@ -481,6 +483,12 @@ where
 pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
     Python::with_gil(|py| {
         error.display(py);
+
+        // Checked before the backend mapping, whose `DynamoException` fallback
+        // would otherwise classify it as `Unknown`.
+        if let Some(error) = worker_unavailable_to_dynamo(py, &error) {
+            return error;
+        }
 
         if let Some((backend_err, message)) = py_exception_to_backend_error(py, &error) {
             let mut builder = DynamoError::builder()
