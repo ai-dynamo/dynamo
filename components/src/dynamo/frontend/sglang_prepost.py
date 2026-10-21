@@ -320,14 +320,15 @@ def create_parsers(
         reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
         parser_request = None
         if _continuation_template_kwargs(request).get("continue_final_message"):
-            messages = _materialize_messages((request.get("messages") or [])[-1:])
-            if messages and messages[0].get("role") == "assistant":
+            final_messages = _materialize_messages((request.get("messages") or [])[-1:])
+            final_message = final_messages[0] if final_messages else None
+            if final_message and final_message.get("role") == "assistant":
                 parser_request = SglangChatCompletionRequest(
                     messages=[
                         {
                             "role": "assistant",
                             "content": _flatten_message_content(
-                                messages[0].get("content")
+                                final_message.get("content")
                             )
                             or "",
                         }
