@@ -26,6 +26,30 @@ pub(super) type PrefillOutput = Option<serde_json::Value>;
 /// prefill whose KV transfer may still be needed by the decode worker.
 pub(super) struct PrefillTask(JoinHandle<Result<PrefillOutput, PrefillError>>);
 
+/// Decode failure makes the paired prefill unnecessary. Signal its independent
+/// context, leaving the background task alive to drain the response and clean up.
+pub(super) fn cancel_prefill_on_decode_error(
+    prefill_context: Arc<dyn AsyncEngineContext>,
+    decode_result: anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>>,
+) -> anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> {
+    let response = decode_result.inspect_err(|_| prefill_context.stop_generating())?;
+    let context = response.context();
+    let stream = response.inspect(move |output| {
+        if output.err().is_some()
+            || matches!(
+                output
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.finish_reason.as_ref()),
+                Some(FinishReason::Error(_) | FinishReason::Cancelled)
+            )
+        {
+            prefill_context.stop_generating();
+        }
+    });
+    Ok(ResponseStream::new(Box::pin(stream), context))
+}
+
 /// Prefill's output as a stream item tagged with [`PREFILL_OUTPUT_ANNOTATION`].
 fn output_item(output: PrefillOutput) -> Option<Annotated<LLMEngineOutput>> {
     let engine_data = Some(output?);
@@ -222,6 +246,106 @@ mod tests {
             "prefill connection lost".to_string(),
             None,
         ))
+    }
+
+    #[tokio::test]
+    async fn decode_failures_stop_paired_prefill_and_preserve_the_error() {
+        for observe in [false, true] {
+            for kind in ["dispatch", "annotation", "error", "cancelled"] {
+                let request = Arc::new(Controller::default());
+                let prefill = Arc::new(Controller::default());
+                let (tx, task) = pending_prefill();
+                let reason = match kind {
+                    "error" => Some(FinishReason::Error("decode failed".into())),
+                    "cancelled" => Some(FinishReason::Cancelled),
+                    _ => None,
+                };
+                let item = if kind == "annotation" {
+                    Annotated::from_error("decode failed")
+                } else {
+                    Annotated::from_data(LLMEngineOutput {
+                        token_ids: vec![42],
+                        finish_reason: reason.clone(),
+                        ..Default::default()
+                    })
+                };
+                let decode: anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> =
+                    if kind == "dispatch" {
+                        Err(anyhow::anyhow!("decode failed"))
+                    } else {
+                        Ok(ResponseStream::new(
+                            Box::pin(stream::iter([item])),
+                            request.clone(),
+                        ))
+                    };
+                let result = if observe {
+                    task.forward_decode(async { decode }, request.clone(), PrefillNeed::None)
+                        .await
+                } else {
+                    drop(task);
+                    decode
+                };
+                let result = cancel_prefill_on_decode_error(prefill.clone(), result);
+                if kind == "dispatch" {
+                    assert_eq!(result.unwrap_err().to_string(), "decode failed");
+                } else {
+                    let mut response = result.unwrap();
+                    assert!(Arc::ptr_eq(
+                        &response.context(),
+                        &(request.clone() as Arc<dyn AsyncEngineContext>)
+                    ));
+                    let item = response
+                        .next()
+                        .now_or_never()
+                        .expect("do not wait for prefill")
+                        .unwrap();
+                    if kind == "annotation" {
+                        assert!(item.err().unwrap().to_string().contains("decode failed"));
+                    } else {
+                        let data = item.data.unwrap();
+                        assert_eq!(data.token_ids, [42]);
+                        assert_eq!(data.finish_reason, reason);
+                    }
+                }
+                assert!(prefill.is_stopped(), "{kind}, observer={observe}");
+                assert!(!prefill.is_killed());
+                assert!(!request.is_stopped());
+                tx.send(Ok(None)).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn decode_failure_keeps_prefill_cleanup_alive() {
+        let prefill = Arc::new(Controller::default());
+        let backend = prefill.clone();
+        let (cleanup_tx, cleanup_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (done_tx, done_rx) = oneshot::channel();
+        let task = PrefillTask::spawn(async move {
+            backend.stopped().await;
+            cleanup_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            done_tx.send(()).unwrap();
+            Ok(None)
+        });
+        let result = task
+            .forward_decode(
+                async { Err(anyhow::anyhow!("decode failed")) },
+                Arc::new(Controller::default()),
+                PrefillNeed::None,
+            )
+            .await;
+        assert!(cancel_prefill_on_decode_error(prefill, result).is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(1), cleanup_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        release_tx.send(()).expect("cleanup must still be running");
+        tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

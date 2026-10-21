@@ -518,6 +518,7 @@ impl
 
         let tracker = prefill_req.tracker.clone();
         let mut prefill_context = independent_prefill_context(prefill_req, &context)?;
+        let prefill_engine_context = prefill_context.context();
         if let Some(session_affinity) = session_affinity {
             prefill_context.insert(
                 SESSION_AFFINITY_CONTEXT_KEY,
@@ -690,10 +691,11 @@ impl
             (true, true) => PrefillNeed::BeforeFirst,
         };
         let decode = next.generate(context.map(|_| decode_req));
-        match prefill_completion {
+        let result = match prefill_completion {
             Some(completion) => completion.forward_decode(decode, engine_ctx, output).await,
             None => decode.await,
-        }
+        };
+        handoff::cancel_prefill_on_decode_error(prefill_engine_context, result)
     }
 }
 
