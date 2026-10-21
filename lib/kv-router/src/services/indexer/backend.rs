@@ -2209,4 +2209,56 @@ mod session_tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn stores_ingested_after_a_clear_survive_the_clear() {
+        for (indexer, session_prefix_index) in [
+            make_session_test_indexer(),
+            make_concurrent_session_test_indexer(),
+        ] {
+            let worker = WorkerWithDpRank::new(7, 0);
+            indexer
+                .try_apply_event(
+                    store_event(7, 0, 1, &[], &[11], StorageTier::Device)
+                        .with_session_id("session-1"),
+                )
+                .await
+                .unwrap();
+
+            // The engine clears its cache and stores new blocks before the session
+            // consumer has applied the clear.
+            indexer.try_apply_event(clear_event(7, 0, 2)).await.unwrap();
+            let device_store = store_event(7, 0, 3, &[], &[41, 42], StorageTier::Device)
+                .with_session_id("session-1");
+            let block_hashes = match &device_store.event.data {
+                KvCacheEventData::Stored(stored) => stored
+                    .blocks
+                    .iter()
+                    .map(|block| block.block_hash)
+                    .collect::<Vec<_>>(),
+                _ => unreachable!(),
+            };
+            indexer.try_apply_event(device_store).await.unwrap();
+            indexer
+                .try_apply_event(store_event(
+                    7,
+                    0,
+                    4,
+                    &[],
+                    &[41, 42],
+                    StorageTier::HostPinned,
+                ))
+                .await
+                .unwrap();
+            indexer.flush_session_updates().await.unwrap();
+
+            let lineage = |tier| {
+                session_prefix_index
+                    .get_session_block_lineage_in_tier("session-1", worker, tier, None)
+                    .unwrap()
+            };
+            assert_eq!(lineage(StorageTier::Device), vec![block_hashes.clone()]);
+            assert_eq!(lineage(StorageTier::HostPinned), vec![block_hashes.clone()]);
+        }
+    }
 }

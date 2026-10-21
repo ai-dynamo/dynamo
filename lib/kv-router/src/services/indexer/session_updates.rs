@@ -268,11 +268,9 @@ impl SessionMutation {
             }
             Self::Cleared { worker } => {
                 residency_versions.advance(worker);
-                residency_versions.advance_rank_lifecycle(worker);
                 index.clear_worker_frontiers(worker);
             }
             Self::WorkerRemoved { worker_id } => {
-                residency_versions.advance_worker_lifecycle(worker_id);
                 index.clear_worker_id_frontiers(worker_id);
             }
         }
@@ -391,6 +389,17 @@ impl SessionUpdateSender {
     }
 
     pub(super) fn enqueue(&self, mutation: SessionMutation) -> Result<(), KvRouterError> {
+        // Lifecycle generations advance in ingestion order, so a store ingested after a
+        // clear carries the new generation even before the clear itself is applied.
+        match &mutation {
+            SessionMutation::Cleared { worker } => {
+                self.residency_versions.advance_rank_lifecycle(*worker);
+            }
+            SessionMutation::WorkerRemoved { worker_id } => {
+                self.residency_versions.advance_worker_lifecycle(*worker_id);
+            }
+            _ => {}
+        }
         self.tx
             .send(SessionUpdateMessage::Mutation(mutation))
             .map_err(|_| KvRouterError::IndexerOffline)
