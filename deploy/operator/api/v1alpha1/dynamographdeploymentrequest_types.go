@@ -207,7 +207,7 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta2) != has(self.model)",message="exactly one of native v1alpha1 fields or v1beta2 must be specified"
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta2) || (has(self.backend) && has(self.profilingConfig))",message="native v1alpha1 requests require backend and profilingConfig"
 // +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.backend) || has(self.useMocker) || has(self.profilingConfig) || has(self.runtimeVersionOverride) || has(self.enableGpuDiscovery) || has(self.autoApply) || has(self.deploymentOverrides))",message="v1beta2 is mutually exclusive with native v1alpha1 fields"
-// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) == has(oldSelf.v1beta2)",message="request representation is immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) == has(oldSelf.v1beta2) && (!has(self.v1beta2) || self.v1beta2 == oldSelf.v1beta2)",message="the conversion carrier is immutable"
 type DynamoGraphDeploymentRequestSpec struct {
 	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`
 

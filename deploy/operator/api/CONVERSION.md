@@ -183,6 +183,12 @@ explicit, complete foreign-version payload under `spec.v1beta1` or
   public outer `Spec` or `Status` into an envelope, because that would permit
   recursive foreign-version envelopes.
 - Native fields and a foreign-version envelope are mutually exclusive.
+- A foreign-version spec envelope is a read-only conversion view. Its presence
+  and content are immutable on update; clients change a request through the
+  API version that owns its native representation.
+- Validating admission rejects direct creation through a foreign-version
+  envelope. Conversion is the only producer of envelope content, after the
+  native request has passed its versioned schema validation and pruning.
 - Conversion unwraps the matching envelope when returning to its native version.
 - Otherwise conversion moves the complete native spec and status into the
   target version's envelope without mutating the source.

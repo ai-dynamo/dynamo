@@ -553,7 +553,7 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 // Native v1beta1 fields and the V1Beta2 conversion envelope are mutually exclusive.
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta2) != has(self.model)",message="exactly one of native v1beta1 fields or v1beta2 must be specified"
 // +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.backend) || has(self.image) || has(self.runtimeVersionOverride) || has(self.modelCache) || has(self.hardware) || has(self.workload) || has(self.sla) || has(self.overrides) || has(self.features) || has(self.searchStrategy) || has(self.autoApply))",message="v1beta2 is mutually exclusive with native v1beta1 fields"
-// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) == has(oldSelf.v1beta2)",message="request representation is immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) == has(oldSelf.v1beta2) && (!has(self.v1beta2) || self.v1beta2 == oldSelf.v1beta2)",message="the conversion carrier is immutable"
 type DynamoGraphDeploymentRequestSpec struct {
 	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`
 
