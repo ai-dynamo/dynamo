@@ -37,7 +37,6 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime_full
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
-ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
 ARG NIXL_REF
@@ -332,9 +331,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 {% endif %}
 
 # Place wheels in /opt/dynamo/wheelhouse unconditionally — dev/local-dev images
-# install from source and skip the pip install RUN below, but they still need
-# the wheels on disk because tests/dependencies/test_kvbm_imports.py greps
-# this path and runs in dev-derived test images.
+# install from source and skip the pip install RUN below.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% if target not in ("dev", "local-dev") %}
@@ -347,8 +344,8 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
     \
-    # nixl/nixl-cu13 for KVBM's `import nixl` ABI; version from NIXL_REF, matching
-    # the nixl-sys wheel_builder links. LD_PRELOAD swaps the runtime .so (nixl#1668).
+    # nixl/nixl-cu13 for `import nixl` (dynamo.nixl_connect); version from NIXL_REF.
+    # LD_PRELOAD swaps the runtime .so (nixl#1668).
     echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     _nixl_ver="${NIXL_REF#v}" && \
     uv pip install --no-deps "nixl==${_nixl_ver}" "nixl-cu13==${_nixl_ver}" && \
@@ -362,14 +359,6 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     # below points imageio at the in-tree LGPL CLI.
     uv pip install --no-deps --requirement /tmp/requirements.trtllm.txt && \
     \
-    if [ "${ENABLE_KVBM}" = "true" ]; then \
-        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -z "$KVBM_WHEEL" ]; then \
-            echo "ERROR: ENABLE_KVBM=true but no kvbm*.whl found in /opt/dynamo/wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install --no-deps "$KVBM_WHEEL"; \
-    fi && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then uv pip install --no-deps "$GMS_WHEEL"; fi; \

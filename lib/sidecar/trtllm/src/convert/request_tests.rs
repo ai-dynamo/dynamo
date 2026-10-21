@@ -207,6 +207,34 @@ fn image_metadata_that_cannot_be_honored_is_rejected() {
 }
 
 #[test]
+fn visible_stop_tokens_stop_in_engine_and_stay_in_output() {
+    let mut req = request();
+    req.stop_conditions.stop_token_ids = Some(vec![7]);
+    req.stop_conditions.stop_token_ids_hidden = Some(vec![2, 200002]);
+    req.stop_conditions.stop_token_ids_visible = Some(vec![200012, 7]);
+    let proto = build_generate_request(req, "req", "model", None, AGG).expect("build");
+    let stopping = proto.stopping.unwrap();
+    assert_eq!(stopping.include_stop_in_output, Some(true));
+    let stop_ids: Vec<_> = stopping
+        .conditions
+        .iter()
+        .filter_map(|condition| match condition.condition {
+            Some(pb::stop_condition::Condition::StopTokenId(id)) => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stop_ids, [2, 7, 200002, 200012]);
+}
+
+#[test]
+fn empty_visible_stop_tokens_leave_stop_trimming_on() {
+    let mut req = request();
+    req.stop_conditions.stop_token_ids_visible = Some(Vec::new());
+    let proto = build_generate_request(req, "req", "model", None, AGG).expect("build");
+    assert_eq!(proto.stopping.unwrap().include_stop_in_output, None);
+}
+
+#[test]
 fn omitted_max_tokens_without_context_length_is_rejected() {
     let mut req = request();
     req.stop_conditions.max_tokens = None;

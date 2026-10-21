@@ -191,7 +191,9 @@ jobs:
           docs/fern/scripts/tests/test_gen_rust_api.py \
           docs/fern/scripts/tests/test_gen_kubernetes_api.py \
           docs/fern/scripts/tests/test_api_reference_regressions.py \
-          docs/fern/scripts/tests/test_api_freshness.py
+          docs/fern/scripts/tests/test_api_freshness.py \
+          docs/fern/scripts/tests/test_relink_shared_reference.py \
+          docs/fern/scripts/tests/test_resolve_translation_links.py
     - name: Generate API references from source
       # The Python/Rust references are publish-time artifacts (generated in
       # fern-docs.yml against the branch being published), not committed
@@ -388,7 +390,8 @@ jobs:
       run: npm install -g fern-api
     - name: Check for broken links
       working-directory: docs/fern
-      run: fern docs broken-links
+      # Without --strict the command reports errors and still exits 0.
+      run: fern docs broken-links --strict
 
   operator:
     needs: changed-files
@@ -416,7 +419,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
     steps:
@@ -546,7 +549,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
     steps:
