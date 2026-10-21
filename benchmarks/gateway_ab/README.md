@@ -401,6 +401,25 @@ python3 -m benchmarks.gateway_ab --context perf-cluster \
 
 To compare two builds, run each and compare their reports. Run them back to back on the same nodes.
 
+### In pull requests
+
+The `Gateway A/B` job in `.github/workflows/pr.yaml` runs a trimmed version on pull requests that
+change the EPP, the Frontend's HTTP service, the KV router, this harness, or CI (the `gateway_ab`
+filter in `.github/filters.yaml`). It uses the local backend on one runner, and the frontend image
+built for the pull request runs every process: both routers, the mocker workers, and aiperf.
+
+```bash
+python3 -m benchmarks.gateway_ab --backend local \
+  --frontend-image "$IMAGE" --worker-image "$IMAGE" \
+  --topologies disagg --request-rate 14 --requests 420 --rounds 3 \
+  --max-ttft-regression 10 all
+```
+
+One disaggregated load point and three rounds of 30 s per side take about ten minutes. Three rounds
+give wide intervals and the gate tests their low end, so it trips only on a regression clearly above
+10%, not on noise. The job adds `report.md` to its summary and uploads the run directory. Run the
+same command to reproduce a failure.
+
 ## Knobs
 
 | Flag | Default | Notes |

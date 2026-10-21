@@ -16,6 +16,7 @@
 #   triton   -> triton build and test
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
+#   gateway_ab -> frontend image build and the Frontend vs Gateway+EPP A/B check
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
 #   examples -> recipe-check (Kustomize recipe generation and docs tests)
 #   sidecar  -> unified sidecar image build, publish, and compliance checks
@@ -477,6 +478,20 @@ rust:
 
 benchmarks:
   - 'benchmarks/**'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+# The Gateway A/B job compares the Frontend with Gateway + EPP on mocker
+# workers. It runs on changes to either request path: the EPP, the Frontend's
+# HTTP service, and the KV router both of them embed. The harness is included
+# so a change to it is measured before it reaches anyone else's pull request.
+gateway_ab:
+  - *ci
+  - 'deploy/inference-gateway/ext-proc/**'
+  - 'lib/llm/src/http/**'
+  - 'lib/llm/src/kv_router/**'
+  - 'lib/kv-router/**'
+  - 'benchmarks/gateway_ab/**'
   - '!**/*.md'
   - '!**/*.rst'
 

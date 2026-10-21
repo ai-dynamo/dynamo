@@ -41,6 +41,7 @@ jobs:
       triton: ${{ steps.changes.outputs.triton }}
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
+      gateway_ab: ${{ steps.changes.outputs.gateway_ab }}
       sample: ${{ steps.changes.outputs.sample }}
       efa: ${{ steps.changes.outputs.efa }}
       base_ref: ${{ steps.changes.outputs.base_ref }}
@@ -160,6 +161,7 @@ jobs:
       - frontend-build
       - frontend-test
       - frontend-copy-to-acr
+      - gateway-ab
     if: always()
     steps:
       - name: Check all dependent jobs
@@ -766,7 +768,8 @@ jobs:
       needs.changed-files.outputs.snapshot_vllm == 'true' ||
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
       needs.changed-files.outputs.snapshot_trtllm == 'true' ||
-      needs.changed-files.outputs.deploy == 'true'
+      needs.changed-files.outputs.deploy == 'true' ||
+      needs.changed-files.outputs.gateway_ab == 'true'
     uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -1051,6 +1054,72 @@ jobs:
       - name: Validate router-side AIC in the frontend image
         working-directory: /workspace
         run: python tests/frontend/router_ais_image_smoke.py
+
+  # Frontend (A) against Gateway + EPP (B) on mocker workers, both behind one
+  # Envoy, with benchmarks/gateway_ab's local backend. A trimmed run: one
+  # disaggregated load point and three ~30 s rounds per side, about ten
+  # minutes. It fails when the low end of the 95% interval puts B's TTFT mean,
+  # p50, or p90 more than 10% above A's, so run-to-run noise does not trip it.
+  gateway-ab:
+    name: Gateway A/B
+    needs: [changed-files, frontend-build]
+    if: |
+      always() && !cancelled() &&
+      needs.changed-files.outputs.gateway_ab == 'true' &&
+      needs.frontend-build.result == 'success'
+    # A runner with a Docker daemon, as for operator-integration.
+    runs-on: prod-builder-amd-v1
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      # It also runs the mocker workers and aiperf, so every process on both
+      # sides comes from this commit.
+      IMAGE: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}-${{ needs.frontend-build.outputs.target_tag_plain }}
+      NAME_PREFIX: ci${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Log in to ECR
+        uses: $/.github/actions/docker-login
+        with:
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+      - name: Raise the inotify instance limit
+        # Every container watches the file-discovery store with inotify, and
+        # the kernel caps instances per user across the host.
+        run: |
+          sudo -n sysctl -w fs.inotify.max_user_instances=1024 ||
+            echo "::warning::Could not raise fs.inotify.max_user_instances"
+      - name: Run the A/B
+        run: |
+          python3 -m benchmarks.gateway_ab all --backend local \
+            --frontend-image "$IMAGE" --worker-image "$IMAGE" \
+            --name-prefix "$NAME_PREFIX" --results "$RUNNER_TEMP/gateway-ab" \
+            --topologies disagg --request-rate 14 --requests 420 --rounds 3 \
+            --run-timeout 300 --max-ttft-regression 10
+      - name: Publish the report
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/gateway-ab/report.md" ]; then
+            cat "$RUNNER_TEMP/gateway-ab/report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gateway-ab-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gateway-ab
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Tear down
+        # all tears down when it finishes; this covers a cancelled job.
+        if: always()
+        run: python3 -m benchmarks.gateway_ab teardown --backend local --name-prefix "$NAME_PREFIX"
 
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE

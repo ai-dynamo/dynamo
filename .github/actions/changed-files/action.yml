@@ -70,6 +70,9 @@ outputs:
   benchmarks:
     description: 'Whether benchmarks files changed'
     value: ${{ steps.filter.outputs.benchmarks_any_modified }}
+  gateway_ab:
+    description: 'Whether files the Gateway A/B check measures changed'
+    value: ${{ steps.filter.outputs.gateway_ab_any_modified }}
   efa:
     description: 'Whether AWS EFA Dockerfile changed'
     value: ${{ steps.filter.outputs.efa_any_modified }}

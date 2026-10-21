@@ -80,7 +80,11 @@ def test_every_arm_runs_identical_workers(topology):
     for ctype, replicas, mode in manifests.worker_roles(cfg, topology):
         for i in range(replicas):
             a = runs[f"gwab-ab-{topology}-fe-{ctype}{i}"]
-            assert _command(a, cfg.worker_image)[3:] == manifests.mocker_args(cfg, mode)
+            assert _command(a, cfg.worker_image) == [
+                "-m",
+                "dynamo.mocker",
+                *manifests.mocker_args(cfg, mode),
+            ]
             for tag in manifests.TAGS.values():
                 other = runs[f"gwab-ab-{topology}-{tag}-{ctype}{i}"]
                 assert _command(other, cfg.worker_image) == _command(
