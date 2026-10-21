@@ -8,6 +8,7 @@ use async_trait::async_trait;
 
 use std::sync::Arc;
 
+use dynamo_kv_hashing::ExternalSequenceBlockHash;
 use dynamo_kv_indexer::{KvRouterError, SessionPrefixIndexer};
 use dynamo_worker_selection::SharedCacheHits;
 
@@ -28,6 +29,15 @@ pub trait SharedKvCache: Send + Sync {
         block_size: u32,
         cache_namespace: Option<&str>,
     ) -> Result<SharedCacheHits, KvRouterError>;
+
+    /// Resolve observed object keys in input order; unknown blocks return empty groups.
+    fn resolve_object_keys(
+        &self,
+        _blocks: &[ExternalSequenceBlockHash],
+        _expected_tenant: Option<&str>,
+    ) -> Result<Vec<Vec<String>>, KvRouterError> {
+        Err(KvRouterError::Unsupported("object key resolution".into()))
+    }
 
     /// Hands the router's session prefix index to the cache so residency events that name
     /// a session can update it. The default ignores the index.
