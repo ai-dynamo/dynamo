@@ -140,12 +140,11 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "options, allow_top, wrapped, expected",
+    "options, wrapped, expected",
     [
-        pytest.param({}, False, False, {}, id="default"),
+        pytest.param({}, False, {}, id="default"),
         pytest.param(
             {"logprobs": 0},
-            False,
             False,
             {"return_logprob": True, "top_logprobs_num": 0},
             id="chosen-token",
@@ -153,31 +152,24 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
         pytest.param(
             {"prompt_logprobs": 0},
             False,
-            False,
             {},
             id="prompt-only-excluded",
         ),
-        pytest.param({"logprobs": 3}, False, False, None, id="top-rejected"),
         pytest.param(
             {"logprobs": 3},
-            True,
             False,
             {"return_logprob": True, "top_logprobs_num": 3},
-            id="top-allowed",
+            id="top-allowed-by-default",
         ),
         pytest.param(
             {"logprobs": 0, "prompt_logprobs": 5},
-            True,
             True,
             {"return_logprob": True, "top_logprobs_num": 0},
             id="wrapped-mixed-excludes-prompt",
         ),
     ],
 )
-async def test_prefill_forwards_first_token_logprob_options(
-    monkeypatch, wrapped, allow_top, options, expected
-):
-    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1" if allow_top else "0")
+async def test_prefill_forwards_first_token_logprob_options(wrapped, options, expected):
     calls = []
 
     async def async_generate(**kwargs):
@@ -204,11 +196,6 @@ async def test_prefill_forwards_first_token_logprob_options(
 
     context = SimpleNamespace(id=lambda: "request-id", trace_id="trace-id")
     async with aclosing(handler.generate(request, context)) as stream:
-        if expected is None:
-            with pytest.raises(ValueError, match="DYN_SGL_ALLOW_TOP_LOGPROBS"):
-                await anext(stream)
-            assert not calls
-            return
         await anext(stream)
 
     assert len(calls) == 1
@@ -790,29 +777,15 @@ def test_engine_generate_requires_object_sampling_params_for_prefill_override():
         )
 
 
-def test_engine_generate_rejects_top_logprobs_by_default(monkeypatch):
-    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
-
-    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
-        build_native_generate_request(
-            {"return_logprob": True, "top_logprobs_num": 1},
-            input_ids=[1],
-            request_id="request",
-            priority=None,
-        )
-
-
-def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
-    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
-
+def test_engine_generate_allows_top_logprobs_by_default():
     native = build_native_generate_request(
-        {"return_logprob": True, "top_logprobs_num": 2},
+        {"return_logprob": True, "top_logprobs_num": 1},
         input_ids=[1],
         request_id="request",
         priority=None,
     )
 
-    assert native.top_logprobs_num == 2
+    assert native.top_logprobs_num == 1
 
 
 @pytest.mark.asyncio
@@ -927,6 +900,19 @@ async def test_native_generate_stream_maps_terminal_finish_reason(
         ),
         (
             {"prompt_tokens": 4, "completion_tokens": 2, "cached_tokens": 0},
+            {
+                "prompt_tokens": 4,
+                "completion_tokens": 2,
+                "total_tokens": 6,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            },
+        ),
+        (
+            {"prompt_tokens": 4, "completion_tokens": 2, "cached_tokens": None},
+            {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+        ),
+        (
+            {"prompt_tokens": 4, "completion_tokens": 2},
             {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
         ),
         ({"prompt_tokens": 4}, None),
@@ -1876,9 +1862,7 @@ class TestMultimodalGuard:
         )
 
 
-def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
-    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
-
+def test_build_logprob_kwargs_allows_chosen_token_logprobs():
     kwargs = DecodeWorkerHandler._build_logprob_kwargs(
         {"output_options": {"logprobs": 0}}
     )
@@ -1886,16 +1870,7 @@ def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
     assert kwargs == {"return_logprob": True, "top_logprobs_num": 0}
 
 
-def test_build_logprob_kwargs_rejects_top_logprobs_by_default(monkeypatch):
-    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
-
-    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
-        DecodeWorkerHandler._build_logprob_kwargs({"output_options": {"logprobs": 1}})
-
-
-def test_build_logprob_kwargs_allows_top_logprobs_with_escape_hatch(monkeypatch):
-    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
-
+def test_build_logprob_kwargs_allows_top_logprobs_by_default():
     kwargs = DecodeWorkerHandler._build_logprob_kwargs(
         {"output_options": {"logprobs": 2}}
     )
@@ -2185,6 +2160,131 @@ async def test_native_generate_stream_reports_kv_cache_hit_on_final_chunk(
     if reports:
         expected["kv_cache_hit"] = {"prompt_tokens": 4, "reused_tokens": 3}
     assert chunks[1]["engine_data"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_field", ["prompt_tokens", "completion_tokens"])
+async def test_process_token_stream_waits_for_complete_usage_metadata(missing_field):
+    handler = _new_decode_handler()
+    complete_meta = {
+        "id": "cache-usage-request",
+        "finish_reason": None,
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "cached_tokens": 2,
+    }
+    incomplete_meta = dict(complete_meta)
+    del incomplete_meta[missing_field]
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {"output_ids": [101], "meta_info": incomplete_meta},
+                    {"output_ids": [102], "meta_info": complete_meta},
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert "completion_usage" not in chunks[0]
+    assert "finish_reason" not in chunks[1]
+    assert chunks[1]["completion_usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 2
+    }
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_reports_metadata_changes_per_choice():
+    handler = _new_decode_handler()
+    responses = [
+        {
+            "index": index,
+            "output_ids": [] if reason else [101],
+            "meta_info": {
+                "id": "cache-usage-request",
+                "finish_reason": reason,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cached_tokens": cached_tokens,
+            },
+        }
+        for index, prompt_tokens, completion_tokens, cached_tokens, reason in [
+            (0, 3, 1, None, None),
+            (1, 3, 1, None, None),
+            (0, 3, 2, 0, None),
+            (1, 3, 2, None, None),
+            (0, 4, 3, 0, None),
+            (0, 4, 4, 2, None),
+            (0, 4, 5, 2, None),
+            (1, 3, 2, None, {"type": "stop"}),
+            (0, 4, 5, 2, {"type": "stop"}),
+        ]
+    ]
+
+    chunks = await _collect(
+        handler._process_token_stream(_stream(responses), _Context())
+    )
+
+    assert ["completion_usage" in chunk for chunk in chunks] == [
+        True,
+        True,
+        True,
+        False,
+        True,
+        True,
+        False,
+        True,
+        True,
+    ]
+    assert chunks[2]["completion_usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 0
+    }
+    assert chunks[4]["completion_usage"]["prompt_tokens"] == 4
+    assert chunks[5]["completion_usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 2
+    }
+    assert "prompt_tokens_details" not in chunks[0]["completion_usage"]
+    assert chunks[-2]["completion_usage"]["completion_tokens"] == 2
+    assert chunks[-1]["completion_usage"]["completion_tokens"] == 5
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_preserves_cache_usage_before_metadata_clear():
+    handler = _new_decode_handler()
+    uploader = SimpleNamespace(upload_choice=AsyncMock())
+    metadata = [
+        {
+            "id": "cache-usage-request",
+            "finish_reason": reason,
+            "prompt_tokens": 3,
+            "completion_tokens": index + 1,
+            "cached_tokens": 2,
+        }
+        for index, reason in enumerate([None, None, {"type": "stop"}])
+    ]
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {"output_ids": [101 + index], "meta_info": meta}
+                    for index, meta in enumerate(metadata)
+                ]
+            ),
+            _Context(),
+            metadata_uploader=uploader,
+        )
+    )
+
+    assert metadata == [{}, {}, {}]
+    assert "completion_usage" not in chunks[1]
+    assert all(
+        chunk["completion_usage"]["prompt_tokens_details"] == {"cached_tokens": 2}
+        for chunk in (chunks[0], chunks[-1])
+    )
+    uploader.upload_choice.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,7 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import HttpError
+from dynamo.llm.exceptions import HttpError, WorkerUnavailable
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
@@ -50,6 +50,7 @@ from .structural_tag_policy import (
     runtime_structural_tag_options,
 )
 from .thinking import runtime_default_thinking_mode
+from .usage import response_usage, update_usage_metadata
 from .utils import (
     PromptLogprobsAccumulator,
     as_error_envelope,
@@ -1258,6 +1259,7 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
+        usage_metadata: dict[str, Any] = {}
         # Per-request reasoning-token usage (NVBug 6678449b); see
         # _ReasoningUsageAnnotator. Must be per-request, never module-level.
         # The counts live on the post-processors, which are per-request too.
@@ -1277,6 +1279,16 @@ class VllmProcessor:
         prompt_logprobs = PromptLogprobsAccumulator(request)
         pending_terminals: dict[int, dict[str, Any]] = {}
         locally_stopped_requests: set[str] = set()
+
+        def attach_usage(output: dict[str, Any], *, finished: bool) -> None:
+            if usage := response_usage(
+                request,
+                usage_metadata,
+                prompt_tokens=input_tokens,
+                completion_tokens=cumulative_output_tokens,
+                finished=finished,
+            ):
+                output["usage"] = reasoning_usage.annotate(usage)
 
         try:
             _inject_routing_metadata(dynamo_preproc, dynamo_preproc, mm_routing_info)
@@ -1331,6 +1343,9 @@ class VllmProcessor:
                     break
 
                 prompt_logprobs.update(engine_response)
+                # Keep sparse metadata even when a choice is suppressed locally.
+                if backend_usage := engine_response.get("completion_usage"):
+                    update_usage_metadata(usage_metadata, backend_usage)
 
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
@@ -1366,6 +1381,7 @@ class VllmProcessor:
                         if prompt_logprobs.needs_payload and pending_idx != output_idx:
                             continue
                         terminal = pending_terminals.pop(pending_idx)
+                        attach_usage(terminal, finished=True)
                         prompt_logprobs.attach(terminal)
                         yield {"_dynamo_annotated": True, "data": terminal}
 
@@ -1461,8 +1477,11 @@ class VllmProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    if usage := engine_response.get("completion_usage"):
-                        dynamo_out["usage"] = reasoning_usage.annotate(usage)
+                    attach_usage(
+                        dynamo_out,
+                        finished=bool(raw_finish_reason)
+                        or output_request_id in locally_stopped_requests,
+                    )
                     prompt_logprobs.attach(dynamo_out)
                     if (
                         output_request_id in locally_stopped_requests
@@ -1496,12 +1515,18 @@ class VllmProcessor:
                 yield envelope
             else:
                 for terminal in pending_terminals.values():
+                    attach_usage(terminal, finished=True)
                     yield {"_dynamo_annotated": True, "data": terminal}
             _nvtx.end_range(rng_stream)
         except VLLMClientError:
             # Preserve request-side 400/404/422 errors for generator(), which
             # translates them at Dynamo's HTTP boundary. The generic handler
             # below is reserved for genuine internal failures.
+            raise
+        except WorkerUnavailable:
+            # The routed pipeline rejected the request as retryable (for example,
+            # prefill routing is still activating). An error envelope would turn
+            # that 503 into a 500; let the binding restore the class instead.
             raise
         except Exception as e:
             backend_error = backend_invalid_argument_to_http_error(e)

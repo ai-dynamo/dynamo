@@ -47,7 +47,6 @@ use dynamo_runtime::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
         async_trait, error::PipelineError,
     },
-    protocols::EndpointId,
     protocols::annotated::Annotated,
     traits::DistributedRuntimeProvider,
 };
@@ -578,18 +577,6 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
         .into()
 }
 
-// for router discovery registration
-pub const KV_ROUTER_ENDPOINT: &str = "router-discovery";
-
-/// Creates an EndpointId for the KV router in the given namespace.
-pub fn router_endpoint_id(namespace: String, component: String) -> EndpointId {
-    EndpointId {
-        namespace,
-        component,
-        name: KV_ROUTER_ENDPOINT.to_string(),
-    }
-}
-
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
@@ -611,7 +598,6 @@ pub struct KvRouter {
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
     shared_cache: Option<Arc<dyn SharedKvCache>>,
-    endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     /// Optional session-aware logical prefix index.
     session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
@@ -918,17 +904,9 @@ impl KvRouter {
             approximate_lru_ranks,
             request_leases,
             shared_cache,
-            endpoint_registration: None,
             teardown_task_guard: None,
             session_prefix_index,
         })
-    }
-
-    pub(crate) fn set_endpoint_registration(
-        &mut self,
-        registration: dynamo_runtime::discovery::EndpointRegistrationLease,
-    ) {
-        self.endpoint_registration = Some(registration);
     }
 
     /// Attach a request classifier before placing this router into service.
