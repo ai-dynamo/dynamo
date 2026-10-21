@@ -362,9 +362,9 @@ ENV IMAGEIO_FFMPEG_EXE=
 # next line has to name the same two directories.
 RUN --mount=type=bind,source=./container/deps/sglang/install_nixl_ucx_compat.sh,target=/tmp/install_nixl_ucx_compat.sh,readonly \
     --mount=type=bind,source=./container/deps/sglang/discover_nixl_ucx_layout.py,target=/tmp/discover_nixl_ucx_layout.py,readonly \
-    --mount=type=bind,source=./container/deps/register_nixl_libs.sh,target=/tmp/register_nixl_libs.sh,readonly \
+    --mount=type=bind,source=./container/deps/register_nixl_libs.py,target=/tmp/register_nixl_libs.py,readonly \
     bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat && \
-    bash /tmp/register_nixl_libs.sh --link /opt/dynamo/nixl
+    python3 /tmp/register_nixl_libs.py --link /opt/dynamo/nixl
 ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat:/opt/dynamo/nixl${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 {% endif %}
 

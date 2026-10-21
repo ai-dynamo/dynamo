@@ -212,9 +212,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Use the base image's NIXL everywhere: register its libraries with the loader
 # for the Rust bindings, and add its Python bindings to site-packages so
 # `import nixl` works without the base image's PYTHONPATH.
-RUN --mount=type=bind,source=./container/deps/register_nixl_libs.sh,target=/tmp/register_nixl_libs.sh,readonly \
+RUN --mount=type=bind,source=./container/deps/register_nixl_libs.py,target=/tmp/register_nixl_libs.py,readonly \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
-    bash /tmp/register_nixl_libs.sh --python /usr/bin/python3 \
+    /usr/bin/python3 /tmp/register_nixl_libs.py \
         --lib-dir "/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu" && \
     test -d /opt/nvidia/nvda_nixl/lib/python3/dist-packages/nixl_cu13 && \
     echo /opt/nvidia/nvda_nixl/lib/python3/dist-packages \

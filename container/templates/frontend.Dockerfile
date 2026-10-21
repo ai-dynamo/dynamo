@@ -187,8 +187,8 @@ USER root
 # Register the NIXL wheel's libraries with the loader so the Rust bindings'
 # dlopen("libnixl_capi.so") resolves. NIXL finds the backend plugins beside
 # them on its own, so NIXL_PLUGIN_DIR is deliberately left unset.
-RUN --mount=type=bind,source=./container/deps/register_nixl_libs.sh,target=/tmp/register_nixl_libs.sh,readonly \
-    bash /tmp/register_nixl_libs.sh --python /opt/dynamo/venv/bin/python && \
+RUN --mount=type=bind,source=./container/deps/register_nixl_libs.py,target=/tmp/register_nixl_libs.py,readonly \
+    /opt/dynamo/venv/bin/python /tmp/register_nixl_libs.py && \
     chmod 755 /opt/dynamo/.launch_screen && \
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc

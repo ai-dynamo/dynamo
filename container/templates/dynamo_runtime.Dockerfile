@@ -117,8 +117,8 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
 # Register the NIXL wheel's libraries with the loader so the Rust bindings'
 # dlopen("libnixl_capi.so") resolves. NIXL finds its plugins beside them.
 USER root
-RUN --mount=type=bind,source=./container/deps/register_nixl_libs.sh,target=/tmp/register_nixl_libs.sh,readonly \
-    bash /tmp/register_nixl_libs.sh --python /opt/dynamo/venv/bin/python --cuda-major "${CUDA_MAJOR}"
+RUN --mount=type=bind,source=./container/deps/register_nixl_libs.py,target=/tmp/register_nixl_libs.py,readonly \
+    /opt/dynamo/venv/bin/python /tmp/register_nixl_libs.py --cuda-major "${CUDA_MAJOR}"
 USER dynamo
 
 # Install gpu_memory_service wheel if enabled (all targets)

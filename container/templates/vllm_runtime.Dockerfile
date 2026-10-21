@@ -62,8 +62,8 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV NIXL_PREFIX=/opt/dynamo/nixl \
     NIXL_LIB_DIR=/opt/dynamo/nixl \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
-RUN --mount=type=bind,source=./container/deps/register_nixl_libs.sh,target=/tmp/register_nixl_libs.sh,readonly \
-    bash /tmp/register_nixl_libs.sh --cuda-major "${CUDA_MAJOR}" --link "${NIXL_PREFIX}"
+RUN --mount=type=bind,source=./container/deps/register_nixl_libs.py,target=/tmp/register_nixl_libs.py,readonly \
+    python3 /tmp/register_nixl_libs.py --cuda-major "${CUDA_MAJOR}" --link "${NIXL_PREFIX}"
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 {% endif %}
 
