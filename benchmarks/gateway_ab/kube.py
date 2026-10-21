@@ -23,6 +23,10 @@ class KubeError(RuntimeError):
     pass
 
 
+class ForbiddenError(KubeError):
+    """RBAC denied the read, so the object's presence is unknown."""
+
+
 def _absent(stderr: str) -> bool:
     """Whether a failed ``kubectl get`` means the object or its kind is absent.
 
@@ -91,7 +95,8 @@ class Kube:
         if proc.returncode != 0:
             if _absent(proc.stderr):
                 return None
-            raise KubeError(f"kubectl get {' '.join(args)}: {proc.stderr.strip()}")
+            error = ForbiddenError if "(Forbidden)" in proc.stderr else KubeError
+            raise error(f"kubectl get {' '.join(args)}: {proc.stderr.strip()}")
         return json.loads(proc.stdout)
 
     def exists(self, args: Sequence[str], *, namespaced: bool = True) -> bool:

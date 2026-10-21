@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Drive aiperf inside the loadgen pod and pull back compact results.
+"""Drive aiperf inside the loadgen pod and pull back its summary.
 
 aiperf runs detached (``nohup``) and is polled for an exit-code file, so a
-dropped ``kubectl exec`` stream — common behind proxies that cut idle
-connections — never loses a run. Only a few hundred KB of per-request samples
-leave the pod; the full aiperf artifacts stay in the pod for inspection.
+dropped ``kubectl exec`` stream, or an exec that fails while the API server
+or kubelet restarts, never loses a run. Only aiperf's summary export leaves
+the pod; the full aiperf artifacts stay in the pod for inspection.
 """
 
 from __future__ import annotations
@@ -20,11 +20,15 @@ import subprocess
 import time
 from typing import Any
 
+from ..router.common import get_common_aiperf_flags
 from .kube import Kube, KubeError
+from .stats import LATENCY_METRICS, LATENCY_STATS, THROUGHPUT_METRICS
 
 log = logging.getLogger(__name__)
 
 RESULTS_ROOT = "/results"
+# aiperf's per-run summary: means and percentiles of every metric.
+SUMMARY_FILE = "profile_export_aiperf.json"
 
 # aiperf renames its processes ("aiperf system_controller", "aiperf
 # worker_<id>", ...), so "aiperf profile" matches only the wrapper shell.
@@ -108,6 +112,10 @@ class Workload:
                 f"--prefix-length ({self.prefix_length}) must be shorter than "
                 f"--isl ({self.isl}), which includes it"
             )
+        points = self.points()
+        if len(set(points)) != len(points):
+            # Each point's runs are stored under its label.
+            raise ValueError("load points must be distinct")
 
     def prefix_tokens(self) -> int:
         """Shared-prefix tokens at the start of every prompt (0 when disabled)."""
@@ -166,9 +174,9 @@ def aiperf_command(
         model,
         "--url",
         url,
-        "--endpoint-type",
-        "chat",
-        "--streaming",
+        # Streaming chat with ignore_eos and no GPU telemetry, as the router
+        # benchmarks run it.
+        *get_common_aiperf_flags(),
         *load,
         "--request-count",
         str(workload.requests_for(point)),
@@ -184,8 +192,6 @@ def aiperf_command(
         str(workload.osl),
         "--output-tokens-stddev",
         "0",
-        "--extra-inputs",
-        "ignore_eos:true",
         # Mocker emits random token ids, so re-tokenizing its text output does
         # not round-trip; trust the server's usage counts instead.
         "--use-server-token-count",
@@ -211,50 +217,34 @@ def aiperf_command(
     return cmd
 
 
-# Runs inside the loadgen pod with the image's python3. Reads aiperf's
-# exports and prints one compact JSON object. Must stay standard-library only.
-_EXTRACT_SCRIPT = r"""
-import json, os, sys
-d = sys.argv[1]
-summary = json.load(open(os.path.join(d, "profile_export_aiperf.json")))
-samples = {"time_to_first_token": [], "inter_token_latency": [], "request_latency": []}
-errors = 0
-records = 0
-with open(os.path.join(d, "profile_export.jsonl")) as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        rec = json.loads(line)
-        meta = rec.get("metadata") or {}
-        if meta.get("benchmark_phase", "profiling") != "profiling":
-            continue
-        records += 1
-        if rec.get("error"):
-            errors += 1
-            continue
-        metrics = rec.get("metrics") or {}
-        for name, out in samples.items():
-            m = metrics.get(name)
-            v = m.get("value") if isinstance(m, dict) else m
-            if isinstance(v, (int, float)):
-                out.append(round(float(v), 4))
-def scalar(name):
-    m = summary.get(name)
-    return m.get("avg") if isinstance(m, dict) else None
-error_summary = summary.get("error_summary") or []
-summary_errors = sum(int(e.get("count", 0)) for e in error_summary if isinstance(e, dict))
-print(json.dumps({
-    "aiperf_version": summary.get("aiperf_version"),
-    "records": records,
-    "errors": max(errors, summary_errors),
-    "request_count": scalar("request_count"),
-    "request_throughput": scalar("request_throughput"),
-    "output_token_throughput": scalar("output_token_throughput"),
-    "benchmark_duration": scalar("benchmark_duration"),
-    "samples": samples,
-}))
-"""
+def summarize(summary: dict[str, Any]) -> dict[str, Any]:
+    """The per-run values the report compares, from aiperf's summary export.
+
+    aiperf summarizes the profiling phase only, so warmup requests are left
+    out. ``records`` counts the requests that succeeded.
+    """
+
+    def field(metric: str, key: str = "avg") -> Any:
+        value = summary.get(metric)
+        return value.get(key) if isinstance(value, dict) else None
+
+    errors = summary.get("error_summary") or []
+    return {
+        "aiperf_version": summary.get("aiperf_version"),
+        "records": field("request_count"),
+        "errors": sum(int(e.get("count", 0)) for e in errors if isinstance(e, dict)),
+        "benchmark_duration": field("benchmark_duration"),
+        **{metric: field(metric) for metric in THROUGHPUT_METRICS},
+        "latency": {
+            metric: {key: field(metric, key) for key in LATENCY_STATS.values()}
+            for metric in LATENCY_METRICS
+        },
+    }
+
+
+def _gone(stderr: str) -> bool:
+    """Whether a failed exec means the loadgen pod or container no longer exists."""
+    return "(NotFound)" in stderr or "No such container" in stderr
 
 
 class LoadGen:
@@ -330,28 +320,21 @@ class LoadGen:
         self.kill_aiperf()
         self.kube.exec(self.pod, ["sh", "-c", launch])
         deadline = time.monotonic() + timeout_s
-        pod_errors = 0
         while True:
             try:
                 proc = self.kube.exec(
                     self.pod, ["cat", rc_file], check=False, timeout=60
                 )
             except subprocess.TimeoutExpired:
-                proc = None  # transient; aiperf keeps running detached
+                proc = None
             if proc is not None and proc.returncode == 0 and proc.stdout.strip():
                 rc = int(proc.stdout.strip())
                 break
-            if proc is not None and proc.returncode != 0:
-                # "No such file" just means aiperf is still running; anything
-                # else is the exec itself failing, e.g. the pod is gone.
-                if "No such file" in proc.stderr:
-                    pod_errors = 0
-                else:
-                    pod_errors += 1
-                    if pod_errors >= 3:
-                        raise KubeError(
-                            f"cannot reach loadgen pod {self.pod}: {proc.stderr.strip()}"
-                        )
+            if proc is not None and proc.returncode != 0 and _gone(proc.stderr):
+                raise KubeError(f"loadgen {self.pod} is gone: {proc.stderr.strip()}")
+            # Anything else, from "No such file" while aiperf runs to an exec
+            # failing while the API server restarts, is waited out: aiperf
+            # keeps running detached.
             if time.monotonic() > deadline:
                 self.kill_aiperf()
                 raise KubeError(f"aiperf did not finish within {timeout_s}s")
@@ -361,7 +344,9 @@ class LoadGen:
                 self.pod, ["tail", "-n", "40", log_file], check=False
             ).stdout
             raise KubeError(f"aiperf exited {rc}:\n{tail}")
-        out = self.kube.exec(
-            self.pod, ["python3", "-", artifact_dir], input=_EXTRACT_SCRIPT
-        ).stdout
-        return json.loads(out)
+        path = f"{artifact_dir}/{SUMMARY_FILE}"
+        out = self.kube.exec(self.pod, ["cat", path]).stdout
+        try:
+            return summarize(json.loads(out))
+        except ValueError as e:
+            raise KubeError(f"cannot parse {path}: {e}") from e

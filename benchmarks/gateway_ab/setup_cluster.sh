@@ -65,10 +65,11 @@ fi
 
 if [[ "${SKIP_GATEWAY:-0}" != "1" ]]; then
   # The repository installer uses the current context, so run it with a
-  # kubeconfig whose current context is pinned to ours.
+  # kubeconfig whose current context is pinned to ours. --flatten embeds the
+  # certificates, whose paths may be relative to the original kubeconfig.
   pinned_kubeconfig=$(mktemp)
   trap 'rm -f "$pinned_kubeconfig"' EXIT
-  kubectl config view --raw --minify --context "$KUBE_CONTEXT" > "$pinned_kubeconfig"
+  kubectl config view --raw --minify --flatten --context "$KUBE_CONTEXT" > "$pinned_kubeconfig"
   KUBECONFIG="$pinned_kubeconfig" NAMESPACE="$BENCH_NAMESPACE" AGW_NAMESPACE="$AGW_NAMESPACE" \
     bash "$REPO_ROOT/deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh"
 fi

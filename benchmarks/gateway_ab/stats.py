@@ -5,9 +5,9 @@
 
 The unit of replication is a *round*: one aiperf run per side at one load
 point. Within a round both sides replay the same seed back to back, so a round
-is a matched pair. Each round reduces to one value per side (its mean, a
-percentile, or a throughput), and B is compared with A through a paired
-t-interval on the per-round log ratio B/A.
+is a matched pair. Each round reduces to one value per side (aiperf's mean or
+percentile for the run, or a throughput), and B is compared with A through a
+paired t-interval on the per-round log ratio B/A.
 
 Rounds differ by more than requests within a round do: the seed's arrival
 pattern, cache warmth, and node noise move a whole round. Pairing cancels the
@@ -21,10 +21,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from typing import Any, Literal, Mapping, Sequence, Union
-
-# A summary statistic: a percentile in [0, 100], or the mean.
-Stat = Union[float, Literal["mean"]]
+from typing import Any, Mapping, Sequence
 
 # Per-request latency metrics, as aiperf names them, and the label to report.
 LATENCY_METRICS = {
@@ -32,41 +29,14 @@ LATENCY_METRICS = {
     "inter_token_latency": "ITL",
     "request_latency": "E2E latency",
 }
+# The statistics of each latency metric that are compared, keyed by report
+# label, with the field of aiperf's summary export that holds each per run.
+LATENCY_STATS = {"mean": "avg", "p50": "p50", "p90": "p90", "p99": "p99"}
 # Per-run scalar metrics from aiperf's summary export.
 THROUGHPUT_METRICS = {
     "output_token_throughput": "Output tok/s",
     "request_throughput": "Requests/s",
 }
-
-
-def percentile(values: Sequence[float], q: float) -> float:
-    """Linear-interpolated percentile, ``q`` in [0, 100]. Matches numpy's default."""
-    if not values:
-        raise ValueError("percentile of empty sequence")
-    return _percentile_sorted(sorted(values), q)
-
-
-def _stat(data: Sequence[float], q: Stat) -> float:
-    """``q`` of already-sorted ``data``: a percentile, or the mean."""
-    return statistics.fmean(data) if q == "mean" else _percentile_sorted(data, q)
-
-
-def _percentile_sorted(data: Sequence[float], q: float) -> float:
-    if len(data) == 1:
-        return float(data[0])
-    pos = (len(data) - 1) * q / 100.0
-    lo = math.floor(pos)
-    hi = math.ceil(pos)
-    if lo == hi:
-        return float(data[lo])
-    return data[lo] + (data[hi] - data[lo]) * (pos - lo)
-
-
-def pct_delta(a: float, b: float) -> float:
-    """Relative change of B against A, in percent."""
-    if a == 0:
-        return math.inf if b > 0 else (-math.inf if b < 0 else 0.0)
-    return (b - a) / a * 100.0
 
 
 def t_quantile(p: float, df: int) -> float:
@@ -194,23 +164,31 @@ def verdict(
     return "inconclusive"
 
 
-def _compare(
-    values_a: Sequence[float],
-    values_b: Sequence[float],
-    higher_is_better: bool,
-    min_effect_pct: float,
-    subject: str,
+def compare_scalar(
+    values_a: Mapping[int, float | None],
+    values_b: Mapping[int, float | None],
+    higher_is_better: bool = True,
+    min_effect_pct: float = 2.0,
+    subject: str = "B",
 ) -> dict[str, Any] | None:
-    """One comparison row from per-round values matched by index.
+    """One comparison row from per-round values, with rounds matched by index.
 
-    A pair with a non-positive or non-finite value has no log ratio and is
-    left out. ``a`` and ``b`` are geometric means over the kept rounds, so
-    ``delta_pct`` is exactly B's change against A as the columns show it.
+    A round missing on either side, or with a non-positive or non-finite
+    value, has no log ratio and is left out. ``a`` and ``b`` are geometric
+    means over the kept rounds, so ``delta_pct`` is exactly B's change
+    against A as the columns show it. ``subject`` names B in the verdict.
     """
     kept = [
         (x, y)
-        for x, y in zip(values_a, values_b)
-        if x > 0 and y > 0 and math.isfinite(x) and math.isfinite(y)
+        for x, y in (
+            (values_a[r], values_b.get(r)) for r in sorted(values_a) if r in values_b
+        )
+        if x is not None
+        and y is not None
+        and x > 0
+        and y > 0
+        and math.isfinite(x)
+        and math.isfinite(y)
     ]
     if not kept:
         return None
@@ -225,69 +203,3 @@ def _compare(
         "verdict": verdict(ci, min_effect_pct, higher_is_better, subject),
         "rounds": len(kept),
     }
-
-
-def _matched(
-    a: Mapping[int, Any], b: Mapping[int, Any], present=lambda v: v is not None
-) -> list[int]:
-    return sorted(r for r in a if r in b and present(a[r]) and present(b[r]))
-
-
-def compare_latency(
-    rounds_a: Mapping[int, Sequence[float]],
-    rounds_b: Mapping[int, Sequence[float]],
-    quantiles: Sequence[Stat] = ("mean", 50.0, 90.0, 99.0),
-    min_effect_pct: float = 2.0,
-    subject: str = "B",
-) -> dict[str, dict[str, Any]]:
-    """Per-statistic comparison of one latency metric. Lower is better.
-
-    ``rounds_a`` and ``rounds_b`` map a round index to that round's
-    per-request samples. Rounds are matched by index; a round missing or
-    empty on either side is left out. ``subject`` names B in the verdicts.
-
-    The mean is reported next to the percentiles because latency under
-    batching is often multi-modal, and a percentile that sits between two
-    modes jumps from one to the other on small shifts in the mix.
-    """
-    pairs = _matched(rounds_a, rounds_b, present=bool)
-    sorted_a = {r: sorted(rounds_a[r]) for r in pairs}
-    sorted_b = {r: sorted(rounds_b[r]) for r in pairs}
-    out: dict[str, dict[str, Any]] = {}
-    for q in quantiles:
-        row = _compare(
-            [_stat(sorted_a[r], q) for r in pairs],
-            [_stat(sorted_b[r], q) for r in pairs],
-            higher_is_better=False,
-            min_effect_pct=min_effect_pct,
-            subject=subject,
-        )
-        if row is not None:
-            out[q if q == "mean" else f"p{q:g}"] = row
-    return out
-
-
-def compare_scalar(
-    values_a: Mapping[int, float],
-    values_b: Mapping[int, float],
-    higher_is_better: bool = True,
-    min_effect_pct: float = 2.0,
-    subject: str = "B",
-) -> dict[str, Any] | None:
-    """Compare a per-run scalar (throughput), with rounds matched by index."""
-    pairs = _matched(values_a, values_b)
-    va = [values_a[r] for r in pairs]
-    vb = [values_b[r] for r in pairs]
-    row = _compare(va, vb, higher_is_better, min_effect_pct, subject)
-    if row is not None:
-        row["a_cv_pct"] = cv(va)
-        row["b_cv_pct"] = cv(vb)
-    return row
-
-
-def cv(values: Sequence[float]) -> float:
-    """Coefficient of variation, in percent: across rounds, the A/A noise floor."""
-    if len(values) < 2:
-        return math.nan
-    mean = statistics.fmean(values)
-    return statistics.stdev(values) / mean * 100.0 if mean else math.nan

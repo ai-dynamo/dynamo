@@ -29,6 +29,21 @@ SIDE_DIRECT = "direct"
 # Fewer rounds measured validly on both sides than this and no verdict is given.
 MIN_ROUNDS = 2
 GATED_STATS = ("mean", "p50", "p90")
+# Deployment settings besides the images that change B's delta. A trend row
+# measured with other values is marked as not comparable.
+SETUP_CONFIG = (
+    "model",
+    "agg_workers",
+    "prefill_workers",
+    "decode_workers",
+    "block_size",
+    "speedup_ratio",
+    "mocker_extra_args",
+    "router_cpu",
+    "worker_cpu",
+    "sidecar_cpu",
+    "loadgen_cpu",
+)
 
 
 def load_runs(
@@ -63,9 +78,13 @@ def is_valid(run: dict[str, Any]) -> bool:
     expected = run.get("expected_requests")
     if run.get("errors", 0) > 0:
         return False
-    if expected and run.get("records", 0) < expected:
+    if expected and (run.get("records") or 0) < expected:
         return False
-    return bool(run.get("samples", {}).get("time_to_first_token"))
+    return _stat(run, "time_to_first_token", "avg") is not None
+
+
+def _stat(run: dict[str, Any], metric: str, key: str) -> float | None:
+    return run.get("latency", {}).get(metric, {}).get(key)
 
 
 def build_summary(results: pathlib.Path, min_effect_pct: float = 2.0) -> dict[str, Any]:
@@ -131,21 +150,25 @@ def _point(
         "load_desc": load.describe(),
         "sides": {"a": side_a, "b": side_b},
         "rounds": {"a": len(a_runs), "b": len(b_runs), "paired": len(paired)},
-        "ttft_round_cv_pct": {
-            "a": _round_mean_cv(a_runs),
-            "b": _round_mean_cv(b_runs),
-        },
         "latency": {},
         "throughput": {},
     }
     # Rounds pair up by index: both arms replayed the same seed in them.
     for metric in stats.LATENCY_METRICS:
-        rows = stats.compare_latency(
-            {r: a_by_round[r]["samples"].get(metric, []) for r in paired},
-            {r: b_by_round[r]["samples"].get(metric, []) for r in paired},
-            min_effect_pct=min_effect_pct,
-            subject=subject,
-        )
+        rows = {}
+        # The mean is reported next to the percentiles because latency under
+        # batching is often multi-modal, and a percentile that sits between
+        # two modes jumps from one to the other on small shifts in the mix.
+        for label, key in stats.LATENCY_STATS.items():
+            row = stats.compare_scalar(
+                {r: _stat(a_by_round[r], metric, key) for r in paired},
+                {r: _stat(b_by_round[r], metric, key) for r in paired},
+                higher_is_better=False,
+                min_effect_pct=min_effect_pct,
+                subject=subject,
+            )
+            if row is not None:
+                rows[label] = row
         if rows:
             point["latency"][metric] = rows
     for metric in stats.THROUGHPUT_METRICS:
@@ -185,16 +208,6 @@ def json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [json_safe(v) for v in value]
     return value
-
-
-def _round_mean_cv(runs: list[dict[str, Any]]) -> float:
-    """Run-to-run noise: the CV of each round's mean TTFT, in percent."""
-    means = [
-        sum(t) / len(t)
-        for t in (r["samples"].get("time_to_first_token") for r in runs)
-        if t
-    ]
-    return stats.cv(means)
 
 
 def incomplete(summary: dict[str, Any]) -> list[str]:
@@ -286,8 +299,9 @@ def render_markdown(summary: dict[str, Any]) -> str:
     lines += [
         sides + "Workers are mocker in every arm, built from the same spec.",
         "",
-        "Each round gives one value per side; A and B are their geometric means "
-        "over the rounds measured on both sides. Δ is B relative to A; negative "
+        "Each round gives one value per side, aiperf's mean or percentile for "
+        "the run; A and B are their geometric means over the rounds measured "
+        "on both sides. Δ is B relative to A; negative "
         "latency Δ means B is faster. Intervals are 95% paired t-intervals over "
         "the per-round B/A ratios (both sides replay the same seed each round). "
         f"`same` means the interval lies within ±{summary['min_effect_pct']:g}%; "
@@ -329,7 +343,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
 def _tables(
     points: list[dict[str, Any]], labels: tuple[str, str], heading: str
 ) -> list[str]:
-    """A table per topology comparing two arms, each with its noise line."""
+    """A table per topology comparing two arms."""
     a, b = labels
     by_topology: dict[str, list[dict[str, Any]]] = {}
     for p in points:
@@ -357,15 +371,6 @@ def _tables(
                 if row:
                     lines.append(_row(c, label, row, "{:.1f}"))
         lines.append("")
-        noise = [(p["load_desc"], p["ttft_round_cv_pct"]) for p in pts if p["latency"]]
-        if noise:
-            lines += [
-                "Run-to-run noise (coefficient of variation of the per-round TTFT mean):",
-                "",
-            ]
-            for c, cv in noise:
-                lines.append(f"- {c}: {a} {_fmt_pct(cv['a'])}, {b} {_fmt_pct(cv['b'])}")
-            lines.append("")
     return lines
 
 
@@ -385,11 +390,9 @@ def render_trend(
     runs = []
     for path in history.glob("*/summary.json"):
         summary = json.loads(path.read_text())
-        if not all("load" in p for p in summary.get("points", [])):
-            continue  # written by an older harness without load-point labels
-        started = summary.get("meta", {}).get("started", path.parent.name)
+        started = summary.get("meta", {}).get("started", "")
         runs.append((started, path.parent.name, summary))
-    runs.sort(key=lambda r: r[0])
+    runs.sort(key=lambda r: r[:2])
     newest = _setup(runs[-1][2]) if runs else None
     columns = sorted(
         {
@@ -433,10 +436,11 @@ def render_trend(
 
 def _setup(summary: dict[str, Any]) -> tuple[str, ...]:
     meta = summary.get("meta", {})
+    config = meta.get("config", {})
     return (
         meta.get("backend", "kubernetes"),
         json.dumps(meta.get("workload"), sort_keys=True),
-        json.dumps(meta.get("workers"), sort_keys=True),
+        json.dumps({k: config.get(k) for k in SETUP_CONFIG}, sort_keys=True),
         # Harness version 3 moved A behind the gateway, which changes every B delta.
         json.dumps(meta.get("identity", {}).get("harness")),
     )
@@ -444,14 +448,12 @@ def _setup(summary: dict[str, Any]) -> tuple[str, ...]:
 
 def _row(load: str, label: str, row: dict[str, Any], fmt: str) -> str:
     lo, hi = row["ci_pct"]
+    # One round has no spread, so no interval.
+    ci = "n/a" if math.isnan(lo) else f"{lo:+.1f}%..{hi:+.1f}%"
     return (
         f"| {load} | {label} | {fmt.format(row['a'])} | {fmt.format(row['b'])} | "
-        f"{row['delta_pct']:+.1f}% | {lo:+.1f}%..{hi:+.1f}% | {row['verdict']} |"
+        f"{row['delta_pct']:+.1f}% | {ci} | {row['verdict']} |"
     )
-
-
-def _fmt_pct(v: float) -> str:
-    return "n/a" if v is None or math.isnan(v) else f"{v:.1f}%"
 
 
 def _meta_table(meta: dict[str, Any]) -> list[str]:

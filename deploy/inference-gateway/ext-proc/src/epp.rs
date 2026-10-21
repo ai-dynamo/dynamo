@@ -509,11 +509,7 @@ impl Router {
     /// splits into garbage on `:`, silently never matching a bare `fd00::2`
     /// candidate.
     fn subset_to_worker_ids(&self, candidate_subset: &[String]) -> HashSet<u64> {
-        let candidates: HashSet<&str> = candidate_subset.iter().map(|s| s.as_str()).collect();
-        let candidate_ips: HashSet<IpAddr> = candidate_subset
-            .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
+        let (candidates, candidate_ips) = candidate_sets(candidate_subset);
         let index = read_index(&self.worker_index);
         index
             .endpoints
@@ -1316,15 +1312,16 @@ fn is_prefill_card(card: &ModelDeploymentCard) -> bool {
     card.effective_worker_type() == WorkerType::Prefill
 }
 
-/// Whether a `candidate_subset` hint (`ip:port` or bare `ip` entries) names
-/// the static endpoint, matched the same way as reflected pod addresses.
-fn static_endpoint_in_subset(endpoint: &str, candidate_subset: &[String]) -> bool {
-    let candidates: HashSet<&str> = candidate_subset.iter().map(|s| s.as_str()).collect();
-    let candidate_ips: HashSet<IpAddr> = candidate_subset
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    endpoint_in_subset(endpoint, &candidates, &candidate_ips)
+/// A `candidate_subset` hint (`ip:port` or bare `ip` entries) as the sets
+/// [`endpoint_in_subset`] matches an endpoint against.
+fn candidate_sets(candidate_subset: &[String]) -> (HashSet<&str>, HashSet<IpAddr>) {
+    (
+        candidate_subset.iter().map(String::as_str).collect(),
+        candidate_subset
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect(),
+    )
 }
 
 fn spawn_prefill_discovery_watcher(
@@ -1440,7 +1437,8 @@ impl EndpointPicker for Router {
             } else if let Some(endpoint) = &self.static_endpoint {
                 // One endpoint fronts every worker, so a subset hint either
                 // names it (no narrowing) or excludes everything.
-                if !static_endpoint_in_subset(endpoint, &req.candidate_subset) {
+                let (candidates, candidate_ips) = candidate_sets(&req.candidate_subset);
+                if !endpoint_in_subset(endpoint, &candidates, &candidate_ips) {
                     tracing::warn!(
                         subset = ?req.candidate_subset,
                         endpoint = %endpoint,
@@ -1788,47 +1786,17 @@ mod tests {
     }
 
     #[test]
-    fn static_endpoint_subset_match_uses_address_semantics() {
-        let subset = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(static_endpoint_in_subset(
-            "127.0.0.1:8100",
-            &subset(&["127.0.0.1:8100"])
-        ));
-        assert!(static_endpoint_in_subset(
-            "127.0.0.1:8100",
-            &subset(&["127.0.0.1"])
-        ));
-        assert!(static_endpoint_in_subset(
-            "[fd00::2]:8100",
-            &subset(&["fd00::2"])
-        ));
-        assert!(!static_endpoint_in_subset(
-            "127.0.0.1:8100",
-            &subset(&["10.0.0.1:8100"])
-        ));
-    }
-
-    #[test]
     fn prefill_cards_are_recognized_by_worker_type() {
-        // A current prefill worker that does not emit the legacy marker bit
-        // (the mocker registers exactly this).
+        // The mocker registers prefill workers without the legacy marker bit.
+        // Legacy cards resolve as in lib/llm's effective_worker_type tests.
         assert!(is_prefill_card(&card(
             Some(WorkerType::Prefill),
             ModelType::empty()
         )));
-        // A current prefill worker that dual-emits the marker (vLLM).
-        assert!(is_prefill_card(&card(
-            Some(WorkerType::Prefill),
-            ModelType::Prefill
+        assert!(!is_prefill_card(&card(
+            Some(WorkerType::Decode),
+            ModelType::Chat
         )));
-        // A legacy prefill card: no worker_type, marker bit only.
-        assert!(is_prefill_card(&card(None, ModelType::Prefill)));
-
-        let chat = ModelType::Chat | ModelType::Completions;
-        assert!(!is_prefill_card(&card(Some(WorkerType::Decode), chat)));
-        assert!(!is_prefill_card(&card(Some(WorkerType::Aggregated), chat)));
-        // A legacy card with no marker is an aggregated worker.
-        assert!(!is_prefill_card(&card(None, chat)));
     }
 
     #[test]
