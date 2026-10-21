@@ -492,10 +492,8 @@ def test_priority_key_for_framework(framework, expected):
     assert _priority_key_for(framework) is expected
 
 
-# Tail of a vLLM post-merge GPU-parallel job (22 GiB card, 16 slots): small
-# long tests, 7.3 GiB disaggregated_same_gpu pairs, a large multimodal test,
-# and an 18.7 GiB tool-calling test with a short timeout that ran alone last
-# under the default order. (name, profiled_gib, runtime_s, timeout_s)
+# Tail of a vLLM post-merge GPU-parallel job (22 GiB card, 16 slots) where the
+# 18.7 GiB short-timeout test ran alone last. (name, gib, runtime_s, timeout_s)
 _VLLM_TAIL_TESTS = [
     ("small_a", 3.8, 300, 1800),
     ("small_b", 3.8, 300, 1800),
