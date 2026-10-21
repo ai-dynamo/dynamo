@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""SGLang plugin that makes a redundant ``resume_memory_occupation`` safe."""
-
 from __future__ import annotations
 
 import logging
