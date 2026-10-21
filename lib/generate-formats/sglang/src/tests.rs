@@ -78,3 +78,78 @@ fn catalog_format_owns_client_shape_and_reuses_native_exchange() {
         7
     );
 }
+
+#[test]
+fn codec_extends_native_field_rules_and_joins_structured_sequences() {
+    use crate::response_merge::{FieldClass, PrefillFlags, RuleSet};
+    struct Structured;
+    impl ClientCodec for Structured {
+        fn rules(&self) -> Arc<RuleSet> {
+            Arc::new(crate::rules().extend(
+                [("/meta_info/custom_scores".into(), FieldClass::Delta)],
+                PrefillFlags::default(),
+            ))
+        }
+        fn overlay_sequence(&self, path: &str, prefix: &Value, target: &mut Value) -> bool {
+            if path != "/meta_info/routed_experts" {
+                return crate::Native.overlay_sequence(path, prefix, target);
+            }
+            let (Some(prefix), Some(target)) =
+                (prefix["data"].as_array(), target["data"].as_array_mut())
+            else {
+                return false;
+            };
+            target.splice(..prefix.len().min(target.len()), prefix.iter().cloned());
+            true
+        }
+    }
+    let format = SglangFormat::with_codec("structured", Structured);
+    let opened = format
+        .open(ClientRequest {
+            body: br#"{"input_ids":[1],"return_routed_experts":true}"#,
+            headers: &HeaderMap::from_iter([(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            )]),
+            default_request_id: "public",
+        })
+        .unwrap();
+    let mut bound = (opened.bind)(&crate::testkit::worker()).unwrap();
+    assert!(
+        bound
+            .request
+            .annotations
+            .iter()
+            .any(|a| a == dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION)
+    );
+    for (response, prefill) in [
+        (
+            json!({"meta_info":{"routed_experts":{"data":[1],"dtype":"u8"}}}),
+            true,
+        ),
+        (
+            json!({"output_ids":[2],"meta_info":{"custom_scores":[0.25]}}),
+            false,
+        ),
+        (
+            json!({"output_ids":[3],"meta_info":{"custom_scores":[0.5],"routed_experts":{"data":[0,2,3],"dtype":"u8"}}}),
+            false,
+        ),
+    ] {
+        bound
+            .exchange
+            .chunk(
+                crate::inspect(response, prefill).unwrap().output,
+                prefill,
+                &mut |_| {},
+            )
+            .unwrap();
+    }
+    let result = bound.exchange.finish().unwrap().unwrap();
+    assert_eq!(result["output_ids"], json!([2, 3]));
+    assert_eq!(result["meta_info"]["custom_scores"], json!([0.25, 0.5]));
+    assert_eq!(
+        result["meta_info"]["routed_experts"],
+        json!({"data":[1,2,3],"dtype":"u8"})
+    );
+}

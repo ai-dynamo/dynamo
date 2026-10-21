@@ -65,12 +65,18 @@ pub fn run(
     format: &dyn GenerateFormat,
     shape: &dyn ClientShape,
     scenario: &Scenario,
+    worker: &dyn sim::Worker,
 ) -> Option<Result<Outcome, String>> {
     let body = shape.body(&scenario.request)?;
-    Some(drive(format, &body, scenario))
+    Some(drive(format, &body, scenario, worker))
 }
 
-fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Result<Outcome, String> {
+fn drive(
+    format: &dyn GenerateFormat,
+    body: &[u8],
+    scenario: &Scenario,
+    worker: &dyn sim::Worker,
+) -> Result<Outcome, String> {
     let truth = &scenario.truth;
     let Opened {
         bind, validation, ..
@@ -118,15 +124,16 @@ fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Resul
     let info = &scenario.engine_info;
     let mut prefill = None;
     if disaggregated {
-        let response = sim::stream(
-            truth,
-            &worker_body(&body, true),
-            &request.token_ids,
-            Role::Prefill,
-            info,
-        )
-        .pop()
-        .ok_or("prefill sent no response")?;
+        let response = worker
+            .stream(sim::Request {
+                truth,
+                body: &worker_body(&body, true),
+                prompt: &request.token_ids,
+                role: Role::Prefill,
+                engine_info: info,
+            })
+            .pop()
+            .ok_or("prefill sent no response")?;
         let inspected = crate::inspect(response, true)
             .map_err(|e| format!("inspect rejected prefill's response: {e}"))?;
         if !inspected.output.token_ids.is_empty() || !inspected.terminal {
@@ -139,13 +146,13 @@ fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Resul
             .chunk(output, true, &mut |_| {})
             .map_err(|e| e.to_string())?;
     }
-    let chunks = sim::stream(
+    let chunks = worker.stream(sim::Request {
         truth,
-        &worker_body(&body, false),
-        &request.token_ids,
+        body: &worker_body(&body, false),
+        prompt: &request.token_ids,
         role,
-        info,
-    );
+        engine_info: info,
+    });
     let count = chunks.len();
     for (index, chunk) in chunks.into_iter().enumerate() {
         let last = index + 1 == count;

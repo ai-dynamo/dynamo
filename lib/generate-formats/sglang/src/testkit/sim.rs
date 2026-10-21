@@ -86,6 +86,35 @@ fn top_logprobs(id: u32, lp: f64, k: usize) -> Value {
     )
 }
 
+/// One engine invocation, including its native body and serving role.
+pub struct Request<'a> {
+    pub truth: &'a Truth,
+    pub body: &'a Map<String, Value>,
+    pub prompt: &'a [u32],
+    pub role: Role,
+    pub engine_info: &'a Value,
+}
+
+/// A format's simulated worker. Implementations can own encoding configuration
+/// and inspect the request and serving role, just like a real producer.
+pub trait Worker: Send + Sync {
+    fn stream(&self, request: Request<'_>) -> Vec<Value>;
+}
+
+pub struct NativeWorker;
+
+impl Worker for NativeWorker {
+    fn stream(&self, request: Request<'_>) -> Vec<Value> {
+        stream(
+            request.truth,
+            request.body,
+            request.prompt,
+            request.role,
+            request.engine_info,
+        )
+    }
+}
+
 /// SGLang's response stream for `body` sent with `prompt`.
 pub fn stream(
     truth: &Truth,

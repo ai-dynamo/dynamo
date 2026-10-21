@@ -2201,6 +2201,7 @@ dependencies = [
  "libc",
  "libloading 0.8.9",
  "lru",
+ "mime",
  "minijinja",
  "modelexpress-client",
  "modelexpress-common",

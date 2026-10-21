@@ -15,6 +15,8 @@ use serde_json::{Map, Value};
 
 use dynamo_llm::protocols::response_merge::PrefillNeed;
 
+use crate::{ClientCodec, Native};
+
 /// How one response field joins chunks and prefill/decode output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -92,6 +94,24 @@ impl RuleSet {
         Ok(Self::new(file.fields, file.prefill_request_flags))
     }
 
+    /// Add or override field classes, retaining the native request flags.
+    /// Additional flag groups request prefill output for new response fields.
+    pub fn extend(
+        &self,
+        fields: impl IntoIterator<Item = (String, FieldClass)>,
+        flags: PrefillFlags,
+    ) -> Self {
+        let mut combined: BTreeMap<_, _> = self
+            .fields()
+            .map(|(path, class)| (path.to_owned(), class))
+            .collect();
+        combined.extend(fields);
+        let mut prefill_flags = self.prefill_flags.clone();
+        prefill_flags.before_first.extend(flags.before_first);
+        prefill_flags.before_last.extend(flags.before_last);
+        Self::new(combined, prefill_flags)
+    }
+
     pub fn fields(&self) -> impl Iterator<Item = (&str, FieldClass)> {
         self.fields.iter().map(|f| (f.path.as_str(), f.class))
     }
@@ -165,7 +185,7 @@ impl RuleSet {
 
     /// P/D: prompt values are swapped in; prefill's base64 prefix overwrites
     /// decode's in place, and decode's value is dropped without one.
-    fn join_prefill(&self, prefill: &mut Value, decode: &mut Value) {
+    fn join_prefill(&self, prefill: &mut Value, decode: &mut Value, codec: &impl ClientCodec) {
         self.swap(FieldClass::Prompt, prefill, decode);
         for field in self.of(FieldClass::SequenceFinal) {
             let Some(target) = object(decode, &field.parent) else {
@@ -174,9 +194,7 @@ impl RuleSet {
             let source = object(prefill, &field.parent).and_then(|o| o.get(&field.key));
             let joined = match (source, target.get_mut(&field.key)) {
                 (_, None) => true,
-                (Some(Value::String(source)), Some(Value::String(target))) => {
-                    overlay_base64_prefix(source, target)
-                }
+                (Some(source), Some(target)) => codec.overlay_sequence(&field.path, source, target),
                 _ => false,
             };
             if !joined {
@@ -209,7 +227,7 @@ fn slot<'a>(object: &'a mut Map<String, Value>, key: &str) -> &'a mut Value {
 /// that length, in place. Whole 4-character groups are copied as text; only
 /// the group where `prefix`'s bytes end is decoded. Returns false, leaving
 /// `target` unchanged, when either value is not padded standard base64.
-fn overlay_base64_prefix(prefix: &str, target: &mut String) -> bool {
+pub(crate) fn overlay_base64_prefix(prefix: &str, target: &mut String) -> bool {
     let decoded_len = |text: &str| text.trim_end_matches('=').len() * 3 / 4;
     let len = decoded_len(prefix);
     let whole = len / 3 * 4;
@@ -266,7 +284,8 @@ fn is_padded_base64(text: &str) -> bool {
 }
 
 /// Builds one client response from streamed chunks and prefill output.
-pub struct Assembler {
+pub struct Assembler<C = Native> {
+    codec: Arc<C>,
     rules: Arc<RuleSet>,
     prefill: Option<Value>,
     joined: Option<Value>,
@@ -274,7 +293,14 @@ pub struct Assembler {
 
 impl Assembler {
     pub fn new(rules: Arc<RuleSet>) -> Self {
+        Self::with_codec(rules, Arc::new(Native))
+    }
+}
+
+impl<C: ClientCodec> Assembler<C> {
+    pub fn with_codec(rules: Arc<RuleSet>, codec: Arc<C>) -> Self {
         Self {
+            codec,
             rules,
             prefill: None,
             joined: None,
@@ -288,7 +314,8 @@ impl Assembler {
     /// Streaming: join prefill values for rendering, then restore them.
     pub fn render<T>(&mut self, mut chunk: Value, render: impl FnOnce(&Value) -> T) -> T {
         if let Some(prefill) = &mut self.prefill {
-            self.rules.join_prefill(prefill, &mut chunk);
+            self.rules
+                .join_prefill(prefill, &mut chunk, self.codec.as_ref());
         }
         let rendered = render(&chunk);
         if let Some(prefill) = &mut self.prefill {
@@ -309,7 +336,8 @@ impl Assembler {
     pub fn finish(&mut self) -> Option<Value> {
         let mut response = self.joined.take()?;
         if let Some(prefill) = &mut self.prefill {
-            self.rules.join_prefill(prefill, &mut response);
+            self.rules
+                .join_prefill(prefill, &mut response, self.codec.as_ref());
         }
         Some(response)
     }

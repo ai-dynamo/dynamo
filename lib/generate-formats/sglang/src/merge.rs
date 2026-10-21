@@ -65,6 +65,22 @@ pub fn rules() -> Arc<RuleSet> {
 /// and response. Formats that only reshape what clients send and receive
 /// implement this and keep SGLang's joining and P/D.
 pub trait ClientCodec: Send + Sync + 'static {
+    /// Response field semantics; extend the native rules to add engine fields.
+    fn rules(&self) -> Arc<RuleSet> {
+        rules()
+    }
+
+    /// Join a sequence value at the P/D seam. Aggregated values pass through.
+    /// Return false to omit an unusable field rather than expose stale rows.
+    fn overlay_sequence(&self, _path: &str, prefix: &Value, target: &mut Value) -> bool {
+        match (prefix, target) {
+            (Value::String(prefix), Value::String(target)) => {
+                crate::response_merge::overlay_base64_prefix(prefix, target)
+            }
+            _ => false,
+        }
+    }
+
     /// The client's body as an SGLang `/generate` body; `None` when it is one.
     fn decode_request(&self, _body: &[u8]) -> Result<Option<Value>, ClientError> {
         Ok(None)
@@ -111,6 +127,7 @@ impl ClientCodec for Native {
 pub struct SglangFormat<C: ClientCodec = Native> {
     name: String,
     codec: Arc<C>,
+    rules: Arc<RuleSet>,
 }
 
 impl SglangFormat {
@@ -137,6 +154,7 @@ impl<C: ClientCodec> SglangFormat<C> {
     pub fn with_codec(name: impl Into<String>, codec: C) -> Self {
         Self {
             name: name.into(),
+            rules: codec.rules(),
             codec: Arc::new(codec),
         }
     }
@@ -182,7 +200,8 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
         let cache_namespace = request.cache_namespace().map(str::to_owned);
         let stream = request.stream;
         let (input_ids, body) = request.into_worker_envelope(&request_id);
-        let prefill_need = RULES.prefill_need(&body);
+        let rules = self.rules.clone();
+        let prefill_need = rules.prefill_need(&body);
         let codec = self.codec.clone();
         Ok(Opened {
             model: None,
@@ -219,7 +238,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
                 Ok(Bound {
                     request,
                     exchange: Box::new(Exchange {
-                        assembler: Assembler::new(RULES.clone()),
+                        assembler: Assembler::with_codec(rules, codec.clone()),
                         codec,
                         request_id,
                         stream,
@@ -254,9 +273,9 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
     }
 }
 
-struct Exchange<C> {
+struct Exchange<C: ClientCodec> {
     codec: Arc<C>,
-    assembler: Assembler,
+    assembler: Assembler<C>,
     request_id: String,
     stream: bool,
 }

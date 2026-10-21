@@ -150,6 +150,7 @@ pub struct Harness {
     pub format: SharedFormat,
     pub shape: Arc<dyn ClientShape>,
     pub cases: u32,
+    pub worker: Arc<dyn super::sim::Worker>,
 }
 
 /// The parts of an outcome a client can observe.
@@ -175,6 +176,7 @@ impl Harness {
             format,
             shape: Arc::new(NativeShape),
             cases: 512,
+            worker: Arc::new(super::sim::NativeWorker),
         }
     }
 
@@ -204,7 +206,12 @@ impl Harness {
     }
 
     fn outcome(&self, scenario: &Scenario) -> Result<Outcome, TestCaseError> {
-        match driver::run(self.format.as_ref(), self.shape.as_ref(), scenario) {
+        match driver::run(
+            self.format.as_ref(),
+            self.shape.as_ref(),
+            scenario,
+            self.worker.as_ref(),
+        ) {
             None => Err(TestCaseError::reject("the client cannot express it")),
             Some(Err(violation)) => Err(TestCaseError::fail(violation)),
             Some(Ok(outcome)) => Ok(outcome),
