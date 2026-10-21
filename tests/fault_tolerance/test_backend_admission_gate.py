@@ -23,14 +23,18 @@ of that rank, whose own per-engine gauges the multi-rank scenario compares
 against the gate's.
 
 A refusal must reach the client as an overload — HTTP 529 under the default
-configuration — and the frontend must mark the refusing worker overloaded, never
-report it down, so the healthy worker keeps serving once capacity returns. The
-frontend's router client records both as structured `routing_event` log
-records, which the shared `tests.utils.router_logs` helpers parse: each refusal
-must add a `worker_overloaded` record for the worker, and no scenario may ever
-produce a `worker_inhibited` one. For the length of that overload lease (one
-second) the frontend refuses new work for the worker itself, so a scenario that
-sends new requests after a refusal waits the lease out first.
+configuration — and the frontend must never report the refusing worker down, so
+the healthy worker keeps serving once capacity returns. When the worker could
+neither admit nor queue any more work, the refusal is the whole worker's, and
+the frontend marks the worker overloaded instead. The frontend's router client
+records both as structured `routing_event` log records, which the shared
+`tests.utils.router_logs` helpers parse: each whole-worker refusal must add a
+`worker_overloaded` record for the worker, and no scenario may ever produce a
+`worker_inhibited` one. For the length of that overload lease (one second) the
+frontend refuses new work for the worker itself, so a scenario that sends new
+requests after such a refusal waits the lease out first. A refusal limited to
+the request's DP rank, while the worker could still take other work, marks
+nothing, so the worker's other ranks keep receiving work at once.
 
 The gate has two engine limits, applied per rank and across the worker. A
 request holds engine request capacity from admission until it finishes, and
@@ -552,10 +556,13 @@ async def _shed(
     url: str,
     rank: str = UNSPECIFIED,
     headers: dict[str, str] | None = None,
+    whole_worker: bool = True,
 ) -> None:
     """Submit one request the gate must reject rather than queue, and check the
     client sees the frontend's overload status for it, and that the frontend
-    marked the worker overloaded and never reported it down."""
+    never reported the worker down. A whole-worker refusal must also make the
+    frontend mark the worker overloaded; a refusal limited to `rank` marks
+    nothing, which the caller checks once later traffic has been logged."""
     marks = len(_routing_events(gate, "worker_overloaded"))
     # Read before the request exists: a scrape awaits, and the request could
     # otherwise be rejected first and leave no further rejection to wait for.
@@ -567,13 +574,14 @@ async def _shed(
         f"a refusal must reach the client as an overload ({OVERLOADED}), got "
         f"{status}: {body}"
     )
-    await asyncio.to_thread(
-        wait_for_worker_routing_events,
-        gate.frontend,
-        instance_id=gate.worker_id,
-        routing_event="worker_overloaded",
-        expected_count=marks + 1,
-    )
+    if whole_worker:
+        await asyncio.to_thread(
+            wait_for_worker_routing_events,
+            gate.frontend,
+            instance_id=gate.worker_id,
+            routing_event="worker_overloaded",
+            expected_count=marks + 1,
+        )
     _assert_never_reported_down(gate)
 
 
@@ -1180,6 +1188,83 @@ def test_ranks_admit_and_queue_independently_and_share_the_aggregate(
         )
         await gate.assert_counters("rank 1", "1", received=2, direct=1, queue=1)
         await gate.assert_counters("unspecified work", received=2, queue=1, rejected=1)
+
+    settings = {
+        ENGINE_REQUEST_LIMIT_ENV: 1,
+        ENGINE_REQUEST_WAITING_LIMIT_ENV: 1,
+        REQUEST_QUEUE_LIMIT_ENV: 1,
+    }
+    # Two sequences per rank, so an admitted request always answers at once.
+    with _deployment(
+        request,
+        dynamo_dynamic_ports,
+        request_plane,
+        settings,
+        max_num_seqs=2,
+        dp_size=2,
+    ) as deployment:
+        _run(dynamo_dynamic_ports.frontend_port, deployment, scenario, dp_size=2)
+
+
+@pytest.mark.timeout(120)
+def test_a_full_rank_refuses_for_itself_and_its_idle_sibling_is_admitted_at_once(
+    request,
+    runtime_services_session,
+    predownload_tokenizers,
+    request_plane,
+    dynamo_dynamic_ports,
+):
+    """A worker serving ranks 0 and 1, with every limit at one per rank.
+
+    With rank 0's engine and queue full and rank 1 idle, the worker refuses the
+    next rank 0 request for rank 0 alone: the client still sees an overload,
+    but the frontend marks nothing. So a rank 1 request sent at once — without
+    waiting out an overload lease, retrying or another client — is admitted
+    and runs on rank 1's engine while rank 0 stays full.
+    """
+
+    async def scenario(
+        gate: Gate, session: aiohttp.ClientSession, url: str, worker_id: int
+    ) -> None:
+        on_rank = {rank: _pin(worker_id, rank) for rank in (0, 1)}
+        marks = len(_routing_events(gate, "worker_overloaded"))
+
+        hold_0 = await _start_running(
+            gate, session, url, (1, 0, 0), "rank-0", "0", on_rank[0]
+        )
+        queued_0 = await _stage_waiting(
+            gate,
+            session,
+            url,
+            functools.partial(_hold, headers=on_rank[0]),
+            (1, 0, 1),
+            "queued on rank 0",
+            "0",
+        )
+        assert await gate.occupancy("1") == (0, 0, 0)
+
+        await _shed(gate, session, url, "0", on_rank[0], whole_worker=False)
+        hold_1 = await _start_running(
+            gate, session, url, (1, 0, 0), "rank-1", "1", on_rank[1]
+        )
+        await gate.await_engine_agreement("rank 1's request to run on its engine")
+        assert await gate.occupancy("0") == (1, 0, 1), "rank 0 stays full"
+
+        hold_0.close()
+        queued_0 = await _result(queued_0, "queued on rank 0")
+        for response in (queued_0, hold_1):
+            response.close()
+        await gate.await_idle()
+        await gate.await_engine_agreement("every engine to drain")
+        assert (
+            len(_routing_events(gate, "worker_overloaded")) == marks
+        ), "a refusal for one rank must never mark the worker overloaded"
+
+        await gate.assert_counters(
+            "rank 0", "0", received=3, direct=1, queue=1, rejected=1
+        )
+        await gate.assert_counters("rank 1", "1", received=1, direct=1)
+        await gate.assert_counters("unspecified work")
 
     settings = {
         ENGINE_REQUEST_LIMIT_ENV: 1,

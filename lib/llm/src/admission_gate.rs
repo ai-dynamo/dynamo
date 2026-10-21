@@ -87,6 +87,11 @@
 //! residence has no age limit: a request leaves the queue only by admission or
 //! cancellation.
 //!
+//! A rejection is [`ErrorType::WorkerRankOverloaded`] with the request's rank
+//! when it is limited to that rank and the worker could still admit or queue
+//! other work. Otherwise it is [`ErrorType::WorkerOverloaded`]. A rank-local
+//! rejection does not make routing back off from the whole worker.
+//!
 //! Every queue operation is O(1) in the queue's length: the queues are doubly
 //! linked lists threaded through one preallocated pool of slots, and a queued
 //! request keeps a handle to its own slot, so a cancellation unlinks exactly
@@ -467,8 +472,12 @@ impl CapacityWarning {
     }
 }
 
-/// The message a shed request is refused with.
+/// The message a shed request is refused with when the worker can take no more
+/// work.
 const OVERLOADED_MESSAGE: &str = "Server overloaded: worker at capacity";
+
+/// The message a shed request is refused with when only its DP rank is full.
+const RANK_OVERLOADED_MESSAGE: &str = "Server overloaded: DP rank at capacity";
 
 /// The message a request cancelled while queued is refused with. It is
 /// deliberately not an overload: the caller went away, which is not
@@ -615,7 +624,9 @@ where
 /// [`reject`] builds from it, so no admission state escapes this module.
 enum Rejection {
     /// The request could not be admitted and its queue had no room for it.
-    QueueFull,
+    /// `dp_rank` is its DP rank when the worker could still take other work
+    /// (see [`GateState::refusal_rank`]), or `None` for the whole worker.
+    QueueFull { dp_rank: Option<u32> },
     /// The request was cancelled before it was admitted.
     Cancelled,
 }
@@ -624,19 +635,34 @@ enum Rejection {
 /// caller fails it with.
 ///
 /// Shedding is backpressure on this one worker, so it carries
-/// [`ErrorType::WorkerOverloaded`]. A cancellation is not backpressure: the
+/// [`ErrorType::WorkerOverloaded`], or [`ErrorType::WorkerRankOverloaded`] when
+/// it is limited to the request's DP rank. A cancellation is not backpressure: the
 /// caller went away, so classifying it as an overload would misreport a worker
 /// that never refused anything.
 fn reject(rejection: Rejection, context: Option<&Arc<dyn AsyncEngineContext>>) -> DynamoError {
     let request_id = context.map(|context| context.id()).unwrap_or_default();
     let (error_type, message) = match rejection {
-        Rejection::QueueFull => {
+        Rejection::QueueFull { dp_rank: None } => {
             tracing::warn!(
                 request_id,
                 "Worker at capacity (an engine limit and the queue are both full), rejecting \
                  request"
             );
             (ErrorType::WorkerOverloaded, OVERLOADED_MESSAGE)
+        }
+        Rejection::QueueFull {
+            dp_rank: Some(dp_rank),
+        } => {
+            tracing::warn!(
+                request_id,
+                dp_rank,
+                "DP rank at capacity while the worker can still take other work, rejecting \
+                 request"
+            );
+            (
+                ErrorType::WorkerRankOverloaded(dp_rank),
+                RANK_OVERLOADED_MESSAGE,
+            )
         }
         Rejection::Cancelled => {
             tracing::debug!(request_id, "{CANCELLED_MESSAGE}");
@@ -986,6 +1012,11 @@ impl QueueSlots {
         &mut self.slots[index as usize]
     }
 
+    /// Whether the pool has a free slot, so a request can queue.
+    fn has_free_slot(&self) -> bool {
+        self.free != NIL
+    }
+
     /// Queue `waiter` at the tail of `fifo`, or hand it back when the pool is
     /// full.
     fn push_back(&mut self, fifo: &mut Fifo, waiter: Waiter) -> Result<QueueHandle, Waiter> {
@@ -1229,6 +1260,27 @@ impl GateState {
     /// measures need room, at its rank and worker-wide.
     fn has_engine_room(&self, rank: AdmissionRank) -> bool {
         self.has_aggregate_engine_room() && self.has_rank_engine_room(rank)
+    }
+
+    /// The DP rank to limit the refusal of a request of `rank` to, when it
+    /// could neither enter the engine nor queue: its own while the worker could
+    /// still take other work, or `None` to refuse it for the whole worker.
+    ///
+    /// Whichever limit refused this request, the worker could take other work
+    /// in either of two ways. An unspecified request could enter the engine at
+    /// once while both engine measures have worker-wide room, since no
+    /// unspecified request is left queued then; and it could queue while the
+    /// worker-wide queue limit has room and the queue storage, which every
+    /// queue shares, has a free slot. Only when neither holds is the refusal
+    /// the whole worker's, as an unspecified request's refusal therefore
+    /// always is.
+    fn refusal_rank(&self, rank: AdmissionRank) -> Option<u32> {
+        let AdmissionRank::Rank(rank) = rank else {
+            return None;
+        };
+        let can_enter = self.has_aggregate_engine_room();
+        let can_queue = self.queued.has_aggregate_room() && self.slots.has_free_slot();
+        (can_enter || can_queue).then_some(rank)
     }
 
     /// Reserve both engine measures for one request of `rank` entering the
@@ -1563,7 +1615,8 @@ impl BackendAdmissionGate {
     /// the request reaches the engine: capacity is reserved *before* `generate`
     /// is polled, so a refused request never reaches the engine, and the
     /// refusal is this call's error — [`ErrorType::WorkerOverloaded`] when the
-    /// gate is full — before any response stream exists. The gate watches
+    /// gate is full, or [`ErrorType::WorkerRankOverloaded`] while the worker
+    /// could still take other work — before any response stream exists. The gate watches
     /// `context` while the request is queued, and refuses it as
     /// [`ErrorType::Cancelled`] once stopped. An engine failure keeps its own
     /// error untouched.
@@ -1663,7 +1716,7 @@ impl BackendAdmissionGate {
             Cancelled,
             Admitted,
             Queued(QueueHandle, oneshot::Receiver<()>),
-            Rejected,
+            Rejected(Option<u32>),
         }
 
         let (rank, fallback, series, decision) = self.transition(|state| {
@@ -1692,7 +1745,8 @@ impl BackendAdmissionGate {
                 Decision::Queued(handle, granted)
             } else {
                 series.rejected();
-                Decision::Rejected
+                // Scoped under the same lock, from the state that refused it.
+                Decision::Rejected(state.refusal_rank(rank))
             };
             (rank, fallback, series, decision)
         });
@@ -1706,7 +1760,7 @@ impl BackendAdmissionGate {
                 EnginePermit::new(Arc::clone(self), rank, series),
                 AdmissionSource::Direct,
             )),
-            Decision::Rejected => Err(reject(Rejection::QueueFull, context)),
+            Decision::Rejected(dp_rank) => Err(reject(Rejection::QueueFull { dp_rank }, context)),
             Decision::Queued(handle, granted) => {
                 let permit = AdmissionTicket {
                     gate: Arc::clone(self),
@@ -2224,8 +2278,18 @@ mod tests {
             .map(|error| (error.error_type(), error.message()))
     }
 
+    /// Refused as an overload of the whole worker.
     fn is_queue_full(acquired: &Acquired) -> bool {
         refusal(acquired) == Some((ErrorType::WorkerOverloaded, OVERLOADED_MESSAGE))
+    }
+
+    /// Refused as an overload of DP rank `dp_rank` alone.
+    fn is_rank_full(acquired: &Acquired, dp_rank: u32) -> bool {
+        refusal(acquired)
+            == Some((
+                ErrorType::WorkerRankOverloaded(dp_rank),
+                RANK_OVERLOADED_MESSAGE,
+            ))
     }
 
     fn is_cancelled(acquired: &Acquired) -> bool {
@@ -3401,8 +3465,8 @@ mod tests {
             .map(permit)
             .collect();
         assert!(
-            is_queue_full(&gate.acquire(None, Some(1)).await),
-            "rank 1 is at its own limit"
+            is_rank_full(&gate.acquire(None, Some(1)).await, 1),
+            "rank 1 is at its own limit, but the aggregate has room for other work"
         );
         let more_unspecified: Vec<_> =
             futures::future::join_all((0..2).map(|_| gate.acquire(None, None)))
@@ -3442,6 +3506,96 @@ mod tests {
         for waiter in [first, second] {
             assert_eq!(permit(outcome(waiter).await).rank, UNSPECIFIED);
         }
+        assert_eq!(published(&gate), (0, 0, 0));
+    }
+
+    /// A refusal names its rank exactly while the worker could still take
+    /// other work, by either path: entering the engine, or queueing. Once it
+    /// could do neither, every refusal is the whole worker's, as an
+    /// unspecified request's always is — including one naming a rank the
+    /// worker does not serve.
+    #[tokio::test]
+    async fn a_refusal_names_its_rank_only_while_the_worker_can_take_other_work() {
+        // Without queues the aggregate queue is always full, yet rank 5 can
+        // still enter the engine while rank 4 is at its own limit.
+        let gate = ranked_gate((1, 1, 0), 4, 2);
+        let four = permit(gate.acquire(None, Some(4)).await);
+        assert!(is_rank_full(&gate.acquire(None, Some(4)).await, 4));
+        let five = permit(
+            gate.acquire(None, Some(5))
+                .now_or_never()
+                .expect("rank 5 enters"),
+        );
+        for dp_rank in [Some(4), Some(5), None] {
+            assert!(
+                is_queue_full(&gate.acquire(None, dp_rank).await),
+                "{dp_rank:?}"
+            );
+        }
+        drop((four, five));
+
+        let gate = ranked_gate((1, 1, 1), 4, 2);
+        let four = permit(gate.acquire(None, Some(4)).await);
+        let queued_four = spawn_queued_at(&gate, Some(4), None).await;
+        assert!(is_rank_full(&gate.acquire(None, Some(4)).await, 4));
+        let five = permit(
+            gate.acquire(None, Some(5))
+                .now_or_never()
+                .expect("rank 5 enters"),
+        );
+        // The aggregate engine limits are full now, but other work can queue.
+        assert!(is_rank_full(&gate.acquire(None, Some(4)).await, 4));
+        let queued_five = spawn_queued_at(&gate, Some(5), None).await;
+        for dp_rank in [Some(4), Some(5), None, Some(6)] {
+            assert!(
+                is_queue_full(&gate.acquire(None, dp_rank).await),
+                "{dp_rank:?}"
+            );
+        }
+        assert_eq!(
+            outcomes_at(&gate, rank(4)).3,
+            3,
+            "each counted under rank 4"
+        );
+        assert_eq!(outcomes_at(&gate, rank(5)).3, 1);
+        assert_eq!(outcomes_at(&gate, UNSPECIFIED).3, 2);
+
+        drop(four);
+        let queued_four = permit(outcome(queued_four).await);
+        drop(five);
+        drop((queued_four, permit(outcome(queued_five).await)));
+        assert_eq!(published(&gate), (0, 0, 0));
+    }
+
+    /// Queue storage that could not grow refuses requests the queue limits
+    /// would still take, and blocks queueing for every rank alike, not just
+    /// the refused request's: such a refusal names its rank only while other
+    /// work can still enter the engine.
+    #[tokio::test]
+    async fn a_refusal_for_want_of_queue_storage_names_its_rank_only_while_other_work_can_enter() {
+        let gate = ranked_gate((1, 1, 2), 4, 2);
+        // As if growing it had failed: one slot, under a worker-wide queue
+        // limit of four.
+        gate.state.lock().slots = QueueSlots::with_capacity(1);
+        let four = permit(gate.acquire(None, Some(4)).await);
+        let queued_four = spawn_queued_at(&gate, Some(4), None).await;
+        assert!(is_rank_full(&gate.acquire(None, Some(4)).await, 4));
+        let five = permit(
+            gate.acquire(None, Some(5))
+                .now_or_never()
+                .expect("rank 5 enters"),
+        );
+        for dp_rank in [Some(5), None] {
+            assert!(
+                is_queue_full(&gate.acquire(None, dp_rank).await),
+                "{dp_rank:?}"
+            );
+        }
+        assert_eq!(queued(&gate), 1);
+
+        drop(four);
+        let queued_four = permit(outcome(queued_four).await);
+        drop((five, queued_four));
         assert_eq!(published(&gate), (0, 0, 0));
     }
 
@@ -4245,9 +4399,14 @@ mod tests {
         // Backpressure on this one worker. A pool-scoped `ResourceExhausted`
         // would claim the whole pool is out of room, and a `Backend` error
         // would report a fault that did not happen.
-        let error = reject(Rejection::QueueFull, None);
+        let error = reject(Rejection::QueueFull { dp_rank: None }, None);
         assert_eq!(error.error_type(), ErrorType::WorkerOverloaded);
         assert_eq!(error.message(), OVERLOADED_MESSAGE);
+
+        // The same overload, limited to one DP rank.
+        let error = reject(Rejection::QueueFull { dp_rank: Some(4) }, None);
+        assert_eq!(error.error_type(), ErrorType::WorkerRankOverloaded(4));
+        assert_eq!(error.message(), RANK_OVERLOADED_MESSAGE);
     }
 
     #[test]
@@ -5095,7 +5254,7 @@ mod tests {
         let gate = ranked_gate((1, 1, 1), 0, 2);
         let zero = permit(handoff(&gate, None, Some(0)).await);
         let queued_zero = spawn_queued_at(&gate, Some(0), None).await;
-        assert!(is_queue_full(&gate.acquire(None, Some(0)).await));
+        assert!(is_rank_full(&gate.acquire(None, Some(0)).await, 0));
         let (controller, context) = stoppable();
         let queued_one_cancelled = {
             let _one = permit(handoff(&gate, None, Some(1)).await);

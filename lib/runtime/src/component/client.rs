@@ -829,8 +829,8 @@ impl Client {
         self.routing_instances.overload_reconciliation_needed()
     }
 
-    /// Mark an instance overloaded immediately after a worker-scoped
-    /// `WorkerOverloaded` response. This is backpressure, not a fault, so it
+    /// Mark an instance overloaded immediately after a `WorkerOverloaded`
+    /// response for the whole worker. This is backpressure, not a fault, so it
     /// does not call `report_instance_down`. A fresh worker-monitor publication
     /// clears this hint early. Its bounded lease otherwise permits a recovery probe.
     pub fn mark_overloaded_immediate(&self, instance_id: u64) {
