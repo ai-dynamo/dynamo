@@ -747,6 +747,16 @@ export const ARTIFACTS: Artifact[] = [
     tags: [{ label: "1.6.0", clipboard: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.6.0" }],
   },
   {
+    category: "container",
+    group: "component",
+    name: "dynamo-sidecar",
+    description: "Engine sidecars that run Dynamo beside a stock SGLang, TensorRT-LLM, or vLLM engine",
+    meta: "CPU-only · AMD64/ARM64",
+    href: `${NGC_C}/dynamo-sidecar/tags`,
+    badge: "Experimental",
+    tags: [{ label: "1.6.0", clipboard: "nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:1.6.0" }],
+  },
+  {
     category: "wheel",
     name: "ai-dynamo",
     description: "Main package with backend integrations (vLLM, SGLang, TRT-LLM)",
