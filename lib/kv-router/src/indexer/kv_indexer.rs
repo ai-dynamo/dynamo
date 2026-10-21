@@ -129,21 +129,24 @@ fn apply_prune_removes(trie: &mut RadixTree, entries: Vec<BlockEntry>, event_id_
 
 struct PendingMutationReceivers<'a> {
     mutation_rx: &'a mut mpsc::Receiver<MutationRequest>,
-    remove_worker_rx: &'a mut mpsc::Receiver<WorkerId>,
-    remove_worker_dp_rank_rx: &'a mut mpsc::Receiver<(WorkerId, DpRank)>,
     routing_rx: &'a mut mpsc::Receiver<RoutingDecisionRequest>,
 }
 
-enum MutationRequest {
+pub(crate) enum MutationRequest {
     Event(RouterEvent),
     EventWithAck {
         event: RouterEvent,
         resp: oneshot::Sender<bool>,
     },
-    ResetWorkerDpRank {
+    RemoveWorker {
+        worker_id: WorkerId,
+    },
+    /// Remove one rank. `resp` is `Some` for acknowledged resets
+    /// (`reset_worker_dp_rank_and_wait`) and `None` for fire-and-forget removal.
+    RemoveWorkerDpRank {
         worker_id: WorkerId,
         dp_rank: DpRank,
-        resp: oneshot::Sender<()>,
+        resp: Option<oneshot::Sender<()>>,
     },
 }
 
@@ -214,7 +217,8 @@ impl KvEventSender {
             .map_err(|error| match error.0 {
                 MutationRequest::Event(event) => mpsc::error::SendError(event),
                 MutationRequest::EventWithAck { .. }
-                | MutationRequest::ResetWorkerDpRank { .. } => {
+                | MutationRequest::RemoveWorker { .. }
+                | MutationRequest::RemoveWorkerDpRank { .. } => {
                     unreachable!("event sender only submits event mutations")
                 }
             })
@@ -225,8 +229,43 @@ impl KvEventSender {
     }
 }
 
+/// Enqueues whole-worker removals on the same FIFO mutation queue as KV events.
+#[derive(Clone)]
+pub struct RemoveWorkerSender {
+    mutation_tx: mpsc::Sender<MutationRequest>,
+}
+
+impl RemoveWorkerSender {
+    pub(crate) fn new(mutation_tx: mpsc::Sender<MutationRequest>) -> Self {
+        Self { mutation_tx }
+    }
+
+    pub async fn send(&self, worker: WorkerId) -> Result<(), mpsc::error::SendError<WorkerId>> {
+        self.mutation_tx
+            .send(MutationRequest::RemoveWorker { worker_id: worker })
+            .await
+            .map_err(|error| match error.0 {
+                MutationRequest::RemoveWorker { worker_id } => mpsc::error::SendError(worker_id),
+                _ => unreachable!("remove worker sender only enqueues RemoveWorker mutations"),
+            })
+    }
+
+    pub fn max_capacity(&self) -> usize {
+        self.mutation_tx.max_capacity()
+    }
+
+    #[cfg(all(test, feature = "standalone-indexer"))]
+    pub(crate) async fn reserve_many(
+        &self,
+        n: usize,
+    ) -> Result<mpsc::PermitIterator<'_, MutationRequest>, mpsc::error::SendError<()>> {
+        self.mutation_tx.reserve_many(n).await
+    }
+}
+
 fn apply_mutation(
     trie: &mut RadixTree,
+    approximate_lru_lane: &mut ApproximateLruLane,
     mutation: MutationRequest,
     counters: &PreBoundEventCounters,
     prune_manager: &Option<WorkerPruneManager>,
@@ -238,43 +277,46 @@ fn apply_mutation(
         MutationRequest::EventWithAck { event, resp } => {
             let _ = resp.send(apply_event_with_counters(trie, event, counters));
         }
-        MutationRequest::ResetWorkerDpRank {
+        MutationRequest::RemoveWorker { worker_id } => {
+            approximate_lru_lane.forget_worker(worker_id);
+            trie.remove_worker(worker_id);
+            if let Some(pm) = prune_manager {
+                pm.remove_worker(worker_id);
+            }
+        }
+        MutationRequest::RemoveWorkerDpRank {
             worker_id,
             dp_rank,
             resp,
         } => {
+            approximate_lru_lane.forget_rank(WorkerWithDpRank::new(worker_id, dp_rank));
             trie.remove_worker_dp_rank(worker_id, dp_rank);
             if let Some(pm) = prune_manager {
                 pm.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
             }
-            let _ = resp.send(());
+            if let Some(resp) = resp {
+                let _ = resp.send(());
+            }
         }
     }
 }
 
 fn drain_pending_mutations(
     trie: &mut RadixTree,
+    approximate_lru_lane: &mut ApproximateLruLane,
     receivers: PendingMutationReceivers<'_>,
     counters: &PreBoundEventCounters,
     prune_manager: &Option<WorkerPruneManager>,
     event_id_counter: &mut u64,
 ) {
-    while let Ok(worker) = receivers.remove_worker_rx.try_recv() {
-        trie.remove_worker(worker);
-        if let Some(pm) = prune_manager {
-            pm.remove_worker(worker);
-        }
-    }
-
-    while let Ok((worker_id, dp_rank)) = receivers.remove_worker_dp_rank_rx.try_recv() {
-        trie.remove_worker_dp_rank(worker_id, dp_rank);
-        if let Some(pm) = prune_manager {
-            pm.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
-        }
-    }
-
     while let Ok(mutation) = receivers.mutation_rx.try_recv() {
-        apply_mutation(trie, mutation, counters, prune_manager);
+        apply_mutation(
+            trie,
+            approximate_lru_lane,
+            mutation,
+            counters,
+            prune_manager,
+        );
     }
 
     while let Ok(routing_req) = receivers.routing_rx.try_recv() {
@@ -330,10 +372,6 @@ pub struct KvIndexer {
     match_details_tx: mpsc::Sender<MatchDetailsRequest>,
     /// A sender for exact worker/block residency checks.
     contains_worker_block_tx: mpsc::Sender<ContainsWorkerBlockRequest>,
-    /// A sender for remove worker requests.
-    remove_worker_tx: mpsc::Sender<WorkerId>,
-    /// A sender for remove worker dp_rank requests.
-    remove_worker_dp_rank_tx: mpsc::Sender<(WorkerId, DpRank)>,
     /// A sender for get workers requests.
     get_workers_tx: mpsc::Sender<GetWorkersRequest>,
     /// A sender for dump requests.
@@ -426,9 +464,6 @@ impl KvIndexer {
         let (match_details_tx, match_details_rx) = mpsc::channel::<MatchDetailsRequest>(128);
         let (contains_worker_block_tx, contains_worker_block_rx) =
             mpsc::channel::<ContainsWorkerBlockRequest>(128);
-        let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
-        let (remove_worker_dp_rank_tx, remove_worker_dp_rank_rx) =
-            mpsc::channel::<(WorkerId, DpRank)>(16);
         let (get_workers_tx, get_workers_rx) = mpsc::channel::<GetWorkersRequest>(16);
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
         let (flush_tx, flush_rx) = mpsc::channel::<FlushRequest>(16);
@@ -457,8 +492,6 @@ impl KvIndexer {
                     let mut match_details_rx = match_details_rx;
                     let mut contains_worker_block_rx = contains_worker_block_rx;
                     let mut mutation_rx = mutation_rx;
-                    let mut remove_worker_rx = remove_worker_rx;
-                    let mut remove_worker_dp_rank_rx = remove_worker_dp_rank_rx;
                     let mut get_workers_rx = get_workers_rx;
                     let mut dump_rx = dump_rx;
                     let mut flush_rx = flush_rx;
@@ -480,26 +513,14 @@ impl KvIndexer {
                                 return;
                             }
 
-                            Some(worker) = remove_worker_rx.recv() => {
-                                approximate_lru_lane.forget_worker(worker);
-                                trie.remove_worker(worker);
-                                if let Some(pm) = &prune_manager {
-                                    pm.remove_worker(worker);
-                                }
-                            }
-
-                            Some((worker_id, dp_rank)) = remove_worker_dp_rank_rx.recv() => {
-                                approximate_lru_lane.forget_rank(
-                                    WorkerWithDpRank::new(worker_id, dp_rank)
-                                );
-                                trie.remove_worker_dp_rank(worker_id, dp_rank);
-                                if let Some(pm) = &prune_manager {
-                                    pm.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
-                                }
-                            }
-
                             Some(mutation) = mutation_rx.recv() => {
-                                apply_mutation(&mut trie, mutation, &counters, &prune_manager);
+                                apply_mutation(
+                                    &mut trie,
+                                    &mut approximate_lru_lane,
+                                    mutation,
+                                    &counters,
+                                    &prune_manager,
+                                );
                             }
 
                             Some(req) = match_rx.recv() => {
@@ -568,10 +589,9 @@ impl KvIndexer {
                                 // the complete tail.
                                 drain_pending_mutations(
                                     &mut trie,
+                                    &mut approximate_lru_lane,
                                     PendingMutationReceivers {
                                         mutation_rx: &mut mutation_rx,
-                                        remove_worker_rx: &mut remove_worker_rx,
-                                        remove_worker_dp_rank_rx: &mut remove_worker_dp_rank_rx,
                                         routing_rx: &mut routing_rx,
                                     },
                                     &counters,
@@ -585,10 +605,9 @@ impl KvIndexer {
                             Some(flush_req) = flush_rx.recv() => {
                                 drain_pending_mutations(
                                     &mut trie,
+                                    &mut approximate_lru_lane,
                                     PendingMutationReceivers {
                                         mutation_rx: &mut mutation_rx,
-                                        remove_worker_rx: &mut remove_worker_rx,
-                                        remove_worker_dp_rank_rx: &mut remove_worker_dp_rank_rx,
                                         routing_rx: &mut routing_rx,
                                     },
                                     &counters,
@@ -653,8 +672,6 @@ impl KvIndexer {
             match_tx,
             match_details_tx,
             contains_worker_block_tx,
-            remove_worker_tx,
-            remove_worker_dp_rank_tx,
             get_workers_tx,
             dump_tx,
             flush_tx,
@@ -761,9 +778,9 @@ impl KvIndexer {
     ///
     /// ### Returns
     ///
-    /// A `mpsc::Sender` for `WorkerId`s.
-    pub fn remove_worker_sender(&self) -> mpsc::Sender<WorkerId> {
-        self.remove_worker_tx.clone()
+    /// A sender that enqueues whole-worker removals on the FIFO mutation queue.
+    pub fn remove_worker_sender(&self) -> RemoveWorkerSender {
+        RemoveWorkerSender::new(self.mutation_tx.clone())
     }
 
     /// Get a sender for get workers requests.
@@ -846,12 +863,19 @@ impl KvIndexerInterface for KvIndexer {
     }
 
     async fn remove_worker(&self, worker: WorkerId) {
-        self.remove_worker_tx.send(worker).await.unwrap();
+        self.mutation_tx
+            .send(MutationRequest::RemoveWorker { worker_id: worker })
+            .await
+            .unwrap();
     }
 
     async fn remove_worker_dp_rank(&self, worker: WorkerId, dp_rank: DpRank) {
-        self.remove_worker_dp_rank_tx
-            .send((worker, dp_rank))
+        self.mutation_tx
+            .send(MutationRequest::RemoveWorkerDpRank {
+                worker_id: worker,
+                dp_rank,
+                resp: None,
+            })
             .await
             .unwrap();
     }
@@ -868,10 +892,10 @@ impl KvIndexerInterface for KvIndexer {
         }
         let (resp_tx, resp_rx) = oneshot::channel();
         self.mutation_tx
-            .send(MutationRequest::ResetWorkerDpRank {
+            .send(MutationRequest::RemoveWorkerDpRank {
                 worker_id,
                 dp_rank,
-                resp: resp_tx,
+                resp: Some(resp_tx),
             })
             .await
             .map_err(|_| KvRouterError::IndexerOffline)?;
@@ -1055,10 +1079,10 @@ mod fifo_reset_tests {
         let (resp_tx, resp_rx) = oneshot::channel();
         indexer
             .mutation_tx
-            .send(MutationRequest::ResetWorkerDpRank {
+            .send(MutationRequest::RemoveWorkerDpRank {
                 worker_id: 7,
                 dp_rank: 0,
-                resp: resp_tx,
+                resp: Some(resp_tx),
             })
             .await
             .unwrap();
@@ -1080,5 +1104,91 @@ mod fifo_reset_tests {
         let new_scores = indexer.find_matches(vec![LocalBlockHash(2)]).await.unwrap();
         assert!(!old_scores.scores.contains_key(&worker));
         assert_eq!(new_scores.scores.get(&worker), Some(&1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remove_worker_dp_rank_does_not_overtake_queued_stores() {
+        use crate::test_utils::make_store_event_with_dp_rank;
+
+        let mut resurrected = 0;
+        let mut sibling_lost = 0;
+        let attempts = 20;
+        for _ in 0..attempts {
+            let indexer = KvIndexer::new(
+                CancellationToken::new(),
+                32,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+            );
+            // A sibling rank of the same worker must survive removal of rank 0.
+            let sibling_hashes: Vec<u64> = (900_000_001..=900_000_016).collect();
+            indexer
+                .apply_event(make_store_event_with_dp_rank(7, &sibling_hashes, 1))
+                .await;
+
+            let n = 2000u64;
+            for i in 0..n {
+                let base = i * 1000;
+                let hashes: Vec<u64> = (base + 1..=base + 64).collect();
+                indexer
+                    .apply_event(make_store_event_with_dp_rank(7, &hashes, 0))
+                    .await;
+            }
+            indexer.remove_worker_dp_rank(7, 0).await;
+            indexer.flush().await;
+
+            let last = (n - 1) * 1000;
+            let q: Vec<LocalBlockHash> = (last + 1..=last + 64).map(LocalBlockHash).collect();
+            let scores = indexer.find_matches(q).await.unwrap();
+            if scores.scores.contains_key(&WorkerWithDpRank::new(7, 0)) {
+                resurrected += 1;
+            }
+
+            let q: Vec<LocalBlockHash> =
+                sibling_hashes.iter().copied().map(LocalBlockHash).collect();
+            let scores = indexer.find_matches(q).await.unwrap();
+            if !scores.scores.contains_key(&WorkerWithDpRank::new(7, 1)) {
+                sibling_lost += 1;
+            }
+        }
+        assert_eq!(
+            resurrected, 0,
+            "removed dp_rank came back from queued stores"
+        );
+        assert_eq!(sibling_lost, 0, "sibling dp_rank was removed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remove_worker_does_not_overtake_queued_stores() {
+        use crate::test_utils::create_store_event;
+
+        let mut resurrected = 0;
+        let attempts = 20;
+        for _ in 0..attempts {
+            let indexer = KvIndexer::new(
+                CancellationToken::new(),
+                32,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+            );
+            let n = 2000u64;
+            for i in 0..n {
+                let base = i * 1000;
+                let hashes: Vec<u64> = (base + 1..=base + 64).collect();
+                indexer
+                    .apply_event(create_store_event(7, i, hashes, None))
+                    .await;
+            }
+            indexer.remove_worker(7).await;
+            indexer.flush().await;
+            let last = (n - 1) * 1000;
+            let q: Vec<LocalBlockHash> = (last + 1..=last + 64).map(LocalBlockHash).collect();
+            let scores = indexer.find_matches(q).await.unwrap();
+            if scores.scores.contains_key(&WorkerWithDpRank::new(7, 0)) {
+                resurrected += 1;
+            }
+        }
+        assert_eq!(
+            resurrected, 0,
+            "removed worker came back from queued stores"
+        );
     }
 }
