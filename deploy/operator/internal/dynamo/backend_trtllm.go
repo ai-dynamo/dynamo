@@ -125,7 +125,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
 		// Direct Python command: combine command + args
 		// Shell-quote each part to handle args with spaces (e.g., JSON in --override-engine-args)
-		var quotedParts []string
+		quotedParts := make([]string, 0, len(container.Command)+len(container.Args))
 		for _, part := range container.Command {
 			quotedParts = append(quotedParts, shellQuoteForBashC(part))
 		}

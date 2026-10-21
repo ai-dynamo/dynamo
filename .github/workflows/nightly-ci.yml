@@ -690,6 +690,18 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
+  cross-version-compatibility:
+    name: SGLang nightly N-2 compatibility
+    needs: [compute-release-mode, resolve-source-sha, deploy-operator, frontend-copy-to-acr, sglang-copy-to-acr, deploy-test-sglang]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' && needs.deploy-test-sglang.result == 'success' }}
+    uses: $/.github/workflows/cross-version-compatibility.yml
+    with:
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+      worker_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+    secrets: inherit
+
   deploy-cleanup:
     name: Nightly Deploy Cleanup
     if: always()
@@ -771,8 +783,9 @@ jobs:
         uses: ./.github/actions/setup-dynamo-operator
         with:
           vcluster_name: nightly-efa-${{ github.run_id }}
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          repository: ${{ vars.ACR_REPOSITORY }}
+          # From ECR, like the test images below: these nodes pull ECR without a secret.
+          registry: ${{ vars.ECR_REGISTRY }}
+          repository: ${{ vars.ECR_REPOSITORY }}
           operator_tag: ${{ needs.operator-build.outputs.operator_default_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
@@ -1512,7 +1525,7 @@ jobs:
   # ============================================================================
   coverage-report:
     name: Generate Coverage Report
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, rust-tests]
     if: always()
     permissions:

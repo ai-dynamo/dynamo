@@ -239,7 +239,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             # Prompt logprobs are discarded until the handoff carries their metadata.
             logprob_kwargs = _shared_logprobs.build_sglang_logprob_kwargs(
                 {"logprobs": output_options.get("logprobs")},
-                allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
             )
             results = await self.engine.async_generate(
                 **input_param,

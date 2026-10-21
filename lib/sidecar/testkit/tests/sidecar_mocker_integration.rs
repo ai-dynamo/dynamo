@@ -22,7 +22,9 @@ mod support;
 
 use support::sglang::{self as sglang_fixture, http};
 use support::vllm as vllm_fixture;
-use support::{FixtureConfig, GenerateOpening, ProcessFixture, SidecarFixture, WireFixture};
+use support::{
+    DiscoveryFixture, FixtureConfig, GenerateOpening, ProcessFixture, SidecarFixture, WireFixture,
+};
 
 fn after_token_responses(count: usize, action: StreamAction) -> RequestPlan {
     RequestPlan {
@@ -552,6 +554,7 @@ macro_rules! enroll_baseline {
 
 enroll_baseline!(vllm, support::vllm::Fixture);
 enroll_baseline!(sglang, support::sglang::Fixture);
+enroll_baseline!(trtllm, support::trtllm::Fixture);
 
 #[tokio::test]
 async fn vllm_teardown_terminates_handlers_with_clients_alive() {
@@ -745,6 +748,87 @@ async fn sglang_malformed_terminal_fails_then_recovers() {
             BackendError::Unknown,
         );
         assert!(error.to_string().contains("missing finish_reason"));
+        bounded("malformed RPC released", handle.wait(Event::Dropped)).await;
+        healthy(&fixture, &engine, &control).await;
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn trtllm_teardown_terminates_handlers_with_clients_alive() {
+    let (outputs, tokens) = bounded(
+        "server teardown with live clients",
+        teardown_with_live_clients::<support::trtllm::Fixture>(),
+    )
+    .await;
+    let error = failure(outputs, &tokens, BackendError::Unknown);
+    assert!(error.to_string().contains("Generate"));
+}
+
+#[tokio::test]
+async fn trtllm_native_rejection_recovers_on_same_engine() {
+    let error = bounded(
+        "native rejection and recovery",
+        native_rejection::<support::trtllm::Fixture>(1_000_001),
+    )
+    .await;
+    assert!(
+        error
+            .to_string()
+            .contains("exceeds the Mocker limit of 1000000"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn trtllm_malformed_terminal_fails_then_recovers() {
+    bounded("malformed terminal and recovery", async {
+        use dynamo_trtllm_sidecar::proto as pb;
+        let control = Controller::<support::trtllm::Adapter>::default();
+        let mut fixture =
+            support::trtllm::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        fixture.respond(
+            ctx.id(),
+            vec![
+                pb::GenerateResponse {
+                    event: Some(pb::generate_response::Event::Token(pb::TokenOutput {
+                        output_index: Some(0),
+                        tokens: vec![pb::TokenInfo {
+                            token_id: 101,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+                pb::GenerateResponse {
+                    event: Some(pb::generate_response::Event::Finished(
+                        pb::GenerationFinished {
+                            output_index: Some(0),
+                            reason: pb::FinishReason::Unspecified as i32,
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                },
+            ],
+        );
+        let error = failure(
+            collect(
+                &engine,
+                request("mocker-model", vec![1, 2, 3], 3),
+                GenerateContext::new(ctx, None),
+            )
+            .await,
+            &[101],
+            BackendError::Unknown,
+        );
+        assert!(error.to_string().contains("unspecified finish reason"));
         bounded("malformed RPC released", handle.wait(Event::Dropped)).await;
         healthy(&fixture, &engine, &control).await;
         finish(&mut fixture, &engine).await;
@@ -1136,6 +1220,49 @@ async fn vllm_visible_stop_tokens_preserve_tool_delimiters() {
         let response = wire.response.unwrap();
         assert_eq!(response.output_text, Some(false));
         assert!(response.output_token_ids);
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}
+
+// SGLang text trims the matched stop token, so the delimiter must arrive as an ID.
+#[tokio::test]
+async fn sglang_visible_stop_tokens_preserve_tool_delimiters() {
+    bounded("visible tool delimiter", async {
+        use dynamo_sglang_sidecar::proto as pb;
+        let control = Controller::<sglang_fixture::Adapter>::default();
+        let mut fixture =
+            sglang_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        fixture.respond(
+            ctx.id(),
+            vec![pb::GenerateResponse {
+                output_ids: vec![42],
+                meta_info: [(
+                    "finish_reason".to_string(),
+                    json!({"type": "stop", "matched": 42}).to_string(),
+                )]
+                .into(),
+                finished: true,
+                ..Default::default()
+            }],
+        );
+        let mut req = request("mocker-model", vec![11, 22, 33], 1);
+        req.stop_conditions.stop_token_ids_visible = Some(vec![42]);
+        req.stop_conditions.stop_token_ids_hidden = Some(vec![2]);
+        let outputs = collect(&engine, req, GenerateContext::new(ctx, None)).await;
+        assert!(
+            outputs
+                .iter()
+                .all(|output| output.as_ref().unwrap().text.is_none())
+        );
+        terminal(outputs, &[42], 3, FinishReason::Stop);
+        let wire = handle.native_request().unwrap();
+        assert_eq!(wire.sampling_params.unwrap().stop_token_ids, [2, 42]);
+        assert_eq!(wire.return_text, None);
         finish(&mut fixture, &engine).await;
     })
     .await;
