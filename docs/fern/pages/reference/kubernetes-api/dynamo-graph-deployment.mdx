@@ -166,9 +166,7 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 </ParamField>
 
 <ParamField path="env" type="[]core/v1.EnvVar">
-  Environment variables merged into each component's `main` container environment and, in Dynamo sidecar mode or an LPX agent runtime sidecar, its `runtime` init container environment. A container-specific `env` entry with the same name takes precedence.
-
-  The operator sorts the merged entries by name. Kubernetes expands a `$(NAME)` reference in an `env` value only from entries earlier in the same container's list, so the reference resolves only when `NAME` sorts before the entry that uses it; otherwise the value keeps the literal `$(NAME)` text. For example, a container entry `A` with value `$(Z_GRAPH)` keeps that text even when this list defines `Z_GRAPH`. The bindings the operator publishes to LPX runtimes, such as `LPX_MODEL_PATH`, are the exception: they precede every sorted entry, so any entry can reference them.
+  Environment variables prepended to each component's `main` container environment and, in Dynamo sidecar mode, its `runtime` init container environment. A container-specific `env` entry with the same name takes precedence and may reference values from this list.
 
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#EnvVar" target="_blank">core/v1.EnvVar</a>
 </ParamField>

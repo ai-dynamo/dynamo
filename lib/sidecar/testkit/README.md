@@ -17,7 +17,7 @@ lib/sidecar/
 │   ├── error.rs                # Inline tests: transport status mapping
 │   ├── json.rs                 # Inline tests: shared JSON/protobuf conversion
 │   ├── transport.rs            # Production policy and existing socket test
-│   └── transport/tests.rs      # Retry/pool policy using paused time; Unix-socket connect and reconnect
+│   └── transport/tests.rs      # Retry/pool policy using paused time
 ├── vllm/src/
 │   ├── model.rs                # Inline tests: discovery metadata and configuration
 │   ├── engine.rs               # Inline tests: worker configuration and local lifecycle
@@ -36,20 +36,6 @@ lib/sidecar/
 │   └── protocol/
 │       ├── request_tests.rs    # Request fields, public refusals, routing and rendezvous
 │       └── response_tests.rs   # Token/logprob conversion, stops, usage and errors
-├── lpx/src/
-│   ├── health.rs               # Inline tests: grpc.health.v1 status mapping
-│   ├── standby.rs              # Inline test: standby without a system server
-│   ├── tests.rs                # Shared request, handoff and engine fixtures
-│   └── tests/
-│       ├── fake.rs             # In-process loopback fake of an LPX engine's OpenEngine services
-│       ├── model.rs            # Identification, role checks and registration
-│       ├── convert.rs          # Request fields, refusals, responses and error mapping
-│       ├── handoff.rs          # vLLM handoff to KV session, against golden vectors
-│       ├── engine.rs           # Bootstrap waits, served-name check, in-band errors, decode-leg cancellation, abort and trace via the fake
-│       ├── load.rs             # GetLoad polling: router load, KV gauges and forward-pass metrics
-│       └── health.rs           # Readiness following grpc.health.v1 through start, a lost watch, drain and cleanup
-├── lpx/tests/
-│   └── executable.rs           # The built executable: help, argument refusals, rank parsing and standby
 └── testkit/
     ├── src/
     │   ├── lib.rs              # Bounded waits and public testkit exports
@@ -65,7 +51,7 @@ lib/sidecar/
     │       ├── vllm.rs        # vLLM protocol, discovery, health and child-command adapter
     │       ├── sglang.rs      # SGLang gRPC/HTTP peers, discovery, health and child-command adapter
     │       ├── trtllm.rs      # OpenEngine peer, context limits and child-command adapter
-    │       ├── lpx.rs         # LPX OpenEngine identity, role, decode KV session and child-command adapter (reuses the TensorRT-LLM protocol adapter)
+    │       ├── lpx.rs         # LPX peer and child-command adapter
     │       └── process.rs     # Local discovery, worker processes and TCP routing
     └── README.md              # This guide
 ```
@@ -129,12 +115,12 @@ boundary; isolated conversion tests do not establish native engine behavior.
 
 ## Running tests
 
-From the repository root, run all common, vLLM, SGLang and LPX library tests,
-including their local-server tests and the testkit controller regression:
+From the repository root, run all common, vLLM and SGLang library tests, including
+their local-server tests and the testkit controller regression:
 
 ```sh
 cargo test --locked -p dynamo-sidecar-common -p dynamo-vllm-sidecar \
-  -p dynamo-sglang-sidecar -p dynamo-lpx-sidecar -p dynamo-sidecar-testkit --lib
+  -p dynamo-sglang-sidecar -p dynamo-sidecar-testkit --lib
 ```
 
 Run one request-conversion test by its full name:
@@ -197,18 +183,16 @@ clients. That makes peer-loss tests deterministic.
 
 | Suite | Scope | Execution |
 | --- | --- | --- |
-| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request fields, native rejection and peer teardown for vLLM, SGLang, TensorRT-LLM and LPX; logprob fields for all but LPX; malformed responses for all but LPX; shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
-| `router_sidecar_mocker_integration.rs` | All four backends: registration/error recovery, delayed/interrupted startup, cancellation and SIGTERM; all but LPX: frontend HTTP errors/recovery; real PrefillRouter handoff within vLLM, SGLang and TensorRT-LLM, and from a vLLM prefill worker to an LPX decode worker; vLLM and SGLang: model alias publication and native-health readiness; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
+| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM, SGLang and TensorRT-LLM; native rejection, malformed responses and shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
+| `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
 | `tests/serve/test_sidecar.py` | vLLM/SGLang: real engine logprobs, structured output, cancellation/recovery, KV transfer and routing, where the `*_kv_router` configs warm two caches and require cache-based selection, plus a completed transfer to decode when disaggregated; TensorRT-LLM: basic aggregated/disaggregated chat | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
-vLLM, SGLang, TensorRT-LLM and LPX register the shared wire and process scenarios, except that LPX skips the HTTP error scenario: the LPX sidecar reports a mid-stream UNAVAILABLE as a migratable shutdown, so the frontend quarantines the worker before the scenario's recovery request. TensorRT-LLM and LPX both use the existing OpenEngine Mocker through a controlled service, and their process tests supply a local model path and verify the context limit returned by OpenEngine; LPX's also verify the KV block size and scheduler limits the engine reports. The LPX fixture plays the hybrid engine; the LPU-only LPX engine, which the sidecar serves through the same code, is not enrolled.
+vLLM, SGLang and TensorRT-LLM register the shared wire and process scenarios. TensorRT-LLM uses the existing OpenEngine Mocker through a controlled inference service. Its process tests supply a local model path and verify the context limit returned by OpenEngine.
 
-The alias and health-publication scenarios use `DiscoveryFixture` controls for vLLM and SGLang. TensorRT-LLM is excluded from these scenarios because its sidecar does not discover served aliases or gate publication on native health. vLLM keeps Control healthy while the fixture controls Inference readiness; SGLang uses its native HealthCheck RPC. Separate tokenizer discovery, parser settings inherited from engine metadata, changed engine roles and native trace headers remain SGLang-specific because vLLM has different contracts for those values.
+The alias and health-publication scenarios use `DiscoveryFixture` controls for vLLM and SGLang. TensorRT-LLM is excluded from these scenarios because its sidecar uses a configured model path and does not discover served aliases or gate publication on native health. vLLM keeps Control healthy while the fixture controls Inference readiness; SGLang uses its native HealthCheck RPC. Separate tokenizer discovery, parser settings inherited from engine metadata, changed engine roles and native trace headers remain SGLang-specific because vLLM has different contracts for those values.
 
 CPU handoff checks opaque vLLM metadata, SGLang concurrent bootstrap coordination, and TensorRT-LLM OpenEngine KV session forwarding. CPU handoff cancellation holds the peers before Mocker admission; it proves transport cleanup and recovery, not native scheduler or transfer cleanup. A Mocker cannot prove that a real engine accepts the serialized request, executes a structured-output constraint, releases its real scheduler work, or transfers GPU KV cache.
-
-LPX has no prefill role, so the generic handoff scenario pairs a vLLM prefill worker with an LPX decode worker and checks that the Rust vLLM sidecar's flat `kv_transfer_params` reach the engine as exactly the decode KV session's attributes. Every pairing without a bootstrap rendezvous (vLLM, TensorRT-LLM, and vLLM prefill to LPX decode) checks that a decode `Generate` pending when the client leaves stays open, because only that leg releases the prefill worker's KV; the LPX crate's tests cover the wrapped handoff shape and a decode leg cancelled before or during dispatch, which the process path cannot stage on cue.
 
 Existing tests in `lib/mocker/servers/{vllm,sglang}/tests/sidecar.rs` retain distinct
 KV-event and handoff coverage. Backend-local socket tests in `vllm/src/tests.rs`
@@ -256,15 +240,13 @@ The legacy Python backend suite is also distributed by behavior, including
    sidecar child. Its alias and readiness controls keep protocol messages in the
    backend's support file, so another backend can enroll without copying the
    scenario body.
-3. Register common baseline scenarios once in the small enrollment macro. Every
-   enrolled backend invokes the same macro, producing a separate ordinary Tokio
-   test for every scenario. The macro only declares tests; it does not run or
-   select them dynamically. A new baseline is therefore included for every
-   enrolled backend.
+3. Register common baseline scenarios once in the small enrollment macro. Both
+   backends invoke the same macro, producing a separate ordinary Tokio test for
+   every scenario. The macro only declares tests; it does not run or select them
+   dynamically. A new baseline is therefore included for every enrolled backend.
 4. Put a genuine difference in a named fixture value, such as whether
-   `generate()` waits for response headers or how a refused request reaches its
-   caller. Keep checks meaningful for each backend: SGLang
-   starts its lazy RPC when the response stream is polled.
+   `generate()` waits for response headers. Keep checks meaningful for each
+   backend: SGLang starts its lazy RPC when the response stream is polled.
    A check that only describes vLLM protobuf fields or errors belongs in an
    explicit vLLM test, not an optional callback or a no-op fixture method.
 5. Give faulted requests distinct IDs. Await the received/checkpoint/dropped
