@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -44,6 +45,7 @@ type disaggregatedSetProgram struct {
 
 func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetProgram() *disaggregatedSetProgram {
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
+	rollout.discoveryBackend = r.Config.Discovery.Backend
 	return &disaggregatedSetProgram{
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,
@@ -128,7 +130,7 @@ func (p *disaggregatedSetProgram) Reconcile(
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 
-	result, err := p.workloads.Reconcile(ctx, req.DGD, restart.State, checkpoints.Infos)
+	result, inferencePending, err := p.workloads.Reconcile(ctx, req.DGD, restart.State, checkpoints.Infos)
 	if err != nil {
 		return programResult, fmt.Errorf("failed to reconcile DisaggregatedSet pathway: %w", err)
 	}
@@ -141,6 +143,11 @@ func (p *disaggregatedSetProgram) Reconcile(
 	}
 
 	programResult.applyReconcileResult(req.DGD.Generation, result)
+
+	// Frontend admission can recover without a Kubernetes resource change.
+	if inferencePending {
+		programResult.RequeueAfter = 10 * time.Second
+	}
 	return programResult, nil
 }
 

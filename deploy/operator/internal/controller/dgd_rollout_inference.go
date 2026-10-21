@@ -30,6 +30,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 )
 
 var rolloutWorkerMetadataGVK = schema.GroupVersionKind{Group: "nvidia.com", Version: "v1alpha1", Kind: "DynamoWorkerMetadata"}
@@ -77,6 +78,9 @@ func (r *dgdWorkerRolloutReconciler) replacementInferenceReady(ctx context.Conte
 			newPods[pod.UID] = true
 		}
 		if _, ok := frontendComponents[pod.Labels[consts.KubeLabelDynamoComponent]]; ok {
+			if rolloutFrontendProbeUnsupported(&pod) {
+				return true, nil
+			}
 			frontends = append(frontends, pod)
 			frontendComponents[pod.Labels[consts.KubeLabelDynamoComponent]] = true
 		}
@@ -98,7 +102,11 @@ func (r *dgdWorkerRolloutReconciler) replacementInferenceReady(ctx context.Conte
 	if err := r.List(ctx, metadata, client.InNamespace(dgd.Namespace)); err != nil {
 		return false, err
 	}
-	targets, found, err := replacementInferenceTargets(metadata.Items, newPods)
+	cohortPods, err := r.rolloutReplacementCohort(dgd, pods.Items)
+	if err != nil {
+		return false, err
+	}
+	targets, found, err := replacementInferenceTargets(metadata.Items, newPods, cohortPods)
 	if err != nil {
 		return false, err
 	}
@@ -138,20 +146,67 @@ func (r *dgdWorkerRolloutReconciler) replacementInferenceReady(ctx context.Conte
 			return nil
 		})
 	}
-	if err := group.Wait(); err != nil {
-		return false, err
+	err = group.Wait()
+	return err == nil, err
+}
+
+// Match serving cards to the same graph and desired generation before pairing them with prefill.
+func (r *dgdWorkerRolloutReconciler) rolloutReplacementCohort(dgd *nvidiacomv1beta1.DynamoGraphDeployment, pods []corev1.Pod) (map[types.UID]bool, error) {
+	hashes, err := desiredWorkerHashes(dgd)
+	if err != nil {
+		return nil, err
 	}
-	return true, nil
+	workerHash := r.activeWorkerHashForDCDGeneration(dgd, hashes)
+	selectors := make(map[string]string)
+	for _, component := range dgd.Spec.Components {
+		if dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			selectors[component.ComponentName] = dynamo.GetDCDResourceName(dgd, component.ComponentName, workerHash)
+		}
+	}
+	cohort := make(map[types.UID]bool)
+	for _, pod := range pods {
+		selector, worker := selectors[pod.Labels[consts.KubeLabelDynamoComponent]]
+		if worker && pod.DeletionTimestamp == nil && rolloutPodReady(&pod) &&
+			pod.Labels[consts.KubeLabelDynamoSelector] == selector {
+			cohort[pod.UID] = true
+		}
+	}
+	return cohort, nil
+}
+
+type rolloutModelCard struct {
+	InstanceID uint64 `json:"instance_id"`
+	Card       struct {
+		DisplayName string `json:"display_name"`
+		ModelType   string `json:"model_type"`
+		WorkerType  string `json:"worker_type"`
+	} `json:"card_json"`
+}
+
+func (card rolloutModelCard) inferenceTarget() (rolloutInferenceTarget, error) {
+	prefill := card.Card.WorkerType == "prefill" || strings.Contains(card.Card.ModelType, "Prefill")
+	if card.Card.ModelType == "" && !prefill && card.Card.WorkerType != "encode" {
+		return rolloutInferenceTarget{}, fmt.Errorf("replacement model card lacks model type and a recognized surface-less role")
+	}
+	target := rolloutInferenceTarget{Model: card.Card.DisplayName, InstanceID: card.InstanceID, Prefill: prefill}
+	if strings.Contains(card.Card.ModelType, "Chat") {
+		target.Paths = append(target.Paths, "/v1/chat/completions")
+	}
+	if strings.Contains(card.Card.ModelType, "Completions") {
+		target.Paths = append(target.Paths, "/v1/completions")
+	}
+	return target, nil
 }
 
 // replacementInferenceTargets requires metadata owned by currently ready replacement Pods.
-func replacementInferenceTargets(metadata []unstructured.Unstructured, newPods map[types.UID]bool) ([]rolloutInferenceTarget, bool, error) {
+func replacementInferenceTargets(metadata []unstructured.Unstructured, newPods, cohortPods map[types.UID]bool) ([]rolloutInferenceTarget, bool, error) {
 	var targets []rolloutInferenceTarget
 	found := false
 	selected := make(map[string]rolloutInferenceTarget)
+	surfaces := make(map[string]map[string]bool)
 	for _, object := range metadata {
 		owner := metav1.GetControllerOf(&object)
-		if object.GetDeletionTimestamp() != nil || owner == nil || owner.Kind != "Pod" || !newPods[owner.UID] {
+		if object.GetDeletionTimestamp() != nil || owner == nil || owner.Kind != "Pod" || (!newPods[owner.UID] && !cohortPods[owner.UID]) {
 			continue
 		}
 
@@ -164,34 +219,30 @@ func replacementInferenceTargets(metadata []unstructured.Unstructured, newPods m
 		if err != nil {
 			return nil, false, err
 		}
-		var cards map[string]struct {
-			InstanceID uint64 `json:"instance_id"`
-			Card       struct {
-				DisplayName string `json:"display_name"`
-				ModelType   string `json:"model_type"`
-				WorkerType  string `json:"worker_type"`
-			} `json:"card_json"`
-		}
+		var cards map[string]rolloutModelCard
 		if err := json.Unmarshal(raw, &cards); err != nil {
 			return nil, false, err
 		}
 		for _, card := range cards {
-			if card.Card.ModelType == "" {
-				return nil, false, fmt.Errorf("replacement model card lacks model type")
+			target, err := card.inferenceTarget()
+			if err != nil {
+				return nil, false, err
 			}
-			found = true
-			target := rolloutInferenceTarget{Model: card.Card.DisplayName, InstanceID: card.InstanceID,
-				Prefill: card.Card.WorkerType == "prefill" || strings.Contains(card.Card.ModelType, "Prefill")}
-			if strings.Contains(card.Card.ModelType, "Chat") {
-				target.Paths = append(target.Paths, "/v1/chat/completions")
+			if newPods[owner.UID] {
+				found = true
 			}
-			if strings.Contains(card.Card.ModelType, "Completions") {
-				target.Paths = append(target.Paths, "/v1/completions")
+			if !target.Prefill {
+				switch card.Card.WorkerType {
+				case "decode", "aggregated", "":
+					if surfaces[target.Model] == nil {
+						surfaces[target.Model] = make(map[string]bool)
+					}
+					for _, path := range target.Paths {
+						surfaces[target.Model][path] = true
+					}
+				}
 			}
-			if target.Prefill && len(target.Paths) == 0 {
-				target.Paths = []string{"/v1/chat/completions", "/v1/completions"}
-			}
-			if len(target.Paths) == 0 {
+			if !newPods[owner.UID] || (!target.Prefill && len(target.Paths) == 0) {
 				continue
 			}
 			if target.Model == "" || target.InstanceID == 0 {
@@ -206,6 +257,16 @@ func replacementInferenceTargets(metadata []unstructured.Unstructured, newPods m
 		}
 	}
 	for _, target := range selected {
+		if target.Prefill {
+			target.Paths = nil
+			for path := range surfaces[target.Model] {
+				target.Paths = append(target.Paths, path)
+			}
+			if len(target.Paths) == 0 {
+				return nil, false, fmt.Errorf("replacement prefill model %s has no paired serving surface", target.Model)
+			}
+			sort.Strings(target.Paths)
+		}
 		targets = append(targets, target)
 	}
 	sort.Slice(targets, func(i, j int) bool {
@@ -217,7 +278,6 @@ func replacementInferenceTargets(metadata []unstructured.Unstructured, newPods m
 	return targets, found, nil
 }
 
-// rolloutPodReady reports the Pod readiness condition used by serving endpoint selection.
 func rolloutPodReady(pod *corev1.Pod) bool {
 	for _, condition := range pod.Status.Conditions {
 		if condition.Type == corev1.PodReady {
@@ -227,7 +287,34 @@ func rolloutPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
-// rolloutFrontendAddress resolves the frontend Pod IP and named HTTP container port.
+// TLS credentials and opaque environment sources cannot be used by the operator's HTTP client.
+func rolloutFrontendProbeUnsupported(pod *corev1.Pod) bool {
+	for _, containers := range [][]corev1.Container{pod.Spec.Containers, pod.Spec.InitContainers} {
+		for _, container := range containers {
+			if container.Name != consts.MainContainerName && container.Name != consts.RuntimeContainerName {
+				continue
+			}
+			if len(container.EnvFrom) > 0 {
+				return true
+			}
+			for _, env := range container.Env {
+				if (env.Name == "DYN_TLS_CERT_PATH" || env.Name == "DYN_TLS_KEY_PATH" || env.Name == "DYN_TLS_CLIENT_CA_CERT_PATH") &&
+					(env.Value != "" || env.ValueFrom != nil) {
+					return true
+				}
+			}
+			for _, args := range [][]string{container.Command, container.Args} {
+				for _, arg := range args {
+					if strings.Contains(arg, "--tls-cert-path") || strings.Contains(arg, "--tls-key-path") || strings.Contains(arg, "--tls-client-ca-cert-path") {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
 func rolloutFrontendAddress(pod *corev1.Pod) (string, error) {
 	if pod.Status.PodIP == "" {
 		return "", fmt.Errorf("frontend %s has no Pod IP", pod.Name)
@@ -310,13 +397,11 @@ func (r *dgdWorkerRolloutReconciler) probeReplacementInference(ctx context.Conte
 	return nil
 }
 
-// isDGDFrontendPod limits admission-related Pod events to managed serving frontends.
 func isDGDFrontendPod(object client.Object) bool {
 	return object.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName] != "" &&
 		object.GetLabels()[consts.KubeLabelDynamoComponentType] == consts.ComponentTypeFrontend
 }
 
-// mapDGDServingPodToRequests enqueues graphs affected by managed worker or frontend Pod changes.
 func mapDGDServingPodToRequests(ctx context.Context, object client.Object) []ctrl.Request {
 	if isDGDFrontendPod(object) {
 		return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: object.GetNamespace(),

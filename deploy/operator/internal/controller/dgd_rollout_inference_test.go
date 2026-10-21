@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +32,9 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
 // rolloutProbeServer implements the released frontend's worker-attribution response shape.
@@ -196,6 +200,35 @@ func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, pending)
 
+	t.Log("TLS and opaque environments keep legacy retirement without plaintext probes")
+	for _, container := range []corev1.Container{
+		{Name: consts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_TLS_CERT_PATH", Value: "/tls/server.crt"}}},
+		{Name: consts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_TLS_CLIENT_CA_CERT_PATH", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "tls"}, Key: "ca"}}}}},
+		{Name: consts.RuntimeContainerName, Args: []string{"--tls-cert-path=/tls/server.crt", "--tls-key-path=/tls/server.key"}},
+		{Name: consts.MainContainerName, EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "frontend-env"}}}}},
+	} {
+		configured := frontend2.DeepCopy()
+		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(frontend2), configured))
+		configured.Spec = frontend2.DeepCopy().Spec
+		if container.Name == consts.RuntimeContainerName {
+			configured.Spec.InitContainers = []corev1.Container{container}
+		} else {
+			configured.Spec.Containers[0].Env = container.Env
+			configured.Spec.Containers[0].EnvFrom = container.EnvFrom
+		}
+		require.NoError(t, r.Update(t.Context(), configured))
+		before := first.chat.Load() + second.chat.Load()
+		rollout, pending, err = r.buildRollingUpdateContext(t.Context(), dgd)
+		require.NoError(t, err)
+		require.False(t, pending)
+		require.Zero(t, rollout.OldWorkerReplicaTargetsByDCD[oldDCD.Name])
+		require.Equal(t, before, first.chat.Load()+second.chat.Load())
+	}
+	restored := frontend2.DeepCopy()
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(frontend2), restored))
+	restored.Spec = frontend2.DeepCopy().Spec
+	require.NoError(t, r.Update(t.Context(), restored))
+
 	t.Log("Drive the production program: retry a blocked gate after ten seconds, then stop polling after success")
 	programDGD := dgd.DeepCopy()
 	programDGD.Annotations[consts.AnnotationCurrentWorkerHashV2] = "old"
@@ -213,6 +246,41 @@ func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, programResult.RequeueAfter)
 	require.True(t, isRollingUpdateInProgress(&programResult.Status), "rollout phase alone must not schedule polling")
+
+	t.Log("DisaggregatedSet retries a blocked gate even without a subsequent resource event")
+	dsDGD := programDGD.DeepCopy()
+	roles := newEnvtestDSHappyPathDGD("roles").Spec.Components
+	for i := range dsDGD.Spec.Components {
+		if dsDGD.Spec.Components[i].ComponentName == "worker" {
+			dsDGD.Spec.Components[i] = roles[1]
+			dsDGD.Spec.Components[i].ComponentName = "worker"
+			dsDGD.Spec.Components[i].Replicas = ptr.To(int32(2))
+		}
+	}
+	dsDGD.Spec.Components = append(dsDGD.Spec.Components, roles[0])
+	dsHashes, err := desiredWorkerHashes(dsDGD)
+	require.NoError(t, err)
+	dsReplacement := newDCD.DeepCopy()
+	dsReplacement.Name = dynamo.GetDCDResourceName(dsDGD, "worker", dsHashes.v2)
+	dsReplacement.Labels[consts.KubeLabelDynamoWorkerHash] = dsHashes.v2
+	dsWorker := worker.DeepCopy()
+	dsWorker.Labels[consts.KubeLabelDynamoSelector] = dsReplacement.Name
+	dsOwner := createTestDGDReconcilerWithStatus(dsDGD, withObjects(oldDCD, dsReplacement, dsWorker, metadata, frontend1, frontend2))
+	dsOwner.Config.Namespace.Restricted = dsDGD.Namespace
+	dsOwner.RuntimeConfig.Gate = features.Gates{LWS: true, DisaggregatedSet: true}
+	require.NoError(t, rbacv1.AddToScheme(dsOwner.Scheme()))
+	require.NoError(t, disaggregatedsetv1.AddToScheme(dsOwner.Scheme()))
+	require.NoError(t, appsv1.AddToScheme(dsOwner.Scheme()))
+	require.NoError(t, leaderworkersetv1.AddToScheme(dsOwner.Scheme()))
+	dsProgram := dsOwner.newDisaggregatedSetProgram()
+	second.mode.Store(1)
+	dsResult, err := dsProgram.Reconcile(t.Context(), workloadProgramRequest{DGD: dsDGD})
+	require.NoError(t, err)
+	require.Equal(t, 10*time.Second, dsResult.RequeueAfter)
+	second.mode.Store(0)
+	dsResult, err = dsProgram.Reconcile(t.Context(), workloadProgramRequest{DGD: dsDGD})
+	require.NoError(t, err)
+	require.Zero(t, dsResult.RequeueAfter)
 
 	t.Log("A recreated worker cannot reuse metadata belonging to the previous Pod UID")
 	worker.UID = "recreated-pod-uid"
@@ -252,11 +320,16 @@ func TestReplacementInferenceTargets_ModelRoles(t *testing.T) {
 	tests := []struct {
 		name        string
 		modelType   string
+		workerType  string
+		surface     string
 		prefill     bool
 		wantTargets int
 		wantError   bool
 	}{
-		{name: "prefill uses phase attribution", modelType: "Prefill", prefill: true, wantTargets: 1},
+		{name: "legacy prefill uses chat only", modelType: "Prefill", surface: "Chat", prefill: true, wantTargets: 1},
+		{name: "surface-less prefill uses completions only", workerType: "prefill", surface: "Completions", prefill: true, wantTargets: 1},
+		{name: "prefill waits for paired serving metadata", workerType: "prefill", prefill: true, wantError: true},
+		{name: "surface-less encoder retains legacy rollout", workerType: "encode"},
 		{name: "embedding retains legacy rollout", modelType: "Embedding"},
 		{name: "incomplete model card cannot bypass gate", wantError: true},
 	}
@@ -266,12 +339,20 @@ func TestReplacementInferenceTargets_ModelRoles(t *testing.T) {
 			metadata := unstructured.Unstructured{Object: map[string]any{
 				"spec": map[string]any{"data": map[string]any{"model_cards": map[string]any{
 					"new/backend/generate/42": map[string]any{"instance_id": int64(42), "card_json": map[string]any{
-						"display_name": "test-model", "model_type": tt.modelType,
+						"display_name": "test-model", "model_type": tt.modelType, "worker_type": tt.workerType,
 					}},
 				}}},
 			}}
 			metadata.SetOwnerReferences([]metav1.OwnerReference{{Kind: "Pod", UID: "new", Controller: ptr.To(true)}})
-			targets, found, err := replacementInferenceTargets([]unstructured.Unstructured{metadata}, map[types.UID]bool{"new": true})
+			cards := []unstructured.Unstructured{metadata}
+			if tt.surface != "" {
+				paired := metadata.DeepCopy()
+				paired.SetOwnerReferences([]metav1.OwnerReference{{Kind: "Pod", UID: "decode", Controller: ptr.To(true)}})
+				require.NoError(t, unstructured.SetNestedField(paired.Object, tt.surface, "spec", "data", "model_cards", "new/backend/generate/42", "card_json", "model_type"))
+				require.NoError(t, unstructured.SetNestedField(paired.Object, "decode", "spec", "data", "model_cards", "new/backend/generate/42", "card_json", "worker_type"))
+				cards = append(cards, *paired)
+			}
+			targets, found, err := replacementInferenceTargets(cards, map[types.UID]bool{"new": true}, map[types.UID]bool{"decode": true})
 			if tt.wantError {
 				require.Error(t, err)
 				return
@@ -283,6 +364,16 @@ func TestReplacementInferenceTargets_ModelRoles(t *testing.T) {
 				return
 			}
 			require.Equal(t, tt.prefill, targets[0].Prefill)
+			require.Len(t, targets[0].Paths, 1)
+			path := "/v1/chat/completions"
+			if tt.surface == "Completions" {
+				path = "/v1/completions"
+			}
+			require.Equal(t, path, targets[0].Paths[0])
+
+			t.Log("An unrelated serving Pod cannot supply the prefill surface")
+			_, _, err = replacementInferenceTargets(cards, map[types.UID]bool{"new": true}, nil)
+			require.ErrorContains(t, err, "no paired serving surface")
 
 			t.Log("Verify that a real HTTP probe sends and checks prefill attribution")
 			server := httptest.NewServer(&rolloutProbeServer{})

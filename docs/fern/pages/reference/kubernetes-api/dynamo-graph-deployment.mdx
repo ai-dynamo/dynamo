@@ -58,6 +58,10 @@ checks the response's actual worker ID against replacement metadata owned by a R
 Prefill workers use the phase-specific prefill worker ID. A successful HTTP status without
 matching worker attribution does not release the old replica.
 
+Prefill probes use only the Chat or Completions endpoints advertised by a Ready decode
+or aggregated worker in the same DGD's replacement generation. Missing paired serving
+metadata retains the old prefill replica. A surface-less encoder remains outside this gate.
+
 The gate reuses the existing nvext API, including the API in frontend 1.5.0. The operator
 must be able to reach each frontend Pod's named `http` port, and frontend nvext must remain
 enabled. Failed requests, timeouts, disabled nvext, missing metadata, or missing attribution
@@ -69,6 +73,14 @@ not change worker Pod readiness or reuse success from a previous reconciliation.
 A frontend component with `replicas: 0` does not need to have a Ready Pod. Any Ready Pods
 that still exist for that component remain subject to inference verification until they
 leave service. Frontends with an omitted or positive replica count still require readiness.
+
+Frontends configured with HTTP TLS or mutual TLS retain the existing rollout behavior;
+the operator does not load frontend certificates or send plaintext probes to TLS listeners.
+This exclusion recognizes `DYN_TLS_CERT_PATH`, `DYN_TLS_KEY_PATH`, and
+`DYN_TLS_CLIENT_CA_CERT_PATH`, including `valueFrom` entries, and their frontend CLI flags
+in the `main` or sidecar-mode `runtime` container. Frontends using `envFrom` also retain
+the existing behavior because their HTTP transport configuration is not visible in the
+Pod spec. These deployments do not receive the replacement-inference protection.
 
 Embedding and other non-text models, external frontends, non-Kubernetes discovery,
 `Recreate`, and provider-native Grove updates retain their existing behavior. Replica
