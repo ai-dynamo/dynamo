@@ -296,8 +296,7 @@ where
             session_affinity,
         )
         .await?;
-        // Box the state: `unfold` moves it by value on every chunk, and `RetryManager` holds the
-        // whole `PreprocessedRequest` inline.
+        // `unfold` moves its state on every chunk; box it so that is a pointer copy.
         let retry_manager = Box::new(retry_manager);
         let response_stream = stream::unfold(retry_manager, move |mut retry_manager| async move {
             retry_manager

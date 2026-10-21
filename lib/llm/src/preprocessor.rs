@@ -5738,8 +5738,8 @@ impl OpenAIPreprocessor {
         };
 
         // transform the common response stream into a chat response stream
-        // (state is boxed because `unfold` moves it by value on every chunk)
 
+        // `unfold` moves its state on every chunk; box it so that is a pointer copy.
         stream::unfold(Box::new(state), |mut inner| {
             async move {
                 // Drain the buffered client-facing plain usage chunk first.
