@@ -24,7 +24,6 @@ mod engine;
 mod fake;
 mod handoff;
 mod health;
-mod load;
 mod model;
 
 use fake::{FakeEngine, FakeServer};
@@ -128,22 +127,7 @@ fn discovered(mode: DisaggregationMode) -> DiscoveredEngine {
 /// An engine in `mode` for `server` that skipped the bootstrap, as if it
 /// had passed, and started.
 async fn started(server: &FakeServer, mode: DisaggregationMode) -> LpxSidecarEngine {
-    started_with_capacity(server, mode, Some(256)).await
-}
-
-async fn started_with_capacity(
-    server: &FakeServer,
-    mode: DisaggregationMode,
-    total_kv_blocks: Option<u64>,
-) -> LpxSidecarEngine {
-    let mut info = fake::server_info(mode);
-    info.capacity = Some(crate::pb::DeploymentCapacity {
-        kv_block_size: total_kv_blocks.map(|_| 32),
-        total_kv_blocks,
-        max_running_requests: Some(4),
-        ..Default::default()
-    });
-    let discovered = DiscoveredEngine::check(info, fake::model_info(), mode).expect("accepted");
+    let discovered = discovered(mode);
     let engine_config = discovered.engine_config();
     let engine = LpxSidecarEngine::new(
         GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").expect("valid test endpoint"),

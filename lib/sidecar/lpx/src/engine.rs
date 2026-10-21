@@ -9,9 +9,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    AsyncEngineContext, DynamoError, EngineConfig, FpmBinding, GenerateContext, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, MetricsBindings, MetricsCtx, PreprocessedRequest,
-    RuntimeConfig, WorkerConfig, usage,
+    AsyncEngineContext, DynamoError, EngineConfig, GenerateContext, LLMEngine, LLMEngineOutput,
+    LLMEngineOutputExt, PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -29,7 +28,6 @@ use crate::convert::{
     dispatch_failure, stream_status, trace_headers,
 };
 use crate::health;
-use crate::load;
 use crate::model::{DiscoveredEngine, engine_label, expected_role, role_name};
 
 const ALREADY_STARTED: &str = "the LPX sidecar has already started";
@@ -64,7 +62,6 @@ pub struct LpxSidecarEngine {
     /// The configured connection pool, opened by `start` and named after the
     /// identified engine. The bootstrap uses only a one-connection probe.
     client: OnceCell<Arc<OpenEngineClient>>,
-    load: Arc<load::Poller>,
     cancel: CancellationToken,
 }
 
@@ -81,7 +78,6 @@ impl LpxSidecarEngine {
             discovered,
             engine_config,
             client: OnceCell::new(),
-            load: Arc::new(load::Poller::default()),
             cancel: CancellationToken::new(),
         }
     }
@@ -240,32 +236,6 @@ impl LLMEngine for LpxSidecarEngine {
             "LPX OpenEngine server identified"
         );
         Ok(self.engine_config.clone())
-    }
-
-    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
-        let client = self.connected()?;
-        Ok(self
-            .load
-            .snapshot_bindings(
-                client,
-                &self.discovered,
-                &self.endpoint,
-                self.cancel.child_token(),
-            )
-            .await)
-    }
-
-    async fn forward_pass_metrics(&self) -> Result<FpmBinding, DynamoError> {
-        let client = self.connected()?;
-        Ok(self
-            .load
-            .fpm_binding(
-                client,
-                &self.discovered,
-                &self.endpoint,
-                self.cancel.child_token(),
-            )
-            .await)
     }
 
     async fn generate(
@@ -435,7 +405,6 @@ impl LLMEngine for LpxSidecarEngine {
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
         self.cancel.cancel();
-        self.load.shutdown().await;
         tracing::info!("LPX sidecar shutdown complete");
         Ok(())
     }

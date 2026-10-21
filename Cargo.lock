@@ -2821,7 +2821,6 @@ dependencies = [
  "axum 0.8.4",
  "clap",
  "dynamo-backend-common",
- "dynamo-mocker",
  "dynamo-runtime",
  "dynamo-sidecar-common",
  "dynamo-trtllm-sidecar",

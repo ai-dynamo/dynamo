@@ -191,7 +191,6 @@ fn the_role_decides_where_the_worker_registers() {
             .map(|(name, value)| (name.to_string(), value.to_string()))
     );
     assert!(!config.enable_kv_routing, "LPX publishes no KV events");
-    assert!(config.enable_load_metrics);
     // The router would otherwise expect this worker to answer KV recovery.
     assert!(!config.enable_local_indexer, "LPX hosts no KV indexer");
 

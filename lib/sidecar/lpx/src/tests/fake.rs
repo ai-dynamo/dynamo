@@ -49,12 +49,6 @@ pub(super) struct State {
     /// GetModelInfo never answers this many more times.
     pub(super) model_info_stalls: Mutex<usize>,
     pub(super) model_info_calls: AtomicUsize,
-    /// GetLoad response; defaults to UNIMPLEMENTED.
-    pub(super) load: Mutex<Result<pb::LoadInfo, tonic::Code>>,
-    /// When set, the next GetLoad call never answers.
-    pub(super) stall_next_load: Mutex<bool>,
-    pub(super) load_calls: AtomicUsize,
-    pub(super) load_called: tokio::sync::Notify,
     pub(super) behavior: Mutex<Behavior>,
 
     pub(super) requests: Mutex<Vec<pb::GenerateRequest>>,
@@ -76,10 +70,6 @@ impl FakeEngine {
             model_info_status: Mutex::new(None),
             model_info_stalls: Mutex::new(0),
             model_info_calls: AtomicUsize::new(0),
-            load: Mutex::new(Err(tonic::Code::Unimplemented)),
-            stall_next_load: Mutex::new(false),
-            load_calls: AtomicUsize::new(0),
-            load_called: tokio::sync::Notify::new(),
             behavior: Mutex::new(Behavior::Complete),
             requests: Mutex::new(Vec::new()),
             metadata: Mutex::new(Vec::new()),
@@ -91,34 +81,6 @@ impl FakeEngine {
     pub(super) fn with_behavior(self, behavior: Behavior) -> Self {
         *self.0.behavior.lock().unwrap() = behavior;
         self
-    }
-
-    pub(super) fn set_load(&self, load: Result<pb::LoadInfo, tonic::Code>) {
-        *self.0.load.lock().unwrap() = load;
-    }
-
-    pub(super) fn stall_next_load(&self) {
-        *self.0.stall_next_load.lock().unwrap() = true;
-    }
-
-    pub(super) fn load_calls(&self) -> usize {
-        self.0.load_calls.load(Ordering::SeqCst)
-    }
-
-    pub(super) async fn wait_for_load_calls(&self, target: usize) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let notified = self.0.load_called.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                if self.load_calls() >= target {
-                    return;
-                }
-                notified.await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("timed out waiting for {target} GetLoad calls"));
     }
 
     pub(super) fn requests(&self) -> Vec<pb::GenerateRequest> {
@@ -353,15 +315,7 @@ impl pb::control_server::Control for FakeEngine {
         &self,
         _request: Request<pb::GetLoadRequest>,
     ) -> Result<Response<pb::LoadInfo>, Status> {
-        self.0.load_calls.fetch_add(1, Ordering::SeqCst);
-        self.0.load_called.notify_waiters();
-        if std::mem::take(&mut *self.0.stall_next_load.lock().unwrap()) {
-            std::future::pending::<()>().await;
-        }
-        match self.0.load.lock().unwrap().clone() {
-            Ok(load) => Ok(Response::new(load)),
-            Err(code) => Err(Status::new(code, "scripted GetLoad failure")),
-        }
+        Err(Status::unimplemented("GetLoad is not used"))
     }
 
     async fn health(

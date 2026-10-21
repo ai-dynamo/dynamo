@@ -22,8 +22,6 @@ use crate::pb::inference_client::InferenceClient;
 /// Bound on one `Control` RPC once the server is up, so a connected but
 /// unresponsive server cannot hang startup or cancellation.
 pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(30);
-/// Bound on one `Control.GetLoad` poll, which runs every 10 ms.
-const LOAD_RPC_TIMEOUT: Duration = Duration::from_millis(100);
 /// How often a still-starting engine is reported while the bootstrap waits.
 const WAIT_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -227,20 +225,6 @@ impl OpenEngineClient {
                 ),
             )),
         }
-    }
-
-    /// Polls `Control.GetLoad` with a short timeout, keeping the raw status so
-    /// the caller can tell `UNIMPLEMENTED` from a transient failure.
-    pub(crate) async fn get_load(&self) -> Result<pb::LoadInfo, tonic::Status> {
-        timeout(
-            LOAD_RPC_TIMEOUT,
-            self.control().get_load(pb::GetLoadRequest {
-                include_per_rank: false,
-            }),
-        )
-        .await
-        .map_err(|_| tonic::Status::deadline_exceeded("GetLoad timed out"))?
-        .map(tonic::Response::into_inner)
     }
 }
 

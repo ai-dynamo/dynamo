@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_llm::first_token::FirstTokenSource;
-use dynamo_llm::fpm_publisher::FpmDirectPublisher;
 use dynamo_llm::local_model::runtime_config::{
     DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagConfig, TOPOLOGY_TAINT_PREFIX,
 };
@@ -35,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 use crate::adapter::{EngineAdapter, RawEngineAdapter};
 use crate::disagg::DisaggregationMode;
 use crate::engine::{
-    EngineConfig, FpmBinding, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
+    EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
 };
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::publisher::{PublisherHandles, setup_publishers};
@@ -186,12 +185,9 @@ pub struct WorkerConfig {
     pub exclude_tools_when_tool_choice_none: bool,
     /// Whether this worker should keep an in-process KV indexer.
     pub enable_local_indexer: bool,
-    /// Enable KV events, first-token signals, and snapshot load publishers.
+    /// Kill switch for KV-aware-routing publishers. When `false`, skip
+    /// `engine.kv_event_sources()` and `SnapshotPublisher` setup.
     pub enable_kv_routing: bool,
-    /// Enable snapshot load publishers without requiring KV routing.
-    /// Defaults to false; KV events and first-token signals remain gated
-    /// independently by `enable_kv_routing`.
-    pub enable_load_metrics: bool,
     /// Per-endpoint Prometheus metric labels appended to every metric.
     /// Common labels: `("model", "<served-name>")`.
     pub metrics_labels: Vec<(String, String)>,
@@ -260,7 +256,6 @@ impl Default for WorkerConfig {
             exclude_tools_when_tool_choice_none: true,
             enable_local_indexer: true,
             enable_kv_routing: true,
-            enable_load_metrics: false,
             metrics_labels: Vec::new(),
             disaggregation_mode: DisaggregationMode::Aggregated,
             health_check_payload: None,
@@ -337,13 +332,6 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.setup_metrics(ctx).await,
             EngineKind::Raw(e) => e.setup_metrics(ctx).await,
-        }
-    }
-
-    async fn forward_pass_metrics(&self) -> Result<FpmBinding, DynamoError> {
-        match self {
-            EngineKind::Llm(engine) => engine.forward_pass_metrics().await,
-            EngineKind::Raw(_) => Ok(FpmBinding::default()),
         }
     }
 
@@ -459,8 +447,6 @@ pub struct Worker {
     engine_route_shutdown: CancellationToken,
     /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
     publishers: Option<PublisherHandles>,
-    /// Independent of KV/load publishers; dropped after engine cleanup.
-    fpm_publisher: Option<FpmDirectPublisher>,
     /// Framework-owned lifecycle gauges. Set in `setup_publishing` after
     /// `engine.start()` succeeds; observed in `cleanup_once` and the drain
     /// step. Always present once `start()` returns Ok, independent of
@@ -491,7 +477,6 @@ impl Worker {
             engine_route_mutation: Arc::new(tokio::sync::Mutex::new(())),
             engine_route_shutdown: CancellationToken::new(),
             publishers: None,
-            fpm_publisher: None,
             lifecycle: None,
         }
     }
@@ -755,8 +740,7 @@ impl Worker {
     /// (via Push or ZMQ); snapshot writes flow through the publisher
     /// inline (no polling, no GIL on the framework side). KV/snapshot setup is skipped when the
     /// engine declares neither source, and KV events additionally require a block size. The
-    /// lifecycle publisher is independent of those engine declarations. Forward-pass
-    /// publishers are declared separately and survive either KV/snapshot opt-out.
+    /// lifecycle publisher is independent of those engine declarations.
     async fn setup_publishing(
         &mut self,
         endpoint: &dynamo_runtime::component::Endpoint,
@@ -773,52 +757,18 @@ impl Worker {
         };
         let bindings = self.engine.setup_metrics(ctx).await?;
 
-        // Complete the FPM handoff before snapshot setup, allowing one engine
-        // producer to receive both sinks before it starts.
-        let fpm = self.engine.forward_pass_metrics().await?;
-        if fpm.dp_size > 0 {
-            let (publisher, ranks) = FpmDirectPublisher::new(
-                endpoint.clone(),
-                endpoint.drt().connection_id().to_string(),
-                fpm.dp_size,
-            )
-            .await
-            .map_err(|error| {
-                err(
-                    ErrorType::Backend(BackendError::CannotConnect),
-                    format!("forward-pass publisher setup: {error}"),
-                )
-            })?;
-            self.fpm_publisher = Some(publisher);
-            if let Some(on_ready) = fpm.on_ready {
-                on_ready(ranks).map_err(|error| {
-                    err(
-                        ErrorType::Backend(BackendError::CannotConnect),
-                        format!("forward-pass publisher on_ready: {error}"),
-                    )
-                })?;
-            }
-        }
-
-        if !self.config.enable_kv_routing && !self.config.enable_load_metrics {
-            tracing::debug!(
-                "KV routing and load metrics disabled; skipping kv/snapshot publishers"
-            );
+        if !self.config.enable_kv_routing {
+            tracing::debug!("enable_kv_routing=false; skipping kv/snapshot publishers");
             self.lifecycle = Some(lifecycle);
             return Ok(());
         }
-        let first_token_source =
-            if self.config.enable_kv_routing && matches!(&self.engine, EngineKind::Llm(_)) {
-                let (worker_type, _) = resolve_worker_type_and_needs(&self.config);
-                FirstTokenSource::for_endpoint(endpoint, worker_type).await
-            } else {
-                None
-            };
-        let kv_sources = if self.config.enable_kv_routing {
-            self.engine.kv_event_sources().await?
+        let first_token_source = if matches!(&self.engine, EngineKind::Llm(_)) {
+            let (worker_type, _) = resolve_worker_type_and_needs(&self.config);
+            FirstTokenSource::for_endpoint(endpoint, worker_type).await
         } else {
-            Vec::new()
+            None
         };
+        let kv_sources = self.engine.kv_event_sources().await?;
         if kv_sources.is_empty() && bindings.dp_ranks.is_empty() {
             tracing::debug!(
                 "engine returned no KV sources / dp_ranks; skipping KV/snapshot publishers"
@@ -838,7 +788,7 @@ impl Worker {
             snapshot_dp_ranks = bindings.dp_ranks.len(),
             enable_local_indexer,
             kv_cache_block_size = ?kv_cache_block_size,
-            "Starting worker publishers"
+            "Starting KV-aware-routing publishers"
         );
         let kv_state_endpoint = match &self.config.kv_state_endpoint {
             Some(endpoint) => endpoint.clone(),
@@ -1038,7 +988,6 @@ impl Worker {
         // complete. The worker completion publisher follows the serving endpoint's process-local
         // lifetime; its channel closes naturally when the adapter and any request clones drop.
         self.publishers = None;
-        self.fpm_publisher = None;
         // Mark stopped even on failure so a follow-up call no-ops. Cleanup may
         // tear down process groups that cannot safely be destroyed twice.
         self.state = LifecycleState::Stopped;
@@ -3681,97 +3630,6 @@ mod handoff_and_lifecycle_tests {
             .endpoint("generate")
     }
 
-    #[derive(Default)]
-    struct LoadMetricsEngine {
-        publisher: Arc<StdMutex<Option<Arc<crate::SnapshotPublisher>>>>,
-    }
-
-    #[async_trait]
-    impl LLMEngine for LoadMetricsEngine {
-        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
-            Ok(EngineConfig {
-                model: "load-test".to_string(),
-                ..Default::default()
-            })
-        }
-
-        async fn generate(
-            &self,
-            _request: PreprocessedRequest,
-            _ctx: crate::engine::GenerateContext,
-        ) -> Result<
-            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
-            DynamoError,
-        > {
-            unreachable!("not used in publisher tests")
-        }
-
-        async fn setup_metrics(
-            &self,
-            _ctx: MetricsCtx<'_>,
-        ) -> Result<MetricsBindings, DynamoError> {
-            let publisher = self.publisher.clone();
-            Ok(MetricsBindings {
-                dp_ranks: vec![0],
-                on_publisher_ready: Some(Box::new(move |ready| {
-                    *publisher.lock().unwrap() = Some(ready);
-                    Ok(())
-                })),
-            })
-        }
-
-        async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
-            panic!("load-only workers must not request KV sources");
-        }
-
-        async fn cleanup(&self) -> Result<(), DynamoError> {
-            self.publisher.lock().unwrap().take();
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn load_metrics_gate_is_independent_of_kv_routing() {
-        for enable_load_metrics in [false, true] {
-            let endpoint = test_local_endpoint().await;
-            let engine = Arc::new(LoadMetricsEngine::default());
-            let mut worker = Worker::new(
-                engine.clone(),
-                WorkerConfig {
-                    enable_kv_routing: false,
-                    enable_load_metrics,
-                    ..Default::default()
-                },
-            );
-            let config = worker
-                .start_engine(endpoint.drt().connection_id())
-                .await
-                .unwrap();
-            let metrics = crate::EngineMetrics::with_engine_config(endpoint.clone(), &config);
-            let lifecycle = crate::metrics::LifecycleGauges::new(&metrics, 0.0).unwrap();
-            worker
-                .setup_publishing(&endpoint, &config, &metrics, 0.0, lifecycle)
-                .await
-                .unwrap();
-            assert!(worker.lifecycle.is_some());
-            assert!(worker.fpm_publisher.is_none());
-            assert!(
-                worker
-                    .publishers
-                    .as_ref()
-                    .and_then(PublisherHandles::first_token_source)
-                    .is_none()
-            );
-            let publisher = engine.publisher.lock().unwrap().clone();
-            assert_eq!(publisher.is_some(), enable_load_metrics);
-            if let Some(publisher) = publisher {
-                assert_eq!(publisher.dp_ranks(), vec![0]);
-            }
-            worker.cleanup_once().await;
-            endpoint.drt().shutdown();
-        }
-    }
-
     /// Mock engine that records endpoint/control lifecycle calls, lets a test
     /// force `on_endpoint_ready` to fail, and advertises configurable
     /// control/update sets.
@@ -3896,147 +3754,6 @@ mod handoff_and_lifecycle_tests {
             } else {
                 Ok(())
             }
-        }
-    }
-
-    #[derive(Default)]
-    struct FpmMetricsEngine {
-        ranks: Arc<StdMutex<Vec<crate::FpmPublisher>>>,
-        log: Arc<StdMutex<Vec<&'static str>>>,
-    }
-
-    #[async_trait]
-    impl LLMEngine for FpmMetricsEngine {
-        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
-            Ok(EngineConfig {
-                model: "fpm-test".to_string(),
-                ..Default::default()
-            })
-        }
-
-        async fn generate(
-            &self,
-            _request: PreprocessedRequest,
-            _ctx: crate::engine::GenerateContext,
-        ) -> Result<
-            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
-            DynamoError,
-        > {
-            unreachable!("not used in publisher tests")
-        }
-
-        async fn setup_metrics(
-            &self,
-            _ctx: MetricsCtx<'_>,
-        ) -> Result<MetricsBindings, DynamoError> {
-            self.log.lock().unwrap().push("setup_metrics");
-            Ok(MetricsBindings::default())
-        }
-
-        async fn forward_pass_metrics(&self) -> Result<FpmBinding, DynamoError> {
-            self.log.lock().unwrap().push("forward_pass_metrics");
-            let ranks = self.ranks.clone();
-            let log = self.log.clone();
-            Ok(FpmBinding {
-                dp_size: 1,
-                on_ready: Some(Box::new(move |ready| {
-                    log.lock().unwrap().push("on_ready");
-                    *ranks.lock().unwrap() = ready;
-                    Ok(())
-                })),
-            })
-        }
-
-        async fn cleanup(&self) -> Result<(), DynamoError> {
-            self.ranks.lock().unwrap().clear();
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn forward_pass_publisher_survives_disabled_routing_and_empty_snapshot_ranks() {
-        for enable_load_metrics in [false, true] {
-            let endpoint = test_local_endpoint().await;
-            let engine = Arc::new(FpmMetricsEngine::default());
-            let mut worker = Worker::new(
-                engine.clone(),
-                WorkerConfig {
-                    enable_kv_routing: false,
-                    enable_load_metrics,
-                    ..Default::default()
-                },
-            );
-            let config = worker
-                .start_engine(endpoint.drt().connection_id())
-                .await
-                .unwrap();
-            let metrics = crate::EngineMetrics::with_engine_config(endpoint.clone(), &config);
-            let lifecycle = crate::LifecycleGauges::new(&metrics, 0.0).unwrap();
-            worker
-                .setup_publishing(&endpoint, &config, &metrics, 0.0, lifecycle)
-                .await
-                .unwrap();
-            assert_eq!(
-                *engine.log.lock().unwrap(),
-                ["setup_metrics", "forward_pass_metrics", "on_ready"]
-            );
-            let ranks = engine.ranks.lock().unwrap().clone();
-            assert_eq!(ranks.len(), 1);
-
-            let mut subscriber =
-                dynamo_runtime::transports::event_plane::EventSubscriber::for_endpoint(
-                    &endpoint,
-                    "forward-pass-metrics",
-                )
-                .await
-                .unwrap()
-                .typed::<serde_json::Value>();
-            // The idle heartbeat establishes subscription readiness without
-            // guessing a ZMQ discovery/handshake delay.
-            let heartbeat = tokio::time::timeout(Duration::from_secs(5), subscriber.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap()
-                .1;
-            assert_eq!(heartbeat["wall_time"], 0.0);
-            ranks[0]
-                .publish(crate::ForwardPassSnapshot {
-                    wall_time_secs: 0.25,
-                    ..Default::default()
-                })
-                .unwrap();
-            let sample = tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    let sample = subscriber.next().await.unwrap().unwrap().1;
-                    if sample["wall_time"] == 0.25 {
-                        break sample;
-                    }
-                }
-            })
-            .await
-            .unwrap();
-            assert_eq!(
-                sample["worker_id"],
-                endpoint.drt().connection_id().to_string()
-            );
-            assert_eq!(sample["dp_rank"], 0);
-            assert!(
-                sample["counter_id"].as_i64().unwrap() > heartbeat["counter_id"].as_i64().unwrap()
-            );
-
-            worker.cleanup_once().await;
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while ranks[0]
-                    .publish(crate::ForwardPassSnapshot::default())
-                    .is_ok()
-                {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-            })
-            .await
-            .expect("cleanup closes the live publisher's receiver");
-            endpoint.drt().shutdown();
         }
     }
 

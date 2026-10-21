@@ -20,8 +20,7 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_mocker::common::protocols::FpmSink;
-pub use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher};
+use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher, FpmSink};
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;

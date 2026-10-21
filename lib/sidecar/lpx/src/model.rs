@@ -196,7 +196,6 @@ impl DiscoveredEngine {
             exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
             // An LPX engine publishes no KV events and hosts no KV indexer.
             enable_kv_routing: false,
-            enable_load_metrics: true,
             enable_local_indexer: false,
             disaggregation_mode: mode,
             route_to_encoder: false,
