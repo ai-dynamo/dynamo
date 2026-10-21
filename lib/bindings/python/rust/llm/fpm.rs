@@ -59,12 +59,10 @@ impl FpmEventRelay {
     #[new]
     #[pyo3(signature = (endpoint, zmq_endpoint))]
     fn new(py: Python<'_>, endpoint: Endpoint, zmq_endpoint: String) -> PyResult<Self> {
-        let endpoint = endpoint.inner;
-        // Initialization waits on the secondary runtime, whose callbacks may
-        // need the GIL. Let those callbacks progress while we wait.
+        // Don't hold the GIL while blocking on the runtime; its tasks may need it.
         let inner = py
             .allow_threads(move || {
-                llm_rs::fpm_publisher::FpmEventRelay::new(endpoint, zmq_endpoint)
+                llm_rs::fpm_publisher::FpmEventRelay::new(endpoint.inner, zmq_endpoint)
             })
             .map_err(to_pyerr)?;
         Ok(Self { inner })
@@ -107,12 +105,16 @@ impl FpmDirectPublisher {
     ///         attention DP is disabled.
     #[new]
     #[pyo3(signature = (endpoint, worker_id, dp_size=1))]
-    fn new(endpoint: Endpoint, worker_id: String, dp_size: u32) -> PyResult<Self> {
+    fn new(py: Python<'_>, endpoint: Endpoint, worker_id: String, dp_size: u32) -> PyResult<Self> {
         let rt = endpoint.inner.component().drt().runtime().secondary();
-        let (inner, publishers) = rt
-            .block_on(async {
-                llm_rs::fpm_publisher::FpmDirectPublisher::new(endpoint.inner, worker_id, dp_size)
-                    .await
+        // Don't hold the GIL while blocking on the runtime; its tasks may need it.
+        let (inner, publishers) = py
+            .allow_threads(move || {
+                rt.block_on(llm_rs::fpm_publisher::FpmDirectPublisher::new(
+                    endpoint.inner,
+                    worker_id,
+                    dp_size,
+                ))
             })
             .map_err(to_pyerr)?;
         Ok(Self { inner, publishers })
