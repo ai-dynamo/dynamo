@@ -16,6 +16,15 @@ pub(crate) struct Args {
     #[arg(long)]
     pub model_path: String,
 
+    /// Deployment-level default thinking mode advertised to the Dynamo
+    /// frontend's chat formatter.
+    #[arg(
+        long = "dyn-default-thinking-mode",
+        env = "DYN_DEFAULT_THINKING_MODE",
+        value_parser = ["enabled", "disabled"]
+    )]
+    pub default_thinking_mode: Option<String>,
+
     /// Model maximum sequence length (input + output). Used to register the
     /// context length and to derive a default `max_tokens` when a request omits
     /// one. A value supplied here takes precedence over the context length

@@ -59,6 +59,7 @@ validator = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+temp-env = "0.3"
 
 [package.metadata.cargo-machete]
 ignored = ["prost"]

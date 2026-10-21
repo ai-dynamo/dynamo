@@ -1,0 +1,205 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "MiniMax M3 NVFP4"
+subtitle: "Serve MiniMax M3 NVFP4 with Dynamo and vLLM on GB200, aggregated or with prefill/decode disaggregation."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Each target below is a Dynamo + vLLM deployment of MiniMax M3 — a multimodal model serving up to 1M-token context with MoE and sparse attention — with KV-aware routing, NVFP4-packed routed experts, and FP8 KV cache, running aggregated or with prefill/decode disaggregation on GB200 NVL72 rack. KV transfer and tensor parallelism run over NVLink (MNNVL) using Kubernetes ComputeDomains.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="agg">
+<span><b>Checkpoint</b> nvidia/MiniMax-M3-NVFP4</span>
+<span><b>Precision</b> NVFP4 weights, FP8 KV cache</span>
+<span><b>GPUs</b> 12x GB200, three TP4 workers</span>
+<span><b>KV storage</b> OffloadingConnector with a 400 GB host budget setting</span>
+<span><b>Routing</b> KV-aware across replicas</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="disagg">
+<span><b>Checkpoint</b> nvidia/MiniMax-M3-NVFP4</span>
+<span><b>Precision</b> NVFP4 weights, FP8 KV cache</span>
+<span><b>GPUs</b> 12x GB200 prefill + 12x GB200 decode</span>
+<span><b>Workers</b> Three TP4 prefill + three TP4 decode</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+</div>
+
+## Prerequisites
+
+Both targets require:
+
+- A Kubernetes cluster with the Dynamo platform installed. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- GB200 GPU nodes: 12 GPUs for aggregated serving or 24 GPUs for disaggregated serving.
+- The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
+- A Hugging Face token with access to `nvidia/MiniMax-M3-NVFP4` and `Inferact/MiniMax-M3-EAGLE3-GQA`.
+- Standalone Kustomize v5.8.1 and a private cluster Kustomization with registry credentials, GB200 placement, cache bindings, and networking appropriate to the cluster.
+- The disaggregated target requires network-interface annotations and UCX/NCCL interface settings that match the target cluster. It also requires all six workers to use a compatible rack-scoped ComputeDomain channel.
+
+Set the namespace and create the Hugging Face token secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace "${NAMESPACE}"
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n "${NAMESPACE}"
+```
+
+If the namespace and Secret already exist, use them instead. Run the following commands from the Dynamo repository root.
+
+<Warning>
+Both targets require a populated `shared-model-cache` PVC in the selected namespace unless the cluster binding coordinates a different claim for download and serving. Set `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your cluster (`kubectl get storageclass`) before applying it.
+</Warning>
+
+## Deploy
+
+Edit `storageClassName` in the model-cache manifest, then populate the cache:
+
+```bash
+kubectl apply -f recipes/minimax-m3/model-cache/model-cache.yaml -n "${NAMESPACE}"
+kubectl apply -f recipes/minimax-m3/model-cache/model-download.yaml -n "${NAMESPACE}"
+kubectl wait --for=condition=complete job/minimax-m3-model-download \
+  -n "${NAMESPACE}" --timeout=14400s
+```
+
+Prepare a private cluster Kustomization for the selected deployment using the [beta cluster starter](https://github.com/ai-dynamo/dynamo/blob/main/recipes/templates/kustomize/README.md). Keep filled site values outside the recipe contribution.
+
+<div data-variant="agg">
+
+Follow the [aggregated cluster setup](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/README.md#deploy). Point the private composition's `resources` at `recipes/minimax-m3/vllm/agg-gb200-agentic/deploy.yaml` and validate it with the command in that guide.
+
+</div>
+
+<div data-variant="disagg">
+
+Follow the [disaggregated cluster setup](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/README.md#deploy). Point the private composition's `resources` at `recipes/minimax-m3/vllm/disagg-gb200-agentic/deploy.yaml` and validate it with the command in that guide.
+
+</div>
+
+Set `CLUSTER_KUSTOMIZATION` to the filled private directory, then render and apply the validated composition with standalone Kustomize v5.8.1:
+
+```bash
+kustomize build --load-restrictor LoadRestrictionsNone "$CLUSTER_KUSTOMIZATION" | \
+  kubectl apply --dry-run=server -f - -n "$NAMESPACE"
+kustomize build --load-restrictor LoadRestrictionsNone "$CLUSTER_KUSTOMIZATION" | \
+  kubectl apply -f - -n "$NAMESPACE"
+```
+
+Use `LoadRestrictionsNone` only with reviewed paths. It allows the private composition to reference the portable recipe and generated schema.
+
+Monitor the deployment until the frontend and every worker report ready:
+
+```bash
+kubectl get dynamographdeployments,pods -n "${NAMESPACE}"
+```
+
+## Smoke Test
+
+Forward the selected frontend service.
+
+<div data-variant="agg">
+
+```bash
+kubectl port-forward \
+  svc/minimax-m3-agg-gb200-agentic-frontend 8000:8000 \
+  -n "${NAMESPACE}"
+```
+
+</div>
+
+<div data-variant="disagg">
+
+```bash
+kubectl port-forward \
+  svc/minimax-m3-disagg-gb200-agentic-frontend 8000:8000 \
+  -n "${NAMESPACE}"
+```
+
+</div>
+
+In another terminal, send a chat request:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "nvidia/MiniMax-M3-NVFP4",
+    "messages": [{"role": "user", "content": "Respond with a short readiness message."}],
+    "max_tokens": 64
+  }'
+```
+
+A successful smoke test returns an HTTP 200 response containing a chat completion.
+
+## Benchmark
+
+See the MiniMax M3 benchmark [README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/perf/README.md) for the full workflow—staging the trace on the PVC, running a concurrency sweep, and fetching artifacts—and use the checked-in [AIPerf Job](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/perf/perf.yaml) to run the trace replay.
+
+Both serving manifests default to real EAGLE3 verification with three draft tokens. The benchmark Job does not change that setting. For synthetic-acceptance experiments, follow the [benchmark-only configuration instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/README.md#synthetic-acceptance-for-benchmarks). Use the checked-in [aggregated Component](https://github.com/ai-dynamo/dynamo/tree/main/recipes/minimax-m3/vllm/agg-gb200-agentic/kustomize/components/synthetic-acceptance) or [disaggregated Component](https://github.com/ai-dynamo/dynamo/tree/main/recipes/minimax-m3/vllm/disagg-gb200-agentic/kustomize/components/synthetic-acceptance) described there. Both select acceptance length 2.89.
+
+<Warning>
+Synthetic acceptance bypasses real EAGLE3 verification. Use it only for controlled performance experiments, never production responses or accuracy evaluation.
+</Warning>
+
+### Optimization Targets
+
+The intended agentic workload and interactivity targets are:
+
+| Workload | Median ISL | Median OSL | KV cache hit rate | User output tok/s | TTFT P50 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Agentic | 64k | 400 | 90% | 50 | ≤ 5 s |
+
+The benchmark replays the Mooncake-format agentic trace described in the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/perf/README.md).
+
+### Performance Results
+
+The verified results below use synthetic acceptance with the SpeedBench coding acceptance length. They describe three aggregated TP4 workers (12 GPUs) and three prefill plus three decode TP4 workers (24 GPUs), respectively.
+
+| Workload | Framework | Recipe | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| Agentic (15% subset) | vLLM | Aggregated (3 workers) | GB200 | 162 | 468.3 | 50.2 | 765 |
+| Agentic (15% subset) | vLLM | Disaggregated (3P3D) | GB200 | 128 | 344.9 | 82.6 | 1,886 |
+
+## Compare All Targets
+
+Both targets use vLLM, TP4 workers, FP8 KV cache, prefix caching, KV events, KV-aware routing, and EAGLE3 speculative decoding with three speculative tokens.
+
+| | Aggregated | Disaggregated |
+| --- | --- | --- |
+| **GPUs** | 12x GB200 | 24x GB200 |
+| **Workers** | 3 aggregated | 3 prefill + 3 decode |
+| **Parallelism** | TP4 per worker | TP4 per worker |
+| **GPU memory utilization** | 0.90 | 0.80 prefill / 0.90 decode |
+| **Maximum sequences** | 256 | 32 prefill / 256 decode |
+| **Maximum batched tokens** | 16,384 | 24,576 prefill / 8,192 decode |
+| **KV path** | OffloadingConnector with a 400 GB CPU budget setting | NIXL transfer between prefill and decode |
+| **Maximum context** | 1,048,576 | 1,048,576 |
+
+## Notes
+
+- Both manifests pin the model checkpoint and the EAGLE3 checkpoint to specific Hugging Face revisions.
+- Both manifests select real EAGLE3 verification by default; synthetic acceptance length 2.89 is an explicit benchmark-only option.
+- The aggregated target uses vLLM's `OffloadingConnector` with `CPUOffloadingSpec` and sets `cpu_bytes_to_use` to `400000000000`.
+- Both targets enable `--frontend-decoding`. This path supports VP8/VP9 video input but does not support H.264/H.265. Re-encode H.264/H.265 videos to VP9 before sending them to these deployments.
+
+## Source
+
+- Recipe README: [recipes/minimax-m3/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/README.md)
+- Aggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/agg-gb200-agentic/deploy.yaml)
+- Disaggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/disagg-gb200-agentic/deploy.yaml)
+- Model cache: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/model-cache/model-cache.yaml)
+- Model download: [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/model-cache/model-download.yaml)

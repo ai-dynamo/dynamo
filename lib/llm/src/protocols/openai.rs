@@ -29,6 +29,7 @@ pub mod pooling;
 pub mod rerank;
 pub mod responses;
 pub mod stream_aggregator;
+mod strict_schema;
 pub mod tools;
 pub mod validate;
 pub mod videos;
@@ -139,6 +140,10 @@ pub(crate) trait OpenAIOutputOptionsProvider {
     fn get_formatted_prompt(&self) -> Option<bool>;
 
     fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
+        None
+    }
+
+    fn get_no_stop_trim(&self) -> Option<bool> {
         None
     }
 }
@@ -275,6 +280,7 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
             skip_special_tokens,
             formatted_prompt,
             return_tokens_as_token_ids,
+            no_stop_trim: self.get_no_stop_trim(),
         })
     }
 }
@@ -400,9 +406,23 @@ impl GuidedToolConstraint {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParsingOptions {
+    /// Request mode retained so stream and batch use the same native-family eligibility.
+    #[serde(default)]
+    pub tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
+
+    /// A disabled thinking request must not regain a reasoning channel during raw batch recovery.
+    #[serde(default)]
+    pub reasoning_disabled: bool,
+
+    /// JSON response formatting is a content contract, separate from guided tool JSON.
+    #[serde(default)]
+    pub structured_response: bool,
+
+    #[serde(default)]
+    pub default_thinking_mode: Option<String>,
 
     /// Final request policy for tool output. Some model parsers (currently
     /// Harmony) must still run during non-streaming aggregation to remove
@@ -433,16 +453,11 @@ pub struct ParsingOptions {
     #[serde(default)]
     pub move_reasoning_to_content_when_empty: bool,
 
-    /// The worker's operator-configured structural-tag policy. Carried through so
-    /// the HTTP-layer tool-call-gate reconstruction
-    /// (`http::service::apply_request_tool_call_parsing_options`) can consult the
-    /// same structural-tag contract the real preprocessing path uses, instead of
-    /// only recognizing intrinsically-forced model families.
-    #[serde(default)]
-    pub structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode,
-
-    #[serde(default)]
-    pub structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope,
+    /// The worker's structural-tag policy. Carried through so the HTTP-layer
+    /// tool-call-gate reconstruction consults the same configuration as the
+    /// request preprocessor. Presence enables operator-controlled tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_tag: Option<crate::local_model::runtime_config::StructuralTagConfig>,
 
     #[serde(
         default = "crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none"
@@ -472,12 +487,15 @@ impl ParsingOptions {
         Self {
             tool_call_parser,
             reasoning_parser,
+            reasoning_disabled: false,
+            structured_response: false,
+            default_thinking_mode: None,
+            tool_choice: None,
             suppress_tool_calls: false,
             guided_tool_constraint: GuidedToolConstraint::None,
             parallel_tool_calls: None,
             move_reasoning_to_content_when_empty: false,
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::default(),
-            structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope::default(),
+            structural_tag: None,
             exclude_tools_when_tool_choice_none:
                 crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
             tools: Vec::new(),
@@ -508,13 +526,11 @@ impl ParsingOptions {
             let whole_response_decoder = matches!(
                 self.tool_call_parser.as_deref(),
                 Some("harmony" | "kimi_k3" | "kimi-k3")
-            )
-                || chat_completions::unified_parser::selected_batch_family(
-                    self.tool_call_parser.as_deref(),
-                    self.reasoning_parser.as_deref(),
-                )
-                .is_some()
-                || chat_completions::tool_parser_v2::unified_family(
+            ) || chat_completions::unified_parser::configured_family(
+                self.tool_call_parser.as_deref(),
+                self.reasoning_parser.as_deref(),
+            ) == Some("muse_glimmer")
+                || chat_completions::unified_parser::selected_content_decoder_family(
                     self.tool_call_parser.as_deref(),
                     self.reasoning_parser.as_deref(),
                 )

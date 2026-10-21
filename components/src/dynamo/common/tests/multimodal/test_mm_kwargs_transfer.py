@@ -4,7 +4,7 @@
 """Unit tests for MM kwargs transfer (NIXL sender/receiver + SHM sender/receiver)."""
 
 import asyncio
-import pickle
+import struct
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,6 +17,9 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsShmTransferMetadata,
     MmKwargsTransferMetadata,
     TensorTransferSpec,
+    _pack_buffers,
+    _unpack_buffers,
+    decode_mm_kwargs_item,
 )
 
 pytestmark = [
@@ -33,6 +36,35 @@ def _make_feature(data=None, mm_hash="hash_default"):
     feat.mm_hash = mm_hash
     feat.modality = "image"
     return feat
+
+
+def _make_kwargs_item(marker: int, *, large: bool = False):
+    """Build a real vLLM ``MultiModalKwargsItem`` for round-trip tests.
+
+    ``marker`` makes each item distinct so order can be checked. With
+    ``large=True`` the tensor is above vLLM's 256-byte zero-copy threshold, so
+    the encoder spills it to an auxiliary buffer and the frame carries more than
+    one buffer. vLLM is imported lazily so the dynamo-runtime lane (no vLLM) can
+    still collect the non-vLLM tests in this module.
+    """
+    import torch
+    from vllm.multimodal.inputs import (
+        MultiModalBatchedField,
+        MultiModalFieldElem,
+        MultiModalFlatField,
+        MultiModalKwargsItem,
+    )
+
+    n = 4096 if large else 4
+    pixel_values = MultiModalFieldElem(
+        data=torch.arange(marker, marker + n, dtype=torch.float32),
+        field=MultiModalBatchedField(),
+    )
+    grid = MultiModalFieldElem(
+        data=torch.tensor([[1, marker % 7 + 1, 2]], dtype=torch.int64),
+        field=MultiModalFlatField(slices=[slice(0, 1)], dim=0),
+    )
+    return MultiModalKwargsItem({"pixel_values": pixel_values, "image_grid_thw": grid})
 
 
 class TestMmKwargsTransferMetadata:
@@ -246,14 +278,21 @@ class TestMmKwargsNixlSenderCleanup:
         await sender.cleanup([])
 
 
+# The SHM round-trip now serializes real vLLM MultiModalKwargsItem objects with
+# vLLM's msgpack serializer, so these tests require vLLM and run in the vllm
+# lane. The receiver returns writable buffers, so decoding builds no tensor over
+# a read-only buffer. PyTorch warns about a read-only buffer only once per
+# process, so test_decode_emits_no_read_only_warning checks it in a fresh
+# interpreter.
+@pytest.mark.vllm
 class TestMmKwargsShmTransfer:
-    """Tests for the SHM sender/receiver round-trip."""
+    """Tests for the SHM sender/receiver round-trip with the msgpack frame."""
 
     @pytest.mark.asyncio
     async def test_single_item_roundtrip(self):
-        """Single feature round-trips through SHM correctly."""
-        test_data = {"pixel_values": [1, 2, 3], "grid_thw": [1, 4, 4]}
-        feat = _make_feature(data=test_data, mm_hash="hash_single")
+        """Single real MultiModalKwargsItem round-trips through SHM correctly."""
+        item = _make_kwargs_item(0)
+        feat = _make_feature(data=item, mm_hash="hash_single")
 
         sender = MmKwargsShmSender()
         extra_update, handles = await sender.prepare([feat], modality="image")
@@ -273,22 +312,16 @@ class TestMmKwargsShmTransfer:
         assert "__pickled_kwargs_item__" in results
         items = results["__pickled_kwargs_item__"]
         assert len(items) == 1
-        restored = pickle.loads(items[0])
-        assert restored == test_data
+        restored = decode_mm_kwargs_item(items[0])
+        assert restored == item
 
         await sender.cleanup(handles)
 
     @pytest.mark.asyncio
     async def test_multi_image_roundtrip_preserves_order(self):
         """Multiple features round-trip in correct order through SHM."""
-        data_items = [
-            {"name": "image_0", "values": list(range(100))},
-            {"name": "image_1", "values": list(range(200))},
-            {"name": "image_2", "values": list(range(300))},
-        ]
-        feats = [
-            _make_feature(data=data_items[i], mm_hash=f"hash_{i}") for i in range(3)
-        ]
+        items = [_make_kwargs_item(marker) for marker in (10, 20, 30)]
+        feats = [_make_feature(data=items[i], mm_hash=f"hash_{i}") for i in range(3)]
 
         sender = MmKwargsShmSender()
         extra_update, handles = await sender.prepare(feats, modality="image")
@@ -304,24 +337,123 @@ class TestMmKwargsShmTransfer:
             MmKwargsShmTransferMetadata.model_validate(meta)
         )
 
-        items = results["__pickled_kwargs_item__"]
-        assert len(items) == 3
+        restored_items = results["__pickled_kwargs_item__"]
+        assert len(restored_items) == 3
 
-        # Verify ORDER is preserved
+        # Verify ORDER is preserved: each blob decodes back to its own item.
         for i in range(3):
-            restored = pickle.loads(items[i])
-            assert restored["name"] == f"image_{i}"
-            assert len(restored["values"]) == (i + 1) * 100
+            assert decode_mm_kwargs_item(restored_items[i]) == items[i]
 
         await sender.cleanup(handles)
 
     @pytest.mark.asyncio
+    async def test_large_tensor_uses_aux_buffer_and_roundtrips(self):
+        """A tensor above the zero-copy threshold spills to an aux buffer.
+
+        The frame must then carry more than one buffer, and the item must still
+        round-trip. This exercises the multi-buffer framing that a small inline
+        item never reaches.
+        """
+        item = _make_kwargs_item(0, large=True)
+        feat = _make_feature(data=item, mm_hash="hash_large")
+
+        sender = MmKwargsShmSender()
+        extra_update, handles = await sender.prepare([feat], modality="image")
+
+        meta = extra_update["mm_kwargs_shm"]
+        receiver = MmKwargsShmReceiver()
+        results = await receiver.receive(
+            MmKwargsShmTransferMetadata.model_validate(meta)
+        )
+        blob = results["__pickled_kwargs_item__"][0]
+        (buffer_count,) = struct.unpack_from("<I", blob, 0)
+        assert buffer_count >= 2, "large tensor should spill to an aux buffer"
+        assert decode_mm_kwargs_item(blob) == item
+
+        await sender.cleanup(handles)
+
+    @pytest.mark.timeout(60)
+    def test_decode_emits_no_read_only_warning(self):
+        """Decoding a received large item builds no tensor on a read-only buffer.
+
+        PyTorch warns "The given buffer is not writable" only once per process,
+        so the check runs in a fresh interpreter. As a positive control, the
+        script then decodes an immutable copy, which must warn once.
+        """
+        import os
+        import subprocess
+        import sys
+        import textwrap
+
+        script = textwrap.dedent(
+            """
+            import asyncio
+            import warnings
+            from unittest.mock import MagicMock
+
+            import torch
+            from vllm.multimodal.inputs import (
+                MultiModalBatchedField,
+                MultiModalFieldElem,
+                MultiModalKwargsItem,
+            )
+
+            from dynamo.common.multimodal import mm_kwargs_transfer as m
+
+            elem = MultiModalFieldElem(
+                data=torch.arange(4096, dtype=torch.float32),
+                field=MultiModalBatchedField(),
+            )
+            item = MultiModalKwargsItem({"pixel_values": elem})
+
+            async def receive():
+                feat = MagicMock(data=item, mm_hash="h", modality="image")
+                sender = m.MmKwargsShmSender()
+                extra, handles = await sender.prepare([feat], modality="image")
+                meta = m.MmKwargsShmTransferMetadata.model_validate(
+                    extra["mm_kwargs_shm"]
+                )
+                try:
+                    results = await m.MmKwargsShmReceiver().receive(meta)
+                finally:
+                    await sender.cleanup(handles)
+                return results["__pickled_kwargs_item__"][0]
+
+            def read_only_warnings(buf):
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    m.decode_mm_kwargs_item(buf)
+                return sum("not writable" in str(w.message) for w in caught)
+
+            blob = asyncio.run(receive())
+            print(m.__file__)
+            print(read_only_warnings(blob), read_only_warnings(bytes(blob)))
+            """
+        )
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=50,
+        )
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        module_file, counts = proc.stdout.strip().splitlines()[-2:]
+        # The subprocess must test the same code as this process.
+        assert module_file == mm_kwargs_transfer.__file__
+        # (received buffer, immutable copy): the copy proves the check works.
+        assert tuple(counts.split()) == ("0", "1")
+
+    @pytest.mark.asyncio
     async def test_skips_none_data_features(self):
         """Features with data=None are skipped, hashes still collected."""
+        item0 = _make_kwargs_item(1)
+        item2 = _make_kwargs_item(2)
         feats = [
-            _make_feature(data="real_data_0", mm_hash="hash_0"),
+            _make_feature(data=item0, mm_hash="hash_0"),
             _make_feature(data=None, mm_hash="hash_1"),
-            _make_feature(data="real_data_2", mm_hash="hash_2"),
+            _make_feature(data=item2, mm_hash="hash_2"),
         ]
 
         sender = MmKwargsShmSender()
@@ -338,8 +470,8 @@ class TestMmKwargsShmTransfer:
         )
         items = results["__pickled_kwargs_item__"]
         assert len(items) == 2
-        assert pickle.loads(items[0]) == "real_data_0"
-        assert pickle.loads(items[1]) == "real_data_2"
+        assert decode_mm_kwargs_item(items[0]) == item0
+        assert decode_mm_kwargs_item(items[1]) == item2
 
         await sender.cleanup(handles)
 
@@ -360,7 +492,7 @@ class TestMmKwargsShmTransfer:
     @pytest.mark.asyncio
     async def test_cleanup_removes_shared_memory(self):
         """Cleanup properly unlinks shared memory segments."""
-        feat = _make_feature(data="test", mm_hash="hash")
+        feat = _make_feature(data=_make_kwargs_item(0), mm_hash="hash")
         sender = MmKwargsShmSender()
         extra_update, handles = await sender.prepare([feat], modality="image")
 
@@ -386,11 +518,12 @@ class TestMmKwargsShmTransfer:
 class TestMmKwargsShmCleanupErrorHandling:
     """Tests for SHM cleanup error handling (Devin review fix #1)."""
 
+    @pytest.mark.vllm
     @pytest.mark.asyncio
     async def test_cleanup_handles_file_not_found(self):
         """FileNotFoundError is silently handled (already unlinked)."""
 
-        feat = _make_feature(data="test", mm_hash="hash")
+        feat = _make_feature(data=_make_kwargs_item(0), mm_hash="hash")
         sender = MmKwargsShmSender()
         extra_update, handles = await sender.prepare([feat], modality="image")
 
@@ -470,11 +603,12 @@ class TestMmKwargsNixlReceiverOrdering:
 
         from dynamo.common.multimodal.mm_kwargs_transfer import MmKwargsNixlReceiver
 
-        # Prepare 3 pickled items with distinct content
+        # This test exercises only the receiver's byte ordering, not the item
+        # serialization, so distinct opaque byte payloads are enough.
         items = [
-            pickle.dumps({"image_idx": 0, "data": "first"}),
-            pickle.dumps({"image_idx": 1, "data": "second"}),
-            pickle.dumps({"image_idx": 2, "data": "third"}),
+            b"item-0-first",
+            b"item-1-second",
+            b"item-2-third",
         ]
 
         # Build metadata as if the sender prepared 3 specs
@@ -513,7 +647,7 @@ class TestMmKwargsNixlReceiverOrdering:
         mock_nixl.RdmaMetadata.model_validate = lambda x: x
         receiver._nixl_connect = mock_nixl
 
-        # Mock connector.begin_read: copy pickled data into the buffer
+        # Mock connector.begin_read: copy each payload into the buffer
         # with REVERSE completion order (item 2 finishes first, item 0 last)
         # to verify ordering is preserved despite out-of-order completion.
         delays = [0.03, 0.02, 0.01]  # item 0 slowest, item 2 fastest
@@ -529,7 +663,7 @@ class TestMmKwargsNixlReceiverOrdering:
 
             async def mock_wait():
                 await asyncio.sleep(delays[idx])
-                # Write the pickled data into the buffer
+                # Write the payload into the buffer
                 buf = buffers[idx]
                 buf[: len(item_data)] = torch.frombuffer(
                     bytearray(item_data), dtype=torch.uint8
@@ -552,10 +686,114 @@ class TestMmKwargsNixlReceiverOrdering:
 
         # CRITICAL: verify order matches spec order, not completion order
         for i, raw in enumerate(received_items):
-            restored = pickle.loads(raw)
-            assert restored["image_idx"] == i, (
-                f"Item {i} has image_idx={restored['image_idx']}; "
-                f"results are in completion order instead of spec order"
+            assert raw == items[i], (
+                f"Item {i} is {raw!r}; results are in completion order "
+                f"instead of spec order"
             )
-            expected_data = ["first", "second", "third"][i]
-            assert restored["data"] == expected_data
+            # The decoder builds tensors over this buffer, so it must be writable.
+            assert not memoryview(raw).readonly
+
+
+class TestMmKwargsShmReceiverBuffers:
+    """The SHM receiver returns writable buffers (no vLLM needed)."""
+
+    @pytest.mark.asyncio
+    async def test_shm_receiver_returns_writable_buffer(self):
+        sender = MmKwargsShmSender()
+        shm_item, handle = await sender._encode_item(0, b"serialized-item")
+        try:
+            metadata = MmKwargsShmTransferMetadata(
+                modality="image", items=[shm_item], mm_hashes=["h"]
+            )
+            results = await MmKwargsShmReceiver().receive(metadata)
+        finally:
+            await sender.cleanup([handle])
+
+        (blob,) = results["__pickled_kwargs_item__"]
+        assert blob == b"serialized-item"
+        # The decoder builds tensors over this buffer, so it must be writable.
+        assert not memoryview(blob).readonly
+
+
+class TestBufferFraming:
+    """Tests for the length-prefix frame that carries the msgpack buffers.
+
+    These cover only the byte framing (no vLLM), so they run in the
+    dynamo-runtime lane alongside the NIXL/SHM transport tests.
+    """
+
+    def test_pack_unpack_roundtrip(self):
+        bufs = [b"abc", b"", b"defghij"]
+        unpacked = _unpack_buffers(_pack_buffers(bufs))
+        assert [bytes(mv) for mv in unpacked] == bufs
+
+    def test_pack_unpack_empty_sequence(self):
+        unpacked = _unpack_buffers(_pack_buffers([]))
+        assert unpacked == []
+
+    def test_unpack_rejects_short_header(self):
+        # Fewer than the 4 bytes needed for the count prefix.
+        with pytest.raises(ValueError, match="too short"):
+            _unpack_buffers(b"\x01\x00")
+
+    def test_unpack_rejects_length_past_end(self):
+        # Declares one buffer of 999 bytes but only 3 follow.
+        blob = struct.pack("<I", 1) + struct.pack("<Q", 999) + b"abc"
+        with pytest.raises(ValueError, match="runs past the end"):
+            _unpack_buffers(blob)
+
+    def test_unpack_rejects_trailing_bytes(self):
+        blob = _pack_buffers([b"abc"]) + b"EXTRA"
+        with pytest.raises(ValueError, match="trailing bytes"):
+            _unpack_buffers(blob)
+
+    def test_unpack_rejects_oversized_count(self):
+        # Count far larger than the remaining bytes can describe.
+        blob = struct.pack("<I", 2**31) + b""
+        with pytest.raises(ValueError, match="declares"):
+            _unpack_buffers(blob)
+
+
+@pytest.mark.vllm
+class TestMsgpackDecodeRestrictions:
+    """The decoder reconstructs only the target type and refuses pickle codes."""
+
+    def test_decode_refuses_pickle_extension_code(self):
+        """A frame carrying msgpack's pickle extension code must raise.
+
+        The decoder accepts only the raw tensor-view code, so it refuses this
+        code whatever VLLM_ALLOW_INSECURE_SERIALIZATION says, and the receiver
+        falls back. The frame is built directly with msgspec, so no pickle
+        object is created.
+        """
+        from msgspec import msgpack
+        from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+        ext = msgpack.Ext(CUSTOM_TYPE_PICKLE, b"\x00 not a pickle")
+        frame = _pack_buffers([msgpack.encode(ext)])
+        with pytest.raises(NotImplementedError, match="Extension type code 1"):
+            decode_mm_kwargs_item(frame)
+
+    def test_decode_refuses_pickle_extension_code_with_insecure_flag(self, monkeypatch):
+        """The refusal holds when VLLM_ALLOW_INSECURE_SERIALIZATION is set.
+
+        vLLM's own decoder honors the pickle code when the variable is set, so
+        with these dummy bytes it would fail with an unpickling error instead
+        of refusing the code. The frame carries no pickle object.
+        """
+        import vllm.envs as envs
+        from msgspec import msgpack
+        from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+        # vLLM caches its environment after an engine starts. Read it live, and
+        # prove that the decoder sees the variable change in this process.
+        envs.disable_envs_cache()
+        monkeypatch.delenv("VLLM_ALLOW_INSECURE_SERIALIZATION", raising=False)
+        assert envs.VLLM_ALLOW_INSECURE_SERIALIZATION is False
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        assert envs.VLLM_ALLOW_INSECURE_SERIALIZATION is True
+
+        ext = msgpack.Ext(CUSTOM_TYPE_PICKLE, b"\x00 not a pickle")
+        frame = _pack_buffers([msgpack.encode(ext)])
+        with pytest.raises(NotImplementedError, match="Extension type code 1"):
+            decode_mm_kwargs_item(frame)

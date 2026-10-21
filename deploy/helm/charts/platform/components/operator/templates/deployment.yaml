@@ -64,6 +64,10 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.controllerManager.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if and (not .Values.namespaceRestriction.enabled) .Values.upgradeCRD }}
       initContainers:
       - name: crd-apply
@@ -75,6 +79,7 @@ spec:
           - "--crds-dir=/opt/dynamo-operator/crds/"
           - "--version={{ .Chart.AppVersion }}"
           - "--lpx-enabled={{ .Values.lpx.enabled }}"
+          - "--dgdr-v1beta2-enabled={{ .Values.dgdrV1Beta2.enabled }}"
           - "--conversion-webhook-service-name={{ include "dynamo-operator.fullname" . }}-webhook-service"
           - "--conversion-webhook-service-namespace={{ .Release.Namespace }}"
       {{- end }}

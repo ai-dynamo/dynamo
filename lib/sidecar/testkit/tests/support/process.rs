@@ -7,7 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_backend_common::{DisaggregationMode, LLMEngineOutput, PreprocessedRequest};
+use dynamo_llm::discovery::ModelWatcher;
+use dynamo_llm::entrypoint::RouterConfig;
+use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_llm::namespace::NamespaceFilter;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig};
@@ -178,6 +182,92 @@ impl Drop for Environment {
     }
 }
 
+pub struct Frontend {
+    url: String,
+    client: reqwest::Client,
+    cancel: CancellationToken,
+    service: JoinHandle<anyhow::Result<()>>,
+    watcher: JoinHandle<()>,
+}
+
+impl Frontend {
+    pub async fn start(env: &Environment) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let service = HttpService::builder()
+            .host("127.0.0.1")
+            .port(address.port())
+            .enable_cmpl_endpoints(true)
+            .build()
+            .unwrap();
+        let watcher = Arc::new(ModelWatcher::new(
+            env.runtime.clone(),
+            service.state().manager_clone(),
+            RouterConfig {
+                router_mode: RouterMode::RoundRobin,
+                ..Default::default()
+            },
+            0,
+            None,
+            None,
+            None,
+            service.state().metrics_clone(),
+        ));
+        let discovery = env
+            .runtime
+            .discovery()
+            .list_and_watch(DiscoveryQuery::AllModels, Some(env.runtime.primary_token()))
+            .await
+            .unwrap();
+        let watched = watcher.clone();
+        let namespace = NamespaceFilter::Exact(env.namespace.clone());
+        let watcher_task = tokio::spawn(async move { watched.watch(discovery, namespace).await });
+        let cancel = CancellationToken::new();
+        let service = service.spawn_with_listener(cancel.clone(), listener).await;
+        bounded(
+            "HTTP frontend model discovery",
+            watcher.wait_for_chat_model(),
+        )
+        .await;
+        Self {
+            url: format!("http://{address}/v1/completions"),
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            cancel,
+            service,
+            watcher: watcher_task,
+        }
+    }
+
+    pub fn generate(&self, model: &str, id: &str, is_streaming: bool) -> reqwest::RequestBuilder {
+        self.client
+            .post(&self.url)
+            .header("x-dynamo-request-id", id)
+            .json(&serde_json::json!({
+                "model": model, "prompt": "hello", "max_tokens": 3,
+                "stream": is_streaming, "temperature": 0, "ignore_eos": true,
+                "nvext": {"extra_fields": ["completion_token_ids"]},
+            }))
+    }
+
+    pub async fn shutdown(mut self) {
+        self.cancel.cancel();
+        bounded("HTTP frontend shutdown", &mut self.service)
+            .await
+            .unwrap()
+            .unwrap();
+        self.watcher.abort();
+        let _ = (&mut self.watcher).await;
+    }
+}
+
+impl Drop for Frontend {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.service.abort();
+        self.watcher.abort();
+    }
+}
+
 pub struct Process {
     child: Child,
     stdout: PathBuf,
@@ -202,7 +292,7 @@ impl Process {
         };
         let stdout = env.root.path().join(format!("{role}.stdout"));
         let stderr = env.root.path().join(format!("{role}.stderr"));
-        let mut command = F::command();
+        let mut command = F::command(&env.model);
         for (key, _) in std::env::vars_os() {
             let key_text = key.to_string_lossy();
             if key_text.starts_with("DYN_")
@@ -247,14 +337,25 @@ impl Process {
                 "backend",
                 "--disaggregation-mode",
                 role,
+                "--discovery-backend",
+                "file",
+                "--request-plane",
+                "tcp",
+                "--response-plane",
+                "tcp",
+                "--event-plane",
+                "zmq",
             ])
-            .env("DYN_DISCOVERY_BACKEND", "file")
+            // CLI overrides must reach the runtime before discovery or connection setup.
+            .env("DYN_DISCOVERY_BACKEND", "invalid-backend")
             .env("DYN_FILE_KV", env.root.path().join("discovery"))
-            .env("DYN_REQUEST_PLANE", "tcp")
-            .env("DYN_EVENT_PLANE", "zmq")
+            .env("DYN_REQUEST_PLANE", "invalid-transport")
+            .env("DYN_RESPONSE_PLANE", "invalid-transport")
+            .env("DYN_EVENT_PLANE", "invalid-transport")
             .env("DYN_SYSTEM_HOST", "127.0.0.1")
             .env("DYN_SYSTEM_PORT", "0")
             .env("DYN_HEALTH_CHECK_ENABLED", "false")
+            .env("DYN_LOGGING_JSONL", "1")
             .env(
                 "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS",
                 grace_secs.to_string(),

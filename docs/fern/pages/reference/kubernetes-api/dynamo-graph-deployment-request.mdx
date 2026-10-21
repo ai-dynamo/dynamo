@@ -753,9 +753,23 @@ topologies, see the [Router Guide](../../developer-guide/knowledge-base/modular-
 
 `hardware.gpuSku` uses lowercase underscore format (`h100_sxm`, not `H100-SXM5-80GB`). When
 `gpuSku` is omitted, the operator normalizes the discovered GPU product name (for example,
-`NVIDIA B300 SXM6 AC`) to the matching value (`b300_sxm`).
+`NVIDIA B300 SXM6 AC`) to the matching value (`b300_sxm`). The observed Vera Rubin product name
+`NVIDIA VR NVL72 ES` and its GPU Feature Discovery form `NVIDIA-VR-NVL72-ES` map to the canonical
+AISimulate identifier `vr_nvl72`. GB200 discovery uses the canonical AISimulate identifier `gb200`:
 
-<span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>gb200_sxm</Badge> <Badge intent="note" minimal>gb10</Badge> <Badge intent="note" minimal>b300_sxm</Badge> <Badge intent="note" minimal>b200_sxm</Badge> <Badge intent="note" minimal>h200_sxm</Badge> <Badge intent="note" minimal>h100_sxm</Badge> <Badge intent="note" minimal>h100_pcie</Badge> <Badge intent="note" minimal>a100_sxm</Badge> <Badge intent="note" minimal>a100_pcie</Badge> <Badge intent="note" minimal>a30</Badge> <Badge intent="note" minimal>l40s</Badge> <Badge intent="note" minimal>l40</Badge> <Badge intent="note" minimal>l4</Badge> <Badge intent="note" minimal>v100_sxm</Badge> <Badge intent="note" minimal>v100_pcie</Badge> <Badge intent="note" minimal>t4</Badge> <Badge intent="note" minimal>mi200</Badge> <Badge intent="note" minimal>mi300</Badge></span>
+```yaml
+spec:
+  hardware:
+    gpuSku: gb200
+```
+
+<span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vr_nvl72</Badge> <Badge intent="note" minimal>gb200</Badge> <Badge intent="note" minimal>gb200_sxm</Badge> <Badge intent="note" minimal>gb10</Badge> <Badge intent="note" minimal>b300_sxm</Badge> <Badge intent="note" minimal>b200_sxm</Badge> <Badge intent="note" minimal>h200_sxm</Badge> <Badge intent="note" minimal>h100_sxm</Badge> <Badge intent="note" minimal>h100_pcie</Badge> <Badge intent="note" minimal>a100_sxm</Badge> <Badge intent="note" minimal>a100_pcie</Badge> <Badge intent="note" minimal>a30</Badge> <Badge intent="note" minimal>l40s</Badge> <Badge intent="note" minimal>l40</Badge> <Badge intent="note" minimal>l4</Badge> <Badge intent="note" minimal>v100_sxm</Badge> <Badge intent="note" minimal>v100_pcie</Badge> <Badge intent="note" minimal>t4</Badge> <Badge intent="note" minimal>mi200</Badge> <Badge intent="note" minimal>mi300</Badge></span>
+
+<Warning>
+  `gb200_sxm` is deprecated because GB200 systems use NVL rather than SXM. Existing manifests remain
+  admitted with their existing behavior, but admission emits a warning. Update manifests to use
+  `gpuSku: gb200`; newly discovered GB200 hardware is stored as `gb200`.
+</Warning>
 
 <Note>
   Not all SKUs are supported by the AIC profiler for `rapid` mode.

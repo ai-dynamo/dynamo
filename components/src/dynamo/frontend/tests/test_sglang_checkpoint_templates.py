@@ -143,5 +143,7 @@ def test_auto_guidance_receives_checkpoint_tokens(weather_request, monkeypatch):
         tokenizer=HunyuanTokenizer(),
         tool_call_parser_name="hunyuan",
         reasoning_parser_name="hunyuan",
+        structural_tag_mode="on",
+        structural_tag_scope="always",
     )
     assert result.guided_decoding == {"structural_tag": {"type": "object"}}

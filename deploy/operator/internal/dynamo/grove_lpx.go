@@ -26,23 +26,31 @@ import (
 // Missing cliques are pending. Inputs remain read-only.
 func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphDeployment, groupName string, componentNames []string, pcs *grovev1alpha1.PodCliqueSet, pcsg *grovev1alpha1.PodCliqueScalingGroup, pclqs map[string]*grovev1alpha1.PodClique) GroveReadiness {
 	component := source.GetComponentByName(groupName)
-	status := v1beta1.ComponentReplicaStatus{ComponentKind: v1beta1.ComponentKindPodCliqueScalingGroup, RuntimeNamespace: source.GetDynamoNamespaceForComponent(component)}
+	status := v1beta1.ComponentReplicaStatus{ComponentKind: v1beta1.ComponentKindPodCliqueScalingGroup}
 	// Draft instances are counted from their own complete Agent cliques.
 	statuses := make(map[string]v1beta1.ComponentReplicaStatus)
 	for _, name := range componentNames {
 		member := source.GetComponentByName(name)
 		if member.ComponentName != component.ComponentName {
 			statuses[member.ComponentName] = v1beta1.ComponentReplicaStatus{
-				ComponentKind: v1beta1.ComponentKindPodClique, RuntimeNamespace: source.GetDynamoNamespaceForComponent(member),
+				ComponentKind: v1beta1.ComponentKindPodClique,
 			}
 		}
 	}
 	verifiedAvailable := int32(0)
+	completed := false
 	result := func(ready bool, message string) GroveReadiness {
 		if status.AvailableReplicas != nil {
 			status.AvailableReplicas = ptr.To(min(*status.AvailableReplicas, verifiedAvailable))
 		}
 		statuses[component.ComponentName] = status
+		for name, memberStatus := range statuses {
+			memberStatus.RuntimeNamespace = source.Status.Components[name].RuntimeNamespace
+			if clique := grovePodCliqueSetCliqueForComponent(pcs, name); completed && clique != nil {
+				memberStatus.RuntimeNamespace = clique.Labels[commonconsts.KubeLabelDynamoNamespace] + "-" + clique.Labels[commonconsts.KubeLabelDynamoWorkerHash]
+			}
+			statuses[name] = memberStatus
+		}
 		return GroveReadiness{Ready: ready, Message: message, ComponentStatuses: statuses}
 	}
 	pending := func(message string) GroveReadiness {
@@ -70,6 +78,7 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 		return pending("LPX scaling group has not applied the desired revision and capacity")
 	}
 	// Observe every member before returning so partial draft readiness remains visible.
+	completed = pcsg.Status.Replicas == replicas && pcsg.Status.UpdatedReplicas == replicas
 	unreadyMessage := ""
 	for replica := range replicas {
 		replicaReady := true
@@ -94,6 +103,7 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 			default:
 				readiness = observeLPXRole(ctx, pclq)
 			}
+			completed = completed && readiness.revision.hasCompletedAcceptedPCSRevision(hash)
 			// Sum complete model instances, never physical Agent Pod counts.
 			if isDraft {
 				draft.ComponentNames = append(draft.ComponentNames, name)
@@ -131,7 +141,7 @@ func observeLPXRole(ctx context.Context, pclq *grovev1alpha1.PodClique) groveCom
 
 	// A model instance is counted only after the complete build width is observed.
 	readiness := podCliqueReadiness(pclq, log.FromContext(ctx))
-	role.ready, role.reason = readiness.ready, readiness.reason
+	role.ready, role.reason, role.revision = readiness.ready, readiness.reason, readiness.revision
 	if pclq.Status.ObservedGeneration == nil || *pclq.Status.ObservedGeneration != pclq.Generation {
 		return role
 	}

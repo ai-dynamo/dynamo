@@ -33,7 +33,7 @@ class ImageNvExt(BaseModel):
 
 
 class NvCreateImageRequest(BaseModel):
-    """Request for image generation (/v1/images/generations endpoint).
+    """Request for image generation or editing endpoints.
 
     Matches the flattened Rust NvCreateImageRequest in lib/llm/src/protocols/openai/images.rs
     """
@@ -54,6 +54,12 @@ class NvCreateImageRequest(BaseModel):
 
     quality: Optional[str] = None
     """Image quality: standard, hd, high, medium, low, auto."""
+
+    background: Optional[str] = None
+    """Image background: transparent, opaque, or auto."""
+
+    output_format: Optional[str] = None
+    """Output image encoding: png, jpeg, or webp."""
 
     response_format: Optional[str] = None
     """Response format: url or b64_json."""
@@ -104,3 +110,18 @@ class NvImagesResponse(BaseModel):
 
     data: list[ImageData] = []
     """List of generated images."""
+
+    background: Optional[str] = None
+    """Background of the generation: transparent or opaque."""
+
+    output_format: Optional[str] = None
+    """Output format of the generated images: png, webp, or jpeg."""
+
+    size: Optional[str] = None
+    """Size of the generated images in WxH format."""
+
+    quality: Optional[str] = None
+    """Quality of the generated images: low, medium, or high."""
+
+    usage: Optional[Dict[str, Any]] = None
+    """Token usage of the generation, when the model reports it."""

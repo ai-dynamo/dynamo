@@ -16,6 +16,95 @@ use validator::Validate;
 pub mod env_config;
 pub mod environment_names;
 
+/// Parser generation shared by startup validation and frontend routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParserVersion {
+    Auto,
+    V1,
+    V2,
+}
+
+impl TryFrom<Option<&str>> for ParserVersion {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Option<&str>) -> Result<Self> {
+        use environment_names::llm::DYN_PARSER_VERSION;
+        match value {
+            Some("1") => Ok(Self::V1),
+            Some("2") => Ok(Self::V2),
+            Some("auto") | None => Ok(Self::Auto),
+            Some(value) => {
+                anyhow::bail!("{DYN_PARSER_VERSION} must be unset, auto, 1, or 2; got {value:?}")
+            }
+        }
+    }
+}
+
+/// Read parser startup configuration once so request routing cannot diverge from it.
+pub fn selected_parser_version() -> Result<ParserVersion> {
+    use environment_names::llm::{DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, DYN_PARSER_VERSION};
+    static VERSION: OnceLock<Result<ParserVersion, String>> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            let version = match std::env::var(DYN_PARSER_VERSION) {
+                Ok(value) => ParserVersion::try_from(Some(value.as_str())),
+                Err(std::env::VarError::NotPresent) => ParserVersion::try_from(None),
+                Err(std::env::VarError::NotUnicode(_)) => Err(anyhow::anyhow!(
+                    "{DYN_PARSER_VERSION} must be unset, auto, 1, or 2; value is not valid UTF-8"
+                )),
+            };
+            let experimental = std::env::var_os(DYN_ENABLE_EXPERIMENTAL_PARSERS_V2);
+            let enabled = experimental
+                .as_ref()
+                .map(|value| {
+                    let value = value.to_str().ok_or_else(|| {
+                        anyhow::anyhow!("value is not valid UTF-8")
+                    })?;
+                    parse_bool(value).map_err(|error| {
+                        anyhow::anyhow!("{DYN_ENABLE_EXPERIMENTAL_PARSERS_V2}={value:?} is not a valid boolean: {error}")
+                    })
+                })
+                .transpose();
+
+            let selection = match (enabled, version) {
+                (Ok(Some(true)), Ok(ParserVersion::V1))
+                | (Ok(Some(false)), Ok(ParserVersion::V2)) => Err(anyhow::anyhow!(
+                    "conflicting parser settings: {DYN_ENABLE_EXPERIMENTAL_PARSERS_V2}={:?} conflicts with {DYN_PARSER_VERSION}={:?}",
+                    experimental.as_ref().map(|value| value.to_string_lossy()),
+                    std::env::var_os(DYN_PARSER_VERSION)
+                        .map(|value| value.to_string_lossy().into_owned())
+                )),
+                (Err(error), _) => Err(error),
+                (Ok(_), Err(error)) => Err(error),
+                (Ok(Some(true)), Ok(ParserVersion::Auto)) => Ok(ParserVersion::V2),
+                (Ok(Some(false)) | Ok(None), Ok(ParserVersion::Auto)) => Ok(ParserVersion::Auto),
+                (Ok(Some(false)), Ok(ParserVersion::V1)) => Ok(ParserVersion::V1),
+                (Ok(Some(true)), Ok(ParserVersion::V2)) => Ok(ParserVersion::V2),
+                (Ok(None), Ok(ParserVersion::V1)) => Ok(ParserVersion::V1),
+                (Ok(None), Ok(ParserVersion::V2)) => Ok(ParserVersion::V2),
+            };
+
+            if let Some(raw_value) = experimental.as_ref() {
+                let value = raw_value.to_str().unwrap_or("<non-UTF-8>");
+                let resolved = selection
+                    .as_ref()
+                    .map(|selection| format!("{selection:?}"))
+                    .unwrap_or_else(|_| "invalid or conflicting settings".to_string());
+                tracing::warn!(
+                    target: "dynamo_unified",
+                    value,
+                    resolved_selection = %resolved,
+                    "experimental V2 parser routing setting is present"
+                );
+            }
+
+            selection.map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .copied()
+        .map_err(|error| anyhow::anyhow!(error.clone()))
+}
+
 /// Default system host for health and metrics endpoints
 const DEFAULT_SYSTEM_HOST: &str = "0.0.0.0";
 
@@ -320,6 +409,7 @@ impl RuntimeConfig {
     /// Environment variables are prefixed with `DYN_RUNTIME_` and `DYN_SYSTEM`
     pub fn from_settings() -> Result<RuntimeConfig> {
         use environment_names::runtime::system as env_system;
+        Self::validate_parser_environment()?;
         // Check for deprecated environment variables
         if std::env::var(env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS).is_ok() {
             tracing::warn!(
@@ -340,6 +430,10 @@ impl RuntimeConfig {
         let config: RuntimeConfig = Self::figment().extract()?;
         config.validate()?;
         Ok(config)
+    }
+
+    pub fn validate_parser_environment() -> Result<()> {
+        selected_parser_version().map(|_| ())
     }
 
     /// Check if System server should be enabled
@@ -563,6 +657,191 @@ mod tests {
             assert_eq!(config.num_worker_threads, Some(7), "{WORKERS} was not read");
             assert_eq!(config.max_blocking_threads, 11, "{BLOCKING} was not read");
         });
+    }
+
+    #[test]
+    fn parser_selection_configuration_table() {
+        const CHILD: &str = "DYNAMO_PARSER_SELECTION_TEST_CHILD";
+        const EXPECTED: &str = "DYNAMO_PARSER_SELECTION_EXPECTED";
+        use environment_names::llm::{DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, DYN_PARSER_VERSION};
+
+        if std::env::var_os(CHILD).is_some() {
+            let expected = std::env::var(EXPECTED).expect("expected selection");
+            let result = selected_parser_version();
+            match expected.as_str() {
+                "Auto" => assert_eq!(result.unwrap(), ParserVersion::Auto),
+                "V1" => assert_eq!(result.unwrap(), ParserVersion::V1),
+                "V2" => assert_eq!(result.unwrap(), ParserVersion::V2),
+                "conflict" => {
+                    let error = result.unwrap_err().to_string();
+                    assert!(error.contains(DYN_ENABLE_EXPERIMENTAL_PARSERS_V2));
+                    assert!(error.contains(DYN_PARSER_VERSION));
+                }
+                "invalid" => {
+                    assert!(result.is_err());
+                    assert!(RuntimeConfig::from_settings().is_err());
+                }
+                other => panic!("unexpected expected selection: {other}"),
+            }
+            return;
+        }
+
+        let cases = [
+            (None, None, "Auto"),
+            (Some("false"), None, "Auto"),
+            (Some("0"), None, "Auto"),
+            (Some("off"), None, "Auto"),
+            (Some("no"), None, "Auto"),
+            (Some(""), None, "Auto"),
+            (Some("true"), None, "V2"),
+            (Some("1"), None, "V2"),
+            (Some("on"), None, "V2"),
+            (Some("yes"), None, "V2"),
+            (None, Some("auto"), "Auto"),
+            (None, Some("1"), "V1"),
+            (None, Some("v1"), "invalid"),
+            (None, Some("2"), "V2"),
+            (None, Some("v2"), "invalid"),
+            (Some("false"), Some("auto"), "Auto"),
+            (Some("true"), Some("auto"), "V2"),
+            (Some("false"), Some("1"), "V1"),
+            (Some("false"), Some("2"), "conflict"),
+            (Some("true"), Some("1"), "conflict"),
+            (Some("true"), Some("2"), "V2"),
+            (Some("false"), Some("v1"), "invalid"),
+            (Some("false"), Some("v2"), "invalid"),
+            (Some("true"), Some("v1"), "invalid"),
+            (Some("true"), Some("v2"), "invalid"),
+            (Some("perhaps"), None, "invalid"),
+            (None, Some(""), "invalid"),
+            (None, Some("3"), "invalid"),
+        ];
+        for (experimental, version, expected) in cases {
+            let mut command = crate::test_utils::isolated_command(
+                "config::tests::parser_selection_configuration_table",
+            );
+            command.env(CHILD, "1").env(EXPECTED, expected).env(
+                DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
+                experimental.unwrap_or(""),
+            );
+            if experimental.is_none() {
+                command.env_remove(DYN_ENABLE_EXPERIMENTAL_PARSERS_V2);
+            }
+            if let Some(version) = version {
+                command.env(DYN_PARSER_VERSION, version);
+            } else {
+                command.env_remove(DYN_PARSER_VERSION);
+            }
+            let output = command
+                .output()
+                .expect("run isolated parser selection test");
+            crate::test_utils::assert_isolated_success(&output);
+        }
+    }
+
+    #[test]
+    fn parser_selection_is_cached_for_process_lifetime() {
+        const CHILD: &str = "DYNAMO_PARSER_SELECTION_CACHE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = crate::test_utils::isolated_command(
+                "config::tests::parser_selection_is_cached_for_process_lifetime",
+            )
+            .env(CHILD, "1")
+            .env(
+                environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
+                "true",
+            )
+            .output()
+            .expect("run isolated parser cache test");
+            crate::test_utils::assert_isolated_success(&output);
+            return;
+        }
+
+        assert_eq!(selected_parser_version().unwrap(), ParserVersion::V2);
+        temp_env::with_vars(
+            [
+                (
+                    environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
+                    None,
+                ),
+                (environment_names::llm::DYN_PARSER_VERSION, Some("1")),
+            ],
+            || {
+                assert_eq!(selected_parser_version().unwrap(), ParserVersion::V2);
+            },
+        );
+    }
+
+    #[test]
+    fn parser_selection_warning_is_emitted_once_and_startup_rejects_conflicts() {
+        const CHILD: &str = "DYNAMO_PARSER_SELECTION_WARNING_CHILD";
+        const MODE: &str = "DYNAMO_PARSER_SELECTION_WARNING_MODE";
+        if std::env::var_os(CHILD).is_none() {
+            let warning = crate::test_utils::isolated_command(
+                "config::tests::parser_selection_warning_is_emitted_once_and_startup_rejects_conflicts",
+            )
+            .env(CHILD, "1")
+            .env(MODE, "warning")
+            .env(environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, "true")
+            .output()
+            .expect("run isolated parser warning test");
+            crate::test_utils::assert_isolated_success(&warning);
+            let stderr = String::from_utf8_lossy(&warning.stderr);
+            assert_eq!(
+                stderr
+                    .matches("experimental V2 parser routing setting is present")
+                    .count(),
+                1,
+                "{stderr}"
+            );
+            assert!(stderr.contains("value=\"true\""), "{stderr}");
+            assert!(stderr.contains("resolved_selection=V2"), "{stderr}");
+
+            let conflict = crate::test_utils::isolated_command(
+                "config::tests::parser_selection_warning_is_emitted_once_and_startup_rejects_conflicts",
+            )
+            .env(CHILD, "1")
+            .env(MODE, "conflict")
+            .env(environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, "true")
+            .env(environment_names::llm::DYN_PARSER_VERSION, "1")
+            .output()
+            .expect("run isolated parser startup conflict test");
+            crate::test_utils::assert_isolated_success(&conflict);
+            let stderr = String::from_utf8_lossy(&conflict.stderr);
+            assert_eq!(
+                stderr
+                    .matches("experimental V2 parser routing setting is present")
+                    .count(),
+                1,
+                "{stderr}"
+            );
+            return;
+        }
+
+        match std::env::var(MODE).as_deref() {
+            Ok("warning") => {
+                let subscriber = tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_writer(std::io::stderr)
+                    .finish();
+                tracing::subscriber::with_default(subscriber, || {
+                    assert_eq!(selected_parser_version().unwrap(), ParserVersion::V2);
+                    assert_eq!(selected_parser_version().unwrap(), ParserVersion::V2);
+                });
+            }
+            Ok("conflict") => {
+                let subscriber = tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_writer(std::io::stderr)
+                    .finish();
+                tracing::subscriber::with_default(subscriber, || {
+                    let error = RuntimeConfig::from_settings().unwrap_err().to_string();
+                    assert!(error.contains("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2"));
+                    assert!(error.contains("DYN_PARSER_VERSION"));
+                });
+            }
+            value => panic!("unexpected test mode: {value:?}"),
+        }
     }
 
     /// The builder given to the pyo3 bridge must carry the configured worker count.

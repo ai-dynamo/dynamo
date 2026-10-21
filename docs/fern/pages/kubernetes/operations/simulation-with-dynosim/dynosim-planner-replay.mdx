@@ -22,6 +22,26 @@ Planner field types and defaults, see the
 the simulation adapter, see
 [DynoSim Architecture](../../../developer-guide/knowledge-base/concepts/simulation/dynosim-architecture.md#planner-simulation-adapter).
 
+## Planner Defaults
+
+To enable Planner with its production defaults, add:
+
+```yaml
+planner: {policy: enabled}
+```
+
+The adapter resolves concrete settings through Dynamo's `PlannerConfig`. With the default
+`target: throughput`, Planner enables load scaling and disables throughput-based scaling, just
+as it does in a live deployment. To use throughput-based scaling, set `target: sla` and supply
+both `evaluation.sla.ttft_ms` and `evaluation.sla.itl_ms`, as in the example below.
+
+Omitted adjustment intervals use Planner defaults. An explicit `null` is also accepted for a
+scaling mode that is disabled after target normalization; an active mode requires a concrete
+interval. The resolved configuration always contains numeric intervals. The load interval still
+controls performance-model updates during throughput-only scaling, so a null load interval uses
+the production default rather than disabling those updates. The load interval must be shorter
+than the throughput interval only when both scaling modes are enabled.
+
 ## Prerequisites
 
 Build the Rust runtime bindings and install Dynamo from the repository root:
