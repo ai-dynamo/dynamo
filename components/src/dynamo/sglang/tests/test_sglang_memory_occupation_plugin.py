@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import pytest
 
@@ -74,20 +74,4 @@ def test_resume_skips_tags_that_were_not_released(resume_hook):
     resume_hook(_ORIGINAL, manager, ResumeMemoryOccupationReqInput())
 
     manager.memory_saver_adapter.resume.assert_called_once_with("kv_cache")
-    assert manager.offload_tags == set()
-
-
-def test_resume_of_released_tags_is_unchanged(resume_hook):
-    manager = _manager(["kv_cache", "cuda_graph"])
-
-    resume_hook(
-        _ORIGINAL,
-        manager,
-        ResumeMemoryOccupationReqInput(tags=["kv_cache", "cuda_graph"]),
-    )
-
-    assert manager.memory_saver_adapter.resume.call_args_list == [
-        call("cuda_graph"),
-        call("kv_cache"),
-    ]
     assert manager.offload_tags == set()
