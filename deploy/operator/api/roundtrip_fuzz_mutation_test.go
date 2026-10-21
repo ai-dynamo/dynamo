@@ -71,8 +71,9 @@ func fuzzMutatedSpokeCarrier[
 	f := newRoundTripFiller(*fuzzSeed)
 	for i := 0; i < *fuzzIters; i++ {
 		// Stage 1, hub -> spoke: build the spoke carrier with hub-only data preserved in annotations.
+		// Keep this flow on one representation; envelope mutation has dedicated tests below.
 		in := newHub()
-		f.Fill(in)
+		f.FillNoCustom(in)
 		carrier := PS(new(S))
 		if err := carrier.ConvertFrom(in); err != nil {
 			t.Fatalf("%s iter %d ConvertFrom: %v\ninput=%s", name, i, err, mustJSON(in))
@@ -80,7 +81,7 @@ func fuzzMutatedSpokeCarrier[
 
 		// Stage 2, mutation: update the carrier without deleting existing values or annotations.
 		patch := PS(new(S))
-		f.Fill(patch)
+		f.FillNoCustom(patch)
 		sparseFuzzInto(carrier, patch)
 		carrierBeforeYAML := toYAML(t, carrier)
 
@@ -129,8 +130,9 @@ func fuzzMutatedHubCarrier[
 	f := newRoundTripFiller(*fuzzSeed)
 	for i := 0; i < *fuzzIters; i++ {
 		// Stage 1, spoke -> hub: build the hub carrier with spoke-only data preserved in annotations.
+		// Keep this flow on one representation; envelope mutation has dedicated tests below.
 		in := PS(new(S))
-		f.Fill(in)
+		f.FillNoCustom(in)
 		carrier := newHub()
 		if err := in.ConvertTo(carrier); err != nil {
 			t.Fatalf("%s iter %d ConvertTo: %v\ninput=%s", name, i, err, mustJSON(in))
@@ -138,7 +140,7 @@ func fuzzMutatedHubCarrier[
 
 		// Stage 2, mutation: update the carrier without deleting existing values or annotations.
 		patch := newHub()
-		f.Fill(patch)
+		f.FillNoCustom(patch)
 		sparseFuzzInto(carrier, patch)
 		carrierBeforeYAML := toYAML(t, carrier)
 
@@ -207,17 +209,27 @@ type v1Beta2SpokeEnvelopeMutationOps struct {
 
 func (ops v1Beta2SpokeEnvelopeMutationOps) buildCarrier() (*v1beta2.DynamoGraphDeploymentRequest, error) {
 	in := &v1beta1.DynamoGraphDeploymentRequest{}
-	ops.f.Fill(in)
+	ops.f.FillNoCustom(in)
 	carrier := &v1beta2.DynamoGraphDeploymentRequest{}
 	return carrier, carrier.ConvertFrom(in)
 }
 
 func (ops v1Beta2SpokeEnvelopeMutationOps) mutateCarrier(carrier *v1beta2.DynamoGraphDeploymentRequest) {
 	patch := &v1beta1.DynamoGraphDeploymentRequest{}
-	ops.f.Fill(patch)
+	ops.f.FillNoCustom(patch)
 	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
-	mutateJSONEnvelope(ops.t, carrier.Spec.V1Beta1, &v1beta1.DynamoGraphDeploymentRequestSpec{}, &patch.Spec)
-	mutateJSONEnvelope(ops.t, carrier.Status.V1Beta1, &v1beta1.DynamoGraphDeploymentRequestStatus{}, &patch.Status)
+	replaceJSONEnvelope(
+		ops.t,
+		carrier.Spec.V1Beta1,
+		&v1beta1.DynamoGraphDeploymentRequestNativeSpec{},
+		&patch.Spec.DynamoGraphDeploymentRequestNativeSpec,
+	)
+	replaceJSONEnvelope(
+		ops.t,
+		carrier.Status.V1Beta1,
+		&v1beta1.DynamoGraphDeploymentRequestNativeStatus{},
+		&patch.Status.DynamoGraphDeploymentRequestNativeStatus,
+	)
 }
 
 func (v1Beta2SpokeEnvelopeMutationOps) convertAway(
@@ -241,17 +253,27 @@ type v1Beta1HubEnvelopeMutationOps struct {
 
 func (ops v1Beta1HubEnvelopeMutationOps) buildCarrier() (*v1beta1.DynamoGraphDeploymentRequest, error) {
 	in := &v1beta2.DynamoGraphDeploymentRequest{}
-	ops.f.Fill(in)
+	ops.f.FillNoCustom(in)
 	carrier := &v1beta1.DynamoGraphDeploymentRequest{}
 	return carrier, in.ConvertTo(carrier)
 }
 
 func (ops v1Beta1HubEnvelopeMutationOps) mutateCarrier(carrier *v1beta1.DynamoGraphDeploymentRequest) {
 	patch := &v1beta2.DynamoGraphDeploymentRequest{}
-	ops.f.Fill(patch)
+	ops.f.FillNoCustom(patch)
 	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
-	mutateJSONEnvelope(ops.t, carrier.Spec.V1Beta2, &v1beta2.DynamoGraphDeploymentRequestSpec{}, &patch.Spec)
-	mutateJSONEnvelope(ops.t, carrier.Status.V1Beta2, &v1beta2.DynamoGraphDeploymentRequestStatus{}, &patch.Status)
+	replaceJSONEnvelope(
+		ops.t,
+		carrier.Spec.V1Beta2,
+		&v1beta2.DynamoGraphDeploymentRequestNativeSpec{},
+		&patch.Spec.DynamoGraphDeploymentRequestNativeSpec,
+	)
+	replaceJSONEnvelope(
+		ops.t,
+		carrier.Status.V1Beta2,
+		&v1beta2.DynamoGraphDeploymentRequestNativeStatus{},
+		&patch.Status.DynamoGraphDeploymentRequestNativeStatus,
+	)
 }
 
 func (v1Beta1HubEnvelopeMutationOps) convertAway(
@@ -305,7 +327,7 @@ func fuzzMutatedDGDRCarrier[C, A any](
 	}
 }
 
-func mutateJSONEnvelope(t *testing.T, envelope *apiextensionsv1.JSON, payload, patch any) {
+func replaceJSONEnvelope(t *testing.T, envelope *apiextensionsv1.JSON, payload, replacement any) {
 	t.Helper()
 
 	// Require and decode the complete typed payload carried by the envelope.
@@ -316,9 +338,9 @@ func mutateJSONEnvelope(t *testing.T, envelope *apiextensionsv1.JSON, payload, p
 		t.Fatalf("unmarshal envelope: %v", err)
 	}
 
-	// Mutate nested payload values and write the complete payload back to the envelope.
-	sparseFuzzInto(payload, patch)
-	raw, err := json.Marshal(payload)
+	// Replace the payload with another schema-valid native value. Sparse merging
+	// two valid values can violate cross-field invariants in the combined result.
+	raw, err := json.Marshal(replacement)
 	if err != nil {
 		t.Fatalf("marshal envelope: %v", err)
 	}

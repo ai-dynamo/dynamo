@@ -332,6 +332,8 @@ spec:
                   description: |-
                     V1Beta2 losslessly preserves a native v1beta2 spec while this object is
                     represented through v1alpha1. It is mutually exclusive with native fields.
+                    This field is a read-only conversion view; modify the request through the
+                    native v1beta2 API.
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
               type: object
@@ -342,8 +344,8 @@ spec:
                   rule: has(self.v1beta2) || (has(self.backend) && has(self.profilingConfig))
                 - message: v1beta2 is mutually exclusive with native v1alpha1 fields
                   rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.useMocker) || has(self.profilingConfig) || has(self.runtimeVersionOverride) || has(self.enableGpuDiscovery) || has(self.autoApply) || has(self.deploymentOverrides))'
-                - message: request representation is immutable
-                  rule: has(self.v1beta2) == has(oldSelf.v1beta2)
+                - message: the conversion carrier is immutable
+                  rule: has(self.v1beta2) == has(oldSelf.v1beta2) && (!has(self.v1beta2) || self.v1beta2 == oldSelf.v1beta2)
             status:
               description: Status reflects the current observed state of this deployment request.
               properties:
@@ -9348,6 +9350,8 @@ spec:
                   description: |-
                     V1Beta2 losslessly preserves a native v1beta2 spec while this object is
                     represented through v1beta1. It is mutually exclusive with native fields.
+                    This field is a read-only conversion view; modify the request through the
+                    native v1beta2 API.
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
                 workload:
@@ -9382,8 +9386,8 @@ spec:
                   rule: has(self.v1beta2) != has(self.model)
                 - message: v1beta2 is mutually exclusive with native v1beta1 fields
                   rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.image) || has(self.runtimeVersionOverride) || has(self.modelCache) || has(self.hardware) || has(self.workload) || has(self.sla) || has(self.overrides) || has(self.features) || has(self.searchStrategy) || has(self.autoApply))'
-                - message: request representation is immutable
-                  rule: has(self.v1beta2) == has(oldSelf.v1beta2)
+                - message: the conversion carrier is immutable
+                  rule: has(self.v1beta2) == has(oldSelf.v1beta2) && (!has(self.v1beta2) || self.v1beta2 == oldSelf.v1beta2)
             status:
               description: Status reflects the current observed state of this deployment request.
               properties:
@@ -9746,6 +9750,8 @@ spec:
                   description: |-
                     V1Beta1 losslessly preserves a native v1beta1 spec while this object is
                     represented through v1beta2. It is mutually exclusive with native fields.
+                    This field is a read-only conversion view; modify the request through the
+                    native v1beta1 API.
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
                 workload:
@@ -9810,8 +9816,8 @@ spec:
                   rule: has(self.v1beta1) != has(self.model)
                 - message: v1beta1 is mutually exclusive with native v1beta2 fields
                   rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))'
-                - message: request representation is immutable
-                  rule: has(self.v1beta1) == has(oldSelf.v1beta1)
+                - message: the conversion carrier is immutable
+                  rule: has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)
             status:
               description: DynamoGraphDeploymentRequestStatus represents reconciliation of persistent search intent.
               properties:

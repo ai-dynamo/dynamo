@@ -171,6 +171,8 @@ else:
 # Match the package-qualified links in crd-ref-docs-config.yaml.
 duplicate_types = [
     "DynamoGraphDeploymentRequest",
+    "DynamoGraphDeploymentRequestNativeSpec",
+    "DynamoGraphDeploymentRequestNativeStatus",
     "DynamoGraphDeploymentRequestSpec",
     "DynamoGraphDeploymentRequestStatus",
     "DynamoGraphDeploymentStatus",

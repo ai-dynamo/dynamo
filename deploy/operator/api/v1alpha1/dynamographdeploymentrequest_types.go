@@ -137,15 +137,8 @@ type DeploymentOverridesSpec struct {
 	WorkersImage string `json:"workersImage,omitempty"`
 }
 
-// DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
-// This CRD serves as the primary interface for users to request model deployments with
-// specific performance constraints and resource requirements, enabling SLA-driven deployments.
-// Native v1alpha1 fields and the V1Beta2 conversion envelope are mutually exclusive.
-// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) != has(self.model)",message="exactly one of native v1alpha1 fields or v1beta2 must be specified"
-// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) || (has(self.backend) && has(self.profilingConfig))",message="native v1alpha1 requests require backend and profilingConfig"
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.backend) || has(self.useMocker) || has(self.profilingConfig) || has(self.runtimeVersionOverride) || has(self.enableGpuDiscovery) || has(self.autoApply) || has(self.deploymentOverrides))",message="v1beta2 is mutually exclusive with native v1alpha1 fields"
-// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) == has(oldSelf.v1beta2)",message="request representation is immutable"
-type DynamoGraphDeploymentRequestSpec struct {
+// DynamoGraphDeploymentRequestNativeSpec contains the native v1alpha1 request fields.
+type DynamoGraphDeploymentRequestNativeSpec struct {
 	// Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
 	// This is a high-level identifier for easy reference in kubectl output and logs.
 	// The controller automatically sets this value in profilingConfig.config.deployment.model.
@@ -205,9 +198,23 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// Only applicable when AutoApply is true.
 	// +kubebuilder:validation:Optional
 	DeploymentOverrides *DeploymentOverridesSpec `json:"deploymentOverrides,omitempty"`
+}
+
+// DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
+// This CRD serves as the primary interface for users to request model deployments with
+// specific performance constraints and resource requirements, enabling SLA-driven deployments.
+// Native v1alpha1 fields and the V1Beta2 conversion envelope are mutually exclusive.
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) != has(self.model)",message="exactly one of native v1alpha1 fields or v1beta2 must be specified"
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) || (has(self.backend) && has(self.profilingConfig))",message="native v1alpha1 requests require backend and profilingConfig"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.backend) || has(self.useMocker) || has(self.profilingConfig) || has(self.runtimeVersionOverride) || has(self.enableGpuDiscovery) || has(self.autoApply) || has(self.deploymentOverrides))",message="v1beta2 is mutually exclusive with native v1alpha1 fields"
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) == has(oldSelf.v1beta2) && (!has(self.v1beta2) || self.v1beta2 == oldSelf.v1beta2)",message="the conversion carrier is immutable"
+type DynamoGraphDeploymentRequestSpec struct {
+	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`
 
 	// V1Beta2 losslessly preserves a native v1beta2 spec while this object is
 	// represented through v1alpha1. It is mutually exclusive with native fields.
+	// This field is a read-only conversion view; modify the request through the
+	// native v1beta2 API.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
@@ -233,10 +240,8 @@ type DeploymentStatus struct {
 	Created bool `json:"created,omitempty"`
 }
 
-// DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
-// The controller updates this status as the DGDR progresses through its lifecycle.
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.state) || has(self.backend) || has(self.observedGeneration) || has(self.conditions) || has(self.profilingResults) || has(self.generatedDeployment) || has(self.deployment))",message="v1beta2 is mutually exclusive with native v1alpha1 status fields"
-type DynamoGraphDeploymentRequestStatus struct {
+// DynamoGraphDeploymentRequestNativeStatus contains the native v1alpha1 status fields.
+type DynamoGraphDeploymentRequestNativeStatus struct {
 	// State is a high-level textual status of the deployment request lifecycle.
 	// +optional
 	State DGDRState `json:"state,omitempty"`
@@ -274,6 +279,13 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// Contains name, namespace, state, and creation status of the managed DGD.
 	// +kubebuilder:validation:Optional
 	Deployment *DeploymentStatus `json:"deployment,omitempty"`
+}
+
+// DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
+// The controller updates this status as the DGDR progresses through its lifecycle.
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.state) || has(self.backend) || has(self.observedGeneration) || has(self.conditions) || has(self.profilingResults) || has(self.generatedDeployment) || has(self.deployment))",message="v1beta2 is mutually exclusive with native v1alpha1 status fields"
+type DynamoGraphDeploymentRequestStatus struct {
+	DynamoGraphDeploymentRequestNativeStatus `json:",inline"`
 
 	// V1Beta2 losslessly preserves a native v1beta2 status while this object is
 	// represented through v1alpha1.

@@ -90,7 +90,7 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 
-	if src.Status.V1Beta2 != nil && hasNativeV1Alpha1Status(src.Status) {
+	if src.Status.V1Beta2 != nil && hasNativeV1Alpha1Status(src.Status.DynamoGraphDeploymentRequestNativeStatus) {
 		return fmt.Errorf("v1alpha1 status contains both native fields and v1beta2 envelope")
 	}
 
@@ -103,9 +103,9 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 	}
 
 	var spokeStatusSave DynamoGraphDeploymentRequestStatus
-	hasNativeStatus := hasNativeV1Alpha1Status(src.Status)
+	hasNativeStatus := hasNativeV1Alpha1Status(src.Status.DynamoGraphDeploymentRequestNativeStatus)
 	statusIsEmpty := src.Status.V1Beta2 == nil && !hasNativeStatus
-	legacyV1Beta2 := src.Spec.V1Beta2 == nil && !hasNativeV1Alpha1Spec(src.Spec) &&
+	legacyV1Beta2 := src.Spec.V1Beta2 == nil && !hasNativeV1Alpha1Spec(src.Spec.DynamoGraphDeploymentRequestNativeSpec) &&
 		restoredHubSpec != nil && restoredHubSpec.V1Beta2 != nil
 	switch {
 	case dst.Spec.V1Beta2 != nil && hasNativeStatus:
@@ -145,7 +145,7 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 	ConvertToDynamoGraphDeploymentRequestSpec(&src.Spec, &dst.Spec, restoredSpokeSpec, &hubSpecSave)
 
 	var hubStatusSave v1beta1.DynamoGraphDeploymentRequestStatus
-	hasNativeStatus := hasNativeV1Beta1Status(src.Status)
+	hasNativeStatus := hasNativeV1Beta1Status(src.Status.DynamoGraphDeploymentRequestNativeStatus)
 	statusIsEmpty := src.Status.V1Beta2 == nil && !hasNativeStatus
 	switch {
 	case src.Spec.V1Beta2 != nil && hasNativeStatus:
@@ -303,7 +303,7 @@ func restoreDGDRSpokeStatus(raw string) (DynamoGraphDeploymentRequestStatus, boo
 // v1alpha1 to v1beta1.
 func ConvertFromDynamoGraphDeploymentRequestSpec(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec, restored *v1beta1.DynamoGraphDeploymentRequestSpec, save *DynamoGraphDeploymentRequestSpec) error {
 	if src.V1Beta2 != nil {
-		if hasNativeV1Alpha1Spec(*src) {
+		if hasNativeV1Alpha1Spec(src.DynamoGraphDeploymentRequestNativeSpec) {
 			return fmt.Errorf("v1alpha1 spec contains both native fields and v1beta2 envelope")
 		}
 		dst.V1Beta2 = src.V1Beta2.DeepCopy()
@@ -312,7 +312,7 @@ func ConvertFromDynamoGraphDeploymentRequestSpec(src *DynamoGraphDeploymentReque
 
 	// Accept the annotation-backed representation emitted before v1alpha1
 	// gained its public structural carrier, then migrate it on the next read.
-	if restored != nil && restored.V1Beta2 != nil && !hasNativeV1Alpha1Spec(*src) {
+	if restored != nil && restored.V1Beta2 != nil && !hasNativeV1Alpha1Spec(src.DynamoGraphDeploymentRequestNativeSpec) {
 		dst.V1Beta2 = restored.V1Beta2.DeepCopy()
 		return nil
 	}
@@ -1100,7 +1100,7 @@ func ConvertFromDynamoGraphDeploymentRequestStatus(src *DynamoGraphDeploymentReq
 	}
 
 	// Accept and migrate the legacy annotation-backed envelope representation.
-	if restored != nil && restored.V1Beta2 != nil && !hasNativeV1Alpha1Status(*src) {
+	if restored != nil && restored.V1Beta2 != nil && !hasNativeV1Alpha1Status(src.DynamoGraphDeploymentRequestNativeStatus) {
 		dst.V1Beta2 = restored.V1Beta2.DeepCopy()
 		return
 	}
@@ -1218,19 +1218,16 @@ func saveDGDRHubOnlyStatus(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst 
 	}
 }
 
-func hasNativeV1Alpha1Spec(spec DynamoGraphDeploymentRequestSpec) bool {
-	spec.V1Beta2 = nil
-	return !reflect.DeepEqual(spec, DynamoGraphDeploymentRequestSpec{})
+func hasNativeV1Alpha1Spec(spec DynamoGraphDeploymentRequestNativeSpec) bool {
+	return !reflect.DeepEqual(spec, DynamoGraphDeploymentRequestNativeSpec{})
 }
 
-func hasNativeV1Alpha1Status(status DynamoGraphDeploymentRequestStatus) bool {
-	status.V1Beta2 = nil
-	return !reflect.DeepEqual(status, DynamoGraphDeploymentRequestStatus{})
+func hasNativeV1Alpha1Status(status DynamoGraphDeploymentRequestNativeStatus) bool {
+	return !reflect.DeepEqual(status, DynamoGraphDeploymentRequestNativeStatus{})
 }
 
-func hasNativeV1Beta1Status(status v1beta1.DynamoGraphDeploymentRequestStatus) bool {
-	status.V1Beta2 = nil
-	return !reflect.DeepEqual(status, v1beta1.DynamoGraphDeploymentRequestStatus{})
+func hasNativeV1Beta1Status(status v1beta1.DynamoGraphDeploymentRequestNativeStatus) bool {
+	return !reflect.DeepEqual(status, v1beta1.DynamoGraphDeploymentRequestNativeStatus{})
 }
 
 func restoreDGDRHubOnlyStatus(restored *v1beta1.DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequestStatus, src *DynamoGraphDeploymentRequestStatus) {
