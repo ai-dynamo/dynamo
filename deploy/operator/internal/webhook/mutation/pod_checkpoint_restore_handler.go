@@ -272,6 +272,9 @@ func expectedSnapshotCompatibilityHashForPod(pod *corev1.Pod) string {
 	return pod.Annotations[consts.SnapshotCandidateCompatibilityHashAnnotation]
 }
 
+// shapeNativeRestorePod builds a restore Pod, applies Dynamo's restore policy,
+// and removes private candidate annotations before validating the Snapshot contract.
+// pod and resolved must be non-nil.
 func (h *PodCheckpointRestoreMutator) shapeNativeRestorePod(
 	pod *corev1.Pod,
 	snapshotName string,

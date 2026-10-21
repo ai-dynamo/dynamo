@@ -30,6 +30,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
+// TestPodCheckpointRestoreMutatorNativeRestore checks native restore admission,
+// including candidate cleanup and preservation of the Snapshot restore annotations.
 func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
