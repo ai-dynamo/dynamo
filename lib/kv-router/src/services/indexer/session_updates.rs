@@ -30,7 +30,8 @@ pub struct SessionUpdateSender {
 struct ResidencyVersions {
     next: AtomicU64,
     by_rank: DashMap<WorkerWithDpRank, AtomicU64>,
-    by_worker_id: DashMap<WorkerId, AtomicU64>,
+    lifecycle_by_rank: DashMap<WorkerWithDpRank, AtomicU64>,
+    lifecycle_by_worker_id: DashMap<WorkerId, AtomicU64>,
 }
 
 impl ResidencyVersions {
@@ -40,7 +41,7 @@ impl ResidencyVersions {
             .get(&worker)
             .map_or(0, |version| version.load(Ordering::Acquire));
         let worker_version = self
-            .by_worker_id
+            .lifecycle_by_worker_id
             .get(&worker.worker_id)
             .map_or(0, |version| version.load(Ordering::Acquire));
         rank_version.max(worker_version)
@@ -58,9 +59,33 @@ impl ResidencyVersions {
         }
     }
 
-    fn advance_worker_id(&self, worker_id: WorkerId) {
+    fn current_lifecycle(&self, worker: WorkerWithDpRank) -> u64 {
+        let rank_version = self
+            .lifecycle_by_rank
+            .get(&worker)
+            .map_or(0, |version| version.load(Ordering::Acquire));
+        let worker_version = self
+            .lifecycle_by_worker_id
+            .get(&worker.worker_id)
+            .map_or(0, |version| version.load(Ordering::Acquire));
+        rank_version.max(worker_version)
+    }
+
+    fn advance_rank_lifecycle(&self, worker: WorkerWithDpRank) {
         let next_version = self.next.fetch_add(1, Ordering::AcqRel) + 1;
-        match self.by_worker_id.entry(worker_id) {
+        match self.lifecycle_by_rank.entry(worker) {
+            Entry::Occupied(entry) => {
+                entry.get().store(next_version, Ordering::Release);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(AtomicU64::new(next_version));
+            }
+        }
+    }
+
+    fn advance_worker_lifecycle(&self, worker_id: WorkerId) {
+        let next_version = self.next.fetch_add(1, Ordering::AcqRel) + 1;
+        match self.lifecycle_by_worker_id.entry(worker_id) {
             Entry::Occupied(entry) => {
                 entry.get().store(next_version, Ordering::Release);
             }
@@ -89,6 +114,7 @@ pub(super) enum SessionMutation {
         session_id: String,
         parent_hash: Option<ExternalSequenceBlockHash>,
         block_hashes: Vec<ExternalSequenceBlockHash>,
+        lifecycle_version: u64,
     },
     /// A tier stored blocks without naming a session, such as a device offload to host
     /// memory or a host load-back to the device.
@@ -96,6 +122,7 @@ pub(super) enum SessionMutation {
         worker: WorkerWithDpRank,
         tier: StorageTier,
         block_hashes: Vec<ExternalSequenceBlockHash>,
+        lifecycle_version: u64,
     },
     Removed {
         worker: WorkerWithDpRank,
@@ -113,7 +140,11 @@ pub(super) enum SessionMutation {
 impl SessionMutation {
     /// Session frontiers follow device events and worker-owned lower tiers. Shared
     /// cache-owner residency is not attributed to a worker rank.
-    pub(super) fn from_event(event: &RouterEvent, targets_primary: bool) -> Option<Self> {
+    pub(super) fn from_event(
+        event: &RouterEvent,
+        targets_primary: bool,
+        lifecycle_version: u64,
+    ) -> Option<Self> {
         if !targets_primary && event.resolved_residency_domain() != Ok(ResidencyDomain::Worker) {
             return None;
         }
@@ -129,11 +160,13 @@ impl SessionMutation {
                         session_id,
                         parent_hash: stored.parent_hash,
                         block_hashes,
+                        lifecycle_version,
                     }),
                     None => Some(Self::Inherited {
                         worker,
                         tier,
                         block_hashes,
+                        lifecycle_version,
                     }),
                 }
             }
@@ -196,7 +229,11 @@ impl SessionMutation {
                 session_id,
                 parent_hash,
                 block_hashes,
+                lifecycle_version,
             } => {
+                if residency_versions.current_lifecycle(worker) != lifecycle_version {
+                    return;
+                }
                 if let Err(error) = index.update_session_from_stored_blocks_in_tier(
                     &session_id,
                     worker,
@@ -211,7 +248,11 @@ impl SessionMutation {
                 worker,
                 tier,
                 block_hashes,
+                lifecycle_version,
             } => {
+                if residency_versions.current_lifecycle(worker) != lifecycle_version {
+                    return;
+                }
                 index.inherit_stored_blocks(worker, tier, &block_hashes);
             }
             Self::Removed {
@@ -227,10 +268,11 @@ impl SessionMutation {
             }
             Self::Cleared { worker } => {
                 residency_versions.advance(worker);
+                residency_versions.advance_rank_lifecycle(worker);
                 index.clear_worker_frontiers(worker);
             }
             Self::WorkerRemoved { worker_id } => {
-                residency_versions.advance_worker_id(worker_id);
+                residency_versions.advance_worker_lifecycle(worker_id);
                 index.clear_worker_id_frontiers(worker_id);
             }
         }
@@ -333,6 +375,19 @@ impl SessionUpdateSender {
 
     pub(super) fn residency_version(&self, worker: WorkerWithDpRank) -> u64 {
         self.residency_versions.current(worker)
+    }
+
+    pub(super) fn mutation_from_event(
+        &self,
+        event: &RouterEvent,
+        targets_primary: bool,
+    ) -> Option<SessionMutation> {
+        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+        SessionMutation::from_event(
+            event,
+            targets_primary,
+            self.residency_versions.current_lifecycle(worker),
+        )
     }
 
     pub(super) fn enqueue(&self, mutation: SessionMutation) -> Result<(), KvRouterError> {

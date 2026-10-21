@@ -451,7 +451,8 @@ impl Indexer {
             | Self::Concurrent {
                 session_updates, ..
             } => session_updates.as_ref().and_then(|sender| {
-                SessionMutation::from_event(&event, targets_primary)
+                sender
+                    .mutation_from_event(&event, targets_primary)
                     .map(|mutation| (sender.clone(), mutation))
             }),
             Self::Remote { .. } | Self::None => None,
@@ -1702,6 +1703,20 @@ mod session_tests {
         (indexer, session_prefix_index)
     }
 
+    fn session_update_sender(indexer: &Indexer) -> SessionUpdateSender {
+        match indexer {
+            Indexer::Single {
+                session_updates: Some(sender),
+                ..
+            }
+            | Indexer::Concurrent {
+                session_updates: Some(sender),
+                ..
+            } => sender.clone(),
+            _ => panic!("session updates are not configured"),
+        }
+    }
+
     pub(crate) fn remove_event(
         worker_id: u64,
         dp_rank: u32,
@@ -2166,5 +2181,32 @@ mod session_tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn worker_removal_invalidates_delayed_store_mutations() {
+        for (indexer, session_prefix_index) in [
+            make_session_test_indexer(),
+            make_concurrent_session_test_indexer(),
+        ] {
+            let worker = WorkerWithDpRank::new(7, 0);
+            let sender = session_update_sender(&indexer);
+            let tagged_store =
+                store_event(7, 0, 1, &[], &[41], StorageTier::Device).with_session_id("session-1");
+            let inherited_store = store_event(7, 0, 2, &[], &[41], StorageTier::HostPinned);
+            let delayed_stored = sender.mutation_from_event(&tagged_store, true).unwrap();
+            let delayed_inherited = sender.mutation_from_event(&inherited_store, false).unwrap();
+
+            indexer.remove_worker(worker.worker_id).await;
+            sender.enqueue(delayed_stored).unwrap();
+            sender.enqueue(delayed_inherited).unwrap();
+            sender.flush().await.unwrap();
+
+            assert!(
+                session_prefix_index
+                    .get_session_residency("session-1")
+                    .is_empty()
+            );
+        }
     }
 }
