@@ -60,10 +60,12 @@ adapter so callers (mode subclasses) have a single entry point.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from dynamo.common.forward_pass_metrics import encode as _encode_fpm_record
-from dynamo.planner.config.planner_config import resolve_min_endpoint
+from dynamo.planner.config.planner_config import PlannerConfig, resolve_min_endpoint
+from dynamo.planner.monitoring.signal_health import PlannerSignalHealth
 
 if TYPE_CHECKING:
     import grpc.aio
@@ -219,6 +221,10 @@ class OrchestratorEngineAdapter:
             # init in one process) — metrics emission disabled, but
             # the adapter still runs normally.
             self._plugin_framework_metrics = None
+
+        self._signal_health = PlannerSignalHealth(
+            config, self._plugin_framework_metrics
+        )
 
         # Build orchestrator + scheduler + circuit_breaker + registry.
         # All transport-shaped knobs (timeouts + wire security) live under
@@ -541,6 +547,35 @@ class OrchestratorEngineAdapter:
                 plugin.registered_at = self._last_tick_monotonic
         return self._compute_next_scheduled_tick()
 
+    def apply_runtime_configuration(
+        self,
+        candidate: PlannerConfig,
+        fields: Iterable[str],
+        predictor: BuiltinLoadPredict | None,
+    ) -> None:
+        active_predictor: BuiltinLoadPredict | None = None
+        if predictor is not None:
+            active = self._builtins["load_predict"]
+            if not isinstance(active, BuiltinLoadPredict):
+                raise TypeError(
+                    "runtime prediction updates require the builtin load predictor"
+                )
+            active_predictor = active
+        changed = {
+            field
+            for field in fields
+            if getattr(self._config, field) != getattr(candidate, field)
+        }
+        for field in changed:
+            setattr(self._config, field, getattr(candidate, field))
+        if active_predictor is not None and predictor is not None:
+            active_predictor.install_prepared_predictors(predictor)
+        if changed or predictor is not None:
+            self._orchestrator.invalidate_runtime_configuration()
+            self._startup_down_candidate = None
+            self._startup_down_inventory = None
+            self._startup_down_sources = frozenset()
+
     async def tick(
         self,
         scheduled_tick: ScheduledTick,
@@ -648,6 +683,10 @@ class OrchestratorEngineAdapter:
         diagnostics.execute_action = outcome.execute_action
         diagnostics.short_circuit_reason = outcome.short_circuit_reason
         diagnostics.audit_events = list(outcome.audit_events)
+
+        self._signal_health.observe(
+            scheduled_tick, tick_input, self._capabilities, diagnostics
+        )
 
         return PlannerEffects(
             scale_to=scale_to,

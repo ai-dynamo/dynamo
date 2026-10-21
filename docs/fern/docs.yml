@@ -47,6 +47,9 @@ versions:
     path: ./index.yml
 
 redirects:
+  - source: "/dynamo/dev/recipes/nemotron-3-5-super-vl-120b-a12b"
+    destination: "/dynamo/dev/recipes/nemotron-3-5-super-vl"
+
   - source: "/dynamo/dev/reference/agent-skills"
     destination: "/dynamo/dev/agent-skills/overview"
 

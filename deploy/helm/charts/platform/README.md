@@ -46,6 +46,40 @@ up to your target version. Each entry describes changes introduced in that relea
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
+### v1.7.0
+
+#### Operator behavior breaking changes
+
+##### Native sidecar backend inference
+
+**Change:** Backend inference recognizes a direct `vllm-rs` engine command in `main`,
+including a literal absolute path. It continues to inspect the engine for backend
+validation and compilation-cache defaults, independently of the runtime sidecar launch.
+The inferred framework participates in the graph-wide worker-generation hash.
+
+**Affected:** Deployments with this engine command and no explicit `backendFramework`
+previously resolved to an undetected backend. The vLLM reference manifests already set
+`backendFramework: vllm` and are unaffected by this inference change.
+
+**Action:** Plan for a one-time worker rollout when upgrading to v1.7.0. To perform the
+migration before the operator upgrade, set `spec.backendFramework: vllm` on affected
+DGDs and complete that manifest-driven rollout first. This moves the migration earlier;
+it does not eliminate it. Explicit frameworks must match the engine launch. Opaque
+engine commands, including shell wrappers and image entrypoints, still require an
+explicit framework.
+
+**Existing deployments:** Reconciliation can roll all workers in an affected DGD without
+an authored manifest change. With `compilationCache.mountPath` set, the engine also gains
+`VLLM_CACHE_ROOT` pointing to that path. Standalone DCDs can roll when newly inferred cache
+defaults change their pod template. Runtime registration used by Planner does not affect
+the desired worker hash or engine configuration.
+
+**Planner permissions:** Registration-based native identity requires `list` on `pods`
+in addition to worker metadata access. If an older Planner service account receives
+HTTP 403 when listing Pods, Planner warns and uses existing status/default fallbacks.
+Grant Pod-list access to enable registered native names, models, and capabilities;
+other API errors still propagate.
+
 ### v1.6.0
 
 #### Runtime Compatibility
@@ -149,6 +183,53 @@ created by Dynamo 1.6.0 when Grove is managed outside the platform chart.
 **Action:** Upgrade externally managed Grove and its CRDs to `v0.1.0-alpha.15` or later before
 using rollout budgets or Coherent updates, or creating new multinode DGDs. Updating Dynamo's
 dependency or platform chart does not upgrade separately managed Grove installations.
+
+#### External Grove installation preflight
+
+With `global.grove.enabled=true` and `global.grove.install=false`, a read-only
+`pre-install,pre-upgrade` Job verifies the Grove controller version against the pinned
+dependency and completed rollout before applying the operator Deployment.
+It assumes a compatible, fully rolled out controller has matching Grove CRDs installed;
+CRDs are not inspected. Upgrade Grove and matching CRDs first.
+The minimum version comes from the `grove-charts` dependency in `Chart.yaml`.
+Its YAML scalar is anchored in the chart annotation and referenced by the dependency,
+so Helm can pass the same value directly to the checker even when external Grove disables
+that dependency. No symlink, generator, or synchronization step is required. The
+standalone operator chart does not run this platform preflight.
+Unknown/custom/RC image tags and digest-only images fail rather than claiming compatibility.
+To resolve missing or ambiguous discovery, select the controller explicitly:
+
+```yaml
+dynamo-operator:
+  grovePreflight:
+    namespace: grove-system
+    deploymentName: grove-operator
+```
+
+The preflight uses its own `grovePreflight.affinity` (empty by default), so it can run
+before controller Pods exist. On OpenShift, omit the fixed UID and let admission assign it:
+
+```yaml
+dynamo-operator:
+  grovePreflight:
+    podSecurityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+```
+
+An explicit map replaces the entire pod security context; `null` uses the chart's secure
+defaults (including UID 65532). This does not change the operator's security context.
+
+Helm and Flux execute these hooks; Argo CD maps them to PreSync. Offline rendering does not
+run the check. Disabled hooks, selective sync, and raw `kubectl apply` bypass the gate;
+independent Grove releases must be upgraded first. Set `grovePreflight.enabled=false` only
+with a separate compatibility gate. Override `image`/`imagePullSecrets` for restricted registries.
+The Job has a 120-second deadline and two retries. Failed Jobs retain diagnostic logs.
+Helm 3.18+ also prints them via `helm.sh/hook-output-log-policy: hook-failed`, using the
+installer's Pod/log read permissions. With older Helm, read them with `kubectl logs`.
+Successful Jobs are deleted. Supporting ServiceAccount/ClusterRole/ClusterRoleBinding hooks
+persist until the next attempt and require manual removal when retiring the release.
 
 **Existing deployments:** The operator origin version gates alias injection. An operator-only
 upgrade leaves existing multinode workload pod templates unchanged and does not roll them solely to
@@ -348,7 +429,7 @@ Kubernetes: `>=1.30.0-0`
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.15 |
-| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0-rc.3 |
+| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
 ## Values
@@ -363,6 +444,14 @@ Kubernetes: `>=1.30.0-0`
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
 | global.snapshot.install | bool | `false` | Whether this chart should install the bundled Snapshot subchart (github.com/ai-dynamo/snapshot): its operator, node agent, and CRDs. NOTE: For production environments, it is recommended to install Snapshot separately. |
+| dynamo-operator.grovePreflight.enabled | bool | `true` | Validate externally managed Grove before installing/upgrading the operator. Disable only with a separate compatibility gate. |
+| dynamo-operator.grovePreflight.image | string | `"docker.io/library/python:3.12-slim"` | Image containing Python 3 (standard library only). Override for an internal registry. |
+| dynamo-operator.grovePreflight.imagePullSecrets | list | `[]` | Existing pull secrets for the Grove preflight image. |
+| dynamo-operator.grovePreflight.activeDeadlineSeconds | int | `120` | Maximum Job duration in seconds, including retries. |
+| dynamo-operator.grovePreflight.affinity | object | `{}` | Independent preflight affinity. Does not inherit controllerManager.affinity. |
+| dynamo-operator.grovePreflight.podSecurityContext | string | `nil` | Full replacement of the preflight pod security context. Null defaults to runAsNonRoot=true, runAsUser=65532 and seccompProfile.type=RuntimeDefault. On OpenShift, supply a context without runAsUser for admission to assign it. |
+| dynamo-operator.grovePreflight.namespace | string | `""` | Namespace of external Grove. Empty discovers across all namespaces. |
+| dynamo-operator.grovePreflight.deploymentName | string | `""` | External Grove Deployment name. Requires namespace; empty discovers by container name. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.upgradeCRD | bool | `true` | Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container. When false, the chart installs no CRDs; apply them separately before starting a cluster-wide operator. Namespace-restricted installations must set this to false and use the CRDs managed by the cluster-wide operator. |
 | dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2 API schemas. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. The operator does not reconcile v1beta2 resources. |

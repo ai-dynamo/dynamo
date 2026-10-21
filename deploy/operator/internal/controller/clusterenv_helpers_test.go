@@ -8,11 +8,6 @@
 package controller
 
 import (
-	"fmt"
-	"os/exec"
-	"strings"
-
-	semver "github.com/Masterminds/semver/v3"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -71,18 +66,4 @@ func clusterTestRestrictedConfig(namespace string) *configv1alpha1.OperatorConfi
 	config.Namespace.Restricted = namespace
 	config.GPU.DiscoveryEnabled = ptr.To(false)
 	return config
-}
-
-func clusterTestOperatorVersion() (string, error) {
-	output, err := exec.Command(
-		"git", "describe", "--tags", "--match", "v[0-9]*", "--abbrev=12", "--long", "HEAD",
-	).Output()
-	if err != nil {
-		return "", fmt.Errorf("describe current commit: %w", err)
-	}
-	version := strings.TrimPrefix(strings.TrimSpace(string(output)), "v")
-	if _, err := semver.NewVersion(version); err != nil {
-		return "", fmt.Errorf("git describe returned invalid semantic version %q: %w", version, err)
-	}
-	return version, nil
 }

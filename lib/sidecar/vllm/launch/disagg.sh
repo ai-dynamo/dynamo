@@ -38,9 +38,9 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_SYSTEM_PORT1                Decode sidecar system port (default: 8081)"
             echo "  DYN_SYSTEM_PORT2                Prefill sidecar system port (default: 8082)"
             echo "  VLLM_DECODE_HTTP_PORT           Decode vLLM HTTP port (default: 8100)"
-            echo "  VLLM_DECODE_GRPC_PORT           Decode vLLM gRPC port (default: 50051)"
+            echo "  VLLM_DECODE_GRPC_PORT           Decode vLLM gRPC port (default: 30001)"
             echo "  VLLM_PREFILL_HTTP_PORT          Prefill vLLM HTTP port (default: 8110)"
-            echo "  VLLM_PREFILL_GRPC_PORT          Prefill vLLM gRPC port (default: 50052)"
+            echo "  VLLM_PREFILL_GRPC_PORT          Prefill vLLM gRPC port (default: 30011)"
             echo "  VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT  Decode NIXL port (default: 5600)"
             echo "  VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT Prefill NIXL port (default: 20097)"
             echo "  VLLM_PREFILL_KV_EVENT_PORT      Prefill KV event port (default: 20081)"
@@ -66,9 +66,9 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 # Managed ports are indexed like DYN_SYSTEM_PORT{N}: worker 1 is decode, 2 is prefill.
 VLLM_DECODE_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${VLLM_DECODE_HTTP_PORT:-8100}")
-VLLM_DECODE_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${VLLM_DECODE_GRPC_PORT:-50051}")
+VLLM_DECODE_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${VLLM_DECODE_GRPC_PORT:-30001}")
 VLLM_PREFILL_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 2 "${VLLM_PREFILL_HTTP_PORT:-8110}")
-VLLM_PREFILL_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${VLLM_PREFILL_GRPC_PORT:-50052}")
+VLLM_PREFILL_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${VLLM_PREFILL_GRPC_PORT:-30011}")
 VLLM_DECODE_GPU="${VLLM_DECODE_GPU:-0}"
 VLLM_PREFILL_GPU="${VLLM_PREFILL_GPU:-1}"
 VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 "${VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT:-5600}")
