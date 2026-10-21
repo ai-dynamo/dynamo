@@ -7,7 +7,10 @@ title: TensorRT-LLM Multimodal
 This document provides a comprehensive guide for multimodal inference using TensorRT-LLM backend in Dynamo.
 
 You can provide multimodal inputs in the following ways:
+
 - By sending image URLs
+- By sending audio URLs
+- By sending base64-encoded audio with `input_audio`
 - By providing paths to pre-computed embedding files
 
 > **Note:** You should provide **either image URLs or embedding file paths** in a single request.
@@ -19,7 +22,7 @@ You can provide multimodal inputs in the following ways:
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Full support for all image models |
 | **Image** | Pre-computed Embeddings (.safetensors) | Yes | Yes | Direct embedding files |
 | **Video** | HTTP/HTTPS URL | Yes | Yes | Decoded per request; H.264/H.265 on NVDEC, other codecs via the TensorRT-LLM loader |
-| **Audio** | HTTP/HTTPS URL | No | No | Not implemented |
+| **Audio** | `audio_url` (HTTPS or base64 data URL), `input_audio` (base64 WAV/MP3) | Yes | Not validated | Requires a model with audio support in TensorRT-LLM. separate encoder workers are not supported |
 
 ### Supported URL Formats
 
@@ -133,6 +136,51 @@ curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '
     "max_tokens": 160
 }'
 ```
+
+## Audio Input
+
+For aggregated serving, use a model with audio support in TensorRT-LLM and enable
+`--modality multimodal` or `--enable-multimodal`.
+
+### Example Request
+
+With `google/gemma-4-E2B-it` running, send an audio URL:
+
+```bash
+curl -sS http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "google/gemma-4-E2B-it",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Transcribe the attached speech exactly."},
+        {"type": "audio_url", "audio_url": {
+          "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
+        }}
+      ]
+    }],
+    "temperature": 0,
+    "max_tokens": 100
+  }'
+```
+
+The `audio_url.url` field also accepts a base64 data URL, such as
+`data:audio/wav;base64,...`.
+
+For base64-encoded audio, replace the `audio_url` content part with `input_audio`.
+Set `data` to the encoded file contents and `format` to `wav` or `mp3`:
+
+```json
+{
+  "type": "input_audio",
+  "input_audio": {"data": "<base64-encoded audio>", "format": "wav"}
+}
+```
+
+Non-streaming requests with unsupported models or invalid audio return HTTP 400.
+If a streaming response has already started, errors are reported in the stream
+and the HTTP status remains 200.
 
 ## Disaggregated Serving
 
@@ -440,7 +488,7 @@ await register_model(
 
 ## Known Limitations
 
-- **No audio support** - No audio encoder implementation
+- **Audio input** - Dynamo's TensorRT-LLM adapter rejects audio requests combined with separate encoder outputs or pre-computed image embeddings.
 - **Video decode requires NVDEC** - H.264/H.265 video is decoded on the GPU; the
   runtime image ships no software video decoder. This needs a GPU with a video
   decode engine and a container granted the `video` driver capability — see
