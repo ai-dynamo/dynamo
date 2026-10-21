@@ -42,6 +42,7 @@ var deviceDriverEqualityPattern = regexp.MustCompile(`(?:^|&&)\s*\(*\s*device\.d
 // ApplyClaim replaces the first container's scalar GPU resources with a shared
 // DRA ResourceClaim. Every container that references this claim name will share
 // the same physical GPUs.
+// podSpec must be non-nil and contain at least one container.
 func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for DRA claim")
@@ -69,6 +70,7 @@ func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 
 // ApplyPodClaim adds the GPU NoSchedule toleration and the shared DRA claim
 // template to the pod. It never changes container resources.
+// podSpec must be non-nil; it may have no containers.
 func ApplyPodClaim(podSpec *corev1.PodSpec, claimTemplateName string) {
 	// GPU nodes are typically tainted with nvidia.com/gpu=NoSchedule. DRA
 	// bypasses the device-plugin toleration injection, so add it explicitly.

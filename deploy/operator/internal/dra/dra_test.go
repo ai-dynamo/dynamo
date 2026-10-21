@@ -140,6 +140,8 @@ func TestApplyClaim_AlwaysTargetsFirstContainer(t *testing.T) {
 	assert.Empty(t, ps.Containers[1].Resources.Claims)
 }
 
+// TestApplyPodClaim_LeavesContainersAndMatchingEntriesInPlace checks that pod claim
+// setup preserves container resources, matching tolerations, and other pod claims.
 func TestApplyPodClaim_LeavesContainersAndMatchingEntriesInPlace(t *testing.T) {
 	t.Log("Build a pod with GPU limits, a GPU toleration using Equal, and the shared claim after another claim")
 	oldTemplate := "old-template"
