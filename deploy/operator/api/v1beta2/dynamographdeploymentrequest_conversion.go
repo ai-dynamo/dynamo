@@ -24,6 +24,7 @@ import (
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 )
 
@@ -44,27 +45,15 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentRequest but got %T", dstRaw)
 	}
 
-	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-	if err := convertPayload(
+	return convertRequestPayloads(
+		&src.ObjectMeta, &dst.ObjectMeta,
 		src.Spec.DynamoGraphDeploymentRequestNativeSpec, src.Spec.V1Beta1,
 		&dst.Spec.DynamoGraphDeploymentRequestNativeSpec,
 		func(envelope *apiextensionsv1.JSON) { dst.Spec.V1Beta2 = envelope },
-		"v1beta2", "v1beta1", "spec",
-	); err != nil {
-		return err
-	}
-
-	// Empty status has no representation discriminator. Keep it empty instead
-	// of manufacturing an empty JSON envelope after status-subresource reset.
-	if src.Status.V1Beta1 == nil && !hasNativeV1Beta2Status(src.Status.DynamoGraphDeploymentRequestNativeStatus) {
-		return nil
-	}
-
-	return convertPayload(
 		src.Status.DynamoGraphDeploymentRequestNativeStatus, src.Status.V1Beta1,
 		&dst.Status.DynamoGraphDeploymentRequestNativeStatus,
 		func(envelope *apiextensionsv1.JSON) { dst.Status.V1Beta2 = envelope },
-		"v1beta2", "v1beta1", "status",
+		"v1beta2", "v1beta1",
 	)
 }
 
@@ -75,27 +64,47 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentRequest but got %T", srcRaw)
 	}
 
-	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-	if err := convertPayload(
+	return convertRequestPayloads(
+		&src.ObjectMeta, &dst.ObjectMeta,
 		src.Spec.DynamoGraphDeploymentRequestNativeSpec, src.Spec.V1Beta2,
 		&dst.Spec.DynamoGraphDeploymentRequestNativeSpec,
 		func(envelope *apiextensionsv1.JSON) { dst.Spec.V1Beta1 = envelope },
-		"v1beta1", "v1beta2", "spec",
+		src.Status.DynamoGraphDeploymentRequestNativeStatus, src.Status.V1Beta2,
+		&dst.Status.DynamoGraphDeploymentRequestNativeStatus,
+		func(envelope *apiextensionsv1.JSON) { dst.Status.V1Beta1 = envelope },
+		"v1beta1", "v1beta2",
+	)
+}
+
+func convertRequestPayloads[S, D, SS, DS nativePayload](
+	srcMeta, dstMeta *metav1.ObjectMeta,
+	srcSpec S,
+	foreignSpec *apiextensionsv1.JSON,
+	dstSpec *D,
+	setSpecEnvelope func(*apiextensionsv1.JSON),
+	srcStatus SS,
+	foreignStatus *apiextensionsv1.JSON,
+	dstStatus *DS,
+	setStatusEnvelope func(*apiextensionsv1.JSON),
+	srcVersion, foreignVersion string,
+) error {
+	*dstMeta = *srcMeta.DeepCopy()
+	if err := convertPayload(
+		srcSpec, foreignSpec, dstSpec, setSpecEnvelope,
+		srcVersion, foreignVersion, "spec",
 	); err != nil {
 		return err
 	}
 
-	// Empty status has no representation discriminator. Keep it empty in every
-	// served view and let the spec select the representation for later writes.
-	if src.Status.V1Beta2 == nil && !hasNativeV1Beta1Status(src.Status.DynamoGraphDeploymentRequestNativeStatus) {
+	// Empty status has no representation discriminator. Keep it empty instead
+	// of manufacturing an envelope after the status subresource resets it.
+	if foreignStatus == nil && !hasNativeFields(srcStatus) {
 		return nil
 	}
 
 	return convertPayload(
-		src.Status.DynamoGraphDeploymentRequestNativeStatus, src.Status.V1Beta2,
-		&dst.Status.DynamoGraphDeploymentRequestNativeStatus,
-		func(envelope *apiextensionsv1.JSON) { dst.Status.V1Beta1 = envelope },
-		"v1beta1", "v1beta2", "status",
+		srcStatus, foreignStatus, dstStatus, setStatusEnvelope,
+		srcVersion, foreignVersion, "status",
 	)
 }
 
