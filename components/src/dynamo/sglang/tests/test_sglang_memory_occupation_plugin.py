@@ -32,9 +32,11 @@ _ORIGINAL = weight_updater.SchedulerWeightUpdaterManager.resume_memory_occupatio
 
 @pytest.fixture
 def resume_hook(monkeypatch):
+    """Expose the hook without modifying SGLang's global registry."""
     hooks = {}
 
     def capture_hook(_registry, target, hook, hook_type=HookType.AFTER, **_kwargs):
+        """Keep registrations local so each test receives a fresh hook."""
         hooks[target] = (hook, hook_type)
 
     monkeypatch.setattr(HookRegistry, "register", classmethod(capture_hook))
@@ -46,7 +48,7 @@ def resume_hook(monkeypatch):
 
 
 def _manager(offload_tags):
-    # Only the attributes resume reaches for kv_cache and cuda_graph tags.
+    """Provide the scheduler state reached when resuming KV or graph memory."""
     return SimpleNamespace(
         offload_tags=set(offload_tags),
         memory_saver_adapter=Mock(),
@@ -55,6 +57,7 @@ def _manager(offload_tags):
 
 
 def test_redundant_resume_is_a_noop(resume_hook):
+    """An empty offload set must return success without calling the adapter."""
     manager = _manager([])
 
     result = resume_hook(_ORIGINAL, manager, ResumeMemoryOccupationReqInput())
@@ -65,6 +68,7 @@ def test_redundant_resume_is_a_noop(resume_hook):
 
 
 def test_resume_skips_tags_that_were_not_released(resume_hook):
+    """The default all-tags request must resume only the released KV cache."""
     manager = _manager(["kv_cache"])
 
     resume_hook(_ORIGINAL, manager, ResumeMemoryOccupationReqInput())

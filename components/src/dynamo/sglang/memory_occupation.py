@@ -28,6 +28,7 @@ def register_memory_occupation_plugin() -> None:
     """
 
     def around_resume_memory_occupation(original, manager, recv_req):
+        """Filter against scheduler state before delegating to SGLang's resume."""
         requested = recv_req.tags or GPU_MEMORY_ALL_TYPES
         released = [tag for tag in requested if tag in manager.offload_tags]
         if len(released) != len(requested):
