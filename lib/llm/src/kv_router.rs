@@ -1489,6 +1489,8 @@ impl KvRouter {
                     find_matches_elapsed,
                     total_elapsed,
                 );
+                m.queue_wait
+                    .observe(response.queue_wait.as_secs_f64() * 1000.0);
             }
             if let (Some(hits), Some(m)) = (shared_cache_hits, metrics::RouterRequestMetrics::get())
             {
