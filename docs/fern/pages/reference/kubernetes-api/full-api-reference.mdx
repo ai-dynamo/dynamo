@@ -4806,7 +4806,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10; an explicit empty workload receives the same shape from the schema. An explicit workload.static: \&#123;\&#125; opts out of that shape, leaving the workload to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the fields it names.
+Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10; an explicit empty workload receives the same shape from the schema. An explicit workload.static: \&#123;\&#125; opts out of that shape, leaving the workload to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the fields it names. The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a KV-load ratio search.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4888,7 +4888,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10; an explicit empty workload receives the same shape from the schema. An explicit workload.static: \&#123;\&#125; opts out of that shape, leaving the workload to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the fields it names.
+Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10; an explicit empty workload receives the same shape from the schema. An explicit workload.static: \&#123;\&#125; opts out of that shape, leaving the workload to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the fields it names. The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a KV-load ratio search.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5010,7 +5010,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10; an explicit empty workload receives the same shape from the schema. An explicit workload.static: \&#123;\&#125; opts out of that shape, leaving the workload to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the fields it names.
+Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10; an explicit empty workload receives the same shape from the schema. An explicit workload.static: \&#123;\&#125; opts out of that shape, leaving the workload to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the fields it names. The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a KV-load ratio search.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5209,7 +5209,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10; an explicit empty workload receives the same shape from the schema. An explicit workload.static: \&#123;\&#125; opts out of that shape, leaving the workload to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the fields it names.
+Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10; an explicit empty workload receives the same shape from the schema. An explicit workload.static: \&#123;\&#125; opts out of that shape, leaving the workload to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the fields it names. The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a KV-load ratio search.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5296,7 +5296,7 @@ See [ObjectiveMode](#objectivemode).
 </ParamField>
 
 <ParamField path="metric" type="ObjectiveMetric">
-Metric is the scalar target when mode is Optimize. When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
+Metric is the scalar target when mode is Optimize. When omitted in Optimize mode, admission defaults it to Throughput.
 See [ObjectiveMetric](#objectivemetric).
 **Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  Optional: \&#123;\&#125;
 </ParamField>

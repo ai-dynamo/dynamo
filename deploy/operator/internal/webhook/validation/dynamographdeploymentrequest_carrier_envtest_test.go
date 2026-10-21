@@ -1,6 +1,8 @@
 package validation_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"sort"
 	"testing"
 
@@ -71,5 +73,29 @@ func carrierRoundTrip(t *testing.T, ownerFixture, otherFixture runtime.Object, c
 	}
 	if after.GetGeneration() != created.GetGeneration() {
 		t.Fatalf("generation = %d, want %d: a metadata-only patch rewrote the spec", after.GetGeneration(), created.GetGeneration())
+	}
+
+	t.Log("Write the unchanged foreign view back with a full update; the spec must be byte-stable")
+	beforeSpec, err := json.Marshal(foreign.Object["spec"])
+	if err != nil {
+		t.Fatalf("encode the foreign spec: %v", err)
+	}
+	current, err := otherClient.Get(t.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("read the foreign view before the update: %v", err)
+	}
+	updated, err := otherClient.Update(t.Context(), current, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("full update of the unchanged foreign view: %v", err)
+	}
+	afterSpec, err := json.Marshal(updated.Object["spec"])
+	if err != nil {
+		t.Fatalf("encode the updated spec: %v", err)
+	}
+	if !bytes.Equal(beforeSpec, afterSpec) {
+		t.Fatalf("the foreign spec changed across an unchanged update:\nbefore: %s\nafter:  %s", beforeSpec, afterSpec)
+	}
+	if updated.GetGeneration() != created.GetGeneration() {
+		t.Fatalf("generation = %d, want %d: an unchanged update rewrote the spec", updated.GetGeneration(), created.GetGeneration())
 	}
 }
