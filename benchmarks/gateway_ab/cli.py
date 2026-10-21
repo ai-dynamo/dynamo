@@ -21,6 +21,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import math
 import pathlib
 import signal
 import subprocess
@@ -45,8 +46,9 @@ EXIT_PREFLIGHT = 2
 EXIT_REGRESSION = 3
 # Bumped when a change makes new rounds incomparable with stored ones, so a
 # resume refuses to mix them. 2: a seed per load point, --isl includes the
-# shared prefix. 3: A reaches its Frontend through the gateway.
-HARNESS_VERSION = 3
+# shared prefix. 3: A reaches its Frontend through the gateway. 4: run files
+# hold aiperf's summary statistics instead of per-request samples.
+HARNESS_VERSION = 4
 # Flags that only one backend reads, with their argparse destinations.
 KUBERNETES_ONLY = {
     "context": "--context",
@@ -64,6 +66,10 @@ LOCAL_ONLY = {"epp_binary": "--epp-binary", "envoy_image": "--envoy-image"}
 DEFAULT_OUTPUT = "benchmarks/results/gateway_ab"
 
 
+class RefusedError(KubeError):
+    """Nothing ran: the results directory belongs to other settings."""
+
+
 class Bench:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -79,6 +85,7 @@ class Bench:
             frontend_image=args.frontend_image or "",
             worker_image=args.worker_image or "",
             name_prefix=args.name_prefix,
+            namespace=args.namespace,
             agg_workers=args.agg_workers,
             prefill_workers=args.prefill_workers,
             decode_workers=args.decode_workers,
@@ -192,25 +199,30 @@ class Bench:
         pending = []
         for rnd in range(w.rounds):
             for i, point in enumerate(w.points()):
-                seed = w.seed_for(rnd, i)
                 # Alternate which side goes first so slow drift (cache warmth,
                 # neighbours, thermal) does not land on one side. With the
                 # direct arm, A stays in the middle, next to both arms it is
                 # compared with.
                 order = self.arms if (rnd + i) % 2 == 0 else self.arms[::-1]
-                for side in order:
-                    out = (
-                        results
-                        / "runs"
-                        / topology
-                        / side
-                        / point.label
-                        / f"r{rnd}.json"
+                outs = [
+                    results / "runs" / topology / side / point.label / f"r{rnd}.json"
+                    for side in order
+                ]
+                # The report pairs a round's arms, so a resume measures every
+                # arm of an incomplete round again rather than pairing new
+                # runs with ones measured in another session.
+                if all(_valid_run_file(out) for out in outs):
+                    log.info(
+                        "skip %s %s round %d (already measured)",
+                        topology,
+                        point.describe(),
+                        rnd,
                     )
-                    if _valid_run_file(out):
-                        log.info("skip %s (already measured)", out.relative_to(results))
-                    else:
-                        pending.append((rnd, point, seed, side, out))
+                    continue
+                seed = w.seed_for(rnd, i)
+                pending += [
+                    (rnd, point, seed, side, out) for side, out in zip(order, outs)
+                ]
         if not pending:
             return 0
         self._check_deployed(topology)
@@ -271,6 +283,12 @@ class Bench:
         headers: dict[str, str],
         out: pathlib.Path,
     ) -> bool:
+        """One recorded run; False if it failed or came back invalid.
+
+        A failure is not retried here: the attempt has already sent this
+        round's prompts, so a replay would find them in caches its pair
+        partner never had. A resume measures the whole round again.
+        """
         artifact_dir = f"{RESULTS_ROOT}/{topology}/{side}/{point.label}/r{rnd}"
         cmd = aiperf_command(
             model=self.cfg.model,
@@ -281,60 +299,48 @@ class Bench:
             seed=seed,
             artifact_dir=artifact_dir,
         )
-        for attempt in (1, 2):
-            started = _now()
-            log.info(
-                "round %d  %-6s %-8s %-10s attempt %d",
-                rnd,
-                topology,
-                side,
-                point.describe(),
-                attempt,
-            )
-            try:
-                result = self.loadgen.run(
-                    cmd, artifact_dir, self.workload.run_timeout_s
-                )
-            except (KubeError, subprocess.TimeoutExpired) as e:
-                log.warning("run failed: %s", e)
-                continue
-            result.update(
-                topology=topology,
-                side=side,
-                load=point.label,
-                round=rnd,
-                seed=seed,
-                url=url,
-                expected_requests=self.workload.requests_for(point),
-                started=started,
-                finished=_now(),
-            )
-            # Written even when invalid, so the report can list it under
-            # "Excluded runs"; a later resume measures it again.
-            _write_atomic(out, json.dumps(result))
-            if not report.is_valid(result):
-                log.warning(
-                    "  invalid: %d of %d requests recorded, %d errors",
-                    result["records"],
-                    result["expected_requests"],
-                    result["errors"],
-                )
-                continue
-            # A failure marker left by an earlier attempt or run no longer applies.
-            out.with_suffix(".error").unlink(missing_ok=True)
-            ttft = result["samples"]["time_to_first_token"]
-            log.info(
-                "  ok: %d requests, %d errors, TTFT p50 %.2f ms, %.0f output tok/s",
-                result["records"],
-                result["errors"],
-                _median(ttft),
-                result.get("output_token_throughput") or 0,
-            )
-            return True
+        # Whatever an earlier session left for this run no longer pairs with
+        # the round being measured.
+        out.unlink(missing_ok=True)
         err = out.with_suffix(".error")
-        err.parent.mkdir(parents=True, exist_ok=True)
-        err.write_text(f"failed twice at {_now()}\n")
-        return False
+        err.unlink(missing_ok=True)
+        started = _now()
+        log.info("round %d  %-6s %-8s %s", rnd, topology, side, point.describe())
+        try:
+            result = self.loadgen.run(cmd, artifact_dir, self.workload.run_timeout_s)
+        except (KubeError, subprocess.TimeoutExpired) as e:
+            log.warning("run failed: %s", e)
+            _write_atomic(err, f"failed at {_now()}: {e}\n")
+            return False
+        result.update(
+            topology=topology,
+            side=side,
+            load=point.label,
+            round=rnd,
+            seed=seed,
+            url=url,
+            expected_requests=self.workload.requests_for(point),
+            started=started,
+            finished=_now(),
+        )
+        # Written even when invalid, so the report can list it under
+        # "Excluded runs".
+        _write_atomic(out, json.dumps(result))
+        if not report.is_valid(result):
+            log.warning(
+                "  invalid: %s of %d requests succeeded, %d errors",
+                result["records"],
+                result["expected_requests"],
+                result["errors"],
+            )
+            return False
+        ttft = result["latency"]["time_to_first_token"]
+        log.info(
+            "  ok: TTFT p50 %.2f ms, %.0f output tok/s",
+            ttft.get("p50") or math.nan,
+            result.get("output_token_throughput") or 0,
+        )
+        return True
 
     # -- metadata ----------------------------------------------------------
 
@@ -359,6 +365,8 @@ class Bench:
                     "harness": HARNESS_VERSION,
                     "backend": self.backend.name,
                     "workload": self._workload_meta(),
+                    # Priming changes the caches round 0 starts from.
+                    "prime": not self.args.no_prime,
                     "config": dataclasses.asdict(self.cfg),
                     "deployment": self.backend.deployment_identity(),
                     "target": self.backend.target_identity(),
@@ -376,12 +384,16 @@ class Bench:
         if not path.exists():
             return None
         old = json.loads(path.read_text())
-        if old.get("identity") != self._identity():
-            raise KubeError(
-                f"{results} was measured with a different workload, deployment, "
-                "harness version, or target; use a new --results directory"
-            )
-        return old
+        if old.get("identity") == self._identity():
+            return old
+        # A start that measured nothing, refused or failed, must not lock the
+        # directory to its flags.
+        if not any((results / "runs").glob("*/*/*/r*.json")):
+            return None
+        raise RefusedError(
+            f"{results} was measured with a different workload, deployment, "
+            "harness version, or target; use a new --results directory"
+        )
 
     def write_meta(self, results: pathlib.Path) -> None:
         old = self.check_resume(results)
@@ -456,12 +468,9 @@ def cmd_deploy(bench: Bench) -> int:
 def cmd_run(bench: Bench) -> int:
     results = _results_dir(bench.args)
     bench.write_meta(results)
-    failures = 0
-    for topology in bench.topologies:
-        failures += bench.measure_topology(topology, results)
-    log.info("results in %s (%d failed points)", results, failures)
+    failed = _measure_all(bench, results, deploy=False)
     rc = cmd_report(bench, results)
-    return rc or (1 if failures else 0)
+    return rc or (1 if failed else 0)
 
 
 def cmd_report(bench: Bench, results: pathlib.Path | None = None) -> int:
@@ -515,30 +524,46 @@ def cmd_all(bench: Bench) -> int:
     results = _results_dir(bench.args)
     # Refuse an incompatible resume before anything is deployed.
     bench.check_resume(results)
-    failed = []
     try:
+        # A topology this run does not measure, left up by an earlier one,
+        # would compete for CPU with the one being measured.
+        for topology in manifests.TOPOLOGIES:
+            if topology not in bench.topologies:
+                _best_effort(bench.teardown_topology, topology)
         bench.deploy_loadgen()
         bench.write_meta(results)
-        for topology in bench.topologies:
-            # One topology failing must not discard what the others measured.
-            try:
-                bench.deploy_topology(topology)
-                if bench.measure_topology(topology, results):
-                    failed.append(topology)
-            except (KubeError, subprocess.TimeoutExpired) as e:
-                log.error("%s failed: %s", topology, e)
-                failed.append(topology)
-            if not bench.args.keep:
-                # Free the cluster for the next topology so its pods do not
-                # compete with this one's leftovers.
-                _best_effort(bench.teardown_topology, topology)
+        failed = _measure_all(bench, results, deploy=True)
     finally:
         if not bench.args.keep:
             _best_effort(bench.teardown_all)
     rc = cmd_report(bench, results)
+    return rc or (1 if failed else 0)
+
+
+def _measure_all(bench: Bench, results: pathlib.Path, deploy: bool) -> list[str]:
+    """Measure every topology, deploying each first if asked; return the failed.
+
+    One topology failing must not discard what the others measured.
+    """
+    failed = []
+    for topology in bench.topologies:
+        try:
+            if deploy:
+                bench.deploy_topology(topology)
+            if bench.measure_topology(topology, results):
+                failed.append(topology)
+        except (KubeError, subprocess.TimeoutExpired) as e:
+            log.error("%s failed: %s", topology, e)
+            failed.append(topology)
+        if deploy and not bench.args.keep:
+            # Free the cluster for the next topology so its pods do not
+            # compete with this one's leftovers.
+            _best_effort(bench.teardown_topology, topology)
+            if topology in failed:
+                log.info("%s is torn down; rerun with --keep to inspect it", topology)
     if failed:
         log.error("incomplete topologies: %s", ", ".join(failed))
-    return rc or (1 if failed else 0)
+    return failed
 
 
 COMMANDS = {
@@ -701,7 +726,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     r.add_argument(
         "--max-ttft-regression",
-        type=float,
+        type=_finite(float),
         help=f"exit {EXIT_REGRESSION} if B's TTFT is worse than A by more than this percent",
     )
     r.add_argument(
@@ -739,6 +764,9 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             parser.error(str(e))
         return COMMANDS[args.command](bench)
+    except RefusedError as e:
+        log.error("%s", e)
+        return EXIT_PREFLIGHT
     except (KubeError, subprocess.TimeoutExpired) as e:
         log.error("%s", e)
         return 1
@@ -754,10 +782,14 @@ def _exit_on_sigterm():
     cancel or `timeout` would otherwise leave every deployment running.
     Returns the previous handler, or None off the main thread.
     """
+
+    def unwind(signum, frame):
+        # A second SIGTERM must not interrupt the teardown the first started.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        sys.exit(128 + signum)
+
     try:
-        return signal.signal(
-            signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum)
-        )
+        return signal.signal(signal.SIGTERM, unwind)
     except ValueError:
         return None
 
@@ -778,9 +810,19 @@ def _csv(kind, choices=None):
     return parse
 
 
-def _positive(kind):
+def _finite(kind):
     def parse(text: str):
         value = kind(text)
+        if not math.isfinite(value):
+            raise argparse.ArgumentTypeError(f"must be a finite number: {text}")
+        return value
+
+    return parse
+
+
+def _positive(kind):
+    def parse(text: str):
+        value = _finite(kind)(text)
         if value <= 0:
             raise argparse.ArgumentTypeError(f"must be positive: {text}")
         return value
@@ -790,7 +832,7 @@ def _positive(kind):
 
 def _non_negative(kind):
     def parse(text: str):
-        value = kind(text)
+        value = _finite(kind)(text)
         if value < 0:
             raise argparse.ArgumentTypeError(f"must not be negative: {text}")
         return value
@@ -847,10 +889,6 @@ def _git_sha() -> str:
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
-
-
-def _median(values: list[float]) -> float:
-    return report.stats.percentile(values, 50) if values else float("nan")
 
 
 def _now() -> str:

@@ -17,7 +17,7 @@ import subprocess
 from typing import Any
 
 from . import manifests
-from .kube import Kube, KubeError, retry
+from .kube import FatalError, ForbiddenError, Kube, KubeError, retry
 from .loadgen import LoadGen
 
 log = logging.getLogger("gateway_ab")
@@ -28,6 +28,12 @@ REQUIRED_CRDS = (
     "dynamographdeployments.nvidia.com",
     "inferencepools.inference.networking.k8s.io",
     "httproutes.gateway.networking.k8s.io",
+)
+# Container states that waiting will not fix: TERMINAL_POD_WAITING_REASONS in
+# deploy/utils/dynamo_deployment.py, which needs kubernetes_asyncio and so is
+# not imported here, plus the image-pull failures a mistyped image causes.
+TERMINAL_WAITING_REASONS = frozenset(
+    {"CrashLoopBackOff", "ErrImagePull", "ImagePullBackOff", "InvalidImageName"}
 )
 
 
@@ -89,19 +95,34 @@ class K8sBackend:
             return [f"cannot reach namespace {self.kube.namespace!r}: {e}"]
         try:
             for crd in REQUIRED_CRDS:
-                if not self.kube.exists(["crd", crd], namespaced=False):
-                    problems.append(f"CRD {crd} is not installed")
-            gw = self.kube.get_json(
-                ["-n", self.cfg.gateway_namespace, "gateway", self.cfg.gateway_name],
-                namespaced=False,
-            )
-            if gw is None:
-                problems.append(
-                    f"Gateway {self.cfg.gateway_namespace}/{self.cfg.gateway_name} "
-                    "not found"
+                try:
+                    if not self.kube.exists(["crd", crd], namespaced=False):
+                        problems.append(f"CRD {crd} is not installed")
+                except ForbiddenError:
+                    # Credentials scoped to the namespace cannot read CRDs;
+                    # deploying fails clearly if one is missing.
+                    log.warning("Not allowed to read CRD %s; skipping that check", crd)
+            gateway = f"{self.cfg.gateway_namespace}/{self.cfg.gateway_name}"
+            try:
+                gw = self.kube.get_json(
+                    [
+                        "-n",
+                        self.cfg.gateway_namespace,
+                        "gateway",
+                        self.cfg.gateway_name,
+                    ],
+                    namespaced=False,
                 )
-            elif not _condition_true(gw, "Programmed"):
-                problems.append(f"Gateway {self.cfg.gateway_name} is not Programmed")
+                if gw is None:
+                    problems.append(f"Gateway {gateway} not found")
+                elif not _condition_true(gw, "Programmed"):
+                    problems.append(f"Gateway {gateway} is not Programmed")
+            except ForbiddenError:
+                # Finding the Gateway's URL reads it too.
+                if not self.args.gateway_url:
+                    problems.append(
+                        f"not allowed to read Gateway {gateway}; pass --gateway-url"
+                    )
             # Name the flag, not its value: the value is only a Secret's name,
             # but logging it trips code scanning's clear-text-secret check.
             for flag, secret in (
@@ -152,8 +173,8 @@ class K8sBackend:
             # Always start from fresh deployments. An in-place update that
             # rolls the EPP and the workers together can bind the new EPP to
             # the outgoing worker generation's namespace, where it stays and
-            # answers 503 once those workers drain. Recreating also gives
-            # every run cold caches and router state.
+            # answers 503 once those workers drain (#16581). Recreating also
+            # gives every run cold caches and router state.
             log.info("Recreating %s for a clean start", topology)
             self.teardown_topology(topology)
             self._wait_pods_gone(names)
@@ -205,8 +226,24 @@ class K8sBackend:
         ``kubectl wait --for=condition=Ready`` right after an apply can match
         the previous generation's condition before the operator has seen the
         change, and measurement would then start mid-rollout with old and new
-        pods both serving.
+        pods both serving. A pod in a state waiting will not fix fails at once.
         """
+        pods = self.kube.get_json(
+            ["pods", "-l", f"nvidia.com/dynamo-graph-deployment-name={name}"]
+        ) or {"items": []}
+        for pod in pods["items"]:
+            status = pod.get("status", {})
+            for c in [
+                *status.get("initContainerStatuses", []),
+                *status.get("containerStatuses", []),
+            ]:
+                waiting = c.get("state", {}).get("waiting") or {}
+                if waiting.get("reason") in TERMINAL_WAITING_REASONS:
+                    raise FatalError(
+                        f"{name}: pod {pod['metadata']['name']} container "
+                        f"{c.get('name')}: {waiting['reason']} "
+                        f"{waiting.get('message', '')}".rstrip()
+                    )
         dgd = self.kube.get_json(["dynamographdeployment", name])
         if dgd is None:
             raise KubeError(f"{name} not found")
@@ -231,9 +268,6 @@ class K8sBackend:
                 s.get("readyReplicas") == s.get("updatedReplicas", want) == want
             ):
                 raise KubeError(f"{name}: component {comp} not fully updated and ready")
-        pods = self.kube.get_json(
-            ["pods", "-l", f"nvidia.com/dynamo-graph-deployment-name={name}"]
-        ) or {"items": []}
         if any(p["metadata"].get("deletionTimestamp") for p in pods["items"]):
             raise KubeError(f"{name}: old pods still terminating")
 
@@ -260,10 +294,12 @@ class K8sBackend:
         if topology == "disagg" and "Prefill worker discovered" not in logs:
             return (
                 "The EPP never activated prefill routing, so decode sidecars reject "
-                "requests without a prefill worker id. EPP images up to 1.5.1 detect "
-                "prefill workers only by the legacy ModelType::Prefill bit, which the "
-                "mocker does not emit; use an EPP image with the worker_type-based "
-                "detection (see README, 'Disaggregated serving needs')."
+                "requests without a prefill worker id. If this EPP image is 1.5.1 or "
+                "older, it detects prefill workers only by the legacy "
+                "ModelType::Prefill bit, which the mocker does not emit; use one with "
+                "the worker_type-based detection (see README, 'Disaggregated serving "
+                "needs'). Otherwise check that the prefill workers registered: "
+                f"kubectl logs -l nvidia.com/dynamo-graph-deployment-name={dgd}"
             )
         return (
             "Check the HTTPRoute status and the EPP logs: "
@@ -305,27 +341,29 @@ class K8sBackend:
             return f"http://{manifests.frontend_service(self.cfg, topology, side)}:8000"
         if self.args.gateway_url:
             return self.args.gateway_url.rstrip("/")
+        ns, name = self.cfg.gateway_namespace, self.cfg.gateway_name
+        gw = self.kube.get_json(["-n", ns, "gateway", name], namespaced=False) or {}
+        http_ports = {
+            listener.get("port")
+            for listener in gw.get("spec", {}).get("listeners", [])
+            if listener.get("protocol") == "HTTP"
+        }
         svcs = self.kube.get_json(
-            [
-                "-n",
-                self.cfg.gateway_namespace,
-                "svc",
-                "-l",
-                f"gateway.networking.k8s.io/gateway-name={self.cfg.gateway_name}",
-            ],
+            ["-n", ns, "svc", "-l", f"gateway.networking.k8s.io/gateway-name={name}"],
             namespaced=False,
         )
-        items = (svcs or {}).get("items", [])
-        if not items:
-            raise KubeError(
-                f"no Service for Gateway {self.cfg.gateway_name} in "
-                f"{self.cfg.gateway_namespace}; pass --gateway-url"
-            )
-        svc = items[0]
-        port = svc["spec"]["ports"][0]["port"]
-        return (
-            f"http://{svc['metadata']['name']}.{self.cfg.gateway_namespace}"
-            f".svc.cluster.local:{port}"
+        # The Service also exposes ports that are not listeners (Istio lists
+        # its status port first), so take one that a plaintext listener serves.
+        for svc in (svcs or {}).get("items", []):
+            for port in svc["spec"].get("ports", []):
+                if port.get("port") in http_ports:
+                    return (
+                        f"http://{svc['metadata']['name']}.{ns}"
+                        f".svc.cluster.local:{port['port']}"
+                    )
+        raise KubeError(
+            f"no Service port of Gateway {ns}/{name} serves an HTTP listener; "
+            "pass --gateway-url"
         )
 
 

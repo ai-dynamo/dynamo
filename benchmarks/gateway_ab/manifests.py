@@ -40,6 +40,10 @@ TAGS = {"frontend": "fe", "epp": "epp", "direct": "dir"}
 # cannot tell them apart.
 TARGET_HEADER = "X-Dynamo-AB-Target"
 MODEL_HEADER = "X-Gateway-Model-Name"
+# The one endpoint the benchmark calls. Routes match it exactly, and both
+# headers above, so a broader route on a shared Gateway cannot win the match
+# and take the traffic.
+CHAT_PATH = "/v1/chat/completions"
 
 PART_OF = "app.kubernetes.io/part-of"
 # Every object also carries its run's --name-prefix, so teardown of one run
@@ -75,6 +79,9 @@ class BenchConfig:
     frontend_image: str = ""
     worker_image: str = ""
     name_prefix: str = "ab"
+    # Qualifies the route header, since runs in two namespaces can share a
+    # Gateway and a name prefix.
+    namespace: str = "gateway-ab"
 
     agg_workers: int = 2
     prefill_workers: int = 2
@@ -157,7 +164,7 @@ def request_headers(cfg: BenchConfig, topology: str, side: str) -> dict[str, str
     """
     return {
         MODEL_HEADER: cfg.model,
-        TARGET_HEADER: dgd_name(cfg, topology, side),
+        TARGET_HEADER: f"{cfg.namespace}/{dgd_name(cfg, topology, side)}",
     }
 
 
@@ -185,6 +192,8 @@ def build_httproute(cfg: BenchConfig, topology: str, side: str) -> dict[str, Any
     """Route from the shared Gateway to B's InferencePool or to A's Frontend.
 
     The two routes differ only in their backend and the target header value.
+    They match every header the arm's requests carry, so they outrank a route
+    that matches fewer.
     """
     if side not in SIDES:
         raise ValueError(f"only {SIDES} go through the Gateway, not {side!r}")
@@ -225,9 +234,12 @@ def build_httproute(cfg: BenchConfig, topology: str, side: str) -> dict[str, Any
                     "matches": [
                         {
                             "headers": [
-                                {"name": TARGET_HEADER, "type": "Exact", "value": name}
+                                {"name": header, "type": "Exact", "value": value}
+                                for header, value in request_headers(
+                                    cfg, topology, side
+                                ).items()
                             ],
-                            "path": {"type": "PathPrefix", "value": "/"},
+                            "path": {"type": "Exact", "value": CHAT_PATH},
                         }
                     ],
                     "backendRefs": [backend],

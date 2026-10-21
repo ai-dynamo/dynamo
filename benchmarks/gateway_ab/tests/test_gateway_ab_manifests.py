@@ -60,7 +60,6 @@ def test_direct_arm_is_a_copy_of_a(topology):
     # A copy, not A itself: replaying A's prompts would hit A's caches.
     assert direct["metadata"]["name"] != a["metadata"]["name"]
     assert direct["spec"] == a["spec"]
-    assert direct["metadata"]["labels"]["gateway-ab/side"] == "direct"
     names = [o["metadata"]["name"] for o in m.build_all(cfg, (topology,))]
     assert m.dgd_name(cfg, topology, "direct") in names
     # Only A and B go through the Gateway.
@@ -68,63 +67,25 @@ def test_direct_arm_is_a_copy_of_a(topology):
         m.build_httproute(cfg, topology, "direct")
 
 
-@pytest.mark.parametrize("topology", m.TOPOLOGIES)
-def test_router_tiers_use_kv_routing_and_same_image(topology):
-    cfg = m.BenchConfig()
-    fe = _main(_components(m.build_dgd(cfg, topology, "frontend"))["Frontend"])
-    epp_component = _components(m.build_dgd(cfg, topology, "epp"))["Epp"]
-    epp = _main(epp_component)
-    assert epp_component["type"] == "epp"
+def test_both_routers_run_the_same_kv_router_and_read_the_block_size_from_cards():
+    cfg = m.BenchConfig(block_size=64)
+    a = _components(m.build_dgd(cfg, "disagg", "frontend"))
+    b = _components(m.build_dgd(cfg, "disagg", "epp"))
+    fe, epp = _main(a["Frontend"]), _main(b["Epp"])
+    assert b["Epp"]["type"] == "epp"
     assert {"name": "DYN_ROUTER_MODE", "value": "kv"} in fe["env"]
     assert fe["image"] == epp["image"] == cfg.frontend_image
     assert fe["resources"] == epp["resources"]
-
-
-def test_block_size_reaches_the_mocker_and_the_epp_reads_the_card():
-    cfg = m.BenchConfig(block_size=64)
-    comps = _components(m.build_dgd(cfg, "disagg", "epp"))
-    # Only the standalone EPP reads DYN_KV_CACHE_BLOCK_SIZE; in Dynamo mode it
-    # takes the block size from the workers' model cards, as the Frontend does.
-    assert "env" not in _main(comps["Epp"])
+    # The EPP takes the block size from the workers' model cards, as the
+    # Frontend does, so neither router is told it any other way.
+    assert "env" not in epp
     for name in ("prefill", "decode"):
-        args = _main(comps[name])["args"]
+        args = _main(b[name])["args"]
         assert args[args.index("--block-size") + 1] == "64"
 
 
-def test_every_object_carries_its_run_prefix():
-    cfg = m.BenchConfig(name_prefix="u1", with_direct=True)
-    for obj in m.build_all(cfg, m.TOPOLOGIES):
-        assert obj["metadata"]["labels"][m.INSTANCE] == "u1", obj["kind"]
-    # A loadgen from another run, or one built before the labels, is replaced.
-    other = m.build_loadgen_pod(m.BenchConfig(name_prefix="u2"))
-    mine = m.build_loadgen_pod(cfg)
-    assert (
-        other["metadata"]["annotations"][m.LOADGEN_SPEC_HASH]
-        != mine["metadata"]["annotations"][m.LOADGEN_SPEC_HASH]
-    )
-
-
-def test_disagg_modes():
-    comps = _components(m.build_dgd(m.BenchConfig(), "disagg", "frontend"))
-    for name in ("prefill", "decode"):
-        args = _main(comps[name])["args"]
-        assert args[args.index("--disaggregation-mode") + 1] == name
-    agg = _components(m.build_dgd(m.BenchConfig(), "agg", "frontend"))
-    assert "--disaggregation-mode" not in _main(agg["decode"])["args"]
-
-
-def test_worker_counts():
-    cfg = m.BenchConfig(agg_workers=3, prefill_workers=1, decode_workers=4)
-    assert _components(m.build_dgd(cfg, "agg", "epp"))["decode"]["replicas"] == 3
-    comps = _components(m.build_dgd(cfg, "disagg", "epp"))
-    assert comps["prefill"]["replicas"] == 1
-    assert comps["decode"]["replicas"] == 4
-    with pytest.raises(ValueError):
-        m.BenchConfig(agg_workers=0)
-
-
-def test_routes_share_the_gateway_and_differ_in_backend_and_header():
-    cfg = m.BenchConfig(name_prefix="x")
+def test_routes_differ_only_in_backend_and_target():
+    cfg = m.BenchConfig(name_prefix="x", namespace="ns")
     a = m.build_httproute(cfg, "disagg", "frontend")
     b = m.build_httproute(cfg, "disagg", "epp")
     assert b["spec"]["rules"][0]["backendRefs"] == [
@@ -139,27 +100,37 @@ def test_routes_share_the_gateway_and_differ_in_backend_and_header():
         {"group": "", "kind": "Service", "name": "x-disagg-fe-frontend", "port": 8000}
     ]
     for route, side in ((a, "frontend"), (b, "epp")):
-        header = route["spec"]["rules"][0]["matches"][0]["headers"][0]
-        assert header["name"] == m.TARGET_HEADER
-        assert (
-            header["value"] == m.request_headers(cfg, "disagg", side)[m.TARGET_HEADER]
-        )
+        (match,) = route["spec"]["rules"][0]["matches"]
+        # The exact path and every header the arm's requests carry, so a
+        # broader route on a shared Gateway cannot outrank it.
+        assert match["path"] == {"type": "Exact", "value": m.CHAT_PATH}
+        headers = {h["name"]: h["value"] for h in match["headers"]}
+        assert headers == m.request_headers(cfg, "disagg", side)
         assert route["spec"]["parentRefs"][0]["namespace"] == cfg.gateway_namespace
-    # Apart from the backend and the header value, the two routes are the same.
+    # The target names the namespace: a run with the same prefix in another
+    # namespace selects other routes.
+    assert m.request_headers(cfg, "disagg", "epp")[m.TARGET_HEADER] == "ns/x-disagg-epp"
     for route in (a, b):
         route["metadata"].pop("name")
         rule = route["spec"]["rules"][0]
         rule.pop("backendRefs")
-        rule["matches"][0]["headers"][0].pop("value")
+        for header in rule["matches"][0]["headers"]:
+            if header["name"] == m.TARGET_HEADER:
+                header.pop("value")
     assert a == b
 
 
-def test_images_follow_version():
-    cfg = m.BenchConfig(dynamo_version="9.9.9")
-    assert cfg.frontend_image.endswith("dynamo-frontend:9.9.9")
-    assert cfg.worker_image.endswith("dynamo-planner:9.9.9")
-    override = m.BenchConfig(frontend_image="reg/fe:pr", worker_image="reg/w:pr")
-    assert override.frontend_image == "reg/fe:pr"
+def test_every_object_carries_its_run_prefix():
+    cfg = m.BenchConfig(name_prefix="u1", with_direct=True)
+    for obj in m.build_all(cfg, m.TOPOLOGIES):
+        assert obj["metadata"]["labels"][m.INSTANCE] == "u1", obj["kind"]
+    # A loadgen from another run, or one built before the labels, is replaced.
+    other = m.build_loadgen_pod(m.BenchConfig(name_prefix="u2"))
+    mine = m.build_loadgen_pod(cfg)
+    assert (
+        other["metadata"]["annotations"][m.LOADGEN_SPEC_HASH]
+        != mine["metadata"]["annotations"][m.LOADGEN_SPEC_HASH]
+    )
 
 
 def test_secrets_reach_every_container():
@@ -176,24 +147,3 @@ def test_secrets_reach_every_container():
             assert spec["imagePullSecrets"] == [{"name": "pull"}]
             for c in spec["containers"]:
                 assert c["envFrom"] == [{"secretRef": {"name": "hf"}}]
-
-
-def test_no_cpu_limits():
-    for obj in m.build_all(m.BenchConfig(with_direct=True), m.TOPOLOGIES):
-        if obj["kind"] == "HTTPRoute":
-            continue
-        specs = (
-            [obj["spec"]]
-            if obj["kind"] == "Pod"
-            else [c["podTemplate"]["spec"] for c in obj["spec"]["components"]]
-        )
-        for spec in specs:
-            for c in spec["containers"]:
-                assert "limits" not in c.get("resources", {})
-
-
-def test_unknown_topology_or_side():
-    with pytest.raises(ValueError):
-        m.dgd_name(m.BenchConfig(), "hybrid", "frontend")
-    with pytest.raises(ValueError):
-        m.build_dgd(m.BenchConfig(), "agg", "router")

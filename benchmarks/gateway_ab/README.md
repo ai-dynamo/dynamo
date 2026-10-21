@@ -24,7 +24,7 @@ throughput for each side, plus B's delta against A with a confidence interval an
 ```text
 A  aiperf ──HTTP──▶ Gateway ──HTTP──▶ Frontend (tokenize + KV route) ──TCP──▶ mocker
 B  aiperf ──HTTP──▶ Gateway ──ext_proc──▶ EPP (tokenize + KV route)
-                      └──HTTP──▶ sidecar Frontend (tokenize, direct) ──TCP──▶ mocker
+                      └──HTTP──▶ sidecar Frontend (direct, EPP's tokens) ──TCP──▶ mocker
 ```
 
 ## Why mockers, and where it runs
@@ -57,17 +57,19 @@ See [Running without Kubernetes](#running-without-kubernetes).
 - `python3` 3.10 or later. The harness uses only the standard library, and aiperf runs inside
   the cluster.
 - A Kubernetes cluster. Pods must be able to pull from `nvcr.io` and download the tokenizer from
-  Hugging Face. About 16 CPUs covers the defaults. GPUs are not used.
+  Hugging Face. GPUs are not used. At the default CPU requests, `all` needs about 20 allocatable
+  CPUs while it measures the disaggregated topology (A 6, B 10, the loadgen 4). `deploy` keeps
+  both topologies up and needs about 30, and `--with-direct` adds 4 for agg and 6 for disagg.
 
 ## Quick start on a local cluster
 
 ```bash
-minikube start -p gateway-ab --driver=docker --cpus=16 --memory=48g
+minikube start -p gateway-ab --driver=docker --cpus=20 --memory=48g
 
 # Dynamo platform 1.5.1, Gateway API + Inference Extension CRDs, agentgateway, and a Gateway.
 KUBE_CONTEXT=gateway-ab bash benchmarks/gateway_ab/setup_cluster.sh
 
-# Deploy, measure, report, and tear down both topologies (about 20 minutes with defaults on a 16-CPU minikube).
+# Deploy, measure, report, and tear down both topologies (about 20 minutes with defaults).
 python3 -m benchmarks.gateway_ab --context gateway-ab all
 ```
 
@@ -89,6 +91,8 @@ python3 -m benchmarks.gateway_ab --context my-cluster --namespace my-ns all
 
 `preflight` checks that the namespace, the three CRDs (`DynamoGraphDeployment`, `InferencePool`,
 `HTTPRoute`), and a Programmed Gateway are all present, and that any secrets you name exist.
+Credentials limited to the namespace skip the CRD check, and need `--gateway-url` when they cannot
+read the Gateway.
 
 The operator must be 1.5.0 or later to run the native Rust EPP. Pass `--hf-secret` with a Secret
 holding `HF_TOKEN` for a gated model or to avoid Hugging Face rate limits, and
@@ -213,18 +217,22 @@ seen during in-place updates: when one update rolls both the EPP and its workers
 bind to the outgoing workers' generation and keep returning `503 no endpoints available` after
 they drain.
 
-Re-running `run` with the same `--results` resumes it. Only valid measurements count as done.
-Raising `--rounds` adds rounds. Any other change is refused, because it would mix incomparable
-rounds into one comparison: the workload, the deployment settings, the EPP binary's content, an
-image id (local backend), the cluster context, namespace, or `--gateway-url`, and the harness
-version. Kubernetes image tags are compared by name, so do not re-push a tag mid-run.
+Re-running `run` with the same `--results` resumes it. A round counts as done only when every arm
+measured it validly; otherwise every arm measures it again, so no pair mixes two sessions. Raising
+`--rounds` adds rounds. Any other change is refused, because it would mix incomparable rounds into
+one comparison: the workload, `--no-prime`, the deployment settings, the EPP binary's content, an
+image id or the Docker host (local backend), the cluster context, namespace, or `--gateway-url`,
+and the harness version. A directory that holds no measurement yet takes the new settings.
+Kubernetes image tags are compared by name, so do not re-push a tag mid-run.
 
 ## What makes the comparison fair
 
 - **Same gateway.** Both sides go through the same Gateway. Their routes differ only in the backend
   and in the value of the `X-Dynamo-AB-Target` header that selects them, so the gateway's own cost,
-  which a Frontend behind an ingress pays as well, cancels out of the comparison. A unit test checks
-  the routes.
+  which a Frontend behind an ingress pays as well, cancels out of the comparison. Each route matches
+  the exact chat path and both headers the requests carry, and the target value includes the
+  namespace, so neither a broader route nor another run's route on a shared Gateway can take the
+  traffic. A unit test checks the routes.
 - **Identical workers.** One function builds every DynamoGraphDeployment. Mocker arguments, worker
   counts, images, and resource requests match, and B adds only the direct-mode sidecar and the EPP.
   A unit test enforces this.
@@ -253,7 +261,8 @@ version. Kubernetes image tags are compared by name, so do not re-push a tag mid
   spikes that would swamp the difference being measured.
 - **Valid runs only.** A run counts only if every request succeeded and none went missing. Failed or
   partial runs appear under "Excluded runs" and are left out of the statistics. A failed measurement
-  is retried once, then recorded as missing.
+  is not retried: it has already sent the round's prompts, and a replay would find them cached.
+  Re-running with the same `--results` measures the round again on every arm.
 
 ## Measuring the gateway's cost
 
@@ -311,8 +320,9 @@ latency measures the run length rather than the routing path.
 interval, and a verdict. Negative latency Δ means B is faster. Latency rows cover the mean, p50,
 p90, and p99. When the distribution is multi-modal, trust the mean more than the median.
 
-The round is the unit of measurement. Each round reduces to one value per side, such as that run's
-TTFT p90 or its throughput. A and B are the geometric means of those values over the rounds
+The round is the unit of measurement. Each round reduces to one value per side, aiperf's own
+statistic for that run, such as its TTFT p90 or its throughput. A and B are the geometric means of
+those values over the rounds
 measured validly on both sides, and Δ is B against A as those columns show it. The interval is a
 paired t-interval over the per-round ratios B/A: both sides replay the same seed in a round, back
 to back, so pairing cancels the round-to-round variation they share (the seed's arrival pattern,
@@ -334,9 +344,6 @@ Verdicts read the interval against `--min-effect` (default 2%):
 | `inconclusive` | Includes zero but reaches past ±min-effect. The data cannot separate a negligible difference from a large one. Add rounds or use a quieter cluster. |
 | `n/a (too few rounds)` | Fewer than two rounds measured validly on both sides. One pair has no spread to estimate an interval from. |
 | `n/a (open loop)` | Throughput rows under open-loop load, where each side delivers the rate it is offered |
-
-Under each table, the coefficient of variation of the per-round TTFT mean shows the A/A noise floor
-for that cluster. Treat any Δ smaller than it with suspicion.
 
 With `--with-direct`, a "Gateway cost" section follows, with the same columns for the direct arm
 against A through the gateway. Its verdicts read `gateway worse`, `gateway better`, and so on. The
@@ -366,7 +373,7 @@ for example with one round, fails the run with exit `1` rather than passing unch
 |---|---|
 | `0` | Every point compared, and no regression gate tripped |
 | `1` | Incomplete: a point has no comparison, a run was excluded as invalid, the regression gate could not be evaluated, or a step failed. The report still covers everything that was measured. |
-| `2` | Nothing ran: preflight failed, or the arguments were invalid |
+| `2` | Nothing ran: preflight failed, the arguments were invalid, or `--results` holds runs measured with other settings |
 | `3` | The TTFT regression gate tripped |
 | `143` | Stopped by SIGTERM, after tearing down what it deployed |
 
@@ -443,10 +450,10 @@ same command to reproduce a failure.
 - **Mocker timings are synthetic.** Compare A against B from the same run, never a mocker number
   against a GPU number. The mocker does not model GPU contention between prefill and decode, so
   treat absolute headroom as an upper bound.
-- **B has more CPU in total.** B tokenizes in the EPP and again in each sidecar, while A tokenizes
-  once in the Frontend. B also has a sidecar per worker pod. This difference is part of the
-  architecture, and the benchmark measures it rather than hiding it. Keep it in mind when reading
-  throughput.
+- **B has more CPU in total.** B tokenizes in the EPP, and each sidecar renders the chat template
+  again before reusing the EPP's token ids from `nvext.token_data`, while A does both once in the
+  Frontend. B also has a sidecar per worker pod. This difference is part of the architecture, and
+  the benchmark measures it rather than hiding it. Keep it in mind when reading throughput.
 - **The Gateway is shared.** Both sides use the Gateway in `--gateway-namespace`, and routes select a
   side by the `X-Dynamo-AB-Target` header. Other traffic through that Gateway adds noise to both.
 - **Local clusters are for wiring and trends.** On minikube or kind, the load generator, the
@@ -464,7 +471,7 @@ same command to reproduce a failure.
 | Smoke to `epp` fails with 500 or 503 | The EPP is not ready or found no workers. Check `kubectl logs -l nvidia.com/dynamo-component-type=epp`. |
 | DGD never becomes Ready | Usually an image pull or Hugging Face download failure. Check `kubectl describe pod` and the worker logs, and pass `--hf-secret` when rate-limited. |
 | Local: an EPP container exits with `Too many open files` | File discovery ran out of inotify instances, which are capped per user across the host. Raise them with `sudo sysctl fs.inotify.max_user_instances=1024`. Preflight warns when the limit is below 512. |
-| Local: the EPP exits mentioning `POD_NAMESPACE` | The EPP lacks `DYN_EPP_STATIC_ENDPOINT`: an EPP that has it logs `DYN_EPP_STATIC_ENDPOINT is set` at startup. Pass `--epp-binary` with a build from this branch. |
+| Local: once the workers register, the EPP exits with `Failed to infer configuration` | The EPP lacks `DYN_EPP_STATIC_ENDPOINT` and looked for a Kubernetes API server. An EPP that has it logs `DYN_EPP_STATIC_ENDPOINT is set` at startup. Pass `--epp-binary` with a build from this branch. |
 | `run`: deployed with other settings than these flags | Pass the flags `deploy` used, or run `deploy` again with the new ones. |
 | Excluded runs with errors | Look in the loadgen pod: `kubectl exec <prefix>-loadgen -- cat /results/<topology>/<side>/<load>/r<R>.log` (`<load>` is `c8`, `rps14`, and so on). |
 
@@ -477,6 +484,6 @@ same command to reproduce a failure.
 | `k8s_backend.py` | Kubernetes backend: DGDs, HTTPRoutes, loadgen pod, rollout checks. |
 | `local_backend.py` | Docker backend: containers, Envoy config, EPP with a static endpoint. |
 | `manifests.py` | DynamoGraphDeployment, HTTPRoute, and loadgen manifests for every arm. |
-| `loadgen.py` | aiperf command and in-pod result extraction. |
-| `stats.py` | Percentiles, paired t-intervals, verdicts. Standard library only. |
+| `loadgen.py` | aiperf command, detached runs, and aiperf's per-run summary. |
+| `stats.py` | Paired t-intervals and verdicts. Standard library only. |
 | `report.py` | `summary.json` and `report.md`. |

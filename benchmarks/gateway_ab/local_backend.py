@@ -161,16 +161,15 @@ def envoy_config(cfg: manifests.BenchConfig, topology: str) -> str:
     """
 
     def route(side: str, cluster: str) -> dict[str, Any]:
+        # The same match as the arm's HTTPRoute on Kubernetes.
         return {
             "match": {
-                "prefix": "/",
+                "path": manifests.CHAT_PATH,
                 "headers": [
-                    {
-                        "name": manifests.TARGET_HEADER,
-                        "string_match": {
-                            "exact": manifests.dgd_name(cfg, topology, side)
-                        },
-                    }
+                    {"name": name, "string_match": {"exact": value}}
+                    for name, value in manifests.request_headers(
+                        cfg, topology, side
+                    ).items()
                 ],
             },
             "route": {"cluster": cluster, "timeout": "300s"},
@@ -287,6 +286,17 @@ def envoy_config(cfg: manifests.BenchConfig, topology: str) -> str:
     return json.dumps(config)
 
 
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError as e:
+        raise KubeError(f"cannot read --epp-binary: {e}") from e
+    return digest.hexdigest()
+
+
 def _dns_cluster(name: str, host: str, port: int) -> dict[str, Any]:
     """A cluster of one container, found by its name on the Docker network."""
     return {
@@ -375,20 +385,18 @@ class LocalBackend:
         }
 
     def target_identity(self) -> dict[str, Any]:
-        return {}
+        """The Docker daemon a run measures on; resuming on another would mix hosts."""
+        return {
+            "docker_host": os.environ.get("DOCKER_HOST")
+            or self.docker.run(["context", "show"], check=False).stdout.strip()
+        }
 
     def _epp_sha256(self) -> str | None:
+        """The digest of --epp-binary when this run first read it."""
         if self.epp_binary is None:
             return None
         if self._epp_digest is None:
-            digest = hashlib.sha256()
-            try:
-                with open(self.epp_binary, "rb") as f:
-                    for chunk in iter(lambda: f.read(1 << 20), b""):
-                        digest.update(chunk)
-            except OSError as e:
-                raise KubeError(f"cannot read --epp-binary: {e}") from e
-            self._epp_digest = digest.hexdigest()
+            self._epp_digest = _sha256(self.epp_binary)
         return self._epp_digest
 
     def _image_id(self, image: str) -> str | None:
@@ -578,6 +586,13 @@ class LocalBackend:
         ).stdout.strip()
         epp_args = ["--entrypoint", "/epp"]
         if self.epp_binary:
+            # The container runs whatever is at the path now, so a rebuild
+            # since the run recorded the binary would go unrecorded.
+            if _sha256(self.epp_binary) != self._epp_sha256():
+                raise KubeError(
+                    f"--epp-binary {self.epp_binary} changed during the run; "
+                    "start again"
+                )
             epp_args = [
                 "-v",
                 f"{self.epp_binary}:/epp-dev:ro",
@@ -680,17 +695,24 @@ class LocalBackend:
         return ["--filter", f"label={TOPOLOGY_LABEL}={self.cfg.name_prefix}/{topology}"]
 
     def deployed_fingerprint(self, topology: str) -> str | None:
-        """The fingerprint every container of a topology carries, or None."""
+        """The fingerprint of a topology whose every container runs, or None."""
         out = self.docker.run(
             [
                 "ps",
                 "-a",
                 *self._topology_filter(topology),
                 "--format",
-                f'{{{{.Label "{FINGERPRINT_LABEL}"}}}}',
+                f'{{{{.State}}}} {{{{.Label "{FINGERPRINT_LABEL}"}}}}',
             ]
-        ).stdout.split()
-        prints = set(out)
+        ).stdout
+        rows = [line.split(maxsplit=1) for line in out.splitlines() if line.strip()]
+        workers = sum(n for _, n, _ in manifests.worker_roles(self.cfg, topology))
+        # Workers and a Frontend per arm, plus the EPP and the gateway. A dead
+        # or missing container leaves a deployment unfit to measure.
+        expected = len(manifests.arms(self.cfg)) * (workers + 1) + 2
+        if len(rows) != expected or any(row[0] != "running" for row in rows):
+            return None
+        prints = {row[-1] for row in rows}
         return prints.pop() if len(prints) == 1 else None
 
     def _check_running(self, topology: str) -> None:
@@ -704,7 +726,11 @@ class LocalBackend:
                 "{{.Names}} {{.State}}",
             ]
         ).stdout
-        dead = [line.split()[0] for line in out.splitlines() if "running" not in line]
+        dead = [
+            name
+            for name, state in (line.split() for line in out.splitlines())
+            if state != "running"
+        ]
         if dead:
             raise FatalError(
                 f"containers exited: {', '.join(dead)} " f"(see: docker logs {dead[0]})"
@@ -723,7 +749,8 @@ class LocalBackend:
         logs = self.docker.run(["logs", epp], check=False)
         text = logs.stdout + logs.stderr
         # An EPP with the static endpoint says so at startup; one without it
-        # reaches for Kubernetes instead.
+        # reaches for Kubernetes once its workers register, and kube-rs fails
+        # with "Failed to infer configuration".
         static = "DYN_EPP_STATIC_ENDPOINT is set" in text
         if state != "running":
             hint = ""
@@ -732,9 +759,7 @@ class LocalBackend:
                     " It ran out of inotify instances, which file discovery uses; "
                     "raise them with: sudo sysctl fs.inotify.max_user_instances=1024."
                 )
-            elif not static and (
-                "POD_NAMESPACE" in text or "KUBERNETES_SERVICE_HOST" in text
-            ):
+            elif not static and "infer config" in text.lower():
                 hint = (
                     " This EPP tried to reach Kubernetes, so it lacks "
                     "DYN_EPP_STATIC_ENDPOINT support; pass --epp-binary with an EPP "

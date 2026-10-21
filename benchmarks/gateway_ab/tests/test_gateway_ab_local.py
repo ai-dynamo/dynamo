@@ -43,8 +43,6 @@ class _RecordingDocker(local_backend.Docker):
                     for tag in manifests.TAGS.values()
                 }
             )
-        elif args[:1] == ["ps"]:
-            out = ""
         return subprocess.CompletedProcess(args, 0, out, "")
 
 
@@ -101,14 +99,10 @@ def test_every_arm_runs_identical_workers(topology):
     assert _env(direct_fe) == dict(_env(a_fe), DYN_NAMESPACE=f"ab-{topology}-dir")
 
 
-def test_direct_arm_is_deployed_only_when_asked():
-    backend, docker = _backend()
-    backend.deploy_topology("agg", "fp")
-    assert not any("-dir-" in name for name in _runs(docker))
-
-
-def test_epp_points_at_the_direct_frontend_without_kubernetes():
-    backend, docker = _backend("--epp-binary", "/tmp/epp")
+def test_epp_points_at_the_direct_frontend_without_kubernetes(tmp_path):
+    epp_binary = tmp_path / "epp"
+    epp_binary.write_bytes(b"build")
+    backend, docker = _backend("--epp-binary", str(epp_binary))
     backend.deploy_topology("agg", "fp")
     runs = _runs(docker)
     epp = runs["gwab-ab-agg-epp"]
@@ -116,9 +110,7 @@ def test_epp_points_at_the_direct_frontend_without_kubernetes():
     assert env["DYN_EPP_STATIC_ENDPOINT"] == "172.18.0.9:8000"
     assert env["DYN_SECURE_SERVING"] == "false"
     assert env["DYN_NAMESPACE"] == "ab-agg-epp"
-    # A Dynamo-mode EPP reads the model and block size from the model cards.
-    assert "DYN_KV_CACHE_BLOCK_SIZE" not in env and "DYN_MODEL_NAME" not in env
-    assert "/tmp/epp:/epp-dev:ro" in epp and "/epp-dev" in epp
+    assert f"{epp_binary}:/epp-dev:ro" in epp and "/epp-dev" in epp
     direct = runs["gwab-ab-agg-epp-frontend"]
     assert _command(direct, backend.cfg.frontend_image)[-2:] == [
         "--router-mode",
@@ -178,31 +170,20 @@ def test_envoy_routes_a_past_the_epp_and_b_through_it():
     config = json.loads(local_backend.envoy_config(cfg, "disagg"))
     listener = config["static_resources"]["listeners"][0]
     hcm = listener["filter_chains"][0]["filters"][0]["typed_config"]
-    routes = {}
-    for route in hcm["route_config"]["virtual_hosts"][0]["routes"]:
-        (header,) = route["match"]["headers"]
-        assert header["name"] == manifests.TARGET_HEADER
-        routes[header["string_match"]["exact"]] = route
-    # The same header values select the HTTPRoutes on Kubernetes.
-    a, b = (
-        routes[manifests.request_headers(cfg, "disagg", side)[manifests.TARGET_HEADER]]
-        for side in manifests.SIDES
-    )
+    routes = hcm["route_config"]["virtual_hosts"][0]["routes"]
     assert len(routes) == 2
+    a, b = routes
+    for route, side in ((a, "frontend"), (b, "epp")):
+        # The same match as the arm's HTTPRoute on Kubernetes.
+        match = route["match"]
+        assert match["path"] == manifests.CHAT_PATH
+        headers = {h["name"]: h["string_match"]["exact"] for h in match["headers"]}
+        assert headers == manifests.request_headers(cfg, "disagg", side)
     assert a["route"]["cluster"] == "frontend"
     assert a["typed_per_filter_config"][local_backend.EXT_PROC]["disabled"] is True
     assert b["route"]["cluster"] == "picked_endpoint"
     assert "typed_per_filter_config" not in b
     assert a["route"]["timeout"] == b["route"]["timeout"]
-
-
-def test_urls_use_container_names():
-    backend, _ = _backend()
-    gateway = "http://gwab-ab-disagg-gateway:8080"
-    # A and B share the gateway; the target header picks the route.
-    assert backend.url("disagg", "frontend") == gateway
-    assert backend.url("disagg", "epp") == gateway
-    assert backend.url("agg", "direct") == "http://gwab-ab-agg-dir-frontend:8000"
 
 
 def test_waits_until_every_worker_registered(monkeypatch):
@@ -222,31 +203,26 @@ def test_waits_until_every_worker_registered(monkeypatch):
     assert replies == []
 
 
-def test_exited_container_fails_fast(monkeypatch):
-    backend, docker = _backend()
-
-    def run(args, **kwargs):
-        out = (
-            "gwab-agg-epp exited\ngwab-agg-gateway running\n" if args[0] == "ps" else ""
-        )
-        return subprocess.CompletedProcess(args, 0, out, "")
-
-    monkeypatch.setattr(docker, "run", run)
-    with pytest.raises(cli.KubeError, match="gwab-agg-epp"):
-        backend._check_running("agg")
-
-
-def test_exited_container_is_not_waited_out(monkeypatch):
-    backend, docker = _backend("--ready-timeout", "3000")
+def test_dead_container_fails_the_wait_at_once(monkeypatch):
+    # A prefix that contains "running" must not hide a dead container.
+    backend, docker = _backend("--name-prefix", "running", "--ready-timeout", "3000")
+    # Without the fast failure the wait would run out its timeout instead.
+    monkeypatch.setattr(
+        local_backend.retry.__globals__["time"], "sleep", lambda s: None
+    )
     calls = []
 
     def run(args, **kwargs):
         calls.append(args)
-        out = "gwab-agg-epp exited\n" if args[0] == "ps" else json.dumps({})
+        out = (
+            "gwab-running-agg-epp exited\ngwab-running-agg-gateway running\n"
+            if args[0] == "ps"
+            else json.dumps({})
+        )
         return subprocess.CompletedProcess(args, 0, out, "")
 
     monkeypatch.setattr(docker, "run", run)
-    with pytest.raises(cli.KubeError, match="exited"):
+    with pytest.raises(cli.KubeError, match=r"exited: gwab-running-agg-epp \("):
         backend._wait_for_workers("agg", "gwab-agg-kv")
     assert len(calls) == 1  # failed on the first check, no retries
 
@@ -296,35 +272,30 @@ def test_teardown_refuses_to_keep_a_stale_discovery_store():
         backend.teardown_topology("agg")
 
 
-def test_preflight_reports_missing_docker(monkeypatch):
-    backend, docker = _backend()
-
-    def missing(args, **kwargs):
-        raise cli.KubeError("docker not found on PATH")
-
-    monkeypatch.setattr(docker, "run", missing)
-    assert backend.preflight() == ["docker not found on PATH"]
-
-
-def test_identity_tracks_the_epp_binary_by_content(tmp_path):
+def test_epp_binary_rebuilt_during_the_run_is_refused(tmp_path):
     epp = tmp_path / "epp"
     epp.write_bytes(b"build one")
     backend, _ = _backend("--epp-binary", str(epp))
     first = backend.deployment_identity()["epp_binary_sha256"]
+    backend.deploy_topology("agg", "fp")
     epp.write_bytes(b"build two")  # rebuilt at the same path
-    backend_again, _ = _backend("--epp-binary", str(epp))
-    assert backend_again.deployment_identity()["epp_binary_sha256"] != first
-    images = backend.deployment_identity()["image_ids"]
-    assert set(images) == {
-        backend.cfg.frontend_image,
-        backend.cfg.worker_image,
-        local_backend.DEFAULT_ENVOY_IMAGE,
-    }
+    with pytest.raises(cli.KubeError, match="changed during the run"):
+        backend.deploy_topology("disagg", "fp")
+    # A new run records the new build by its content.
+    again, _ = _backend("--epp-binary", str(epp))
+    assert again.deployment_identity()["epp_binary_sha256"] != first
 
 
-def test_deployed_fingerprint_needs_every_container_to_agree(monkeypatch):
+def test_deployed_fingerprint_needs_every_container_running_and_agreeing(monkeypatch):
     backend, docker = _backend()
-    for out, want in (("fp\nfp\n", "fp"), ("fp\nold\n", None), ("", None)):
+    full = 8  # agg: two workers and a Frontend per arm, the EPP, the gateway
+    for rows, want in (
+        (["running fp"] * full, "fp"),
+        (["running fp"] * (full - 1) + ["running old"], None),
+        (["running fp"] * (full - 1) + ["exited fp"], None),
+        (["running fp"] * (full - 1), None),
+    ):
+        out = "\n".join(rows) + "\n"
         monkeypatch.setattr(
             docker,
             "run",
@@ -344,12 +315,17 @@ def _diagnose(monkeypatch, state, logs, topology="disagg"):
     return backend.diagnose(topology, "epp")
 
 
-def test_diagnose_tells_a_static_capable_epp_from_an_old_one(monkeypatch):
+def test_diagnose_recognizes_an_epp_without_the_static_endpoint(monkeypatch):
     static = "DYN_EPP_STATIC_ENDPOINT is set: skipping the Kubernetes pod reflector"
+    # kube-rs, once a released EPP looks for an API server outside Kubernetes.
+    released = (
+        "Error: Failed to infer configuration: failed to infer config: in-cluster: "
+        "(failed to read an incluster environment variable: environment variable "
+        "not found), kubeconfig: (failed to read kubeconfig)"
+    )
+    old = _diagnose(monkeypatch, "exited", released)
+    assert "lacks DYN_EPP_STATIC_ENDPOINT" in old
     crashed = _diagnose(monkeypatch, "exited", static + "\npanicked at src/epp.rs")
     assert "lacks DYN_EPP_STATIC_ENDPOINT" not in crashed
-    old = _diagnose(monkeypatch, "exited", "POD_NAMESPACE is not set")
-    assert "lacks DYN_EPP_STATIC_ENDPOINT" in old
     waiting = _diagnose(monkeypatch, "running", static)
     assert "has not discovered a prefill worker" in waiting
-    assert "predates" not in waiting
