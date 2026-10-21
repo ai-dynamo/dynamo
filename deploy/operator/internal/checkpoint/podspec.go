@@ -158,10 +158,8 @@ func EnsureRestoreStartupProbe(container *corev1.Container) {
 	}
 	if startup == nil {
 		container.StartupProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{
-					Command: []string{"cat", path.Join(podcontract.SnapshotControlMountPath, podcontract.RestoreCompleteFile)},
-				},
+			Exec: &corev1.ExecAction{
+				Command: []string{"cat", path.Join(podcontract.SnapshotControlMountPath, podcontract.RestoreCompleteFile)},
 			},
 			TimeoutSeconds:   1,
 			PeriodSeconds:    1,

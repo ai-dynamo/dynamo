@@ -19,7 +19,6 @@ package defaulting
 
 import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"k8s.io/utils/ptr"
 )
 
 // defaultMultinodeRoleReplicas persists the role cardinalities implied by a
@@ -37,10 +36,10 @@ func defaultMultinodeRoleReplicas(component *nvidiacomv1beta1.DynamoComponentDep
 
 		switch role.Name {
 		case nvidiacomv1beta1.ComponentRoleLeader:
-			role.Replicas = ptr.To(int32(1))
+			role.Replicas = new(int32(1))
 		case nvidiacomv1beta1.ComponentRoleWorker:
 			if component.Multinode.NodeCount >= 2 {
-				role.Replicas = ptr.To(component.Multinode.NodeCount - 1)
+				role.Replicas = new(component.Multinode.NodeCount - 1)
 			}
 		}
 	}
