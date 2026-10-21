@@ -197,6 +197,7 @@ def _load_processor_module(module_stubs):
         HttpError=type("HttpError", (Exception,), {}),
         InvalidArgument=type("InvalidArgument", (Exception,), {}),
         Unknown=type("Unknown", (Exception,), {}),
+        WorkerUnavailable=type("WorkerUnavailable", (Exception,), {}),
     )
     remove_module("dynamo.frontend.sglang_processor")
     return importlib.import_module("dynamo.frontend.sglang_processor")

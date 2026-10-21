@@ -20,6 +20,15 @@ use dynamo_runtime::{
 };
 
 use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter};
+
+/// Routing state of a prefill hop, resolved atomically by [`PrefillRouter::activation_snapshot`].
+pub(super) enum ActivationSnapshot {
+    Active(Arc<PrefillBinding>),
+    /// A target is set but its binding is not published yet: fail closed.
+    Pending,
+    /// No prefill target (never set, or cleared): passthrough to decode is safe.
+    Untargeted,
+}
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
     kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource},
@@ -632,6 +641,28 @@ impl PrefillRouter {
         PrefillLifecycleState::from_atomic(self.lifecycle.load(Ordering::Acquire))
     }
 
+    /// One consistent view of target, lifecycle and binding, read under the
+    /// target lock. Both publishers (`set_target` and the build loop) store the
+    /// binding and lifecycle while holding that lock, so a routing decision made
+    /// from this snapshot cannot interleave with a Pending->Active transition the
+    /// way two separate lock-free reads can.
+    pub(super) fn activation_snapshot(&self) -> ActivationSnapshot {
+        let target = self.target.lock();
+        match self.lifecycle_state() {
+            PrefillLifecycleState::Active => match self.binding.load_full() {
+                Some(binding) => ActivationSnapshot::Active(binding),
+                // The binding is stored before `Active` under this lock, so this
+                // arm is not expected; resolve by target rather than panicking.
+                None if target.is_some() => ActivationSnapshot::Pending,
+                None => ActivationSnapshot::Untargeted,
+            },
+            PrefillLifecycleState::Pending if target.is_some() => ActivationSnapshot::Pending,
+            PrefillLifecycleState::Pending | PrefillLifecycleState::Unavailable => {
+                ActivationSnapshot::Untargeted
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn target_endpoint_id(&self) -> Option<dynamo_runtime::protocols::EndpointId> {
         self.target_tx
@@ -653,6 +684,7 @@ mod tests {
         DistributedRuntime, Runtime,
         discovery::{DiscoverySpec, EventTransportKind},
         distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
+        error::{ErrorType, match_error_chain},
         pipeline::{
             AsyncEngine, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, SingleIn,
             network::Ingress,
@@ -758,6 +790,37 @@ mod tests {
         let worker = response.next().await.unwrap().data.unwrap().token_ids[0];
         while response.next().await.is_some() {}
         worker
+    }
+
+    /// Worker 99 is the downstream aggregated path, which must never be reached.
+    async fn await_activation(router: &PrefillRouter, expected_prefill_worker: u32) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match router
+                    .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99)))
+                    .await
+                {
+                    Err(error) => {
+                        assert!(
+                            match_error_chain(error.as_ref(), &[ErrorType::WorkerUnavailable], &[]),
+                            "activation window must surface WorkerUnavailable, got: {error}"
+                        );
+                        tokio::task::yield_now().await;
+                    }
+                    Ok(mut response) => {
+                        let worker = response.next().await.unwrap().data.unwrap().token_ids[0];
+                        while response.next().await.is_some() {}
+                        assert_eq!(
+                            worker, expected_prefill_worker,
+                            "activated router must route through prefill"
+                        );
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("committed prefill target must activate");
     }
 
     #[tokio::test]
@@ -900,18 +963,7 @@ mod tests {
         );
         let (admissions, admitted_ids) = watch::channel(vec![ids[0]]);
         router.set_target(Some(target(1, 64, admitted_ids)));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let worker = prefilled_worker(&router).await;
-                if worker != 99 {
-                    assert_eq!(worker, 0);
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("committed prefill target must activate");
+        await_activation(&router, 0).await;
         let retired = router.binding.load_full().unwrap();
         let chooser = retired
             .router
@@ -995,18 +1047,7 @@ mod tests {
         router.set_target(None);
         let (_successor_admissions, successor_ids) = watch::channel(vec![ids[2]]);
         router.set_target(Some(target(2, 32, successor_ids)));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let worker = prefilled_worker(&router).await;
-                if worker != 99 {
-                    assert_eq!(worker, 2);
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("same-endpoint successor must activate");
+        await_activation(&router, 2).await;
         assert_eq!(
             router
                 .binding

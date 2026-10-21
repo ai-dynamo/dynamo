@@ -76,7 +76,7 @@ from dynamo.frontend.utils import (
     random_call_id,
     random_uuid,
 )
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 from dynamo.sglang.thinking_budget import apply_thinking_budget
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
@@ -1095,6 +1095,42 @@ def _qwen_guided_request_without_separation(tool_choice):
     request.pop("reasoning_effort")
     request["separate_reasoning"] = False
     return request
+
+
+@pytest.mark.parametrize(
+    ("routed_error", "expected"),
+    [
+        (WorkerUnavailable("prefill routing is still activating"), WorkerUnavailable),
+        (RuntimeError("worker crashed"), Unknown),
+    ],
+)
+def test_routed_engine_rejection_keeps_worker_unavailable(
+    tokenizer, routed_error, expected
+):
+    class RejectingRoutedEngine(FakeRoutedEngine):
+        async def generate(self, preprocessed, **kwargs):
+            raise routed_error
+
+    processor = SglangProcessor(
+        tokenizer=tokenizer,
+        routed_engine=RejectingRoutedEngine(),
+        tool_call_parser_name="qwen25",
+        reasoning_parser_name="qwen3",
+        eos_token_ids=[tokenizer.eos_token_id],
+    )
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Say hello."}],
+        "max_tokens": 4,
+    }
+
+    async def collect():
+        return [item async for item in processor.generator(request)]
+
+    with pytest.raises(expected) as caught:
+        asyncio.run(collect())
+    if expected is WorkerUnavailable:
+        assert caught.value is routed_error
 
 
 @pytest.mark.parametrize(
