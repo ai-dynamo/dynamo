@@ -121,7 +121,7 @@ KV-cache reuse means remapping the existing cache into the standby engine so in-
 continue after failover. Hardware fault tolerance requires placing the active and standby engines on
 disjoint hardware. Neither capability is currently supported.
 
-For the cross-feature backend overview, see [Compatibility](../../../../reference/general/compatibility.mdx).
+For the cross-feature backend overview, see [Compatibility](../../../../../pages-dev/reference/general/compatibility.mdx).
 
 ## Prerequisites
 

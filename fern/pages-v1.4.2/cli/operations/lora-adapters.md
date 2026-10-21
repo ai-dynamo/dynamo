@@ -399,4 +399,4 @@ plus affinity are rejected.
 | SGLang | <Badge intent="warning" minimal>WIP</Badge> | Support is in progress |
 | TensorRT-LLM | <Badge intent="note" minimal>No</Badge> | Not yet supported |
 
-See the [feature support matrix](../../reference/general/compatibility.mdx#feature-support) for full compatibility details.
+See the [feature support matrix](../../../pages-dev/reference/general/compatibility.mdx#feature-support) for full compatibility details.

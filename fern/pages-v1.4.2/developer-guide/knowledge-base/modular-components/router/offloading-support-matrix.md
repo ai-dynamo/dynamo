@@ -149,4 +149,4 @@ See [Configuration and Tuning](configuration-and-tuning.md) for the cache-hit we
 - [Native KV Offloading](../backends/vllm/native-kv-offloading.md) — vLLM detail page
 - [Using HiCache](../backends/sglang/hicache.md) — SGLang detail page
 - [KV Cache Offloading](../backends/vllm/kv-cache-offloading.md) — vLLM offloading backend catalog (native, KVBM, LMCache, FlexKV)
-- [Feature Matrix](../../../../reference/general/compatibility.mdx) — per-backend feature support across Dynamo
+- [Feature Matrix](../../../../../pages-dev/reference/general/compatibility.mdx) — per-backend feature support across Dynamo
