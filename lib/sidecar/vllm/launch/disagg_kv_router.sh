@@ -55,10 +55,12 @@ while [[ $# -gt 0 ]]; do
             echo "  VLLM_PREFILL1_GRPC_PORT            First prefill gRPC port (default: 30021)"
             echo "  VLLM_PREFILL1_NIXL_SIDE_CHANNEL_PORT First prefill NIXL port (default: 20098)"
             echo "  VLLM_PREFILL1_KV_EVENT_PORT        First prefill KV-event port (default: 20082)"
+            echo "  VLLM_PREFILL1_KV_REPLAY_PORT       First prefill KV-event replay port (default: 20182)"
             echo "  VLLM_PREFILL2_HTTP_PORT            Second prefill HTTP port (default: 8130)"
             echo "  VLLM_PREFILL2_GRPC_PORT            Second prefill gRPC port (default: 30031)"
             echo "  VLLM_PREFILL2_NIXL_SIDE_CHANNEL_PORT Second prefill NIXL port (default: 20099)"
             echo "  VLLM_PREFILL2_KV_EVENT_PORT        Second prefill KV-event port (default: 20083)"
+            echo "  VLLM_PREFILL2_KV_REPLAY_PORT       Second prefill KV-event replay port (default: 20183)"
             echo "  VLLM_BLOCK_SIZE                    KV-event block size (default: 64)"
             echo "  MAX_MODEL_LEN                      Maximum model length (default: 4096)"
             echo "  MAX_CONCURRENT_SEQS                Maximum concurrent sequences per engine (default: 2)"
@@ -83,20 +85,11 @@ VLLM_DECODE1_GPU="${VLLM_DECODE1_GPU:-0}"
 VLLM_DECODE2_GPU="${VLLM_DECODE2_GPU:-1}"
 VLLM_PREFILL1_GPU="${VLLM_PREFILL1_GPU:-2}"
 VLLM_PREFILL2_GPU="${VLLM_PREFILL2_GPU:-3}"
-VLLM_DECODE1_HTTP_PORT="${VLLM_DECODE1_HTTP_PORT:-8100}"
-VLLM_DECODE1_GRPC_PORT="${VLLM_DECODE1_GRPC_PORT:-30001}"
-VLLM_DECODE1_NIXL_SIDE_CHANNEL_PORT="${VLLM_DECODE1_NIXL_SIDE_CHANNEL_PORT:-20096}"
-VLLM_DECODE2_HTTP_PORT="${VLLM_DECODE2_HTTP_PORT:-8110}"
-VLLM_DECODE2_GRPC_PORT="${VLLM_DECODE2_GRPC_PORT:-30011}"
-VLLM_DECODE2_NIXL_SIDE_CHANNEL_PORT="${VLLM_DECODE2_NIXL_SIDE_CHANNEL_PORT:-20097}"
-VLLM_PREFILL1_HTTP_PORT="${VLLM_PREFILL1_HTTP_PORT:-8120}"
-VLLM_PREFILL1_GRPC_PORT="${VLLM_PREFILL1_GRPC_PORT:-30021}"
-VLLM_PREFILL1_NIXL_SIDE_CHANNEL_PORT="${VLLM_PREFILL1_NIXL_SIDE_CHANNEL_PORT:-20098}"
-VLLM_PREFILL1_KV_EVENT_PORT="${VLLM_PREFILL1_KV_EVENT_PORT:-20082}"
-VLLM_PREFILL2_HTTP_PORT="${VLLM_PREFILL2_HTTP_PORT:-8130}"
-VLLM_PREFILL2_GRPC_PORT="${VLLM_PREFILL2_GRPC_PORT:-30031}"
-VLLM_PREFILL2_NIXL_SIDE_CHANNEL_PORT="${VLLM_PREFILL2_NIXL_SIDE_CHANNEL_PORT:-20099}"
-VLLM_PREFILL2_KV_EVENT_PORT="${VLLM_PREFILL2_KV_EVENT_PORT:-20083}"
+# Managed ports are indexed like DYN_SYSTEM_PORT{N}: workers 1-2 are decode, 3-4 are prefill.
+dyn_worker_ports VLLM_DECODE1 1 HTTP=8100 GRPC=30001 NIXL_SIDE_CHANNEL=20096
+dyn_worker_ports VLLM_DECODE2 2 HTTP=8110 GRPC=30011 NIXL_SIDE_CHANNEL=20097
+dyn_worker_ports VLLM_PREFILL1 3 HTTP=8120 GRPC=30021 NIXL_SIDE_CHANNEL=20098 KV_EVENT=20082 KV_REPLAY=20182
+dyn_worker_ports VLLM_PREFILL2 4 HTTP=8130 GRPC=30031 NIXL_SIDE_CHANNEL=20099 KV_EVENT=20083 KV_REPLAY=20183
 VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-64}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
@@ -112,8 +105,8 @@ fi
 
 KV_TRANSFER_CONFIG_PREFILL='{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
 KV_TRANSFER_CONFIG_DECODE='{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
-KV_EVENTS_CONFIG_1="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL1_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}"
-KV_EVENTS_CONFIG_2="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL2_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}"
+KV_EVENTS_CONFIG_1="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL1_KV_EVENT_PORT}\",\"replay_endpoint\":\"tcp://*:${VLLM_PREFILL1_KV_REPLAY_PORT}\",\"enable_kv_cache_events\":true}"
+KV_EVENTS_CONFIG_2="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL2_KV_EVENT_PORT}\",\"replay_endpoint\":\"tcp://*:${VLLM_PREFILL2_KV_REPLAY_PORT}\",\"enable_kv_cache_events\":true}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching vLLM Native-gRPC Sidecars with Disaggregated KV Routing (4 GPUs)" "$MODEL" "$HTTP_PORT" \

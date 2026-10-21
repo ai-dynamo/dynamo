@@ -783,8 +783,9 @@ jobs:
         uses: ./.github/actions/setup-dynamo-operator
         with:
           vcluster_name: nightly-efa-${{ github.run_id }}
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          repository: ${{ vars.ACR_REPOSITORY }}
+          # From ECR, like the test images below: these nodes pull ECR without a secret.
+          registry: ${{ vars.ECR_REGISTRY }}
+          repository: ${{ vars.ECR_REPOSITORY }}
           operator_tag: ${{ needs.operator-build.outputs.operator_default_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
@@ -1398,7 +1399,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dir: ['.', 'lib/bindings/python', 'lib/bindings/kvbm']
+        dir: ['.', 'lib/bindings/python']
     permissions:
       contents: read
     steps:
@@ -1524,7 +1525,7 @@ jobs:
   # ============================================================================
   coverage-report:
     name: Generate Coverage Report
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, rust-tests]
     if: always()
     permissions:

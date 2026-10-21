@@ -43,7 +43,6 @@ COPY --from=dynamo_base /opt/uv/bin/uvx /usr/bin/uvx
 # final image size.
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
-ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
 
@@ -66,8 +65,8 @@ WORKDIR $DYNAMO_HOME/components/src/dynamo/triton
 # python3-venv is the only package needed: the Triton release image ships Python
 # without ensurepip (so `python3 -m venv` below fails without it) but already has
 # UCX 1.20.0 (/opt/hpcx/ucx), libibverbs/rdma-core, librdmacm, and libb64. NIXL is
-# intentionally absent — KVBM is disabled for this runtime because its Python NIXL
-# path requires PyTorch, which the Triton py3 image lacks.
+# intentionally absent — its Python path requires PyTorch, which the Triton py3
+# image lacks.
 #
 # ldconfig lets non-login python3 launches resolve libtritonserver.so and the
 # backend shared objects; dropping upstream's single-binary etcd lets
