@@ -44,12 +44,12 @@ pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRe
 pyo3::create_exception!(dynamo._core, WorkerUnavailable, DynamoException);
 
 /// Convert a routed-pipeline error to a Python exception, keeping the
-/// `WorkerUnavailable` class that the generic [`crate::to_pyerr`] would drop.
+/// `WorkerUnavailable` and `InvalidArgument` class that the generic [`crate::to_pyerr`] would drop.
 pub fn routed_error_to_pyerr(err: anyhow::Error) -> PyErr {
     if is_worker_unavailable(err.as_ref()) {
         return WorkerUnavailable::new_err(err.to_string());
     }
-     if let Some(message) = public_invalid_argument_message(err.as_ref()) {
+    if let Some(message) = public_invalid_argument_message(err.as_ref()) {
         return InvalidArgument::new_err(message);
     }
     crate::to_pyerr(err)
