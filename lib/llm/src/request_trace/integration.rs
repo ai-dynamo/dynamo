@@ -9,11 +9,13 @@ use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 
+use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionStreamResponse, completions::NvCreateCompletionResponse,
 };
+use crate::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
 use crate::request_trace::{
     AgentContextTraceState, RequestReplayMetrics, SharedFinishReasonMetadata,
 };
@@ -34,7 +36,10 @@ fn request_trace_rejection(common_request: &PreprocessedRequest) -> Option<&'sta
     if common_request.prompt_embeds.is_some() {
         return Some("prompt embeddings are not supported");
     }
-    if common_request.multi_modal_data.is_some() {
+    if common_request.multi_modal_data.is_some()
+        || common_request.mm_routing_info.is_some()
+        || common_request.has_opaque_multimodal_input
+    {
         return Some("multimodal inputs are not supported");
     }
     if common_request.sampling_options.n.unwrap_or(1) > 1 {
@@ -56,10 +61,10 @@ fn shared_replay_metrics(
     super::replay_metrics(token_ids, trace_block_size).map(Arc::new)
 }
 
-pub(crate) fn build_request_end_trace_state(
+pub(crate) fn build_request_end_trace_state<T: Send + Sync + 'static>(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
-    context: &Context<()>,
+    context: &Context<T>,
     trace_block_size: usize,
 ) -> Option<RequestEndTraceState> {
     build_request_end_trace_state_for_policy(
@@ -71,10 +76,10 @@ pub(crate) fn build_request_end_trace_state(
     )
 }
 
-fn build_request_end_trace_state_for_policy(
+fn build_request_end_trace_state_for_policy<T: Send + Sync + 'static>(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
-    context: &Context<()>,
+    context: &Context<T>,
     trace_block_size: usize,
     request_trace_enabled: bool,
 ) -> Option<RequestEndTraceState> {
@@ -224,6 +229,45 @@ pub(crate) fn wrap_completion_request_end_stream(
     wrap_request_end_stream(Box::pin(stream), trace_state)
 }
 
+/// Request-end tracing for routes that serve the raw engine stream, such as
+/// native `/generate`. Tool calls are not parsed on these routes.
+pub(crate) fn wrap_engine_output_request_end_stream(
+    stream: Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>>,
+    trace_state: Option<RequestEndTraceState>,
+) -> Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>> {
+    let Some(request) = trace_state.as_ref().and_then(|s| s.request.as_ref()) else {
+        return wrap_request_end_stream(stream, trace_state);
+    };
+    let tracker = request.request_tracker.clone();
+    let input_tokens = request.replay_metrics.input_length;
+    let finish_reason_metadata = finish_reason_metadata_handle(&trace_state);
+    let mut output_tokens = 0usize;
+    let stream = stream.map(move |response| {
+        if let Some(output) = response.data.as_ref() {
+            // Prefill's successful terminal only ends that worker's phase.
+            // It must not mark a request that is cancelled before decode as stopped.
+            if response.event.as_deref() != Some(PREFILL_OUTPUT_ANNOTATION) {
+                super::record_backend_finish_reason_metadata(
+                    finish_reason_metadata.as_ref(),
+                    output.index,
+                    output.finish_reason.as_ref(),
+                    output.stop_reason.as_ref(),
+                );
+            }
+            output_tokens = output_tokens.saturating_add(output.token_ids.len());
+            // ISL was recorded at request construction (first write wins).
+            super::record_llm_metric_tokens(
+                Some(&tracker),
+                None,
+                output_tokens,
+                output.cached_tokens_for_prompt(input_tokens),
+            );
+        }
+        response
+    });
+    wrap_request_end_stream(Box::pin(stream), trace_state)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -319,8 +363,88 @@ mod tests {
         records
     }
 
+    #[tokio::test]
+    async fn engine_stream_traces_completion_and_prefill_only_cancellation() {
+        use crate::protocols::common::FinishReason;
+
+        BUS.init(64);
+        for agent in [false, true] {
+            for complete in [false, true] {
+                let mut receiver = BUS.subscribe();
+                let tracker = Arc::new(RequestTracker::new());
+                tracker.record_isl(3, None);
+                let mut request = preprocessed_request(SamplingOptions::default());
+                if agent {
+                    request.agent_context = Some(AgentContext {
+                        session_id: "generate-session".into(),
+                        parent_session_id: None,
+                        session_final: None,
+                        agent_headers: Default::default(),
+                        input_trigger: None,
+                    });
+                }
+                let context = Context::new(request);
+                let id = context.id().to_string();
+                let state = build_request_end_trace_state_for_policy(
+                    &context,
+                    &Some(tracker.clone()),
+                    &context,
+                    2,
+                    true,
+                );
+                let mut prefill = Annotated::from_data(LLMEngineOutput {
+                    finish_reason: Some(FinishReason::Stop),
+                    ..Default::default()
+                });
+                prefill.event = Some(PREFILL_OUTPUT_ANNOTATION.into());
+                let output = Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![4, 5],
+                    finish_reason: Some(FinishReason::Length),
+                    ..Default::default()
+                });
+                let source = futures::stream::iter([prefill, output]);
+                let mut stream = wrap_engine_output_request_end_stream(Box::pin(source), state);
+                assert!(stream.next().await.is_some());
+                if complete {
+                    assert_eq!(stream.next().await.unwrap().data.unwrap().token_ids, [4, 5]);
+                    assert!(stream.next().await.is_none());
+                } else {
+                    context.context().kill();
+                }
+                drop(stream);
+                let record = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let record = receiver.recv().await.unwrap();
+                        if record.request.as_ref().is_some_and(|r| r.request_id == id) {
+                            break record;
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(record.agent_context.is_some(), agent);
+                let metrics = record.request.unwrap();
+                assert_eq!(metrics.input_tokens, Some(3));
+                assert_eq!(metrics.output_tokens, Some(if complete { 2 } else { 0 }));
+                if complete && agent {
+                    let metadata = metrics.finish_reason_metadata.unwrap();
+                    assert_eq!(metadata.backend_finish_reason.as_deref(), Some("length"));
+                } else {
+                    assert!(metrics.finish_reason_metadata.is_none());
+                }
+                assert!(drain_request_records(&mut receiver, &id).is_empty());
+            }
+        }
+    }
+
     #[test]
     fn rejects_unsupported_request_shapes() {
+        let mut opaque = preprocessed_request(SamplingOptions::default());
+        opaque.has_opaque_multimodal_input = true;
+        assert_eq!(
+            request_trace_rejection(&opaque),
+            Some("multimodal inputs are not supported")
+        );
         let mut multi_choice = preprocessed_request(SamplingOptions {
             n: Some(2),
             ..Default::default()

@@ -180,7 +180,7 @@ Dynamo emits `request_end` after an eligible response stream finishes or is drop
 
 Requests with recognized session identity can include opaque strings in `agent_context.agent_headers`. Trace consumers decide how to interpret the headers and must tolerate unknown names, values, and embedded JSON fields. Captured headers do not change request placement or evict cached blocks. See [Agent Harnesses](agent-harnesses.mdx#agent-headers) for capture rules and limits. Older frontends cannot supply the map during a rolling upgrade.
 
-For chat streams, Dynamo records finish metadata after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason.
+For chat streams, Dynamo records finish metadata after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason. The shared `/generate` handler records backend finish metadata when agent session headers are present. This applies to SGLang, vLLM, and custom format plugins. These routes do not parse tool-call names or IDs.
 
 > [!WARNING]
-> Request tracing currently covers eligible Rust OpenAI chat-completions and completions requests. It skips unsupported replay shapes, including `n > 1`, `best_of > 1`, `prompt_embeds`, multimodal inputs, and requests without a tracker or usable KV cache block size. Sinks use best-effort delivery and can drop records when they lag, so check warnings and validate row counts before treating a capture as complete.
+> Request tracing currently covers eligible Rust OpenAI chat-completions, completions, and plugin `/generate` requests. It skips unsupported replay shapes, including `n > 1`, `best_of > 1`, `prompt_embeds`, multimodal inputs, and requests without a tracker or usable KV cache block size. Sinks use best-effort delivery and can drop records when they lag, so check warnings and validate row counts before treating a capture as complete.
