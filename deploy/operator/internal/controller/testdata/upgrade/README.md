@@ -33,6 +33,28 @@ PodSpec changes remain protected. The independent detector test rejects a new
 generation even if the output is identical. An intentional worker env edit must
 still reach a new workload generation after takeover.
 
+## Multinode Component and DisaggregatedSet coverage
+
+The canonical suite includes aggregated and disaggregated multinode Component
+scenarios for vLLM, SGLang, and TensorRT-LLM, plus one disaggregated multinode
+DisaggregatedSet scenario per engine. Component scenarios stop at DCD-owned
+LeaderWorkerSets; DisaggregatedSet scenarios stop at the DisaggregatedSet itself
+and the frontend's auxiliary DCD/Deployment. The LWS/DS controllers and serving
+Pods do not run. Dependency CRDs and production admission handlers come from the
+pinned LWS module already used by the shared clustertest setup.
+
+Independent checks enforce the selected provider, component/role inventory and
+multinode shape. Historical safety also protects the complete DisaggregatedSet
+spec, identity and generation. Intentional worker edits must reach every edited
+component and both leader/worker templates, including embedded DS role templates.
+The populated graph replay controls cover Deployment, LWS and DS graphs without
+claiming that these freshly captured test graphs came from an older release.
+Formal released history still advances only through the pinned-release workflow.
+
+These cases complete 22 of the 27 canonical matrix entries. The five remaining
+single-node Component cases and the missing-origin historical case remain in
+#16650; the incomplete release-matrix gate stays enforced.
+
 ## Storage and production lifecycle
 
 Run this suite only against a dedicated cluster with no installed controllers or
@@ -142,11 +164,11 @@ git -C "$release_tree" restore --source="$harness" -- \
   deploy/operator/internal/controller/clusterenv_helpers_test.go \
   deploy/operator/internal/controller/clusterenv_test.go \
   deploy/operator/internal/controller/clusterenv_main_test.go \
-  deploy/operator/internal/controller/upgrade_clustertest_test.go \
-  deploy/operator/internal/controller/upgrade_contract_test.go \
+  ':(glob)deploy/operator/internal/controller/upgrade_*_test.go' \
   deploy/operator/internal/controller/testdata/upgrade \
   deploy/operator/internal/testing/clusterenv \
-  deploy/operator/internal/testing/golden
+  deploy/operator/internal/testing/golden \
+  deploy/operator/internal/testing/mocks
 make -C "$release_tree/deploy/operator" clustertest-upgrade-fixtures-regen \
   UPGRADE_RELEASE_TAG=v1.6.0
 ```
@@ -209,9 +231,9 @@ across releases; namespace collisions across all roles are rejected. Long
 namespace names include a digest to remain within Kubernetes' length limit.
 
 Latest origin annotations use `$var:operator-version`, bound exactly to the
-operator chart's `appVersion` by the golden matcher. Worker hashes and the PCS
-spec digest also depend on origin: their exact bindings are computed from the
-reviewed golden DGD/PCS specifications with that version, never from candidate
+operator chart's `appVersion` by the golden matcher. Worker hashes, the PCS
+spec digest and the DS role revision also depend on origin: their exact bindings
+are computed from the reviewed golden DGD/PCS/DS specifications with that version, never from candidate
 output. The independent CREATE origin assertion remains active. All other
 lowering fields remain exact, and historical origins and hashes remain concrete. Accepting a golden never bypasses rollout
 safety assertions.
