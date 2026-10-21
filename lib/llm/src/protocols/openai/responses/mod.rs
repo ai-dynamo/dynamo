@@ -11,12 +11,13 @@ use std::collections::{HashMap, HashSet};
 use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
     InputContent, InputImageContent, InputItem, InputOutputMessageContent, InputParam, InputRole,
-    InputTokenDetails, Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem,
-    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
-    PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent, ReasoningTextContent,
-    RefusalContent, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole,
-    ServiceTierResponses, Status, SummaryPart, TextResponseFormatConfiguration, Tool,
-    ToolChoiceAllowed, ToolChoiceAllowedMode, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    InputTokenDetails, Instructions, Item, MessageItem, MessagePhase, NamespaceToolParamTool,
+    OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
+    OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent,
+    ReasoningTextContent, RefusalContent, Response, ResponseTextParam, ResponseUsage,
+    Role as ResponseRole, ServiceTierResponses, Status, SummaryPart, SummaryTextContent,
+    TextResponseFormatConfiguration, Tool, ToolChoiceAllowed, ToolChoiceAllowedMode,
+    ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -425,9 +426,15 @@ fn convert_function_call_output_content(
 /// run. Without it, a standalone assistant message with empty text (or only
 /// Refusal content parts that this converter currently strips) would be lost
 /// entirely — breaking turn boundaries the model relies on.
+///
+/// `content_phase` records the `phase` of the accumulated text, so commentary
+/// and a final answer echoed back as separate messages are not merged.
+/// `text_reasoning_len` marks how much reasoning preceded the latest text.
 #[derive(Default)]
 struct PendingAssistant {
     content: Option<String>,
+    content_phase: Option<MessagePhase>,
+    text_reasoning_len: usize,
     reasoning_segments: Vec<String>,
     pending_reasoning: String,
     tool_calls: Vec<ChatCompletionMessageToolCall>,
@@ -435,11 +442,38 @@ struct PendingAssistant {
 }
 
 impl PendingAssistant {
-    fn push_text(&mut self, text: &str) {
+    /// Text in a different known phase starts a new assistant turn. Never split
+    /// while tool calls are pending: their tool messages must follow the
+    /// assistant message that carries the calls.
+    fn is_phase_change(&self, phase: Option<MessagePhase>) -> bool {
+        self.tool_calls.is_empty()
+            && matches!((self.content_phase, phase), (Some(current), Some(next)) if current != next)
+    }
+
+    /// Append echoed assistant text. Text in a different phase first flushes the
+    /// current turn into `out`; reasoning echoed after the earlier text moves to
+    /// the new turn, ahead of the text that follows it. The split follows the
+    /// echoed phases alone, since history can come from requests with other tools.
+    fn push_text(
+        &mut self,
+        text: &str,
+        phase: Option<MessagePhase>,
+        out: &mut Vec<ChatCompletionRequestMessage>,
+    ) {
+        if self.is_phase_change(phase) {
+            let split_at = self.text_reasoning_len.min(self.pending_reasoning.len());
+            let later_reasoning = self.pending_reasoning.split_off(split_at);
+            std::mem::take(self).flush_into(out);
+            self.pending_reasoning = later_reasoning;
+        }
         self.touched = true;
+        if phase.is_some() {
+            self.content_phase = phase;
+        }
         if text.is_empty() {
             return;
         }
+        self.text_reasoning_len = self.pending_reasoning.len();
         match self.content.as_mut() {
             Some(existing) => existing.push_str(text),
             None => self.content = Some(text.to_string()),
@@ -568,7 +602,7 @@ fn convert_input_items_to_messages(
                             })
                             .collect::<Vec<_>>()
                             .join("");
-                        pending.push_text(&text);
+                        pending.push_text(&text, out_msg.phase, &mut messages);
                     }
                 },
                 Item::FunctionCall(fc) => {
@@ -687,7 +721,7 @@ fn convert_input_items_to_messages(
                                 convert_input_content_to_text(parts)
                             }
                         };
-                        pending.push_text(&text);
+                        pending.push_text(&text, easy.phase, &mut messages);
                     }
                 }
             }
@@ -1128,6 +1162,16 @@ impl ResponseParams {
             .is_some()
     }
 
+    /// The request defines tools and `tool_choice` is not `none`, so the model
+    /// may follow text with a call.
+    fn tools_callable(&self) -> bool {
+        self.tools.as_ref().is_some_and(|tools| !tools.is_empty())
+            && !matches!(
+                self.tool_choice,
+                Some(ToolChoiceParam::Option(ToolChoiceOptions::None))
+            )
+    }
+
     /// Borrow the retained history-aware map, or rebuild from current tool definitions
     /// when the caller did not retain a map.
     fn tool_name_map(&self) -> std::borrow::Cow<'_, ToolNameMap> {
@@ -1181,12 +1225,12 @@ pub(super) fn normalize_tools(tools: Vec<Tool>) -> Vec<Tool> {
 }
 
 /// Build an assistant text message output item.
-fn make_text_message(id: String, text: String) -> OutputItem {
+fn make_text_message(id: String, text: String, phase: MessagePhase) -> OutputItem {
     OutputItem::Message(OutputMessage {
         id,
         role: AssistantRole::Assistant,
         status: OutputStatus::Completed,
-        phase: None,
+        phase: Some(phase),
         content: vec![OutputMessageContent::OutputText(OutputTextContent {
             text,
             annotations: vec![],
@@ -1216,14 +1260,21 @@ pub fn chat_completion_to_response(
     if let Some(choice) = choice {
         incomplete_reason = responses_incomplete_reason(choice.finish_reason);
 
-        // Reasoning precedes tool calls so output order matches the decoded turn.
+        // Reasoning precedes visible output so output order matches the decoded turn.
+        // The trace is always returned as content; `reasoning.summary` mirrors it.
         if let Some(reasoning_text) = choice.message.reasoning_content
             && !reasoning_text.is_empty()
-            && params.reasoning_summary_requested()
         {
+            let summary = if params.reasoning_summary_requested() {
+                vec![SummaryPart::SummaryText(SummaryTextContent {
+                    text: reasoning_text.clone(),
+                })]
+            } else {
+                vec![]
+            };
             output.push(OutputItem::Reasoning(ReasoningItem {
                 id: Some(format!("rs_{}", Uuid::new_v4().simple())),
-                summary: vec![],
+                summary,
                 content: Some(vec![ReasoningItemContent::ReasoningText(
                     ReasoningTextContent {
                         text: reasoning_text,
@@ -1235,6 +1286,7 @@ pub fn chat_completion_to_response(
         }
 
         // Handle structured tool calls
+        let mut function_calls = Vec::new();
         if let Some(tool_calls) = choice.message.tool_calls {
             if let Some(disallowed) = tool_calls.iter().find(|tc| {
                 allowed_names
@@ -1248,7 +1300,7 @@ pub fn chat_completion_to_response(
             }
             for tc in &tool_calls {
                 let (namespace, name) = names.decode(&tc.function.name);
-                output.push(OutputItem::FunctionCall(FunctionToolCall {
+                function_calls.push(OutputItem::FunctionCall(FunctionToolCall {
                     caller: None,
                     r#async: None,
                     arguments: tc.function.arguments.clone(),
@@ -1282,21 +1334,37 @@ pub fn chat_completion_to_response(
             content.push(OutputMessageContent::Refusal(RefusalContent { refusal }));
         }
         if !content.is_empty() {
+            // A unary response does not say where text fell relative to the
+            // calls, so text alongside calls is commentary placed before them.
+            let phase = if function_calls.is_empty() {
+                MessagePhase::FinalAnswer
+            } else {
+                MessagePhase::Commentary
+            };
             output.push(OutputItem::Message(OutputMessage {
                 id: message_id.clone(),
                 role: AssistantRole::Assistant,
                 status: OutputStatus::Completed,
-                phase: None,
+                phase: Some(phase),
                 content,
             }));
         }
+        output.extend(function_calls);
 
         if output.is_empty() {
-            output.push(make_text_message(message_id, String::new()));
+            output.push(make_text_message(
+                message_id,
+                String::new(),
+                MessagePhase::FinalAnswer,
+            ));
         }
     } else {
         tracing::warn!("No choices in chat completion response, using empty content");
-        output.push(make_text_message(message_id, String::new()));
+        output.push(make_text_message(
+            message_id,
+            String::new(),
+            MessagePhase::FinalAnswer,
+        ));
     }
 
     // Apply `include` filtering: strip logprobs from output text unless
@@ -2896,6 +2964,119 @@ mod tests {
         assert!(matches!(messages[3], ChatCompletionRequestMessage::Tool(_)));
     }
 
+    fn convert_input_json(input: serde_json::Value) -> Vec<ChatCompletionRequestMessage> {
+        let req: NvCreateResponse =
+            serde_json::from_value(serde_json::json!({"model": "m", "input": input})).unwrap();
+        NvCreateChatCompletionRequest::try_from(req)
+            .unwrap()
+            .inner
+            .messages
+    }
+
+    fn assistant_texts(messages: &[ChatCompletionRequestMessage]) -> Vec<&str> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                ChatCompletionRequestMessage::Assistant(assistant) => match &assistant.content {
+                    Some(ChatCompletionRequestAssistantMessageContent::Text(text)) => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Echoed commentary and final-answer messages stay separate assistant
+    /// turns, while phase-less assistant text keeps the legacy merge.
+    #[test]
+    fn test_assistant_phase_change_starts_a_new_turn() {
+        let split = convert_input_json(serde_json::json!([
+            {"role": "user", "content": "hi"},
+            {"type": "message", "role": "assistant", "phase": "commentary",
+             "content": [{"type": "output_text", "text": "Looking."}]},
+            {"role": "assistant", "phase": "final_answer", "content": "Done."}
+        ]));
+        assert_eq!(split.len(), 3);
+        assert_eq!(assistant_texts(&split), vec!["Looking.", "Done."]);
+
+        let legacy = convert_input_json(serde_json::json!([
+            {"role": "user", "content": "hi"},
+            {"type": "message", "role": "assistant",
+             "content": [{"type": "output_text", "text": "Looking."}]},
+            {"role": "assistant", "content": "Done."}
+        ]));
+        assert_eq!(legacy.len(), 2);
+        assert_eq!(assistant_texts(&legacy), vec!["Looking.Done."]);
+
+        let same_phase = convert_input_json(serde_json::json!([
+            {"role": "user", "content": "hi"},
+            {"type": "message", "role": "assistant", "phase": "final_answer",
+             "content": [{"type": "output_text", "text": "Looking."}]},
+            {"role": "assistant", "phase": "final_answer", "content": "Done."}
+        ]));
+        assert_eq!(assistant_texts(&same_phase), vec!["Looking.Done."]);
+    }
+
+    /// Reasoning echoed between commentary and the final answer belongs to the
+    /// final-answer turn, not to the commentary it follows.
+    #[test]
+    fn test_phase_change_moves_later_reasoning_to_the_new_turn() {
+        let reasoning = |text: &str| {
+            serde_json::json!({"type": "reasoning", "summary": [],
+                "content": [{"type": "reasoning_text", "text": text}]})
+        };
+        let messages = convert_input_json(serde_json::json!([
+            {"role": "user", "content": "hi"},
+            reasoning("r1"),
+            {"type": "message", "role": "assistant", "phase": "commentary",
+             "content": [{"type": "output_text", "text": "A"}]},
+            reasoning("r2"),
+            {"type": "message", "role": "assistant", "phase": "final_answer",
+             "content": [{"type": "output_text", "text": "B"}]}
+        ]));
+        let turns: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                ChatCompletionRequestMessage::Assistant(assistant) => {
+                    Some(assistant.reasoning_content.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            turns,
+            vec![
+                Some(ReasoningContent::Text("r1".into())),
+                Some(ReasoningContent::Text("r2".into())),
+            ]
+        );
+        assert_eq!(assistant_texts(&messages), vec!["A", "B"]);
+    }
+
+    /// Commentary shares the assistant turn with the calls it precedes, and a
+    /// phase change never separates pending calls from their tool messages.
+    #[test]
+    fn test_phase_change_keeps_calls_adjacent_to_outputs() {
+        let messages = convert_input_json(serde_json::json!([
+            {"role": "user", "content": "weather?"},
+            {"type": "message", "role": "assistant", "phase": "commentary",
+             "content": [{"type": "output_text", "text": "Checking."}]},
+            {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"},
+            {"type": "message", "role": "assistant", "phase": "final_answer",
+             "content": [{"type": "output_text", "text": "Done."}]},
+            {"type": "function_call_output", "call_id": "c", "output": "ok"}
+        ]));
+        assert_eq!(messages.len(), 3, "expected [user, assistant, tool]");
+        let ChatCompletionRequestMessage::Assistant(assistant) = &messages[1] else {
+            panic!("expected one assistant turn carrying the call");
+        };
+        assert_eq!(assistant.tool_calls.as_ref().unwrap()[0].id, "c");
+        assert_eq!(assistant_texts(&messages), vec!["Checking.Done."]);
+        assert!(matches!(messages[2], ChatCompletionRequestMessage::Tool(_)));
+    }
+
     #[test]
     fn test_refusal_content_folded_into_assistant_text() {
         // Refusal parts in a prior assistant turn must survive to the next
@@ -3341,6 +3522,7 @@ mod tests {
             _ => panic!("Expected Message variant"),
         };
         assert_eq!(msg.role, AssistantRole::Assistant);
+        assert_eq!(msg.phase, Some(MessagePhase::FinalAnswer));
 
         match &msg.content[0] {
             OutputMessageContent::OutputText(txt) => {
@@ -3403,7 +3585,10 @@ mod tests {
         let OutputItem::Reasoning(reasoning) = &wrapped.inner.output[0] else {
             panic!("Expected Reasoning output before the tool call");
         };
-        assert!(reasoning.summary.is_empty());
+        assert!(matches!(
+            reasoning.summary.as_slice(),
+            [SummaryPart::SummaryText(summary)] if summary.text == "Need the weather tool"
+        ));
         assert_eq!(reasoning_text(reasoning), "Need the weather tool");
         match &wrapped.inner.output[1] {
             OutputItem::FunctionCall(fc) => {
@@ -3516,16 +3701,17 @@ mod tests {
         chat.inner.choices[0].finish_reason = Some(FinishReason::ToolCalls);
         let response = chat_completion_to_response(chat, &params, None).unwrap();
         assert_eq!(response.inner.output.len(), 2);
-        let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
+        let OutputItem::FunctionCall(call) = &response.inner.output[1] else {
             panic!("expected the structured function call");
         };
         assert_eq!(call.call_id, "call_original");
         assert_eq!(call.name, "get_weather");
         assert_eq!(call.namespace.as_deref(), Some("weather"));
         assert_eq!(call.arguments, r#"{"city":"Paris"}"#);
-        let OutputItem::Message(message) = &response.inner.output[1] else {
+        let OutputItem::Message(message) = &response.inner.output[0] else {
             panic!("expected the original text");
         };
+        assert_eq!(message.phase, Some(MessagePhase::Commentary));
         let OutputMessageContent::OutputText(content) = &message.content[0] else {
             panic!("expected output text");
         };
@@ -3978,36 +4164,90 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_text_requires_explicit_request() {
+    fn test_reasoning_text_is_returned_and_summary_follows_request() {
         let unrequested = chat_completion_to_response(
-            make_chat_resp_with_reasoning("private reasoning"),
+            make_chat_resp_with_reasoning("raw reasoning"),
             &ResponseParams::default(),
             None,
         )
         .unwrap();
-        assert!(
-            unrequested
-                .inner
-                .output
-                .iter()
-                .all(|item| !matches!(item, OutputItem::Reasoning(_)))
-        );
+        let [
+            OutputItem::Reasoning(reasoning),
+            OutputItem::Message(message),
+        ] = unrequested.inner.output.as_slice()
+        else {
+            panic!("expected reasoning before the message");
+        };
+        assert!(reasoning.summary.is_empty());
+        assert_eq!(reasoning_text(reasoning), "raw reasoning");
+        assert_eq!(message.phase, Some(MessagePhase::FinalAnswer));
 
         let params = requested_reasoning_params();
         let requested =
             chat_completion_to_response(make_chat_resp_with_reasoning("summary"), &params, None)
                 .unwrap();
-        let reasoning = requested
-            .inner
-            .output
-            .iter()
-            .find_map(|item| match item {
-                OutputItem::Reasoning(reasoning) => Some(reasoning),
-                _ => None,
-            })
-            .expect("requested reasoning output");
-        assert!(reasoning.summary.is_empty());
+        let OutputItem::Reasoning(reasoning) = &requested.inner.output[0] else {
+            panic!("expected reasoning output");
+        };
+        assert!(matches!(
+            reasoning.summary.as_slice(),
+            [SummaryPart::SummaryText(summary)] if summary.text == "summary"
+        ));
         assert_eq!(reasoning_text(reasoning), "summary");
+    }
+
+    #[test]
+    fn test_reasoning_only_response_has_no_placeholder_message() {
+        let mut chat_resp = make_chat_resp_with_reasoning("only thinking");
+        chat_resp.inner.choices[0].message.content = None;
+
+        let response =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+        assert!(matches!(
+            response.inner.output.as_slice(),
+            [OutputItem::Reasoning(_)]
+        ));
+
+        let mut empty = make_chat_resp_with_text("");
+        empty.inner.choices[0].message.content = None;
+        let response =
+            chat_completion_to_response(empty, &ResponseParams::default(), None).unwrap();
+        let [OutputItem::Message(placeholder)] = response.inner.output.as_slice() else {
+            panic!("expected only the placeholder message");
+        };
+        assert_eq!(placeholder.phase, Some(MessagePhase::FinalAnswer));
+    }
+
+    /// Text that accompanies calls is commentary placed before them, and a
+    /// length stop marks only the last call incomplete.
+    #[test]
+    fn test_unary_output_orders_reasoning_commentary_then_calls() {
+        let mut chat_resp = make_chat_resp_with_tool_calls(
+            dynamo_protocols::types::FinishReason::Length,
+            &[r#"{"location":"SF"}"#, r#"{"location":"NY"#],
+        );
+        let message = &mut chat_resp.inner.choices[0].message;
+        message.reasoning_content = Some("check both cities".into());
+        message.content = Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+            "Checking.".into(),
+        ));
+
+        let response =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+        let [
+            OutputItem::Reasoning(reasoning),
+            OutputItem::Message(message),
+            OutputItem::FunctionCall(first),
+            OutputItem::FunctionCall(last),
+        ] = response.inner.output.as_slice()
+        else {
+            panic!("expected reasoning, message, then calls");
+        };
+        assert_eq!(reasoning.status, Some(OutputStatus::Completed));
+        assert_eq!(message.phase, Some(MessagePhase::Commentary));
+        assert_eq!(message.status, OutputStatus::Completed);
+        assert_eq!(first.status, Some(OutputStatus::Completed));
+        assert_eq!(last.status, Some(OutputStatus::Incomplete));
     }
 
     #[test]
@@ -4394,12 +4634,16 @@ mod tests {
         assert!(json["output"][0].get("id").is_some());
         assert!(json["output"][0].get("status").is_some());
         assert_eq!(json["output"][0]["type"], "reasoning");
-        assert_eq!(json["output"][0]["summary"], serde_json::json!([]));
+        assert_eq!(
+            json["output"][0]["summary"],
+            serde_json::json!([{"type": "summary_text", "text": "raw reasoning"}])
+        );
         assert_eq!(
             json["output"][0]["content"][0],
             serde_json::json!({"type": "reasoning_text", "text": "raw reasoning"})
         );
         assert_eq!(json["output"][1]["type"], "message");
+        assert_eq!(json["output"][1]["phase"], "final_answer");
 
         // Nullable-required fields must be present as null (not missing).
         for key in [

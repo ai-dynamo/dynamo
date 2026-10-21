@@ -1801,10 +1801,15 @@ class ResponsesPayload(BasePayload):
         output = result.get("output", [])
         assert len(output) > 0, "Response output is empty"
 
-        msg = output[0]
+        # Reasoning items and commentary can precede the final answer.
+        messages = [item for item in output if item.get("type") == "message"]
         assert (
-            msg.get("type") == "message"
-        ), f"Expected output[0].type='message', got {msg.get('type')}"
+            messages
+        ), f"Expected a message output item, got types {[item.get('type') for item in output]}"
+        msg = next(
+            (item for item in messages if item.get("phase") == "final_answer"),
+            messages[-1],
+        )
         assert (
             msg.get("role") == "assistant"
         ), f"Expected role='assistant', got {msg.get('role')}"
@@ -1868,28 +1873,37 @@ class ResponsesStreamPayload(BasePayload):
             non_done[-1] == "response.completed"
         ), f"Last real event should be response.completed, got {non_done[-1]}"
 
-        # Validate text content events
-        assert "response.output_item.added" in event_types, "Missing output_item.added"
-        assert (
-            "response.content_part.added" in event_types
-        ), "Missing content_part.added"
+        # Validate text content events. Reasoning items emit their own item and
+        # part events, so require a message item specifically.
+        message_ids = {
+            data["item"].get("id")
+            for name, data in events
+            if name == "response.output_item.added"
+            and data["item"].get("type") == "message"
+        }
+        assert message_ids, "Missing message output_item.added"
+        assert any(
+            name == "response.content_part.added" and data["item_id"] in message_ids
+            for name, data in events
+        ), "Missing message content_part.added"
         assert "response.output_text.delta" in event_types, "Missing output_text.delta"
         assert "response.output_text.done" in event_types, "Missing output_text.done"
         assert "response.content_part.done" in event_types, "Missing content_part.done"
         assert "response.output_item.done" in event_types, "Missing output_item.done"
 
-        # Verify text deltas concatenate to the final text
-        deltas = [e[1]["delta"] for e in events if e[0] == "response.output_text.delta"]
-        done_events = [e for e in events if e[0] == "response.output_text.done"]
-        assert (
-            len(done_events) == 1
-        ), f"Expected 1 output_text.done, got {len(done_events)}"
-        full_text = "".join(deltas)
-        assert (
-            done_events[0][1]["text"] == full_text
-        ), "Concatenated deltas don't match output_text.done text"
+        # Commentary and the final answer are separate message items; each
+        # item's deltas must concatenate to its output_text.done text.
+        deltas: dict[str, list[str]] = {}
+        for name, data in events:
+            if name == "response.output_text.delta":
+                deltas.setdefault(data["item_id"], []).append(data["delta"])
+        for name, data in events:
+            if name == "response.output_text.done":
+                assert data["text"] == "".join(
+                    deltas.get(data["item_id"], [])
+                ), "Concatenated deltas don't match output_text.done text"
 
-        return full_text
+        return "".join("".join(parts) for parts in deltas.values())
 
     def response_handler(self, response: Any) -> str:
         return ResponsesStreamPayload.extract_content(response)
