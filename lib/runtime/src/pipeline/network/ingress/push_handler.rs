@@ -1054,11 +1054,27 @@ where
 /// and converting the enclosing `PipelineError` yields a bare
 /// `ErrorType::Unknown`, losing the worker error type. Any other variant carries
 /// no worker error and converts to `ErrorType::Unknown`.
+///
+/// A [`PipelineError::DuplicateRequestId`] refusal is typed
+/// [`crate::error::ErrorType::Conflict`]: the worker is healthy and still serving
+/// the earlier request with that id, so fault detection must not quarantine it.
 pub(crate) fn typed_error_from_pipeline_error(e: &PipelineError) -> DynamoError {
     let source: &(dyn std::error::Error + 'static) = match e {
         PipelineError::GenerateError(inner) => inner.as_ref(),
         other => other,
     };
+    let is_duplicate_id = std::iter::successors(Some(source), |e| e.source()).any(|e| {
+        matches!(
+            e.downcast_ref::<PipelineError>(),
+            Some(PipelineError::DuplicateRequestId(_))
+        )
+    });
+    if is_duplicate_id {
+        return DynamoError::builder()
+            .error_type(crate::error::ErrorType::Conflict)
+            .message(source.to_string())
+            .build();
+    }
     DynamoError::from(source)
 }
 
@@ -1106,6 +1122,19 @@ mod tests {
 
         assert_eq!(error.class(), ErrorType::Internal);
         assert_eq!(error.reason().as_str(), "runtime.unclassified");
+    }
+
+    /// A worker that refuses a request id it is still serving is not a faulty
+    /// worker; the refusal keeps a `Conflict` type through the prologue.
+    #[test]
+    fn duplicate_request_id_is_a_conflict() {
+        let e = PipelineError::GenerateError(anyhow::Error::new(
+            PipelineError::DuplicateRequestId("same-id".to_string()),
+        ));
+        let error = typed_error_from_pipeline_error(&e);
+
+        assert_eq!(error.class(), ErrorType::Conflict);
+        assert_eq!(error.reason().as_str(), "request.conflict");
     }
 
     #[derive(Clone, Default)]
