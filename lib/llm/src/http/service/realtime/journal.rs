@@ -3,14 +3,11 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::sync::Arc;
 
 use dynamo_protocols::types::realtime::{
     DynamoRealtimeClientEvent, RealtimeAudioFormats, RealtimeClientEvent,
     RealtimeClientEventSessionUpdate, RealtimeServerEvent, Session,
 };
-
-use super::budget::{Budget, Reservation};
 
 const MAX_RETAINED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RETAINED_EVENTS: usize = 4096;
@@ -35,7 +32,7 @@ pub(super) struct Journal {
     session: Option<RealtimeClientEventSessionUpdate>,
     turns: VecDeque<Turn>,
     previous_item: Option<(String, String)>,
-    reservation: Reservation,
+    bytes: usize,
     events: usize,
     max_bytes: usize,
     max_events: usize,
@@ -50,16 +47,12 @@ fn eligible(session: &Session) -> bool {
 }
 
 impl Journal {
-    pub(super) fn new(
-        session: &RealtimeClientEventSessionUpdate,
-        budget: &Arc<Budget>,
-    ) -> Option<Self> {
+    pub(super) fn new(session: &RealtimeClientEventSessionUpdate) -> Option<Self> {
         if !eligible(&session.session) {
             return None;
         }
         let bytes = retained_size(session);
-        let mut reservation = budget.reservation();
-        if bytes > MAX_RETAINED_BYTES || !reservation.try_grow(bytes) {
+        if bytes > MAX_RETAINED_BYTES {
             tracing::debug!("Realtime recovery disabled: session exceeds retention limit");
             return None;
         }
@@ -67,7 +60,7 @@ impl Journal {
             session: Some(session.clone()),
             turns: VecDeque::new(),
             previous_item: None,
-            reservation,
+            bytes,
             events: 1,
             max_bytes: MAX_RETAINED_BYTES,
             max_events: MAX_RETAINED_EVENTS,
@@ -81,36 +74,19 @@ impl Journal {
     }
 
     pub(super) fn disable(&mut self, reason: &'static str) {
-        let Some(session) = self.session.take() else {
+        if self.session.take().is_none() {
             return;
-        };
+        }
         tracing::debug!(reason, "Realtime recovery disabled");
-        let mut released = retained_size(&session);
-        drop(session);
-        // Keep turn order so a later clear cannot suppress an earlier turn's output.
         for turn in &mut self.turns {
             turn.events = Vec::new();
             // Keep only reconciliation still needed by output already in flight.
             if turn.replay_remaining == 0 {
                 turn.prefix = String::new();
             }
-            let retained = turn.prefix.capacity()
-                + turn.client_item.as_ref().map_or(0, String::capacity)
-                + turn.worker_item.as_ref().map_or(0, String::capacity);
-            released += turn.bytes - retained;
-            turn.bytes = retained;
         }
-        self.reservation.release(released);
-        self.release_empty_queue();
+        self.bytes = 0;
         self.events = 0;
-    }
-
-    fn release_empty_queue(&mut self) {
-        if self.turns.is_empty() {
-            let bytes = self.turns.capacity() * size_of::<Turn>();
-            self.turns = VecDeque::new();
-            self.reservation.release(bytes);
-        }
     }
 
     pub(super) fn record(&mut self, event: &DynamoRealtimeClientEvent) {
@@ -140,26 +116,19 @@ impl Journal {
         }
         if matches!(event, RealtimeClientEvent::InputAudioBufferClear(_))
             && has_open_turn
-            && let Some(turn) = self.turns.back_mut()
+            && let Some(turn) = self.turns.pop_back()
+            && self.session.is_some()
         {
-            // Reuse the allocated slot so even an exhausted budget can suppress
-            // stale output until the worker acknowledges the clear.
-            let turn = std::mem::replace(
-                turn,
-                Turn {
-                    is_cleared: true,
-                    ..Default::default()
-                },
-            );
-            if self.session.is_some() {
-                self.events -= turn.events.len();
-            }
-            let bytes = turn.bytes;
-            drop(turn);
-            self.reservation.release(bytes);
+            self.bytes -= turn.bytes;
+            self.events -= turn.events.len();
         }
         if self.session.is_none() {
-            if matches!(event, RealtimeClientEvent::InputAudioBufferCommit(_))
+            if matches!(event, RealtimeClientEvent::InputAudioBufferClear(_)) && has_open_turn {
+                self.turns.push_back(Turn {
+                    is_cleared: true,
+                    ..Default::default()
+                });
+            } else if matches!(event, RealtimeClientEvent::InputAudioBufferCommit(_))
                 && let Some(turn) = self.turns.back_mut()
                 && !turn.is_cleared
             {
@@ -168,41 +137,26 @@ impl Journal {
             return;
         }
 
-        let needs_turn = !has_open_turn;
-        let queue_growth = if needs_turn {
-            capacity_growth(self.turns.len(), self.turns.capacity())
-        } else {
-            0
-        };
-        let event_growth = if needs_turn {
-            capacity_growth(0, 0)
-        } else {
-            self.turns.back().map_or(0, |turn| {
-                capacity_growth(turn.events.len(), turn.events.capacity())
-            })
-        };
-        let turn_bytes = retained_size(event) - size_of_val(event)
-            + event_growth * size_of::<RealtimeClientEvent>();
-        let bytes = turn_bytes + queue_growth * size_of::<Turn>();
-        if self.reservation.bytes.saturating_add(bytes) > self.max_bytes
-            || self.events >= self.max_events
-            || !self.reservation.try_grow(bytes)
-        {
+        let needs_turn =
+            !has_open_turn || matches!(event, RealtimeClientEvent::InputAudioBufferClear(_));
+        let bytes = retained_size(event) + if needs_turn { size_of::<Turn>() } else { 0 };
+        if self.bytes.saturating_add(bytes) > self.max_bytes || self.events >= self.max_events {
+            if matches!(event, RealtimeClientEvent::InputAudioBufferClear(_)) {
+                self.turns.push_back(Turn {
+                    is_cleared: true,
+                    ..Default::default()
+                });
+            }
             self.disable("retention limit exceeded");
             return;
         }
+        self.bytes += bytes;
         self.events += 1;
         if needs_turn {
-            if queue_growth > 0 {
-                self.turns.reserve_exact(queue_growth);
-            }
             self.turns.push_back(Turn::default());
         }
         if let Some(turn) = self.turns.back_mut() {
-            turn.bytes += turn_bytes;
-            if event_growth > 0 {
-                turn.events.reserve_exact(event_growth);
-            }
+            turn.bytes += bytes;
             turn.is_committed = matches!(event, RealtimeClientEvent::InputAudioBufferCommit(_));
             turn.is_cleared = matches!(event, RealtimeClientEvent::InputAudioBufferClear(_));
             if let Some(event) = clone_audio_event(event) {
@@ -215,17 +169,13 @@ impl Journal {
         let session = self.session.as_ref()?.clone();
         self.waiting_for_session = true;
         if let Some((worker, client)) = self.previous_item.take() {
-            let bytes = worker.capacity() + client.capacity();
-            drop((worker, client));
-            self.reservation.release(bytes);
+            self.bytes -= worker.len() + client.len();
         }
         for turn in &mut self.turns {
             turn.next_event = 0;
             if let Some(id) = turn.worker_item.take() {
-                let bytes = id.capacity();
-                drop(id);
-                turn.bytes -= bytes;
-                self.reservation.release(bytes);
+                turn.bytes -= id.len();
+                self.bytes -= id.len();
             }
             turn.replay_remaining = turn.prefix.len();
         }
@@ -246,24 +196,20 @@ impl Journal {
     }
 
     fn finish_turn(&mut self) {
-        if let Some(mut turn) = self.turns.pop_front() {
+        if let Some(turn) = self.turns.pop_front() {
             if self.session.is_some() {
+                self.bytes -= turn.bytes;
                 self.events -= turn.events.len();
             }
-            if let (Some(worker), Some(client)) = (turn.worker_item.take(), turn.client_item.take())
-            {
-                if let Some((worker, client)) = self.previous_item.take() {
-                    let bytes = worker.capacity() + client.capacity();
-                    drop((worker, client));
-                    self.reservation.release(bytes);
+            if let (Some(worker), Some(client)) = (turn.worker_item, turn.client_item) {
+                if self.session.is_some() {
+                    if let Some((worker, client)) = &self.previous_item {
+                        self.bytes -= worker.len() + client.len();
+                    }
+                    self.bytes += worker.len() + client.len();
                 }
-                turn.bytes -= worker.capacity() + client.capacity();
                 self.previous_item = Some((worker, client));
             }
-            let bytes = turn.bytes;
-            drop(turn);
-            self.reservation.release(bytes);
-            self.release_empty_queue();
         }
     }
 
@@ -287,17 +233,8 @@ impl Journal {
             Error(_) => {
                 self.disable("worker application error");
                 // An ordered error can cancel replay before the replacement assigns an item ID.
-                let mut released = 0;
-                self.turns.retain(|turn| {
-                    if turn.client_item.is_some() && turn.worker_item.is_none() {
-                        released += turn.bytes;
-                        false
-                    } else {
-                        true
-                    }
-                });
-                self.reservation.release(released);
-                self.release_empty_queue();
+                self.turns
+                    .retain(|turn| turn.client_item.is_none() || turn.worker_item.is_some());
                 return Ok(true);
             }
             InputAudioBufferCleared(_) => {
@@ -339,12 +276,7 @@ impl Journal {
                 .front()
                 .is_some_and(|turn| turn.worker_item.as_ref().is_some_and(|id| id != item_id))
         {
-            if let Some(turn) = self.turns.pop_front() {
-                let bytes = turn.bytes;
-                drop(turn);
-                self.reservation.release(bytes);
-            }
-            self.release_empty_queue();
+            self.turns.pop_front();
         }
         let Some(turn) = self.turns.front_mut() else {
             if self.session.is_some() {
@@ -355,36 +287,13 @@ impl Journal {
         if turn.is_cleared || (turn.has_terminal && !is_commit) {
             return Ok(false);
         }
-        if self.session.is_none() && turn.client_item.is_none() {
-            // No identity translation is needed, but queued clear markers still
-            // require this turn's terminal output before they become active.
-            turn.has_terminal |= is_terminal;
-            if turn.has_terminal && turn.is_committed {
-                self.finish_turn();
-            }
-            return Ok(true);
-        }
-        let binding_bytes = usize::from(turn.worker_item.is_none()) * item_id.len()
-            + usize::from(turn.client_item.is_none()) * item_id.len();
-        if binding_bytes > 0
-            && (self.reservation.bytes.saturating_add(binding_bytes) > self.max_bytes
-                || !self.reservation.try_grow(binding_bytes))
-        {
-            let needs_translation = turn.client_item.is_some();
-            self.disable("item identity retention limit exceeded");
-            return if needs_translation {
-                Err("realtime replay identity budget exhausted")
-            } else {
-                self.reconcile(event)
-            };
-        }
-        let turn = self.turns.front_mut().ok_or("missing transcription turn")?;
         match &turn.worker_item {
             Some(bound) if bound != item_id => return Err("out-of-order transcription output"),
             None => {
                 turn.worker_item = Some(item_id.clone());
                 let bytes = item_id.len();
                 turn.bytes += bytes;
+                self.bytes += bytes;
             }
             _ => {}
         }
@@ -393,6 +302,7 @@ impl Journal {
         } else {
             turn.client_item = Some(item_id.clone());
             turn.bytes += item_id.len();
+            self.bytes += item_id.len();
         }
 
         let mut forward = true;
@@ -413,30 +323,14 @@ impl Journal {
             turn.replay_remaining -= matched;
             delta.drain(..matched);
             forward = !delta.is_empty();
-            if self.session.is_some() {
-                let needed = turn.prefix.len().saturating_add(delta.len());
-                let capacity = if needed > turn.prefix.capacity() {
-                    needed.max(turn.prefix.capacity().saturating_mul(2)).max(8)
-                } else {
-                    turn.prefix.capacity()
-                };
-                let added = capacity - turn.prefix.capacity();
-                if self.reservation.bytes.saturating_add(added) > self.max_bytes
-                    || !self.reservation.try_grow(added)
-                {
-                    self.disable("transcript retention limit exceeded");
-                } else {
-                    if added > 0 {
-                        turn.prefix.reserve_exact(capacity - turn.prefix.len());
-                    }
-                    turn.prefix.push_str(delta);
-                    turn.bytes += added;
-                }
-            } else if turn.replay_remaining == 0 {
-                let bytes = turn.prefix.capacity();
-                turn.prefix = String::new();
-                turn.bytes -= bytes;
-                self.reservation.release(bytes);
+            if self.session.is_some() && self.bytes.saturating_add(delta.len()) <= self.max_bytes {
+                let capacity = turn.prefix.capacity();
+                turn.prefix.push_str(delta);
+                let added = turn.prefix.capacity() - capacity;
+                turn.bytes += added;
+                self.bytes += added;
+            } else if self.session.is_some() {
+                self.disable("transcript retention limit exceeded");
             }
         }
         if is_terminal {
@@ -454,12 +348,11 @@ impl Journal {
         {
             self.finish_turn();
         }
+        if self.bytes > self.max_bytes {
+            self.disable("retention limit exceeded");
+        }
         Ok(forward)
     }
-}
-
-fn capacity_growth(len: usize, capacity: usize) -> usize {
-    if len == capacity { capacity.max(4) } else { 0 }
 }
 
 fn clone_audio_event(event: &RealtimeClientEvent) -> Option<RealtimeClientEvent> {
@@ -545,8 +438,7 @@ mod tests {
 
     #[test]
     fn replay_preserves_unicode_ids_and_acknowledgements_but_allows_final_revisions() {
-        let mut journal =
-            Journal::new(&configuration(), &Arc::new(Budget::new(MAX_RETAINED_BYTES))).unwrap();
+        let mut journal = Journal::new(&configuration()).unwrap();
         assert!(!journal.can_recover());
         assert!(acknowledge(&mut journal).is_some());
         record(
@@ -565,7 +457,7 @@ mod tests {
                 .is_some()
         );
 
-        let bytes = journal.reservation.bytes;
+        let bytes = journal.bytes;
         for replacement in ["replacement", "another"] {
             let setup = serde_json::to_value(journal.start_replay().unwrap()).unwrap();
             assert!(setup["session"]["audio"]["input"]["turn_detection"].is_null());
@@ -601,7 +493,7 @@ mod tests {
             );
         }
         assert!(
-            journal.reservation.bytes <= bytes + 16,
+            journal.bytes <= bytes + 16,
             "replacing worker IDs must release old storage"
         );
         let event = server(&mut journal, delta("another", " next"))
@@ -617,15 +509,14 @@ mod tests {
         assert!(journal.turns.is_empty());
         assert_eq!(journal.events, 1);
         assert_eq!(
-            journal.reservation.bytes,
+            journal.bytes,
             retained_size(&configuration()) + "another".len() + "original".len()
         );
     }
 
     #[test]
     fn queued_turns_clear_and_idle_replay_retain_only_unfinished_input() {
-        let mut journal =
-            Journal::new(&configuration(), &Arc::new(Budget::new(MAX_RETAINED_BYTES))).unwrap();
+        let mut journal = Journal::new(&configuration()).unwrap();
         acknowledge(&mut journal);
         record(
             &mut journal,
@@ -682,8 +573,7 @@ mod tests {
 
     #[test]
     fn divergence_fails_and_retention_or_application_errors_disable_recovery() {
-        let mut journal =
-            Journal::new(&configuration(), &Arc::new(Budget::new(MAX_RETAINED_BYTES))).unwrap();
+        let mut journal = Journal::new(&configuration()).unwrap();
         acknowledge(&mut journal);
         record(
             &mut journal,
@@ -695,13 +585,12 @@ mod tests {
         assert!(server(&mut journal, delta("new", "hé🙃")).is_err());
 
         for event_limit in [true, false] {
-            let mut journal =
-                Journal::new(&configuration(), &Arc::new(Budget::new(MAX_RETAINED_BYTES))).unwrap();
+            let mut journal = Journal::new(&configuration()).unwrap();
             acknowledge(&mut journal);
             if event_limit {
                 journal.max_events = 1;
             } else {
-                journal.max_bytes = journal.reservation.bytes + 1;
+                journal.max_bytes = journal.bytes + 1;
             }
             record(
                 &mut journal,
@@ -711,8 +600,7 @@ mod tests {
             assert_eq!(journal.events, 0);
             assert!(journal.turns.iter().all(|t| t.events.is_empty()));
         }
-        let mut journal =
-            Journal::new(&configuration(), &Arc::new(Budget::new(MAX_RETAINED_BYTES))).unwrap();
+        let mut journal = Journal::new(&configuration()).unwrap();
         acknowledge(&mut journal);
         assert!(
             server(
@@ -728,8 +616,7 @@ mod tests {
 
     #[test]
     fn disabling_recovery_preserves_inflight_output_and_early_finals() {
-        let mut journal =
-            Journal::new(&configuration(), &Arc::new(Budget::new(MAX_RETAINED_BYTES))).unwrap();
+        let mut journal = Journal::new(&configuration()).unwrap();
         acknowledge(&mut journal);
         journal.max_events = 2;
         record(
@@ -773,8 +660,7 @@ mod tests {
             "old"
         );
 
-        let mut journal =
-            Journal::new(&configuration(), &Arc::new(Budget::new(MAX_RETAINED_BYTES))).unwrap();
+        let mut journal = Journal::new(&configuration()).unwrap();
         acknowledge(&mut journal);
         record(
             &mut journal,
@@ -799,8 +685,7 @@ mod tests {
     #[test]
     fn application_error_allows_a_new_turn_after_the_worker_cancels_an_open_turn() {
         for stage in ["original", "replacement-unbound", "replacement-bound"] {
-            let mut journal =
-                Journal::new(&configuration(), &Arc::new(Budget::new(MAX_RETAINED_BYTES))).unwrap();
+            let mut journal = Journal::new(&configuration()).unwrap();
             acknowledge(&mut journal);
             record(
                 &mut journal,
@@ -844,197 +729,6 @@ mod tests {
                 assert_eq!(serde_json::to_value(event).unwrap(), expected);
             }
             assert!(journal.turns.is_empty());
-        }
-    }
-
-    #[test]
-    fn shared_budget_exhaustion_preserves_live_output_and_releases_retention() {
-        let budget = Arc::new(Budget::new(64 * 1024));
-        let mut first = Journal::new(&configuration(), &budget).unwrap();
-        let mut second = Journal::new(&configuration(), &budget).unwrap();
-        acknowledge(&mut first);
-        acknowledge(&mut second);
-        record(
-            &mut first,
-            json!({"type": "input_audio_buffer.append", "audio": "A".repeat(32 * 1024)}),
-        );
-        server(&mut first, delta("first", "hello")).unwrap();
-        let first_bytes = first.reservation.bytes;
-        record(
-            &mut second,
-            json!({"type": "input_audio_buffer.append", "audio": "B".repeat(32 * 1024)}),
-        );
-        assert!(!second.can_recover());
-        assert!(first.can_recover());
-        assert_eq!(budget.used(), first_bytes);
-        assert!(
-            server(&mut second, completed("second", "still healthy"))
-                .unwrap()
-                .is_some()
-        );
-        record(&mut first, json!({"type": "input_audio_buffer.commit"}));
-        server(&mut first, completed("first", "hello")).unwrap();
-        assert_eq!(
-            budget.used(),
-            retained_size(&configuration()) + 2 * "first".len()
-        );
-        record(
-            &mut first,
-            json!({"type": "input_audio_buffer.append", "audio": "A".repeat(32 * 1024)}),
-        );
-        record(&mut first, json!({"type": "input_audio_buffer.clear"}));
-        server(
-            &mut first,
-            json!({"type": "input_audio_buffer.cleared", "event_id": "clear"}),
-        )
-        .unwrap();
-        assert_eq!(
-            budget.used(),
-            retained_size(&configuration()) + 2 * "first".len()
-        );
-        drop(first);
-        drop(second);
-        assert_eq!(budget.used(), 0);
-        assert!(Journal::new(&configuration(), &Arc::new(Budget::new(0))).is_none());
-    }
-
-    #[test]
-    fn disabled_replay_keeps_prefix_and_identity_reservations_until_reconciled() {
-        let budget = Arc::new(Budget::new(64 * 1024));
-        let mut journal = Journal::new(&configuration(), &budget).unwrap();
-        acknowledge(&mut journal);
-        record(
-            &mut journal,
-            json!({"type": "input_audio_buffer.append", "audio": "AAAA"}),
-        );
-        server(&mut journal, delta("original", "hello")).unwrap();
-        journal.start_replay().unwrap();
-        acknowledge(&mut journal);
-        assert!(
-            server(&mut journal, delta("replacement", "he"))
-                .unwrap()
-                .is_none()
-        );
-        journal.disable("test pressure");
-        let turn = journal.turns.front().unwrap();
-        assert_eq!(
-            budget.used(),
-            journal.turns.capacity() * size_of::<Turn>()
-                + turn.prefix.capacity()
-                + "original".len()
-                + "replacement".len()
-        );
-        let before = budget.used();
-        let event = server(&mut journal, delta("replacement", "llo world"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(event["delta"], " world");
-        assert_eq!(event["item_id"], "original");
-        assert!(budget.used() < before);
-        record(&mut journal, json!({"type": "input_audio_buffer.commit"}));
-        server(&mut journal, completed("replacement", "hello world")).unwrap();
-        assert_eq!(budget.used(), "original".len() + "replacement".len());
-        drop(journal);
-        assert_eq!(budget.used(), 0);
-    }
-
-    #[test]
-    fn clear_keeps_suppressing_stale_output_when_retention_is_exhausted() {
-        let budget = Arc::new(Budget::new(64 * 1024));
-        let mut journal = Journal::new(&configuration(), &budget).unwrap();
-        acknowledge(&mut journal);
-        record(
-            &mut journal,
-            json!({"type": "input_audio_buffer.append", "audio": "AAAA"}),
-        );
-        server(&mut journal, delta("old", "partial")).unwrap();
-        journal.max_events = 1;
-        record(&mut journal, json!({"type": "input_audio_buffer.clear"}));
-        assert!(!journal.can_recover());
-        assert!(
-            server(&mut journal, delta("old", "stale"))
-                .unwrap()
-                .is_none()
-        );
-        server(
-            &mut journal,
-            json!({"type": "input_audio_buffer.cleared", "event_id": "clear"}),
-        )
-        .unwrap();
-        assert_eq!(budget.used(), 0);
-        assert!(
-            server(&mut journal, completed("fresh", "new turn"))
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn disabling_recovery_keeps_unbound_turns_ahead_of_clear_markers() {
-        for reason in ["session update", "application error", "identity budget"] {
-            let budget = Arc::new(Budget::new(64 * 1024));
-            let mut journal = Journal::new(&configuration(), &budget).unwrap();
-            acknowledge(&mut journal);
-            record(
-                &mut journal,
-                json!({"type": "input_audio_buffer.append", "audio": "first"}),
-            );
-            record(&mut journal, json!({"type": "input_audio_buffer.commit"}));
-            record(
-                &mut journal,
-                json!({"type": "input_audio_buffer.append", "audio": "discarded"}),
-            );
-            record(&mut journal, json!({"type": "input_audio_buffer.clear"}));
-            match reason {
-                "session update" => {
-                    journal.record(&RealtimeClientEvent::SessionUpdate(configuration()).into())
-                }
-                "application error" => {
-                    server(
-                        &mut journal,
-                        json!({"type": "error", "event_id": "invalid", "error": {
-                            "type": "invalid_request_error", "message": "unsupported event"
-                        }}),
-                    )
-                    .unwrap();
-                }
-                _ => journal.max_bytes = journal.reservation.bytes,
-            }
-            if reason != "identity budget" {
-                assert!(server(&mut journal, committed("first")).unwrap().is_some());
-                assert!(
-                    server(&mut journal, delta("first", "hello"))
-                        .unwrap()
-                        .is_some()
-                );
-            }
-            // Also cover a terminal event that itself exhausts the identity budget.
-            assert!(
-                server(&mut journal, completed("first", "hello"))
-                    .unwrap()
-                    .is_some()
-            );
-            assert!(!journal.can_recover());
-            assert_eq!(budget.used(), journal.turns.capacity() * size_of::<Turn>());
-            assert!(
-                server(&mut journal, delta("discarded", "stale"))
-                    .unwrap()
-                    .is_none()
-            );
-            assert!(
-                server(
-                    &mut journal,
-                    json!({"type": "input_audio_buffer.cleared", "event_id": "clear"}),
-                )
-                .unwrap()
-                .is_some()
-            );
-            assert_eq!(budget.used(), 0);
-            assert!(
-                server(&mut journal, completed("fresh", "next turn"))
-                    .unwrap()
-                    .is_some()
-            );
         }
     }
 }

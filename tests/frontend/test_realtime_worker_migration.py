@@ -26,9 +26,7 @@ pytestmark = [
 
 
 @pytest.fixture(params=[1])
-def migration_frontend(
-    request, monkeypatch, dynamo_dynamic_ports, tmp_path, realtime_budget_mib
-):
+def migration_frontend(request, monkeypatch, dynamo_dynamic_ports, tmp_path):
     model = "migration-asr"
     endpoint = f"migration_{uuid.uuid4().hex}.asr.generate"
     port = dynamo_dynamic_ports.frontend_port
@@ -41,8 +39,6 @@ def migration_frontend(
                 frontend_port=port,
                 migration_limit=request.param,
                 extra_args=[
-                    "--migration-realtime-budget-mib",
-                    str(realtime_budget_mib),
                     "--discovery-backend",
                     "file",
                     "--request-plane",
@@ -78,11 +74,6 @@ def migration_frontend(
                 )
             )
         yield port, model, workers, tmp_path
-
-
-@pytest.fixture
-def realtime_budget_mib():
-    return 512
 
 
 def session_update(model):
@@ -294,11 +285,6 @@ def test_unrecoverable_session_closes(migration_frontend, failure):
 
 @pytest.mark.parametrize("migration_frontend", [0], indirect=True)
 def test_migration_is_disabled_by_default(migration_frontend):
-    asyncio.run(unavailable_replacement(migration_frontend, "disabled"))
-
-
-@pytest.mark.parametrize("realtime_budget_mib", [0])
-def test_zero_realtime_budget_disables_recovery(migration_frontend):
     asyncio.run(unavailable_replacement(migration_frontend, "disabled"))
 
 

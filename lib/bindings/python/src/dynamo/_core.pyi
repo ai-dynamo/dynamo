@@ -3075,7 +3075,6 @@ class EntrypointArgs:
         tokenizer_backend: Optional[str] = None,
         tokenizer_fallback: Optional[bool] = None,
         batch_gateway_url: Optional[str] = None,
-        migration_realtime_budget_mib: int = 512,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3103,7 +3102,6 @@ class EntrypointArgs:
             is_prefill: Whether this is a prefill worker
             is_decode: Whether this is a decode worker (disaggregated); pairs with a prefill peer for readiness
             migration_limit: Maximum number of request migrations (0=disabled)
-            migration_realtime_budget_mib: Shared realtime replay journal budget in MiB (0=disabled)
             migration_max_seq_len: Optional max sequence length for migration
             chat_engine_factory: Optional Python chat completions engine factory callback
             ais_perf_config: Canonical AIS configuration for default KV routing

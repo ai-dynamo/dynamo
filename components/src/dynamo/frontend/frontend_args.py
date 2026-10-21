@@ -195,7 +195,6 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     namespace_prefix: Optional[str] = None
 
     migration_limit: int
-    migration_realtime_budget_mib: int = 512
     migration_max_seq_len: Optional[int]
     model_name: Optional[str]
     model_path: Optional[str]
@@ -274,10 +273,6 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         ):
             raise ValueError(
                 f"--migration-max-seq-len must be between 1 and {_U32_MAX}"
-            )
-        if not 0 <= self.migration_realtime_budget_mib <= _U32_MAX:
-            raise ValueError(
-                f"--migration-realtime-budget-mib must be between 0 and {_U32_MAX}"
             )
         if self.min_initial_workers < 0:
             raise ValueError("--router-min-initial-workers must be >= 0")
@@ -571,20 +566,6 @@ class FrontendArgGroup(ArgGroup):
                 "incomplete streams, and worker-local overload rejection. Also limits replacement "
                 "attempts over the lifetime of an explicit-commit PCM realtime transcription "
                 "session; unfinished audio is replayed to a compatible warm worker."
-            ),
-            arg_type=int,
-        )
-
-        add_argument(
-            g,
-            flag_name="--migration-realtime-budget-mib",
-            env_var="DYN_MIGRATION_REALTIME_BUDGET_MIB",
-            default=512,
-            help=(
-                "Shared memory budget in MiB for realtime replay journals in this frontend "
-                "process. Used when --migration-limit > 0. Exhaustion disables recovery "
-                "for the affected session while healthy traffic continues. "
-                "0 disables realtime replay retention."
             ),
             arg_type=int,
         )
