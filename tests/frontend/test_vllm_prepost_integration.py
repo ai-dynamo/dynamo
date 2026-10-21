@@ -274,7 +274,7 @@ class _PrepostServiceGroup:
         return all(process.is_running() for process in self._processes)
 
     def close(self) -> None:
-        # Worker, frontend, etcd, NATS, then the frontend port reservation.
+        # Worker, frontend, the frontend port reservation, then etcd and NATS.
         self._stack.close()
 
 
@@ -340,9 +340,12 @@ def start_services(
     # The worker writes <capture>.tmp and then renames it onto the capture path.
     # Remove both so this case cannot read the previous case's request.
     group.capture_path.unlink(missing_ok=True)
-    group.capture_path.with_suffix(group.capture_path.suffix + ".tmp").unlink(
-        missing_ok=True
+    capture_tmp_path = group.capture_path.with_suffix(
+        group.capture_path.suffix + ".tmp"
     )
+    capture_tmp_path.unlink(missing_ok=True)
+    assert not group.capture_path.exists()
+    assert not capture_tmp_path.exists()
 
     # Same per-case environment that runtime_services_dynamic_ports provides.
     for name, value in group.env.items():
