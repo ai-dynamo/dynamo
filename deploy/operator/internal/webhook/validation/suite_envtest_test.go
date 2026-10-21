@@ -22,6 +22,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
+	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -43,6 +44,7 @@ const (
 	frontendImage150           = "registry.example/dynamo-frontend:1.5.0"
 	legacyEPPImage140          = "registry.example/epp-image:1.4.0"
 	legacySeedUsername         = "operatorenv-legacy-seeder"
+	admissionAISimulateImage   = "registry.example/aisimulate:1.2.0"
 )
 
 func groveProviderOverride(target, value string) *nvidiacomv1beta1.ProviderOverride {
@@ -64,6 +66,9 @@ func alphaGroveProviderOverride(target, value string) *nvidiacomv1alpha1.Provide
 var (
 	// Fixture barriers observe the same cache used by webhook validation.
 	admissionReader client.Reader
+
+	// Hardware that the v1beta2 defaulter discovers; tests set it before each case.
+	admissionHardware = &fakeHardwareDiscoverer{}
 
 	// Admission cases must remain sequential because they share this gate and a cluster-scoped topology fixture.
 	admissionGate = &mutableFeatureGate{}
@@ -91,7 +96,31 @@ func setupAdmissionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptio
 		OperatorVersion:   opts.OperatorVersion,
 		OperatorPrincipal: opts.OperatorPrincipal,
 		Gate:              admissionGate,
+		DGDRV1beta2: webhookdefaulting.DGDRV1beta2Options{
+			AISimulateImage: admissionAISimulateImage,
+			Hardware:        admissionHardware,
+		},
 	})
+}
+
+// fakeHardwareDiscoverer stands in for the cluster's GPU discovery. Cases run sequentially,
+// so a plain mutex-guarded value is enough.
+type fakeHardwareDiscoverer struct {
+	mu    sync.Mutex
+	found webhookdefaulting.DiscoveredHardware
+	err   error
+}
+
+func (f *fakeHardwareDiscoverer) set(found webhookdefaulting.DiscoveredHardware, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.found, f.err = found, err
+}
+
+func (f *fakeHardwareDiscoverer) Discover(context.Context, string) (webhookdefaulting.DiscoveredHardware, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.found, f.err
 }
 
 type mutableFeatureGate struct {
@@ -121,6 +150,10 @@ type admissionTestCase struct {
 	seedWithoutWebhook bool
 	terminating        bool
 	username           string
+
+	// beforeUpdate runs after the old state is seeded and before the update is submitted. Use
+	// it to change what the webhooks see between the two writes, such as hardware discovery.
+	beforeUpdate func(*testing.T)
 
 	wantSchemaError   string
 	wantCELError      string
@@ -164,6 +197,10 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 		admissionGate.set(test.gates)
 		if test.terminating {
 			old = beginTermination(t, seedClient, old)
+		}
+
+		if test.beforeUpdate != nil {
+			test.beforeUpdate(t)
 		}
 
 		t.Log("Submit the update request through the Kubernetes API server")
