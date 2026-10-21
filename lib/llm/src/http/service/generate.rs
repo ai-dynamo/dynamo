@@ -962,6 +962,7 @@ async fn handler_generate(
             return generate_error_response(status, error_type, error.to_string());
         }
     };
+    let trace_block_size = selection.kv_cache_block_size as usize;
     let routing_metadata = GenerateRoutingMetadata {
         kv_cache_block_size: selection.kv_cache_block_size,
         tower_connector_lora_enabled: selection.tower_connector_lora_enabled,
@@ -997,6 +998,16 @@ async fn handler_generate(
                 return response.into_response();
             }
         };
+    // Build request-end trace state after header metadata (x-request-id,
+    // agent context) is attached, mirroring the OpenAI preprocessor path.
+    let (preprocessed, trace_context) = context.into_parts();
+    let trace_state = crate::request_trace::build_request_end_trace_state(
+        &preprocessed,
+        &preprocessed.tracker,
+        &trace_context,
+        trace_block_size,
+    );
+    let context = trace_context.map(|()| preprocessed);
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: metric_lifecycle.metric_model.clone(),
@@ -1021,6 +1032,7 @@ async fn handler_generate(
             state.clone(),
             response_options,
             metric_lifecycle,
+            trace_state,
         )
         .instrument(dispatch_span),
     )
@@ -1044,6 +1056,7 @@ async fn generate_dispatch(
     state: Arc<service_v2::State>,
     response_options: GenerateResponseOptions,
     metric_lifecycle: GenerateMetricLifecycle,
+    trace_state: Option<crate::request_trace::RequestEndTraceState>,
 ) -> Response {
     let GenerateMetricLifecycle {
         metric_model,
@@ -1122,6 +1135,10 @@ async fn generate_dispatch(
         metric_collector.observe(&mut annotated);
         annotated
     });
+    // Wrap outside the metric collector so sidecar routing_data (timing,
+    // worker) lands on the tracker before request_end is emitted.
+    let stream =
+        crate::request_trace::wrap_generate_request_end_stream(Box::pin(stream), trace_state);
     let response_result = match run_until_killed(
         request_context.as_ref(),
         GenerateResponse::from_annotated_stream_with_options(
@@ -2568,6 +2585,27 @@ pub(crate) mod tests {
         state: Arc<service_v2::State>,
         response_options: GenerateResponseOptions,
     ) -> Response {
+        generate_dispatch_with_trace_for_test(
+            engine,
+            context,
+            request_id,
+            model,
+            state,
+            response_options,
+            None,
+        )
+        .await
+    }
+
+    async fn generate_dispatch_with_trace_for_test(
+        engine: crate::types::openai::generate::GenerateStreamingEngine,
+        context: Context<PreprocessedRequest>,
+        request_id: String,
+        model: String,
+        state: Arc<service_v2::State>,
+        response_options: GenerateResponseOptions,
+        trace_state: Option<crate::request_trace::RequestEndTraceState>,
+    ) -> Response {
         let input_tokens = context.content().token_ids.len();
         let tracker = context.content().tracker.clone().unwrap_or_else(|| {
             let tracker = Arc::new(RequestTracker::new());
@@ -2588,6 +2626,7 @@ pub(crate) mod tests {
             state,
             response_options,
             metric_lifecycle,
+            trace_state,
         )
         .await
     }
@@ -3152,6 +3191,93 @@ pub(crate) mod tests {
                 .get()
                 > 0.0
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn successful_generate_emits_one_request_end_trace_record() {
+        const MODEL: &str = "generate-request-trace-test-model";
+        const WORKER_ID: u64 = 123456789;
+
+        crate::request_trace::init_bus_for_test(64);
+        let mut rx = crate::request_trace::subscribe();
+
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_isl(3, None);
+        tracker.record_worker(WORKER_ID, Some(1), crate::discovery::WORKER_TYPE_DECODE);
+        let context = Context::new(
+            PreprocessedRequest::builder()
+                .model(MODEL.to_string())
+                .token_ids(vec![1, 2, 3])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .tracker(Some(tracker))
+                .build()
+                .expect("build trace test request"),
+        );
+        let (preprocessed, trace_context) = context.into_parts();
+        let trace_request_id = trace_context.id().to_string();
+        let trace_state = crate::request_trace::build_request_end_trace_state_for_test(
+            &preprocessed,
+            &preprocessed.tracker,
+            &trace_context,
+            2,
+        );
+        assert!(trace_state.is_some(), "eligible request builds trace state");
+        let context = trace_context.map(|()| preprocessed);
+
+        let service = HttpService::builder().build().unwrap();
+        let response = generate_dispatch_with_trace_for_test(
+            Arc::new(MetricEngine),
+            context,
+            "req-generate-trace".to_string(),
+            MODEL.to_string(),
+            service.state_clone(),
+            GenerateResponseOptions::default(),
+            trace_state,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let record = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let record = rx.recv().await.expect("trace bus receives");
+                if record.event_type == crate::request_trace::RequestTraceEventType::RequestEnd
+                    && record
+                        .request
+                        .as_ref()
+                        .is_some_and(|request| request.request_id == trace_request_id)
+                {
+                    return record;
+                }
+            }
+        })
+        .await
+        .expect("request_end record before timeout");
+
+        let request = record.request.expect("request metrics");
+        assert_eq!(request.input_tokens, Some(3));
+        let replay = request.replay.expect("replay metrics");
+        assert_eq!(replay.trace_block_size, 2);
+        assert_eq!(replay.input_length, 3);
+        assert_eq!(replay.input_sequence_hashes.len(), 2);
+        assert_eq!(
+            request.worker.and_then(|worker| worker.decode_worker_id),
+            Some(WORKER_ID)
+        );
+
+        // Completion emits exactly once; nothing else for this request follows.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        while let Ok(extra) = rx.try_recv() {
+            assert!(
+                extra
+                    .request
+                    .as_ref()
+                    .is_none_or(|request| request.request_id != trace_request_id),
+                "request_end must be emitted once"
+            );
+        }
     }
 
     #[test]

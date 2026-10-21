@@ -311,11 +311,13 @@ async fn handler(
     if let Err(response) = check_model_serving_ready(&state, &model) {
         return adapt_openai_error(response);
     }
-    let engine = match state
+    // Select the engine and its card's KV block size from the same WorkerSet so
+    // request-trace replay hashes match the blocks the router will see.
+    let selection = match state
         .manager()
-        .get_generate_engine_for_capability(&model, SGLANG_GENERATE_CAPABILITY)
+        .get_generate_engine_for_capability_with_routing(&model, SGLANG_GENERATE_CAPABILITY)
     {
-        Ok(engine) => engine,
+        Ok(selection) => selection,
         Err(error) => {
             let status = match error {
                 crate::discovery::ModelManagerError::ModelUnavailable(_) => {
@@ -326,6 +328,8 @@ async fn handler(
             return error_response(status, error.to_string());
         }
     };
+    let trace_block_size = selection.kv_cache_block_size as usize;
+    let engine = selection.engine;
 
     let request_context = resolve_request_context(&headers, request.rid.as_deref());
     let preprocessed = match preprocessed_request(
@@ -344,6 +348,16 @@ async fn handler(
             Ok(context) => context,
             Err(response) => return adapt_openai_error(response),
         };
+    // Build request-end trace state after header metadata (x-request-id,
+    // agent context) is attached, mirroring the OpenAI preprocessor path.
+    let (preprocessed, trace_context) = context.into_parts();
+    let trace_state = crate::request_trace::build_request_end_trace_state(
+        &preprocessed,
+        &preprocessed.tracker,
+        &trace_context,
+        trace_block_size,
+    );
+    let context = trace_context.map(|()| preprocessed);
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
@@ -371,6 +385,7 @@ async fn handler(
             state.clone(),
             stream_handle,
             streaming,
+            trace_state,
         )
         .instrument(dispatch_span),
     )
@@ -395,6 +410,7 @@ async fn dispatch(
     state: Arc<service_v2::State>,
     stream_handle: ConnectionHandle,
     streaming: bool,
+    trace_state: Option<crate::request_trace::RequestEndTraceState>,
 ) -> Response {
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         state.manager().metric_model_for(&model),
@@ -473,6 +489,10 @@ async fn dispatch(
     };
 
     let engine_context = stream.context();
+    // Wrap the engine stream itself so both the unary fold and SSE paths emit
+    // request_end once the router has recorded timing/worker/osl on the tracker.
+    let stream =
+        crate::request_trace::wrap_generate_request_end_stream(Box::pin(stream), trace_state);
     if !streaming {
         let fold = SglangGenerateStream::fold(stream, merger());
         return match run_until_killed(request_context.as_ref(), fold).await {
@@ -576,6 +596,7 @@ mod tests {
             state.clone(),
             ConnectionHandle::create_disabled(tx),
             true,
+            None,
         )
         .await;
 
@@ -763,6 +784,7 @@ mod tests {
             state.clone(),
             stream_handle,
             true,
+            None,
         )
         .await;
         connection_handle.disarm();
@@ -848,6 +870,7 @@ mod tests {
                 state,
                 ConnectionHandle::create_disabled(tx),
                 false,
+                None,
             )
             .await;
             assert_eq!(response.status(), status);
@@ -858,6 +881,108 @@ mod tests {
                 serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
                 body
             );
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn successful_dispatch_emits_one_request_end_trace_record() {
+        const WORKER_ID: u64 = 987654321;
+
+        crate::request_trace::init_bus_for_test(64);
+        let chunk = |ids: serde_json::Value| {
+            crate::protocols::Annotated::from_data(LLMEngineOutput {
+                engine_data: Some(serde_json::json!({"sglang_response": {"output_ids": ids}})),
+                ..Default::default()
+            })
+        };
+        for streaming in [false, true] {
+            let mut rx = crate::request_trace::subscribe();
+            let request: SglangGenerateRequest = serde_json::from_value(serde_json::json!({
+                "input_ids": [1, 2, 3],
+                "stream": streaming,
+            }))
+            .unwrap();
+            let preprocessed =
+                preprocessed_request(request, "test-model", None, "req-sglang-trace").unwrap();
+            preprocessed.tracker.as_ref().unwrap().record_worker(
+                WORKER_ID,
+                Some(0),
+                crate::discovery::WORKER_TYPE_DECODE,
+            );
+            let (preprocessed, trace_context) = Context::new(preprocessed).into_parts();
+            let trace_request_id = trace_context.id().to_string();
+            let trace_state = crate::request_trace::build_request_end_trace_state_for_test(
+                &preprocessed,
+                &preprocessed.tracker,
+                &trace_context,
+                2,
+            );
+            assert!(trace_state.is_some(), "eligible request builds trace state");
+            let context = trace_context.map(|()| preprocessed);
+
+            let state = service_v2::HttpService::builder()
+                .build()
+                .unwrap()
+                .state_clone();
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let response = dispatch(
+                Arc::new(ReplayEngine(vec![
+                    chunk(serde_json::json!([5])),
+                    chunk(serde_json::json!([6])),
+                ])),
+                context,
+                "req-sglang-trace".to_string(),
+                "test-model".to_string(),
+                state,
+                ConnectionHandle::create_disabled(tx),
+                streaming,
+                trace_state,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "streaming={streaming}");
+            // Drain the body so the SSE path runs the engine stream to completion.
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+
+            let record = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let record = rx.recv().await.expect("trace bus receives");
+                    if record.event_type == crate::request_trace::RequestTraceEventType::RequestEnd
+                        && record
+                            .request
+                            .as_ref()
+                            .is_some_and(|request| request.request_id == trace_request_id)
+                    {
+                        return record;
+                    }
+                }
+            })
+            .await
+            .expect("request_end record before timeout");
+
+            let request = record.request.expect("request metrics");
+            assert_eq!(request.input_tokens, Some(3), "streaming={streaming}");
+            let replay = request.replay.expect("replay metrics");
+            assert_eq!(replay.trace_block_size, 2);
+            assert_eq!(replay.input_length, 3);
+            assert_eq!(replay.input_sequence_hashes.len(), 2);
+            assert_eq!(
+                request.worker.and_then(|worker| worker.decode_worker_id),
+                Some(WORKER_ID)
+            );
+
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            while let Ok(extra) = rx.try_recv() {
+                assert!(
+                    extra
+                        .request
+                        .as_ref()
+                        .is_none_or(|request| request.request_id != trace_request_id),
+                    "request_end must be emitted once (streaming={streaming})"
+                );
+            }
         }
     }
 }

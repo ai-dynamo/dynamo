@@ -9,6 +9,7 @@ use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 
+use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::{
@@ -68,6 +69,24 @@ pub(crate) fn build_request_end_trace_state(
         context,
         trace_block_size,
         super::policy().emit_request_end_records(),
+    )
+}
+
+/// Bypasses the env-derived `OnceLock` policy so dispatch-level tests can enable
+/// request-end capture deterministically.
+#[cfg(test)]
+pub(crate) fn build_request_end_trace_state_for_test(
+    common_request: &PreprocessedRequest,
+    tracker: &Option<Arc<RequestTracker>>,
+    context: &Context<()>,
+    trace_block_size: usize,
+) -> Option<RequestEndTraceState> {
+    build_request_end_trace_state_for_policy(
+        common_request,
+        tracker,
+        context,
+        trace_block_size,
+        true,
     )
 }
 
@@ -222,6 +241,15 @@ pub(crate) fn wrap_completion_request_end_stream(
         response
     });
     wrap_request_end_stream(Box::pin(stream), trace_state)
+}
+
+/// Token-in/token-out `/generate` bypasses the OpenAI postprocessor, so there is
+/// no choice-level finish-reason metadata to capture; only completion is hooked.
+pub(crate) fn wrap_generate_request_end_stream(
+    stream: Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>>,
+    trace_state: Option<RequestEndTraceState>,
+) -> Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>> {
+    wrap_request_end_stream(stream, trace_state)
 }
 
 #[cfg(test)]
