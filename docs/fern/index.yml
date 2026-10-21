@@ -744,7 +744,7 @@ navigation:
             path: pages/use-cases/agents/agent-simulation.mdx
           - section: ThunderAgent Program Scheduler
             collapsed: true
-            slug: thunderagent-program-scheduler
+            slug: thunder-agent-program-scheduler
             path: pages/use-cases/agents/thunderagent-program-scheduler.md
             contents:
               - page: ThunderAgent Python Router
