@@ -770,6 +770,13 @@ impl Indexer {
     /// Device-tier overlap scores, including side-indexer credit. Tier-aware
     /// callers should use [`Self::find_tiered_matches`].
     pub async fn find_matches(&self, hashes: Vec<LocalBlockHash>) -> Result<OverlapScores> {
+        if let Indexer::Single { lower_tier, .. } | Indexer::Concurrent { lower_tier, .. } = self
+            && lower_tier.group_residency().is_active()
+        {
+            // Hybrid workers are present: the pipeline cuts their scores to the
+            // last boundary with a recurrent state, after the side merge too.
+            return Ok(self.find_match_details(hashes).await?.overlap_scores);
+        }
         let Some(side) = self.approx() else {
             return self.find_primary_matches(hashes).await;
         };
@@ -785,16 +792,6 @@ impl Indexer {
 
     /// Device-tier overlap scores from the primary only (no side-indexer credit).
     async fn find_primary_matches(&self, hashes: Vec<LocalBlockHash>) -> Result<OverlapScores> {
-        if let Indexer::Single { lower_tier, .. } | Indexer::Concurrent { lower_tier, .. } = self
-            && lower_tier.group_residency().is_active()
-        {
-            // Hybrid workers are present: go through the pipeline so their
-            // scores are cut to the last boundary with a recurrent state.
-            return Ok(self
-                .find_primary_match_details(hashes)
-                .await?
-                .overlap_scores);
-        }
         Ok(match self {
             Indexer::Single { primary, .. } => primary.find_matches(hashes).await?,
             Indexer::Concurrent { primary, .. } => primary.find_matches(hashes).await?,
@@ -1176,7 +1173,6 @@ mod tests {
                 .map(LocalBlockHash)
                 .collect::<Vec<_>>(),
         );
-        // Recurrent group 1 of the hybrid worker has a state at block 1 only.
         let mamba = RouterEvent::with_storage_tier(
             hybrid.worker_id,
             KvCacheEvent {
