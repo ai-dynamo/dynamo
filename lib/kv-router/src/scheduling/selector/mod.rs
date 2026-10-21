@@ -234,7 +234,7 @@ impl RouterSelectionTelemetry {
         let filtered = filters.filtered_count() + policy_filtered;
         for (field, value) in [
             ("dynamo.router.candidate.count", candidate_count),
-            ("dynamo.router.candidate.eligible.count", candidate_count),
+            ("dynamo.router.candidate.eligible.count", filters.eligible),
             ("dynamo.router.candidate.filtered.count", filtered),
             (
                 "dynamo.router.candidate.filtered.not_allowed",

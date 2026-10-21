@@ -657,4 +657,82 @@ mod tests {
 
         assert_eq!(reads.get(), 2);
     }
+
+    #[test]
+    fn dispatch_span_records_only_the_last_target_dp_rank() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::prelude::*;
+
+        #[derive(Clone, Default)]
+        struct Recorded(Arc<Mutex<Vec<(&'static str, String)>>>);
+
+        impl tracing::field::Visit for Recorded {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((field.name(), format!("{value:?}")));
+            }
+
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((field.name(), value.to_owned()));
+            }
+        }
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorded {
+            fn on_record(
+                &self,
+                _: &tracing::Id,
+                values: &tracing::span::Record<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                values.record(&mut self.clone());
+            }
+        }
+
+        for (targets, worker, rank) in [
+            (vec![AffinityTarget::new(1, Some(3))], "1", Some("3")),
+            (
+                vec![
+                    AffinityTarget::new(1, Some(3)),
+                    AffinityTarget::new(2, None),
+                ],
+                "2",
+                None,
+            ),
+        ] {
+            let recorded = Recorded::default();
+            let _guard = tracing::subscriber::set_default(
+                tracing_subscriber::registry().with(recorded.clone()),
+            );
+            let dispatch = DispatchSpan {
+                span: tracing::info_span!(
+                    "request.dispatch",
+                    "dynamo.dispatch.destination.worker.id" = tracing::field::Empty,
+                    "dynamo.dispatch.destination.dp.rank" = tracing::field::Empty,
+                    "dynamo.dispatch.result" = tracing::field::Empty,
+                ),
+                target: Default::default(),
+            };
+            for target in targets {
+                dispatch.record_target(target);
+            }
+            dispatch.finish("accepted");
+
+            let fields = recorded.0.lock().unwrap();
+            let last = |name: &str| {
+                fields
+                    .iter()
+                    .rev()
+                    .find(|(field, _)| *field == name)
+                    .map(|(_, value)| value.as_str())
+            };
+            assert_eq!(last("dynamo.dispatch.destination.worker.id"), Some(worker));
+            assert_eq!(last("dynamo.dispatch.destination.dp.rank"), rank);
+            assert_eq!(last("dynamo.dispatch.result"), Some("accepted"));
+        }
+    }
 }
