@@ -47,6 +47,7 @@ from .health_check import (
     VllmEmbeddingHealthCheckPayload,
     VllmHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
+    VllmTranscriptionHealthCheckPayload,
 )
 from .instrumented_scheduler import (
     ENV_FPM_BENCHMARK_OUTPUT_PATH,
@@ -59,6 +60,7 @@ from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
 from .realtime import RealtimeHandler, RealtimeTextHandler, RealtimeTranscriptionHandler
 from .state_agent import StateAgentLifecycle, state_agent_settings
+from .transcription_handler import TranscriptionWorkerHandler
 
 
 def _register_request_cache_metrics(
@@ -1736,7 +1738,7 @@ class _WorkerLifecycle:
 
 
 class WorkerFactory:
-    """Factory for creating and initializing multimodal vLLM workers."""
+    """Factory for creating and initializing vLLM workers."""
 
     def __init__(
         self,
@@ -1799,10 +1801,20 @@ class WorkerFactory:
         shutdown_endpoints: list,
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
-        """Create the appropriate multimodal worker based on config flags."""
+        """Create the appropriate worker based on config flags."""
 
         if config.realtime:
             await self._create_realtime_worker(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine=snapshot_engine,
+            )
+            return
+
+        if config.transcription_worker:
+            await self._create_transcription_worker(
                 runtime,
                 config,
                 shutdown_event,
@@ -2021,6 +2033,98 @@ class WorkerFactory:
             raise
         finally:
             handler.cleanup()
+
+    async def _create_transcription_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
+    ) -> None:
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        if snapshot_engine is not None:
+            # A restored snapshot carries the engine together with the stat
+            # logger factory it was built with; bind that factory and retarget
+            # the FPM worker id the same way the realtime worker does.
+            engine_setup, stat_logger_factory = snapshot_engine
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                prometheus_temp_dir,
+                _component_gauges,
+            ) = engine_setup
+            os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+            stat_logger_factory.bind_endpoint(generate_endpoint)
+            await _sync_fpm_worker_id_or_shutdown(
+                engine_client, vllm_config, fpm_worker_id
+            )
+        else:
+            # Publish engine metrics like the realtime worker: without a stat
+            # logger factory the worker would report none.
+            stat_logger_factory = StatLoggerFactory(endpoint=generate_endpoint)
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                prometheus_temp_dir,
+                _component_gauges,
+            ) = self.setup_vllm_engine(
+                config,
+                stat_logger_factory,
+                fpm_worker_id=fpm_worker_id,
+            )
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        stat_logger_factory.set_num_gpu_blocks_all(
+            per_rank_kv_blocks(vllm_config.cache_config.num_gpu_blocks, dp_size) or 0
+        )
+        stat_logger_factory.init_publish()
+        handler = TranscriptionWorkerHandler(
+            runtime=runtime,
+            engine=engine_client,
+            config=config,
+            shutdown_event=shutdown_event,
+        )
+        model_name = config.served_model_name or config.model
+        health_payload = VllmTranscriptionHealthCheckPayload(model_name).to_dict()
+        metric_labels = [
+            (prometheus_names.labels.MODEL, model_name),
+            (prometheus_names.labels.MODEL_NAME, model_name),
+        ]
+
+        register_model_taint_route(runtime, generate_endpoint)
+        logger.info("Starting to serve the transcription worker endpoint...")
+        try:
+            await asyncio.gather(
+                generate_endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=metric_labels,
+                    health_check_payload=health_payload,
+                ),
+                self.register_vllm_model(
+                    ModelInput.Text,
+                    ModelType.Transcriptions,
+                    generate_endpoint,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to serve transcription worker endpoint")
+            raise
+        finally:
+            handler.cleanup()
+            if prometheus_temp_dir is not None:
+                prometheus_temp_dir.cleanup()
 
     async def _create_embedding_worker(
         self,

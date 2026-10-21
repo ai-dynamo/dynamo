@@ -28,7 +28,8 @@ use crate::types::{
         classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
         embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
         images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-        rerank::OpenAIRerankStreamingEngine, videos::OpenAIVideosStreamingEngine,
+        rerank::OpenAIRerankStreamingEngine, transcriptions::OpenAITranscriptionsStreamingEngine,
+        videos::OpenAIVideosStreamingEngine,
     },
 };
 
@@ -297,6 +298,14 @@ impl Model {
             .load()
             .values()
             .any(|worker_set| worker_set.has_audios_engine())
+    }
+
+    /// Check if any WorkerSet has a transcriptions engine.
+    pub fn has_transcriptions_engine(&self) -> bool {
+        self.worker_sets
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_transcriptions_engine())
     }
 
     /// Check if any WorkerSet has a realtime engine.
@@ -635,6 +644,13 @@ impl Model {
     pub fn get_audios_engine(&self) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.audios_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_audios_engine()))
+    }
+
+    pub fn get_transcriptions_engine(
+        &self,
+    ) -> Result<OpenAITranscriptionsStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.transcriptions_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_transcriptions_engine()))
     }
 
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
