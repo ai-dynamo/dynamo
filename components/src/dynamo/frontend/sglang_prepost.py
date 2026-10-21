@@ -7,6 +7,7 @@ import copy
 import inspect
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -39,7 +40,12 @@ from .structural_tag_policy import (
     should_attempt_structural_tag,
 )
 from .thinking import apply_default_thinking_mode_to_template_kwargs
-from .utils import PreprocessError, legacy_guided_decoding, random_call_id
+from .utils import (
+    PreprocessError,
+    extract_mm_urls,
+    legacy_guided_decoding,
+    random_call_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -424,6 +430,67 @@ def _should_use_deepseek_v4_encoding(
     )
 
 
+def _is_deepseek_v41_hint(value: Any) -> bool:
+    hint = _normalize_deepseek_v4_hint(value).replace(".", "")
+    return "deepseekv41" in hint or "deepseekv4p1" in hint
+
+
+@lru_cache(maxsize=16)
+def _read_model_config(model_dir: str) -> dict[str, Any]:
+    try:
+        with open(os.path.join(model_dir, "config.json"), encoding="utf-8") as f:
+            config = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
+def _model_config(tokenizer) -> dict[str, Any]:
+    model_dir = getattr(tokenizer, "name_or_path", None)
+    if not isinstance(model_dir, str) or not os.path.isdir(model_dir):
+        return {}
+    return _read_model_config(model_dir)
+
+
+def _is_deepseek_v41_config(config: dict[str, Any]) -> bool:
+    # Same test as SGLang's chat_encoding.is_deepseek_v41_arch.
+    architectures = config.get("architectures") or []
+    arch = str(architectures[0]) if architectures else ""
+    return config.get("model_type") == "deepseek_v41" or "DeepseekV41" in arch
+
+
+def _deepseek_chat_encoding(
+    request: dict[str, Any],
+    *,
+    tokenizer,
+    tool_call_parser_name: str | None,
+    reasoning_parser_name: str | None,
+) -> str | None:
+    """The SGLang DeepSeek encoder for this request: "dsv41", "dsv4" or None.
+
+    V4.1 is checked first because every V4.1 hint also contains "deepseekv4".
+    """
+    if getattr(tokenizer, "chat_template", None) is not None:
+        return None
+    if _is_deepseek_v41_config(_model_config(tokenizer)) or any(
+        _is_deepseek_v41_hint(value)
+        for value in (
+            request.get("model"),
+            tool_call_parser_name,
+            reasoning_parser_name,
+        )
+    ):
+        return "dsv41"
+    if _should_use_deepseek_v4_encoding(
+        request,
+        tokenizer=tokenizer,
+        tool_call_parser_name=tool_call_parser_name,
+        reasoning_parser_name=reasoning_parser_name,
+    ):
+        return "dsv4"
+    return None
+
+
 def _filter_template_tools(
     request: dict[str, Any],
     *,
@@ -573,6 +640,102 @@ def _render_deepseek_v4_prompt_token_ids(
         thinking_mode=thinking_mode,
         reasoning_effort=reasoning_effort,
     )
+    return _normalize_prompt_token_ids(tokenizer.encode(prompt))
+
+
+def _render_deepseek_v41_prompt_token_ids(
+    request: dict[str, Any],
+    *,
+    messages: list[dict[str, Any]],
+    tokenizer,
+    template_tools: list[dict[str, Any]] | None,
+) -> list[int]:
+    """Render DeepSeek-V4.1 prompt token ids via SGLang's ``encoding_dsv41``.
+
+    Mirrors the ``dsv41`` branch of SGLang's ``serving_chat``. The V4.1 encoder
+    reads OpenAI content parts itself and returns the images in prompt order.
+    Each image becomes one ``image_token_id``, which SGLang's V4.1 processor
+    expands, so the prompt must hold one per image that the worker receives.
+    """
+    try:
+        from sglang.srt.entrypoints.openai import encoding_dsv41
+        from sglang.srt.entrypoints.openai.chat_encoding import (
+            default_dsv41_reasoning_effort_from_env,
+            dsv41_tool_payload,
+            parse_dsv41_reasoning_effort,
+        )
+    except ImportError as exc:
+        raise ValueError(
+            "DeepSeek-V4.1 preprocessing requires SGLang's "
+            "sglang.srt.entrypoints.openai.encoding_dsv41 encoder. "
+            "Install an SGLang build that includes the DeepSeek-V4.1 integration."
+        ) from exc
+
+    encoding_messages = copy.deepcopy(messages)
+    for msg in encoding_messages:
+        if msg.get("content") is None:
+            msg["content"] = ""
+
+    if template_tools:
+        # Render only the fields the client sent, as SGLang does: its request
+        # model holds the client's tools, while convert_tools() fills defaults.
+        chosen = {tool["function"]["name"] for tool in template_tools}
+        tools = [
+            dsv41_tool_payload(SglangTool.model_validate(tool))
+            for tool in request.get("tools") or []
+            if (tool.get("function") or {}).get("name") in chosen
+        ]
+        if not encoding_messages or encoding_messages[0].get("role") != "system":
+            encoding_messages.insert(0, {"role": "system", "content": ""})
+        encoding_messages[0]["tools"] = tools
+
+    if (task := request.get("task")) is not None:
+        encoding_dsv41.attach_task_to_last_user_message(encoding_messages, task)
+
+    chat_template_kwargs = dict(
+        request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
+    )
+    thinking_mode = "thinking" if chat_template_kwargs.get("thinking") else "chat"
+    requested_effort = request.get("reasoning_effort")
+    if requested_effort is None:
+        requested_effort = chat_template_kwargs.get("reasoning_effort")
+    reasoning_effort = parse_dsv41_reasoning_effort(requested_effort)
+    if reasoning_effort is None:
+        reasoning_effort = default_dsv41_reasoning_effort_from_env(
+            os.environ.get("SGLANG_DSV41_REASONING_EFFORT")
+        )
+
+    try:
+        prompt, media = encoding_dsv41.encode_messages(
+            encoding_messages,
+            thinking_mode=thinking_mode,
+            reasoning_effort=reasoning_effort,
+            return_multi_modal_data=True,
+        )
+    except ValueError as exc:
+        raise PreprocessError(str(exc)) from exc
+
+    images = media["images"]
+    if images:
+        image_token_id = _model_config(tokenizer).get("image_token_id")
+        if not isinstance(image_token_id, int):
+            raise PreprocessError("image input is not supported for this model")
+        # The worker receives extract_mm_urls()'s images; each must line up
+        # with the placeholder the encoder put at its position.
+        try:
+            mm_data, _ = extract_mm_urls(messages)
+        except ValueError as exc:
+            raise PreprocessError(str(exc)) from exc
+        forwarded = [item.get("Url") for item in (mm_data or {}).get("image_url", [])]
+        if [image["url"] for image in images] != forwarded:
+            raise PreprocessError(
+                "DeepSeek-V4.1 images must be URL image_url parts in user or tool "
+                "messages"
+            )
+        prompt = prompt.replace(
+            encoding_dsv41.IMAGE_PLACEHOLDER,
+            tokenizer.convert_ids_to_tokens(image_token_id),
+        )
     return _normalize_prompt_token_ids(tokenizer.encode(prompt))
 
 
@@ -937,12 +1100,20 @@ def preprocess_chat_request(
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
     )
 
-    if _should_use_deepseek_v4_encoding(
+    deepseek_encoding = _deepseek_chat_encoding(
         request,
         tokenizer=tokenizer,
         tool_call_parser_name=tool_call_parser_name,
         reasoning_parser_name=reasoning_parser_name,
-    ):
+    )
+    if deepseek_encoding == "dsv41":
+        prompt_token_ids = _render_deepseek_v41_prompt_token_ids(
+            request,
+            messages=messages,
+            tokenizer=tokenizer,
+            template_tools=template_tools,
+        )
+    elif deepseek_encoding == "dsv4":
         prompt_token_ids = _render_deepseek_v4_prompt_token_ids(
             request,
             messages=messages,
