@@ -51,6 +51,8 @@ runs:
         STORAGE_SIZE: ${{ inputs.storage_size }}
         STORAGE_CLASS: ${{ inputs.storage_class }}
         STORAGE_PVC_NAME: ${{ inputs.storage_pvc_name }}
+        AGENT_CPU_REQUEST: 500m
+        PAGEBROKER_CPU_REQUEST: '1'
       run: |
         echo "::group::Install snapshot-agent"
         set -euo pipefail
@@ -70,6 +72,9 @@ runs:
           exit 1
         fi
 
+        # CI reserves less CPU than the chart default (pagebroker 8, agent 2):
+        # observed use is well under 1 CPU, and one agent pod per GPU node per
+        # concurrent run otherwise exhausts node CPU. Limits are unchanged.
         helm upgrade --install "${RELEASE_NAME}" oci://ghcr.io/ai-dynamo/snapshot/snapshot \
           --version "${CHART_VERSION}" \
           --namespace "${NAMESPACE}" \
@@ -80,6 +85,8 @@ runs:
           --set storage.pvc.create=true \
           --set storage.pvc.size="${STORAGE_SIZE}" \
           --set-string storage.pvc.storageClass="${STORAGE_CLASS}" \
+          --set pageBroker.resources.requests.cpu="${PAGEBROKER_CPU_REQUEST}" \
+          --set daemonset.resources.requests.cpu="${AGENT_CPU_REQUEST}" \
           --debug
 
         kubectl wait --for=condition=Established \
@@ -105,6 +112,18 @@ runs:
         if [[ -z "${DAEMONSET_NAME}" ]]; then
           echo "::error::snapshot-agent DaemonSet was not created"
           kubectl get deployment,daemonset,pods -n "${NAMESPACE}" -o wide
+          exit 1
+        fi
+
+        # Helm ignores unknown --set keys; fail if the CPU overrides didn't apply.
+        AGENT_CPU="$(kubectl get daemonset "${DAEMONSET_NAME}" \
+          -n "${NAMESPACE}" \
+          -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].resources.requests.cpu}')"
+        PAGEBROKER_CPU="$(kubectl get daemonset "${DAEMONSET_NAME}" \
+          -n "${NAMESPACE}" \
+          -o jsonpath='{.spec.template.spec.containers[?(@.name=="pagebroker")].resources.requests.cpu}')"
+        if [[ "${AGENT_CPU}" != "${AGENT_CPU_REQUEST}" || "${PAGEBROKER_CPU}" != "${PAGEBROKER_CPU_REQUEST}" ]]; then
+          echo "::error::snapshot-agent CPU requests are agent=${AGENT_CPU} pagebroker=${PAGEBROKER_CPU}; expected agent=${AGENT_CPU_REQUEST} pagebroker=${PAGEBROKER_CPU_REQUEST}"
           exit 1
         fi
 

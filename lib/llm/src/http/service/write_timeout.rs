@@ -14,8 +14,6 @@ use std::sync::{
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use axum_server::accept::{Accept, NoDelayAcceptor};
-use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use futures::task::AtomicWaker;
 use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -89,6 +87,12 @@ pub(super) struct ConnectionService<S> {
     deadline: ConnectionDeadline,
 }
 
+impl<S> ConnectionService<S> {
+    pub(super) fn new(inner: S, deadline: ConnectionDeadline) -> Self {
+        Self { inner, deadline }
+    }
+}
+
 impl<S, B> tower::Service<axum::http::Request<B>> for ConnectionService<S>
 where
     S: tower::Service<axum::http::Request<B>>,
@@ -107,75 +111,6 @@ where
     }
 }
 
-#[derive(Clone)]
-pub(super) struct WriteTimeoutAcceptor<A> {
-    inner: A,
-    timeout: Duration,
-}
-
-impl<A> WriteTimeoutAcceptor<A> {
-    fn new(inner: A, timeout: Duration) -> Self {
-        Self { inner, timeout }
-    }
-}
-
-impl<A, I, S> Accept<I, S> for WriteTimeoutAcceptor<A>
-where
-    A: Accept<I, S>,
-    A::Future: Send + 'static,
-    A::Stream: Send + 'static,
-    A::Service: Send + 'static,
-{
-    type Stream = WriteTimeoutIo<A::Stream>;
-    type Service = ConnectionService<A::Service>;
-    type Future = Pin<Box<dyn Future<Output = io::Result<(Self::Stream, Self::Service)>> + Send>>;
-
-    fn accept(&self, stream: I, service: S) -> Self::Future {
-        let accepted = self.inner.accept(stream, service);
-        let timeout = self.timeout;
-        Box::pin(async move {
-            let (inner, service) = accepted.await?;
-            let deadline = ConnectionDeadline::default();
-            Ok((
-                WriteTimeoutIo {
-                    inner,
-                    timeout,
-                    stalled: None,
-                    is_write_pending: false,
-                    expired: false,
-                    connection_deadline: deadline.clone(),
-                    transfer_timer: None,
-                },
-                ConnectionService {
-                    inner: service,
-                    deadline,
-                },
-            ))
-        })
-    }
-}
-
-/// Acceptor for plaintext connections: `TCP_NODELAY`, then the write-idle timeout.
-///
-/// Streamed tokens are small writes. With Nagle's algorithm on, the first one waits
-/// for the client's ACK of the response headers, and a client that delays its ACKs,
-/// as a gateway in front of the Frontend can, holds it back 40 ms or more.
-pub(super) fn http_acceptor(timeout: Duration) -> WriteTimeoutAcceptor<NoDelayAcceptor> {
-    WriteTimeoutAcceptor::new(NoDelayAcceptor::new(), timeout)
-}
-
-/// [`http_acceptor`] for TLS: `TCP_NODELAY` applies to the TCP socket, so it
-/// sits below the TLS handshake.
-pub(super) fn https_acceptor(
-    config: RustlsConfig,
-    timeout: Duration,
-) -> WriteTimeoutAcceptor<RustlsAcceptor<NoDelayAcceptor>> {
-    WriteTimeoutAcceptor::new(
-        RustlsAcceptor::new(config).acceptor(NoDelayAcceptor::new()),
-        timeout,
-    )
-}
-
 pub(super) struct WriteTimeoutIo<I> {
     inner: I,
     timeout: Duration,
@@ -187,6 +122,22 @@ pub(super) struct WriteTimeoutIo<I> {
 }
 
 impl<I> WriteTimeoutIo<I> {
+    pub(super) fn new(
+        inner: I,
+        timeout: Duration,
+        connection_deadline: ConnectionDeadline,
+    ) -> Self {
+        Self {
+            inner,
+            timeout,
+            stalled: None,
+            is_write_pending: false,
+            expired: false,
+            connection_deadline,
+            transfer_timer: None,
+        }
+    }
+
     fn check_timeout(&mut self, cx: &mut Context<'_>) -> io::Result<()> {
         if let Some(deadline) = self.connection_deadline.next(cx) {
             let timer = self
@@ -304,33 +255,18 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for WriteTimeoutIo<I> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::server::serve;
     use super::*;
     use axum::{
         Router,
         body::{Body, Bytes},
         routing::get,
     };
+    use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    // The TLS path needs no separate check: NoDelayAcceptor accepts only a
-    // TcpStream, so https_acceptor cannot place it anywhere but below TLS.
-    #[tokio::test]
-    async fn accepted_connections_turn_nagle_off() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (_client, accepted) =
-            tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
-        let (stream, _) = accepted.unwrap();
-        assert!(
-            !stream.nodelay().unwrap(),
-            "accepted sockets start with Nagle on"
-        );
-        let (io, _) = http_acceptor(Duration::from_secs(1))
-            .accept(stream, ())
-            .await
-            .unwrap();
-        assert!(io.inner.nodelay().unwrap());
-    }
+    use tokio_rustls::TlsAcceptor;
+    use tokio_util::sync::CancellationToken;
+    use tokio_util::task::AbortOnDropHandle;
 
     #[tokio::test(start_paused = true)]
     async fn completed_transfers_remove_their_connection_deadline() {
@@ -338,15 +274,7 @@ mod tests {
         let connection = ConnectionDeadline::default();
         let first = connection.start(Duration::from_secs(1));
         let second = connection.start(Duration::from_secs(5));
-        let mut writer = WriteTimeoutIo {
-            inner,
-            timeout: Duration::from_secs(30),
-            stalled: None,
-            is_write_pending: false,
-            expired: false,
-            connection_deadline: connection.clone(),
-            transfer_timer: None,
-        };
+        let mut writer = WriteTimeoutIo::new(inner, Duration::from_secs(30), connection.clone());
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         writer.check_timeout(&mut cx).unwrap();
@@ -379,15 +307,11 @@ mod tests {
     async fn write_progress_resets_deadline_and_stalled_write_expires() {
         tokio::time::timeout(Duration::from_secs(2), async {
             let (inner, mut reader) = tokio::io::duplex(1);
-            let mut writer = WriteTimeoutIo {
+            let mut writer = WriteTimeoutIo::new(
                 inner,
-                timeout: Duration::from_millis(100),
-                stalled: None,
-                is_write_pending: false,
-                expired: false,
-                connection_deadline: ConnectionDeadline::default(),
-                transfer_timer: None,
-            };
+                Duration::from_millis(100),
+                ConnectionDeadline::default(),
+            );
             writer.write_all(b"a").await.unwrap();
             let write = writer.write_all(b"b");
             tokio::pin!(write);
@@ -427,113 +351,49 @@ mod tests {
     }
 
     // Actual HTTP and TLS connections with a client that stops consuming data.
-    // Runs the same acceptor used by the frontend, without GPU/model infrastructure.
+    // Runs the same accept loop used by the frontend, without GPU/model infrastructure.
+    // Serial: the HTTP/2 test below shortens the transfer deadline through the environment.
     #[tokio::test]
+    #[serial_test::serial]
     async fn stalled_download_is_bounded_for_http_and_https() {
         tokio::time::timeout(Duration::from_secs(15), async {
             for tls in [false, true] {
                 for shutdown in [false, true] {
-                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                    let addr = listener.local_addr().unwrap();
-                    let handle = axum_server::Handle::new();
+                    let (upstream, released, _upstream) = spawn_upstream().await;
+                    let cert =
+                        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
                     let idle = if shutdown {
                         Duration::from_secs(30)
                     } else {
                         Duration::from_millis(100)
                     };
-                    let upstream_listener =
-                        tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                    let upstream_addr = upstream_listener.local_addr().unwrap();
-                    let upstream_handle = axum_server::Handle::new();
-                    let dropped = std::sync::Arc::new(tokio::sync::Notify::new());
-                    let body_dropped = dropped.clone();
-                    let upstream_router = Router::new().route(
-                        "/v1/files/file-1/content",
-                        get(move || {
-                            let notice = DropNotice(body_dropped.clone());
-                            async move {
-                                let chunk = Bytes::from(vec![b'x'; 65536]);
-                                Body::from_stream(async_stream::stream! {
-                                    let _notice = notice;
-                                    loop { yield Ok::<_, io::Error>(chunk.clone()); }
-                                })
-                            }
-                        }),
-                    );
-                    let upstream = TestServer {
-                        task: tokio::spawn(
-                            axum_server::from_tcp(upstream_listener.into_std().unwrap())
-                                .handle(upstream_handle.clone())
-                                .serve(upstream_router.into_make_service()),
-                        ),
-                        handle: upstream_handle,
-                    };
-                    let (_, router) = super::super::batch_proxy::router(
-                        &format!("http://{upstream_addr}"),
-                        None,
-                        None,
-                        1024,
-                        1024,
-                        tokio_util::sync::CancellationToken::new(),
+                    let stop = CancellationToken::new();
+                    let stopped = stop.clone().cancelled_owned();
+                    let (addr, frontend) = spawn_frontend(
+                        upstream,
+                        tls.then(|| tls_acceptor(&cert)),
+                        idle,
+                        async move {
+                            stopped.await;
+                            Duration::from_millis(100)
+                        },
                     )
-                    .unwrap();
-                    let mut client: Box<dyn TestConnection>;
-                    let task;
-                    if tls {
-                        let cert =
-                            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-                        let provider =
-                            std::sync::Arc::new(rustls::crypto::ring::default_provider());
-                        let config = rustls::ServerConfig::builder_with_provider(provider.clone())
-                            .with_safe_default_protocol_versions()
-                            .unwrap()
-                            .with_no_client_auth()
-                            .with_single_cert(
-                                vec![cert.cert.der().clone()],
-                                rustls::pki_types::PrivatePkcs8KeyDer::from(
-                                    cert.key_pair.serialize_der(),
-                                )
-                                .into(),
-                            )
-                            .unwrap();
-                        let config = axum_server::tls_rustls::RustlsConfig::from_config(
-                            std::sync::Arc::new(config),
-                        );
-                        let server = axum_server::from_tcp(listener.into_std().unwrap())
-                            .acceptor(https_acceptor(config, idle))
-                            .handle(handle.clone())
-                            .serve(router.into_make_service());
-                        task = tokio::spawn(server);
+                    .await;
+                    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+                    let mut client: Box<dyn TestConnection> = if tls {
                         let mut roots = rustls::RootCertStore::empty();
                         roots.add(cert.cert.der().clone()).unwrap();
+                        let provider = Arc::new(rustls::crypto::ring::default_provider());
                         let config = rustls::ClientConfig::builder_with_provider(provider)
                             .with_safe_default_protocol_versions()
                             .unwrap()
                             .with_root_certificates(roots)
                             .with_no_client_auth();
-                        let connector =
-                            tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
-                        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-                        client = Box::new(
-                            connector
-                                .connect(
-                                    rustls::pki_types::ServerName::try_from("localhost").unwrap(),
-                                    stream,
-                                )
-                                .await
-                                .unwrap(),
-                        );
+                        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+                        let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+                        Box::new(connector.connect(name, stream).await.unwrap())
                     } else {
-                        let server = axum_server::from_tcp(listener.into_std().unwrap())
-                            .acceptor(http_acceptor(idle))
-                            .handle(handle.clone())
-                            .serve(router.into_make_service());
-                        task = tokio::spawn(server);
-                        client = Box::new(tokio::net::TcpStream::connect(addr).await.unwrap());
-                    }
-                    let mut frontend = TestServer {
-                        handle: handle.clone(),
-                        task,
+                        Box::new(stream)
                     };
                     client
                         .write_all(
@@ -550,26 +410,15 @@ mod tests {
                     assert!(headers.starts_with(b"HTTP/1.1 200"));
                     // Keep the socket open but stop reading, filling downstream buffers.
                     if shutdown {
-                        handle.graceful_shutdown(Some(Duration::from_millis(100)));
+                        stop.cancel();
+                        tokio::time::timeout(Duration::from_secs(3), frontend)
+                            .await
+                            .expect("shutdown waited on the stalled connection")
+                            .unwrap();
                     }
-                    tokio::time::timeout(Duration::from_secs(3), async {
-                        while handle.connection_count() != 0 {
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                    })
-                    .await
-                    .expect("stalled connection did not close independently of body polling");
-                    tokio::time::timeout(Duration::from_secs(1), dropped.notified())
+                    tokio::time::timeout(Duration::from_secs(3), released.cancelled())
                         .await
-                        .expect("proxy retained the upstream response after downstream closure");
-                    handle.shutdown();
-                    tokio::time::timeout(Duration::from_secs(1), &mut frontend.task)
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .unwrap();
-                    drop(client);
-                    drop(upstream);
+                        .expect("stalled connection retained the upstream response");
                 }
             }
         })
@@ -583,92 +432,137 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn http2_transfer_deadline_closes_unconsumed_response() {
-        temp_env::async_with_vars([
-            (dynamo_runtime::config::environment_names::llm::DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS, Some("1")),
-        ], tokio::time::timeout(Duration::from_secs(10), async {
-            for is_tls in [false, true] {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let addr = listener.local_addr().unwrap();
-                let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let upstream_addr = upstream_listener.local_addr().unwrap();
-                let upstream_handle = axum_server::Handle::new();
-                let dropped = Arc::new(tokio::sync::Notify::new());
-                let body_dropped = dropped.clone();
-                let upstream_router = Router::new().route("/v1/files/file-1/content", get(move || {
-                    let notice = DropNotice(body_dropped.clone());
-                    async move {
-                        let chunk = Bytes::from(vec![b'x'; 65536]);
-                        Body::from_stream(async_stream::stream! {
-                            let _notice = notice;
-                            loop { yield Ok::<_, io::Error>(chunk.clone()); }
-                        })
-                    }
-                }));
-                let upstream = TestServer {
-                    task: tokio::spawn(axum_server::from_tcp(upstream_listener.into_std().unwrap())
-                        .handle(upstream_handle.clone()).serve(upstream_router.into_make_service())),
-                    handle: upstream_handle,
-                };
-                let (_, proxy) = super::super::batch_proxy::router(
-                    &format!("http://{upstream_addr}"), None, None, 1024, 1024,
-                    tokio_util::sync::CancellationToken::new(),
-                ).unwrap();
-                let handle = axum_server::Handle::new();
-                let idle = Duration::from_secs(30);
-                let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-                let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5))
-                    .add_root_certificate(reqwest::Certificate::from_der(cert.cert.der()).unwrap());
-                let task = if is_tls {
-                    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                        .with_safe_default_protocol_versions().unwrap().with_no_client_auth()
-                        .with_single_cert(vec![cert.cert.der().clone()], rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()).into()).unwrap();
-                    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-                    let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(config));
-                    tokio::spawn(axum_server::from_tcp(listener.into_std().unwrap())
-                        .acceptor(https_acceptor(config, idle)).handle(handle.clone())
-                        .serve(proxy.into_make_service()))
-                } else {
-                    tokio::spawn(axum_server::from_tcp(listener.into_std().unwrap())
-                        .acceptor(http_acceptor(idle)).handle(handle.clone())
-                        .serve(proxy.into_make_service()))
-                };
-                let mut frontend = TestServer { handle: handle.clone(), task };
-                let client = if is_tls { client.build().unwrap() } else { client.http2_prior_knowledge().build().unwrap() };
-                let response = client.get(format!("{}://localhost:{}/v1/files/file-1/content", if is_tls { "https" } else { "http" }, addr.port()))
-                    .send().await.unwrap();
-                assert_eq!(response.version(), reqwest::Version::HTTP_2);
-                assert_eq!(response.status(), reqwest::StatusCode::OK);
-                // Keep the response unread. No socket-write stall or shutdown can make this pass.
-                tokio::time::timeout(Duration::from_secs(3), dropped.notified()).await
-                    .expect("HTTP/2 transfer deadline retained upstream response");
-                tokio::time::timeout(Duration::from_secs(1), async {
-                    while handle.connection_count() != 0 { tokio::time::sleep(Duration::from_millis(10)).await; }
-                }).await.expect("HTTP/2 transfer deadline retained downstream connection");
-                drop(response);
-                handle.shutdown();
-                tokio::time::timeout(Duration::from_secs(1), &mut frontend.task).await.unwrap().unwrap().unwrap();
-                drop(upstream);
-            }
-        })).await.unwrap();
+        use dynamo_runtime::config::environment_names::llm::DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS;
+        temp_env::async_with_vars(
+            [(DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS, Some("1"))],
+            tokio::time::timeout(Duration::from_secs(10), async {
+                for tls in [false, true] {
+                    let (upstream, released, _upstream) = spawn_upstream().await;
+                    let cert =
+                        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+                    let (addr, _frontend) = spawn_frontend(
+                        upstream,
+                        tls.then(|| tls_acceptor(&cert)),
+                        Duration::from_secs(30),
+                        std::future::pending(),
+                    )
+                    .await;
+                    let client = reqwest::Client::builder()
+                        .no_proxy()
+                        .timeout(Duration::from_secs(5))
+                        .add_root_certificate(
+                            reqwest::Certificate::from_der(cert.cert.der()).unwrap(),
+                        );
+                    let client = if tls {
+                        client
+                    } else {
+                        client.http2_prior_knowledge()
+                    };
+                    let scheme = if tls { "https" } else { "http" };
+                    let response = client
+                        .build()
+                        .unwrap()
+                        .get(format!(
+                            "{scheme}://localhost:{}/v1/files/file-1/content",
+                            addr.port()
+                        ))
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(response.version(), reqwest::Version::HTTP_2);
+                    assert_eq!(response.status(), reqwest::StatusCode::OK);
+                    // Keep the response unread. No socket-write stall or shutdown can make this pass.
+                    tokio::time::timeout(Duration::from_secs(3), released.cancelled())
+                        .await
+                        .expect("HTTP/2 transfer deadline retained upstream response");
+                }
+            }),
+        )
+        .await
+        .unwrap();
     }
 
-    struct TestServer {
-        handle: axum_server::Handle,
-        task: tokio::task::JoinHandle<io::Result<()>>,
+    /// Serves an endless file download; the token is cancelled once its body is dropped.
+    async fn spawn_upstream() -> (SocketAddr, CancellationToken, AbortOnDropHandle<()>) {
+        let released = CancellationToken::new();
+        let body_released = released.clone();
+        let router = Router::new().route(
+            "/v1/files/file-1/content",
+            get(move || {
+                let guard = body_released.clone().drop_guard();
+                async move {
+                    let chunk = Bytes::from(vec![b'x'; 65536]);
+                    Body::from_stream(async_stream::stream! {
+                        let _guard = guard;
+                        loop { yield Ok::<_, io::Error>(chunk.clone()); }
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let idle = Duration::from_secs(30);
+        let server = serve(listener, None, router, idle, std::future::pending());
+        (addr, released, AbortOnDropHandle::new(tokio::spawn(server)))
     }
 
-    impl Drop for TestServer {
-        fn drop(&mut self) {
-            self.handle.shutdown();
-            self.task.abort();
-        }
+    /// Serves the batch proxy for `upstream` on the frontend's accept loop.
+    async fn spawn_frontend(
+        upstream: SocketAddr,
+        tls: Option<TlsAcceptor>,
+        write_idle_timeout: Duration,
+        shutdown: impl Future<Output = Duration> + Send + 'static,
+    ) -> (SocketAddr, AbortOnDropHandle<()>) {
+        let (_, router) = super::super::batch_proxy::router(
+            &format!("http://{upstream}"),
+            None,
+            None,
+            1024,
+            1024,
+            CancellationToken::new(),
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve(listener, tls, router, write_idle_timeout, shutdown);
+        (addr, AbortOnDropHandle::new(tokio::spawn(server)))
     }
 
-    struct DropNotice(std::sync::Arc<tokio::sync::Notify>);
+    fn tls_acceptor(cert: &rcgen::CertifiedKey) -> TlsAcceptor {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+        let mut config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.cert.der().clone()], key.into())
+            .unwrap();
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        TlsAcceptor::from(Arc::new(config))
+    }
 
-    impl Drop for DropNotice {
-        fn drop(&mut self) {
-            self.0.notify_one();
-        }
+    // A client that connects and never sends a ClientHello is closed once the TLS
+    // handshake timeout passes, instead of holding its connection task open.
+    #[tokio::test(start_paused = true)]
+    async fn silent_tls_client_is_closed_after_handshake_timeout() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve(
+            listener,
+            Some(tls_acceptor(&cert)),
+            Router::new(),
+            Duration::from_secs(30),
+            std::future::pending(),
+        );
+        let _server = AbortOnDropHandle::new(tokio::spawn(server));
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let mut buf = [0; 1];
+        let read = tokio::time::timeout(Duration::from_secs(60), client.read(&mut buf))
+            .await
+            .expect("silent TLS client was not closed");
+        assert_eq!(read.unwrap(), 0);
+        assert!(started.elapsed() >= Duration::from_secs(10));
     }
 }
