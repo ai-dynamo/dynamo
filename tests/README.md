@@ -506,7 +506,7 @@ pytest -m "nightly and vllm and gpu_1" -v --tb=short
 
 ### Reproducing CI locally
 
-All commands shown in the "Local equivalent" columns above are also documented in [Running Rust Checks and Tests](#running-rust-checks-and-tests) and [Running Python Tests](#running-python-tests). Run Rust commands from the repo root, repeating for each workspace dir: `.`, `lib/bindings/python`, `lib/runtime/examples`, `lib/bindings/kvbm`. Run Python commands inside a container.
+All commands shown in the "Local equivalent" columns above are also documented in [Running Rust Checks and Tests](#running-rust-checks-and-tests) and [Running Python Tests](#running-python-tests). Run Rust commands from the repo root, repeating for each workspace dir: `.`, `lib/bindings/python`, `lib/runtime/examples`. Run Python commands inside a container.
 
 ---
 

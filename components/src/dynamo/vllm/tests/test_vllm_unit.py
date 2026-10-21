@@ -349,6 +349,32 @@ def test_pd_connector_importable_from_module_path():
     assert module.PdConnector.__name__ == "PdConnector"
 
 
+@pytest.mark.parametrize("offload", ["_LMCacheConnectorV1", "_FlexKVConnectorV1"])
+def test_pd_connector_checks_connector_order(monkeypatch, offload):
+    """Test PdConnector takes LMCache or FlexKV first and NIXL second, without KVBM."""
+    pd = importlib.import_module("dynamo.vllm.pd_connector")
+    offload_cls = getattr(pd, offload)
+    if offload_cls is None:
+        pytest.skip(f"{offload} is not available in this vLLM build")
+
+    def children(*classes):
+        def init(self, vllm_config, role, kv_cache_config):
+            self._connectors = [Mock(spec=cls) for cls in classes]
+
+        return init
+
+    monkeypatch.setattr(
+        pd.MultiConnector, "__init__", children(offload_cls, pd.NixlConnector)
+    )
+    pd.PdConnector(vllm_config=None, role=None, kv_cache_config=None)
+
+    monkeypatch.setattr(
+        pd.MultiConnector, "__init__", children(pd.NixlConnector, offload_cls)
+    )
+    with pytest.raises(TypeError, match="first connector"):
+        pd.PdConnector(vllm_config=None, role=None, kv_cache_config=None)
+
+
 # _uses_nixl_connector / _uses_dynamo_connector tests
 
 
