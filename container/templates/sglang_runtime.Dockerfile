@@ -186,9 +186,11 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
 # Nothing on the runtime path runs uv.
 RUN --mount=type=bind,from=ghcr.io/astral-sh/uv:0.13.4,source=/,target=/tmp/uv-image \
     if [ -e /usr/local/bin/uv ]; then \
-        install -m 0755 /tmp/uv-image/uv /tmp/uv-image/uvx /usr/local/bin/ && \
-        /usr/local/bin/uv --version | grep -q '^uv 0\.13\.4 '; \
-    fi
+        install -m 0755 /tmp/uv-image/uv /tmp/uv-image/uvx /usr/local/bin/; \
+    fi && \
+    for u in $(which -a uv uvx); do \
+        "$u" --version | grep -q '^uvx\{0,1\} 0\.13\.4 ' || { echo "unexpected uv at $u" >&2; exit 1; }; \
+    done
 
 # Install SGLang-specific runtime dependencies without changing the upstream
 # dependency solution. imageio-ffmpeg is installed from source (no bundled
