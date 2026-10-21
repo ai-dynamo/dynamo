@@ -119,6 +119,24 @@ class DistributedRuntime:
         """
         ...
 
+    def register_engine_http_handler(
+        self,
+        name: str,
+        callback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    ) -> None:
+        """Register `/engine/{name}/...` on an enabled system server.
+
+        The async callback receives `method`, the relative `path`, and JSON
+        `body` (None for an empty body), and returns `status` and JSON `body`.
+        Registration fails if the name is already registered. No authentication
+        is added; callers must restrict access to the system listener.
+        """
+        ...
+
+    def unregister_engine_http_handler(self, name: str) -> None:
+        """Remove a handler; already dispatched requests may still finish."""
+        ...
+
     def register_engine_route(
         self,
         route_name: str,
