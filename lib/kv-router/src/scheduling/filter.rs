@@ -7,6 +7,8 @@ use super::types::KvSchedulerError;
 use crate::protocols::{
     DpRank, RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
+use crate::sequences::WorkerLoadProjection;
+use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkerEligibilityError {
@@ -42,6 +44,7 @@ pub struct RoutingEligibility<'a> {
     pinned_worker: Option<WorkerWithDpRank>,
     affinity_target: Option<WorkerAffinityTarget>,
     routing_constraints: &'a RoutingConstraints,
+    worker_loads: Option<&'a FxHashMap<WorkerWithDpRank, WorkerLoadProjection>>,
 }
 
 impl<'a> RoutingEligibility<'a> {
@@ -59,7 +62,29 @@ impl<'a> RoutingEligibility<'a> {
             pinned_worker,
             affinity_target: None,
             routing_constraints,
+            worker_loads: None,
         }
+    }
+
+    pub(crate) fn with_worker_loads(
+        mut self,
+        loads: &'a FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) -> Self {
+        self.worker_loads = Some(loads);
+        self
+    }
+
+    fn has_request_capacity<C: WorkerConfigLike>(
+        &self,
+        worker: WorkerWithDpRank,
+        config: &C,
+    ) -> bool {
+        let Some(limit) = config.engine_request_limit().filter(|limit| *limit > 0) else {
+            return true;
+        };
+        self.worker_loads
+            .and_then(|loads| loads.get(&worker))
+            .is_none_or(|load| (load.active_requests as u64) < limit)
     }
 
     #[inline]
@@ -213,7 +238,8 @@ impl<'a> RoutingEligibility<'a> {
             });
         }
 
-        if self.is_worker_overloaded(worker.worker_id) {
+        if self.is_worker_overloaded(worker.worker_id) || !self.has_request_capacity(worker, config)
+        {
             return Err(WorkerEligibilityError::WorkerOverloaded {
                 worker_id: worker.worker_id,
             });
@@ -231,6 +257,9 @@ impl<'a> RoutingEligibility<'a> {
         C: WorkerConfigLike,
         F: FnMut(WorkerWithDpRank, &C) -> bool,
     {
+        let mut predicate = |worker, config: &C| {
+            self.has_request_capacity(worker, config) && predicate(worker, config)
+        };
         if let Some(worker) = self.pinned_worker {
             let Ok(config) = self.validate_worker_rank(workers, worker) else {
                 return false;
@@ -308,9 +337,11 @@ impl<'a> RoutingEligibility<'a> {
         }
         let ranks = config.data_parallel_start_rank()
             ..config.data_parallel_start_rank() + config.data_parallel_size();
-        target
-            .dp_rank
-            .map_or(!ranks.is_empty(), |rank| ranks.contains(&rank))
+        ranks
+            .filter(|rank| target.dp_rank.is_none_or(|target| target == *rank))
+            .any(|rank| {
+                self.has_request_capacity(WorkerWithDpRank::new(target.worker_id, rank), config)
+            })
     }
 
     pub fn for_each_eligible_worker_rank<C, F>(&self, workers: &HashMap<WorkerId, C>, mut visit: F)

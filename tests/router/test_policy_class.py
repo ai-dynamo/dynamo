@@ -254,14 +254,22 @@ def test_weighted_policy_class_client_completion_priority(
         "enable_prefix_caching": False,
     }
 
-    with MockerProcess(
-        request,
-        mocker_args=mocker_args,
-        num_mockers=1,
-        store_backend="etcd",
-        request_plane="nats",
-        model_name=ROUTER_MODEL_NAME,
-    ) as mocker:
+    # Admission covers the client burst; the four-sequence batch still creates
+    # the prefill queue whose weighted completion order this test measures.
+    with monkeypatch.context() as worker_env:
+        worker_env.setenv(
+            "DYN_ENGINE_REQUEST_LIMIT", str(len(POLICY_CLASSES) * REQUESTS_PER_CLASS)
+        )
+        mocker = MockerProcess(
+            request,
+            mocker_args=mocker_args,
+            num_mockers=1,
+            store_backend="etcd",
+            request_plane="nats",
+            model_name=ROUTER_MODEL_NAME,
+        )
+
+    with mocker:
         equal = _run_case(
             request=request,
             mocker=mocker,

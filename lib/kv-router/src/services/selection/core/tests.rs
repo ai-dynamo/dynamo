@@ -128,6 +128,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         data_parallel_size: None,
         max_num_batched_tokens: Some(1024),
         total_kv_blocks: None,
+        engine_request_limit: None,
         stable_routing_id: None,
         is_eagle: None,
         taints: HashSet::new(),
@@ -730,6 +731,52 @@ fn capturing_policy_factory() -> (
         )
     });
     (factory, observed)
+}
+
+#[tokio::test]
+async fn request_capacity_is_enforced_before_composed_policy_and_updates_live() {
+    let (factory, _) = capturing_policy_factory();
+    let core = core_with_host_and_policy(SelectionHost::default(), Some(factory));
+    for id in [1, 2] {
+        let mut worker = worker(id);
+        worker.engine_request_limit = Some(1);
+        core.upsert_worker(worker).await.unwrap();
+    }
+    let first = core
+        .select_and_reserve(reserve_request("first"))
+        .await
+        .unwrap();
+    let second = core
+        .select_and_reserve(reserve_request("second"))
+        .await
+        .unwrap();
+    assert_ne!(first.worker_id, second.worker_id);
+    let full = core
+        .select_and_reserve(reserve_request("full"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        full,
+        SelectionError::Scheduler(KvSchedulerError::AllEligibleWorkersOverloaded)
+    ));
+    core.patch_worker(
+        first.worker_id,
+        serde_json::from_value(serde_json::json!({
+            "engine_request_limit": 2
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let expanded = core
+        .select_and_reserve(reserve_request("expanded"))
+        .await
+        .unwrap();
+    assert_eq!(expanded.worker_id, first.worker_id);
+    for id in ["first", "second", "expanded"] {
+        core.free_reservation(id).await.unwrap();
+    }
+    core.shutdown();
 }
 
 // Keep clock- and poll-order tests independent of the native indexer thread.
@@ -3438,6 +3485,7 @@ fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerC
         data_parallel_size: endpoints.len().max(1) as u32,
         max_num_batched_tokens: None,
         total_kv_blocks: None,
+        engine_request_limit: None,
         stable_routing_id: None,
         is_eagle: None,
         taints: HashSet::new(),

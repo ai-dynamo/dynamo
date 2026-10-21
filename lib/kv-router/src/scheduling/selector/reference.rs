@@ -688,6 +688,60 @@ mod tests {
     }
 
     #[test]
+    fn request_capacity_is_per_rank_and_preserves_pins_and_unknown_limits() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let mut workers = HashMap::from([(
+            7,
+            SimpleWorkerConfig {
+                data_parallel_start_rank: 3,
+                data_parallel_size: 2,
+                engine_request_limit: Some(1),
+                ..Default::default()
+            },
+        )]);
+        let full = WorkerWithDpRank::new(7, 3);
+        let idle = WorkerWithDpRank::new(7, 4);
+        let mut request = base_request(4096);
+        request.overlap.effective_overlap_blocks.insert(full, 256.0);
+        request.worker_loads.insert(
+            full,
+            crate::sequences::WorkerLoadProjection {
+                active_requests: 1,
+                ..Default::default()
+            },
+        );
+        let selector = DefaultWorkerSelector::new(None, "test");
+        let select = |request: &SchedulingRequest, workers: &HashMap<_, _>| {
+            selector.select_worker(WorkerSelectionInput::configured(
+                workers,
+                request,
+                request.eligibility(),
+                16,
+            ))
+        };
+        assert_eq!(select(&request, &workers).unwrap().worker, idle);
+        let target = crate::protocols::WorkerAffinityTarget {
+            worker_id: full.worker_id,
+            dp_rank: Some(full.dp_rank),
+        };
+        assert!(
+            !request
+                .eligibility()
+                .affinity_target_is_eligible(&workers, target)
+        );
+        request.pinned_worker = Some(full);
+        assert!(matches!(
+            select(&request, &workers),
+            Err(KvSchedulerError::PinnedWorkerOverloaded { worker_id: 7 })
+        ));
+        for limit in [None, Some(0)] {
+            workers.get_mut(&7).unwrap().engine_request_limit = limit;
+            assert_eq!(select(&request, &workers).unwrap().worker, full);
+        }
+    }
+
+    #[test]
     fn softmax_sample_orders_extreme_finite_costs() {
         let result = softmax_sample_entries(vec![(0, -f64::MAX), (1, f64::MAX)], 1.0, 0.6);
         assert_eq!(result.0, 0);

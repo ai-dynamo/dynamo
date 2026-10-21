@@ -371,17 +371,15 @@ address.
 </ParamField>
 
 <ParamField path="--engine-request-limit" type="integer" default="null">
-  Maximum requests handled concurrently by the engine. Setting a positive integer enables worker-side
-  admission control. When the engine slots and the Dynamo overflow queue are full, the worker rejects
-  the request and the Frontend returns the configured overload status, 529 by default.
+  Concurrent request limit advertised to the KV router for each data-parallel rank. A positive value overrides reported native engine capacity; when unset, the router uses native capacity when known. A four-rank worker with limit `2` advertises eight slots, two per rank. When every eligible rank is full, the Frontend returns its configured overload status, 529 by default or 429 with `DYN_HTTP_OVERLOAD_STATUS_CODE=429`.
+
+  Counts cover scheduler-visible reservations. This option does not enable a worker-side admission gate or enforce a global engine limit across independent Frontends. The current worker admission boundary is pass-through. See [Request Capacity in KV Routing](../../kubernetes/fault-tolerance/request-rejection.md#request-capacity-in-kv-routing) for upgrade behavior and unknown capacity.
 
   Environment variable: `DYN_ENGINE_REQUEST_LIMIT`
 </ParamField>
 
 <ParamField path="DYN_DYNAMO_REQUEST_QUEUE_LIMIT" type="integer" default="16">
-  Advanced overflow-queue size for requests waiting in Dynamo before entering the engine. Applies only
-  when `--engine-request-limit` or `DYN_ENGINE_REQUEST_LIMIT` is set. Must be at least `2`; the
-  effective per-worker cap is the engine limit plus this queue limit.
+  Legacy overflow-queue setting for worker-side admission implementations. The current pass-through worker boundary does not implement a queue, so this setting does not add buffering or change the KV router's request-capacity limit.
 </ParamField>
 
 <ParamField path="DYN_SYSTEM_HOST" type="string" default="0.0.0.0">

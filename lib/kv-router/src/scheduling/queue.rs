@@ -548,6 +548,7 @@ pub struct SchedulerQueue<
     Sel: WorkerSelector<C> = super::selector::WorkerSelectionPolicy,
     RF: OverlapScoresRefresh = NoopOverlapScoresRefresh,
 > {
+    slots: Arc<ActiveSequencesMultiWorker<P>>,
     admission_tx: mpsc::Sender<AdmissionCommand>,
     runtime_policy: Arc<RuntimePolicyControl>,
     cleanup: Arc<AdmissionCleanup>,
@@ -700,7 +701,7 @@ impl<
             pending_count: Arc::clone(&pending_count),
             pending_isl_tokens: Arc::clone(&pending_isl_tokens),
             class_counters: Arc::clone(&class_counters),
-            slots,
+            slots: Arc::clone(&slots),
             workers_with_configs: workers_with_configs.clone(),
             projected_loads: FxHashMap::default(),
             block_size,
@@ -715,6 +716,7 @@ impl<
         };
         tokio::spawn(actor.run(admission_rx));
         Self {
+            slots,
             admission_tx,
             runtime_policy,
             cleanup,
@@ -875,14 +877,7 @@ impl<
         request: &SchedulingRequest,
         ingress_at: Instant,
     ) -> ClassifyRequest {
-        let available = self
-            .available_worker_provider
-            .as_ref()
-            .and_then(|provider| provider(request));
-        let workers = self.workers_with_configs.borrow();
-        let cached_tokens = SchedulingContext::new(request, &workers)
-            .with_available_workers(available.as_deref())
-            .best_cached_tokens();
+        let cached_tokens = self.best_cached_tokens(request);
         let mut classification =
             ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
                 .with_pinned_worker(request.pinned_worker)
@@ -924,22 +919,32 @@ impl<
         let _ = ack_rx.await;
     }
 
-    fn default_queue_metadata(
-        &self,
-        request: &SchedulingRequest,
-        ingress_at: Instant,
-    ) -> QueueMetadata {
+    fn best_cached_tokens(&self, request: &SchedulingRequest) -> usize {
         let available = self
             .available_worker_provider
             .as_ref()
             .and_then(|provider| provider(request));
         let workers = self.workers_with_configs.borrow();
-        let snapshot = QueueSnapshot::new(
-            request.isl_tokens,
-            SchedulingContext::new(request, &workers)
-                .with_available_workers(available.as_deref())
-                .best_cached_tokens(),
-        );
+        let loads = if workers
+            .values()
+            .any(|config| config.engine_request_limit().is_some_and(|limit| limit > 0))
+        {
+            self.slots.project_worker_loads(None, Instant::now())
+        } else {
+            FxHashMap::default()
+        };
+        SchedulingContext::new(request, &workers)
+            .with_available_workers(available.as_deref())
+            .with_worker_loads(&loads)
+            .best_cached_tokens()
+    }
+
+    fn default_queue_metadata(
+        &self,
+        request: &SchedulingRequest,
+        ingress_at: Instant,
+    ) -> QueueMetadata {
+        let snapshot = QueueSnapshot::new(request.isl_tokens, self.best_cached_tokens(request));
         let class_index = self
             .profile
             .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens);
@@ -2419,6 +2424,189 @@ mod tests {
         ));
 
         (queue, slots, cfg_tx)
+    }
+
+    #[tokio::test]
+    async fn cache_classification_excludes_capacity_full_ranks() {
+        for same_worker in [false, true] {
+            let profile = policy_profile(
+                r#"
+default_policy_family: latency
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: cached
+  - min_tokens: 64
+    bucket: uncached
+policy_classes:
+  - name: latency_cached
+    policy_family: latency
+    cache_bucket: cached
+    quantum: 1
+  - name: latency_uncached
+    policy_family: latency
+    cache_bucket: uncached
+    quantum: 1
+"#,
+            );
+            let (queue, slots, cfg_tx) = make_queue_with_profile_and_sender(2, 16, 65_536, profile);
+            if same_worker {
+                slots.upsert_worker(WorkerDpRange::new(0, 0, 2)).unwrap();
+            }
+            cfg_tx.send_modify(|configs| {
+                for config in configs.values_mut() {
+                    config.engine_request_limit = Some(1);
+                }
+                if same_worker {
+                    configs.get_mut(&0).unwrap().data_parallel_size = 2;
+                    configs.remove(&1);
+                }
+            });
+            let cached = WorkerWithDpRank::new(0, 0);
+            let idle = if same_worker {
+                WorkerWithDpRank::new(0, 1)
+            } else {
+                WorkerWithDpRank::new(1, 0)
+            };
+            let (mut booking, booking_rx) = make_request("cached-booking", 256);
+            booking.pinned_worker = Some(cached);
+            queue.enqueue(booking).await;
+            assert_eq!(booking_rx.await.unwrap().unwrap().best_worker, cached);
+
+            let (mut request, _rx) = make_request("classification", 256);
+            request.overlap.effective_cached_tokens.insert(cached, 224);
+            request.overlap.effective_cached_tokens.insert(idle, 16);
+            let check = |request: &SchedulingRequest, expected_cached: usize, class: &str| {
+                let metadata = queue.default_queue_metadata(request, Instant::now());
+                assert_eq!(metadata.snapshot.cached_tokens, expected_cached);
+                assert_eq!(queue.profile.class(metadata.class_index).name, class);
+                assert_eq!(
+                    queue
+                        .build_classify_request(request, Instant::now())
+                        .scheduling_cost_tokens(),
+                    (256 - expected_cached).max(1)
+                );
+            };
+            check(&request, 16, "latency_uncached");
+            request.pinned_worker = Some(cached);
+            check(&request, 0, "latency_uncached");
+            request.pinned_worker = Some(idle);
+            check(&request, 16, "latency_uncached");
+            request.pinned_worker = None;
+
+            let (mut second, second_rx) = make_request("idle-booking", 256);
+            second.pinned_worker = Some(idle);
+            queue.enqueue(second).await;
+            assert_eq!(second_rx.await.unwrap().unwrap().best_worker, idle);
+            // An all-full snapshot is conservative; the actor still owns admission.
+            check(&request, 0, "latency_uncached");
+            for unlimited in [None, Some(0)] {
+                cfg_tx.send_modify(|configs| {
+                    for config in configs.values_mut() {
+                        config.engine_request_limit = unlimited;
+                    }
+                });
+                check(&request, 224, "latency_cached");
+            }
+            cfg_tx.send_modify(|configs| {
+                for config in configs.values_mut() {
+                    config.engine_request_limit = Some(1);
+                }
+            });
+            request.worker_loads = slots.project_worker_loads(None, decay_now());
+            slots
+                .free(&"cached-booking".to_owned(), decay_now())
+                .unwrap();
+            // Caller snapshots may be stale after a booking is released.
+            check(&request, 224, "latency_cached");
+            slots.free(&"idle-booking".to_owned(), decay_now()).unwrap();
+            slots.assert_completely_drained(decay_now());
+        }
+    }
+
+    #[tokio::test]
+    async fn request_capacity_routes_same_prefix_to_idle_worker() {
+        let (queue, slots, configs) = make_queue_with_sender(2, 16, 65536, None, None);
+        configs.send_modify(|workers| {
+            for config in workers.values_mut() {
+                config.engine_request_limit = Some(1);
+            }
+        });
+        let cached_worker = WorkerWithDpRank::new(0, 0);
+        for (id, expected) in [("first", 0), ("second", 1)] {
+            let (mut request, rx) = make_request(id, 4096);
+            request
+                .overlap
+                .effective_overlap_blocks
+                .insert(cached_worker, 256.0);
+            request
+                .overlap
+                .effective_cached_tokens
+                .insert(cached_worker, 4096);
+            queue.enqueue(request).await;
+            assert_eq!(
+                rx.await.unwrap().unwrap().best_worker.worker_id,
+                expected,
+                "a cached but full worker must not beat an idle worker"
+            );
+        }
+        let (full, full_rx) = make_request("full", 1);
+        queue.enqueue(full).await;
+        assert!(matches!(
+            full_rx.await.unwrap(),
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+        ));
+        slots.free(&"first".to_owned(), decay_now()).unwrap();
+        let (released, released_rx) = make_request("released", 1);
+        queue.enqueue(released).await;
+        assert_eq!(released_rx.await.unwrap().unwrap().best_worker.worker_id, 0);
+        slots.free(&"released".to_owned(), decay_now()).unwrap();
+        slots.free(&"second".to_owned(), decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test]
+    async fn request_capacity_cancellation_releases_decode_and_prefill_slots() {
+        for track_prefill_tokens in [false, true] {
+            let (queue, slots, configs) = make_queue_with_sender(1, 16, 65536, None, None);
+            configs
+                .send_modify(|workers| workers.get_mut(&0).unwrap().engine_request_limit = Some(1));
+            let (mut request, rx) = make_request("cancelled", 4096);
+            request.mode = ScheduleMode::TrackedWithLifecycle {
+                request_id: "cancelled".into(),
+            };
+            request.track_prefill_tokens = track_prefill_tokens;
+            let lease = queue
+                .new_request_lifecycle_lease(Some("cancelled"))
+                .unwrap();
+            let lease = queue
+                .enqueue_with_block_hashes_and_lease(request, None, Some(lease))
+                .await
+                .unwrap();
+            rx.await.unwrap().unwrap();
+            let (blocked, blocked_rx) = make_request("blocked", 1);
+            queue.enqueue(blocked).await;
+            assert!(matches!(
+                blocked_rx.await.unwrap(),
+                Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+            ));
+            drop(lease);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while slots
+                    .project_worker_loads(None, decay_now())
+                    .values()
+                    .any(|load| load.active_requests != 0)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let (recovered, recovered_rx) = make_request("recovered", 1);
+            queue.enqueue(recovered).await;
+            recovered_rx.await.unwrap().unwrap();
+            slots.free(&"recovered".to_owned(), decay_now()).unwrap();
+            slots.assert_completely_drained(decay_now());
+        }
     }
 
     fn policy_profile(yaml: &str) -> PolicyProfile {
