@@ -53,7 +53,8 @@ Formal released history still advances only through the pinned-release workflow.
 
 These cases complete 22 of the 27 canonical matrix entries. The five remaining
 single-node Component cases and the missing-origin historical case remain in
-#16650; the incomplete release-matrix gate stays enforced.
+[#16650](https://github.com/ai-dynamo/dynamo/issues/16650); the incomplete
+release-matrix gate stays enforced.
 
 ## Storage and production lifecycle
 
