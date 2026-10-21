@@ -34,6 +34,8 @@ pub(crate) struct ModelLimits {
     /// and the default `max_tokens`. Absent when neither source supplied one,
     /// which leaves requests that omit `max_tokens` to be rejected.
     pub(crate) context_length: Option<u32>,
+    /// Engine window before any operator override; media expansion uses this window.
+    pub(crate) engine_context_length: Option<u32>,
     /// Cap on generated tokens, when the engine reports one. A context window
     /// alone can imply a larger budget than the engine will accept.
     pub(crate) max_output_tokens: Option<u32>,
@@ -129,6 +131,7 @@ impl TrtllmClient {
             });
         Ok(ModelLimits {
             context_length: info.max_context_length.filter(|len| *len > 0),
+            engine_context_length: info.max_context_length.filter(|len| *len > 0),
             max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
             supports_image: Some(supports_image),
         })

@@ -62,6 +62,7 @@ pub(crate) fn limits(context_length: u32) -> Option<ModelLimits> {
 pub(crate) fn image_limits(context_length: u32) -> Option<ModelLimits> {
     Some(ModelLimits {
         context_length: Some(context_length),
+        engine_context_length: Some(context_length),
         supports_image: Some(true),
         ..Default::default()
     })

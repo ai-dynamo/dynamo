@@ -81,6 +81,7 @@ pub(crate) fn build_generate_request(
         .map(|context| context.session_id.trim())
         .filter(|session_id| !session_id.is_empty())
         .map(str::to_string);
+    let include_stop_in_output = has_visible_stop_tokens(&request).then_some(true);
     let token_ids = Arc::unwrap_or_clone(request.token_ids);
 
     Ok(pb::GenerateRequest {
@@ -116,7 +117,7 @@ pub(crate) fn build_generate_request(
             // Keeps a matched visible stop token (e.g. Harmony's `<|call|>`) in
             // the output. A visible token equal to `end_id` finishes as END_ID
             // and may still be dropped.
-            include_stop_in_output: has_visible_stop_tokens(request).then_some(true),
+            include_stop_in_output,
         }),
         response: Some(pb::ResponseOptions {
             // A prefill worker streams no tokens to the client, but it must
@@ -239,6 +240,15 @@ fn image_media(
     if limits.is_none_or(|limits| limits.supports_image != Some(true)) {
         return Err(client::invalid_argument(
             "the loaded TensorRT-LLM model does not advertise image support through Control.GetModelInfo",
+        ));
+    }
+    if let Some(limits) = limits
+        && (limits.engine_context_length.is_none()
+            || limits.context_length != limits.engine_context_length)
+    {
+        return Err(client::invalid_argument(
+            "image requests require --context-length to match the window reported by \
+             TensorRT-LLM; the sidecar cannot enforce a different window after media expansion",
         ));
     }
 

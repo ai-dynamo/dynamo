@@ -43,6 +43,8 @@ ARG NIXL_REF
 ARG TRTLLM_SOURCE_REPOSITORY
 ARG TRTLLM_SOURCE_COMMIT
 
+COPY container/deps/trtllm/validate_media_overlay.py /tmp/validate_media_overlay.py
+
 # Optional source overlay for cross-repository CI. Keep the base image's server
 # lifecycle entry points, which are coupled to that release's frontend runtime.
 # capabilities imports model_config; install that helper with the media loader.
@@ -72,9 +74,14 @@ RUN if [ -n "${TRTLLM_SOURCE_COMMIT}" ]; then \
             install -m 0644 "${source_dir}/tensorrt_llm/inputs/${module}" \
                 "${package_dir}/inputs/${module}"; \
         done && \
+        sed -i \
+            -e '/^[[:space:]]*session = await _get_aiohttp_session()$/d' \
+            -e 's/, session=session)/)/g' \
+            "${package_dir}/inputs/utils.py" && \
         test -f "${package_dir}/inputs/model_config.py" && \
         grep -Fq 'from tensorrt_llm.inputs.model_config import resolve_top_level_model_type' \
             "${package_dir}/grpc/openengine/capabilities.py" && \
+        /usr/bin/python3 /tmp/validate_media_overlay.py --check-signatures-only && \
         rm -rf "${source_dir}"; \
     fi
 

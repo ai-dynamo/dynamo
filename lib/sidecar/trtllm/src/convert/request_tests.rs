@@ -150,6 +150,26 @@ fn image_media_requires_the_loaded_models_advertised_capability() {
 }
 
 #[test]
+fn images_reject_unknown_or_overridden_engine_windows() {
+    for engine_window in [None, Some(32768)] {
+        for max_tokens in [None, Some(1)] {
+            let mut req = request();
+            add_images(&mut req, ["https://example.com/image.png"]);
+            req.stop_conditions.max_tokens = max_tokens;
+            let limits = Some(ModelLimits {
+                context_length: Some(4096),
+                engine_context_length: engine_window,
+                supports_image: Some(true),
+                ..Default::default()
+            });
+            let error = build_generate_request(req, "req", "model", limits, AGG)
+                .expect_err("media expansion cannot honor a different window");
+            assert!(error.to_string().contains("--context-length to match"));
+        }
+    }
+}
+
+#[test]
 fn unsupported_media_modalities_and_sources_are_rejected() {
     let mut req = request();
     req.multi_modal_data = Some(HashMap::from([(
@@ -354,6 +374,7 @@ fn the_derived_max_tokens_respects_the_engines_output_cap() {
             context_length: Some(4096),
             max_output_tokens: Some(256),
             supports_image: Some(false),
+            ..Default::default()
         }),
         AGG,
     )
@@ -505,6 +526,7 @@ fn image_media_is_preserved_across_prefill_and_decode_requests() {
     )]));
     let image_limits = Some(ModelLimits {
         context_length: Some(4096),
+        engine_context_length: Some(4096),
         supports_image: Some(true),
         ..Default::default()
     });

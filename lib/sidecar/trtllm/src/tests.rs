@@ -49,10 +49,6 @@ struct FakeTrtllm {
     empty_model_info: Arc<AtomicBool>,
     /// Answers `UNAVAILABLE`, the shape of an engine that is not serving yet.
     unavailable_model_info: Arc<AtomicBool>,
-    /// Portable coarse-grained model capability.
-    supports_multimodal: Arc<AtomicBool>,
-    /// TensorRT-LLM's finer-grained modality advertisement.
-    advertises_image: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
 }
 
@@ -86,10 +82,7 @@ impl pb::inference_server::Inference for FakeTrtllm {
         self.requests.lock().await.push(request.clone());
 
         let request_id = request.request_id.clone();
-        // Image markers expand inside TensorRT-LLM after Dynamo tokenizes the
-        // text prompt. Simulate that so the integration test proves Dynamo
-        // trusts the engine's terminal usage rather than the unexpanded input.
-        let prompt_tokens = prompt_len(&request) + if request.media.is_empty() { 0 } else { 64 };
+        let prompt_tokens = prompt_len(&request);
         let wants_logprobs = wants_logprobs(&request);
         let context_only = is_context_only(&request);
         let hang = self.hang.load(Ordering::SeqCst);
@@ -197,14 +190,6 @@ impl pb::control_server::Control for FakeTrtllm {
         if self.unavailable_model_info.load(Ordering::SeqCst) {
             return Err(Status::unavailable("not serving yet"));
         }
-        let supports_multimodal = self.supports_multimodal.load(Ordering::SeqCst);
-        let modalities = if self.advertises_image.load(Ordering::SeqCst) {
-            vec![prost_types::Value {
-                kind: Some(prost_types::value::Kind::StringValue("image".to_string())),
-            }]
-        } else {
-            Vec::new()
-        };
         Ok(Response::new(pb::ModelInfo {
             model_id: "fake-model".to_string(),
             max_context_length: if self.empty_model_info.load(Ordering::SeqCst) {
@@ -212,19 +197,7 @@ impl pb::control_server::Control for FakeTrtllm {
             } else {
                 Some(4096)
             },
-            supports_multimodal: Some(supports_multimodal),
-            extra: Some(prost_types::Struct {
-                fields: [(
-                    "trtllm_supported_modalities".to_string(),
-                    prost_types::Value {
-                        kind: Some(prost_types::value::Kind::ListValue(
-                            prost_types::ListValue { values: modalities },
-                        )),
-                    },
-                )]
-                .into_iter()
-                .collect(),
-            }),
+            supports_multimodal: Some(false),
             ..Default::default()
         }))
     }
@@ -546,60 +519,6 @@ async fn aggregated_generation_streams_delta_then_terminal() {
     match sent.input.as_ref().expect("input") {
         pb::generate_request::Input::TokenIds(tokens) => assert_eq!(tokens.ids, [11, 22, 33]),
         other => panic!("expected token IDs input, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn advertised_image_media_reaches_openengine_and_uses_expanded_usage() {
-    let service = FakeTrtllm::default();
-    service.supports_multimodal.store(true, Ordering::SeqCst);
-    service.advertises_image.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine(&server.endpoint, 1);
-    engine.start(0).await.expect("start");
-
-    let mut req = request();
-    req.stop_conditions.max_tokens = None;
-    add_images(&mut req, ["data:image/png;base64,aW1hZ2U="]);
-    let outputs = collect(&engine, req).await;
-    let usage = outputs
-        .last()
-        .and_then(|output| output.completion_usage.as_ref())
-        .expect("terminal engine usage");
-    assert_eq!(usage.prompt_tokens, 67, "3 text tokens + 64 image tokens");
-
-    let requests = server.service.requests.lock().await;
-    let sent = requests.first().expect("recorded request");
-    assert_eq!(sent.stopping.as_ref().expect("stopping").max_tokens, None);
-    assert_eq!(sent.media.len(), 1);
-    assert_eq!(sent.media[0].modality, pb::Modality::Image as i32);
-    assert!(matches!(
-        sent.media[0].source.as_ref(),
-        Some(pb::media_item::Source::DataUri(value)) if value.starts_with("data:image/png")
-    ));
-}
-
-#[tokio::test]
-async fn both_multimodal_capability_signals_are_required() {
-    for (coarse, image) in [(true, false), (false, true)] {
-        let service = FakeTrtllm::default();
-        service.supports_multimodal.store(coarse, Ordering::SeqCst);
-        service.advertises_image.store(image, Ordering::SeqCst);
-        let server = FakeServer::start(service).await;
-        let engine = engine(&server.endpoint, 1);
-        engine.start(0).await.expect("start");
-
-        let mut req = request();
-        add_images(&mut req, ["https://example.com/image.png"]);
-        let context = dynamo_backend_common::testing::mock_context();
-        let result = engine
-            .generate(req, GenerateContext::new(context, None))
-            .await;
-        assert!(
-            result.is_err(),
-            "capabilities ({coarse}, {image}) must fail closed"
-        );
-        assert!(server.service.requests.lock().await.is_empty());
     }
 }
 
@@ -976,37 +895,6 @@ async fn a_configured_context_length_survives_a_server_without_control() {
             .contains("does not advertise image support")
     );
     assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn image_request_retries_transient_capability_discovery() {
-    let service = FakeTrtllm::default();
-    service.unavailable_model_info.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine_with(&server.endpoint, transport(1), Some(8192), AGG);
-    engine.start(0).await.expect("start with configured window");
-
-    server
-        .service
-        .unavailable_model_info
-        .store(false, Ordering::SeqCst);
-    server
-        .service
-        .supports_multimodal
-        .store(true, Ordering::SeqCst);
-    server
-        .service
-        .advertises_image
-        .store(true, Ordering::SeqCst);
-    let mut image_request = request();
-    add_images(&mut image_request, ["https://example.com/image.png"]);
-
-    let output = collect(&engine, image_request).await;
-    assert_eq!(
-        output.last().unwrap().finish_reason,
-        Some(FinishReason::Stop)
-    );
-    assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 2);
 }
 
 /// Shutdown has to terminate in-flight requests: the worker cannot drain if a

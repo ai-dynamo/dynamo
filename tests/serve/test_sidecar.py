@@ -6,6 +6,7 @@
 import importlib.util
 import os
 import pathlib
+import runpy
 from dataclasses import dataclass, field
 
 import pytest
@@ -585,6 +586,13 @@ def test_serve_deployment(
     predownload_models,
 ):
     """Launch a sidecar deployment and run its configured request payloads."""
+    if sidecar_config_test.name == "trtllm_aggregated_image":
+        runpy.run_path(
+            os.path.join(
+                WORKSPACE_DIR, "container/deps/trtllm/validate_media_overlay.py"
+            ),
+            run_name="__main__",
+        )
     assert (
         num_system_ports >= 2
     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
