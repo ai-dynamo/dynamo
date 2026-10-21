@@ -142,6 +142,50 @@ async fn kv_routing_discovers_contract_and_forwards_selected_rank() {
 }
 
 #[tokio::test]
+async fn single_rank_kv_routing_preserves_only_real_conversation_ids() {
+    let service = FakeTrtllm::default();
+    service.kv_routing.store(true, Ordering::SeqCst);
+    service.dp_size.store(1, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine_with_kv_routing(&server.endpoint);
+    engine.start(0).await.expect("start with KV routing");
+
+    for session_id in [None, Some("real-session")] {
+        let mut req = request();
+        req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+            dp_rank: Some(0),
+            ..Default::default()
+        });
+        req.agent_context = session_id
+            .map(|session_id| serde_json::from_value(json!({"session_id": session_id})).unwrap());
+        collect(&engine, req).await;
+    }
+
+    assert_eq!(
+        server.service.target_dp_ranks.lock().await.as_slice(),
+        [None, None],
+        "single-rank engines do not need an explicit rank hint"
+    );
+    let requests = server.service.requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !requests[0]
+            .extra
+            .as_ref()
+            .unwrap()
+            .fields
+            .contains_key("conversation_id"),
+        "anonymous requests must not create native per-conversation state"
+    );
+    assert_eq!(
+        requests[1].extra.as_ref().unwrap().fields["conversation_id"].kind,
+        Some(prost_types::value::Kind::StringValue(
+            "real-session".to_string()
+        ))
+    );
+}
+
+#[tokio::test]
 async fn cleanup_cancels_a_hung_load_poll() {
     use std::collections::HashMap;
 

@@ -85,6 +85,9 @@ node holds the remaining TP ranks.
 
 ### Multi-Node DP
 
-The sidecar forwards the selected attention-DP rank to OpenEngine for KV-aware routing.
+The sidecar forwards the selected attention-DP rank to OpenEngine for KV-aware routing when the engine has more than one attention-DP rank. For single-rank engines, it omits the redundant rank hint and does not synthesize a conversation ID for anonymous requests. Explicit session IDs are preserved.
+
+> [!WARNING]
+> For multi-rank engines with conversation affinity enabled, OpenEngine currently requires a conversation ID with a rank hint. The sidecar supplies a request-scoped ID when the client provides no session. With KVCM2 `block_reuse_config.policy: per_conversation`, those one-shot IDs can retain conversation state until cache reset or engine restart, causing host memory to grow with anonymous request count. Avoid this combination for sustained anonymous traffic until TensorRT-LLM accepts rank hints without conversation IDs or bounds retained conversation state.
 
 ![TensorRT-LLM data parallelism across two nodes. Only the leader sidecar serves requests: the Dynamo Frontend router picks a DP rank and sends requests over the request plane to the node 0 Dynamo Sidecar, which registers DP ranks 0-3 and calls its local TensorRT-LLM over native gRPC.](../../../../../../assets/img/sidecar-trtllm-multinode-dp.svg)

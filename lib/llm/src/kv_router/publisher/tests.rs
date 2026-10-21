@@ -1390,8 +1390,8 @@ mod tests_startup_helpers {
                 next_event_id,
                 None,
                 None,
-                Some(1),
-                heartbeat_source.then_some((1, std::time::Duration::from_millis(500))),
+                Some(0),
+                heartbeat_source.then_some((0, std::time::Duration::from_millis(500))),
             )
         });
 
@@ -1420,7 +1420,7 @@ mod tests_startup_helpers {
             },
         ];
 
-        let batch = (0.0, events, Some(1_i32));
+        let batch = (0.0, events, Some(0_i32));
 
         let payload = Bytes::from(rmps::to_vec_named(&batch).unwrap());
 
@@ -1480,6 +1480,29 @@ mod tests_startup_helpers {
         };
         assert_eq!(removed.block_hashes, vec![ExternalSequenceBlockHash(42)]);
 
+        // The first accepted batch confirms the subscription is established.
+        // Neither another rank nor an unlabeled batch may reach this rank-zero
+        // source (unlabeled batches otherwise default to rank zero).
+        for rank in [Some(1_i32), None] {
+            send_multipart(
+                &pub_socket,
+                vec![
+                    Vec::new(),
+                    (seq + 1).to_be_bytes().to_vec(),
+                    rmps::to_vec_named(&(
+                        0.0,
+                        vec![MapKvEvent::BlockRemoved {
+                            block_hashes: vec![999],
+                        }],
+                        rank,
+                    ))
+                    .unwrap(),
+                ],
+            )
+            .await
+            .expect("failed to send foreign-rank ZMQ test event");
+        }
+
         // Heartbeat-aware sources invalidate residency on a transport gap;
         // legacy advisory streams continue with the received events.
         let gap_frames = vec![
@@ -1509,6 +1532,7 @@ mod tests_startup_helpers {
         ));
         for (index, event) in recovery.iter().enumerate() {
             assert_eq!(event.event.event_id, 2 + index as u64);
+            assert_eq!(event.event.dp_rank, 0);
         }
 
         if heartbeat_source {

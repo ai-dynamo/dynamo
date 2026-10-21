@@ -468,15 +468,20 @@ impl LLMEngine for TrtllmSidecarEngine {
             .filter(|_| self.started.initialized())
             .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
+        // A single-rank engine needs no hint, even when it advertises the
+        // capability. Suppress it and the associated anonymous conversation ID
+        // to avoid retaining one-shot per-conversation cache state.
+        let use_dp_targeting = self
+            .routing
+            .get()
+            .is_some_and(|routing| routing.dp_targeting && routing.dp_size > 1);
         let proto_request = build_generate_request_with_routing(
             &request,
             &request_id,
             &self.model.source,
             Some(*limits),
             self.mode,
-            self.routing
-                .get()
-                .is_some_and(|routing| routing.dp_targeting),
+            use_dp_targeting,
         )?;
         let target_dp_rank = request.routing.as_ref().and_then(|routing| {
             if self.mode.is_prefill() {
@@ -493,13 +498,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                 )));
             }
         }
-        // Legacy single-rank servers accept logical rank zero, but not the
-        // optional OpenEngine targeting metadata.
-        let target_dp_rank = target_dp_rank.filter(|_| {
-            self.routing
-                .get()
-                .is_some_and(|routing| routing.dp_targeting)
-        });
+        let target_dp_rank = target_dp_rank.filter(|_| use_dp_targeting);
         let parent_affinity = if self.mode.is_prefill() && self.subagent_affinity_auth_key.is_some()
         {
             request.agent_context.as_ref().and_then(|agent| {
