@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
@@ -38,6 +39,7 @@ import (
 const (
 	dcdAdmissionSGLangBackend = "sglang"
 	dcdAdmissionVLLMBackend   = "vllm"
+	dcdAdmissionTRTLLMBackend = "trtllm"
 )
 
 func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
@@ -56,7 +58,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		}
 	)
 
-	tests := []struct {
+	type dcdAdmissionTestCase struct {
 		name               string
 		deployment         runtime.Object
 		oldDeployment      runtime.Object
@@ -68,7 +70,43 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		wantWarnings       []string
 		wantPodAnnotations map[string]string
 		wantRoleReplicas   map[string]int32
-	}{
+	}
+	tests := []dcdAdmissionTestCase{
+		{name: "DGD-owned vLLM multi-GPU automatic candidate is admitted without checkpointRef", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "vllm")
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: k8sptr.To(true)}}
+			dcd.Spec.PodTemplate.Annotations = map[string]string{
+				consts.RestoreCandidateSourceKindAnnotation: consts.RestoreCandidateSourceSnapshotJob,
+				consts.CheckpointNameAnnotation:             "capture-job",
+				consts.SnapshotJobCandidateUIDAnnotation:    "capture-job-uid",
+			}
+		})},
+		{name: "DGD-owned SGLang multi-GPU checkpointRef restore is admitted", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, dcdAdmissionSGLangBackend)
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: k8sptr.To(true)}}
+			dcd.Spec.Experimental.Checkpoint.CheckpointRef = k8sptr.To("existing-snapshot")
+		})},
+		{name: "TRT-LLM snapshot failover is rejected at admission", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = dcdAdmissionTRTLLMBackend
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, dcdAdmissionTRTLLMBackend)
+		}), wantWebhookErrs: []string{"spec.experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
+		{name: "inferred TRT-LLM snapshot failover is rejected at admission", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = ""
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, dcdAdmissionTRTLLMBackend)
+		}), wantWebhookErrs: []string{"spec.experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
+		{name: "TRT-LLM snapshot failover cannot be enabled on update", oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = dcdAdmissionTRTLLMBackend
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, dcdAdmissionTRTLLMBackend)
+			dcd.Spec.Experimental.Failover = nil
+		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = dcdAdmissionTRTLLMBackend
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, dcdAdmissionTRTLLMBackend)
+		}), wantWebhookErrs: []string{"spec.experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
+		{name: "automatic failover default startup policy cannot bypass election", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "vllm")
+			dcd.Spec.Experimental.Checkpoint.StartupPolicy = ""
+		}), wantWebhookErrs: []string{"spec.experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"}},
 		// Sidecar mode is derived from live init-container names in both API versions.
 		{name: "beta unrelated init container retains standard mode", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
@@ -800,7 +838,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 checkpoint with inter-pod GMS and failover reports both errors",
+			name: "v1beta1 checkpoint with inter-pod GMS and failover remains rejected",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				enableBetaInterPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 				dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
@@ -811,7 +849,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				"spec.experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
-				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover is temporarily unsupported",
 			},
 		},
 		{
@@ -2025,6 +2062,50 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				"spec.experimental.failover.numShadows: Invalid value: 2: is immutable for inter-pod GMS failover; delete and recreate the DynamoComponentDeployment to change it",
 			},
 		},
+	}
+
+	t.Log("Add complete-probe cases to the admission table for both API versions")
+	for _, placement := range []string{"main", "frontend sidecar", "role"} {
+		beta := betaDCDForAdmission(nil)
+		alpha := alphaDCDForAdmission(nil)
+		betaSpec := &beta.Spec.DynamoComponentDeploymentSharedSpec
+		alphaSpec := &alpha.Spec.DynamoComponentDeploymentSharedSpec
+		betaPath := field.NewPath("spec")
+		alphaPath := field.NewPath("spec")
+		betaContainer := &betaSpec.PodTemplate.Spec.Containers[0]
+		alphaContainer := alphaSpec.ExtraPodSpec.MainContainer
+
+		// Select a representative container in each source-version template.
+		switch placement {
+		case "main":
+			betaPath = betaPath.Child("podTemplate", "spec", "containers").Index(0)
+			alphaPath = alphaPath.Child("extraPodSpec", "mainContainer")
+		case "frontend sidecar":
+			betaSpec.FrontendSidecar = k8sptr.To("frontend")
+			betaSpec.PodTemplate.Spec.Containers = append(betaSpec.PodTemplate.Spec.Containers, corev1.Container{Name: "frontend", Image: frontendImage150})
+			betaContainer = &betaSpec.PodTemplate.Spec.Containers[1]
+			betaPath = betaPath.Child("podTemplate", "spec", "containers").Index(1)
+			alphaSpec.ExtraPodSpec.PodSpec = &corev1.PodSpec{Containers: []corev1.Container{{Name: "frontend", Image: frontendImage150}}}
+			alphaContainer = &alphaSpec.ExtraPodSpec.Containers[0]
+			alphaPath = alphaPath.Child("extraPodSpec", "containers").Index(0)
+		case "role":
+			setBetaExplicitMultinodeRoleTemplates(betaSpec, 2)
+			betaContainer = &betaSpec.Roles[1].PodTemplate.Spec.Containers[0]
+			betaPath = betaPath.Child("roles").Index(1).Child("podTemplate", "spec", "containers").Index(0)
+			setAlphaExplicitMultinodeRoleTemplates(alphaSpec, 2)
+			alphaContainer = &alphaSpec.Roles[0].PodTemplate.Spec.Containers[0]
+			alphaPath = alphaPath.Child("roles").Index(0).Child("podTemplate", "spec", "containers").Index(0)
+		}
+
+		// Keep the shared probe cases on the resource's production admission path.
+		probeCases := containerProbeAdmissionCases(beta, betaContainer, betaPath)
+		probeCases = append(probeCases, containerProbeAdmissionCases(alpha, alphaContainer, alphaPath)...)
+		for _, probeCase := range probeCases {
+			tests = append(tests, dcdAdmissionTestCase{
+				name: probeCase.name, deployment: probeCase.deployment,
+				oldDeployment: probeCase.oldDeployment, wantCELErr: probeCase.wantCELErr,
+			})
+		}
 	}
 
 	for _, tt := range tests {

@@ -6,7 +6,7 @@
 # AIC application and perf-model compatibility namespaces are provided by the
 # separately staged AISimulate wheel.
 aiofiles<=25.1.0
-aiohttp>=3.14.3,<4.0  # see overrides.planner.txt: aiperf pins aiohttp~=3.13.3
+aiohttp>=3.14.3,<4.0
 filterpy==1.4.5
 # gRPC + protobuf are runtime deps for the plugin-orchestrator transport.
 # Pin in sync with requirements.common.txt.

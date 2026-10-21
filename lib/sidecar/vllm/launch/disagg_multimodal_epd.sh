@@ -30,12 +30,13 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [--model <name>] [vLLM engine options...]"
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  EC_SHARED_STORAGE_PATH       Existing shared EC directory; otherwise a temporary directory is created"
             echo "  DYN_HTTP_PORT                Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT1/2/3         Encode/decode/prefill system ports (defaults: 8081/8082/8083)"
-            echo "  VLLM_ENCODER_HTTP/GRPC_PORT  Encoder ports (defaults: 8100/50051)"
-            echo "  VLLM_PREFILL_HTTP/GRPC_PORT  Prefill ports (defaults: 8110/50052)"
-            echo "  VLLM_DECODE_HTTP/GRPC_PORT   Decode ports (defaults: 8120/50053)"
+            echo "  VLLM_ENCODER_HTTP/GRPC_PORT  Encoder ports (defaults: 8100/30001)"
+            echo "  VLLM_PREFILL_HTTP/GRPC_PORT  Prefill ports (defaults: 8110/30011)"
+            echo "  VLLM_DECODE_HTTP/GRPC_PORT   Decode ports (defaults: 8120/30021)"
             echo "  VLLM_ENCODER/PREFILL/DECODE_GPU  GPU indices (defaults: 0/1/2)"
             echo "  VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT  Prefill NIXL port (default: 5601)"
             echo "  VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT   Decode NIXL port (default: 5602)"
@@ -48,6 +49,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_sidecar vllm SIDECAR_CMD
 
 EC_STORAGE_OWNED=false
 if [[ -z "${EC_SHARED_STORAGE_PATH:-}" ]]; then
@@ -69,11 +72,11 @@ trap epd_exit_trap EXIT
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 VLLM_ENCODER_HTTP_PORT="${VLLM_ENCODER_HTTP_PORT:-8100}"
-VLLM_ENCODER_GRPC_PORT="${VLLM_ENCODER_GRPC_PORT:-50051}"
+VLLM_ENCODER_GRPC_PORT="${VLLM_ENCODER_GRPC_PORT:-30001}"
 VLLM_PREFILL_HTTP_PORT="${VLLM_PREFILL_HTTP_PORT:-8110}"
-VLLM_PREFILL_GRPC_PORT="${VLLM_PREFILL_GRPC_PORT:-50052}"
+VLLM_PREFILL_GRPC_PORT="${VLLM_PREFILL_GRPC_PORT:-30011}"
 VLLM_DECODE_HTTP_PORT="${VLLM_DECODE_HTTP_PORT:-8120}"
-VLLM_DECODE_GRPC_PORT="${VLLM_DECODE_GRPC_PORT:-50053}"
+VLLM_DECODE_GRPC_PORT="${VLLM_DECODE_GRPC_PORT:-30021}"
 VLLM_ENCODER_GPU="${VLLM_ENCODER_GPU:-0}"
 VLLM_PREFILL_GPU="${VLLM_PREFILL_GPU:-1}"
 VLLM_DECODE_GPU="${VLLM_DECODE_GPU:-2}"
@@ -154,17 +157,17 @@ vllm-rs serve "$MODEL" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_ENCODER_GRPC_PORT}" \
     --disaggregation-mode encode &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_DECODE_GRPC_PORT}" \
     --disaggregation-mode decode &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT3:-8083}" \
-    dynamo-vllm-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "127.0.0.1:${VLLM_PREFILL_GRPC_PORT}" \
     --disaggregation-mode prefill \
     --route-to-encoder &

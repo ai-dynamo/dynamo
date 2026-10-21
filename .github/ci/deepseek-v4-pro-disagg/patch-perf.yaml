@@ -21,13 +21,28 @@ spec:
         effect: NoExecute
       containers:
       - name: bench
+        resources:
+          requests:
+            ephemeral-storage: 2Gi
+          limits:
+            ephemeral-storage: 16Gi
         env:
+        - name: AIPERF_OUTPUT_DIR
+          value: /aiperf
+        - name: ARTIFACT_ROOT
+          value: /aiperf/results
         # Chat framing adds about 80 tokens; leave room under max-model-len=9280.
         - name: ISL
           value: "8064"
         - name: CONCURRENCIES
           value: "512"
+        volumeMounts:
+        - name: aiperf-output
+          mountPath: /aiperf
       volumes:
+      - name: aiperf-output
+        emptyDir:
+          sizeLimit: 16Gi
       - name: model-cache
         persistentVolumeClaim:
           claimName: shared-model-cache

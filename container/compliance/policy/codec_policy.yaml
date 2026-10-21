@@ -59,8 +59,8 @@ deny_globs:
   - "**/libsw*_dynamo-*.so*"
   - "**/libpostproc_dynamo.so*"
   - "**/libpostproc_dynamo-*.so*"
-  # Standalone ffmpeg/ffprobe CLIs (e.g. a distro /usr/bin/ffmpeg). Our own copy
-  # at /usr/local/bin/ffmpeg is re-permitted by allow_paths below.
+  # Standalone ffmpeg/ffprobe CLIs (e.g. a distro /usr/bin/ffmpeg). Our own
+  # /usr/local/bin/ffmpeg and ffprobe are re-permitted by allow_exact_paths below.
   - "**/bin/ffmpeg"
   - "**/bin/ffprobe"
   # GPL prebuilt ffmpeg binary that imageio-ffmpeg bundles under site-packages.
@@ -83,8 +83,12 @@ allow_paths:
   - "/usr/local/lib/libav"
   - "/usr/local/lib/libsw"
   - "/usr/local/lib/libpostproc"
-  - "/usr/local/bin/ffmpeg"
   - "/usr/local/src/ffmpeg"   # retained source tree (kept for legal reasons)
+
+# Standalone tools must match exactly, without allowing similarly named paths.
+allow_exact_paths:
+  - "/usr/local/bin/ffmpeg"
+  - "/usr/local/bin/ffprobe"  # links the same _dynamo libraries; adds no codec
 
 # Explicit third-party exceptions: LOGGED in the report but do NOT fail the build.
 # Every entry must carry a reason and an owner so the waiver is auditable.

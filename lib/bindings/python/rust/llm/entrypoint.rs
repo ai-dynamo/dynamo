@@ -34,11 +34,12 @@ use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::reasoning_field::ReasoningField;
 use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
-use dynamo_mocker::common::perf_model::PerfModel;
 
-use super::ais_callback::{create_ais_callback, create_ais_prefill_load_estimator};
-use super::replay::MockEngineArgs as PyMockEngineArgs;
-use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
+use super::ais_callback::create_ais_prefill_load_estimator;
+use super::replay::{
+    materialize_mocker_config, mocker_config_from_json, mocker_config_from_python,
+};
+use dynamo_mocker::config::MockerConfig;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
@@ -468,13 +469,14 @@ pub(crate) struct EntrypointArgs {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    batch_gateway_url: Option<String>,
     metrics_config: Option<MetricsConfig>,
     frontend_api_config: Option<FrontendApiConfig>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     tls_client_ca_cert_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
-    mocker_engine_args: Option<PyMockEngineArgs>,
+    mocker_engine_args: Option<MockerConfig>,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
     namespace_prefix: Option<String>,
@@ -490,7 +492,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -506,7 +508,7 @@ impl EntrypointArgs {
         tls_cert_path: Option<PathBuf>,
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
-        mocker_engine_args: Option<PyMockEngineArgs>,
+        mocker_engine_args: Option<&Bound<'_, PyAny>>,
         runtime_config: Option<ModelRuntimeConfig>,
         namespace: Option<String>,
         namespace_prefix: Option<String>,
@@ -525,6 +527,7 @@ impl EntrypointArgs {
         reasoning_field_name: Option<String>,
         tokenizer_backend: Option<String>,
         tokenizer_fallback: Option<bool>,
+        batch_gateway_url: Option<String>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -595,6 +598,7 @@ impl EntrypointArgs {
             http_host,
             http_port: http_port.unwrap_or(DEFAULT_HTTP_PORT),
             http_metrics_port,
+            batch_gateway_url,
             metrics_config: metrics_prefix.map(|prefix| MetricsConfig::new(Some(prefix))),
             frontend_api_config: FrontendApiConfig::from_optional_flags(
                 enable_anthropic_api,
@@ -607,7 +611,9 @@ impl EntrypointArgs {
             tls_key_path,
             tls_client_ca_cert_path,
             extra_engine_args,
-            mocker_engine_args,
+            mocker_engine_args: mocker_engine_args
+                .map(|value| mocker_config_from_python(value.py(), value))
+                .transpose()?,
             runtime_config,
             namespace,
             namespace_prefix,
@@ -652,6 +658,7 @@ pub fn make_engine<'p>(
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
         .http_metrics_port(args.http_metrics_port);
+    builder.batch_gateway_url(args.batch_gateway_url.clone());
     if let Some(metrics_config) = args.metrics_config.clone() {
         builder.metrics_config(metrics_config);
     }
@@ -786,15 +793,13 @@ async fn select_engine(
         }
         EngineType::Mocker => {
             let mut mocker_args = if let Some(mocker_engine_args) = args.mocker_engine_args {
-                mocker_engine_args.inner()
+                mocker_engine_args
             } else if let Some(extra_args_path) = args.extra_engine_args {
                 tokio::fs::read_to_string(&extra_args_path)
                     .await
                     .map_err(anyhow::Error::from)
                     .and_then(|config_json| {
-                        Python::with_gil(|py| {
-                            Ok(PyMockEngineArgs::from_json(py, &config_json)?.inner())
-                        })
+                        Python::with_gil(|py| Ok(mocker_config_from_json(py, &config_json)?))
                     })
                     .map_err(|e| {
                         anyhow::anyhow!(
@@ -807,13 +812,10 @@ async fn select_engine(
                 tracing::warn!(
                     "No extra_engine_args specified for mocker engine. Using default mocker args."
                 );
-                RsMockEngineArgs::default()
+                MockerConfig::default()
             };
 
-            if let Some(config) = mocker_args.ais_perf_config.as_ref() {
-                let callback = Python::with_gil(|py| create_ais_callback(py, config))?;
-                mocker_args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
-            }
+            mocker_args = Python::with_gil(|py| materialize_mocker_config(py, mocker_args))?;
 
             let endpoint = local_model.endpoint_id().clone();
 

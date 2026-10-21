@@ -579,6 +579,40 @@ def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
     assert cuda_graph_bs_args == ["--cuda-graph-bs-decode=1"]
 
 
+@pytest.mark.parametrize(
+    "mode, role", [("agg", "worker"), ("disagg", "decode"), ("disagg", "prefill")]
+)
+def test_build_dgd_config_sglang_renames_removed_cuda_graph_args(
+    mode: str, role: str
+) -> None:
+    """Generated legacy CUDA graph flags must use names SGLang 0.5.21 accepts."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    worker_args = [
+        "--max-running-requests",
+        "96",
+        "--cuda-graph-bs 1 2 16 16 96 88 104",
+        "--cuda-graph-max-bs=128",
+    ]
+    dgd_config = modifier.build_dgd_config(
+        mode=mode,
+        model_name="Qwen/Qwen3-0.6B",
+        image="example/sglang:test",
+        agg_cli_args=list(worker_args),
+        # MRR 1 makes prefill run its CUDA graph safety check after the rename.
+        prefill_cli_args=["--max-running-requests", "1", *worker_args[2:]],
+        decode_cli_args=list(worker_args),
+    )
+
+    args = _main_container(_component_by_type(dgd_config, role))["args"]
+
+    assert "--cuda-graph-bs" not in args
+    assert not any(arg.startswith("--cuda-graph-max-bs=") for arg in args)
+    assert args.count("--cuda-graph-bs-decode") == 1
+    start = args.index("--cuda-graph-bs-decode") + 1
+    assert args[start : start + 7] == ["1", "2", "16", "16", "96", "88", "104"]
+    assert "--cuda-graph-max-bs-decode=128" in args
+
+
 def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
     """Later MRR overrides must drive CUDA graph batch-size safety."""
     modifier = CONFIG_MODIFIERS["sglang"]

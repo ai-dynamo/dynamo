@@ -72,7 +72,7 @@ permissions:
 jobs:
   # Detect changed files for conditional job execution
   changed-files:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Skip for tag pushes - version release doesn't need changed-files check
     if: github.ref_type != 'tag'
     outputs:
@@ -114,7 +114,7 @@ jobs:
         github.event_name == 'workflow_dispatch'
       ) &&
       (github.event.inputs.tag == '' || github.event.inputs.tag == null)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Determine context
         id: ctx
@@ -189,6 +189,15 @@ jobs:
           fi
           python3 -m pip install --quiet pyyaml
           python3 source-checkout/docs/fern/scripts/gen_nightly_selector.py
+
+      - name: Generate nightly ledger tables
+        # The generated nightly module is the source for both the interactive
+        # ledger and the agent-readable tables. Do this before content sync so
+        # docs-website receives the same rows as the install selector.
+        run: |
+          set -euo pipefail
+          python3 source-checkout/docs/fern/scripts/gen_llms_tables.py \
+            --nightly-data source-checkout/docs/fern/components/nightly-selector-data.generated.ts
 
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -364,7 +373,11 @@ jobs:
             sync_assets
             exit 0
           fi
-          python3 "$gen_script" --assets-only
+          # Same nightly rows as "Generate nightly ledger tables" above, which
+          # already rewrote releases.json and releases-atom.xml as a side
+          # effect. It runs again so this asset step stands on its own.
+          python3 "$gen_script" --assets-only \
+            --nightly-data source-checkout/docs/fern/components/nightly-selector-data.generated.ts
 
           generated_json="source-checkout/docs/fern/assets/releases.json"
           generated_atom="source-checkout/docs/fern/assets/releases-atom.xml"
@@ -737,7 +750,7 @@ jobs:
     if: |
       github.ref_type == 'tag' ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' && github.event.inputs.tag != null)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Determine version tag
         id: version

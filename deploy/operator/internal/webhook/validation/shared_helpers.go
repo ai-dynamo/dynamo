@@ -395,3 +395,12 @@ func effectiveNumShadows(failover *nvidiacomv1beta1.FailoverSpec) int32 {
 	}
 	return failover.NumShadows
 }
+
+// groveNativeMinimumPath locates the owning component's native availability field.
+// component and fldPath are non-nil; an omitted override uses the same path.
+func groveNativeMinimumPath(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path) *field.Path {
+	if component.UsesPCSG() || component.IsLPX() {
+		return fldPath.Child("providerOverride", "value", "minAvailable")
+	}
+	return fldPath.Child("providerOverride", "value", "spec", "minAvailable")
+}

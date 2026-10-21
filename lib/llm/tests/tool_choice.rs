@@ -45,6 +45,7 @@ fn drive_moved_jail(
                 nvext: None,
                 prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             })
         })
 }
@@ -523,6 +524,7 @@ fn make_text_chunk(
         nvext: None,
         prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 
@@ -667,6 +669,7 @@ async fn apply_structural_tag_jail_with_parser_and_choice(
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         })
     })
     .collect()

@@ -11,6 +11,7 @@
 use dynamo_runtime::config::{
     env_is_truthy,
     environment_names::llm::{self as env_llm, metrics as env_metrics},
+    is_truthy,
 };
 
 use crate::reasoning_field::ReasoningField;
@@ -89,7 +90,9 @@ impl Default for AnthropicApiConfig {
     fn default() -> Self {
         Self {
             enabled: env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API),
-            strip_preamble: env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE),
+            strip_preamble: std::env::var(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE)
+                .map(|value| is_truthy(&value))
+                .unwrap_or(true),
         }
     }
 }

@@ -45,7 +45,7 @@ spec:
           - --disaggregation-mode
           - decode
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
           - --tensor-parallel-size
           - '2'
           - --no-enable-log-requests
@@ -101,7 +101,7 @@ spec:
           - --disaggregation-mode
           - prefill
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           - --tensor-parallel-size
           - '2'
           - --no-enable-log-requests
