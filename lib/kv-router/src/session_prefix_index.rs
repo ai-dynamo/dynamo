@@ -316,6 +316,12 @@ impl SessionPrefixIndexer {
     /// root or to a block the target tier already holds, so a tier frontier keeps
     /// implying that its ancestors are in the same tier. Returns the number of
     /// frontiers advanced.
+    ///
+    /// Inheritance reads the source tier's frontier when the destination tier's store
+    /// arrives, so it assumes a worker publishes the destination `Stored` before the
+    /// source `Removed` for the same blocks. SGLang's unified cache does. An engine
+    /// that removes first leaves the session's destination-tier residency unrecorded
+    /// until its next tagged store.
     pub fn inherit_stored_blocks(
         &self,
         worker: WorkerWithDpRank,
