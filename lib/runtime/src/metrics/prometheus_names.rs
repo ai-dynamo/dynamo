@@ -643,6 +643,9 @@ pub mod routing_overhead {
     /// Time spent querying the shared KV cache (Mooncake)
     pub const SHARED_CACHE_QUERY_MS: &str = "overhead_shared_cache_query_ms";
 
+    /// Time a request spent waiting in the router scheduler queue before admission
+    pub const QUEUE_WAIT_MS: &str = "overhead_queue_wait_ms";
+
     /// Total shared cache failures (query and subscriber failures)
     pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }

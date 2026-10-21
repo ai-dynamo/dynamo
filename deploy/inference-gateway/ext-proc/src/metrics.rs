@@ -12,12 +12,15 @@
 //! so existing endpoint-picker scrape configuration keeps working.
 
 use std::sync::{LazyLock, OnceLock};
+use std::time::Duration;
 
 use axum::{
     Router as AxumRouter, http::StatusCode, http::header::CONTENT_TYPE, response::IntoResponse,
     routing::get,
 };
 use dynamo_llm::http::service::metrics::generate_log_buckets;
+use dynamo_llm::kv_router::metrics::RoutingOverheadMetrics;
+use dynamo_runtime::metrics::frontend_perf::{TEMPLATE_SECONDS, TOKENIZE_SECONDS};
 use prometheus::{Encoder, HistogramOpts, HistogramVec, Registry, TEXT_FORMAT, TextEncoder};
 
 /// Port the `/metrics` endpoint binds to unless `DYN_EPP_METRICS_PORT` says
@@ -87,6 +90,35 @@ pub fn observe_cached_tokens(cached_tokens: u64) {
     CACHED_TOKENS
         .with_label_values(&[served_model_label()])
         .observe(cached_tokens as f64);
+}
+
+/// Register the `dynamo_router_overhead_*` histograms with the EPP registry.
+/// `router_id` distinguishes the EPP's series from the Frontend's.
+pub fn register_routing_overhead_metrics(router_id: u64) -> Result<(), prometheus::Error> {
+    RoutingOverheadMetrics::register(&REGISTRY, router_id)
+}
+
+static PREPROCESS_METRICS_REGISTERED: OnceLock<()> = OnceLock::new();
+
+pub fn ensure_preprocess_metrics_registered() {
+    PREPROCESS_METRICS_REGISTERED.get_or_init(|| {
+        for result in [
+            REGISTRY.register(Box::new(TEMPLATE_SECONDS.clone())),
+            REGISTRY.register(Box::new(TOKENIZE_SECONDS.clone())),
+        ] {
+            if let Err(err) = result {
+                tracing::warn!(%err, "failed to register a preprocess latency histogram");
+            }
+        }
+    });
+}
+
+pub fn observe_template_time(elapsed: Duration) {
+    TEMPLATE_SECONDS.observe(elapsed.as_secs_f64());
+}
+
+pub fn observe_tokenize_time(elapsed: Duration) {
+    TOKENIZE_SECONDS.observe(elapsed.as_secs_f64());
 }
 
 /// Serve `/metrics` until the process exits.
@@ -205,5 +237,38 @@ mod tests {
             body.contains("# TYPE dynamo_epp_cached_tokens histogram"),
             "expected histogram metadata, got:\n{body}"
         );
+    }
+
+    #[test]
+    fn request_latency_metrics_are_registered_and_served() {
+        let _guard = bind_test_model();
+        register_routing_overhead_metrics(7).expect("register routing overhead");
+        ensure_preprocess_metrics_registered();
+
+        if let Some(m) = RoutingOverheadMetrics::get() {
+            m.total.observe(2.0);
+            m.queue_wait.observe(1.0);
+        } else {
+            panic!("routing overhead metrics must be registered");
+        }
+        observe_template_time(Duration::from_millis(3));
+        observe_tokenize_time(Duration::from_millis(4));
+
+        let families: Vec<String> = REGISTRY
+            .gather()
+            .iter()
+            .map(|family| family.name().to_string())
+            .collect();
+        for want in [
+            "dynamo_router_overhead_total_ms",
+            "dynamo_router_overhead_queue_wait_ms",
+            "dynamo_frontend_template_seconds",
+            "dynamo_frontend_tokenize_seconds",
+        ] {
+            assert!(
+                families.iter().any(|name| name == want),
+                "missing metric family {want}; got {families:?}"
+            );
+        }
     }
 }
