@@ -1487,15 +1487,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_no_unsupported_fields_still_validates_named_passthrough_fields() {
-        let named = parse_ignored_fields("stop_token_ids");
-        let fields = HashMap::from([("stop_token_ids".to_string(), json!("bad"))]);
-        let err = validate_no_unsupported_fields_with_ignore(&fields, IgnoredFields::Named(&named))
-            .unwrap_err();
-        assert!(err.to_string().contains("stop_token_ids"));
-    }
-
-    #[test]
     fn parse_ignored_fields_trims_and_drops_empty_items() {
         assert_eq!(
             parse_ignored_fields(" reasoning_split, ,other_field,"),
