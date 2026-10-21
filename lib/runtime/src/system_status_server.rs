@@ -1847,14 +1847,14 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_validation_gates_hold_health_but_not_live() {
-        for (check, released) in [("exit 0", true), ("echo bad >&2; exit 1", false)] {
-            let gates =
-                format!(r#"{{"smoke": {{"exec": ["sh", "-c", "{check}"], "timeout_secs": 5}}}}"#);
+        let checks = crate::validation::testing::CheckServer::start().await;
+        for (check, released) in [("pass", true), ("fail", false)] {
+            let url = checks.url(check);
             temp_env::async_with_vars(
                 [
                     (env_system::DYN_SYSTEM_PORT, Some("0")),
                     (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
-                    ("DYN_WORKER_VALIDATION_GATES", Some(gates.as_str())),
+                    ("DYN_PUBLISH_GATE", Some(url.as_str())),
                 ],
                 async {
                     let drt = Arc::new(create_test_drt_async().await);
@@ -1865,10 +1865,10 @@ mod integration_tests {
                         (status, response.json::<serde_json::Value>().await.unwrap())
                     };
 
-                    // Held until the gates run.
+                    // Held until the checks are called.
                     let (status, body) = get("/health").await;
                     assert_eq!(status, 503, "{body}");
-                    assert_eq!(body["validation"]["gates"]["smoke"]["state"], "pending");
+                    assert_eq!(body["validation"]["publish"][&url]["state"], "pending");
 
                     drt.worker_validation().unwrap().start(
                         crate::validation::GateEnv::default(),
@@ -1877,7 +1877,7 @@ mod integration_tests {
                     let mut body = serde_json::Value::Null;
                     for _ in 0..100 {
                         body = get("/health").await.1;
-                        let state = &body["validation"]["gates"]["smoke"]["state"];
+                        let state = &body["validation"]["publish"][&url]["state"];
                         if state == "passed" || state == "failed" {
                             break;
                         }
@@ -1886,10 +1886,10 @@ mod integration_tests {
                     assert_eq!(get("/health").await.0 == 200, released, "{body}");
                     if !released {
                         assert!(
-                            body["validation"]["gates"]["smoke"]["reason"]
+                            body["validation"]["publish"][&url]["reason"]
                                 .as_str()
                                 .unwrap()
-                                .contains("bad")
+                                .contains("check failed")
                         );
                     }
                     let (status, body) = get("/live").await;
@@ -1906,10 +1906,7 @@ mod integration_tests {
         temp_env::async_with_vars(
             [
                 (env_system::DYN_SYSTEM_PORT, Some("-1")),
-                (
-                    "DYN_WORKER_VALIDATION_GATES",
-                    Some(r#"{"smoke": {"exec": ["true"], "timeout_secs": 5}}"#),
-                ),
+                ("DYN_READY_GATE", Some("http://127.0.0.1:9100/checks/warm")),
             ],
             async {
                 let error = crate::DistributedRuntime::new(

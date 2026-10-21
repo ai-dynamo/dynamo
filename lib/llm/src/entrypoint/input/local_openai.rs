@@ -10,7 +10,7 @@
 //! in-process token HTTP input builds, starts the gates once the worker's
 //! engine is registered, and stops serving once the worker is released.
 //!
-//! Nothing here runs unless `DYN_WORKER_VALIDATION_GATES` is set.
+//! Nothing here runs unless `DYN_PUBLISH_GATE` or `DYN_READY_GATE` is set.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -36,7 +36,7 @@ use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest
 
 /// Serve the first card a gated worker registers on the loopback endpoint and
 /// start its gates. A card the endpoint can't serve (prefill, encode,
-/// embeddings, text input, LoRA) starts the gates without `OPENAI_BASE_URL`.
+/// embeddings, text input, LoRA) starts the gates with no `base_url`.
 pub async fn serve_if_gated(endpoint: &Endpoint, card: &ModelDeploymentCard) -> anyhow::Result<()> {
     let drt = endpoint.drt();
     let Some(validation) = drt.worker_validation() else {
@@ -78,7 +78,7 @@ pub async fn serve_if_gated(endpoint: &Endpoint, card: &ModelDeploymentCard) -> 
     } else {
         tracing::warn!(
             model = %card.display_name,
-            "Card has no token chat or completions surface; gates run without OPENAI_BASE_URL"
+            "Card has no token chat or completions surface; checks get no base_url"
         );
     }
     tokio::spawn(start_gates_when_registered(
@@ -257,15 +257,16 @@ mod tests {
 
     #[cfg(feature = "integration")]
     #[tokio::test]
-    async fn an_unservable_card_still_starts_the_gates_without_a_base_url() {
+    async fn an_unservable_card_still_starts_the_gates_with_no_base_url() {
         use crate::model_type::ModelType;
         use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
-        let gate = r#"{"g": {"exec": ["sh", "-c", "test -z \"$OPENAI_BASE_URL\" && test \"$DYN_VALIDATION_MODEL\" = prefill"], "timeout_secs": 10}}"#;
+        let checks = dynamo_runtime::validation::testing::CheckServer::start().await;
+        let gate = checks.url("pass");
         let drt = temp_env::async_with_vars(
             [
                 ("DYN_SYSTEM_PORT", Some("0")),
-                ("DYN_WORKER_VALIDATION_GATES", Some(gate)),
+                ("DYN_PUBLISH_GATE", Some(gate.as_str())),
             ],
             async {
                 DistributedRuntime::new(
@@ -298,5 +299,10 @@ mod tests {
         )
         .await
         .unwrap_or_else(|_| panic!("{}", validation.status_json()));
+        let (_, body) = &checks.requests()[0];
+        assert_eq!(
+            *body,
+            serde_json::json!({"gate": "publish", "base_url": null, "models": ["prefill"]})
+        );
     }
 }

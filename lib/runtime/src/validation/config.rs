@@ -1,141 +1,107 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Parsing for `DYN_WORKER_VALIDATION_GATES`.
+//! Parsing for `DYN_PUBLISH_GATE` and `DYN_READY_GATE`.
 //!
 //! Every misconfiguration is an error: a worker that cannot tell what it is
 //! supposed to check must not start unchecked.
 
-use std::collections::BTreeMap;
-use std::time::Duration;
-
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
 
 use crate::config::environment_names::runtime::validation as env_validation;
 
-/// When a gate runs relative to the worker's model card being published.
-/// `/health` is held until every gate passes, whatever its phase.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GatePhase {
-    /// Run while the card is held: no frontend routes to the worker, so it
-    /// is quiet. No card means no routing under any router.
-    #[default]
-    BeforePublish,
-    /// Run once every `before_publish` gate has passed and the card has been
-    /// published, for checks that need the frontend to see the worker, such
-    /// as warming up on traffic the deployment routes to it. The deployment's
-    /// own routing must keep client traffic off the worker.
-    AfterPublish,
+/// The release point a gate holds. `/health` is held until every gate passes,
+/// whichever it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Gate {
+    /// Holds the model card's discovery write: no frontend routes to the
+    /// worker under any router while these run.
+    Publish,
+    /// Called once the card is published; holds only `/health`. Under etcd
+    /// discovery the worker is routable while these run.
+    Ready,
 }
 
-/// How one gate is checked.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum GateCheck {
-    /// Run this command in the worker container. Exit status 0 is a pass.
-    Exec(Vec<String>),
-    /// POST to a check runner in the same pod, such as a sidecar with its
-    /// own image. A `200` is a pass; any other status is a fail.
-    Url(reqwest::Url),
+impl Gate {
+    /// Name in the `/health` body and the check request.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Gate::Publish => "publish",
+            Gate::Ready => "ready",
+        }
+    }
+
+    fn env_name(self) -> &'static str {
+        match self {
+            Gate::Publish => env_validation::DYN_PUBLISH_GATE,
+            Gate::Ready => env_validation::DYN_READY_GATE,
+        }
+    }
 }
 
-/// One configured gate.
+/// One check URL at one release point.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GateSpec {
-    pub name: String,
-    pub check: GateCheck,
-    /// The gate fails if it has no verdict by then.
-    pub timeout: Duration,
-    /// Gates of one phase run in parallel with one another.
-    pub phase: GatePhase,
+    pub gate: Gate,
+    /// A check runner in the same pod. A `200` is a pass; any other status
+    /// is a fail.
+    pub url: reqwest::Url,
 }
 
-/// Parsed validation configuration. Only exists when gates are configured.
+/// Parsed validation configuration. Only exists when a gate is configured.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidationConfig {
-    /// Gates in name order.
+    /// Publish gates, then ready gates, each in configured order.
     pub gates: Vec<GateSpec>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawGate {
-    exec: Option<Vec<String>>,
-    url: Option<String>,
-    timeout_secs: u64,
-    #[serde(default)]
-    phase: GatePhase,
-}
-
 impl ValidationConfig {
-    /// Read the configuration from the environment. `Ok(None)` when no gates
-    /// are configured, which keeps today's behaviour unchanged.
+    /// Read the configuration from the environment. `Ok(None)` when no gate
+    /// is configured, which keeps today's behaviour unchanged.
     pub fn from_env() -> Result<Option<Self>> {
-        Self::parse(std::env::var(env_validation::DYN_WORKER_VALIDATION_GATES).ok())
+        Self::parse(
+            std::env::var(env_validation::DYN_PUBLISH_GATE).ok(),
+            std::env::var(env_validation::DYN_READY_GATE).ok(),
+        )
     }
 
-    pub fn parse(gates: Option<String>) -> Result<Option<Self>> {
-        let Some(gates) = gates.filter(|value| !value.trim().is_empty()) else {
-            return Ok(None);
-        };
-        let raw: BTreeMap<String, RawGate> = serde_json::from_str(&gates).with_context(|| {
+    pub fn parse(publish: Option<String>, ready: Option<String>) -> Result<Option<Self>> {
+        let mut gates = urls(Gate::Publish, publish)?;
+        gates.extend(urls(Gate::Ready, ready)?);
+        Ok((!gates.is_empty()).then_some(ValidationConfig { gates }))
+    }
+
+    /// True when the model card is held until the publish gates pass, which
+    /// is whenever there are any.
+    pub fn holds_card(&self) -> bool {
+        self.gates.iter().any(|spec| spec.gate == Gate::Publish)
+    }
+}
+
+/// Parse one comma-separated URL list. Unset or blank means none.
+fn urls(gate: Gate, list: Option<String>) -> Result<Vec<GateSpec>> {
+    let Some(list) = list.filter(|value| !value.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let mut specs: Vec<GateSpec> = Vec::new();
+    for url in list.split(',').map(str::trim) {
+        let url = loopback_url(url).with_context(|| {
             format!(
-                "{} must be a JSON object of gate name to \
-                 {{\"exec\": [...] or \"url\": \"...\", \"timeout_secs\": N, \
-                 \"phase\": \"before_publish\" (default) or \"after_publish\"}}",
-                env_validation::DYN_WORKER_VALIDATION_GATES
+                "{} must be a comma-separated list of check URLs",
+                gate.env_name()
             )
         })?;
-        if raw.is_empty() {
-            bail!(
-                "{} must configure at least one gate",
-                env_validation::DYN_WORKER_VALIDATION_GATES
-            );
+        if specs.iter().any(|spec| spec.url == url) {
+            bail!("{} lists {url} twice", gate.env_name());
         }
-        let gates = raw
-            .into_iter()
-            .map(|(name, gate)| {
-                let check = match (gate.exec, gate.url) {
-                    (Some(argv), None)
-                        if argv.first().is_some_and(|program| !program.is_empty()) =>
-                    {
-                        GateCheck::Exec(argv)
-                    }
-                    (None, Some(url)) => GateCheck::Url(
-                        loopback_url(&url).with_context(|| format!("validation gate {name:?}"))?,
-                    ),
-                    _ => bail!(
-                        "validation gate {name:?}: set exactly one of a non-empty \"exec\" \
-                         command or a \"url\""
-                    ),
-                };
-                if gate.timeout_secs == 0 {
-                    bail!("validation gate {name:?}: \"timeout_secs\" must be greater than zero");
-                }
-                Ok(GateSpec {
-                    name,
-                    check,
-                    timeout: Duration::from_secs(gate.timeout_secs),
-                    phase: gate.phase,
-                })
-            })
-            .collect::<Result<_>>()?;
-        Ok(Some(ValidationConfig { gates }))
+        specs.push(GateSpec { gate, url });
     }
-
-    /// True when the model card is held until the `before_publish` gates
-    /// pass, which is whenever there are any.
-    pub fn holds_card(&self) -> bool {
-        self.gates
-            .iter()
-            .any(|gate| gate.phase == GatePhase::BeforePublish)
-    }
+    Ok(specs)
 }
 
-/// `url` gates may only reach a check runner in the same pod.
+/// Gates may only reach a check runner in the same pod.
 fn loopback_url(url: &str) -> Result<reqwest::Url> {
-    let parsed = reqwest::Url::parse(url).with_context(|| format!("invalid \"url\" {url:?}"))?;
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("invalid URL {url:?}"))?;
     let loopback = match parsed.host() {
         Some(url::Host::Domain(domain)) => domain == "localhost",
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
@@ -143,7 +109,7 @@ fn loopback_url(url: &str) -> Result<reqwest::Url> {
         None => false,
     };
     if parsed.scheme() != "http" || !loopback {
-        bail!("\"url\" must be http on loopback (127.0.0.1, ::1 or localhost), got {url:?}");
+        bail!("URL must be http on loopback (127.0.0.1, ::1 or localhost), got {url:?}");
     }
     Ok(parsed)
 }
@@ -152,96 +118,64 @@ fn loopback_url(url: &str) -> Result<reqwest::Url> {
 mod tests {
     use super::*;
 
-    fn parse(gates: &str) -> Result<Option<ValidationConfig>> {
-        ValidationConfig::parse(Some(gates.to_string()))
-    }
-
-    fn phases(gates: &str) -> (Vec<GatePhase>, bool) {
-        let config = parse(gates).unwrap().unwrap();
-        let phases = config.gates.iter().map(|gate| gate.phase).collect();
-        (phases, config.holds_card())
+    fn parse(publish: &str, ready: &str) -> Result<Option<ValidationConfig>> {
+        ValidationConfig::parse(Some(publish.to_string()), Some(ready.to_string()))
     }
 
     #[test]
-    fn parses_gates_in_name_order() {
-        assert_eq!(ValidationConfig::parse(None).unwrap(), None);
-        assert_eq!(ValidationConfig::parse(Some(" ".into())).unwrap(), None);
+    fn parses_both_lists_in_order() {
+        assert_eq!(ValidationConfig::parse(None, None).unwrap(), None);
+        assert_eq!(parse(" ", "").unwrap(), None);
         let config = parse(
-            r#"{"smoke": {"exec": ["python", "/checks/smoke.py"], "timeout_secs": 900},
-                "basic": {"url": "http://127.0.0.1:9100/validate", "timeout_secs": 60}}"#,
+            "http://127.0.0.1:9100/checks/smoke, http://localhost:9100/checks/tools",
+            "http://[::1]:9100/checks/warm",
         )
         .unwrap()
         .unwrap();
-        let names: Vec<_> = config.gates.iter().map(|gate| gate.name.as_str()).collect();
-        assert_eq!(names, ["basic", "smoke"]);
+        let gates: Vec<_> = config
+            .gates
+            .iter()
+            .map(|spec| (spec.gate, spec.url.as_str()))
+            .collect();
         assert_eq!(
-            config.gates[0].check,
-            GateCheck::Url("http://127.0.0.1:9100/validate".parse().unwrap())
+            gates,
+            [
+                (Gate::Publish, "http://127.0.0.1:9100/checks/smoke"),
+                (Gate::Publish, "http://localhost:9100/checks/tools"),
+                (Gate::Ready, "http://[::1]:9100/checks/warm"),
+            ]
         );
-        assert_eq!(
-            config.gates[1].check,
-            GateCheck::Exec(vec!["python".into(), "/checks/smoke.py".into()])
-        );
-        assert_eq!(config.gates[1].timeout, Duration::from_secs(900));
+        assert!(config.holds_card());
     }
 
     #[test]
-    fn phase_decides_whether_the_card_is_held() {
-        use GatePhase::{AfterPublish, BeforePublish};
-        assert_eq!(
-            phases(r#"{"a": {"exec": ["true"], "timeout_secs": 1}}"#),
-            (vec![BeforePublish], true)
-        );
-        assert_eq!(
-            phases(
-                r#"{"soak": {"exec": ["true"], "timeout_secs": 1, "phase": "before_publish"},
-                    "warm": {"exec": ["true"], "timeout_secs": 1, "phase": "after_publish"}}"#
-            ),
-            (vec![BeforePublish, AfterPublish], true)
-        );
-        assert_eq!(
-            phases(r#"{"a": {"exec": ["true"], "timeout_secs": 1, "phase": "after_publish"}}"#),
-            (vec![AfterPublish], false)
-        );
+    fn only_publish_gates_hold_the_card() {
+        let config = parse("", "http://127.0.0.1:9100/warm").unwrap().unwrap();
+        assert!(!config.holds_card());
     }
 
     #[test]
     fn rejects_every_misconfiguration() {
-        for (gates, expected) in [
-            ("not json", "must be a JSON object"),
-            ("{}", "at least one gate"),
-            (r#"{"a": {"timeout_secs": 1}}"#, "exactly one"),
+        for (publish, ready, expected) in [
+            ("not a url", "", "DYN_PUBLISH_GATE"),
+            ("http://10.0.0.1:9100/", "", "on loopback"),
+            ("", "https://127.0.0.1:9100/", "on loopback"),
+            ("", "http://example.com/", "DYN_READY_GATE"),
             (
-                r#"{"a": {"exec": ["true"], "url": "http://127.0.0.1/", "timeout_secs": 1}}"#,
-                "exactly one",
+                "http://127.0.0.1:9100/a,,http://127.0.0.1:9100/b",
+                "",
+                "invalid URL",
             ),
             (
-                r#"{"a": {"url": "http://10.0.0.1:9100/", "timeout_secs": 1}}"#,
-                "on loopback",
-            ),
-            (r#"{"a": {"exec": ["true"]}}"#, "must be a JSON object"),
-            (r#"{"a": {"exec": [], "timeout_secs": 1}}"#, "exactly one"),
-            (
-                r#"{"a": {"exec": ["true"], "timeout_secs": 0}}"#,
-                "greater than zero",
-            ),
-            (
-                r#"{"a": {"exec": ["true"], "timeout_secs": 1, "retries": 3}}"#,
-                "must be a JSON object",
-            ),
-            (
-                r#"{"a": {"exec": ["true"], "timeout_secs": 1, "phase": "later"}}"#,
-                "must be a JSON object",
-            ),
-            (
-                r#"{"a": {"exec": ["true"], "timeout_secs": 1, "after_publish": true}}"#,
-                "must be a JSON object",
+                "http://127.0.0.1:9100/a,http://127.0.0.1:9100/a",
+                "",
+                "twice",
             ),
         ] {
-            let error = format!("{:#}", parse(gates).unwrap_err());
+            let error = format!("{:#}", parse(publish, ready).unwrap_err());
             assert!(
                 error.contains(expected),
-                "{gates:?}: expected {expected:?} in {error:?}"
+                "{publish:?} {ready:?}: expected {expected:?} in {error:?}"
             );
         }
     }

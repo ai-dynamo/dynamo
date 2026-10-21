@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import threading
 import urllib.error
 import urllib.request
@@ -11,11 +12,13 @@ from dynamo.validation import runner
 
 pytestmark = [pytest.mark.gpu_0, pytest.mark.pre_merge, pytest.mark.unit]
 
+REQUEST = {"gate": "publish", "base_url": "http://127.0.0.1:1/v1", "models": ["m"]}
 
-def post(port: int, name: str) -> tuple[int, str]:
+
+def post(port: int, name: str, body: dict) -> tuple[int, str]:
     request = urllib.request.Request(
-        f"http://127.0.0.1:{port}/validate/{name}",
-        data=b'{"DYN_VALIDATION_GATE": "g"}',
+        f"http://127.0.0.1:{port}/checks/{name}",
+        data=json.dumps(body).encode(),
         method="POST",
     )
     try:
@@ -25,19 +28,45 @@ def post(port: int, name: str) -> tuple[int, str]:
         return error.code, error.read().decode()
 
 
-def test_status_is_the_verdict_and_stderr_the_reason():
-    server = runner.make_server(
-        0,
-        {
-            "pass": ["sh", "-c", 'test "$DYN_VALIDATION_GATE" = g'],
-            "fail": ["sh", "-c", "echo no tool call >&2; exit 3"],
-        },
-    )
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    port = server.server_address[1]
-    try:
-        assert post(port, "pass") == (200, "pass")
-        assert post(port, "fail") == (500, "exit status 3: no tool call")
-        assert post(port, "missing")[0] == 404
-    finally:
+@pytest.fixture
+def serve():
+    servers = []
+
+    def start(checks: dict[str, list[str]], timeout: float = 10) -> int:
+        server = runner.make_server(0, checks, timeout)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+        return server.server_address[1]
+
+    yield start
+    for server in servers:
         server.shutdown()
+
+
+def test_status_is_the_verdict_and_stderr_the_reason(serve):
+    port = serve(
+        {
+            "pass": [
+                "sh",
+                "-c",
+                'test "$DYN_VALIDATION_GATE" = publish '
+                '&& test "$DYN_VALIDATION_MODEL" = m '
+                '&& test "$OPENAI_BASE_URL" = http://127.0.0.1:1/v1',
+            ],
+            "fail": ["sh", "-c", "echo no tool call >&2; exit 3"],
+        }
+    )
+    assert post(port, "pass", REQUEST) == (200, "pass")
+    assert post(port, "fail", REQUEST) == (500, "exit status 3: no tool call")
+    assert post(port, "missing", REQUEST)[0] == 404
+
+
+def test_a_hung_check_fails_at_the_timeout(serve):
+    port = serve({"hang": ["sleep", "30"]}, timeout=0.5)
+    assert post(port, "hang", REQUEST) == (500, "no verdict within 0.5s")
+
+
+def test_gate_variables_come_only_from_the_request(serve, monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://somewhere-else/v1")
+    port = serve({"unset": ["sh", "-c", 'test -z "${OPENAI_BASE_URL+x}"']})
+    assert post(port, "unset", {"gate": "publish", "base_url": None})[0] == 200

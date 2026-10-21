@@ -3,24 +3,26 @@
 
 """End-to-end tests for worker validation gates on CPU mocker workers.
 
-Each test runs a real frontend and mocker workers under etcd discovery. A held
-worker must get no client traffic and report not ready, while /live stays up;
-a passing gate releases it; and a restarted worker is checked again.
+Each test runs a real frontend and mocker workers under etcd discovery, with
+the reference check runner serving the publish gate's checks. A held worker
+must get no client traffic and report not ready, while /live stays up; passing
+checks release it; and a restarted worker is checked again.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 import sys
+import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import pytest
 import requests
 
+from dynamo.validation import runner
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 
@@ -48,7 +50,7 @@ class GatedMockerWorker(ManagedProcess):
         *,
         name: str,
         system_port: int,
-        gates: Optional[dict[str, Any]],
+        publish_gate: Optional[list[str]],
     ):
         env = os.environ.copy()
         env["DYN_SYSTEM_PORT"] = str(system_port)
@@ -56,9 +58,10 @@ class GatedMockerWorker(ManagedProcess):
         # mocker fixture; validation adds to /health on top of it.
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_LOG"] = "info"
-        env.pop("DYN_WORKER_VALIDATION_GATES", None)
-        if gates is not None:
-            env["DYN_WORKER_VALIDATION_GATES"] = json.dumps(gates)
+        env.pop("DYN_PUBLISH_GATE", None)
+        env.pop("DYN_READY_GATE", None)
+        if publish_gate:
+            env["DYN_PUBLISH_GATE"] = ",".join(publish_gate)
         super().__init__(
             command=[
                 sys.executable,
@@ -78,6 +81,23 @@ class GatedMockerWorker(ManagedProcess):
             straggler_commands=["-m dynamo.mocker"],
             log_dir=f"{request.node.name}_{name}",
         )
+
+
+@pytest.fixture
+def check_runner() -> Iterator[Callable[[dict[str, list[str]]], Callable[[str], str]]]:
+    """Start the reference check runner on loopback; returns each check's URL."""
+    servers = []
+
+    def start(checks: dict[str, list[str]]) -> Callable[[str], str]:
+        server = runner.make_server(0, checks, timeout=120)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+        port = server.server_address[1]
+        return lambda name: f"http://127.0.0.1:{port}/checks/{name}"
+
+    yield start
+    for server in servers:
+        server.shutdown()
 
 
 def _is_200(response: requests.Response) -> bool:
@@ -103,9 +123,9 @@ def _wait_for(
     raise AssertionError(f"timed out waiting for {what}")
 
 
-def _gate_state(system_port: int, gate: str) -> Optional[str]:
+def _check(system_port: int, url: str) -> dict[str, Any]:
     _, body = _health(system_port)
-    return body.get("validation", {}).get("gates", {}).get(gate, {}).get("state")
+    return body.get("validation", {}).get("publish", {}).get(url, {})
 
 
 def _model_listed(frontend_port: int) -> bool:
@@ -144,33 +164,31 @@ def test_failing_gate_holds_the_worker_and_old_worker_keeps_serving(
     dynamo_dynamic_ports,
     num_system_ports,  # noqa: ARG001
     predownload_tokenizers,  # noqa: ARG001
+    check_runner,
 ) -> None:
     frontend_port = dynamo_dynamic_ports.frontend_port
     old_port, new_port = (int(p) for p in dynamo_dynamic_ports.system_ports)
 
     with DynamoFrontendProcess(request, frontend_port=frontend_port):
-        with GatedMockerWorker(request, name="old", system_port=old_port, gates=None):
+        with GatedMockerWorker(
+            request, name="old", system_port=old_port, publish_gate=None
+        ):
             _wait_for(lambda: _model_listed(frontend_port), "the old worker's model")
 
-            failing = {
-                "smoke": {
-                    "exec": ["sh", "-c", "echo tool parser mismatch >&2; exit 1"],
-                    "timeout_secs": 60,
-                }
-            }
+            url = check_runner(
+                {"smoke": ["sh", "-c", "echo tool parser mismatch >&2; exit 1"]}
+            )
+            smoke = url("smoke")
             with GatedMockerWorker(
-                request, name="new", system_port=new_port, gates=failing
+                request, name="new", system_port=new_port, publish_gate=[smoke]
             ):
                 _wait_for(
-                    lambda: _gate_state(new_port, "smoke") == "failed",
-                    "the failing gate's verdict",
+                    lambda: _check(new_port, smoke).get("state") == "failed",
+                    "the failing check's verdict",
                 )
                 status, body = _health(new_port)
                 assert status == 503, body
-                assert (
-                    "tool parser mismatch"
-                    in body["validation"]["gates"]["smoke"]["reason"]
-                ), body
+                assert "tool parser mismatch" in _check(new_port, smoke)["reason"], body
                 live = requests.get(f"http://localhost:{new_port}/live", timeout=5)
                 assert live.status_code == 200
 
@@ -187,40 +205,38 @@ def test_passing_gates_release_the_worker(
     dynamo_dynamic_ports,
     num_system_ports,  # noqa: ARG001
     predownload_tokenizers,  # noqa: ARG001
+    check_runner,
     tmp_path,
 ) -> None:
     frontend_port = dynamo_dynamic_ports.frontend_port
     system_port = int(dynamo_dynamic_ports.system_ports[0])
     flag = tmp_path / "release"
 
-    gates = {
-        # Goes through the worker's loopback OpenAI endpoint.
-        "completion": {
-            "exec": [sys.executable, "-m", "dynamo.validation.completion"],
-            "timeout_secs": 120,
-        },
-        # Holds until the test creates the flag file.
-        "manual": {
-            "exec": ["sh", "-c", f"while [ ! -f {flag} ]; do sleep 0.2; done"],
-            "timeout_secs": 120,
-        },
-    }
+    url = check_runner(
+        {
+            # Goes through the worker's loopback OpenAI endpoint.
+            "completion": [sys.executable, "-m", "dynamo.validation.completion"],
+            # Holds until the test creates the flag file.
+            "manual": ["sh", "-c", f"while [ ! -f {flag} ]; do sleep 0.2; done"],
+        }
+    )
+    publish_gate = [url("completion"), url("manual")]
 
     with DynamoFrontendProcess(request, frontend_port=frontend_port):
         with GatedMockerWorker(
-            request, name="gated", system_port=system_port, gates=gates
+            request, name="gated", system_port=system_port, publish_gate=publish_gate
         ):
             _wait_for(
-                lambda: _gate_state(system_port, "completion") == "passed",
-                "the completion gate to pass through the loopback endpoint",
+                lambda: _check(system_port, url("completion")).get("state") == "passed",
+                "the completion check to pass through the loopback endpoint",
             )
-            # Still held by the manual gate: not ready and not routable. The
+            # Still held by the manual check: not ready and not routable. The
             # frontend has no card for the model, so it reports it unknown.
             status, body = _health(system_port)
             assert status == 503, body
             assert not _model_listed(frontend_port)
             assert _chat(frontend_port).status_code == 404
-            # The completion gate's own request went through the loopback
+            # The completion check's own request went through the loopback
             # endpoint, not the frontend; the client request must not have.
             served_while_held = _generate_requests(system_port)
 
@@ -238,20 +254,19 @@ def test_a_restarted_worker_is_checked_again(
     dynamo_dynamic_ports,
     num_system_ports,  # noqa: ARG001
     predownload_tokenizers,  # noqa: ARG001
+    check_runner,
     tmp_path,
 ) -> None:
     system_port = int(dynamo_dynamic_ports.system_ports[0])
     runs = tmp_path / "runs"
-    gates = {
-        "count": {
-            "exec": ["sh", "-c", f"echo run >> {runs}"],
-            "timeout_secs": 60,
-        }
-    }
+    url = check_runner({"count": ["sh", "-c", f"echo run >> {runs}"]})
 
     for attempt in (1, 2):
         with GatedMockerWorker(
-            request, name=f"worker-{attempt}", system_port=system_port, gates=gates
+            request,
+            name=f"worker-{attempt}",
+            system_port=system_port,
+            publish_gate=[url("count")],
         ):
             _wait_for(lambda: _health(system_port)[0] == 200, "release")
             assert runs.read_text().splitlines() == ["run"] * attempt

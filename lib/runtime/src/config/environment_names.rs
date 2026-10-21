@@ -177,11 +177,13 @@ pub mod runtime {
 
     /// Worker validation gates
     pub mod validation {
-        /// JSON map of gate name to `{"exec": [...], "timeout_secs": N}` or
-        /// `{"url": "http://127.0.0.1:...", "timeout_secs": N}`, each with an
-        /// optional `"phase"`: `"before_publish"` (default) or
-        /// `"after_publish"`. Unset disables validation.
-        pub const DYN_WORKER_VALIDATION_GATES: &str = "DYN_WORKER_VALIDATION_GATES";
+        /// Comma-separated loopback check URLs that hold the worker's model
+        /// card until each answers 200. Unset adds no gate.
+        pub const DYN_PUBLISH_GATE: &str = "DYN_PUBLISH_GATE";
+        /// Comma-separated loopback check URLs, called once the card is
+        /// published, that hold `/health` until each answers 200. Unset adds
+        /// no gate.
+        pub const DYN_READY_GATE: &str = "DYN_READY_GATE";
     }
 
     /// Canary deployment configuration

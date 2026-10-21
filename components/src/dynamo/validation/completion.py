@@ -3,8 +3,8 @@
 
 """Built-in ``completion`` check: one chat completion must return content.
 
-Reads ``OPENAI_BASE_URL`` and ``DYN_VALIDATION_MODEL``, which the worker sets
-for every gate. Exits 0 on a pass; on a failure it exits 1 with the reason on
+Reads ``OPENAI_BASE_URL`` and ``DYN_VALIDATION_MODEL``, which the check runner
+sets from the worker's request. Exits 0 on a pass; on a failure it exits 1 with the reason on
 stderr, which the worker reports on ``/health``.
 """
 

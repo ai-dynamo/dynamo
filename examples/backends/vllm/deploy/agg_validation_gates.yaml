@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Aggregated vLLM worker with validation gates: "completion" runs in the
-# worker container and "smoke" in a check-runner sidecar. A failing check
-# holds the new worker, so with max-unavailable 0 the rollout stalls while the
-# old pods serve. See docs: kubernetes/fault-tolerance/validation-gates.
+# Aggregated vLLM worker with a publish gate: a check-runner sidecar serves
+# the "completion" and "smoke" checks, and the worker calls both before it
+# publishes its model card. A failing check holds the new worker, so with
+# max-unavailable 0 the rollout stalls while the old pods serve. See docs:
+# kubernetes/fault-tolerance/validation-gates.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -34,17 +35,14 @@ spec:
           command: [python3, -m, dynamo.vllm]
           args: [--model, Qwen/Qwen3-0.6B]
           env:
-          - name: DYN_WORKER_VALIDATION_GATES
-            value: |
-              {
-                "completion": {"exec": ["python3", "-m", "dynamo.validation.completion"], "timeout_secs": 600},
-                "smoke": {"url": "http://127.0.0.1:9100/validate/smoke", "timeout_secs": 900}
-              }
+          - name: DYN_PUBLISH_GATE
+            value: http://127.0.0.1:9100/checks/completion,http://127.0.0.1:9100/checks/smoke
           resources:
             limits:
               nvidia.com/gpu: "1"
-        # Replace the image and command with your own checks.
+        # Replace the image and checks with your own.
         - name: check-runner
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          command: [python3, -m, dynamo.validation.runner, --port, "9100",
-                    --check, "smoke=python3 -m dynamo.validation.completion"]
+          command: [python3, -m, dynamo.validation.runner, --port, "9100", --timeout, "600",
+                    --check, "completion=python3 -m dynamo.validation.completion",
+                    --check, "smoke=python3 /checks/smoke.py"]

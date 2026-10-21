@@ -5,6 +5,7 @@
 
 * ``python -m dynamo.validation.completion``: one chat completion through the
   worker's loopback OpenAI endpoint must return content.
-* ``python -m dynamo.validation.runner``: a check runner for ``url`` gates, run
-  as a sidecar with its own image.
+* ``python -m dynamo.validation.runner``: a check runner that serves checks
+  like this one to ``DYN_PUBLISH_GATE`` and ``DYN_READY_GATE``, as a sidecar
+  or a helper process in the worker container.
 """

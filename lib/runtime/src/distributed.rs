@@ -173,7 +173,7 @@ pub struct DistributedRuntime {
     // Local endpoint registry for in-process calls
     local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry,
 
-    // Worker validation gates; `None` unless DYN_WORKER_VALIDATION_GATES is set
+    // Worker validation gates; `None` unless DYN_PUBLISH_GATE or DYN_READY_GATE is set
     worker_validation: Option<Arc<crate::validation::WorkerValidation>>,
 
     // This hierarchy's own metrics registry
@@ -542,8 +542,8 @@ impl DistributedRuntime {
         self.system_health.clone()
     }
 
-    /// Get the local endpoint registry for in-process endpoint calls
-    /// Worker validation gates, when `DYN_WORKER_VALIDATION_GATES` is set.
+    /// Worker validation gates, when `DYN_PUBLISH_GATE` or `DYN_READY_GATE`
+    /// is set.
     pub fn worker_validation(&self) -> Option<&Arc<crate::validation::WorkerValidation>> {
         self.worker_validation.as_ref()
     }

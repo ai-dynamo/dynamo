@@ -4,14 +4,14 @@
 //! Holds model-card discovery writes until worker validation releases.
 //!
 //! Under etcd discovery the frontend routes to any endpoint that has a model
-//! card, whatever the pod's readiness. So a worker with `before_publish` gates
-//! (the default phase) must not write its card while they run.
+//! card, whatever the pod's readiness. So a worker with a publish gate
+//! (`DYN_PUBLISH_GATE`) must not write its card while its checks run.
 //! [`register_model_card`](crate::local_model::register_model_card) returns as
-//! usual and the card waits here. When every `before_publish` gate passes, the
-//! held cards are written in registration order. Any
-//! `after_publish` gates then run against the published card, and the worker
-//! reports ready once they pass too. A worker whose gates are all
-//! `after_publish` writes its card at once.
+//! usual and the card waits here. When every publish check passes, the held
+//! cards are written in registration order. The ready checks
+//! (`DYN_READY_GATE`) are then called against the published card, and the
+//! worker reports ready once they pass too. A worker with only a ready gate
+//! writes its card at once.
 //!
 //! A held card can be unregistered but not edited: a taint update is refused
 //! until release. If a held card can't be written, the worker shuts down so
@@ -47,8 +47,8 @@ fn card_key(endpoint: &Endpoint, model_suffix: Option<&str>) -> CardKey {
 }
 
 /// Hold `spec` if this worker's validation requires it. Returns the spec back
-/// when it should be written now: no gates, no `before_publish` gate, or
-/// already published.
+/// when it should be written now: no gates, no publish gate, or already
+/// published.
 pub(crate) async fn hold_card(
     endpoint: &Endpoint,
     model_suffix: Option<&str>,
@@ -129,20 +129,23 @@ mod tests {
     use crate::local_model::{LocalModel, register_model_card, update_model_taints};
     use crate::model_card::ModelDeploymentCard;
     use dynamo_runtime::discovery::DiscoveryQuery;
+    use dynamo_runtime::validation::testing::CheckServer;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use std::collections::HashSet;
     use std::time::Duration;
 
-    async fn gated() -> (DistributedRuntime, dynamo_runtime::component::Endpoint) {
-        gated_with(r#"{"g": {"exec": ["true"], "timeout_secs": 30}}"#).await
-    }
-
-    /// A worker with these gates and one registered model card.
-    async fn gated_with(gates: &str) -> (DistributedRuntime, dynamo_runtime::component::Endpoint) {
+    /// A worker with these publish and ready checks and one registered model
+    /// card.
+    async fn gated(
+        publish: &[&str],
+        ready: &[&str],
+    ) -> (DistributedRuntime, dynamo_runtime::component::Endpoint) {
+        let (publish, ready) = (publish.join(","), ready.join(","));
         temp_env::async_with_vars(
             [
                 ("DYN_SYSTEM_PORT", Some("0")),
-                ("DYN_WORKER_VALIDATION_GATES", Some(gates)),
+                ("DYN_PUBLISH_GATE", Some(publish.as_str())),
+                ("DYN_READY_GATE", Some(ready.as_str())),
             ],
             async {
                 let drt = DistributedRuntime::new(
@@ -185,9 +188,25 @@ mod tests {
             .unwrap();
     }
 
+    /// Wait until `url`'s check at `gate` reaches `state`.
+    async fn wait_for_state(drt: &DistributedRuntime, gate: &str, url: &str, state: &str) {
+        let validation = drt.worker_validation().unwrap();
+        for _ in 0..200 {
+            if validation.status_json()[gate][url]["state"] == state {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "{gate} check {url} never {state}: {}",
+            validation.status_json()
+        );
+    }
+
     #[tokio::test]
     async fn card_is_written_only_on_release_and_cannot_be_tainted_while_held() {
-        let (drt, endpoint) = gated().await;
+        let checks = CheckServer::start().await;
+        let (drt, endpoint) = gated(&[&checks.url("pass")], &[]).await;
         assert_eq!(cards(&drt).await, 0, "held card was written");
         let taints = HashSet::from(["drain".to_string()]);
         let error = update_model_taints(&endpoint, taints.clone())
@@ -201,26 +220,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_after_publish_gates_write_the_card_at_once() {
-        let (drt, _) = gated_with(
-            r#"{"g": {"exec": ["true"], "timeout_secs": 30, "phase": "after_publish"}}"#,
-        )
-        .await;
+    async fn only_a_ready_gate_writes_the_card_at_once() {
+        let checks = CheckServer::start().await;
+        let (drt, _) = gated(&[], &[&checks.url("pass")]).await;
         assert_eq!(cards(&drt).await, 1);
         assert!(!drt.worker_validation().unwrap().is_released());
     }
 
     #[tokio::test]
-    async fn after_publish_gates_run_against_the_published_card() {
-        let (drt, endpoint) = gated_with(
-            r#"{"soak": {"exec": ["true"], "timeout_secs": 30},
-                "warm": {"exec": ["sleep", "1"], "timeout_secs": 30, "phase": "after_publish"}}"#,
-        )
-        .await;
+    async fn ready_checks_run_against_the_published_card() {
+        let checks = CheckServer::start().await;
+        let warm = checks.url("slow");
+        let (drt, endpoint) = gated(&[&checks.url("pass")], &[warm.as_str()]).await;
         assert_eq!(
             cards(&drt).await,
             0,
-            "card written before the first gates passed"
+            "card written before the publish checks passed"
         );
         let error = update_model_taints(&endpoint, HashSet::new())
             .await
@@ -229,20 +244,11 @@ mod tests {
 
         let validation = drt.worker_validation().unwrap();
         validation.start(Default::default(), drt.child_token());
-        for _ in 0..200 {
-            if validation.status_json()["gates"]["warm"]["state"] == "running" {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(
-            validation.status_json()["gates"]["warm"]["state"],
-            "running"
-        );
+        wait_for_state(&drt, "ready", &warm, "running").await;
         assert_eq!(
             cards(&drt).await,
             1,
-            "card not written before the after_publish gate"
+            "card not written before the ready check"
         );
         assert!(!validation.is_released());
         update_model_taints(&endpoint, HashSet::from(["drain".to_string()]))
@@ -255,32 +261,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_gate_before_publish_never_writes_the_card() {
-        let (drt, _) = gated_with(
-            r#"{"soak": {"exec": ["false"], "timeout_secs": 30},
-                "warm": {"exec": ["true"], "timeout_secs": 30, "phase": "after_publish"}}"#,
-        )
-        .await;
+    async fn a_failed_publish_check_never_writes_the_card() {
+        let checks = CheckServer::start().await;
+        let (soak, warm) = (checks.url("fail"), checks.url("pass"));
+        let (drt, _) = gated(&[soak.as_str()], &[warm.as_str()]).await;
         let validation = drt.worker_validation().unwrap();
         validation.start(Default::default(), drt.child_token());
-        for _ in 0..200 {
-            if validation.status_json()["gates"]["soak"]["state"] == "failed" {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        wait_for_state(&drt, "publish", &soak, "failed").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(cards(&drt).await, 0);
         assert!(!validation.is_released());
-        assert_eq!(
-            validation.status_json()["gates"]["warm"]["state"],
-            "pending"
-        );
+        assert_eq!(validation.status_json()["ready"][&warm]["state"], "pending");
     }
 
     #[tokio::test]
     async fn a_card_unregistered_while_held_is_never_written() {
-        let (drt, endpoint) = gated().await;
+        let checks = CheckServer::start().await;
+        let (drt, endpoint) = gated(&[&checks.url("pass")], &[]).await;
         LocalModel::detach_from_endpoint(&endpoint, None)
             .await
             .unwrap();
@@ -290,7 +287,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_card_that_cannot_be_published_shuts_the_worker_down() {
-        let (drt, _) = gated().await;
+        let checks = CheckServer::start().await;
+        let (drt, _) = gated(&[&checks.url("pass")], &[]).await;
         // Another model now owns the held card's discovery key, so writing the
         // held card on release is refused.
         let other = ModelDeploymentCard::with_name_only("other");
