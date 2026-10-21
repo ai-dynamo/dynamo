@@ -4971,8 +4971,6 @@ async fn get_model_openai(
     State(state): State<Arc<service_v2::State>>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> Result<Response, ErrorResponse> {
-    check_ready(&state)?;
-
     let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
 
     // The retrieve route (`/v1/models/{*model_id}`) is a catch-all, so model
@@ -4987,6 +4985,7 @@ async fn get_model_openai(
     // wins over the readiness sub-resource of a sibling `foo`.
     // `get_model_retrieve` applies the readiness gate itself (503 if not ready).
     if state.manager().get_committed_model(model_id).is_some() {
+        check_ready(&state)?;
         return get_model_retrieve(&state, model_id);
     }
 
@@ -5000,6 +4999,7 @@ async fn get_model_openai(
         return get_model_readiness(&state, base);
     }
 
+    check_ready(&state)?;
     Err(ErrorMessage::model_not_found())
 }
 
@@ -5044,11 +5044,13 @@ fn get_model_retrieve(
     .into_response())
 }
 
-/// `GET /v1/models/{model}/ready` — structured per-namespace worker readiness
-/// detail (Mechanism 4). Deliberately *not* readiness-gated: it exists to
-/// diagnose models that are not yet ready, so it returns 200 with the full
-/// breakdown regardless of whether the model would be served.
-fn get_model_readiness(
+/// `GET /v1/models/{model}/ready` — model-specific HTTP serving readiness.
+/// Returns 200 only when topology, a usable engine, and HTTP routes are ready;
+/// otherwise returns 503 with the same diagnostic shape. Namespace details
+/// continue to describe worker topology; the top-level ready/reason also
+/// account for local frontend serving state. Unknown models remain 404.
+/// No inference request is dispatched by this check.
+pub(super) fn get_model_readiness(
     state: &Arc<service_v2::State>,
     model_id: &str,
 ) -> Result<Response, ErrorResponse> {
@@ -5056,7 +5058,28 @@ fn get_model_readiness(
         .manager()
         .get_committed_model(model_id)
         .ok_or_else(ErrorMessage::model_not_found)?;
-    Ok(Json(model.namespace_readiness()).into_response())
+    let mut readiness = model.namespace_readiness();
+    if readiness.ready {
+        let serving_reason = if !state.is_ready() {
+            Some(format!("frontend is {}", state.service_stage()))
+        } else if !model.is_ready_to_serve() {
+            Some("model has no usable serving engine".to_string())
+        } else if !state.model_http_routes_ready(&model) {
+            Some("model HTTP inference routes are not ready".to_string())
+        } else {
+            None
+        };
+        if let Some(reason) = serving_reason {
+            readiness.ready = false;
+            readiness.reason = Some(reason);
+        }
+    }
+    let status = if readiness.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    Ok((status, Json(readiness)).into_response())
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoints
