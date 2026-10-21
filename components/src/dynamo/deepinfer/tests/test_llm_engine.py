@@ -6,6 +6,7 @@
 import asyncio
 import json
 import sys
+import threading
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -39,11 +40,13 @@ class FakeContext:
 def native(monkeypatch):
     """Install a fake ``deepinfer`` package whose LLM wraps a FakeEngine."""
     fake = FakeEngine()
+    fake.construct_threads = set()
     llm_kwargs = {}
 
     class FakeLLM:
         def __init__(self, **kwargs):
             llm_kwargs.update(kwargs)
+            fake.construct_threads.add(threading.current_thread().name)
             self.llm_engine = fake
 
     def module(name, **attrs):
@@ -140,6 +143,14 @@ async def test_start_builds_the_native_engine_and_registers(native, model_dir):
         assert sys.modules["os"].environ["CUDA_VISIBLE_DEVICES"] == "4,5"
     finally:
         await engine.cleanup()
+
+
+async def test_native_engine_is_built_and_stepped_on_one_thread(engine, native):
+    await run(engine, request(max_tokens=2))
+
+    assert len(native.construct_threads) == 1
+    assert native.construct_threads == native.step_threads
+    assert threading.current_thread().name not in native.step_threads
 
 
 async def test_generate_streams_tokens_then_a_terminal_chunk(engine):

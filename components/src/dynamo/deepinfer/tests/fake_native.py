@@ -36,6 +36,16 @@ class FakeEngine:
         self.aborted = []
         self.closed = threading.Event()
         self.step_threads = set()
+        self.add_threads = set()
+        self.abort_threads = set()
+        self.close_threads = set()
+        self.flushes = 0
+        # When set, step() blocks on the gate after announcing itself, so a test
+        # can act while a native step is in flight.
+        self.step_gate = None
+        self.step_started = threading.Event()
+        # Accept requests but never schedule them, like an engine that lost one.
+        self.lose_requests = False
         self.fail_on_step = None
         self.reject = set()
         self.steps = 0
@@ -46,13 +56,17 @@ class FakeEngine:
         self.top_k = 0
 
     def add_request(self, *, user_id, request_id, sampling_params, prompt_token_ids):
+        self.add_threads.add(threading.current_thread().name)
         if request_id in self.reject:
             raise ValueError("prompt too long")
         self.added.append((request_id, sampling_params, list(prompt_token_ids)))
+        if self.lose_requests:
+            return
         max_tokens = getattr(sampling_params, "max_tokens", sampling_params)
         self.pending[request_id] = [0, max_tokens, len(prompt_token_ids)]
 
     def abort_request(self, request_id):
+        self.abort_threads.add(threading.current_thread().name)
         self.aborted.append(request_id)
         self.pending.pop(request_id, None)
 
@@ -61,8 +75,11 @@ class FakeEngine:
 
     def step(self):
         self.steps += 1
-        time.sleep(self.step_delay)
         self.step_threads.add(threading.current_thread().name)
+        if self.step_gate is not None:
+            self.step_started.set()
+            self.step_gate.wait(10)
+        time.sleep(self.step_delay)
         if self.fail_on_step is not None and self.steps >= self.fail_on_step:
             raise RuntimeError("cuda error")
         pointers = []
@@ -86,6 +103,7 @@ class FakeEngine:
         return pointers
 
     def flush_inflight_reqs(self):
+        self.flushes += 1
         return []
 
     def clone(self, request_id):
@@ -93,4 +111,5 @@ class FakeEngine:
         return SimpleNamespace(**vars(self.slots[request_id]))
 
     def close(self):
+        self.close_threads.add(threading.current_thread().name)
         self.closed.set()

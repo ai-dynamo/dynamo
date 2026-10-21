@@ -115,7 +115,11 @@ class DeepInferLLMEngine(LLMEngine):
         del worker_id
         model_path = await asyncio.to_thread(resolve_model_path, self.config.model)
         self._eos_token_ids, self._bos_token_id = read_special_token_ids(model_path)
-        self._runner = await asyncio.to_thread(self._build_runner, model_path)
+        runner = EngineRunner()
+        # The native engine is built on the runner's own thread so that
+        # construction and every later step share one thread.
+        await runner.start(lambda: self._create_native_engine(model_path))
+        self._runner = runner
         logger.info(
             "DeepInfer engine ready: model=%s ep=%d cp=%d",
             self.config.model,
@@ -133,10 +137,12 @@ class DeepInferLLMEngine(LLMEngine):
             ),
         )
 
-    def _build_runner(self, model_path: str) -> EngineRunner:
-        """Construct the native engine. Runs in a worker thread: it blocks for
-        the model load, and the environment must be set before DeepInfer (and
-        torch) are imported."""
+    def _create_native_engine(self, model_path: str) -> tuple[Any, Any]:
+        """Construct the native engine and return ``(engine, clone)``.
+
+        Runs on the runner's worker thread: it blocks for the model load, and
+        the environment must be set before DeepInfer (and torch) are imported.
+        """
         config = self.config
         for key, value in _ENGINE_ENV_DEFAULTS.items():
             os.environ.setdefault(key, value)
@@ -164,9 +170,7 @@ class DeepInferLLMEngine(LLMEngine):
             lookahead_tokens=min(1, int(os.environ["DEEPINFER_USE_NEXTN_DECODE"])),
         )
         self._sampling_params_cls = SamplingParams
-        runner = EngineRunner(llm.llm_engine, RequestOutput.clone)
-        runner.start()
-        return runner
+        return llm.llm_engine, RequestOutput.clone
 
     async def generate(
         self, request: GenerateRequest, context: Context
@@ -191,26 +195,20 @@ class DeepInferLLMEngine(LLMEngine):
             raise InvalidArgument(str(exc)) from exc
 
         request_id = self._request_id(context)
-        results: asyncio.Queue = asyncio.Queue()
-        self._streams[request_id] = results
-        loop = asyncio.get_running_loop()
-
-        def sink(item: list[TokenOutput] | BaseException) -> None:
-            try:
-                loop.call_soon_threadsafe(results.put_nowait, item)
-            except RuntimeError:  # event loop already closed during shutdown
-                pass
 
         import numpy as np
 
         finished = False
         try:
             try:
-                runner.submit(
-                    request_id, np.asarray(token_ids, dtype=np.int32), params, sink
+                results = runner.submit(
+                    request_id, np.asarray(token_ids, dtype=np.int32), params
                 )
             except RunnerClosed as exc:
                 raise EngineShutdown(str(exc)) from exc
+            except ValueError as exc:  # duplicate request id
+                raise InvalidArgument(str(exc)) from exc
+            self._streams[request_id] = results
             logprobs, _ = parse_logprob_options(request.get("output_options") or {})
             completion_tokens = 0
             while True:
@@ -347,8 +345,7 @@ class DeepInferLLMEngine(LLMEngine):
         runner, self._runner = self._runner, None
         if runner is None:
             return
-        # Joining blocks on the native shutdown, so keep it off the event loop.
-        stopped = await asyncio.to_thread(runner.stop, 60.0)
-        if not stopped:
-            logger.warning("DeepInfer engine thread did not stop within 60s")
+        # Lets the in-flight native step finish before the engine is closed.
+        if not await runner.stop(60.0):
+            logger.warning("DeepInfer engine did not stop within 60s")
         logger.info("DeepInfer engine shutdown")
