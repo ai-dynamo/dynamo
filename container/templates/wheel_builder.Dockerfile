@@ -665,17 +665,21 @@ COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-p
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/sidecar/
 
-# Build Python and Rust AISimulate from the same source revision. The published
-# Dynamo metadata keeps a version requirement so its wheel can upload to PyPI.
-COPY container/deps/build_aisimulate.py /opt/dynamo/container/deps/build_aisimulate.py
-RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
-    source ${VIRTUAL_ENV}/bin/activate && \
-    python /opt/dynamo/container/deps/build_aisimulate.py \
-        --root /opt/dynamo \
-        --source /opt/aisimulate-source \
-        --output /opt/dynamo/dist
+COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
 
+# AISimulate is released separately as an abi3 wheel. Stage the pinned published
+# wheel for all images that install it explicitly. Runtime images own dependency
+# installation through their requirements files and local wheels.
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    python -m pip download \
+        --only-binary=:all: \
+        --no-deps \
+        --no-index \
+        --find-links https://pypi.nvidia.com/aisimulate/ \
+        --dest /opt/dynamo/dist \
+        --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
 # source cache so the rust NOTICES generator can inline upstream license text

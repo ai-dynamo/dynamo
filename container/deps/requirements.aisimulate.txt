@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Containers build the wheel from the Cargo.toml source patch instead.
-aisimulate>0.13.0.dev1,<0.14.0
+# Keep in sync with the aisimulate-core pins in Cargo.toml and lib/bindings/python/Cargo.toml.
+aisimulate==0.13.0
