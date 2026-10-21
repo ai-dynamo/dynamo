@@ -29,7 +29,6 @@ use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_me
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::{Context, Result};
-use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
@@ -140,6 +139,7 @@ pub struct State {
     cancel_token: CancellationToken,
     // Frontend API behavior read by request handlers after the service is built.
     frontend_api_config: FrontendApiConfig,
+    responses_api_enabled: bool,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
@@ -152,6 +152,7 @@ pub struct State {
 struct StateConfig {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    responses_api_enabled: bool,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
@@ -553,6 +554,7 @@ impl State {
             },
             cancel_token,
             frontend_api_config: config.frontend_api_config,
+            responses_api_enabled: config.responses_api_enabled,
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
         }
@@ -585,6 +587,37 @@ impl State {
 
     pub fn is_ready(&self) -> bool {
         self.service_observer.is_ready()
+    }
+
+    /// Check the model's local HTTP routes independently of process readiness.
+    /// Tensor-only models have no HTTP inference route. Every HTTP engine
+    /// registered for this model must have its corresponding route enabled.
+    pub(crate) fn model_http_routes_ready(&self, model: &crate::discovery::Model) -> bool {
+        let routes = [
+            (model.has_chat_engine(), EndpointType::Chat),
+            (
+                model.has_chat_engine() && self.responses_api_enabled,
+                EndpointType::Responses,
+            ),
+            (
+                model.has_chat_engine() && self.anthropic_api_enabled(),
+                EndpointType::AnthropicMessages,
+            ),
+            (model.has_completions_engine(), EndpointType::Completion),
+            (model.has_embeddings_engine(), EndpointType::Embedding),
+            (model.has_classify_engine(), EndpointType::Classify),
+            (model.has_pooling_engine(), EndpointType::Pooling),
+            (model.has_rerank_engine(), EndpointType::Rerank),
+            (model.has_images_engine(), EndpointType::Images),
+            (model.has_videos_engine(), EndpointType::Videos),
+            (model.has_audios_engine(), EndpointType::Audios),
+            (model.has_realtime_engine(), EndpointType::Realtime),
+            (model.has_generate_engine(), EndpointType::Generate),
+        ];
+        routes.iter().any(|(has_engine, _)| *has_engine)
+            && routes
+                .iter()
+                .all(|(has_engine, endpoint)| !*has_engine || self.flags.get(endpoint))
     }
 
     pub fn start_draining(&self) {
@@ -759,6 +792,10 @@ pub struct HttpServiceConfig {
     #[builder(default = "false")]
     enable_batch_endpoints: bool,
 
+    /// Internal Batch Gateway origin. When set, expose the complete Batch API through this frontend.
+    #[builder(default = "None")]
+    batch_gateway_url: Option<String>,
+
     /// Experimental engine-native Generate APIs. **Disabled by default**. The
     /// builder flag mounts both vLLM `/inference/v1/generate` and SGLang
     /// `/generate`; the backend-specific `DYN_*_ENABLE_*` variables mount one.
@@ -799,8 +836,8 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_nvext: bool,
 
-    /// Master switch for the frontend admin API surface (`GET` /
-    /// `POST /busy_threshold`). Default `true`; env-truthy
+    /// Master switch for `/router_policy` (including its busy-threshold subresource)
+    /// and the legacy `/busy_threshold` API. Default `true`; env-truthy
     /// `DYN_DISABLE_FRONTEND_ADMIN_API` overrides to `false`.
     #[builder(default = "true")]
     enable_admin_api: bool,
@@ -864,13 +901,11 @@ impl HttpService {
     }
 
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
-        self.run_inner(cancel_token, None, None).await
+        self.run_inner(cancel_token, None).await
     }
 
     /// Like [`spawn`], but uses a caller-provided pre-bound listener. Closes the TOCTOU
-    /// port-allocation gap for tests that need to know the bound port up front. Not
-    /// supported in TLS mode, which binds internally. Returns an error if invoked on a
-    /// service built with `enable_tls(true)`.
+    /// port-allocation gap for tests that need to know the bound port up front.
     ///
     /// [`spawn`]: HttpService::spawn
     pub async fn spawn_with_listener(
@@ -883,24 +918,21 @@ impl HttpService {
     }
 
     /// Like [`run`], but serves on a caller-provided pre-bound listener instead of
-    /// binding `{host}:{port}` internally. See [`spawn_with_listener`] for the TLS
-    /// restriction.
+    /// binding `{host}:{port}` internally.
     ///
     /// [`run`]: HttpService::run
-    /// [`spawn_with_listener`]: HttpService::spawn_with_listener
     pub async fn run_with_listener(
         &self,
         cancel_token: CancellationToken,
         listener: tokio::net::TcpListener,
     ) -> Result<()> {
-        self.run_inner(cancel_token, Some(listener), None).await
+        self.run_inner(cancel_token, Some(listener)).await
     }
 
     async fn run_inner(
         &self,
         cancel_token: CancellationToken,
         listener: Option<tokio::net::TcpListener>,
-        tls_handle: Option<axum_server::Handle>,
     ) -> Result<()> {
         if self.tls_client_ca_cert_path.is_some() && !self.enable_tls {
             anyhow::bail!("TLS must be enabled when a client CA certificate is configured");
@@ -916,14 +948,7 @@ impl HttpService {
         let state = self.state.clone();
         let state_cancel = state.cancel_token().clone();
 
-        if self.enable_tls {
-            if listener.is_some() {
-                return Err(anyhow::anyhow!(
-                    "Pre-bound listener is not supported in TLS mode. \
-                     Use run()/spawn() (which bind internally) when enable_tls is set."
-                ));
-            }
-            let addr = listen_socket_addr(&self.host, self.port)?;
+        let tls = if self.enable_tls {
             let cert_path = self
                 .tls_cert_path
                 .as_ref()
@@ -939,125 +964,64 @@ impl HttpService {
             )
             .context("Failed to create TLS config")?;
             server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-            let config = RustlsConfig::from_config(Arc::new(server_config));
+            Some(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)))
+        } else {
+            None
+        };
 
-            let handle = tls_handle.unwrap_or_default();
-            let std_listener = bind_listener(addr)
-                .and_then(|l| l.into_std())
-                .map_err(|e| {
+        let listener = match listener {
+            Some(l) => l,
+            None => {
+                let addr = listen_socket_addr(&self.host, self.port)?;
+                bind_listener(addr).map_err(|e| {
                     tracing::error!(
                         protocol = %protocol,
                         address = %address,
                         error = %e,
                         "Failed to bind server to address"
                     );
-                    anyhow::anyhow!("Failed to start {} server on {}: {}", protocol, address, e)
-                })?;
-            let server = axum_server::from_tcp_rustls(std_listener, config)
-                .handle(handle.clone())
-                .serve(router.into_make_service());
-
-            let server = async {
-                tokio::pin!(server);
-                tokio::select! {
-                    result = &mut server => result,
-                    address = handle.listening() => {
-                        if let Some(address) = address {
-                            tracing::info!(%address, "HTTPS server listening");
-                        }
-                        server.await
+                    match e.kind() {
+                        std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+                            "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
+                            protocol,
+                            self.port
+                        ),
+                        _ => anyhow::anyhow!(
+                            "Failed to start {} server on {}: {}",
+                            protocol,
+                            address,
+                            e
+                        ),
                     }
-                }
-            };
-
-            self.spawn_rl_listener_if_configured(&cancel_token).await?;
-
-            // Spawn canary after all fallible startup so it won't leak on early errors
-            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
-
-            tokio::select! {
-                result = server => {
-                    let result = result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e));
-                    state.start_stopping();
-                    cancel_token.cancel();
-                    result?;
-                }
-                _ = observer.cancelled() => {
-                    state.start_draining();
-                    tracing::info!("HTTPS server shutdown requested");
-                    let shutdown_timeout =
-                        Duration::from_secs(get_graceful_shutdown_timeout() as u64);
-                    handle.graceful_shutdown(Some(shutdown_timeout));
-                    if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
-                        tracing::warn!(
-                            inflight_requests = state.inflight_count(),
-                            "Timed out waiting for inflight inference requests to drain"
-                        );
-                    }
-                    state.start_stopping();
-                    state_cancel.cancel();
-                }
+                })?
             }
-        } else {
-            let listener = match listener {
-                Some(l) => l,
-                None => {
-                    let addr = listen_socket_addr(&self.host, self.port)?;
-                    bind_listener(addr).map_err(|e| {
-                        tracing::error!(
-                            protocol = %protocol,
-                            address = %address,
-                            error = %e,
-                            "Failed to bind server to address"
-                        );
-                        match e.kind() {
-                            std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
-                                "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
-                                protocol,
-                                self.port
-                            ),
-                            _ => anyhow::anyhow!(
-                                "Failed to start {} server on {}: {}",
-                                protocol,
-                                address,
-                                e
-                            ),
-                        }
-                    })?
-                }
-            };
+        };
+        tracing::info!(address = %listener.local_addr()?, "{protocol} server listening");
 
-            self.spawn_rl_listener_if_configured(&cancel_token).await?;
+        self.spawn_rl_listener_if_configured(&cancel_token).await?;
 
-            // Spawn canary after all fallible startup so it won't leak on early errors
-            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+        // Spawn canary after all fallible startup so it won't leak on early errors
+        tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
-            let state = self.state.clone();
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    observer.cancelled_owned().await;
-                    state.start_draining();
-                    tracing::info!("HTTP server shutdown requested");
-                    let shutdown_timeout =
-                        Duration::from_secs(get_graceful_shutdown_timeout() as u64);
-                    if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
-                        tracing::warn!(
-                            inflight_requests = state.inflight_count(),
-                            "Timed out waiting for inflight inference requests to drain"
-                        );
-                    }
-                    state.start_stopping();
-                    state_cancel.cancel();
-                })
-                .await
-                .inspect_err(|_| {
-                    self.state.start_stopping();
-                    cancel_token.cancel()
-                })?;
-            self.state.start_stopping();
-            cancel_token.cancel();
-        }
-
+        // The server keeps accepting while inflight requests drain, then gives open
+        // connections what is left of the shutdown budget.
+        let shutdown = async {
+            observer.cancelled().await;
+            state.start_draining();
+            tracing::info!("{protocol} server shutdown requested");
+            let shutdown_timeout = Duration::from_secs(get_graceful_shutdown_timeout() as u64);
+            let drain_started = tokio::time::Instant::now();
+            if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
+                tracing::warn!(
+                    inflight_requests = state.inflight_count(),
+                    "Timed out waiting for inflight inference requests to drain"
+                );
+            }
+            shutdown_timeout.saturating_sub(drain_started.elapsed())
+        };
+        super::server::serve(listener, tls, router, write_idle_timeout(), shutdown).await;
+        state.start_stopping();
+        state_cancel.cancel();
         Ok(())
     }
 
@@ -1131,6 +1095,16 @@ fn get_graceful_shutdown_timeout() -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(5)
+}
+
+fn write_idle_timeout() -> Duration {
+    std::env::var(env_llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_secs)
+        .filter(|duration| tokio::time::Instant::now().checked_add(*duration).is_some())
+        .unwrap_or(Duration::from_secs(120))
 }
 
 const DEFAULT_LISTEN_BACKLOG: u32 = 4096;
@@ -1307,6 +1281,7 @@ impl HttpServiceConfigBuilder {
             StateConfig {
                 metrics_config,
                 frontend_api_config,
+                responses_api_enabled: config.enable_responses_endpoints,
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
                 streaming_backend_error_check: config.streaming_backend_error_check,
@@ -1324,9 +1299,10 @@ impl HttpServiceConfigBuilder {
         state
             .flags
             .set(&EndpointType::Responses, config.enable_responses_endpoints);
-        state
-            .flags
-            .set(&EndpointType::Batch, config.enable_batch_endpoints);
+        state.flags.set(
+            &EndpointType::Batch,
+            config.enable_batch_endpoints || config.batch_gateway_url.is_some(),
+        );
         state.flags.set(
             &EndpointType::AnthropicMessages,
             anthropic_endpoints_enabled,
@@ -1406,7 +1382,11 @@ impl HttpServiceConfigBuilder {
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
+        // TODO: Revisit admin write exposure: listener separation, authentication, and default enablement.
         if admin_api_enabled {
+            system_routes.push(super::router_policy::router_policy_router(
+                state.manager_clone(),
+            ));
             system_routes.push(super::busy_threshold::busy_threshold_router(
                 state.clone(),
                 None,
@@ -1414,12 +1394,22 @@ impl HttpServiceConfigBuilder {
         } else {
             tracing::info!(
                 env = env_llm::DYN_DISABLE_FRONTEND_ADMIN_API,
-                "frontend admin API disabled — busy_threshold routes not registered"
+                "frontend admin API disabled — admin routes not registered"
             );
         }
         for extension in &config.frontend_route_extensions {
             let route_set = extension(FrontendExtensionContext::new(state.clone()))?;
             system_routes.push(route_set.into_parts());
+        }
+        if let Some(gateway) = config.batch_gateway_url.as_deref() {
+            system_routes.push(super::batch_proxy::router(
+                gateway,
+                var(HTTP_SVC_FILES_PATH_ENV).ok(),
+                var(HTTP_SVC_BATCHES_PATH_ENV).ok(),
+                super::openai::get_body_limit(),
+                super::batch_proxy::upload_body_limit(),
+                state.cancel_token().clone(),
+            )?);
         }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
@@ -1433,7 +1423,7 @@ impl HttpServiceConfigBuilder {
             anthropic_endpoints_enabled,
             vllm_generate_enabled,
             sglang_generate_enabled,
-            config.enable_batch_endpoints,
+            config.enable_batch_endpoints && config.batch_gateway_url.is_none(),
         )?;
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
@@ -1795,18 +1785,9 @@ mod tests {
             .build()
             .unwrap();
         let cancel = CancellationToken::new();
-        let tls_handle = axum_server::Handle::new();
-        let server_handle = tls_handle.clone();
-        let server_cancel = cancel.clone();
-        let handle = tokio::spawn(async move {
-            service
-                .run_inner(server_cancel, None, Some(server_handle))
-                .await
-        });
-        let addr = tokio::time::timeout(Duration::from_secs(2), tls_handle.listening())
-            .await
-            .expect("TLS service did not start")
-            .expect("TLS service failed to bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = service.spawn_with_listener(cancel.clone(), listener).await;
 
         let root = reqwest::Certificate::from_pem(&std::fs::read(certificates.ca.path()).unwrap())
             .unwrap();
@@ -1891,6 +1872,406 @@ mod tests {
             error.to_string(),
             "TLS must be enabled when a client CA certificate is configured"
         );
+    }
+
+    struct ReadinessOnlyEngine;
+
+    #[async_trait::async_trait]
+    impl<Req, Resp>
+        dynamo_runtime::engine::AsyncEngine<
+            dynamo_runtime::pipeline::SingleIn<Req>,
+            dynamo_runtime::pipeline::ManyOut<Resp>,
+            dynamo_runtime::pipeline::Error,
+        > for ReadinessOnlyEngine
+    where
+        Req: Send + Sync + 'static,
+        Resp: dynamo_runtime::engine::Data,
+    {
+        async fn generate(
+            &self,
+            _request: dynamo_runtime::pipeline::SingleIn<Req>,
+        ) -> Result<dynamo_runtime::pipeline::ManyOut<Resp>, dynamo_runtime::pipeline::Error>
+        {
+            unreachable!("model readiness must not dispatch inference")
+        }
+    }
+
+    #[tokio::test]
+    async fn model_readiness_waits_for_topology_engine_and_routes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder().port(port).build().unwrap();
+        let state = service.state_clone();
+        let control = service.clone();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+        let model_name = "test/model";
+        let ready_url = format!("{base}/v1/models/{model_name}/ready");
+        let encoded_ready_url = format!("{base}/v1/models/test%2Fmodel/ready");
+        assert_eq!(
+            client.get(&ready_url).send().await.unwrap().status(),
+            reqwest::StatusCode::NOT_FOUND
+        );
+
+        let mut card = crate::model_card::ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.needs = Vec::new();
+        let mut workers =
+            crate::discovery::WorkerSet::new("test-ns".to_string(), "worker".to_string(), card);
+        let (members, receiver) = tokio::sync::watch::channel::<Vec<u64>>(vec![]);
+        workers.set_instance_watcher(receiver);
+        state
+            .manager()
+            .add_worker_set(model_name, "test-ns", workers);
+
+        let response = client.get(&ready_url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["namespaces"]["test-ns"]["ready"], false);
+        assert!(
+            body["reason"]
+                .as_str()
+                .unwrap()
+                .contains("required worker types")
+        );
+        members.send(vec![1]).unwrap();
+        let response = client.get(&ready_url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(body["namespaces"]["test-ns"]["ready"], true);
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["reason"], "model has no usable serving engine");
+
+        state
+            .manager()
+            .add_chat_completions_model(
+                model_name,
+                "worker",
+                Arc::new(crate::engines::StreamingEngineAdapter::new(
+                    crate::engines::make_echo_engine(),
+                )),
+            )
+            .unwrap();
+        let response = client.get(&ready_url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["reason"],
+            "model HTTP inference routes are not ready"
+        );
+        // Model readiness must not change process-level health or liveness.
+        for path in ["/health", "/live"] {
+            assert_eq!(
+                client
+                    .get(format!("{base}{path}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                reqwest::StatusCode::OK
+            );
+        }
+        control
+            .enable_model_endpoint(EndpointType::Chat, true)
+            .unwrap();
+        let response = client.get(&ready_url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(body["model"], model_name);
+        assert_eq!(body["ready"], true);
+        assert_eq!(body["reason"], serde_json::Value::Null);
+        let response = client.get(&encoded_ready_url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let encoded_body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(encoded_body["model"], model_name);
+        assert_eq!(encoded_body["ready"], true);
+        assert!(
+            body["namespaces"]
+                .as_object()
+                .unwrap()
+                .contains_key("test-ns")
+        );
+        assert_eq!(client.post(format!("{base}/v1/chat/completions")).json(&serde_json::json!({"model": model_name, "messages": [{"role": "user", "content": "test"}]})).send().await.unwrap().status(), reqwest::StatusCode::OK);
+        control
+            .enable_model_endpoint(EndpointType::Chat, false)
+            .unwrap();
+        assert_eq!(
+            client.get(&ready_url).send().await.unwrap().status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        state.manager().remove_model(model_name);
+        assert_eq!(
+            client.get(&ready_url).send().await.unwrap().status(),
+            reqwest::StatusCode::NOT_FOUND
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn model_readiness_rejects_tensor_only_without_blocking_other_models() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder().port(port).build().unwrap();
+        let state = service.state_clone();
+        let control = service.clone();
+        state
+            .manager()
+            .add_tensor_model("tensor-only", "worker", Arc::new(ReadinessOnlyEngine))
+            .unwrap();
+        state
+            .manager()
+            .add_chat_completions_model(
+                "http-model",
+                "worker",
+                Arc::new(crate::engines::StreamingEngineAdapter::new(
+                    crate::engines::make_echo_engine(),
+                )),
+            )
+            .unwrap();
+        control
+            .enable_model_endpoint(EndpointType::Chat, true)
+            .unwrap();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+        let response = client
+            .get(format!("{base}/v1/models/tensor-only/ready"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(body["ready"], false);
+        assert!(
+            body["namespaces"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|ns| ns["ready"] == true)
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/v1/models/http-model/ready"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/health"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        state.start_draining();
+        let response = client
+            .get(format!("{base}/v1/models/http-model/ready"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["reason"],
+            "frontend is draining"
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/live"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn model_readiness_waits_for_generate_route_without_dispatching_inference() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .enable_engine_apis(true)
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let control = service.clone();
+        state
+            .manager()
+            .add_generate_model("generate-only", "worker", Arc::new(ReadinessOnlyEngine))
+            .unwrap();
+        control
+            .enable_model_endpoint(EndpointType::Generate, false)
+            .unwrap();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/v1/models/generate-only/ready");
+        let response = client.get(&url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["ready"],
+            false
+        );
+        control
+            .enable_model_endpoint(EndpointType::Generate, true)
+            .unwrap();
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            reqwest::StatusCode::OK
+        );
+        control
+            .enable_model_endpoint(EndpointType::Generate, false)
+            .unwrap();
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        handle.abort();
+    }
+
+    async fn spawn_derived_route_readiness_service(
+        responses: bool,
+        anthropic: bool,
+    ) -> (HttpService, u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .enable_responses_endpoints(responses)
+            .enable_anthropic_endpoints(anthropic)
+            .build()
+            .unwrap();
+        service
+            .model_manager()
+            .add_chat_completions_model("derived-chat", "worker", Arc::new(ReadinessOnlyEngine))
+            .unwrap();
+        let running = service.clone();
+        let handle = tokio::spawn(async move {
+            running
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+        (service, port, handle)
+    }
+
+    #[tokio::test]
+    async fn model_readiness_requires_configured_responses_route() {
+        for configured in [false, true] {
+            let (service, port, handle) =
+                spawn_derived_route_readiness_service(configured, false).await;
+            let path = "/v1/models/derived-chat/ready";
+            assert_eq!(get_status(port, path).await, reqwest::StatusCode::OK);
+            service
+                .enable_model_endpoint(EndpointType::Responses, false)
+                .unwrap();
+            assert_eq!(
+                get_status(port, path).await,
+                if configured {
+                    reqwest::StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    reqwest::StatusCode::OK
+                }
+            );
+            assert!(service.model_endpoint_enabled(EndpointType::Chat));
+            service
+                .enable_model_endpoint(EndpointType::Responses, true)
+                .unwrap();
+            assert_eq!(get_status(port, path).await, reqwest::StatusCode::OK);
+            handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn model_readiness_requires_configured_anthropic_route() {
+        for configured in [false, true] {
+            let (service, port, handle) =
+                spawn_derived_route_readiness_service(true, configured).await;
+            let path = "/v1/models/derived-chat/ready";
+            assert_eq!(get_status(port, path).await, reqwest::StatusCode::OK);
+            service
+                .enable_model_endpoint(EndpointType::AnthropicMessages, false)
+                .unwrap();
+            assert_eq!(
+                get_status(port, path).await,
+                if configured {
+                    reqwest::StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    reqwest::StatusCode::OK
+                }
+            );
+            assert!(service.model_endpoint_enabled(EndpointType::Chat));
+            service
+                .enable_model_endpoint(EndpointType::AnthropicMessages, true)
+                .unwrap();
+            assert_eq!(get_status(port, path).await, reqwest::StatusCode::OK);
+            handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn model_readiness_anthropic_preserves_exact_model_precedence() {
+        let (service, port, handle) = spawn_derived_route_readiness_service(true, true).await;
+        service
+            .model_manager()
+            .add_chat_completions_model(
+                "derived-chat/ready",
+                "worker",
+                Arc::new(ReadinessOnlyEngine),
+            )
+            .unwrap();
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/v1/models/derived-chat/ready");
+        let response = client
+            .get(&url)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(body["id"], "derived-chat/ready");
+        assert_eq!(body["type"], "model");
+        assert!(body.get("ready").is_none());
+        service
+            .model_manager()
+            .remove_chat_completions_model("derived-chat/ready")
+            .unwrap();
+        let response = client.get(&url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["ready"],
+            true
+        );
+        service.state().start_draining();
+        let response = client.get(&url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["reason"], "frontend is draining");
+        handle.abort();
     }
 
     #[test]
@@ -2101,11 +2482,8 @@ mod tests {
         assert_eq!(observer.inflight_count(), 0);
     }
 
-    /// `enable_admin_api=false` ⇒ `GET /busy_threshold` is not registered and
-    /// returns 404, not 503 or 405. Inference is unaffected (covered by other
-    /// tests).
     #[tokio::test]
-    async fn test_admin_api_disabled_404s_busy_threshold() {
+    async fn test_admin_api_disabled_404s_router_management() {
         let cancel_token = Arc::new(CancellationToken::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -2124,14 +2502,24 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        let resp = reqwest::Client::new()
-            .get(format!("http://localhost:{}/busy_threshold", port))
-            .send()
-            .await
-            .expect("request failed");
-        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+        let client = reqwest::Client::new();
+        for (method, path) in [
+            (reqwest::Method::GET, "/busy_threshold"),
+            (reqwest::Method::POST, "/busy_threshold"),
+            (reqwest::Method::GET, "/router_policy/busy_threshold"),
+            (reqwest::Method::POST, "/router_policy/busy_threshold"),
+            (reqwest::Method::GET, "/router_policy"),
+            (reqwest::Method::PATCH, "/router_policy"),
+        ] {
+            let response = client
+                .request(method, format!("http://localhost:{port}{path}"))
+                .json(&serde_json::json!({"model": "missing"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
+        }
 
-        // And /live still works (sanity: only the admin surface is gated).
         let live = reqwest::Client::new()
             .get(format!("http://localhost:{}/live", port))
             .send()
@@ -2172,6 +2560,221 @@ mod tests {
     async fn spawn_default_service() -> (u16, tokio::task::JoinHandle<()>) {
         let (port, _, handle) = spawn_service(|builder| builder).await;
         (port, handle)
+    }
+
+    #[tokio::test]
+    async fn test_batch_proxy_uses_frontend_without_inference_admission() {
+        let mut gateway = mockito::Server::new_async().await;
+        let list = gateway
+            .mock("GET", "/v1/batches")
+            .match_header("authorization", "Bearer batch-test")
+            .with_status(200)
+            .with_body(r#"{"object":"list","data":[]}"#)
+            .create_async()
+            .await;
+        let (port, state, handle) =
+            spawn_service(|builder| builder.batch_gateway_url(Some(gateway.url()))).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        // No model is registered: batch control-plane calls must still work.
+        let response = client
+            .get(format!("http://127.0.0.1:{port}/v1/batches"))
+            .header("authorization", "Bearer batch-test")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["object"],
+            "list"
+        );
+        assert_eq!(state.inflight_count(), 0);
+        list.assert_async().await;
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_batch_upload_limit_preserves_online_json_limit() {
+        temp_env::async_with_vars(
+            [
+                (env_llm::DYN_HTTP_BODY_LIMIT_MB, Some("1")),
+                (env_llm::DYN_BATCH_UPLOAD_BODY_LIMIT_MB, Some("3")),
+            ],
+            async {
+                let mut gateway = mockito::Server::new_async().await;
+                let upload = gateway
+                    .mock("POST", "/v1/files")
+                    .with_status(200)
+                    .with_body(r#"{"id":"file-1"}"#)
+                    .create_async()
+                    .await;
+                let (port, _, task) =
+                    spawn_service(|builder| builder.batch_gateway_url(Some(gateway.url()))).await;
+                let task = tokio_util::task::AbortOnDropHandle::new(task);
+                let client = reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .unwrap();
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "model": "model", "input": "x".repeat(2 * 1024 * 1024),
+                }))
+                .unwrap();
+                let response = client
+                    .post(format!("http://127.0.0.1:{port}/v1/files"))
+                    .body(body.clone())
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let _ = response.bytes().await.unwrap();
+                let response = client
+                    .post(format!("http://127.0.0.1:{port}/v1/responses"))
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+                assert_eq!(
+                    response.json::<serde_json::Value>().await.unwrap()["code"],
+                    413
+                );
+                upload.assert_async().await;
+                task.abort();
+                let _ = task.await;
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_shutdown_closes_stalled_batch_downloads() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        trait Connection: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+        impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Connection for T {}
+
+        temp_env::async_with_vars(
+            [
+                (env_llm::DYN_BATCH_MAX_FILE_TRANSFERS, Some("1")),
+                (env_llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS, Some("120")),
+                (env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1")),
+            ],
+            tokio::time::timeout(Duration::from_secs(20), async {
+                for is_tls in [false, true] {
+                    let released = CancellationToken::new();
+                    let body_released = released.clone();
+                    let upstream_router = axum::Router::new().route(
+                        "/v1/files/file-1/content",
+                        axum::routing::get(move || {
+                            let guard = body_released.clone().drop_guard();
+                            async move {
+                                let chunk = axum::body::Bytes::from(vec![b'x'; 65536]);
+                                axum::body::Body::from_stream(async_stream::stream! {
+                                    let _guard = guard;
+                                    loop { yield Ok::<_, std::io::Error>(chunk.clone()); }
+                                })
+                            }
+                        }),
+                    );
+                    let upstream_listener =
+                        tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let upstream_addr = upstream_listener.local_addr().unwrap();
+                    let upstream_cancel = CancellationToken::new();
+                    let _upstream_guard = upstream_cancel.clone().drop_guard();
+                    let upstream_task =
+                        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                            axum::serve(upstream_listener, upstream_router)
+                                .with_graceful_shutdown(upstream_cancel.cancelled_owned())
+                                .await
+                                .unwrap();
+                        }));
+
+                    let certificates = make_mtls_test_certificates();
+                    let service = HttpService::builder()
+                        .host("127.0.0.1")
+                        .port(0)
+                        .batch_gateway_url(Some(format!("http://{upstream_addr}")))
+                        .enable_tls(is_tls)
+                        .tls_cert_path(
+                            is_tls.then(|| certificates.server_cert.path().to_path_buf()),
+                        )
+                        .tls_key_path(is_tls.then(|| certificates.server_key.path().to_path_buf()))
+                        .build()
+                        .unwrap();
+                    let state = service.state_clone();
+                    let cancel = CancellationToken::new();
+                    let _guard = cancel.clone().drop_guard();
+                    let server_cancel = cancel.clone();
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let addr = listener.local_addr().unwrap();
+                    let mut task =
+                        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                            service.run_with_listener(server_cancel, listener).await
+                        }));
+                    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+                    let mut client: Box<dyn Connection> = if is_tls {
+                        let config = dynamo_runtime::tls_utils::client_tls_config(
+                            Some(certificates.ca.path()),
+                            false,
+                            None,
+                            None,
+                        )
+                        .unwrap();
+                        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+                        Box::new(
+                            connector
+                                .connect(
+                                    rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap(),
+                                    stream,
+                                )
+                                .await
+                                .unwrap(),
+                        )
+                    } else {
+                        Box::new(stream)
+                    };
+                    client
+                        .write_all(
+                            b"GET /v1/files/file-1/content HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    client.flush().await.unwrap();
+                    let mut headers = Vec::new();
+                    while !headers.ends_with(b"\r\n\r\n") {
+                        assert!(headers.len() < 8192);
+                        headers.push(client.read_u8().await.unwrap());
+                    }
+                    assert!(headers.starts_with(b"HTTP/1.1 200"));
+                    assert_eq!(state.inflight_count(), 0);
+                    assert!(!released.is_cancelled());
+                    // The 120-second idle deadline cannot make the 1-second drain pass.
+                    cancel.cancel();
+                    tokio::time::timeout(Duration::from_secs(3), &mut task)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(state.service_stage(), ServiceStage::Stopping);
+                    tokio::time::timeout(Duration::from_secs(1), released.cancelled())
+                        .await
+                        .expect("frontend retained upstream response");
+                    drop(client);
+                    upstream_task.abort();
+                    let _ = upstream_task.await;
+                }
+            }),
+        )
+        .await
+        .unwrap();
     }
 
     /// Verifies that an unsupported content type returns the standard JSON error

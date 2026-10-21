@@ -15,7 +15,7 @@ Start the mock vLLM endpoint:
 
 ```bash
 cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
-  --listen 127.0.0.1:50051 \
+  --listen 127.0.0.1:30001 \
   --model mocker-model \
   --extra-engine-args '{"engine":{"speedup_ratio":1000,"block_size":64}}'
 ```
@@ -24,7 +24,7 @@ Point the existing Dynamo sidecar at it:
 
 ```bash
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --grpc-endpoint 127.0.0.1:50051
+  --grpc-endpoint 127.0.0.1:30001
 ```
 
 `--extra-engine-args` accepts inline JSON or a JSON file path. The values use
@@ -121,17 +121,17 @@ port mappings, a Service, or firewall rules need a known event port. For example
 
 ```bash
 cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
-  --listen 0.0.0.0:50051 \
+  --listen 0.0.0.0:30001 \
   --model mocker-model \
   --extra-engine-args '{"engine":{"speedup_ratio":1000,"block_size":64},"dynamo":{"zmq_kv_events_port":5557}}'
 
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --grpc-endpoint mock-host:50051
+  --grpc-endpoint mock-host:30001
 ```
 
 Replace `mock-host` with a host reachable from the sidecar. Expose both TCP
 ports on that host, preserving the event port number. For Docker port mapping,
-use `-p 50051:50051 -p 5557:5557` on the mock-server container. The sidecar will
+use `-p 30001:30001 -p 5557:5557` on the mock-server container. The sidecar will
 connect to `mock-host:5557` for events.
 
 An explicit replay client can use the existing optional replay socket by adding
@@ -151,11 +151,11 @@ Run separate endpoints for the two emulated vLLM roles:
 
 ```bash
 cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
-  --listen 127.0.0.1:50051 --model mocker-model \
+  --listen 127.0.0.1:30001 --model mocker-model \
   --disaggregation-mode prefill --extra-engine-args '{"engine":{"speedup_ratio":1000}}'
 
 cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
-  --listen 127.0.0.1:50052 --model mocker-model \
+  --listen 127.0.0.1:30011 --model mocker-model \
   --disaggregation-mode decode --extra-engine-args '{"engine":{"speedup_ratio":1000}}'
 ```
 
@@ -163,11 +163,11 @@ Then start one sidecar for each endpoint:
 
 ```bash
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --grpc-endpoint 127.0.0.1:50051 \
+  --grpc-endpoint 127.0.0.1:30001 \
   --disaggregation-mode prefill
 
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --grpc-endpoint 127.0.0.1:50052 \
+  --grpc-endpoint 127.0.0.1:30011 \
   --disaggregation-mode decode
 ```
 

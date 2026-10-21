@@ -27,6 +27,10 @@ pub(super) struct CrtcNodeState {
     pub(super) worker_cutoffs: FxHashMap<WorkerWithDpRank, usize>,
     /// Workers with full edge coverage.
     pub(super) full_edge_workers: WorkerSet,
+    /// Hash of the block just before `edge[0]`, or 0 for root children. The
+    /// head never moves, so however often the tree splits, the parent is the node whose
+    /// edge ends with this block.
+    pub(super) parent_tail: ExternalSequenceBlockHash,
 }
 
 impl CrtcNodeState {
@@ -37,6 +41,7 @@ impl CrtcNodeState {
             edge,
             worker_cutoffs: FxHashMap::default(),
             full_edge_workers: WorkerSet::default(),
+            parent_tail: ExternalSequenceBlockHash(0),
         }
     }
 
@@ -262,6 +267,8 @@ impl CrtcNodeState {
             edge: suffix_edge,
             worker_cutoffs: suffix_cutoffs,
             full_edge_workers: suffix_full,
+            // The prefix now ends with the block before the suffix's head.
+            parent_tail: self.edge[pos - 1].1,
         }
     }
 

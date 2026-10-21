@@ -34,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
@@ -3090,7 +3091,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					`{"spec":{"template":{"topologyConstraint":{"pack":"rack"}}}}`,
 				)
 			}),
-			wantWebhookErrs: []string{`spec.providerOverride.value: Invalid value: null: does not match the registered PodCliqueSet schema: json: cannot unmarshal string into Go struct field TopologyConstraint.spec.template.topologyConstraint.pack of type v1alpha1.TopologyPackConstraint`},
+			// Go 1.27's encoding/json names the root struct (PodCliqueSet) in
+			// UnmarshalTypeError; Go 1.26 named the immediate parent
+			// (TopologyConstraint).
+			wantWebhookErrs: []string{`spec.providerOverride.value: Invalid value: null: does not match the registered PodCliqueSet schema: json: cannot unmarshal string into Go struct field PodCliqueSet.spec.template.topologyConstraint.pack of type v1alpha1.TopologyPackConstraint`},
 		},
 		{
 			name: "typed and provider-native Grove topology cannot be combined",
@@ -4064,6 +4068,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		},
 	}
 
+	t.Log("Add complete-probe cases to the admission table for both API versions")
+	tests = append(tests, probeDGDAdmissionCases()...)
+
 	t.Log("Add the LPX scenarios to the same DGD admission table")
 	tests = append(tests, lpxDGDAdmissionCases()...)
 
@@ -4106,6 +4113,54 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			assertDGDAdmissionDefaults(t, actual, tt)
 		})
 	}
+}
+
+// probeDGDAdmissionCases builds probe rows for the shared DGD admission table.
+func probeDGDAdmissionCases() []dgdAdmissionTestCase {
+	var tests []dgdAdmissionTestCase
+	for _, placement := range []string{"main", "frontend sidecar", "role"} {
+		beta := betaDGDForAdmission(nil)
+		alpha := alphaDGDForAdmission(nil)
+		betaSpec := betaWorkerComponent(beta)
+		alphaSpec := alpha.Spec.Services["worker"]
+		betaPath := field.NewPath("spec", "components").Index(1)
+		alphaPath := field.NewPath("spec", "services").Key("worker")
+		betaContainer := &betaSpec.PodTemplate.Spec.Containers[0]
+		alphaContainer := alphaSpec.ExtraPodSpec.MainContainer
+
+		// Select a representative container in each source-version template.
+		switch placement {
+		case "main":
+			betaPath = betaPath.Child("podTemplate", "spec", "containers").Index(0)
+			alphaPath = alphaPath.Child("extraPodSpec", "mainContainer")
+		case "frontend sidecar":
+			betaSpec.FrontendSidecar = k8sptr.To("frontend")
+			betaSpec.PodTemplate.Spec.Containers = append(betaSpec.PodTemplate.Spec.Containers, corev1.Container{Name: "frontend", Image: frontendImage150})
+			betaContainer = &betaSpec.PodTemplate.Spec.Containers[1]
+			betaPath = betaPath.Child("podTemplate", "spec", "containers").Index(1)
+			alphaSpec.ExtraPodSpec.PodSpec = &corev1.PodSpec{Containers: []corev1.Container{{Name: "frontend", Image: frontendImage150}}}
+			alphaContainer = &alphaSpec.ExtraPodSpec.Containers[0]
+			alphaPath = alphaPath.Child("extraPodSpec", "containers").Index(0)
+		case "role":
+			setBetaExplicitMultinodeRoleTemplates(betaSpec, 2)
+			betaContainer = &betaSpec.Roles[1].PodTemplate.Spec.Containers[0]
+			betaPath = betaPath.Child("roles").Index(1).Child("podTemplate", "spec", "containers").Index(0)
+			setAlphaExplicitMultinodeRoleTemplates(alphaSpec, 2)
+			alphaContainer = &alphaSpec.Roles[0].PodTemplate.Spec.Containers[0]
+			alphaPath = alphaPath.Child("roles").Index(0).Child("podTemplate", "spec", "containers").Index(0)
+		}
+
+		// Keep the shared probe cases on the resource's production admission path.
+		probeCases := containerProbeAdmissionCases(beta, betaContainer, betaPath)
+		probeCases = append(probeCases, containerProbeAdmissionCases(alpha, alphaContainer, alphaPath)...)
+		for _, probeCase := range probeCases {
+			tests = append(tests, dgdAdmissionTestCase{
+				name: probeCase.name, deployment: probeCase.deployment,
+				oldDeployment: probeCase.oldDeployment, wantCELErr: probeCase.wantCELErr,
+			})
+		}
+	}
+	return tests
 }
 
 func admittedBetaDGD(t *testing.T, actual *unstructured.Unstructured) *nvidiacomv1beta1.DynamoGraphDeployment {

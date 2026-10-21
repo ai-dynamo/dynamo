@@ -38,12 +38,13 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_SYSTEM_PORT1                Decode sidecar system port (default: 8081)"
             echo "  DYN_SYSTEM_PORT2                Prefill sidecar system port (default: 8082)"
             echo "  VLLM_DECODE_HTTP_PORT           Decode vLLM HTTP port (default: 8100)"
-            echo "  VLLM_DECODE_GRPC_PORT           Decode vLLM gRPC port (default: 50051)"
+            echo "  VLLM_DECODE_GRPC_PORT           Decode vLLM gRPC port (default: 30001)"
             echo "  VLLM_PREFILL_HTTP_PORT          Prefill vLLM HTTP port (default: 8110)"
-            echo "  VLLM_PREFILL_GRPC_PORT          Prefill vLLM gRPC port (default: 50052)"
+            echo "  VLLM_PREFILL_GRPC_PORT          Prefill vLLM gRPC port (default: 30011)"
             echo "  VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT  Decode NIXL port (default: 5600)"
             echo "  VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT Prefill NIXL port (default: 20097)"
             echo "  VLLM_PREFILL_KV_EVENT_PORT      Prefill KV event port (default: 20081)"
+            echo "  VLLM_PREFILL_KV_REPLAY_PORT     Prefill KV event replay port (default: 20181)"
             echo "  VLLM_DECODE_GPU                 Decode GPU index (default: 0)"
             echo "  VLLM_PREFILL_GPU                Prefill GPU index (default: 1)"
             echo "  MAX_MODEL_LEN                   Maximum model length (default: 4096)"
@@ -64,15 +65,17 @@ trap dynamo_exit_trap EXIT
 
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
-VLLM_DECODE_HTTP_PORT="${VLLM_DECODE_HTTP_PORT:-8100}"
-VLLM_DECODE_GRPC_PORT="${VLLM_DECODE_GRPC_PORT:-50051}"
-VLLM_PREFILL_HTTP_PORT="${VLLM_PREFILL_HTTP_PORT:-8110}"
-VLLM_PREFILL_GRPC_PORT="${VLLM_PREFILL_GRPC_PORT:-50052}"
+# Managed ports are indexed like DYN_SYSTEM_PORT{N}: worker 1 is decode, 2 is prefill.
+VLLM_DECODE_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${VLLM_DECODE_HTTP_PORT:-8100}")
+VLLM_DECODE_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${VLLM_DECODE_GRPC_PORT:-30001}")
+VLLM_PREFILL_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 2 "${VLLM_PREFILL_HTTP_PORT:-8110}")
+VLLM_PREFILL_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${VLLM_PREFILL_GRPC_PORT:-30011}")
 VLLM_DECODE_GPU="${VLLM_DECODE_GPU:-0}"
 VLLM_PREFILL_GPU="${VLLM_PREFILL_GPU:-1}"
-VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT="${VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT:-5600}"
-VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT="${VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT:-20097}"
-VLLM_PREFILL_KV_EVENT_PORT="${VLLM_PREFILL_KV_EVENT_PORT:-20081}"
+VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 "${VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT:-5600}")
+VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 "${VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT:-20097}")
+VLLM_PREFILL_KV_EVENT_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_PREFILL_KV_EVENT_PORT:-20081}")
+VLLM_PREFILL_KV_REPLAY_PORT=$(dyn_port DYN_VLLM_KV_REPLAY_PORT 2 "${VLLM_PREFILL_KV_REPLAY_PORT:-20181}")
 
 # Default KV cache cap from profiling (2x safety over min=560 MiB); ~3.8 GiB
 # peak VRAM per engine. The profiler/test framework takes precedence through
@@ -121,7 +124,7 @@ vllm-rs serve "$MODEL" \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
-    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}" \
+    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL_KV_EVENT_PORT}\",\"replay_endpoint\":\"tcp://*:${VLLM_PREFILL_KV_REPLAY_PORT}\",\"enable_kv_cache_events\":true}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 

@@ -303,7 +303,7 @@ jobs:
         id: calculate-builder-flavor
         shell: bash
         run: |
-          if [[ ${{ inputs.framework }} != @(vllm|sglang|trtllm) ]]; then
+          if [[ ${{ inputs.framework }} != @(vllm|sglang|trtllm|triton) ]]; then
             echo "builder_flavor=general" >> $GITHUB_OUTPUT
           else
             echo "builder_flavor=${{ inputs.framework }}" >> $GITHUB_OUTPUT

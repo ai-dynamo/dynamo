@@ -33,7 +33,19 @@ func ResolveComponentRuntimeStatus(
 	annotations map[string]string,
 ) ComponentRuntimeStatus {
 	status := ComponentRuntimeStatus{}
-	main := mainContainerFromPodSpec(podSpec)
+	main := GetMainContainerFromPodSpec(podSpec)
+
+	// Native sidecars publish their identity through runtime registration. Do not
+	// predict it from either the engine flags or the sidecar's launch command.
+	if podSpec != nil {
+		for _, container := range podSpec.InitContainers {
+			if container.Name == commonconsts.RuntimeContainerName {
+				main = nil
+				break
+			}
+		}
+	}
+
 	if main != nil {
 		tokens := shellCommandLineTokens(main.Command, main.Args)
 		status.ServedModelName = firstFlagValue(
@@ -91,18 +103,6 @@ func ResolveGroveComponentRuntimeStatuses(
 		)
 	}
 	return statuses
-}
-
-func mainContainerFromPodSpec(podSpec *corev1.PodSpec) *corev1.Container {
-	if podSpec == nil {
-		return nil
-	}
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podSpec.Containers[i]
-		}
-	}
-	return nil
 }
 
 func shellCommandLineTokens(command, args []string) []string {

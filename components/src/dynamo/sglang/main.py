@@ -40,7 +40,7 @@ from dynamo.sglang.init_multimodal import (
     init_multimodal_worker,
 )
 from dynamo.sglang.init_rerank import init_rerank
-from dynamo.sglang.nixl_telemetry import install_per_rank_nixl_prometheus_ports
+from dynamo.sglang.nixl_telemetry import install_scheduler_process_wrapper
 from dynamo.sglang.shutdown import install_graceful_shutdown
 from dynamo.sglang.snapshot import prepare_snapshot_engine
 
@@ -55,8 +55,9 @@ async def worker(argv: list[str] | None = None):
     dump_config(config.dynamo_args.dump_config_to, config)
 
     # Must run before any sgl.Engine is constructed: it changes how the engine
-    # launches its scheduler processes, each of which needs its own exporter port.
-    install_per_rank_nixl_prometheus_ports()
+    # launches its scheduler processes, each of which needs its own exporter port
+    # and, under pure data parallelism, the publisher's KV metrics address.
+    install_scheduler_process_wrapper()
 
     if (
         config.server_args.load_format == "gms"

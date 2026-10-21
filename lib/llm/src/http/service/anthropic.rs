@@ -110,11 +110,15 @@ pub fn anthropic_models_router(
     let retrieve_path = format!("{}/{{*model_id}}", models_path);
     let list_doc = RouteDoc::new(axum::http::Method::GET, &models_path);
     let retrieve_doc = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
+    let readiness_doc = RouteDoc::new(
+        axum::http::Method::GET,
+        format!("{}/{{model_id}}/ready", models_path),
+    );
     let router = Router::new()
         .route(&models_path, get(list_models))
         .route(&retrieve_path, get(get_model))
         .with_state(state);
-    (vec![list_doc, retrieve_doc], router)
+    (vec![list_doc, retrieve_doc, readiness_doc], router)
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +575,16 @@ async fn anthropic_messages(
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
     apply_anthropic_nvext_policy(&mut chat_request, &headers, state.nvext_enabled());
+    // Native Anthropic stop reporting needs this internal metadata even when
+    // client extensions are disabled. The converters consume it, never emit nvext.
+    let fields = chat_request
+        .nvext
+        .get_or_insert_with(Default::default)
+        .extra_fields
+        .get_or_insert_with(Vec::new);
+    if !fields.iter().any(|field| field == "stop_reason") {
+        fields.push("stop_reason".to_string());
+    }
     if let Err(error) = chat_request.validate() {
         let error = invalid_argument(error.to_string());
         return Err(AnthropicHandlerError::validation(error.message())
@@ -1110,10 +1124,17 @@ async fn get_model(
     headers: HeaderMap,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> Result<Response, super::openai::ErrorResponse> {
-    super::openai::check_ready(&state)?;
-
     // Strip leading slash from wildcard capture (axum `/{*key}` includes it).
     let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
+
+    if state.manager().get_committed_model(model_id).is_none()
+        && let Some(base) = model_id.strip_suffix("/ready")
+        && state.manager().get_committed_model(base).is_some()
+    {
+        return super::openai::get_model_readiness(&state, base);
+    }
+
+    super::openai::check_ready(&state)?;
 
     let models: HashSet<String> = state.manager().model_display_names();
     if !models.contains(model_id) {
