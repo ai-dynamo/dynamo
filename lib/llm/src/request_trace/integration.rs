@@ -3,6 +3,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dynamo_runtime::engine::{AsyncEngineContext, AsyncEngineContextProvider};
 use dynamo_runtime::pipeline::Context;
@@ -23,6 +24,8 @@ use crate::request_trace::{
 struct RequestTraceRequestEndState {
     request_tracker: Arc<RequestTracker>,
     replay_metrics: Arc<RequestReplayMetrics>,
+    // Router guards can overwrite the shared tracker with per-attempt counts.
+    output_tokens: Option<Arc<AtomicUsize>>,
 }
 
 pub(crate) struct RequestEndTraceState {
@@ -128,6 +131,7 @@ fn build_request_end_trace_state_for_policy<T: Send + Sync + 'static>(
     let request = RequestTraceRequestEndState {
         request_tracker,
         replay_metrics,
+        output_tokens: None,
     };
 
     Some(RequestEndTraceState {
@@ -143,18 +147,24 @@ impl RequestEndTraceState {
         let Some(request_state) = self.request.take() else {
             return;
         };
+        let output_tokens = request_state
+            .output_tokens
+            .as_ref()
+            .map(|tokens| tokens.load(Ordering::Relaxed) as u64);
         if let Some(agent_state) = self.agent.take() {
             let (agent_context, mut metrics) =
                 super::request_metrics_from_agent_state(agent_state, self.request_id.clone());
             metrics.replay = Some(super::into_owned_replay_metrics(
                 request_state.replay_metrics,
             ));
+            super::record::set_output_tokens(&mut metrics, output_tokens);
             super::record::emit_agent_request_end(agent_context, metrics);
         } else {
             super::record::emit_request_end(
                 self.request_id.clone(),
                 &request_state.request_tracker,
                 super::into_owned_replay_metrics(request_state.replay_metrics),
+                output_tokens,
             );
         }
     }
@@ -233,13 +243,15 @@ pub(crate) fn wrap_completion_request_end_stream(
 /// native `/generate`. Tool calls are not parsed on these routes.
 pub(crate) fn wrap_engine_output_request_end_stream(
     stream: Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>>,
-    trace_state: Option<RequestEndTraceState>,
+    mut trace_state: Option<RequestEndTraceState>,
 ) -> Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>> {
-    let Some(request) = trace_state.as_ref().and_then(|s| s.request.as_ref()) else {
+    let Some(request) = trace_state.as_mut().and_then(|s| s.request.as_mut()) else {
         return wrap_request_end_stream(stream, trace_state);
     };
     let tracker = request.request_tracker.clone();
     let input_tokens = request.replay_metrics.input_length;
+    let logical_output_tokens = Arc::new(AtomicUsize::new(0));
+    request.output_tokens = Some(logical_output_tokens.clone());
     let finish_reason_metadata = finish_reason_metadata_handle(&trace_state);
     let mut output_tokens = 0usize;
     let stream = stream.map(move |response| {
@@ -255,13 +267,11 @@ pub(crate) fn wrap_engine_output_request_end_stream(
                 );
             }
             output_tokens = output_tokens.saturating_add(output.token_ids.len());
+            logical_output_tokens.store(output_tokens, Ordering::Relaxed);
             // ISL was recorded at request construction (first write wins).
-            super::record_llm_metric_tokens(
-                Some(&tracker),
-                None,
-                output_tokens,
-                output.cached_tokens_for_prompt(input_tokens),
-            );
+            if let Some(cached_tokens) = output.cached_tokens_for_prompt(input_tokens) {
+                tracker.record_isl(input_tokens, Some(cached_tokens));
+            }
         }
         response
     });
@@ -327,6 +337,7 @@ mod tests {
                 agent: None,
                 request: Some(RequestTraceRequestEndState {
                     request_tracker: tracker,
+                    output_tokens: None,
                     replay_metrics: Arc::new(RequestReplayMetrics {
                         trace_block_size: 2,
                         input_length: 2,
@@ -373,6 +384,7 @@ mod tests {
                 let mut receiver = BUS.subscribe();
                 let tracker = Arc::new(RequestTracker::new());
                 tracker.record_isl(3, None);
+                tracker.record_first_token();
                 let mut request = preprocessed_request(SamplingOptions::default());
                 if agent {
                     request.agent_context = Some(AgentContext {
@@ -407,6 +419,10 @@ mod tests {
                 assert!(stream.next().await.is_some());
                 if complete {
                     assert_eq!(stream.next().await.unwrap().data.unwrap().token_ids, [4, 5]);
+                    // A retiring router attempt can finish after the frontend
+                    // counted its final chunk. Its count is not the logical OSL.
+                    tracker.record_osl(1);
+                    tracker.record_finish();
                     assert!(stream.next().await.is_none());
                 } else {
                     context.context().kill();
@@ -426,6 +442,7 @@ mod tests {
                 let metrics = record.request.unwrap();
                 assert_eq!(metrics.input_tokens, Some(3));
                 assert_eq!(metrics.output_tokens, Some(if complete { 2 } else { 0 }));
+                assert_eq!(metrics.avg_itl_ms.is_some(), complete);
                 if complete && agent {
                     let metadata = metrics.finish_reason_metadata.unwrap();
                     assert_eq!(metadata.backend_finish_reason.as_deref(), Some("length"));
