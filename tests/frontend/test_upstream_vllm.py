@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Run selected upstream vLLM assertions against Dynamo and report each result."""
+"""Discover upstream chat tests and report Dynamo and vLLM-only results separately."""
 
 import json
 import os
@@ -10,13 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.utils.constants import DynamoPortRange
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.output_paths import resolve_test_output_path
-from tests.utils.port_utils import reserved_ports
 
 SUPPORT = Path(__file__).parents[1] / "utils/upstream_vllm"
-SELECTION = json.loads((SUPPORT / "selection.json").read_text())
+ALLOW_FAILURES = json.loads((SUPPORT / "allow_failures.json").read_text())
 pytestmark = [
     pytest.mark.nightly,
     pytest.mark.e2e,
@@ -24,7 +22,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.core,
     pytest.mark.upstream_vllm,
-    pytest.mark.timeout(900),
+    pytest.mark.timeout(1600),
 ]
 
 
@@ -41,17 +39,14 @@ def check_result(case):
             raise error(problem.text or problem.get("message", tag))
 
 
-@pytest.fixture(scope="module")
-def upstream_results():
-    """Run upstream pytest once in isolation; retain its log and JUnit report.
+def run_upstream(phase, *options):
+    """Collect or execute the full upstream directory in an isolated process.
 
-    VLLM_TESTS_DIR must contain the pinned tests-only tree prepared by CI.
-    A separate process avoids the two repositories' conflicting tests packages.
+    Requires VLLM_TESTS_DIR and a fresh output directory. Returns its output path
+    and pytest exit code; timeouts and process cleanup errors propagate.
     """
-    upstream = os.environ.get("VLLM_TESTS_DIR")
-    if not upstream:
-        pytest.skip("Run upstream-vllm-chat or set VLLM_TESTS_DIR")
-    output = Path(resolve_test_output_path("upstream-vllm-chat"))
+    upstream = os.environ["VLLM_TESTS_DIR"]
+    output = Path(resolve_test_output_path("upstream-vllm-chat")) / phase
     output.mkdir(parents=True, exist_ok=False)
     env = os.environ.copy()
     env["DYNAMO_CHAT_LAUNCHER"] = str(
@@ -59,47 +54,92 @@ def upstream_results():
     )
     # Use the image's installed runtime rather than CI's source-path overrides.
     env.pop("PYTHONPATH", None)
-    with reserved_ports(1, DynamoPortRange.FRONTEND) as ports, ManagedProcess(
+    with ManagedProcess(
         command=[
             os.environ.get("VLLM_TEST_PYTHON", sys.executable),
             str(SUPPORT / "run.py"),
             upstream,
             str(output),
+            *options,
         ],
-        env={**env, "DYN_SYSTEM_PORT": str(ports[0])},
+        env=env,
         log_dir=str(output),
-        display_name="upstream-vllm",
+        display_name=phase,
         terminate_all_matching_process_names=False,
     ) as process:
-        returncode = process.proc.wait(timeout=800)
+        returncode = process.proc.wait(timeout=120 if phase == "collection" else 1500)
+    return output, returncode
+
+
+def pytest_generate_tests(metafunc):
+    """Parametrize from upstream pytest discovery; the allowance list never selects tests."""
+    if "nodeid" not in metafunc.fixturenames:
+        return
+    if not os.environ.get("VLLM_TESTS_DIR"):
+        metafunc.parametrize(
+            "nodeid",
+            [
+                pytest.param(
+                    None,
+                    marks=pytest.mark.skip(
+                        reason="Run upstream-vllm-chat or set VLLM_TESTS_DIR"
+                    ),
+                )
+            ],
+        )
+        return
+    output, code = run_upstream("collection", "--collect-only")
+    if code != 0:
+        raise RuntimeError(f"Upstream collection failed (exit {code}); see {output}")
+    nodes = json.loads((output / "collection.json").read_text())
+    assert nodes and len(nodes) == len(set(nodes)), "Empty or duplicate collection"
+    assert not ALLOW_FAILURES.keys() - set(nodes), "Stale allow-failure entries"
+    metafunc.parametrize(
+        "nodeid",
+        [
+            pytest.param(
+                node,
+                id=node,
+                marks=pytest.mark.xfail(
+                    reason=ALLOW_FAILURES[node],
+                    raises=UpstreamTestFailure,
+                    strict=False,
+                )
+                if node in ALLOW_FAILURES
+                else (),
+            )
+            for node in nodes
+        ],
+    )
+
+
+@pytest.fixture(scope="module")
+def upstream_results():
+    """Execute all discovered tests once and require one result per full upstream ID."""
+    output, code = run_upstream("execution")
     junit = output / "junit.xml"
-    assert (
-        junit.exists()
-    ), f"Upstream setup failed ({returncode}); see {process.log_path}"
+    assert junit.exists(), f"Upstream setup failed ({code}); see {output}"
     cases = ET.parse(junit).findall(".//testcase")
-    results = {case.attrib["name"]: case for case in cases}
-    assert len(cases) == len(SELECTION) and set(results) == {
-        node.split("::")[-1] for node in SELECTION
-    }, f"Incomplete upstream execution; see {junit}"
-    assert returncode in (0, 1), f"Upstream harness error: exit {returncode}"
+    results = {
+        case.find("properties/property[@name='upstream_nodeid']").get("value"): case
+        for case in cases
+    }
+    nodes = json.loads((output.parent / "collection/collection.json").read_text())
+    assert len(cases) == len(nodes) and set(results) == set(
+        nodes
+    ), f"Incomplete upstream execution; see {junit}"
+    assert code in (0, 1), f"Upstream harness error: exit {code}"
     return results
 
 
-@pytest.mark.parametrize(
-    "nodeid",
-    [
-        pytest.param(
-            node,
-            id=node.split("::")[-1],
-            marks=pytest.mark.xfail(
-                reason=reason, raises=UpstreamTestFailure, strict=False
-            )
-            if reason
-            else (),
+def test_upstream_chat(nodeid, upstream_results, request):
+    """Check each actual outcome; only listed test-body failures may be allowed."""
+    case = upstream_results[nodeid]
+    target = case.find("properties/property[@name='upstream_target']")
+    request.node.user_properties.append(
+        (
+            "upstream_target",
+            target.get("value") if target is not None else "not-executed",
         )
-        for node, reason in SELECTION.items()
-    ],
-)
-def test_upstream_chat(nodeid, upstream_results):
-    """Require the upstream assertion; tolerate only listed test-body failures."""
-    check_result(upstream_results[nodeid.split("::")[-1]])
+    )
+    check_result(case)

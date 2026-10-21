@@ -1,6 +1,4 @@
 {
-  "tests/entrypoints/openai/chat_completion/test_include_reasoning.py::test_default_includes_reasoning": null,
   "tests/entrypoints/openai/chat_completion/test_include_reasoning.py::test_include_reasoning_false_non_streaming": "Dynamo rejects include_reasoning=false; refs #16192",
-  "tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py::test_chat_logit_bias_valid": null,
   "tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py::test_chat_logit_bias_non_integer_key": "Dynamo accepts non-integer logit_bias keys; refs #16192"
 }

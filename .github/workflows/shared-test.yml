@@ -302,11 +302,11 @@ jobs:
         run: |
           set -euo pipefail
           upstream_tests="$(mktemp -d "${RUNNER_TEMP}/vllm-tests.XXXXXX")"
-          # Only tests/config: a source vllm/ directory would shadow the image's wheel.
-          git -C upstream-vllm-source archive HEAD tests pyproject.toml | tar -x -C "$upstream_tests"
+          # Test fixtures need examples; exclude vllm/ so the installed wheel is used.
+          git -C upstream-vllm-source archive HEAD tests examples pyproject.toml | tar -x -C "$upstream_tests"
           client_env="$(mktemp -d "${RUNNER_TEMP}/vllm-client.XXXXXX")"
           uv venv --python "$(command -v python)" --system-site-packages "$client_env"
-          uv pip install --python "$client_env/bin/python" --no-deps tblib==3.1.0
+          uv pip install --python "$client_env/bin/python" --no-deps tblib==3.1.0 pytest-mock==3.15.1
           echo "VLLM_TESTS_DIR=$upstream_tests" >> "$GITHUB_ENV"
           echo "VLLM_TEST_PYTHON=$client_env/bin/python" >> "$GITHUB_ENV"
       # Datadog takes ci.job.name from $GITHUB_JOB, which in a reusable workflow

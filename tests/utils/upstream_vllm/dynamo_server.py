@@ -5,9 +5,12 @@
 import os
 import tempfile
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 import requests
+from constants import DynamoPortRange
+from port_utils import reserved_ports
 
 from tests.utils import RemoteOpenAIServerCustom, RemoteVLLMServer
 
@@ -39,20 +42,26 @@ class RemoteDynamoServer(RemoteOpenAIServerCustom):
         """Start one isolated Dynamo deployment; retain upstream model/CLI handling.
 
         Selected fixtures supply model and engine arguments; cap the KV cache at 1 GiB.
-        The outer Dynamo fixture reserves DYN_SYSTEM_PORT in the Rust i16 range.
+        Each server reserves its own system port in the Rust i16 range.
         Upstream code owns child creation, timeout cleanup and process-group teardown.
         """
         self.model = model
-        self.discovery = tempfile.TemporaryDirectory(prefix="dynamo-upstream-")
-        env = dict(kwargs.pop("env_dict", {}) or {})
-        env.update(
-            DYN_DISCOVERY_BACKEND="file",
-            DYN_REQUEST_PLANE="tcp",
-            DYN_FILE_KV=self.discovery.name,
-            DYN_NAMESPACE=Path(self.discovery.name).name,
-            DYN_SYSTEM_PORT=os.environ["DYN_SYSTEM_PORT"],
-        )
+        self.resources = ExitStack()
         try:
+            discovery = self.resources.enter_context(
+                tempfile.TemporaryDirectory(prefix="dynamo-upstream-")
+            )
+            system_port = self.resources.enter_context(
+                reserved_ports(1, DynamoPortRange.FRONTEND)
+            )[0]
+            env = dict(kwargs.pop("env_dict", {}) or {})
+            env.update(
+                DYN_DISCOVERY_BACKEND="file",
+                DYN_REQUEST_PLANE="tcp",
+                DYN_FILE_KV=discovery,
+                DYN_NAMESPACE=Path(discovery).name,
+                DYN_SYSTEM_PORT=str(system_port),
+            )
             super().__init__(
                 model,
                 [
@@ -69,7 +78,7 @@ class RemoteDynamoServer(RemoteOpenAIServerCustom):
                 **kwargs,
             )
         except BaseException:
-            self.discovery.cleanup()
+            self.resources.close()
             raise
 
     def _get_process_termination_timeout(self):
@@ -95,8 +104,8 @@ class RemoteDynamoServer(RemoteOpenAIServerCustom):
         raise TimeoutError(f"Dynamo did not register {self.model} within {timeout}s")
 
     def _shutdown(self):
-        """Run upstream process cleanup before removing this deployment's discovery state."""
+        """Run upstream cleanup, then release this deployment's discovery state and port."""
         try:
             super()._shutdown()
         finally:
-            self.discovery.cleanup()
+            self.resources.close()
