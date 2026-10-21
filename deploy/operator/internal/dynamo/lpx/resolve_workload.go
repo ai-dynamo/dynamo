@@ -125,6 +125,15 @@ func ResolveWorkload(
 			return nil, fmt.Errorf("component %q agent replicas %d must match the compiled count %d", configuredModel, *count, componentProjections[0].agentReplicas)
 		}
 
+		// The sidecar on Agent Pod 0 serves and the others stand by; only XT engines span several Pods so far.
+		family := componentProjections[0].configuredBuild.family
+		if agentPods := componentProjections[0].agentReplicas; agentRuntimeSidecar(stage) != nil && agentPods > 1 && family != BuildFamilyXT {
+			return nil, fmt.Errorf(
+				"%w: component %q agent %q sidecar serves several Agent Pods only for %s builds, but %s build %q places %d Agent Pods; declare the conductor role instead",
+				ErrUnsupportedRuntime, configuredModel, commonconsts.RuntimeContainerName, BuildFamilyXT, family, model.BuildID, agentPods,
+			)
+		}
+
 		// Retain the authored stage association before acquiring the next component.
 		for _, projection := range componentProjections {
 			projection.stage = stage.ComponentName
@@ -158,7 +167,24 @@ func validateWorkloadConductor(
 	pipeline Pipeline,
 	requiresGPU bool,
 ) error {
+	// Only an LPU-only single model's engine runs in the Agent Pods with its runtime sidecar.
+	if agentRuntimeSidecar(component) != nil && pipeline != PipelineSingle {
+		return fmt.Errorf(
+			"%w: component %q agent %q sidecar requires an LPU-only single-model build; declare the conductor role instead",
+			ErrUnsupportedRuntime, component.ComponentName, commonconsts.RuntimeContainerName,
+		)
+	}
+
 	conductor := component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor)
+	// A shared draft and target pair's conductor serves the pair itself, whatever the build.
+	if pipeline == PipelineSpecDecode && conductor != nil &&
+		common.FindContainerByName(conductor.PodTemplate.Spec.InitContainers, commonconsts.RuntimeContainerName) != nil {
+		return fmt.Errorf(
+			"%w: component %q is the target of a shared draft and target pair, whose conductor takes no Dynamo sidecar; remove the %q init container",
+			ErrUnsupportedRuntime, component.ComponentName, commonconsts.RuntimeContainerName,
+		)
+	}
+
 	// Validate the selected hybrid runtime's GPU resources and claim bindings.
 	if requiresGPU {
 		if pipeline == PipelineSpecDecode {
@@ -174,6 +200,11 @@ func validateWorkloadConductor(
 			return nil
 		}
 		return fmt.Errorf("component %q conductor main container requires a positive GPU count from scalar resources or resourceClaims", component.ComponentName)
+	}
+
+	// A Dynamo sidecar fronts the hybrid GPU engine; the LPU-only conductor is not a Dynamo worker.
+	if conductor != nil && common.FindContainerByName(conductor.PodTemplate.Spec.InitContainers, commonconsts.RuntimeContainerName) != nil {
+		return fmt.Errorf("%w: component %q conductor Dynamo sidecar mode requires a hybrid build whose conductor runs the GPU engine", ErrUnsupportedRuntime, component.ComponentName)
 	}
 
 	// An LPU-only conductor is a singleton even when the workload replica count is larger.

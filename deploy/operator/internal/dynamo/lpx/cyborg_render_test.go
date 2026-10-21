@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -27,12 +28,15 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 	projection.stage = testRenderComponentName
 	projection.configuredBuild.ioFPGACount = 1
 	projection.configuredBuild.ioFanoutFactor = 1
+	serving := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}},
+	}
 	workload := &Workload{
 		modelProjections:     []*ModelProjection{projection},
 		scalingGroupReplicas: 2496,
 	}
 	pcsName := strings.Repeat("a", 28) // target + target-cond consume the remaining Grove budget.
-	plan, err := workload.PlanNodeLocalMaterialization(pcsName)
+	plan, err := workload.PlanNodeLocalMaterialization(pcsName, serving)
 	require.NoError(t, err)
 	plan, err = plan.WithGroup("target")
 	require.NoError(t, err)

@@ -521,6 +521,7 @@ impl WorkerConfig {
                 exclude_tools_when_tool_choice_none,
                 enable_local_indexer,
                 enable_kv_routing,
+                enable_load_metrics: false,
                 metrics_labels,
                 disaggregation_mode: disaggregation_mode.into(),
                 health_check_payload,

@@ -214,7 +214,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{name: "native sidecar rejects non-worker component type",
 			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
-			}), wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].name: Forbidden: is supported only for worker, prefill, and decode components`}},
+			}), wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].name: Forbidden: is supported only for worker, prefill, decode, and LPX components`}},
 
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
 		{name: "native sidecar beta create", deployment: nativeDCDForAdmission(t, false, nil)},

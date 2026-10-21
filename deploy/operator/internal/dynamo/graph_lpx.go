@@ -289,7 +289,9 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		}
 		input.Stages[component.ComponentName] = *lpuTemplate
 		conductor := component.ComponentRole(v1beta1.ComponentRoleLPXConductor)
-		if component != p.component {
+
+		// Only the serving component's declared conductor contributes a template.
+		if component != p.component || conductor == nil {
 			continue
 		}
 
@@ -399,6 +401,10 @@ func renderSelectedLPXRole(
 	// Capture authored precedence before PodSpec defaults fill the role's metadata.
 	metadata := generatePodMetadata(component, dgd, alphaComponent, componentName, discoveryContext)
 	metadata.Labels[commonconsts.KubeLabelDynamoWorkerHash] = defaults.servingHash
+	// LPX sidecars use the worker-hash suffix for their serving namespace.
+	if GetDynamoSidecar(component) != nil {
+		ensurePodTemplate(component).Labels[commonconsts.KubeLabelDynamoWorkerHash] = defaults.servingHash
+	}
 	applyDGDTemplateDefaults(component, dgd, nil)
 	basePodSpec, err := generateBasePodSpecWithDefaults(
 		component,

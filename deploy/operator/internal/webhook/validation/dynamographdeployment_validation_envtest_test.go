@@ -276,7 +276,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{name: "native sidecar rejects non-worker component type",
 			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
-			}), wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.initContainers[0].name: Forbidden: is supported only for worker, prefill, and decode components`}},
+			}), wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.initContainers[0].name: Forbidden: is supported only for worker, prefill, decode, and LPX components`}},
 
 		{name: "native sidecar beta custom runtime image create needs override",
 			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {

@@ -450,6 +450,7 @@ areas:
   path_globs:
   - deploy/operator/internal/controller/lpx/
   - deploy/operator/internal/dynamo/lpx/
+  - lib/sidecar/lpx/
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
@@ -1115,6 +1116,10 @@ shared:
   owners:
   - runtime
   - backend-sglang
+- glob: lib/sidecar/testkit/tests/support/lpx.rs
+  owners:
+  - runtime
+  - lpx
 - glob: tests/deploy/
   owners:
   - ops

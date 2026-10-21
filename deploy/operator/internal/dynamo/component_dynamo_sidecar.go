@@ -26,8 +26,8 @@ func ValidateDynamoSidecar(component *v1beta1.DynamoComponentDeploymentSharedSpe
 		index := slices.IndexFunc(component.PodTemplate.Spec.InitContainers, func(c corev1.Container) bool { return c.Name == commonconsts.RuntimeContainerName })
 		runtimePath := fldPath.Child("podTemplate", "spec", "initContainers").Index(index)
 		detail := fmt.Sprintf("component %q with a runtime init container", component.ComponentName)
-		if !IsWorkerComponent(string(component.ComponentType)) {
-			allErrs = append(allErrs, field.Forbidden(runtimePath.Child("name"), "is supported only for worker, prefill, and decode components"))
+		if !IsWorkerComponent(string(component.ComponentType)) && !component.IsLPX() {
+			allErrs = append(allErrs, field.Forbidden(runtimePath.Child("name"), "is supported only for worker, prefill, decode, and LPX components"))
 		}
 		if runtime.RestartPolicy == nil || *runtime.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 			allErrs = append(allErrs, field.Invalid(runtimePath.Child("restartPolicy"), ptr.Deref(runtime.RestartPolicy, ""), "must be Always for "+detail))

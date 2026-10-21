@@ -38,12 +38,17 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 	if err != nil {
 		return nil, err
 	}
+
+	// Projection-only fixtures model a workload with an authored conductor.
+	serving := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}},
+	}
 	workload := &Workload{
 		modelProjections:     projections,
 		digest:               digest,
 		scalingGroupReplicas: 1,
 	}
-	plan, err := workload.PlanNodeLocalMaterialization(pcs.Name)
+	plan, err := workload.PlanNodeLocalMaterialization(pcs.Name, serving)
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +326,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	})
 	require.NoError(t, err)
 	pcs := renderTestPCS(false)
-	plan, err := selected.PlanNodeLocalMaterialization(pcs.Name)
+	plan, err := selected.PlanNodeLocalMaterialization(pcs.Name, source.GetComponentByName(selected.ServingComponentName()))
 	require.NoError(t, err)
 	templates, err := RenderNodeLocal(selected, plan, RenderInput{
 		Stages: stages, Conductor: conductorTemplate.DeepCopy(),

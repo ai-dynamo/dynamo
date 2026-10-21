@@ -29,6 +29,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
+	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -36,6 +37,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -174,7 +176,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 
 	// A shared draft has no independently configurable scaling group.
-	if spec.IsLPX() && spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil && spec.ProviderOverride != nil {
+	if spec.IsLPX() && !dynamolpx.ServesEndpoint(spec) && spec.ProviderOverride != nil {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride"), "shared LPX draft availability belongs to the target component"))
 	}
 
@@ -200,7 +202,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	// Warn when a deprecated minimum is introduced or changed, regardless of strategy.
 	if spec.MinAvailable != nil && options.grovePathway && (options.oldComponent == nil || !k8sptr.Equal(spec.MinAvailable, options.oldComponent.MinAvailable)) {
 		minimumPath := fldPath.Child("minAvailable")
-		if spec.IsLPX() && spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil {
+		if spec.IsLPX() && !dynamolpx.ServesEndpoint(spec) {
 			v.warnf("%s (%q) is deprecated; remove this field and configure minimum availability on the shared target component; the draft's effective minimum remains 1", minimumPath.String(), spec.ComponentName)
 		} else {
 			replacement := groveNativeMinimumPath(spec, fldPath)
@@ -225,7 +227,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 
 	// Warn for complete-component disruption only when admission knows the serving capacity.
-	if options.grovePathway && warnForStrategy && len(allErrs) == 0 && !(spec.IsLPX() && (spec.Replicas == nil || spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil)) {
+	if options.grovePathway && warnForStrategy && len(allErrs) == 0 && !(spec.IsLPX() && (spec.Replicas == nil || !dynamolpx.ServesEndpoint(spec))) {
 		replicas := k8sptr.Deref(spec.Replicas, 1)
 		minimum := provideroverride.EffectiveGroveMinAvailable(spec)
 		budget := provideroverride.EffectiveGroveMaxUnavailable(spec, options.groveUpdateStrategy)
@@ -672,6 +674,8 @@ type componentRoleSpecValidationOptions struct {
 
 // validateComponentRoleSpec validates role. role and fldPath must not be nil;
 // options.component and optional role fields may be nil.
+//
+//nolint:gocyclo // Role validation reports the upstream, LPX, and LPX runtime sidecar contracts in one pass.
 func (v *sharedValidation) validateComponentRoleSpec(
 	role *nvidiacomv1beta1.ComponentRoleSpec,
 	fldPath *field.Path,
@@ -679,14 +683,76 @@ func (v *sharedValidation) validateComponentRoleSpec(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	// Role templates must not bypass the sidecar restrictions on multinode and LPX layouts.
+	// Only the LPX role whose Pods host the engine may run the Dynamo sidecar; reconciliation checks the build.
 	if role.PodTemplate != nil {
-		for i, container := range role.PodTemplate.Spec.InitContainers {
-			if container.Name == consts.RuntimeContainerName {
-				allErrs = append(allErrs, field.Forbidden(
-					fldPath.Child("podTemplate", "spec", "initContainers").Index(i).Child("name"),
-					"Dynamo sidecar mode is not supported in multinode or LPX role pod templates",
+		lpx := options.component != nil && options.component.IsLPX()
+		hostsEngine := lpx && role.Name == dynamolpx.RuntimeSidecarRole(options.component)
+		hasRuntimeSidecar := false
+		for i := range role.PodTemplate.Spec.InitContainers {
+			container := &role.PodTemplate.Spec.InitContainers[i]
+			if container.Name != consts.RuntimeContainerName {
+				continue
+			}
+			runtimePath := fldPath.Child("podTemplate", "spec", "initContainers").Index(i)
+
+			// Only LPX authors have a role that may host the sidecar, so only they are pointed to it.
+			if !hostsEngine {
+				detail := "Dynamo sidecar mode is not supported in multinode or LPX role pod templates"
+				if lpx {
+					detail = "Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
+				}
+				allErrs = append(allErrs, field.Forbidden(runtimePath.Child("name"), detail))
+				continue
+			}
+			hasRuntimeSidecar = true
+			if k8sptr.Deref(container.RestartPolicy, "") != corev1.ContainerRestartPolicyAlways {
+				allErrs = append(allErrs, field.Invalid(
+					runtimePath.Child("restartPolicy"),
+					k8sptr.Deref(container.RestartPolicy, ""),
+					"must be Always for the LPX runtime init container",
 				))
+			}
+		}
+
+		// The runtime sidecar owns the system port, so main receives no generated port for its probes to name.
+		mainIndex := mainContainerIndex(role.PodTemplate.Spec.Containers)
+		if hasRuntimeSidecar && mainIndex >= 0 {
+			engine := &role.PodTemplate.Spec.Containers[mainIndex]
+			enginePath := fldPath.Child("podTemplate", "spec", "containers").Index(mainIndex)
+
+			// main must not claim the system port name or number the runtime declares.
+			for j, port := range engine.Ports {
+				switch {
+				case port.Name == consts.DynamoSystemPortName:
+					allErrs = append(allErrs, field.Invalid(enginePath.Child("ports").Index(j).Child("name"), port.Name,
+						"is reserved for the runtime init container in Dynamo sidecar mode"))
+				case port.ContainerPort == consts.DynamoSystemPort:
+					allErrs = append(allErrs, field.Invalid(enginePath.Child("ports").Index(j).Child("containerPort"), port.ContainerPort,
+						"is reserved for the runtime init container in Dynamo sidecar mode"))
+				}
+			}
+			for _, probe := range []struct {
+				name  string
+				probe *corev1.Probe
+			}{
+				{"startupProbe", engine.StartupProbe}, {"livenessProbe", engine.LivenessProbe}, {"readinessProbe", engine.ReadinessProbe},
+			} {
+				var portPath *field.Path
+				var port intstr.IntOrString
+				switch {
+				case probe.probe == nil:
+					continue
+				case probe.probe.HTTPGet != nil:
+					portPath, port = enginePath.Child(probe.name, "httpGet", "port"), probe.probe.HTTPGet.Port
+				case probe.probe.TCPSocket != nil:
+					portPath, port = enginePath.Child(probe.name, "tcpSocket", "port"), probe.probe.TCPSocket.Port
+				default:
+					continue
+				}
+				if port.Type == intstr.String && !slices.ContainsFunc(engine.Ports, func(declared corev1.ContainerPort) bool { return declared.Name == port.StrVal }) {
+					allErrs = append(allErrs, field.Invalid(portPath, port.StrVal,
+						"must name a port declared by the main container; in Dynamo sidecar mode the runtime init container owns the system port"))
+				}
 			}
 		}
 	}

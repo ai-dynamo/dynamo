@@ -337,6 +337,22 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(MetricsBindings::default())
     }
 
+    /// Declare forward-pass metrics for the planner, independently of KV routing
+    /// and load metrics. The default declares no ranks and creates no publisher.
+    ///
+    /// Called after [`setup_metrics`](LLMEngine::setup_metrics). For nonzero
+    /// [`FpmBinding::dp_size`], the worker constructs publishers for ranks
+    /// `0..dp_size` and invokes `on_ready` before the snapshot-publisher callback.
+    /// Engines push one [`ForwardPassSnapshot`](crate::ForwardPassSnapshot) per
+    /// retired step and stop their producers in [`cleanup`](LLMEngine::cleanup).
+    /// The framework retains the publisher through engine cleanup, stamps the
+    /// discovery instance ID as a decimal worker ID, assigns its own monotonic
+    /// wire counter, and emits a zeroed idle heartbeat after 1 s without a push.
+    /// Errors abort startup; cleanup runs on the partial state.
+    async fn forward_pass_metrics(&self) -> Result<FpmBinding, DynamoError> {
+        Ok(FpmBinding::default())
+    }
+
     /// Canary payload registered with the runtime's `HealthCheckManager`.
     /// `Worker` calls this once after [`start`](LLMEngine::start). Returning
     /// `Ok(None)` (default) disables active probing — the endpoint then
@@ -598,6 +614,19 @@ pub type OnSnapshotPublisherReady = Box<
 pub struct MetricsBindings {
     pub dp_ranks: Vec<u32>,
     pub on_publisher_ready: Option<OnSnapshotPublisherReady>,
+}
+
+/// Receives the framework's forward-pass publishers in data-parallel rank order.
+pub type OnFpmPublisherReady =
+    Box<dyn FnOnce(Vec<crate::FpmPublisher>) -> Result<(), DynamoError> + Send + 'static>;
+
+/// Declaration returned by [`LLMEngine::forward_pass_metrics`].
+#[derive(Default)]
+pub struct FpmBinding {
+    /// Number of contiguous ranks, starting at zero. Zero disables publication.
+    pub dp_size: u32,
+    /// Invoked once after publisher construction, only when `dp_size > 0`.
+    pub on_ready: Option<OnFpmPublisherReady>,
 }
 
 /// Non-terminal chunk constructor. Terminal chunks come from upstream

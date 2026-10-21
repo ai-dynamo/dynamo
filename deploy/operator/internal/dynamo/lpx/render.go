@@ -31,8 +31,8 @@ type RenderInput struct {
 	// Stages contains an independently merged LPU template for every projected stage.
 	Stages map[string]corev1.PodTemplateSpec
 	// Conductor supplies a fresh, independently merged template for the shared LPU
-	// conductor. Required for non-hybrid pipelines; hybrid pipelines leave it nil
-	// and supply their independently rendered Cyborg clique below.
+	// conductor when plan.ConductorTemplate is nonempty. Otherwise it is nil;
+	// hybrid pipelines supply their independently rendered Cyborg clique below.
 	Conductor *corev1.PodTemplateSpec
 	// Cyborg supplies the GPU clique for hybrid pipelines; nil for LPU-only workloads.
 	Cyborg *grovev1alpha1.PodCliqueTemplateSpec
@@ -76,11 +76,12 @@ func RenderNodeLocal(
 	conductorTemplateName := plan.ConductorTemplate
 	allocation := strings.Join(agentTemplateNames, ":")
 
-	// The serving component owns conductor metadata and storage independently of model order.
+	// The serving component owns conductor metadata and storage independently of model
+	// order. Without a conductor, the serving Agent template owns storage.
 	conductorStage := workload.ServingComponentName()
 	conductorTemplate := input.Conductor
 	storageTemplate := input.Stages[conductorStage]
-	if !hybrid {
+	if plan.ConductorTemplate != "" {
 		if conductorTemplate == nil {
 			return nil, fmt.Errorf("LPX rendering requires an explicit conductor template")
 		}
@@ -173,6 +174,15 @@ func RenderNodeLocal(
 					return nil, fmt.Errorf("stage %s must use the Conductor model-storage mount path %q", stage, modelStoragePath)
 				}
 			}
+
+			// The serving Agent hosts the engine and its runtime sidecar in place of a conductor.
+			if common.FindContainerByName(template.Spec.InitContainers, commonconsts.RuntimeContainerName) != nil {
+				if err := configureServingAgent(&template.Spec, projections, modelStoragePath); err != nil {
+					return nil, fmt.Errorf("stage %s: %w", stage, err)
+				}
+			}
+
+			// Bind the LPX configuration and scheduling to the Agent and any conductor.
 			configureLPURolePods(&template.Spec, conductorSpec, projection, configMap.Name, allocation)
 		}
 		if agent.Replicas == 0 {
@@ -222,7 +232,7 @@ func RenderNodeLocal(
 			cyborgConfigMap,
 			cyborgConfigHash,
 		); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("stage %s conductor: %w", projections[0].stage, err)
 		}
 
 		cyborg.Spec.MinAvailable = ptr.To(int32(1))

@@ -38,6 +38,7 @@ members = [
     "lib/sidecar/sglang",
     "lib/mocker/servers/sglang",
     "lib/sidecar/trtllm",
+    "lib/sidecar/lpx",
     "lib/mocker/servers/trtllm",
     "lib/bindings/c",
     "lib/bindings/python/codegen",

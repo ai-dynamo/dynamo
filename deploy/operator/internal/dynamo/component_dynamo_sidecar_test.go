@@ -369,10 +369,14 @@ func TestGenerateBasePodSpecRejectsInvalidDynamoSidecar(t *testing.T) {
 		{
 			name: "frontend with runtime init container", componentType: v1beta1.ComponentTypeFrontend,
 			restartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
-			wantErrors:    field.ErrorList{field.Forbidden(field.NewPath("spec", "podTemplate", "spec", "initContainers").Index(0).Child("name"), "is supported only for worker, prefill, and decode components")},
+			wantErrors:    field.ErrorList{field.Forbidden(field.NewPath("spec", "podTemplate", "spec", "initContainers").Index(0).Child("name"), "is supported only for worker, prefill, decode, and LPX components")},
 		},
 		{
 			name: "runtime without restartPolicy Always", componentType: v1beta1.ComponentTypeWorker,
+			wantErrors: field.ErrorList{field.Invalid(field.NewPath("spec", "podTemplate", "spec", "initContainers").Index(0).Child("restartPolicy"), corev1.ContainerRestartPolicy(""), `must be Always for component "worker" with a runtime init container`)},
+		},
+		{
+			name: "LPX runtime without restartPolicy Always", componentType: v1beta1.ComponentTypeLPX,
 			wantErrors: field.ErrorList{field.Invalid(field.NewPath("spec", "podTemplate", "spec", "initContainers").Index(0).Child("restartPolicy"), corev1.ContainerRestartPolicy(""), `must be Always for component "worker" with a runtime init container`)},
 		},
 		{

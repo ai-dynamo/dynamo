@@ -3172,7 +3172,7 @@ func resolveLPXTestWorkload(t *testing.T, registry lpx.ModelRegistry, ctx contex
 	t.Helper()
 	workload, err := lpx.ResolveWorkload(ctx, fake.NewClientBuilder().Build(), dgd, singleGroupComponents(t, dgd), registry)
 	require.NoError(t, err)
-	plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment))
+	plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment), dgd.GetComponentByName(workload.ServingComponentName()))
 	require.NoError(t, err)
 	_, missing := resolvePipelineRequests(deployment, nil, workload, plan)
 	fixture := &lpxTestWorkload{workload: workload, plan: plan.ForReplica(0)}
