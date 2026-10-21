@@ -25,7 +25,7 @@ from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uu
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import InvalidArgument, Unknown
+from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 
 from .sglang_prepost import (
     ReasoningParser,
@@ -67,6 +67,32 @@ def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
         return None
     cached_tokens = prompt_details.get("cached_tokens")
     return cached_tokens if isinstance(cached_tokens, int) else None
+
+
+def _request_logprobs_count(request: dict[str, Any]) -> int | None:
+    """Map OpenAI chat logprob fields onto ``output_options.logprobs``.
+
+    The result is the number of alternatives per token. ``logprobs: true``
+    without ``top_logprobs`` is ``0``: the sampled token only. A positive
+    ``top_logprobs`` requires ``logprobs: true``, as in OpenAI.
+    """
+    logprobs = request.get("logprobs")
+    top_logprobs = request.get("top_logprobs")
+    if top_logprobs is not None and (
+        not isinstance(top_logprobs, int)
+        or isinstance(top_logprobs, bool)
+        or top_logprobs < 0
+    ):
+        raise PreprocessError("`top_logprobs` must be an integer >= 0.")
+    if top_logprobs and logprobs is not True:
+        raise PreprocessError(
+            "When using `top_logprobs`, `logprobs` must be set to true."
+        )
+    if logprobs is True:
+        return top_logprobs if top_logprobs is not None else 0
+    if isinstance(logprobs, int) and not isinstance(logprobs, bool):
+        return logprobs
+    return None
 
 
 def _normalize_eos_token_ids(value: Any) -> list[int]:
@@ -430,16 +456,7 @@ def _build_dynamo_preproc(
     elif stop is None:
         stop = []
 
-    # Handle logprobs
-    logprobs_val = None
-    logprobs = request.get("logprobs")
-    top_logprobs = request.get("top_logprobs")
-    if logprobs is True:
-        logprobs_val = top_logprobs if top_logprobs is not None else 1
-    elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
-        logprobs_val = logprobs
-    elif top_logprobs not in (None, 0):
-        logprobs_val = top_logprobs
+    logprobs_val = _request_logprobs_count(request)
 
     nvext = request.get("nvext") or {}
     routing = request.get("routing")
@@ -1007,7 +1024,7 @@ class SglangProcessor:
                     yield envelope
                     if post.locally_finished:
                         break
-        except (InvalidArgument, Unknown):
+        except (InvalidArgument, Unknown, WorkerUnavailable):
             raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)
