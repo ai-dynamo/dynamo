@@ -492,8 +492,8 @@ async fn frontend_refuses_duplicate_in_flight_request_id() {
     });
     assert_eq!(arrivals.recv().await.as_deref(), Some("first"));
 
-    // The first request is parked in the backend, so its id is still in flight. The gate stays
-    // closed until the duplicate has been answered, otherwise the first id could be released first.
+    // The first request is still parked, so its id is in flight. Keep the gate closed until
+    // the duplicate is answered, or the first id could be released first.
     let second_service = service.clone();
     let second = tokio::spawn(async move {
         second_service

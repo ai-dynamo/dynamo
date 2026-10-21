@@ -590,9 +590,8 @@ fn extract_trace_parent<H: GenericHeaders>(
         (None, None, None, None)
     };
 
-    // Transport hop only: the frontend forwards its server-minted id to workers as `request-id`
-    // (see `inject_trace_headers_into_map`). HTTP ingress spans ignore this value so a client
-    // cannot choose the internal request id.
+    // Transport hop only: workers read the frontend's forwarded `request-id`.
+    // HTTP ingress spans ignore it so a client cannot choose the internal request id.
     let request_id = headers
         .get("request-id")
         .or_else(|| headers.get("x-dynamo-request-id"))
@@ -629,10 +628,8 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
     let version = format!("{:?}", req.version());
     let (trace_parent, otel_context) = extract_trace_parent(req.headers());
 
-    // Every inference request gets a server-minted request_id on the span; any client-supplied
-    // `request-id` / `x-dynamo-request-id` is ignored. This is the single source of truth —
-    // workers and get_or_create_request_id read it back via DistributedTraceIdLayer.
-    // Client correlation travels separately as `x_request_id`.
+    // Always server-minted and the single source of truth; client `request-id` headers are
+    // ignored. Client correlation travels separately as `x_request_id`.
     let request_id = Uuid::new_v4().to_string();
 
     let span = tracing::info_span!(
@@ -2529,9 +2526,8 @@ pub mod tests {
     fn http_request_spans_mint_request_id_and_ignore_client_headers() {
         let provider = SdkTracerProvider::builder().build();
         let tracer = provider.tracer("test");
-        // Core `set_default` (not `SubscriberInitExt::set_default`) to avoid
-        // installing the global `log` LogTracer, which would poison a later
-        // `logging::init()` with SetLoggerError.
+        // Core `set_default`: `SubscriberInitExt::set_default` installs the global `log`
+        // LogTracer, which would make a later `logging::init()` fail with SetLoggerError.
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry()
                 .with(tracing_opentelemetry::layer().with_tracer(tracer))
@@ -2564,7 +2560,6 @@ pub mod tests {
         }
         assert_ne!(seen[0], seen[1], "each HTTP request must get its own id");
 
-        // The worker-side transport read is unchanged.
         let trace_parent = TraceParent::from_headers(make_req().headers());
         assert_eq!(trace_parent.request_id.as_deref(), Some(client_id));
     }
