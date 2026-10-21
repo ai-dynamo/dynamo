@@ -218,13 +218,13 @@ func (ops v1Beta2SpokeEnvelopeMutationOps) mutateCarrier(carrier *v1beta2.Dynamo
 	patch := &v1beta1.DynamoGraphDeploymentRequest{}
 	ops.f.FillNoCustom(patch)
 	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
-	mutateJSONEnvelope(
+	replaceJSONEnvelope(
 		ops.t,
 		carrier.Spec.V1Beta1,
 		&v1beta1.DynamoGraphDeploymentRequestNativeSpec{},
 		&patch.Spec.DynamoGraphDeploymentRequestNativeSpec,
 	)
-	mutateJSONEnvelope(
+	replaceJSONEnvelope(
 		ops.t,
 		carrier.Status.V1Beta1,
 		&v1beta1.DynamoGraphDeploymentRequestNativeStatus{},
@@ -262,13 +262,13 @@ func (ops v1Beta1HubEnvelopeMutationOps) mutateCarrier(carrier *v1beta1.DynamoGr
 	patch := &v1beta2.DynamoGraphDeploymentRequest{}
 	ops.f.FillNoCustom(patch)
 	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
-	mutateJSONEnvelope(
+	replaceJSONEnvelope(
 		ops.t,
 		carrier.Spec.V1Beta2,
 		&v1beta2.DynamoGraphDeploymentRequestNativeSpec{},
 		&patch.Spec.DynamoGraphDeploymentRequestNativeSpec,
 	)
-	mutateJSONEnvelope(
+	replaceJSONEnvelope(
 		ops.t,
 		carrier.Status.V1Beta2,
 		&v1beta2.DynamoGraphDeploymentRequestNativeStatus{},
@@ -327,7 +327,7 @@ func fuzzMutatedDGDRCarrier[C, A any](
 	}
 }
 
-func mutateJSONEnvelope(t *testing.T, envelope *apiextensionsv1.JSON, payload, patch any) {
+func replaceJSONEnvelope(t *testing.T, envelope *apiextensionsv1.JSON, payload, replacement any) {
 	t.Helper()
 
 	// Require and decode the complete typed payload carried by the envelope.
@@ -338,9 +338,9 @@ func mutateJSONEnvelope(t *testing.T, envelope *apiextensionsv1.JSON, payload, p
 		t.Fatalf("unmarshal envelope: %v", err)
 	}
 
-	// Mutate nested payload values and write the complete payload back to the envelope.
-	sparseFuzzInto(payload, patch)
-	raw, err := json.Marshal(payload)
+	// Replace the payload with another schema-valid native value. Sparse merging
+	// two valid values can violate cross-field invariants in the combined result.
+	raw, err := json.Marshal(replacement)
 	if err != nil {
 		t.Fatalf("marshal envelope: %v", err)
 	}
