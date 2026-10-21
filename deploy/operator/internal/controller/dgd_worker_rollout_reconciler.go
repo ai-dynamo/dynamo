@@ -71,7 +71,6 @@ type dgdWorkerRolloutReconciler struct {
 	inferenceClient  *http.Client
 }
 
-// newDGDWorkerRolloutReconciler wires rollout state access and bounded HTTP inference probes.
 func newDGDWorkerRolloutReconciler(
 	kubeClient client.Client,
 	recorder events.EventRecorder,

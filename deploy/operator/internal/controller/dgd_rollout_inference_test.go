@@ -349,7 +349,7 @@ func TestRolloutInferenceClient_BypassesProxy(t *testing.T) {
 	t.Log("The production rollout client reaches the frontend without changing the default transport")
 	r := newDGDWorkerRolloutReconciler(nil, nil)
 	defer r.inferenceClient.CloseIdleConnections()
-	err = r.probeReplacementInference(t.Context(), frontend.URL, "/v1/chat/completions",
+	err = r.probeReplacementInference(t.Context(), frontend.URL+"/v1/chat/completions", "/v1/chat/completions",
 		rolloutInferenceTarget{Model: "test-model", InstanceID: 42})
 	require.NoError(t, err)
 	require.Equal(t, int32(1), proxyRequests.Load())
@@ -435,7 +435,7 @@ func TestReplacementInferenceTargets_ModelRoles(t *testing.T) {
 			server := httptest.NewServer(&rolloutProbeServer{})
 			defer server.Close()
 			r := createTestReconcilerWithStatus(createTestDGD("probe", nil))
-			require.NoError(t, r.probeReplacementInference(context.Background(), server.URL, targets[0].Paths[0], targets[0]))
+			require.NoError(t, r.probeReplacementInference(context.Background(), server.URL+targets[0].Paths[0], targets[0].Paths[0], targets[0]))
 		})
 	}
 }

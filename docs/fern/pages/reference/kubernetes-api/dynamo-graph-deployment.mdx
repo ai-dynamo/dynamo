@@ -86,6 +86,11 @@ attribution cannot be assured. Frontends using `envFrom` also retain the existin
 because their probe configuration is not visible in the Pod spec. These deployments do
 not receive the replacement-inference protection.
 
+Probes honor each frontend Pod's explicit `DYN_HTTP_SVC_CHAT_PATH` and
+`DYN_HTTP_SVC_CMP_PATH` overrides. If an override uses `valueFrom` or an environment
+variable reference, the deployment retains the existing rollout behavior because the
+operator cannot resolve its route from the Pod spec.
+
 Embedding and other non-text models, external frontends, non-Kubernetes discovery,
 `Recreate`, and provider-native Grove updates retain their existing behavior. Replica
 budgets still apply: a single-replica deployment with zero surge must stop its old worker

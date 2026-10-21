@@ -35,7 +35,6 @@ import (
 
 var rolloutWorkerMetadataGVK = schema.GroupVersionKind{Group: "nvidia.com", Version: "v1alpha1", Kind: "DynamoWorkerMetadata"}
 
-// rolloutInferenceTarget identifies one replacement model member, not merely a generation label.
 type rolloutInferenceTarget struct {
 	Model      string
 	InstanceID uint64
@@ -130,10 +129,12 @@ func (r *dgdWorkerRolloutReconciler) replacementInferenceReady(ctx context.Conte
 			}
 			for _, target := range targets {
 				for _, path := range target.Paths {
+					endpoint := address + rolloutFrontendPath(&frontend, path)
+
 					// WorkerSet selection precedes instance targeting in older frontends.
 					// A wrong-set failure is safe; retry it without accepting an old-worker response.
 					for attempt := 0; attempt < 4; attempt++ {
-						err = r.probeReplacementInference(probeCtx, address, path, target)
+						err = r.probeReplacementInference(probeCtx, endpoint, path, target)
 						if err == nil || probeCtx.Err() != nil {
 							break
 						}
@@ -298,6 +299,12 @@ func rolloutFrontendProbeUnsupported(pod *corev1.Pod) bool {
 				return true
 			}
 			for _, env := range container.Env {
+				// Kubelet-expanded and externally supplied paths are not visible in the Pod spec.
+				if (env.Name == "DYN_HTTP_SVC_CHAT_PATH" || env.Name == "DYN_HTTP_SVC_CMP_PATH") &&
+					(env.ValueFrom != nil || strings.Contains(env.Value, "$(")) {
+					return true
+				}
+
 				// Match the frontend's truthy vocabulary; referenced values cannot be resolved here.
 				if env.Name == "DYN_DISABLE_FRONTEND_NVEXT" {
 					switch strings.ToLower(strings.TrimSpace(env.Value)) {
@@ -325,6 +332,28 @@ func rolloutFrontendProbeUnsupported(pod *corev1.Pod) bool {
 	return false
 }
 
+func rolloutFrontendPath(pod *corev1.Pod, path string) string {
+	name := "DYN_HTTP_SVC_CMP_PATH"
+	if path == "/v1/chat/completions" {
+		name = "DYN_HTTP_SVC_CHAT_PATH"
+	}
+
+	// Each serving Pod can carry a different route configuration during frontend updates.
+	for _, containers := range [][]corev1.Container{pod.Spec.Containers, pod.Spec.InitContainers} {
+		for _, container := range containers {
+			if container.Name != consts.MainContainerName && container.Name != consts.RuntimeContainerName {
+				continue
+			}
+			for _, env := range container.Env {
+				if env.Name == name {
+					return env.Value
+				}
+			}
+		}
+	}
+	return path
+}
+
 func rolloutFrontendAddress(pod *corev1.Pod) (string, error) {
 	if pod.Status.PodIP == "" {
 		return "", fmt.Errorf("frontend %s has no Pod IP", pod.Name)
@@ -340,7 +369,7 @@ func rolloutFrontendAddress(pod *corev1.Pod) (string, error) {
 }
 
 // probeReplacementInference requires completed generation attributed to the requested replacement worker.
-func (r *dgdWorkerRolloutReconciler) probeReplacementInference(ctx context.Context, address, path string, target rolloutInferenceTarget) error {
+func (r *dgdWorkerRolloutReconciler) probeReplacementInference(ctx context.Context, endpoint, path string, target rolloutInferenceTarget) error {
 	nvext := map[string]any{"extra_fields": []string{"worker_id"}}
 	if target.Prefill {
 		nvext["prefill_worker_id"] = target.InstanceID
@@ -364,7 +393,7 @@ func (r *dgdWorkerRolloutReconciler) probeReplacementInference(ctx context.Conte
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, address+path, bytes.NewReader(raw))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
@@ -420,7 +449,6 @@ func mapDGDServingPodToRequests(ctx context.Context, object client.Object) []ctr
 	return mapDGDWorkerPodToRequests(ctx, object)
 }
 
-// mapRolloutMetadataToDGDRequests follows the exact live Pod owner back to its graph.
 func (r *DynamoGraphDeploymentReconciler) mapRolloutMetadataToDGDRequests(ctx context.Context, object client.Object) []ctrl.Request {
 	owner := metav1.GetControllerOf(object)
 	if owner == nil || owner.Kind != "Pod" {
