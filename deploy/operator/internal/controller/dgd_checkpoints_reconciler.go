@@ -744,9 +744,7 @@ func (r *dgdCheckpointsReconciler) adoptCheckpointGMSResourceClaimTemplate(
 	return nil
 }
 
-// prepareCheckpointGMSPodTemplate configures a checkpoint pod for intra-pod GPU
-// memory sharing after checking the target and extra client containers.
-// podTemplate and gmsSpec must be non-nil.
+// prepareCheckpointGMSPodTemplate requires non-nil podTemplate and gmsSpec.
 func prepareCheckpointGMSPodTemplate(
 	podTemplate *corev1.PodTemplateSpec,
 	targetContainerName string,
