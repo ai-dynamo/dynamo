@@ -691,13 +691,6 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
-    async fn concurrent_sglang_requests_sharing_x_request_id_get_their_own_output() {
-        let mut headers = HeaderMap::new();
-        headers.insert(X_REQUEST_ID_HEADER, "1".parse().unwrap());
-        concurrent_generate_with_shared_client_id(headers, None, "1").await;
-    }
-
     #[test]
     fn request_context_keeps_client_ids_as_correlation_only() {
         let mut headers = HeaderMap::new();

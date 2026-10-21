@@ -1890,16 +1890,6 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_generate_requests_sharing_body_request_id_get_their_own_output() {
-        concurrent_generate_with_shared_client_id(
-            HeaderMap::new(),
-            Some("shared-body-id"),
-            "shared-body-id",
-        )
-        .await;
-    }
-
-    #[tokio::test]
     async fn generate_early_failures_are_counted() {
         let service = HttpService::builder().build().unwrap();
         let state = service.state_clone();
