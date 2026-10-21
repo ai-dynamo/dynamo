@@ -1124,8 +1124,6 @@ mod tests {
         assert_eq!(error.reason().as_str(), "runtime.unclassified");
     }
 
-    /// A worker that refuses a request id it is still serving is not a faulty
-    /// worker; the refusal keeps a `Conflict` type through the prologue.
     #[test]
     fn duplicate_request_id_is_a_conflict() {
         let e = PipelineError::GenerateError(anyhow::Error::new(
