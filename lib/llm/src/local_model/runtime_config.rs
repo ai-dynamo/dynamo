@@ -162,6 +162,12 @@ pub const VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
 pub const SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
     "sglang_qwen_video_processor_contract";
 
+/// Worker-reported pad scheme that SGLang derives from forwarded MM hashes.
+///
+/// Absence means one pad value per media item, the scheme of SGLang releases
+/// before sgl-project/sglang#43043.
+pub const SGLANG_MM_PAD_SCHEME_RUNTIME_KEY: &str = "sglang_mm_pad_scheme";
+
 /// Worker-reported Nemotron Nano Omni video prompt-expansion contract used by
 /// vLLM. Absence disables exact video routing for mixed-version safety.
 pub const VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =

@@ -54,6 +54,8 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{self, Instrument};
 
+#[cfg(feature = "mm-routing")]
+use crate::local_model::runtime_config::SGLANG_MM_PAD_SCHEME_RUNTIME_KEY;
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use crate::local_model::runtime_config::{
     ModelRuntimeConfig, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
@@ -1067,16 +1069,15 @@ fn append_mm_routing_replacement(
     layout: RoutingImagePromptLayout,
     image: MmImageEntry,
     num_image_tokens: usize,
+    pad_scheme: mm_routing::MmPadScheme,
 ) -> Result<()> {
-    let fill_token = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
-
     append_mm_routing_replacement_with_fill(
         expanded,
         tokenizer,
         layout,
         image,
         num_image_tokens,
-        fill_token,
+        &pad_scheme.pads(image.mm_hash),
     )
 }
 
@@ -1087,18 +1088,20 @@ fn append_mm_routing_replacement_with_fill(
     layout: RoutingImagePromptLayout,
     image: MmImageEntry,
     num_image_tokens: usize,
-    fill_token: TokenIdType,
+    fill: &[TokenIdType],
 ) -> Result<()> {
+    // The worker restarts its pad sequence on each placeholder run.
+    let fill_run = || fill.iter().copied().cycle().take(num_image_tokens);
     match layout {
         RoutingImagePromptLayout::RepeatedPad => {
-            expanded.extend(std::iter::repeat_n(fill_token, num_image_tokens));
+            expanded.extend(fill_run());
         }
         RoutingImagePromptLayout::WrappedRepeatedPad {
             image_start,
             image_end,
         } => {
             expanded.push(image_start);
-            expanded.extend(std::iter::repeat_n(fill_token, num_image_tokens));
+            expanded.extend(fill_run());
             expanded.push(image_end);
         }
         RoutingImagePromptLayout::KimiK3 {
@@ -1110,7 +1113,7 @@ fn append_mm_routing_replacement_with_fill(
             let dimensions = format!("image {}x{}", image.width, image.height);
             expanded.extend(encode_routing_segment(tokenizer, &dimensions, false)?);
             expanded.push(media_content);
-            expanded.extend(std::iter::repeat_n(fill_token, num_image_tokens));
+            expanded.extend(fill_run());
             expanded.push(media_end);
         }
     }
@@ -1252,8 +1255,8 @@ fn apply_tracked_mm_replacements(
                 );
             }
             None if kv_event_mm_identity == mm_routing::KvEventMmIdentity::PadValueTokens => {
-                // SGLang has already replaced every placeholder with the
-                // canonical media pad before publishing this KV-event block.
+                // SGLang has already replaced every placeholder with its
+                // media pads before publishing this KV-event block.
                 // The request-side routing block is therefore complete as-is.
             }
             None => {
@@ -1277,6 +1280,7 @@ fn apply_tracked_mm_replacements(
 /// length. Errors are routing-only: callers must discard the partial vector
 /// and fall back without failing the inference request.
 #[cfg(feature = "mm-routing")]
+#[allow(clippy::too_many_arguments)]
 fn expand_mm_routing_tokens(
     tokenizer: &dyn Tokenizer,
     prompt_layout: RoutingImagePromptLayout,
@@ -1285,6 +1289,7 @@ fn expand_mm_routing_tokens(
     mm_image_entries: &[MmImageEntry],
     n_tokens: &[usize],
     token_ids: &[TokenIdType],
+    pad_scheme: mm_routing::MmPadScheme,
 ) -> Result<(Vec<TokenIdType>, usize)> {
     debug_assert_eq!(mm_image_entries.len(), n_tokens.len());
     let n_total: usize = n_tokens.iter().sum();
@@ -1303,6 +1308,7 @@ fn expand_mm_routing_tokens(
                 prompt_layout,
                 mm_image_entries[image_idx],
                 n_tokens[image_idx],
+                pad_scheme,
             )?;
             image_idx += 1;
         } else {
@@ -1324,6 +1330,7 @@ fn try_expand_mm_routing_tokens(
     mm_image_entries: &[MmImageEntry],
     n_tokens: &[usize],
     token_ids: &[TokenIdType],
+    pad_scheme: mm_routing::MmPadScheme,
     model_id: &str,
 ) -> Option<(Vec<TokenIdType>, usize)> {
     match expand_mm_routing_tokens(
@@ -1334,6 +1341,7 @@ fn try_expand_mm_routing_tokens(
         mm_image_entries,
         n_tokens,
         token_ids,
+        pad_scheme,
     ) {
         Ok(expanded) => Some(expanded),
         Err(error) => {
@@ -1830,6 +1838,9 @@ pub struct OpenAIPreprocessor {
     /// model doesn't need it or `bos_token` doesn't round-trip to one id.
     #[cfg(feature = "mm-routing")]
     routing_prepend_bos: Option<crate::protocols::TokenIdType>,
+    /// Worker-published pad scheme for image placeholder runs.
+    #[cfg(feature = "mm-routing")]
+    routing_mm_pad_scheme: mm_routing::MmPadScheme,
 }
 
 pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
@@ -2913,6 +2924,22 @@ impl OpenAIPreprocessor {
         }
 
         #[cfg(feature = "mm-routing")]
+        let routing_mm_pad_scheme = match runtime_config
+            .get_engine_specific::<mm_routing::MmPadScheme>(SGLANG_MM_PAD_SCHEME_RUNTIME_KEY)
+        {
+            Ok(scheme) => scheme.unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!(
+                    target: "mm_routing",
+                    %error,
+                    key = SGLANG_MM_PAD_SCHEME_RUNTIME_KEY,
+                    "invalid MM pad scheme runtime metadata; using single-value image pads"
+                );
+                mm_routing::MmPadScheme::SingleValue
+            }
+        };
+
+        #[cfg(feature = "mm-routing")]
         let routing_image_dimension_policy = routing_image_dimension_policy(
             &runtime_config,
             media_loader.is_some(),
@@ -3003,6 +3030,8 @@ impl OpenAIPreprocessor {
             routing_image_dimension_policy,
             #[cfg(feature = "mm-routing")]
             routing_prepend_bos,
+            #[cfg(feature = "mm-routing")]
+            routing_mm_pad_scheme,
         }))
     }
 
@@ -4355,6 +4384,7 @@ impl OpenAIPreprocessor {
                 &images,
                 &n_tokens,
                 token_ids,
+                self.routing_mm_pad_scheme,
                 counter.model_id(),
             )?;
             (expanded, expanded_prompt_len, Vec::new())
@@ -4409,12 +4439,15 @@ impl OpenAIPreprocessor {
                             .expect("image prompt layout requirement checked above");
                         let image_token_id =
                             image_token_id.expect("image token requirement checked above");
+                        // Mixed media keeps single-value pads: the per-block
+                        // KV-event check below models only that scheme.
                         let result = append_mm_routing_replacement(
                             &mut routing_tokens,
                             self.tokenizer.as_ref(),
                             layout,
                             image,
                             token_count,
+                            mm_routing::MmPadScheme::SingleValue,
                         )
                         .and_then(|()| {
                             append_mm_routing_replacement_with_fill(
@@ -4423,7 +4456,7 @@ impl OpenAIPreprocessor {
                                 layout,
                                 image,
                                 token_count,
-                                image_token_id,
+                                &[image_token_id],
                             )
                         });
                         if let Err(error) = result {
@@ -11632,7 +11665,15 @@ mod tests {
             .collect();
         let mut expanded = vec![7];
 
-        append_mm_routing_replacement(&mut expanded, &tokenizer, layout, image, 3).unwrap();
+        append_mm_routing_replacement(
+            &mut expanded,
+            &tokenizer,
+            layout,
+            image,
+            3,
+            mm_routing::MmPadScheme::SingleValue,
+        )
+        .unwrap();
 
         let mut expected = vec![7, 163602];
         expected.extend(dimension_ids);
@@ -11663,6 +11704,7 @@ mod tests {
             RoutingImagePromptLayout::RepeatedPad,
             image,
             3,
+            mm_routing::MmPadScheme::SingleValue,
         )
         .unwrap();
 
@@ -11692,7 +11734,15 @@ mod tests {
         let fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
         let mut expanded = vec![7];
 
-        append_mm_routing_replacement(&mut expanded, &tokenizer, layout, image, 3).unwrap();
+        append_mm_routing_replacement(
+            &mut expanded,
+            &tokenizer,
+            layout,
+            image,
+            3,
+            mm_routing::MmPadScheme::SingleValue,
+        )
+        .unwrap();
 
         assert_eq!(expanded, vec![7, 19, fill, fill, fill, 20]);
     }
@@ -11762,6 +11812,7 @@ mod tests {
             &[image],
             &[image_token_count],
             &[7, 163605, 8],
+            mm_routing::MmPadScheme::SingleValue,
         )
         .unwrap();
 
@@ -11823,6 +11874,7 @@ mod tests {
             &[image_entry],
             &processed.feature_token_counts,
             &[7, 163605, 8],
+            mm_routing::MmPadScheme::SingleValue,
         )
         .unwrap();
 
@@ -11858,6 +11910,7 @@ mod tests {
             &[image],
             &[3],
             &[7, 163605, 8],
+            mm_routing::MmPadScheme::SingleValue,
             "moonshotai/Kimi-K3",
         );
 
@@ -11894,6 +11947,7 @@ mod tests {
             &images,
             &[2, 3],
             &[7, 10, 8, 10, 9],
+            mm_routing::MmPadScheme::SingleValue,
         )
         .unwrap();
 
@@ -11912,6 +11966,107 @@ mod tests {
             ]
         );
         assert_eq!(prompt_len, expanded.len());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn sglang_wide_pads_restart_on_each_image_run() {
+        let tokenizer = RoutingTestTokenizer {
+            atomic_controls: true,
+            fail_plain_text: false,
+        };
+        let images = [
+            MmImageEntry {
+                mm_hash: 0x1234,
+                width: 320,
+                height: 240,
+            },
+            MmImageEntry {
+                mm_hash: 0x5678,
+                width: 640,
+                height: 480,
+            },
+        ];
+        let a = mm_routing::MmPadScheme::WideV1.pads(images[0].mm_hash);
+        let b = mm_routing::MmPadScheme::WideV1.pads(images[1].mm_hash);
+
+        let (expanded, _) = expand_mm_routing_tokens(
+            &tokenizer,
+            RoutingImagePromptLayout::RepeatedPad,
+            None,
+            10,
+            &images,
+            &[6, 3],
+            &[7, 10, 8, 10, 9],
+            mm_routing::MmPadScheme::WideV1,
+        )
+        .unwrap();
+
+        // SGLang `padding_sequence`: p0 p1 p2 p3 p0 ..., from p0 on each run.
+        assert_eq!(
+            expanded,
+            [
+                7, a[0], a[1], a[2], a[3], a[0], a[1], 8, b[0], b[1], b[2], 9
+            ]
+        );
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn exact_image_routing_uses_the_published_pad_scheme() {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
+        let mm_hash = 0x7be9_56be_787a_1c98;
+        let image = [MmRoutingEntry::Image {
+            mm_hash,
+            width: 320,
+            height: 240,
+        }];
+        let image_run = |published_scheme: Option<&str>| {
+            let mut mdc = ModelDeploymentCard::load_from_disk(
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                None,
+            )
+            .unwrap();
+            if let Some(scheme) = published_scheme {
+                mdc.runtime_config
+                    .set_engine_specific(SGLANG_MM_PAD_SCHEME_RUNTIME_KEY, scheme)
+                    .unwrap();
+            }
+            let mut preprocessor = match Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap()) {
+                Ok(preprocessor) => preprocessor,
+                Err(_) => panic!("test preprocessor unexpectedly shared"),
+            };
+            preprocessor.image_token_counter = Some(
+                mm_routing::image::ImageRoutingProcessor::try_new(
+                    "Qwen/Qwen3-VL-2B-Instruct",
+                    Some("qwen3_vl"),
+                    model_dir.path(),
+                )
+                .unwrap(),
+            );
+            preprocessor.routing_image_token_id = Some(10);
+            preprocessor.routing_image_prompt_layout = Some(RoutingImagePromptLayout::RepeatedPad);
+            preprocessor.kv_cache_block_size = 16;
+            let info = preprocessor
+                .build_mm_exact_routing_info(&image, &[7, 10, 8], None)
+                .unwrap();
+            let tokens = &info.routing_token_ids[..info.expanded_prompt_len];
+            let start = tokens.iter().position(|&token| token == 7).unwrap() + 1;
+            let end = tokens.iter().position(|&token| token == 8).unwrap();
+            tokens[start..end].to_vec()
+        };
+
+        let single = image_run(None);
+        assert!(single.len() > 4);
+        assert!(single.iter().all(|&token| {
+            token == dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_hash)
+        }));
+
+        let wide = image_run(Some("wide_v1"));
+        let pads = mm_routing::MmPadScheme::WideV1.pads(mm_hash);
+        let expected: Vec<_> = pads.iter().copied().cycle().take(single.len()).collect();
+        assert_eq!(wide, expected);
     }
 
     #[cfg(feature = "mm-routing")]

@@ -43,6 +43,8 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     sglang_uses_mla_backend,
     supports_disagg_prefill_cancel_anytime,
+    supports_external_mm_hashes,
+    supports_wide_mm_pad_values,
 )
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
@@ -66,6 +68,7 @@ from dynamo.sglang.gateway import (
 from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
+SGLANG_MM_PAD_SCHEME_RUNTIME_KEY = "sglang_mm_pad_scheme"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY = (
     "tool_call_structural_tag_reasoning_gate"
@@ -556,6 +559,17 @@ async def get_runtime_config(
             "null",
         ):
             publish_sglang_qwen_video_processor_contract(runtime_config, engine)
+        # The frontend must write the image pads that SGLang derives from the
+        # forwarded hashes. Only the aggregated LLM handler forwards them.
+        if (
+            llm_handler
+            and server_args.disaggregation_mode in (None, "null")
+            and supports_external_mm_hashes(engine)
+            and supports_wide_mm_pad_values()
+        ):
+            runtime_config.set_engine_specific(
+                SGLANG_MM_PAD_SCHEME_RUNTIME_KEY, json.dumps("wide_v1")
+            )
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser

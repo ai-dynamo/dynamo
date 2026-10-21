@@ -298,6 +298,80 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     assert "Failed to get runtime config" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    "disaggregation_mode, enable_multimodal, hashes_forwarded, wide_pads, expected",
+    [
+        (None, False, True, True, True),
+        ("null", False, True, True, True),
+        ("null", False, True, False, False),
+        ("null", False, False, True, False),
+        ("null", True, True, True, False),
+        ("prefill", False, True, True, False),
+        ("decode", False, True, True, False),
+    ],
+)
+def test_runtime_config_publishes_wide_mm_pad_scheme(
+    register,
+    monkeypatch,
+    disaggregation_mode,
+    enable_multimodal,
+    hashes_forwarded,
+    wide_pads,
+    expected,
+):
+    """Only a worker that forwards caller hashes to wide-pad SGLang publishes."""
+    server_args = SimpleNamespace(
+        allow_auto_truncate=False,
+        context_length=4096,
+        disaggregation_mode=disaggregation_mode,
+        max_prefill_tokens=None,
+        page_size=16,
+        reasoning_parser=None,
+        speculative_algorithm="NONE",
+        speculative_num_steps=None,
+    )
+    dynamo_args = register.DynamoConfig()
+    dynamo_args.enable_local_indexer = False
+    dynamo_args.enable_multimodal = enable_multimodal
+    capacity = SimpleNamespace(
+        max_num_seqs=None, max_num_batched_tokens=None, total_kv_blocks=None
+    )
+    monkeypatch.setattr(register, "model_card_dp_rank_bounds", lambda _: (0, 1))
+    monkeypatch.setattr(register, "get_sglang_worker_group_id", lambda _: None)
+    monkeypatch.setattr(register, "apply_topology_config", lambda _: None)
+    monkeypatch.setattr(
+        register, "_get_bootstrap_info_for_config", lambda _: (None, None)
+    )
+    monkeypatch.setattr(register, "get_spec_decode_runtime_data", lambda _: None)
+    monkeypatch.setattr(register, "_get_mooncake_runtime_data", lambda _: None)
+    monkeypatch.setattr(register, "runtime_capacity", lambda *_: capacity)
+    monkeypatch.setattr(
+        register, "supports_disagg_prefill_cancel_anytime", lambda _: False
+    )
+    monkeypatch.setattr(
+        register, "supports_external_mm_hashes", lambda _: hashes_forwarded
+    )
+    monkeypatch.setattr(register, "supports_wide_mm_pad_values", lambda: wide_pads)
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            context_len=4096,
+            validate_total_tokens=True,
+            num_reserved_tokens=0,
+            rid_to_state={},
+        ),
+        _scheduler_init_result=SimpleNamespace(scheduler_infos=[{}]),
+    )
+
+    runtime_config = asyncio.run(
+        register.get_runtime_config(engine, server_args, dynamo_args)
+    )
+
+    key = register.SGLANG_MM_PAD_SCHEME_RUNTIME_KEY
+    assert (key in runtime_config.runtime_data) is expected
+    if expected:
+        assert json.loads(runtime_config.runtime_data[key]) == "wide_v1"
+
+
 def test_hicache_publishes_native_offloading_capacity():
     server_args = SimpleNamespace(hicache_write_policy="write_back")
     assert get_hicache_native_offloading_capacity(
@@ -401,6 +475,7 @@ async def test_hicache_publish_failure_preserves_core_capacity(
     )
     monkeypatch.setattr(register, "_get_mooncake_runtime_data", lambda _: None)
     monkeypatch.setattr(register, "runtime_capacity", lambda *_: capacity)
+    monkeypatch.setattr(register, "supports_external_mm_hashes", lambda _: False)
 
     original_set = register.ModelRuntimeConfig.set_engine_specific
 

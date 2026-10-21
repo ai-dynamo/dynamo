@@ -49,7 +49,8 @@ pub(crate) struct DesiredInstance {
     pub(crate) group_key: GroupKey,
     pub(crate) mdc_checksum: String,
     pub(crate) projection_fingerprint: String,
-    /// Digest of this worker's Qwen video prompt-expansion contract.
+    /// Digest of this worker's MM routing contracts: the Qwen video prompt
+    /// expansion and the SGLang MM pad scheme.
     pub(crate) video_contract: Option<String>,
 }
 
@@ -61,8 +62,8 @@ impl DesiredInstance {
 
 /// Returns the cohort's shared contract, if every member publishes one.
 ///
-/// A WorkerSet has one video-routing processor, so exact video routing is
-/// enabled only when all members agree.
+/// A WorkerSet builds one routing prompt for all members, so exact video
+/// routing and SGLang wide image pads are enabled only when all members agree.
 fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
     let mut members = members.iter();
     let agreed = members.next()?.video_contract.clone()?;

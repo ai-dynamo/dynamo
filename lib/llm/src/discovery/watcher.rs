@@ -31,8 +31,9 @@ use crate::{
     kv_router::plugins::RouterPluginBuilder,
     kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext},
     local_model::runtime_config::{
-        SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY, TokenizerBackend,
-        VLLM_INFERENCE_V1_GENERATE_CAPABILITY, VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        SGLANG_MM_PAD_SCHEME_RUNTIME_KEY, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
@@ -422,13 +423,10 @@ impl ModelWatcher {
 
         validate_policy_worker_role(card, &self.plugins)?;
 
-        // Prepare without exact video routing unless the cohort agreed on a contract.
+        // Prepare without the MM routing contracts unless the cohort agreed on them.
         let mut removed_video_contract = false;
         if spec.video_contract.is_none() {
-            for key in [
-                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-                SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            ] {
+            for key in COHORT_MM_ROUTING_CONTRACT_KEYS {
                 removed_video_contract |= card.runtime_config.runtime_data.remove(key).is_some();
             }
         }
@@ -437,8 +435,8 @@ impl ModelWatcher {
                 target: "mm_routing",
                 model_name = card.name(),
                 group = %spec.key.id(),
-                "WorkerSet members publish different Qwen video prompt-expansion contracts; \
-                 exact video routing disabled for this group"
+                "WorkerSet members publish different MM routing contracts; \
+                 exact video routing and SGLang wide image pads disabled for this group"
             );
         }
         // Use per-worker-set router config if the worker provided one in its MDC,
@@ -1431,13 +1429,20 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
     Ok(blake3::hash(&serde_json::to_vec(&value)?).to_string())
 }
 
-/// Hashes the published Qwen video prompt-expansion contract.
+/// Runtime contracts that a WorkerSet uses only when all members publish the
+/// same values. The frontend builds one routing prompt for every member, so a
+/// cohort that disagrees uses the behavior of a worker that publishes none.
+const COHORT_MM_ROUTING_CONTRACT_KEYS: [&str; 3] = [
+    VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    SGLANG_MM_PAD_SCHEME_RUNTIME_KEY,
+];
+
+/// Hashes the published MM routing contracts: the Qwen video prompt expansion
+/// and the SGLang MM pad scheme.
 pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<String> {
     let mut contracts = serde_json::Map::new();
-    for key in [
-        VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-        SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-    ] {
+    for key in COHORT_MM_ROUTING_CONTRACT_KEYS {
         if let Some(contract) = card.runtime_config.runtime_data.get(key) {
             contracts.insert(key.to_string(), contract.clone());
         }
@@ -1533,6 +1538,32 @@ mod tests {
             qwen_video_contract_digest(&vllm),
             qwen_video_contract_digest(&sglang),
             "engine-specific contracts must not share a cohort fingerprint"
+        );
+    }
+
+    #[test]
+    fn sglang_mm_pad_scheme_is_a_cohort_contract() {
+        let absent = ModelDeploymentCard::with_name_only("model");
+        let mut wide = ModelDeploymentCard::with_name_only("model");
+        wide.runtime_config.runtime_data.insert(
+            SGLANG_MM_PAD_SCHEME_RUNTIME_KEY.to_string(),
+            serde_json::json!("wide_v1"),
+        );
+        assert!(qwen_video_contract_digest(&wide).is_some());
+
+        let video_contract = serde_json::json!({"placeholder_target": "bare_video_token"});
+        let mut video_only = absent.clone();
+        let mut wide_with_video = wide.clone();
+        for card in [&mut video_only, &mut wide_with_video] {
+            card.runtime_config.runtime_data.insert(
+                SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY.to_string(),
+                video_contract.clone(),
+            );
+        }
+        assert_ne!(
+            qwen_video_contract_digest(&video_only),
+            qwen_video_contract_digest(&wide_with_video),
+            "workers that disagree on the pad scheme must not share a cohort contract"
         );
     }
 

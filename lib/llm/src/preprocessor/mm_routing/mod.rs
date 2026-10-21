@@ -152,6 +152,51 @@ pub(crate) enum KvEventMmIdentity {
     PadValueTokens,
 }
 
+/// How the worker writes pad tokens over a media placeholder run before it
+/// publishes KV events. Workers that publish no scheme use `SingleValue`.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MmPadScheme {
+    /// Every placeholder becomes `pad_value_for_mm_hash(mm_hash)`.
+    #[default]
+    SingleValue,
+    /// SGLang's four wide pads (sgl-project/sglang#43043), repeated in order
+    /// from the first pad on each placeholder run.
+    WideV1,
+}
+
+impl MmPadScheme {
+    /// Pads for one placeholder run of the media item `mm_hash`, in the
+    /// order the worker writes them, folded the way KV events fold them.
+    pub(crate) fn pads(self, mm_hash: u64) -> Vec<TokenIdType> {
+        use dynamo_kv_router::protocols::{fold_token_id, pad_value_for_mm_hash};
+
+        match self {
+            Self::SingleValue => vec![pad_value_for_mm_hash(mm_hash)],
+            Self::WideV1 => sglang_wide_pads(mm_hash).map(fold_token_id).to_vec(),
+        }
+    }
+}
+
+/// SGLang `_compute_pad_values` for a caller hash: four 62-bit pads from
+/// SHA-256 over a fixed tag and the big-endian hash bytes.
+fn sglang_wide_pads(mm_hash: u64) -> [u64; 4] {
+    use sha2::{Digest, Sha256};
+
+    const TAG: &[u8] = b"sglang-mm-wide-pad-v1";
+    const MASK: u64 = (1 << 62) - 1;
+    let digest = Sha256::new()
+        .chain_update(TAG)
+        .chain_update(mm_hash.to_be_bytes())
+        .finalize();
+    std::array::from_fn(|i| {
+        let word: [u8; 8] = digest[8 * i..8 * (i + 1)]
+            .try_into()
+            .expect("a SHA-256 digest has four 8-byte words");
+        dynamo_kv_router::protocols::MM_PAD_SHIFT_VALUE + (u64::from_be_bytes(word) & MASK)
+    })
+}
+
 /// Geometry and temporal metadata visible to a model's video processor.
 pub(crate) struct VideoRoutingInput<'a> {
     pub frame_count: usize,
@@ -321,6 +366,56 @@ mod tests {
         assert!(
             serde_json::from_str::<SglangQwenVideoProcessorContract>(missing_identity).is_err()
         );
+    }
+
+    /// Raw pads from SGLang's own `MultimodalDataItem.set_hash(h).padding_values()`
+    /// (main at 5ed306bd69). tests/serve/test_sglang_mm_hashes_protocol.py pins
+    /// the installed SGLang to the same vectors.
+    #[test]
+    fn sglang_wide_pads_match_sglang_vectors() {
+        let vectors: [(u64, [u64; 4]); 2] = [
+            (
+                0x7be9_56be_787a_1c98,
+                [
+                    0x2934_b765_0194_40ff,
+                    0x0e10_8bd9_b449_1ead,
+                    0x16cd_70c6_42ba_ac32,
+                    0x2926_960a_32a6_78ab,
+                ],
+            ),
+            (
+                0x0123_4567_89ab_cdef,
+                [
+                    0x0053_9bee_0b64_0cc4,
+                    0x0f7a_1566_abe4_3794,
+                    0x05a4_e871_6d5e_2999,
+                    0x1d25_c7f3_f8c1_3fea,
+                ],
+            ),
+        ];
+        for (mm_hash, expected) in vectors {
+            assert_eq!(sglang_wide_pads(mm_hash), expected, "mm_hash {mm_hash:#x}");
+        }
+
+        assert_eq!(
+            MmPadScheme::WideV1.pads(0x7be9_56be_787a_1c98),
+            vec![27_493_183, 878_207_213, 46_788_210, 850_770_667]
+        );
+        assert_eq!(
+            MmPadScheme::SingleValue.pads(0x7be9_56be_787a_1c98),
+            vec![dynamo_kv_router::protocols::pad_value_for_mm_hash(
+                0x7be9_56be_787a_1c98
+            )]
+        );
+    }
+
+    #[test]
+    fn parses_published_mm_pad_scheme() {
+        assert_eq!(
+            serde_json::from_str::<MmPadScheme>(r#""wide_v1""#).unwrap(),
+            MmPadScheme::WideV1
+        );
+        assert!(serde_json::from_str::<MmPadScheme>(r#""wide_v2""#).is_err());
     }
 
     #[test]
