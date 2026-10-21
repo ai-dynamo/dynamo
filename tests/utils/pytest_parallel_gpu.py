@@ -32,6 +32,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -331,6 +332,34 @@ def _priority_key(test: _TestEntry) -> tuple[bool, float, float]:
     return (test.profiled_gib > 0, test.est_duration, test.profiled_gib)
 
 
+def _vllm_priority_key(test: _TestEntry) -> tuple[bool, float, float]:
+    """vLLM scheduling-priority sort key (use with ``reverse=True``).
+
+    Ordered so that, highest priority first:
+      1. VRAM tests (``profiled_gib > 0``) before zero-VRAM fillers, as in
+         ``_priority_key``.
+      2. Largest VRAM first, so a big test anchors an empty GPU early while
+         small tests remain to pack beside it. Under duration-first order a
+         big-but-short test (e.g. 18.7 GiB, timeout 271s) sorts last and runs
+         alone on the tail after the small tests are gone.
+      3. Longest ``est_duration`` (= timeout/3) first among equal VRAM.
+    """
+    return (test.profiled_gib > 0, test.profiled_gib, test.est_duration)
+
+
+def _priority_key_for(
+    framework: str | None,
+) -> Callable[[_TestEntry], tuple[bool, float, float]]:
+    """Return the sort key for ``DYNAMO_TEST_FRAMEWORK``.
+
+    ``vllm`` uses ``_vllm_priority_key``; every other value, and unset, keeps
+    the default ``_priority_key``.
+    """
+    if (framework or "").strip().lower() == "vllm":
+        return _vllm_priority_key
+    return _priority_key
+
+
 def _select_launches(
     pending: list[_TestEntry],
     gpu_states: dict[int, _GpuState],
@@ -535,7 +564,10 @@ def run_parallel(
     #   3. Largest VRAM first, so a big test anchors an empty GPU at the full
     #      single-proc cap and smaller tests pack into the remaining budget
     #      alongside it instead of the big test running alone on the tail.
-    tests.sort(key=_priority_key, reverse=True)
+    # With DYNAMO_TEST_FRAMEWORK=vllm, steps 2 and 3 swap (largest VRAM, then
+    # longest est_duration): see _vllm_priority_key. Admission is unchanged.
+    priority_key = _priority_key_for(os.environ.get("DYNAMO_TEST_FRAMEWORK"))
+    tests.sort(key=priority_key, reverse=True)
 
     # Reject tests without a KV marker — without explicit memory control
     # they'd each grab the engine's default (e.g. vLLM 90%) and OOM when
@@ -615,6 +647,10 @@ def run_parallel(
             f"\nGPU parallel: {count_str}, {num_slots} concurrent slots, "
             f"GPUs {gpu_list} ({size_str})"
         )
+    if priority_key is _vllm_priority_key:
+        _print("Scheduling priority: vllm (VRAM-first)")
+    else:
+        _print("Scheduling priority: default (duration-first)")
 
     _print()
     for test in tests:

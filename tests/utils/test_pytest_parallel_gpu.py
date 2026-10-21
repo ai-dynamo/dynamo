@@ -17,8 +17,10 @@ from tests.utils import vram_utils
 from tests.utils.pytest_parallel_gpu import (
     _GpuState,
     _priority_key,
+    _priority_key_for,
     _select_launches,
     _TestEntry,
+    _vllm_priority_key,
 )
 from tests.utils.vram_utils import VRAM_MULTI_PROC_MARGIN
 
@@ -450,3 +452,73 @@ def test_simulation_conserves_work_and_respects_budget():
 
     assert makespan >= longest
     assert makespan >= total_work / 8 - 1e-6
+
+
+# --------------------------------------------------------------------------- #
+# vLLM priority policy (DYNAMO_TEST_FRAMEWORK=vllm)
+# --------------------------------------------------------------------------- #
+def test_vllm_priority_orders_vram_first_then_size_then_duration():
+    filler = _t("filler", 0.0, timeout=600)
+    big_short = _t("big_short", 18.7, timeout=271)  # est ~90s
+    small_long = _t("small_long", 3.8, timeout=1800)  # est 600s
+    mid_long = _t("mid_long", 7.3, timeout=900)  # est 300s
+    mid_short = _t("mid_short", 7.3, timeout=300)  # est 100s, ties mid_long
+    pool = [filler, small_long, mid_short, big_short, mid_long]
+
+    names = [t.name for t in sorted(pool, key=_vllm_priority_key, reverse=True)]
+
+    # VRAM tests precede the filler; largest VRAM first; equal VRAM by duration.
+    assert names == ["big_short", "mid_long", "mid_short", "small_long", "filler"]
+
+    # The default policy puts the big-but-short test behind the small-long one.
+    default = [t.name for t in sorted(pool, key=_priority_key, reverse=True)]
+    assert default.index("small_long") < default.index("big_short")
+
+
+@pytest.mark.parametrize(
+    ("framework", "expected"),
+    [
+        ("vllm", _vllm_priority_key),
+        (" VLLM ", _vllm_priority_key),
+        (None, _priority_key),
+        ("", _priority_key),
+        ("sglang", _priority_key),
+        ("trtllm", _priority_key),
+        ("triton", _priority_key),
+        ("dynamo", _priority_key),
+    ],
+)
+def test_priority_key_for_framework(framework, expected):
+    assert _priority_key_for(framework) is expected
+
+
+# Tail of a vLLM post-merge GPU-parallel job (22 GiB card, 16 slots): small
+# long tests, 7.3 GiB disaggregated_same_gpu pairs, a large multimodal test,
+# and an 18.7 GiB tool-calling test with a short timeout that ran alone last
+# under the default order. (name, profiled_gib, runtime_s, timeout_s)
+_VLLM_TAIL_TESTS = [
+    ("small_a", 3.8, 300, 1800),
+    ("small_b", 3.8, 300, 1800),
+    ("small_c", 3.8, 250, 1500),
+    ("small_d", 3.8, 250, 1500),
+    ("disagg_same_gpu_a", 7.3, 200, 900),
+    ("disagg_same_gpu_b", 7.3, 200, 900),
+    ("mm_large", 13.0, 150, 600),
+    ("tool_calling", 18.7, 83, 271),
+    ("filler_0", 0.0, 27, 600),
+    ("filler_1", 0.0, 27, 600),
+    ("filler_2", 0.0, 27, 600),
+    ("filler_3", 0.0, 27, 600),
+]
+
+
+def test_vllm_priority_makespan_beats_default_on_vllm_tail():
+    def workload():
+        return [_SimTest(n, p, r, to) for (n, p, r, to) in _VLLM_TAIL_TESTS]
+
+    kwargs = dict(num_slots=16, gpus_total=[22.0], select=_select_launches)
+    default = _simulate_makespan(workload(), order_key=_priority_key, **kwargs)
+    vllm = _simulate_makespan(workload(), order_key=_vllm_priority_key, **kwargs)
+
+    print(f"\nvllm tail: default={default:.0f}s  vllm={vllm:.0f}s")
+    assert vllm < default
