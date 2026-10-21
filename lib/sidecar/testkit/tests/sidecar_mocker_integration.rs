@@ -847,7 +847,11 @@ fn assert_http_completed(outputs: Outputs, request_id: &str) {
     assert_eq!(outputs.len(), 2);
     assert!(outputs[0].finish_reason.is_none());
     assert_eq!(outputs[1].finish_reason, Some(FinishReason::Length));
-    for (output, expected) in outputs.iter().zip(http::responses(request_id)) {
+    let native_id = outputs[0].engine_data.as_ref().unwrap()["sglang_response"]["meta_info"]["id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(http::logical_request_id(native_id), request_id);
+    for (output, expected) in outputs.iter().zip(http::responses(native_id)) {
         assert_eq!(
             output.engine_data,
             Some(json!({"sglang_response": expected}))
@@ -904,6 +908,8 @@ async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
                 } else {
                     http_checkpoint(&mut stream, &target).await
                 };
+                let native_id = target.native_request().unwrap()["rid"].as_str().unwrap().to_string();
+                assert_eq!(http::logical_request_id(&native_id), ctx.id());
                 let tokens = target.tokens();
                 let survivor_ctx = mock_context();
                 let survivor_id = survivor_ctx.id().to_string();
@@ -923,9 +929,9 @@ async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
                     failure(outputs, &tokens, BackendError::Cancelled);
                 }
                 drop(stream);
-                http.wait_aborted(ctx.id()).await;
+                http.wait_aborted(&native_id).await;
                 bounded("HTTP target transport released", target.wait(Event::Dropped)).await;
-                aborted.push(ctx.id().to_string());
+                aborted.push(native_id.clone());
                 assert_eq!(http.aborted_requests(), aborted);
                 assert_eq!(target.tokens(), tokens);
                 assert!(!survivor.reached(Event::Dropped));
@@ -1121,6 +1127,8 @@ async fn sglang_http_decode_cancellation_waits_for_transfer() {
                     output = stream.next() => panic!("response arrived before headers: {output:?}"),
                 }
                 assert!(poll!(stream.next()).is_pending());
+                let native_id = target.native_request().unwrap()["rid"].as_str().unwrap().to_string();
+                assert_eq!(http::logical_request_id(&native_id), ctx.id());
                 if matches!(cancellation, Cancellation::Explicit) {
                     ctx.stop_generating();
                     failure(
@@ -1139,7 +1147,7 @@ async fn sglang_http_decode_cancellation_waits_for_transfer() {
                     assert!(
                         tokio::time::timeout(std::time::Duration::from_millis(100), async {
                             tokio::select! {
-                                _ = http.wait_aborted(ctx.id()) => panic!("decode aborted before transfer completed"),
+                                _ = http.wait_aborted(&native_id) => panic!("decode aborted before transfer completed"),
                                 _ = target.wait(Event::Dropped) => panic!("decode transport dropped before transfer completed"),
                             }
                         })
@@ -1150,17 +1158,17 @@ async fn sglang_http_decode_cancellation_waits_for_transfer() {
                 }
                 gate.release();
                 if !is_terminal_without_tokens {
-                    http.wait_aborted(ctx.id()).await;
+                    http.wait_aborted(&native_id).await;
                     assert!(*first_token.borrow());
                     assert_eq!(target.tokens(), vec![101]);
-                    aborted.push(ctx.id().to_string());
+                    aborted.push(native_id.clone());
                 }
                 bounded("HTTP decode transport released", target.wait(Event::Dropped)).await;
                 if is_terminal_without_tokens {
                     assert!(
                         tokio::time::timeout(
                             std::time::Duration::from_millis(100),
-                            http.wait_aborted(ctx.id()),
+                            http.wait_aborted(&native_id),
                         )
                         .await
                         .is_err()
