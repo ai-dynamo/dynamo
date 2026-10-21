@@ -77,7 +77,15 @@ pub(super) async fn serve(
 async fn accept(listener: &TcpListener) -> TcpStream {
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => return stream,
+            Ok((stream, _)) => {
+                // Streamed tokens are small writes. With Nagle's algorithm on, one can wait
+                // for the client's delayed ACK of the previous write, 40 ms or more. Set on
+                // the TCP socket, this also covers TLS connections.
+                if let Err(error) = stream.set_nodelay(true) {
+                    tracing::debug!(%error, "Failed to set TCP_NODELAY");
+                }
+                return stream;
+            }
             // Errors such as EMFILE are transient: back off and retry, as axum-server did.
             Err(error) => {
                 tracing::debug!(%error, "Failed to accept HTTP connection");
@@ -128,5 +136,18 @@ async fn serve_io<I>(
     {
         connection.as_mut().graceful_shutdown();
         let _ = connection.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn accepted_connections_turn_nagle_off() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (_client, stream) = tokio::join!(TcpStream::connect(addr), accept(&listener));
+        assert!(stream.nodelay().unwrap());
     }
 }
