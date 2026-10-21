@@ -1045,7 +1045,8 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
     for header in [DYNAMO_REQUEST_ID_HEADER, "request-id"] {
         if headers.contains_key(header) {
             tracing::warn!(
-                "{header} header is deprecated and ignored (DEP #7812); the server generates the request ID. Use x-request-id for client correlation"
+                header,
+                "deprecated request id header ignored (DEP #7812); the server generates the request ID, use x-request-id for client correlation"
             );
         }
     }

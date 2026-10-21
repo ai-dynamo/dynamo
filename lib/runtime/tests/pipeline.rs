@@ -525,24 +525,28 @@ async fn frontend_refuses_duplicate_in_flight_request_id() {
 }
 
 #[tokio::test]
-async fn frontend_routes_concurrent_distinct_ids_to_their_callers() {
+async fn frontend_releases_request_id_when_caller_is_dropped() {
     let (service, gate, mut arrivals) = make_gated_service();
 
-    let spawn_request = |content: &'static str, id: &'static str| {
-        let service = service.clone();
-        tokio::spawn(async move {
-            let stream = service.generate(request_with_id(content, id)).await?;
-            Ok::<_, Error>(collect_data(stream).await)
-        })
-    };
-    let a = spawn_request("a", "id-a");
-    let b = spawn_request("b", "id-b");
+    let parked_service = service.clone();
+    let parked = tokio::spawn(async move {
+        let _ = parked_service
+            .generate(request_with_id("parked", "same-id"))
+            .await;
+    });
+    assert_eq!(arrivals.recv().await.as_deref(), Some("parked"));
 
-    // Release the backend only after both requests are in flight together.
-    arrivals.recv().await.unwrap();
-    arrivals.recv().await.unwrap();
-    gate.add_permits(2);
+    // Drop the caller while its request is still being handed to the backend.
+    parked.abort();
+    assert!(parked.await.unwrap_err().is_cancelled());
 
-    assert_eq!(a.await.unwrap().unwrap(), vec!["a".to_string()]);
-    assert_eq!(b.await.unwrap().unwrap(), vec!["b".to_string()]);
+    gate.add_permits(1);
+    let stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        service.generate(request_with_id("retry", "same-id")),
+    )
+    .await
+    .expect("retry must not wait")
+    .expect("a dropped caller must not keep its request id in flight");
+    assert_eq!(collect_data(stream).await, vec!["retry".to_string()]);
 }

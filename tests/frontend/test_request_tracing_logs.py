@@ -410,8 +410,8 @@ def test_agg_invalid_uuid_warn(tracing_services) -> None:
         e
         for e in req_logs
         if e.get("level") == "WARN"
-        and "x-dynamo-request-id header is deprecated and ignored"
-        in e.get("message", "")
+        and "deprecated request id header ignored" in e.get("message", "")
+        and e.get("header") == "x-dynamo-request-id"
     ]
     assert len(warn_logs) == 1
 
