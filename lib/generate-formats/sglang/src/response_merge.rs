@@ -256,7 +256,7 @@ impl RuleSet {
             if let Some(value) = object(chunk, &field.parent).and_then(|o| o.get_mut(&field.key))
                 && let Some(n) = value.as_u64()
             {
-                *value = Value::from(n + offset);
+                *value = Value::from(n.saturating_add(offset));
             }
         };
         for (&offset, &index) in offsets.iter().zip(&self.cumulative) {
@@ -429,7 +429,7 @@ impl Assembler {
     /// later chunks continue it.
     pub fn migrate(&mut self, delivered: u64) {
         for (offset, seen) in self.offsets.iter_mut().zip(&mut self.seen) {
-            *offset += seen.take().unwrap_or(0);
+            *offset = offset.saturating_add(seen.take().unwrap_or(0));
         }
         self.delivered = delivered;
         self.attempt += 1;
@@ -505,6 +505,29 @@ mod tests {
     use super::*;
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn retry_counters_do_not_wrap(
+            counts in prop::collection::vec(any::<u64>(), 1..4),
+            final_count in prop_oneof![Just(u64::MAX), any::<u64>()],
+            delivered in 1u64..10,
+        ) {
+            let rules = RuleSet::from_json(r#"{"fields": {
+                "/total": "cumulative", "/completed": "output_offset"
+            }}"#).unwrap();
+            let mut assembler = Assembler::new(Arc::new(rules), true);
+            for count in &counts {
+                assembler.render(json!({"total": count}), |_| {});
+                assembler.migrate(delivered);
+            }
+            assembler.render(json!({"total": final_count, "completed": final_count}), |joined| {
+                let total: u128 = counts.iter().map(|&n| u128::from(n)).sum();
+                assert_eq!(joined["total"], (total + u128::from(final_count)).min(u128::from(u64::MAX)) as u64);
+                assert_eq!(joined["completed"], (u128::from(final_count) + u128::from(delivered)).min(u128::from(u64::MAX)) as u64);
+            });
+        }
+
         /// The in-place overlay equals decode, splice, encode.
         #[test]
         fn overlay_matches_decode_splice_encode(
