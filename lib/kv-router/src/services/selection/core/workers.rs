@@ -290,7 +290,7 @@ impl SelectionCore {
                     key.as_ref(),
                 );
                 // Checked per partition, since the factory may build a different policy for each.
-                let inputs = selector.declared_inputs();
+                let inputs = selector.input_requirements();
                 if inputs.contains(WorkerInputs::RESIDENT_BLOCKS)
                     && !inputs.contains(WorkerInputs::CACHE)
                 {

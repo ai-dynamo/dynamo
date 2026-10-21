@@ -23,6 +23,10 @@ use crate::plugins::worker_selection::{
     WorkerCandidates, WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
     WorkerSelectionContext,
 };
+use crate::plugins::worker_selection::{
+    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyState,
+    RuntimePolicyUpdate,
+};
 
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
 pub(super) enum WorkerSelectionPolicyState {
@@ -61,6 +65,7 @@ pub struct WorkerSelectionPolicy {
     state: WorkerSelectionPolicyState,
     exclusive_affinity: bool,
     resident_blocks: Option<ResidentBlockCountsHandle>,
+    runtime: Option<Box<RuntimePolicyState>>,
 }
 
 impl WorkerSelectionPolicy {
@@ -112,6 +117,7 @@ impl WorkerSelectionPolicy {
             worker_label,
             exclusive_affinity: false,
             resident_blocks: None,
+            runtime: None,
             state: WorkerSelectionPolicyState::Composed(RefCell::new(ComposedPolicyState {
                 filters,
                 scorers,
@@ -157,7 +163,60 @@ impl WorkerSelectionPolicy {
         )
     }
 
-    pub(crate) fn declared_inputs(&self) -> WorkerInputs {
+    /// Opt in to runtime parameter updates with a pure replacement builder.
+    /// The initial parameters define the patchable keys and reset values. Replacements must
+    /// require no new worker-input groups and preserve affinity behavior; queue and tracking state are retained.
+    pub fn with_runtime_config(
+        mut self,
+        parameters: serde_json::Map<String, serde_json::Value>,
+        builder: RuntimePolicyBuilder,
+    ) -> Self {
+        self.runtime = Some(Box::new(RuntimePolicyState::new(
+            parameters,
+            builder,
+            self.input_requirements(),
+        )));
+        self
+    }
+
+    /// Return the current complete parameters for this policy instance.
+    pub fn runtime_config(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        self.runtime
+            .as_deref()
+            .map(RuntimePolicyState::config)
+            .ok_or(RuntimePolicyError::Unsupported)
+    }
+
+    /// Validate and replace the policy. Hosts must serialize this with selection.
+    pub fn update_runtime_config(
+        &mut self,
+        update: RuntimePolicyUpdate,
+    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or(RuntimePolicyError::Unsupported)?;
+        let (mut replacement, state) = runtime.prepare(update)?;
+        // Hosts freeze these requirements when constructing their routing pipeline.
+        if !runtime
+            .available_inputs
+            .contains(replacement.input_requirements())
+            || self.exclusive_affinity != replacement.exclusive_affinity
+            || self.worker_label != replacement.worker_label
+        {
+            return Err(RuntimePolicyError::InvalidParameters(
+                "replacement changes routing requirements".into(),
+            ));
+        }
+        let response = state.config();
+        replacement.runtime = Some(Box::new(state));
+        // The host attached the counts to this instance; the replacement keeps reading them.
+        replacement.resident_blocks = self.resident_blocks.take();
+        *self = replacement;
+        Ok(response)
+    }
+
+    pub(crate) fn input_requirements(&self) -> WorkerInputs {
         match &self.state {
             #[cfg(any(test, feature = "bench"))]
             WorkerSelectionPolicyState::Reference(..) => WorkerInputs::CACHE | WorkerInputs::LOAD,
@@ -179,6 +238,7 @@ impl WorkerSelectionPolicy {
             worker_label,
             exclusive_affinity: false,
             resident_blocks: None,
+            runtime: None,
             state: WorkerSelectionPolicyState::Reference(Box::new(kv_router_config), picker),
         }
     }
@@ -369,6 +429,16 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
+    fn runtime_config(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        self.runtime_config()
+    }
+
+    fn update_runtime_config(
+        &mut self,
+        update: RuntimePolicyUpdate,
+    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        self.update_runtime_config(update)
+    }
     fn uses_exclusive_affinity_target(&self) -> bool {
         #[cfg(any(test, feature = "bench"))]
         if matches!(&self.state, WorkerSelectionPolicyState::Reference(..)) {
@@ -378,7 +448,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     }
 
     fn required_worker_inputs(&self) -> WorkerInputs {
-        self.declared_inputs()
+        self.input_requirements()
     }
 
     #[inline(always)]
@@ -1014,6 +1084,59 @@ mod tests {
                 ))
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn runtime_replacement_keeps_resident_block_counts() {
+        use std::sync::Arc;
+
+        use crate::indexer::ResidentBlockCountsHandle;
+        use crate::plugins::worker_selection::RuntimePolicyUpdate;
+
+        struct ExpectCount(u64);
+
+        impl WorkerPicker for ExpectCount {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::RESIDENT_BLOCKS
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert_eq!(input.resident_blocks(0), Some(self.0));
+                Ok(0)
+            }
+        }
+
+        fn build() -> WorkerSelectionPolicy {
+            WorkerSelectionPolicy::new(
+                KvRouterConfig::default(),
+                "test",
+                Vec::new(),
+                Box::new(ExpectCount(5)),
+            )
+        }
+
+        let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
+        let request = base_request(16);
+        let counts = ResidentBlockCountsHandle::fixed([(WorkerWithDpRank::new(0, 0), 5)]);
+        let mut policy = build()
+            .with_resident_block_counts(counts)
+            .with_runtime_config(serde_json::Map::new(), Arc::new(|_| Ok(build())));
+        // The replacement is built without the host's counts; the update carries them over.
+        policy
+            .update_runtime_config(RuntimePolicyUpdate::reset(0))
+            .unwrap();
+        policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
     }
 
     #[test]

@@ -20,6 +20,9 @@ pub use crate::plugins::worker_selection::{
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
 use crate::plugins::worker_selection::{CacheSnapshot, CandidateData, WorkerCacheData};
+use crate::plugins::worker_selection::{
+    RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+};
 pub use policy::WorkerSelectionPolicy;
 use policy::{ComposedPolicyState, WorkerSelectionPolicyStateRef, collect_policy_candidates};
 #[cfg(any(test, feature = "bench"))]
@@ -37,6 +40,19 @@ use crate::protocols::{
 ///
 /// External policies should use [`WorkerSelectionPolicy`].
 pub trait WorkerSelector<C: WorkerConfigLike> {
+    /// Snapshot runtime parameters, when this selector explicitly supports updates.
+    fn runtime_config(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        Err(RuntimePolicyError::Unsupported)
+    }
+
+    /// Apply a validated replacement between selections. The scheduler actor serializes calls.
+    fn update_runtime_config(
+        &mut self,
+        _update: RuntimePolicyUpdate,
+    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        Err(RuntimePolicyError::Unsupported)
+    }
+
     /// Optional worker data required by this selector.
     fn required_worker_inputs(&self) -> WorkerInputs;
 

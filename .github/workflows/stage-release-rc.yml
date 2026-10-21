@@ -33,7 +33,7 @@ on:
         type: string
         default: all
       wheels:
-        description: 'Wheels to stage: all | none | csv of ai-dynamo,ai-dynamo-runtime,kvbm.'
+        description: 'Wheels to stage: all | none | csv of ai-dynamo,ai-dynamo-runtime.'
         required: false
         type: string
         default: all
@@ -201,7 +201,7 @@ jobs:
           FRAMEWORKS = {"vllm", "sglang", "trtllm"}
           VARIANTS = {"runtime", "efa"}
           COMPONENTS = {"frontend", "operator", "planner", "sidecar"}
-          WHEEL_TOKENS = {"ai-dynamo", "ai-dynamo-runtime", "kvbm"}
+          WHEEL_TOKENS = {"ai-dynamo", "ai-dynamo-runtime"}
           HELM_TOKENS = {"platform"}
 
           def fail(msg):
