@@ -249,7 +249,10 @@ areas:
   - components/src/dynamo/common/memory/
   - components/src/dynamo/common/tests/
   - components/src/dynamo/common/utils/
+  - components/src/dynamo/deepinfer/
+  - components/src/dynamo/deepinfer/tests/
   - components/src/dynamo/experimental/
+  - examples/backends/deepinfer/
   - examples/backends/sample/
   - examples/common/
   - examples/custom_backend/
