@@ -11,6 +11,7 @@
 //!    SGLang uses for the configured TP/PP/MLA layout.
 //! 4. Tracks those object keys from the Mooncake master's KV event stream.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -168,6 +169,8 @@ enum QueryToken {
 pub struct HicacheSharedKvCache {
     runtime_configs: RuntimeConfigWatch,
     present_keys: Arc<DashSet<String>>,
+    /// Engine hash -> original object keys -> media still observed for that key.
+    object_keys: Arc<DashMap<ExternalSequenceBlockHash, BTreeMap<String, BTreeSet<String>>>>,
     /// Linker layout: logical page keys with at least one stored component object.
     present_pages: Arc<DashSet<String>>,
     group_states: Arc<DashMap<String, (u64, bool)>>,
@@ -199,6 +202,7 @@ impl HicacheSharedKvCache {
         Self {
             runtime_configs,
             present_keys: Arc::new(DashSet::new()),
+            object_keys: Arc::new(DashMap::new()),
             present_pages: Arc::new(DashSet::new()),
             group_states: Arc::new(DashMap::new()),
             last_sequence: Arc::new(AtomicU64::new(0)),
@@ -297,6 +301,7 @@ impl HicacheSharedKvCache {
         let session_index = self.session_index.load_full();
         if has_previous && sequence != previous.wrapping_add(1) {
             self.present_keys.clear();
+            self.object_keys.clear();
             self.present_pages.clear();
             self.group_states.clear();
             if let Some(index) = &session_index {
@@ -317,14 +322,41 @@ impl HicacheSharedKvCache {
             if !event.tenant_id.is_empty() && event.tenant_id != "default" {
                 continue;
             }
-            if event.event_type == "cleared"
-                && let Some(index) = &session_index
-            {
-                index.clear_owner_frontiers(MOONCAKE_SESSION_OWNER);
+            if event.event_type == "cleared" {
+                self.clear_observations();
+                continue;
             }
             let Some(object_key) = event.object_key else {
                 continue;
             };
+            if let Some(hash) = mooncake_key_block_hash(&object_key) {
+                match event.event_type.as_str() {
+                    "stored" => {
+                        self.object_keys
+                            .entry(hash)
+                            .or_default()
+                            .entry(object_key.clone())
+                            .or_default()
+                            .insert(event.medium.clone().unwrap_or_else(|| "cpu".into()));
+                    }
+                    "removed" => {
+                        if let Some(mut keys) = self.object_keys.get_mut(&hash)
+                            && let Some(media) = keys.get_mut(&object_key)
+                        {
+                            if let Some(medium) = &event.medium {
+                                media.remove(medium);
+                            } else {
+                                media.clear();
+                            }
+                            if media.is_empty() {
+                                keys.remove(&object_key);
+                            }
+                        }
+                        self.object_keys.remove_if(&hash, |_, keys| keys.is_empty());
+                    }
+                    _ => {}
+                }
+            }
             if let Some(index) = &session_index
                 && let Some(block_hash) = mooncake_key_block_hash(&object_key)
             {
@@ -386,7 +418,14 @@ impl HicacheSharedKvCache {
                     }
                 }
                 "removed" => {
-                    self.present_keys.remove(&object_key);
+                    // Another medium may still hold the same object. Keep the
+                    // key inventory (and its size bound) aligned with the resolver.
+                    let still_present = mooncake_key_block_hash(&object_key)
+                        .and_then(|hash| self.object_keys.get(&hash))
+                        .is_some_and(|keys| keys.contains_key(&object_key));
+                    if !still_present {
+                        self.present_keys.remove(&object_key);
+                    }
                     if let Some(group_id) = group_id {
                         self.group_states.remove(&group_id);
                     } else {
@@ -412,10 +451,18 @@ impl HicacheSharedKvCache {
         self.clear_if_index_too_large(MAX_MOONCAKE_INDEX_ENTRIES);
     }
 
-    fn clear(&self) {
+    fn clear_observations(&self) {
         self.present_keys.clear();
         self.present_pages.clear();
         self.group_states.clear();
+        self.object_keys.clear();
+        if let Some(index) = self.session_index.load_full() {
+            index.clear_owner_frontiers(MOONCAKE_SESSION_OWNER);
+        }
+    }
+
+    fn clear(&self) {
+        self.clear_observations();
         self.last_sequence.store(0, Ordering::Release);
         self.has_sequence.store(false, Ordering::Release);
     }
@@ -537,6 +584,51 @@ fn parse_mooncake_event_frames(
 
 #[async_trait]
 impl SharedKvCache for HicacheSharedKvCache {
+    fn resolve_object_keys(
+        &self,
+        blocks: &[ExternalSequenceBlockHash],
+    ) -> Result<Vec<Vec<String>>, KvRouterError> {
+        let (config, _) = self.resolve_mooncake_config_and_endpoint().ok_or_else(|| {
+            KvRouterError::Unsupported("no unambiguous Mooncake runtime configuration".into())
+        })?;
+        blocks
+            .iter()
+            .map(|hash| {
+                let Some(observed) = self.object_keys.get(hash) else {
+                    return Ok(Vec::new());
+                };
+                let mut page_identity = None;
+                let mut keys = Vec::new();
+                for key in observed.keys() {
+                    let Some(page) = mooncake_logical_key(key) else {
+                        continue;
+                    };
+                    let prefix = if page.len() == 64 {
+                        None
+                    } else {
+                        Some(&page[..page.len() - 65])
+                    };
+                    if prefix
+                        != config
+                            .effective_key_prefix()
+                            .filter(|prefix| !prefix.is_empty())
+                    {
+                        continue;
+                    }
+                    if page_identity.is_some_and(|previous| previous != page) {
+                        return Err(KvRouterError::Unsupported(format!(
+                            "ambiguous Mooncake block hash: {}",
+                            hash.0
+                        )));
+                    }
+                    page_identity = Some(page);
+                    keys.push(key.clone());
+                }
+                Ok(keys)
+            })
+            .collect()
+    }
+
     async fn check_blocks(
         &self,
         tokens: &[u32],
@@ -811,6 +903,271 @@ mod tests {
 
     fn runtime_watch_with_config(config: SglangHicacheMooncakeConfig) -> RuntimeConfigWatch {
         runtime_watch_with_config_and_sender(config).0
+    }
+
+    #[tokio::test]
+    async fn pin_uses_worker_lineage_without_store_session_tags() {
+        use crate::kv_router::mooncake_client::{
+            MooncakeClient, command_resolved_blocks, session_block_chains,
+        };
+
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
+        let index = Arc::new(SessionPrefixIndexer::new());
+        cache.attach_session_prefix_index(Arc::clone(&index));
+        let worker = WorkerWithDpRank::new(7, 0);
+        for (session, chain) in [
+            ("worker-only", vec![11, 22]),
+            ("worker-only", vec![11, 33]),
+            ("other", vec![44]),
+        ] {
+            index
+                .update_session_from_stored_blocks(
+                    session,
+                    worker,
+                    None,
+                    &chain
+                        .into_iter()
+                        .map(ExternalSequenceBlockHash)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+        }
+        let keys = |hashes: &[u64]| {
+            hashes
+                .iter()
+                .flat_map(|hash| {
+                    ["k", "v"].map(|kind| format!("{hash:016x}{}_0_{kind}", "0".repeat(48)))
+                })
+                .collect::<Vec<_>>()
+        };
+        cache.apply_batch(
+            1,
+            keys(&[11, 22, 33, 44])
+                .into_iter()
+                .map(|key| MooncakeObjectEvent {
+                    event_type: "stored".into(),
+                    object_key: Some(key),
+                    tenant_id: "default".into(),
+                    session_id: None,
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        assert!(
+            index
+                .get_session_block_lineage_in_tier(
+                    "worker-only",
+                    MOONCAKE_SESSION_OWNER,
+                    StorageTier::HostPinned,
+                    None
+                )
+                .unwrap()
+                .is_empty()
+        );
+        let all = session_block_chains(&index, "worker-only", None).unwrap();
+        assert_eq!(
+            all,
+            vec![
+                vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
+                vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(33)]
+            ]
+        );
+        let selected =
+            session_block_chains(&index, "worker-only", Some(ExternalSequenceBlockHash(22)))
+                .unwrap();
+        assert_eq!(selected, vec![all[0].clone()]);
+        // Ancestors, another session's frontier, and unknown hashes must not select a branch.
+        for hash in [11, 44, 99] {
+            assert!(
+                session_block_chains(&index, "worker-only", Some(ExternalSequenceBlockHash(hash)))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert!(
+            session_block_chains(&index, "missing", None)
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut server = mockito::Server::new_async().await;
+        let client = MooncakeClient::new(&server.url(), "default").unwrap();
+        for (hashes, expected) in [
+            (vec![ExternalSequenceBlockHash(22); 2], keys(&[22])),
+            (all.into_iter().flatten().collect(), keys(&[11, 22, 33])),
+            (selected.into_iter().flatten().collect(), keys(&[11, 22])),
+        ] {
+            let response: Vec<_> = expected.iter().map(|key| serde_json::json!({"key":key,"error_code":if key.ends_with("_v") {-704} else {0}})).collect();
+            let command = server
+                .mock("POST", "/api/v1/soft_pin")
+                .match_body(mockito::Matcher::Json(
+                    serde_json::json!({"tenant_id":"default","keys":expected,"ttl_ms":60000}),
+                ))
+                .with_body(serde_json::json!({"results":response}).to_string())
+                .expect(1)
+                .create_async()
+                .await;
+            let results = command_resolved_blocks(&cache, &client, &hashes, Some(60000))
+                .await
+                .unwrap();
+            assert_eq!(
+                results.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(results[1].error_code, -704); // Stale observations remain per-key failures.
+            command.assert_async().await;
+            let release = server
+                .mock("POST", "/api/v1/soft_unpin")
+                .match_body(mockito::Matcher::Json(
+                    serde_json::json!({"tenant_id":"default","keys":expected}),
+                ))
+                .with_body(serde_json::json!({"results":response}).to_string())
+                .expect(1)
+                .create_async()
+                .await;
+            let mut partly_missing = hashes;
+            partly_missing.push(ExternalSequenceBlockHash(99));
+            assert_eq!(
+                command_resolved_blocks(&cache, &client, &partly_missing, None)
+                    .await
+                    .unwrap(),
+                results
+            );
+            release.assert_async().await;
+        }
+        let no_command = server
+            .mock("POST", "/api/v1/soft_pin")
+            .expect(0)
+            .create_async()
+            .await;
+        for hashes in [
+            vec![],
+            vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(99)],
+        ] {
+            assert!(
+                command_resolved_blocks(&cache, &client, &hashes, Some(60000))
+                    .await
+                    .is_err()
+            );
+        }
+        let tenant_client = MooncakeClient::new(&server.url(), "other").unwrap();
+        assert!(
+            command_resolved_blocks(
+                &cache,
+                &tenant_client,
+                &[ExternalSequenceBlockHash(11)],
+                Some(60000)
+            )
+            .await
+            .is_err()
+        );
+        no_command.assert_async().await;
+        let no_release = server
+            .mock("POST", "/api/v1/soft_unpin")
+            .expect(0)
+            .create_async()
+            .await;
+        for hashes in [vec![], vec![ExternalSequenceBlockHash(99)]] {
+            assert!(
+                command_resolved_blocks(&cache, &client, &hashes, None)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        // A lost observation must not send stale keys, even if the Store may retain them.
+        cache.clear();
+        assert!(
+            command_resolved_blocks(&cache, &client, &[ExternalSequenceBlockHash(22)], None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            command_resolved_blocks(&cache, &tenant_client, &[], None)
+                .await
+                .is_err()
+        );
+        no_release.assert_async().await;
+    }
+
+    #[test]
+    fn object_key_resolution_preserves_components_and_remaining_media() {
+        let config = SglangHicacheMooncakeConfig {
+            key_prefix: Some("model".into()),
+            key_layout: Some("linker".into()),
+            ..mooncake_config()
+        };
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
+        let hash = ExternalSequenceBlockHash(42);
+        let page = format!("{:016x}{}", hash.0, "0".repeat(48));
+        let a = format!("model_{page}_cp0_pp0_c4");
+        let b = format!("model_{page}_cp0_pp0_c4_indexer");
+        let other = format!("other_{page}_cp0_pp0_c4");
+        let event = |kind: &str, key: &str, medium: &str| MooncakeObjectEvent {
+            event_type: kind.into(),
+            object_key: Some(key.into()),
+            medium: Some(medium.into()),
+            ..Default::default()
+        };
+        cache.apply_batch(
+            1,
+            vec![
+                event("stored", &a, "cpu"),
+                event("stored", &a, "disk"),
+                event("stored", &b, "cpu"),
+                event("stored", &other, "cpu"),
+            ],
+        );
+        assert_eq!(
+            cache
+                .resolve_object_keys(&[hash, ExternalSequenceBlockHash(99)])
+                .unwrap(),
+            vec![vec![a.clone(), b.clone()], vec![]]
+        );
+        cache.apply_batch(2, vec![event("removed", &a, "cpu")]);
+        assert_eq!(
+            cache.resolve_object_keys(&[hash]).unwrap()[0],
+            vec![a.clone(), b.clone()]
+        );
+        cache.apply_batch(3, vec![event("removed", &a, "disk")]);
+        assert_eq!(cache.resolve_object_keys(&[hash]).unwrap()[0], vec![b]);
+        // A different full page hash sharing the truncated engine hash is unsafe.
+        let collision = format!("model_{:016x}{}_cp0_pp0_c4", hash.0, "1".repeat(48));
+        cache.apply_batch(4, vec![event("stored", &collision, "cpu")]);
+        assert!(cache.resolve_object_keys(&[hash]).is_err());
+        cache.apply_batch(6, vec![]); // lost events invalidate the mapping
+        assert!(cache.resolve_object_keys(&[hash]).unwrap()[0].is_empty());
+    }
+
+    #[test]
+    fn clear_invalidates_object_keys_and_session_frontiers() {
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
+        let index = Arc::new(SessionPrefixIndexer::new());
+        cache.attach_session_prefix_index(Arc::clone(&index));
+        let key = format!("{}{}_0_k", "000000000000002a", "0".repeat(48));
+        let stored = || MooncakeObjectEvent {
+            event_type: "stored".into(),
+            object_key: Some(key.clone()),
+            session_id: Some("s".into()),
+            ..Default::default()
+        };
+        cache.apply_batch(1, vec![stored()]);
+        assert!(!index.get_session_residency("s").is_empty());
+        cache.apply_batch(
+            2,
+            vec![MooncakeObjectEvent {
+                event_type: "cleared".into(),
+                ..Default::default()
+            }],
+        );
+        assert!(cache.object_keys.is_empty());
+        assert!(cache.present_keys.is_empty());
+        assert!(index.get_session_residency("s").is_empty());
+        cache.apply_batch(3, vec![stored()]);
+        cache.clear();
+        assert!(cache.object_keys.is_empty());
+        assert!(index.get_session_residency("s").is_empty());
     }
 
     #[test]

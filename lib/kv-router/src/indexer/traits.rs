@@ -30,6 +30,17 @@ pub trait SharedKvCache: Send + Sync {
         cache_namespace: Option<&str>,
     ) -> Result<SharedCacheHits, KvRouterError>;
 
+    /// Resolve observed object keys for each engine block hash, in input order.
+    /// Empty entries mean unknown blocks. Implementations must reject ambiguous
+    /// identities rather than return keys from multiple pages or namespaces.
+    /// This is an event-derived snapshot, not a guarantee of restorability.
+    fn resolve_object_keys(
+        &self,
+        _blocks: &[ExternalSequenceBlockHash],
+    ) -> Result<Vec<Vec<String>>, KvRouterError> {
+        Err(KvRouterError::Unsupported("object key resolution".into()))
+    }
+
     /// Hands the router's session prefix index to the cache so residency events that name
     /// a session can update it. The default ignores the index.
     fn attach_session_prefix_index(&self, _index: Arc<SessionPrefixIndexer>) {}
