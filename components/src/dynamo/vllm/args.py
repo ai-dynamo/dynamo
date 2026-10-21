@@ -603,9 +603,32 @@ def create_kv_events_config(
                 "To publish events, explicitly set enable_kv_cache_events to True."
             )
         logger.info(f"Using user-provided kv_events_config {c}")
+        _set_state_agent_topic(engine_config, c)
         return c
 
     return None
+
+
+def _set_state_agent_topic(
+    engine_config: AsyncEngineArgs, events: KVEventsConfig
+) -> None:
+    """Publish on this worker's KV state-agent topic, which its attachment
+    descriptors advertise, so the agent can route its raw streams by topic."""
+    from dynamo.common.kv_state_agent import worker_raw_topic
+
+    from .state_agent import state_agent_settings_from_engine_args
+
+    settings = state_agent_settings_from_engine_args(engine_config)
+    if settings is None:
+        return
+    topic = worker_raw_topic(settings.cache_owner_ids.values())
+    if events.topic != topic:
+        logger.info(
+            "Publishing KV events on the KV state-agent worker topic %r instead of %r",
+            topic,
+            events.topic,
+        )
+        events.topic = topic
 
 
 def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:

@@ -32,6 +32,9 @@ use super::types::{
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
     SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
 };
+use crate::plugins::worker_selection::{
+    RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+};
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, SelectionTrace, SelectionTraceSpec, WorkerConfigLike,
     WorkerId, WorkerSelectionResult, WorkerWithDpRank,
@@ -142,6 +145,10 @@ fn target_cached_prefix_blocks(request: &SchedulingRequest, target: WorkerWithDp
 
 #[allow(clippy::large_enum_variant)]
 enum AdmissionCommand {
+    PolicyConfig {
+        update: Option<RuntimePolicyUpdate>,
+        response: oneshot::Sender<Result<RuntimePolicyConfig, RuntimePolicyError>>,
+    },
     Enqueue {
         request: SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
@@ -158,6 +165,41 @@ enum AdmissionCommand {
         ack_tx: oneshot::Sender<()>,
     },
     Cleanup,
+}
+
+/// Control handle for the policy owned by one scheduler actor. Updates do not replace the
+/// scheduler, its queued requests, or active bookings. A stopped actor rejects further operations.
+pub struct RuntimePolicyControl {
+    tx: mpsc::WeakSender<AdmissionCommand>,
+}
+
+impl RuntimePolicyControl {
+    pub async fn get(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        self.request(None).await
+    }
+
+    pub async fn update(
+        &self,
+        update: RuntimePolicyUpdate,
+    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        self.request(Some(update)).await
+    }
+
+    async fn request(
+        &self,
+        update: Option<RuntimePolicyUpdate>,
+    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        let (response, receiver) = oneshot::channel();
+        let sender = self.tx.upgrade().ok_or(RuntimePolicyError::Unavailable)?;
+        sender
+            .send(AdmissionCommand::PolicyConfig { update, response })
+            .await
+            .map_err(|_| RuntimePolicyError::Unavailable)?;
+        drop(sender);
+        receiver
+            .await
+            .map_err(|_| RuntimePolicyError::Unavailable)?
+    }
 }
 
 #[doc(hidden)]
@@ -507,6 +549,7 @@ pub struct SchedulerQueue<
     RF: OverlapScoresRefresh = NoopOverlapScoresRefresh,
 > {
     admission_tx: mpsc::Sender<AdmissionCommand>,
+    runtime_policy: Arc<RuntimePolicyControl>,
     cleanup: Arc<AdmissionCleanup>,
     capacity_updates: Option<Arc<CapacityUpdates>>,
     direct_release: DirectBookingRelease,
@@ -622,6 +665,9 @@ impl<
                 .collect(),
         );
         let (admission_tx, admission_rx) = mpsc::channel(admission_channel_capacity);
+        let runtime_policy = Arc::new(RuntimePolicyControl {
+            tx: admission_tx.downgrade(),
+        });
         let cleanup = Arc::new(AdmissionCleanup::default());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
         let selection_trace = Arc::new(OnceLock::new());
@@ -670,6 +716,7 @@ impl<
         tokio::spawn(actor.run(admission_rx));
         Self {
             admission_tx,
+            runtime_policy,
             cleanup,
             capacity_updates,
             direct_release,
@@ -1041,6 +1088,10 @@ impl<
             .map_err(|_| KvSchedulerError::SubscriberShutdown)
     }
 
+    pub fn policy_control(&self) -> &Arc<RuntimePolicyControl> {
+        &self.runtime_policy
+    }
+
     /// Notify pending admission after the authoritative mutation is complete.
     pub(crate) fn capacity_changed(&self, worker: Option<WorkerWithDpRank>) {
         if let Some(updates) = &self.capacity_updates {
@@ -1168,6 +1219,19 @@ impl<
                         self.handle_update().await;
                     }
                     let _ = resp_tx.send(result);
+                }
+                AdmissionCommand::PolicyConfig { update, response } => {
+                    // A cancelled or timed-out caller must not leave a queued mutation behind.
+                    if !response.is_closed() {
+                        let result = match update {
+                            Some(update) => self.selector.update_runtime_config(update),
+                            None => self.selector.runtime_config(),
+                        };
+                        let _ = response.send(result);
+                    }
+                    if drain_cleanup && self.drain_cleanup() {
+                        self.handle_update().await;
+                    }
                 }
                 AdmissionCommand::Update { ack_tx } => {
                     self.handle_update().await;
@@ -3532,6 +3596,35 @@ policy_classes:
         })
         .await
         .expect("admission commands must progress with capacity wakes");
+        assert!(!slots.has_booking(&booking));
+        drop(permits);
+        slots.assert_completely_drained(Instant::now());
+    }
+
+    #[tokio::test]
+    async fn runtime_control_drains_cleanup_when_the_command_channel_was_full() {
+        let (queue, slots) = make_queue(1, 16, 64, Some(0.0));
+        let booking = book_directly(&slots, "abandoned");
+        let mut permits = queue
+            .admission_tx
+            .reserve_many(queue.admission_tx.max_capacity())
+            .await
+            .unwrap();
+        drop(queue.booking_handle(booking.clone()));
+        assert!(slots.has_booking(&booking));
+        let (response, receiver) = oneshot::channel();
+        permits
+            .next()
+            .unwrap()
+            .send(AdmissionCommand::PolicyConfig {
+                update: None,
+                response,
+            });
+        let result = tokio::time::timeout(Duration::from_secs(2), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(RuntimePolicyError::Unsupported)));
         assert!(!slots.has_booking(&booking));
         drop(permits);
         slots.assert_completely_drained(Instant::now());

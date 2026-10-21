@@ -2171,7 +2171,7 @@ jobs:
       needs.release-publish.result == 'success' &&
       needs.prepare-release.outputs.nightly != 'true' &&
       needs.prepare-release.outputs.on_demand != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
       - name: Checkout at source commit
