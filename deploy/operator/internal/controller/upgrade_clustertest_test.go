@@ -111,6 +111,30 @@ func captureUpgrade(t *testing.T, env *clusterenv.TestEnv) []unstructured.Unstru
 	return objects
 }
 
+// Capture a graph only if no candidate child call overlapped the API reads.
+func captureUpgradeComponent(t *testing.T, env *clusterenv.TestEnv, completed *upgradeComponentReconciles, components int) ([]unstructured.Unstructured, error) {
+	t.Helper()
+
+	// Record the candidate call revision before reading the resource graph.
+	completed.mu.Lock()
+	revision := completed.revision
+	completed.mu.Unlock()
+
+	// Validate the same graph that the caller will compare against the golden or predecessor.
+	objects := captureUpgrade(t, env)
+	if err := completed.graphReady(objects, components); err != nil {
+		return nil, err
+	}
+
+	// A call that started or finished during capture invalidates these observations.
+	completed.mu.Lock()
+	defer completed.mu.Unlock()
+	if revision != completed.revision {
+		return nil, fmt.Errorf("candidate component reconciliation overlapped capture")
+	}
+	return objects, nil
+}
+
 func TestClusterOperatorUpgrade(t *testing.T) {
 	historical, err := upgradeInputs("history")
 	require.NoError(t, err)
@@ -238,13 +262,17 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 					return err == nil && live.Status.ObservedGeneration == live.Generation && live.Annotations[consts.AnnotationCurrentWorkerHashV2] == want
 				}, 90*time.Second, 200*time.Millisecond)
 			}
+			var after []unstructured.Unstructured
 			if dgd.Annotations[consts.KubeAnnotationEnableGrove] == "false" {
 				t.Log("Wait for each DCD and its immediate workload without requiring serving Pods")
 				require.Eventually(t, func() bool {
-					return completed.graphReady(captureUpgrade(t, env), len(dgd.Spec.Components)) == nil
+					var err error
+					after, err = captureUpgradeComponent(t, env, completed, len(dgd.Spec.Components))
+					return err == nil
 				}, 90*time.Second, 200*time.Millisecond, "component workload graph did not converge")
+			} else {
+				after = captureUpgrade(t, env)
 			}
-			after := captureUpgrade(t, env)
 			checkUpgradeGroveMatrix(t, relative, getOnlyClusterDGD(t, ctx, env.Client(), namespace), after)
 			if isHistory {
 				if err := upgradeSafetyError(transition.hashChanged, before, after); err != nil {

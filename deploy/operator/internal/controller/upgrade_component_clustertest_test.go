@@ -77,8 +77,11 @@ func testUpgradeComponentHistoryBarrier(t *testing.T) {
 			}
 			return setupUpgradeComponentController(mgr, opts, completed)
 		})
-		require.Eventually(t, func() bool { return completed.graphReady(captureUpgrade(t, env), 2) == nil }, 90*time.Second, 100*time.Millisecond)
-		snapshot = captureUpgrade(t, env)
+		require.Eventually(t, func() bool {
+			var err error
+			snapshot, err = captureUpgradeComponent(t, env, completed, 2)
+			return err == nil
+		}, 90*time.Second, 100*time.Millisecond)
 	})
 	require.NotEmpty(t, snapshot)
 
@@ -155,8 +158,13 @@ func testUpgradeComponentHistoryBarrier(t *testing.T) {
 			if incompatible {
 				require.Error(t, upgradeSafetyError(false, before, captureUpgrade(t, env)))
 			} else {
-				require.Eventually(t, func() bool { return completed.graphReady(captureUpgrade(t, env), 2) == nil }, 90*time.Second, 100*time.Millisecond)
-				require.NoError(t, upgradeSafetyError(false, before, captureUpgrade(t, env)))
+				var after []unstructured.Unstructured
+				require.Eventually(t, func() bool {
+					var err error
+					after, err = captureUpgradeComponent(t, env, completed, 2)
+					return err == nil
+				}, 90*time.Second, 100*time.Millisecond)
+				require.NoError(t, upgradeSafetyError(false, before, after))
 			}
 		})
 	}
