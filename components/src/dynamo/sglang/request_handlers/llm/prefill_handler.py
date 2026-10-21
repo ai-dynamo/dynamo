@@ -289,7 +289,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             return
         finish_reason = final_meta_info.get("finish_reason")
         if isinstance(finish_reason, dict) and finish_reason.get("type") == "abort":
-            # Error-bearing aborts raise while consuming the engine stream.
+            # Unsolicited error-bearing aborts raise while consuming the stream.
             # An ordinary backend cancellation must also terminate decode,
             # rather than looking like a successful prefill handoff.
             yield {"token_ids": [], "finish_reason": "cancelled"}
@@ -323,6 +323,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         async with self._cancellation_monitor(
             request_id_future, context, submitted_request_id
         ) as cancellation_task:
+            # The shared iterator briefly drains after abort so SGLang can
+            # clean up, then closes a stream that does not terminate.
             async for res in self._stream_until_cancelled(results, cancellation_task):
                 meta_info = res.get("meta_info") or (
                     res.get("engine_data", {})
@@ -339,14 +341,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 finish_reason = meta_info.get("finish_reason")
                 if isinstance(finish_reason, dict):
+                    if cancellation_task.done():
+                        # SGLang reports our bootstrap-queue abort with status 500.
+                        # Keep draining so engine-side request cleanup can finish.
+                        continue
                     # Bootstrap has already been sent. Surface failures now so
                     # the router can cancel decode instead of waiting for KV.
                     _raise_if_sglang_error(finish_reason)
                     if finish_reason.get("type") == "abort":
                         break
 
-                # The shared iterator briefly drains after abort so SGLang can
-                # clean up, then closes a stream that does not terminate.
             if cancellation_task.done():
                 return None
         return final_meta_info

@@ -163,22 +163,25 @@ impl PrefillRouter {
     ) -> PrefillTask {
         let task_guard = self.task_guard.clone();
         let prefill_context = prefill_stream.context();
-        PrefillTask::spawn(
-            async move {
-                drop(phase_transition_permit);
-                match Self::consume_prefill_stream(prefill_stream, tracker, task_guard).await? {
-                    PrefillCompletion::Handoff {
+        PrefillTask::spawn_unlogged(async move {
+            drop(phase_transition_permit);
+            let result =
+                match Self::consume_prefill_stream(prefill_stream, tracker, task_guard).await {
+                    Ok(PrefillCompletion::Handoff {
                         completion: Some(task),
                         ..
-                    } => task.wait().await,
-                    PrefillCompletion::Terminal { output } => {
+                    }) => {
+                        // The inner observer already logs its own failures.
+                        return task.wait().await;
+                    }
+                    Ok(PrefillCompletion::Terminal { output }) => {
                         PrefillTask::check_output(&output).map(|()| None)
                     }
-                    _ => Ok(None),
-                }
-            },
-            prefill_context,
-        )
+                    Ok(_) => Ok(None),
+                    Err(error) => Err(error),
+                };
+            result.inspect_err(|error| PrefillTask::log_failure(error, prefill_context.as_ref()))
+        })
     }
 }
 
@@ -234,62 +237,85 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        for stopped in [true, false] {
-            for tail in [
-                Annotated::from_data(LLMEngineOutput::cancelled()),
-                Annotated::from_data(LLMEngineOutput::error("prefill failed".to_string())),
-                Annotated::from_error("prefill transport failed"),
-            ] {
-                let cancelled = tail
-                    .data
-                    .as_ref()
-                    .is_some_and(|data| data.finish_reason == Some(FinishReason::Cancelled));
-                let levels = Arc::new(Mutex::new(Vec::new()));
-                let subscriber = tracing_subscriber::registry().with(Levels(levels.clone()));
-                let run = async {
-                    let context = Arc::new(Controller::default());
-                    let first = Annotated::from_data(LLMEngineOutput {
-                        disaggregated_params: Some(json!({
-                            "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
-                        })),
-                        ..Default::default()
-                    });
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    let stream =
-                        stream::iter([first]).chain(stream::once(async move { rx.await.unwrap() }));
-                    let response = ResponseStream::new(Box::pin(stream), context.clone());
-                    let result = PrefillRouter::consume_prefill_stream(response, None, None)
-                        .await
-                        .unwrap();
-                    let PrefillCompletion::Handoff {
-                        completion: Some(task),
-                        ..
-                    } = result
-                    else {
-                        panic!("expected bootstrap completion observer");
-                    };
-                    if stopped {
-                        context.stop_generating();
+        for wrapped in [false, true] {
+            for bootstrap in [true, false] {
+                if !wrapped && !bootstrap {
+                    continue;
+                }
+                for stopped in [true, false] {
+                    for tail in [
+                        Annotated::from_data(LLMEngineOutput::cancelled()),
+                        Annotated::from_data(LLMEngineOutput::error("prefill failed".to_string())),
+                        Annotated::from_error("prefill transport failed"),
+                    ] {
+                        let cancelled = tail.data.as_ref().is_some_and(|data| {
+                            data.finish_reason == Some(FinishReason::Cancelled)
+                        });
+                        let levels = Arc::new(Mutex::new(Vec::new()));
+                        let subscriber =
+                            tracing_subscriber::registry().with(Levels(levels.clone()));
+                        let run = async {
+                            let context = Arc::new(Controller::default());
+                            let first = Annotated::from_data(LLMEngineOutput {
+                                disaggregated_params: Some(json!({
+                                    "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
+                                })),
+                                ..Default::default()
+                            });
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            let stream = stream::iter(bootstrap.then_some(first))
+                                .chain(stream::once(async move { rx.await.unwrap() }));
+                            let response = ResponseStream::new(Box::pin(stream), context.clone());
+                            let task = if wrapped {
+                                let router = super::super::tests::active_conditional_router();
+                                let tracker = Arc::new(RequestTracker::new());
+                                let permit = tracker
+                                    .set_phase(
+                                        crate::protocols::common::timing::RequestPhase::Prefill,
+                                    )
+                                    .await;
+                                router.spawn_prefill_task(response, Some(tracker), permit)
+                            } else {
+                                let result =
+                                    PrefillRouter::consume_prefill_stream(response, None, None)
+                                        .await
+                                        .unwrap();
+                                let PrefillCompletion::Handoff {
+                                    completion: Some(task),
+                                    ..
+                                } = result
+                                else {
+                                    panic!("expected bootstrap completion observer");
+                                };
+                                task
+                            };
+                            if stopped {
+                                context.stop_generating();
+                            }
+                            tx.send(tail).unwrap();
+                            assert!(
+                                tokio::time::timeout(
+                                    std::time::Duration::from_secs(1),
+                                    task.wait()
+                                )
+                                .await
+                                .unwrap()
+                                .is_err()
+                            );
+                        };
+                        tracing::subscriber::with_default(subscriber, || runtime.block_on(run));
+                        let expected = if stopped && cancelled {
+                            tracing::Level::DEBUG
+                        } else {
+                            tracing::Level::WARN
+                        };
+                        assert_eq!(
+                            *levels.lock().unwrap(),
+                            vec![expected],
+                            "wrapped={wrapped}, bootstrap={bootstrap}, stopped={stopped}, cancelled={cancelled}"
+                        );
                     }
-                    tx.send(tail).unwrap();
-                    assert!(
-                        tokio::time::timeout(std::time::Duration::from_secs(1), task.wait())
-                            .await
-                            .unwrap()
-                            .is_err()
-                    );
-                };
-                tracing::subscriber::with_default(subscriber, || runtime.block_on(run));
-                let expected = if stopped && cancelled {
-                    tracing::Level::DEBUG
-                } else {
-                    tracing::Level::WARN
-                };
-                assert_eq!(
-                    *levels.lock().unwrap(),
-                    vec![expected],
-                    "stopped={stopped}, cancelled={cancelled}"
-                );
+                }
             }
         }
     }

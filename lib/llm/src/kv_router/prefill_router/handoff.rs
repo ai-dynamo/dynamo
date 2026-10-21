@@ -45,26 +45,34 @@ impl PrefillTask {
         future: impl Future<Output = Result<PrefillOutput, PrefillError>> + Send + 'static,
         prefill_context: Arc<dyn AsyncEngineContext>,
     ) -> Self {
-        Self(tokio::spawn(
-            async move {
-                let result = future.await;
-                if let Err(error) = &result {
-                    if matches!(error, PrefillError::Cancelled) && prefill_context.is_stopped() {
-                        tracing::debug!(%error, "Prefill background task cancelled");
-                    } else {
-                        // Keep genuine failures visible even after cancellation.
-                        tracing::warn!(%error, "Prefill background task failed");
-                    }
-                }
-                result
-            }
-            .instrument(tracing::Span::current()),
-        ))
+        Self::spawn_unlogged(async move {
+            future
+                .await
+                .inspect_err(|error| Self::log_failure(error, prefill_context.as_ref()))
+        })
+    }
+
+    /// Spawn a wrapper that delegates logging to its child, while logging its
+    /// own failures explicitly so the same child error is not reported twice.
+    pub(super) fn spawn_unlogged(
+        future: impl Future<Output = Result<PrefillOutput, PrefillError>> + Send + 'static,
+    ) -> Self {
+        Self(tokio::spawn(future.instrument(tracing::Span::current())))
+    }
+
+    /// Keep intentional cancellation quiet without hiding unsolicited failures.
+    pub(super) fn log_failure(error: &PrefillError, prefill_context: &dyn AsyncEngineContext) {
+        if matches!(error, PrefillError::Cancelled) && prefill_context.is_stopped() {
+            tracing::debug!(%error, "Prefill background task cancelled");
+        } else {
+            tracing::warn!(%error, "Prefill background task failed");
+        }
     }
 
     /// Return the prefill result, including failures from the observer task.
     pub(super) async fn wait(self) -> Result<PrefillOutput, PrefillError> {
         self.0.await.map_err(|error| {
+            tracing::warn!(%error, "Prefill background task did not complete");
             PrefillError::PrefillError(
                 format!("Prefill background task did not complete: {error}"),
                 Some(Box::new(error)),

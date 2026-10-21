@@ -898,7 +898,7 @@ mod tests {
         }
     }
 
-    fn active_conditional_router() -> Arc<PrefillRouter> {
+    pub(super) fn active_conditional_router() -> Arc<PrefillRouter> {
         let (_activation_tx, activation_rx) = oneshot::channel();
         let router = PrefillRouter::new(
             activation_rx,
