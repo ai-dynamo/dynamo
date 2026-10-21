@@ -12,6 +12,7 @@ use dynamo_llm::protocols::{
 use dynamo_runtime::engine::{AsyncEngine, ResponseStream};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Error, ManyOut, SingleIn};
 use dynamo_sglang_generate::testkit::laws::Harness;
+use proptest::prelude::*;
 use serde_json::{Value, json};
 
 fn custom() -> SharedFormat {
@@ -20,9 +21,26 @@ fn custom() -> SharedFormat {
     registry.get("sglang-zstd").unwrap()
 }
 
+struct CompressedWorker;
+impl dynamo_sglang_generate::testkit::sim::Worker for CompressedWorker {
+    fn stream(&self, request: dynamo_sglang_generate::testkit::sim::Request<'_>) -> Vec<Value> {
+        let mut chunks = dynamo_sglang_generate::testkit::sim::NativeWorker.stream(request);
+        for response in &mut chunks {
+            if let Some(value) = response.pointer_mut("/meta_info/routed_experts")
+                && let Some(encoded) = value.as_str()
+            {
+                *value = compressed(&STANDARD.decode(encoded).unwrap()).into();
+            }
+        }
+        chunks
+    }
+}
+
 #[test]
 fn backend_property_laws_apply_to_the_external_codec() {
-    Harness::native(custom()).check_all();
+    let mut harness = Harness::native(custom());
+    harness.worker = Arc::new(CompressedWorker);
+    harness.check_all();
 }
 
 #[test]
@@ -106,19 +124,14 @@ async fn serve(value: Value) -> (String, tokio::task::JoinHandle<()>) {
 }
 
 #[tokio::test]
-async fn real_http_unary_and_sse_encode_exact_bytes() {
-    // Empty, partial Base64 groups, high bytes, and compressible expert data.
-    for bytes in [
-        vec![],
-        vec![0],
-        vec![0, 1],
-        vec![0, 1, 2],
-        vec![0, 1, 2, 3],
-        vec![255; 4],
-        b"hello".to_vec(),
-        vec![42; 4096],
-    ] {
-        let (url, task) = serve(json!(STANDARD.encode(&bytes))).await;
+async fn real_http_unary_and_sse_preserve_worker_encoding() {
+    let cases = [vec![], vec![0, 255, 1], vec![42; 4096]]
+        .into_iter()
+        .map(|bytes| (compressed(&bytes), Some(bytes)))
+        // Neither transport may even validate the encoding without a P/D join.
+        .chain([("opaque-worker-format".into(), None)]);
+    for (encoded, bytes) in cases {
+        let (url, task) = serve(json!(encoded)).await;
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
@@ -145,13 +158,10 @@ async fn real_http_unary_and_sse_encode_exact_bytes() {
             } else {
                 serde_json::from_str(&text).unwrap()
             };
-            let compressed = STANDARD
-                .decode(body["meta_info"]["routed_experts"].as_str().unwrap())
-                .unwrap();
-            let decoded = zstd::stream::decode_all(compressed.as_slice()).unwrap();
-            assert_eq!(decoded, bytes, "stream={stream}");
-            if bytes.len() == 4096 {
-                assert!(compressed.len() < bytes.len());
+            assert_eq!(body["meta_info"]["routed_experts"], encoded);
+            if let Some(bytes) = &bytes {
+                let frame = STANDARD.decode(&encoded).unwrap();
+                assert_eq!(zstd::stream::decode_all(frame.as_slice()).unwrap(), *bytes);
             }
             assert_eq!(body["output_ids"], json!([3]));
             assert_eq!(body["meta_info"]["id"], "client-id");
@@ -160,31 +170,86 @@ async fn real_http_unary_and_sse_encode_exact_bytes() {
     }
 }
 
-#[tokio::test]
-async fn malformed_binary_data_uses_http_and_sse_error_handling() {
-    for malformed in [json!("not base64!"), json!([1, 2, 3])] {
-        let (url, task) = serve(malformed).await;
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
+fn compressed(bytes: &[u8]) -> String {
+    STANDARD.encode(zstd::stream::encode_all(bytes, 3).unwrap())
+}
+
+fn joined(prefill: Value, decode: Value, stream: bool) -> Value {
+    use dynamo_llm::generate_format::ClientRequest;
+    let format = custom();
+    let body = json!({"input_ids": [1,2], "stream": stream, "return_routed_experts": true});
+    let opened = format
+        .open(ClientRequest {
+            body: body.to_string().as_bytes(),
+            headers: &axum::http::HeaderMap::from_iter([(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            )]),
+            default_request_id: "id",
+        })
+        .unwrap();
+    let mut exchange = (opened.bind)(&dynamo_sglang_generate::testkit::worker(&Value::Null))
+        .unwrap()
+        .exchange;
+    let mut chunks = Vec::new();
+    for (value, is_prefill) in [(prefill, true), (decode, false)] {
+        let output = dynamo_sglang_generate::inspect(value, is_prefill)
+            .unwrap()
+            .output;
+        exchange
+            .chunk(output, is_prefill, &mut |v| chunks.push(v.clone()))
             .unwrap();
-        for stream in [false, true] {
-            let response = client
-                .post(&url)
-                .json(&json!({
-                    "input_ids": [1,2], "stream": stream, "return_routed_experts": true,
-                }))
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(response.status().as_u16(), if stream { 200 } else { 500 });
-            let body = response.text().await.unwrap();
-            assert!(body.contains("Internal server error"), "{body}");
-            assert!(
-                !body.contains("routed_experts"),
-                "backend details must stay private: {body}"
-            );
-        }
-        task.abort();
     }
+    exchange.finish().unwrap().or_else(|| chunks.pop()).unwrap()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    #[test]
+    fn compressed_pd_join_matches_uncompressed_prefix_overlay(
+        prefix in prop::collection::vec(any::<u8>(), 0..128),
+        tail in prop::collection::vec(any::<u8>(), 0..128),
+        stream in any::<bool>(),
+    ) {
+        let body = |bytes: &[u8]| json!({"meta_info": {
+            "routed_experts": compressed(bytes),
+            "indexer_topk": STANDARD.encode(bytes),
+        }});
+        let response = joined(body(&prefix), body(&tail), stream);
+        let frame = STANDARD.decode(response["meta_info"]["routed_experts"].as_str().unwrap()).unwrap();
+        let actual = zstd::stream::decode_all(frame.as_slice()).unwrap();
+        // Independent byte oracle; the other sequence field keeps native Base64.
+        let expected: Vec<u8> = prefix.iter().chain(tail.iter().skip(prefix.len())).copied().collect();
+        prop_assert_eq!(&actual, &expected);
+        prop_assert_eq!(response["meta_info"]["indexer_topk"].as_str().unwrap(), STANDARD.encode(&expected));
+    }
+}
+
+#[test]
+fn missing_or_corrupt_prefill_drops_stale_decode_experts() {
+    let valid = json!(compressed(b"prompt+output"));
+    for prefix in [
+        Value::Null,
+        json!("bad Base64!"),
+        json!(STANDARD.encode(b"not zstd")),
+        json!([1]),
+    ] {
+        for stream in [false, true] {
+            for (prefill, decode) in [(&prefix, &valid), (&valid, &prefix)] {
+                let response = joined(
+                    json!({"meta_info": {"routed_experts": prefill}}),
+                    json!({"meta_info": {"routed_experts": decode}}),
+                    stream,
+                );
+                assert!(response["meta_info"].get("routed_experts").is_none());
+            }
+        }
+    }
+    let response = joined(
+        json!({}),
+        json!({"meta_info": {"routed_experts": valid}}),
+        false,
+    );
+    assert!(response["meta_info"].get("routed_experts").is_none());
 }
