@@ -86,9 +86,7 @@ class GlobalRouterHandler:
         Forward a request to the selected pool and retry faster pools on failure.
 
         Retry order is controlled by pool priorities: lower priority numbers are
-        faster, so retries walk from the selected pool toward faster pools. The
-        inbound context is reused on every attempt so cancellation, request
-        metadata, and distributed trace identity cross the router boundary.
+        faster, so retries walk from the selected pool toward faster pools.
         """
         pool_order = get_priority_retry_order(
             selected_pool=initial_pool_idx,
@@ -112,9 +110,7 @@ class GlobalRouterHandler:
                     yield data
                 return
             except Exception as e:
-                if context is not None and (
-                    context.is_stopped() or context.is_killed()
-                ):
+                if context is not None and context.is_stopped():
                     logger.debug(
                         "Request context was cancelled; skipping priority retry"
                     )

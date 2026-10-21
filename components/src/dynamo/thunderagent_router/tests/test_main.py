@@ -147,12 +147,12 @@ class FakeKvRouter:
         return stream()
 
 
-async def drive(handler: ThunderAgentRouterHandler) -> None:
+async def drive(handler: ThunderAgentRouterHandler, context=None) -> None:
     request = {
         "token_ids": [1, 2, 3],
         "agent_context": {"session_id": "p1"},
     }
-    async for _ in handler.generate(request):
+    async for _ in handler.generate(request, context=context):
         pass
 
 
@@ -164,7 +164,9 @@ async def test_a_placed_program_pins_both_backend_id_and_dp_rank():
     handler._scheduler = FakeScheduler(replica_hint=(7, 3))  # type: ignore[assignment]
     handler._kv_router = FakeKvRouter()  # type: ignore[assignment]
 
-    await drive(handler)
+    context = object()
+    await drive(handler, context=context)
+    assert handler._kv_router.context is context
 
     sent = handler._kv_router.sent
     assert sent is not None

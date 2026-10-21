@@ -88,8 +88,6 @@ class StandaloneRouterHandler:
         Routes a PreprocessedRequest-shaped request to the best worker and streams back
         its LLMEngineOutput responses unchanged, so fields this router does not inspect
         (multimodal data, KV hints, agent context, ...) survive the hop.
-        The inbound context is forwarded into the Rust router so request identity,
-        cancellation, and tracing survive the Python boundary.
         """
         if self.kv_router is None:
             logger.error("KvRouter not initialized - cannot process request")

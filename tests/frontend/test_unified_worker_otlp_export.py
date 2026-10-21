@@ -14,6 +14,8 @@ with its attributes intact.
 from __future__ import annotations
 
 import json
+import os
+import sys
 import time
 
 import pytest
@@ -26,7 +28,7 @@ from tests.frontend.conftest import (
 )
 from tests.frontend.test_request_tracing_logs import _send_chat_completions
 from tests.utils.constants import QWEN
-from tests.utils.managed_process import DynamoFrontendProcess
+from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.otel import (
     get_engine_generate_roles,
     get_span_attribute,
@@ -46,6 +48,122 @@ pytestmark = [
     pytest.mark.model(TEST_MODEL),
     pytest.mark.timeout(180),
 ]
+
+
+@pytest.fixture
+def sample_worker_with_python_routers(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_tokenizers,
+    otlp_collector,
+    tmp_path,
+):
+    """Serve HTTP through real global/standalone Python routers and a CPU worker."""
+    _, otlp_port = otlp_collector
+    ports = dynamo_dynamic_ports
+    global_namespace = "otlp-global"
+    pool_namespace = "otlp-pool"
+    config_path = tmp_path / "global-router.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mode": "agg",
+                "num_agg_pools": 1,
+                "agg_pool_dynamo_namespaces": [pool_namespace],
+                "agg_pool_selection_strategy": {
+                    "ttft_min_ms": 1,
+                    "ttft_max_ms": 1000,
+                    "ttft_resolution": 1,
+                    "itl_min_ms": 1,
+                    "itl_max_ms": 100,
+                    "itl_resolution": 1,
+                    "agg_pool_mapping": [[0]],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    otel_env = {
+        "OTEL_EXPORT_ENABLED": "1",
+        "DYN_LOGGING_JSONL": "1",
+        # The Python binding's client_request spans are emitted at INFO.
+        "DYN_LOG": "info",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"http://127.0.0.1:{otlp_port}",
+        "OTEL_BSP_SCHEDULE_DELAY": "100",
+        "OTEL_SERVICE_NAME": "dynamo-python-router-test",
+    }
+
+    with (
+        DynamoFrontendProcess(
+            request,
+            frontend_port=ports.frontend_port,
+            # Namespace alone sets runtime identity; namespace-prefix filters
+            # discovery so the frontend cannot bypass the Python routers.
+            extra_args=["--namespace-prefix", global_namespace],
+            extra_env=otel_env,
+        ),
+        ManagedProcess(
+            command=[
+                sys.executable,
+                "-m",
+                "dynamo.global_router",
+                "--config",
+                str(config_path),
+                "--model-name",
+                QWEN,
+                "--namespace",
+                global_namespace,
+            ],
+            env={
+                **os.environ,
+                **otel_env,
+                "DYN_SYSTEM_PORT": str(ports.system_ports[1]),
+            },
+            log_dir=f"{request.node.name}_global_router",
+            display_output=True,
+            display_name="global-router",
+            terminate_all_matching_process_names=False,
+        ),
+        SampleUnifiedWorkerProcess(
+            request,
+            frontend_port=ports.frontend_port,
+            system_port=ports.system_ports[0],
+            model_name=QWEN,
+            extra_args=[
+                "--namespace",
+                pool_namespace,
+                "--max-tokens",
+                "1000",
+                "--delay",
+                "0.05",
+            ],
+            extra_env=otel_env,
+        ),
+        ManagedProcess(
+            command=[
+                sys.executable,
+                "-m",
+                "dynamo.router",
+                "--endpoint",
+                f"{pool_namespace}.sample.generate",
+                "--router-block-size",
+                "16",
+            ],
+            env={
+                **os.environ,
+                **otel_env,
+                "DYN_NAMESPACE": pool_namespace,
+                "DYN_SYSTEM_PORT": str(ports.system_ports[2]),
+            },
+            log_dir=f"{request.node.name}_standalone_router",
+            display_output=True,
+            display_name="standalone-router",
+            terminate_all_matching_process_names=False,
+        ),
+    ):
+        wait_for_http_completions_ready(frontend_port=ports.frontend_port, model=QWEN)
+        yield ports.frontend_port
 
 
 def _send_chat_completions_with_headers(
@@ -351,9 +469,6 @@ def test_python_routers_preserve_trace_and_worker_cancellation(
     root = roots[0]
     assert root.parent_span_id == bytes.fromhex(inbound_span_id)
 
-    # Validate the existing route/worker boundary before checking any span
-    # introduced by this fix. A baseline must fail on broken propagation, not
-    # merely because it lacks the new PyO3 dispatch span.
     route = kv_routes[0]
     assert has_complete_span_chain(
         spans, span_id=route.span_id, ancestor_id=root.span_id

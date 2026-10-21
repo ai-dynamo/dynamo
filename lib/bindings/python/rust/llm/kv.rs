@@ -43,7 +43,7 @@ use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
-use tracing::{self, Instrument};
+use tracing::Instrument;
 
 use llm_rs::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use llm_rs::kv_router::RoutingHost;
@@ -2116,14 +2116,14 @@ impl KvRouter {
         request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_size: usize,
-        dispatch_span: Option<tracing::Span>,
+        dispatch_span: tracing::Span,
     ) -> PyResult<Bound<'p, PyAny>> {
         crate::future_into_py(py, async move {
-            let stream = match dispatch_span {
-                Some(span) => inner.generate(request).instrument(span).await,
-                None => inner.generate(request).await,
-            }
-            .map_err(to_pyerr)?;
+            let stream = inner
+                .generate(request)
+                .instrument(dispatch_span)
+                .await
+                .map_err(to_pyerr)?;
             let (tx, rx) =
                 tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(response_buffer_size);
 
@@ -2194,7 +2194,7 @@ impl KvRouter {
         request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_mode: ResponseBufferMode,
-        dispatch_span: Option<tracing::Span>,
+        dispatch_span: tracing::Span,
     ) -> PyResult<Bound<'p, PyAny>> {
         match response_buffer_mode {
             ResponseBufferMode::Rendezvous => {
@@ -2414,7 +2414,7 @@ impl KvRouter {
             SingleIn::new(request),
             Some(tracker),
             response_buffer_size,
-            None,
+            tracing::Span::none(),
         )
     }
 
@@ -2445,7 +2445,8 @@ impl KvRouter {
         let request = crate::create_request_context(request, &context);
         let dispatch_span = context
             .as_ref()
-            .map(|context| crate::get_span_for_context(context, "kv_router.generate_from_request"));
+            .map(|context| crate::get_span_for_context(context, "kv_router.generate_from_request"))
+            .unwrap_or_else(tracing::Span::none);
 
         // Use the helper method to process the request
         Self::dispatch_request_to_stream(

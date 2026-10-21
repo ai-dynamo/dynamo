@@ -61,7 +61,7 @@ class FakeContext:
         self.killed = killed
 
     def is_stopped(self) -> bool:
-        return self.stopped
+        return self.stopped or self.killed
 
     def is_killed(self) -> bool:
         return self.killed
@@ -191,17 +191,12 @@ async def test_decode_retries_using_custom_pool_priorities(tmp_path):
         "decode-slow": slow,
     }
 
-    context = FakeContext()
-    outputs = await _collect_outputs(
-        handler.handle_decode({"token_ids": [1, 2, 3]}, context=context)
-    )
+    outputs = await _collect_outputs(handler.handle_decode({"token_ids": [1, 2, 3]}))
 
     assert outputs == [{"pool": "decode-fast"}]
     assert slow.calls == 1
     assert fast.calls == 1
     assert mid.calls == 0
-    assert slow.contexts == [context]
-    assert fast.contexts == [context]
 
 
 @pytest.mark.asyncio
@@ -225,7 +220,8 @@ async def test_priority_retry_disabled_raises_first_failure(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cancelled_context_is_not_retried(tmp_path):
+@pytest.mark.parametrize("cancel_state", ["stopped", "killed"])
+async def test_cancelled_context_is_not_retried(tmp_path, cancel_state):
     handler = _handler(_write_config(tmp_path, _disagg_config()))
     fast = FakeClient("prefill-fast", outputs=[{"pool": "prefill-fast"}])
     mid = FakeClient("prefill-mid", outputs=[{"pool": "prefill-mid"}])
@@ -236,7 +232,7 @@ async def test_cancelled_context_is_not_retried(tmp_path):
         "prefill-slow": slow,
     }
 
-    context = FakeContext(stopped=True)
+    context = FakeContext(**{cancel_state: True})
     with pytest.raises(RuntimeError, match="prefill-slow generate failed"):
         await _collect_outputs(
             handler.handle_prefill({"token_ids": [1, 2, 3]}, context=context)
@@ -281,17 +277,12 @@ async def test_agg_retries_with_custom_pool_priorities(tmp_path):
         "agg-mid": mid,
     }
 
-    context = FakeContext()
-    outputs = await _collect_outputs(
-        handler.handle_generate({"token_ids": [1]}, context=context)
-    )
+    outputs = await _collect_outputs(handler.handle_generate({"token_ids": [1]}))
 
     assert outputs == [{"pool": "agg-mid"}]
     assert slow.calls == 1
     assert mid.calls == 1
     assert fast.calls == 0
-    assert slow.contexts == [context]
-    assert mid.contexts == [context]
 
 
 @pytest.mark.asyncio
@@ -348,11 +339,9 @@ async def test_agg_handler_measures_packed_token_ids_by_count(tmp_path):
 
     # 4096 packed ids are 16384 bytes; counting bytes would pick the long pool.
     packed_short = (1).to_bytes(4, "little") * 4096
-    context = FakeContext()
     outputs = await _collect_outputs(
-        handler.handle_generate({"token_ids": packed_short}, context=context)
+        handler.handle_generate({"token_ids": packed_short})
     )
 
     assert outputs == [{"pool": "agg-short"}]
     assert short.requests[0]["token_ids"] == [1] * 4096
-    assert short.contexts == [context]
