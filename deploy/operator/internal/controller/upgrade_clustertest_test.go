@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -215,8 +216,13 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 			}
 			completed := &upgradeComponentReconciles{}
 			baseline := completedUpgradeReconciles(t)
+			// Render valid MPI Secret references without starting model-serving Pods.
+			operatorConfig := clusterTestRestrictedConfig(namespace)
+			operatorConfig.MPI.SSHSecretName = upgradeMPISSHSecret
+			operatorConfig.MPI.SSHSecretNamespace = namespace
+			require.Empty(t, configvalidation.ValidateOperatorConfiguration(operatorConfig))
 			env.StartManager(func(mgr ctrl.Manager) error {
-				opts := SetupOptions{Config: clusterTestRestrictedConfig(namespace), RuntimeConfig: &common.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}}
+				opts := SetupOptions{Config: operatorConfig, RuntimeConfig: &common.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}}
 				if err := SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{SetupOptions: opts}); err != nil {
 					return err
 				}
@@ -239,6 +245,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				}, 90*time.Second, 200*time.Millisecond, "component workload graph did not converge")
 			}
 			after := captureUpgrade(t, env)
+			checkUpgradeGroveMatrix(t, relative, getOnlyClusterDGD(t, ctx, env.Client(), namespace), after)
 			if isHistory {
 				if err := upgradeSafetyError(transition.hashChanged, before, after); err != nil {
 					t.Error(err)
