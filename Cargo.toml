@@ -81,7 +81,7 @@ dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.6.0" }
 
 
 # velo
-velo = { version = "0.20.0", default-features = false }
+velo = { version = "=0.20.0", default-features = false }
 
 # External dependencies
 anyhow = { version = "1" }
