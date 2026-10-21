@@ -152,7 +152,6 @@ static OPENAI_FE_IGNORED_FIELDS: LazyLock<HashSet<String>> = LazyLock::new(|| {
     parse_ignored_fields(&std::env::var(DYN_OPENAI_FE_IGNORED_FIELDS).unwrap_or_default())
 });
 
-/// Unknown top-level fields that are dropped instead of rejected.
 #[derive(Clone, Copy)]
 enum IgnoredFields<'a> {
     All,
@@ -168,7 +167,6 @@ impl IgnoredFields<'_> {
     }
 }
 
-/// Parse a comma-separated list of field names. Names are trimmed and empty items dropped.
 fn parse_ignored_fields(value: &str) -> HashSet<String> {
     value
         .split(',')
