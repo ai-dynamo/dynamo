@@ -101,6 +101,7 @@ futures-util = { workspace = true }
 half = { version = "2", features = ["serde", "num-traits"] }
 hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
 http-body-util = "0.1"
+mime = "0.3"
 ipnet = { workspace = true }
 libc = { workspace = true }
 lru = { workspace = true }

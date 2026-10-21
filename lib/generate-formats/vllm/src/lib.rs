@@ -22,6 +22,8 @@ use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRe
 use dynamo_llm::protocols::common::preprocessed_mm_identifier;
 use dynamo_llm::protocols::common::preprocessor::MmRoutingInfo;
 
+mod errors;
+
 pub const NAME: &str = "vllm";
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
@@ -376,6 +378,9 @@ fn preprocessed_from_generate(
     // Keep the token buffer only in the routed request; workers reconstruct it.
     let token_ids = std::mem::take(&mut request.token_ids);
     request.request_id = Some(request_id.to_string());
+    if request.model.is_some() {
+        request.model = Some(model.to_string());
+    }
     let mut vllm_tito = serde_json::to_value(&request)?;
     if let Some(body) = vllm_tito.as_object_mut() {
         body.remove("token_ids");
@@ -444,6 +449,30 @@ fn error_type(status: StatusCode) -> &'static str {
 }
 
 impl GenerateFormat for VllmFormat {
+    fn worker_error(
+        &self,
+        error: &(dyn std::error::Error + 'static),
+        phase: dynamo_llm::generate_format::ErrorPhase,
+    ) -> dynamo_llm::generate_format::WorkerError {
+        errors::classify(error, phase)
+    }
+
+    fn body_error(
+        &self,
+        error: axum::extract::rejection::BytesRejection,
+        headers: &axum::http::HeaderMap,
+    ) -> ClientError {
+        dynamo_llm::generate_format::json_body_error(headers, error).into()
+    }
+
+    fn frontend_error(&self, error: ClientError) -> ClientError {
+        error
+    }
+
+    fn supports_put(&self) -> bool {
+        false
+    }
+
     fn name(&self) -> &str {
         NAME
     }
@@ -453,19 +482,20 @@ impl GenerateFormat for VllmFormat {
     }
 
     fn open(&self, client: ClientRequest<'_>) -> Result<Opened, ClientError> {
-        let request: GenerateRequest = serde_json::from_slice(client.body).map_err(|error| {
-            ClientError::new(format!("Failed to deserialize the JSON body: {error}"))
-        })?;
-        request.validate().map_err(ClientError::new)?;
-        if request.stream {
-            return Err(ClientError {
-                status: StatusCode::NOT_IMPLEMENTED,
-                message:
-                    "streaming (stream=true) is not implemented for /inference/v1/generate yet"
-                        .to_string(),
-                body: None,
-            });
-        }
+        let request: GenerateRequest = client.json()?;
+        let validation = request.validate().map_err(ClientError::new).and_then(|()| {
+            if request.stream {
+                Err(ClientError {
+                    status: StatusCode::NOT_IMPLEMENTED,
+                    message:
+                        "streaming (stream=true) is not implemented for /inference/v1/generate yet"
+                            .to_string(),
+                    response: None,
+                })
+            } else {
+                Ok(())
+            }
+        });
         // vLLM keeps request metadata in headers first, then the body.
         let header = |name| client.headers.get(name).and_then(|v| v.to_str().ok());
         let request_id = header(X_REQUEST_ID_HEADER)
@@ -478,6 +508,8 @@ impl GenerateFormat for VllmFormat {
             model: request.model.clone(),
             request_id: request_id.clone(),
             stream: false,
+            input_tokens: request.token_ids.len(),
+            validation,
             bind: Box::new(move |worker| {
                 let options = request.response_options();
                 let request = preprocessed_from_generate(

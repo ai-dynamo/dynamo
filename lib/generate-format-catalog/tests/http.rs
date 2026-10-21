@@ -55,7 +55,7 @@ async fn respond(
     format: SharedFormat,
     engine: dynamo_llm::types::openai::generate::GenerateStreamingEngine,
     body: Value,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
 ) -> Response {
     let mut card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only("test-model");
     card.runtime_config
@@ -68,6 +68,7 @@ async fn respond(
     let mut request = Request::post("/generate")
         .body(Body::from(body.to_string()))
         .unwrap();
+    headers.insert("content-type", "application/json".parse().unwrap());
     *request.headers_mut() = headers;
     router.oneshot(request).await.unwrap()
 }
@@ -84,57 +85,6 @@ async fn json(response: Response) -> Value {
         .await
         .unwrap();
     serde_json::from_slice(&body).unwrap()
-}
-
-#[tokio::test]
-async fn dispatch_errors_preserve_status_shape_and_metrics() {
-    use dynamo_runtime::error::ErrorType as Backend;
-    for (kind, status, metric, message) in [
-        (
-            Backend::WorkerUnavailable,
-            StatusCode::SERVICE_UNAVAILABLE,
-            ErrorType::Unavailable,
-            "Service temporarily unavailable",
-        ),
-        (
-            Backend::DeadlineExceeded,
-            StatusCode::TOO_MANY_REQUESTS,
-            ErrorType::Cancelled,
-            "request deadline exceeded",
-        ),
-    ] {
-        for streaming in [false, true] {
-            let state = service_v2::HttpService::builder()
-                .build()
-                .unwrap()
-                .state_clone();
-            let response = respond(
-                state.clone(),
-                sglang(),
-                Arc::new(FailingEngine(kind)),
-                serde_json::json!({"input_ids": [1], "stream": streaming}),
-                HeaderMap::new(),
-            )
-            .await;
-            assert_eq!(response.status(), status);
-            assert_eq!(json(response).await["error"]["message"], message);
-            let request_type = if streaming {
-                RequestType::Stream
-            } else {
-                RequestType::Unary
-            };
-            assert_eq!(
-                state.metrics_clone().get_request_counter(
-                    state.manager().metric_model_for("test-model"),
-                    &Endpoint::Generate,
-                    &request_type,
-                    &Status::Error,
-                    &metric
-                ),
-                1
-            );
-        }
-    }
 }
 
 struct ReplayEngine(Vec<Annotated<LLMEngineOutput>>, bool);
@@ -207,6 +157,7 @@ async fn vllm_format_preserves_binding_terminal_status_and_wire_shape() {
     ] {
         let format: SharedFormat = Arc::new(dynamo_vllm_generate::VllmFormat);
         let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
         headers.insert("x-request-id", "header-id".parse().unwrap());
         headers.insert("x-data-parallel-rank", "3".parse().unwrap());
         let body = serde_json::json!({
@@ -286,7 +237,7 @@ async fn unary_dispatch_joins_chunks_and_maps_stream_errors() {
         (
             vec![chunk(serde_json::json!([5])), Annotated::from_err(invalid)],
             StatusCode::BAD_REQUEST,
-            serde_json::json!({"error": {"message": "Invalid request"}}),
+            serde_json::json!({"error": {"message": "bad sampling params"}}),
         ),
         (
             vec![Annotated::from_data(LLMEngineOutput::default())],
@@ -333,6 +284,7 @@ async fn custom_codec_renders_raw_and_decoded_request_errors() {
             let response = router
                 .oneshot(
                     Request::post("/generate")
+                        .header("content-type", "application/json")
                         .body(Body::from(body.to_vec()))
                         .unwrap(),
                 )
@@ -349,7 +301,7 @@ async fn custom_codec_renders_raw_and_decoded_request_errors() {
                 body["custom_failure"]
                     .as_str()
                     .unwrap()
-                    .starts_with("Failed to deserialize")
+                    .starts_with("Failed to ")
             );
             assert_eq!(body.as_object().unwrap().len(), 1);
         }
@@ -388,6 +340,7 @@ async fn overlapping_public_ids_have_independent_cancellation_contexts() {
     let (_, router) = format_generate::router(state, None, format);
     let request = || {
         Request::post("/generate")
+            .header("content-type", "application/json")
             .header("x-request-id", "same-public-id")
             .body(Body::from(r#"{"rid":"same-public-id","input_ids":[1]}"#))
             .unwrap()
@@ -454,3 +407,9 @@ async fn format_request_id_reaches_the_runtime_context() {
             .unwrap();
     }
 }
+
+#[path = "http/compatibility.rs"]
+mod compatibility;
+
+#[path = "http/error_policy.rs"]
+mod error_policy;

@@ -38,6 +38,7 @@ use serde_json::{Value, json};
 use super::generate::SglangGenerateRequest;
 use super::{CAPABILITY, PAYLOAD_KEY, RESPONSE_KEY};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 
 use crate::response_merge::{Assembler, RuleSet};
 use dynamo_llm::generate_format::{
@@ -119,6 +120,20 @@ impl SglangFormat {
 }
 
 impl<C: ClientCodec> SglangFormat<C> {
+    fn parse_error(&self, message: String) -> ClientError {
+        ClientError {
+            status: StatusCode::BAD_REQUEST,
+            response: Some(Box::new(
+                (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(self.codec.parse_error_body(&message)),
+                )
+                    .into_response(),
+            )),
+            message,
+        }
+    }
+
     pub fn with_codec(name: impl Into<String>, codec: C) -> Self {
         Self {
             name: name.into(),
@@ -138,18 +153,15 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
 
     fn open(&self, client: ClientRequest<'_>) -> Result<Opened, ClientError> {
         let request: SglangGenerateRequest = match self.codec.decode_request(client.body)? {
-            None => serde_json::from_slice(client.body),
-            Some(body) => serde_json::from_value(body),
-        }
-        .map_err(|error| {
-            let message = format!("Failed to deserialize the JSON body: {error}");
-            ClientError {
-                status: StatusCode::BAD_REQUEST,
-                body: Some(self.codec.parse_error_body(&message)),
-                message,
-            }
-        })?;
-        request.validate().map_err(ClientError::new)?;
+            None => client
+                .json()
+                .map_err(|error| self.parse_error(error.body_text())),
+            Some(body) => serde_json::from_value(body).map_err(|error| {
+                self.parse_error(format!("Failed to deserialize the JSON body: {error}"))
+            }),
+        }?;
+        let validation = request.validate().map_err(ClientError::new);
+        let input_tokens = request.input_ids.len();
         let header = |name| client.headers.get(name).and_then(|v| v.to_str().ok());
         let request_id = request
             .rid
@@ -165,7 +177,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
                 ..Default::default()
             })
         })()
-        .map_err(ClientError::new)?;
+        .map_err(ClientError::new);
         let priority = request.priority.unwrap_or_default();
         let cache_namespace = request.cache_namespace().map(str::to_owned);
         let stream = request.stream;
@@ -176,11 +188,15 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             model: None,
             request_id: request_id.clone(),
             stream,
+            input_tokens,
+            validation,
             bind: Box::new(move |worker| {
+                let mut annotations = prefill_annotations(prefill_need, stream);
+                annotations.push(crate::PRIVATE_RID_ANNOTATION.to_string());
                 let request = PreprocessedRequest::builder()
                     .model(worker.model.to_string())
                     .token_ids(input_ids)
-                    .stop_conditions(limits)
+                    .stop_conditions(limits?)
                     .sampling_options(SamplingOptions {
                         n: Some(1),
                         ..Default::default()
@@ -197,7 +213,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
                         ..Default::default()
                     }))
                     .extra_args(Some(json!({ PAYLOAD_KEY: body })))
-                    .annotations(prefill_annotations(prefill_need, stream))
+                    .annotations(annotations)
                     .build()
                     .map_err(|error| ClientError::new(error.to_string()))?;
                 Ok(Bound {
@@ -211,6 +227,26 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
                 })
             }),
         })
+    }
+
+    fn ambiguous_model_message(&self) -> &'static str {
+        "multiple SGLang models are registered; configure a model-specific generate endpoint"
+    }
+
+    fn body_error(
+        &self,
+        error: axum::extract::rejection::BytesRejection,
+        headers: &axum::http::HeaderMap,
+    ) -> ClientError {
+        self.parse_error(dynamo_llm::generate_format::json_body_error(headers, error).body_text())
+    }
+
+    fn worker_error(
+        &self,
+        error: &(dyn std::error::Error + 'static),
+        phase: dynamo_llm::generate_format::ErrorPhase,
+    ) -> dynamo_llm::generate_format::WorkerError {
+        crate::errors::classify(error, phase)
     }
 
     fn error_body(&self, _status: StatusCode, message: &str) -> Value {
@@ -334,7 +370,10 @@ mod tests {
             let Opened { bind, .. } = SglangFormat::native()
                 .open(ClientRequest {
                     body: body.to_string().as_bytes(),
-                    headers: &Default::default(),
+                    headers: &axum::http::HeaderMap::from_iter([(
+                        axum::http::header::CONTENT_TYPE,
+                        axum::http::HeaderValue::from_static("application/json"),
+                    )]),
                     default_request_id: "id",
                 })
                 .unwrap();

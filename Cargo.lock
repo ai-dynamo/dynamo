@@ -2769,6 +2769,7 @@ dependencies = [
  "llm-tokenizer",
  "lru 0.16.4",
  "memfile",
+ "mime",
  "minijinja",
  "mockito",
  "modelexpress-client",

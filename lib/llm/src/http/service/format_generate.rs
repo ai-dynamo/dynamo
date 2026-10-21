@@ -29,7 +29,6 @@ use tracing::Instrument;
 use super::disconnect::{
     ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_error,
 };
-use super::error::SanitizedError;
 use super::metrics::{CancellationLabels, ErrorType, HttpQueueGuard, ResponseMetricCollector};
 use super::openai::{
     check_model_serving_ready, check_ready, get_body_limit, get_or_create_request_id,
@@ -37,7 +36,7 @@ use super::openai::{
 };
 use super::{RouteDoc, service_v2};
 use crate::generate_format::{
-    Bound, ClientError, ClientRequest, GenerateExchange, Opened, SharedFormat, Worker,
+    Bound, ClientError, ClientRequest, ErrorPhase, GenerateExchange, Opened, SharedFormat, Worker,
 };
 use crate::protocols::Annotated;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
@@ -71,12 +70,14 @@ pub fn router(
     format: SharedFormat,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or_else(|| DEFAULT_PATH.to_string());
-    let docs = vec![
-        RouteDoc::new(axum::http::Method::POST, &path),
-        RouteDoc::new(axum::http::Method::PUT, &path),
-    ];
+    let mut docs = vec![RouteDoc::new(axum::http::Method::POST, &path)];
+    let mut methods = post(handler);
+    if format.supports_put() {
+        docs.push(RouteDoc::new(axum::http::Method::PUT, &path));
+        methods = methods.put(handler);
+    }
     let router = Router::new()
-        .route(&path, post(handler).put(handler))
+        .route(&path, methods)
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(Arc::new(GenerateRoute { state, format }));
     (docs, router)
@@ -92,69 +93,31 @@ fn error_response(format: &SharedFormat, status: StatusCode, message: &str) -> R
 }
 
 fn client_error(format: &SharedFormat, error: ClientError) -> Response {
-    let body = error
-        .body
-        .unwrap_or_else(|| format.error_body(error.status, &error.message));
-    (error.status, Json(body)).into_response()
-}
-
-/// A failure's metric label, status, and client message.
-fn classify(error: &(dyn std::error::Error + 'static)) -> (ErrorType, StatusCode, String) {
-    use super::metrics::*;
-    // Deadline is checked before overload so a chain carrying both markers keeps
-    // the deadline outcome, matching the OpenAI surface.
-    if request_deadline_exceeded(error) {
-        let message = REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string();
-        (ErrorType::Cancelled, StatusCode::TOO_MANY_REQUESTS, message)
-    } else if request_was_rejected(error) {
-        let message = SanitizedError::Overloaded.to_string();
-        (
-            ErrorType::Overload,
-            StatusCode::SERVICE_UNAVAILABLE,
-            message,
-        )
-    } else if request_was_unavailable(error) {
-        let message = SanitizedError::Unavailable.to_string();
-        (
-            ErrorType::Unavailable,
-            StatusCode::SERVICE_UNAVAILABLE,
-            message,
-        )
-    } else if let Some(error) = super::error::find_canonical_error_in_chain(error)
-        .filter(|e| e.class() == dynamo_runtime::error::ErrorClass::InvalidRequest)
-    {
-        let message = error
-            .public_message()
-            .unwrap_or("Invalid request")
-            .to_string();
-        (ErrorType::Validation, StatusCode::BAD_REQUEST, message)
-    } else if request_was_cancelled(error) {
-        (
-            ErrorType::Cancelled,
-            CANCELLED,
-            SanitizedError::Cancelled.to_string(),
-        )
-    } else {
-        let message = SanitizedError::Internal.to_string();
-        (
-            ErrorType::Internal,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            message,
-        )
-    }
+    error
+        .response
+        .map(|response| *response)
+        .unwrap_or_else(|| error_response(format, error.status, &error.message))
 }
 
 fn stream_error(
     format: &SharedFormat,
     error: &(dyn std::error::Error + 'static),
 ) -> (ErrorType, String) {
-    let (error_type, status, message) = classify(error);
+    let crate::generate_format::WorkerError {
+        kind: error_type,
+        status,
+        message,
+    } = format.worker_error(error, ErrorPhase::Stream { cancelled: false });
     (error_type, format.error_body(status, &message).to_string())
 }
 
 fn adapt_openai_error(format: &SharedFormat, response: super::openai::ErrorResponse) -> Response {
-    let (status, Json(error)) = response;
-    error_response(format, status, error.message())
+    let error = ClientError {
+        status: response.0,
+        message: response.1.0.message().to_string(),
+        response: Some(Box::new(response.into_response())),
+    };
+    client_error(format, format.frontend_error(error))
 }
 
 async fn run_until_killed<T>(
@@ -271,16 +234,19 @@ impl Drop for GenerateMetricCollector {
 async fn handler(
     State(route): State<Arc<GenerateRoute>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Response {
     let GenerateRoute { state, format } = route.as_ref();
-    if let Err(response) = check_ready(state) {
-        return adapt_openai_error(format, response);
-    }
+    let body = match body {
+        Ok(body) => body,
+        Err(error) => return client_error(format, format.body_error(error, &headers)),
+    };
     let Opened {
         request_id,
         stream: streaming,
         model,
+        input_tokens,
+        validation,
         bind,
     } = match format.open(ClientRequest {
         body: &body,
@@ -292,7 +258,7 @@ async fn handler(
     };
     let capability = format.capability();
     let model = match model {
-        Some(model) => state.manager().resolve_canonical_name(&model),
+        Some(model) => Ok(state.manager().resolve_canonical_name(&model)),
         None => {
             let mut models = canonical_generate_models(
                 state.manager(),
@@ -301,20 +267,69 @@ async fn handler(
                     .list_generate_models_for_capability(capability),
             );
             match models.len() {
-                1 => models.remove(0),
-                0 => {
-                    let message = "no generate-capable model is registered";
-                    return error_response(format, StatusCode::NOT_FOUND, message);
-                }
-                _ => {
-                    let message = "multiple models are registered; specify the model";
-                    return error_response(format, StatusCode::BAD_REQUEST, message);
-                }
+                1 => Ok(models.remove(0)),
+                0 => Err((
+                    StatusCode::NOT_FOUND,
+                    "no generate-capable model is registered",
+                )),
+                _ => Err((StatusCode::BAD_REQUEST, format.ambiguous_model_message())),
             }
         }
     };
+    let metric_model = model
+        .as_ref()
+        .ok()
+        .map(|model| state.manager().metric_model_for(model))
+        .unwrap_or(crate::discovery::UNKNOWN_METRIC_MODEL);
+    let tracker = Arc::new(RequestTracker::new());
+    tracker.record_isl(input_tokens, None);
+    let dispatch_span = tracing::info_span!(
+        target: "request_span", "generate", request_id = %request_id, model = %metric_model,
+        input_tokens = tracing::field::Empty, output_tokens = tracing::field::Empty,
+        ttft_ms = tracing::field::Empty, avg_itl_ms = tracing::field::Empty,
+        prefill_worker_id = tracing::field::Empty, decode_worker_id = tracing::field::Empty,
+    );
+    let (mut inflight_guard, collector) = dispatch_span.in_scope(|| {
+        (
+            state.metrics_clone().create_inflight_guard(
+                metric_model,
+                super::metrics::Endpoint::Generate,
+                streaming,
+                &request_id,
+            ),
+            GenerateMetricCollector::new(
+                state.metrics_clone(),
+                metric_model,
+                tracker.clone(),
+                input_tokens,
+            ),
+        )
+    });
+    let mut reject = |response: Response| {
+        inflight_guard.mark_error(match response.status() {
+            StatusCode::NOT_FOUND => ErrorType::NotFound,
+            StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented,
+            StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload,
+            StatusCode::SERVICE_UNAVAILABLE => ErrorType::Unavailable,
+            status if status.as_u16() == 499 => ErrorType::Cancelled,
+            status if status.as_u16() == 529 => ErrorType::Overload,
+            status if status.is_client_error() => ErrorType::Validation,
+            _ => ErrorType::Internal,
+        });
+        response
+    };
+    if let Err(response) = check_ready(state) {
+        return reject(adapt_openai_error(format, response));
+    }
+    if let Err(error) = validation {
+        return reject(client_error(format, error));
+    }
+    let model = match model {
+        Ok(model) => model,
+        Err((status, message)) => return reject(error_response(format, status, message)),
+    };
     if let Err(response) = check_model_serving_ready(state, &model) {
-        return adapt_openai_error(format, response);
+        return reject(adapt_openai_error(format, response));
     }
     let selection = match state
         .manager()
@@ -328,7 +343,7 @@ async fn handler(
                 }
                 _ => StatusCode::NOT_FOUND,
             };
-            return error_response(format, status, &error.to_string());
+            return reject(error_response(format, status, &error.to_string()));
         }
     };
     let worker = Worker {
@@ -342,17 +357,14 @@ async fn handler(
         exchange,
     } = match bind(&worker) {
         Ok(bound) => bound,
-        Err(error) => return client_error(format, error),
+        Err(error) => return reject(client_error(format, error)),
     };
-    // The router records TTFT and ITL into the request's tracker.
-    let tracker = Arc::new(RequestTracker::new());
-    tracker.record_isl(request.token_ids.len(), None);
     request.tracker = Some(tracker.clone());
     let exchange: SharedExchange = Arc::new(Mutex::new(exchange));
     let context: Context<PreprocessedRequest> =
         match preprocessed_context_from_headers(request, request_id.clone(), &headers) {
             Ok(context) => context,
-            Err(response) => return adapt_openai_error(format, response),
+            Err(response) => return reject(adapt_openai_error(format, response)),
         };
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
@@ -366,10 +378,9 @@ async fn handler(
     )
     .await;
 
-    let dispatch_span =
-        tracing::info_span!(target: "request_span", "generate", request_id = %request_id);
     let dispatch = Dispatch {
-        tracker,
+        inflight_guard,
+        collector,
         request_id,
         model,
         state: state.clone(),
@@ -435,7 +446,8 @@ fn events(
 }
 
 struct Dispatch {
-    tracker: Arc<RequestTracker>,
+    inflight_guard: super::metrics::InflightGuard,
+    collector: GenerateMetricCollector,
     request_id: String,
     model: String,
     state: Arc<service_v2::State>,
@@ -452,7 +464,8 @@ impl Dispatch {
         context: Context<PreprocessedRequest>,
     ) -> Response {
         let Self {
-            tracker,
+            mut inflight_guard,
+            mut collector,
             request_id,
             model,
             state,
@@ -461,12 +474,6 @@ impl Dispatch {
             exchange,
             format,
         } = self;
-        let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-            state.manager().metric_model_for(&model),
-            super::metrics::Endpoint::Generate,
-            streaming,
-            &request_id,
-        );
         let cancelled = |inflight_guard: &mut super::metrics::InflightGuard| {
             inflight_guard.mark_error(ErrorType::Cancelled);
             error_response(&format, CANCELLED, "request was cancelled")
@@ -483,7 +490,11 @@ impl Dispatch {
         let stream = match generate_result {
             Ok(stream) => stream,
             Err(error) => {
-                let (mut error_type, status, message) = classify(error.as_ref());
+                let crate::generate_format::WorkerError {
+                    kind: mut error_type,
+                    status,
+                    message,
+                } = format.worker_error(error.as_ref(), ErrorPhase::Dispatch);
                 if request_context.is_killed() || status == CANCELLED {
                     return cancelled(&mut inflight_guard);
                 }
@@ -505,14 +516,6 @@ impl Dispatch {
         };
 
         let engine_context = stream.context();
-        let input_tokens = tracker.isl_tokens().unwrap_or_default();
-        let metric_model = state.manager().metric_model_for(&model).to_string();
-        let mut collector = GenerateMetricCollector::new(
-            state.metrics_clone(),
-            &metric_model,
-            tracker,
-            input_tokens,
-        );
         let stream = stream.map(move |mut item| {
             collector.observe(&mut item);
             item
@@ -535,7 +538,16 @@ impl Dispatch {
                     Json(response).into_response()
                 }
                 Some(Err(error)) => {
-                    let (error_type, status, message) = classify(&error);
+                    let crate::generate_format::WorkerError {
+                        kind: error_type,
+                        status,
+                        message,
+                    } = format.worker_error(
+                        &error,
+                        ErrorPhase::Stream {
+                            cancelled: request_context.is_killed() || engine_context.is_killed(),
+                        },
+                    );
                     if error_type == ErrorType::Internal {
                         tracing::error!(%request_id, %error, "generate stream failed");
                     }

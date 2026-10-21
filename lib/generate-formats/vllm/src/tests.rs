@@ -28,6 +28,22 @@ fn project(raw: &Value, worker: &Worker<'_>) -> PreprocessedRequest {
 }
 
 #[test]
+fn model_alias_is_canonicalized_only_when_the_client_supplies_a_model() {
+    for model in [None, Some("public-alias")] {
+        let mut body = json!({"token_ids":[1], "sampling_params":{}});
+        if let Some(model) = model {
+            body["model"] = json!(model);
+        }
+        let request = project(&body, &routing_metadata(16, false, None));
+        let envelope = &request.extra_args.unwrap()["vllm_tito"];
+        assert_eq!(
+            envelope.get("model"),
+            model.map(|_| json!("test-model")).as_ref()
+        );
+    }
+}
+
+#[test]
 fn engine_fields_reach_envelope_with_resolved_id_and_cache_namespace() {
     let raw = serde_json::json!({
         "request_id": "req-forward",

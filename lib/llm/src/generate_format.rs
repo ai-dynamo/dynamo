@@ -15,11 +15,16 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
+use axum::extract::rejection::{BytesRejection, JsonRejection, MissingJsonContentType};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use dynamo_runtime::error::DynamoError;
 use serde_json::{Value, json};
 
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+
+mod error;
+pub use error::{ErrorPhase, WorkerError};
 
 /// Names the format the frontend serves.
 pub const FORMAT_ENV: &str = "DYN_GENERATE_FORMAT";
@@ -32,13 +37,43 @@ pub struct ClientRequest<'a> {
     pub default_request_id: &'a str,
 }
 
-/// A request the format rejects; the frontend answers `status` with `body`,
+impl ClientRequest<'_> {
+    /// Parse a JSON format with the same media-type and data checks as Axum's extractor.
+    /// Formats accepting another encoding can read `body` directly.
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, JsonRejection> {
+        json_content_type(self.headers)?;
+        axum::Json::from_bytes(self.body).map(|axum::Json(value)| value)
+    }
+}
+
+fn json_content_type(headers: &HeaderMap) -> Result<(), JsonRejection> {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<mime::Mime>().ok());
+    if !content_type.is_some_and(|mime| {
+        mime.type_() == mime::APPLICATION
+            && (mime.subtype() == mime::JSON || mime.suffix() == Some(mime::JSON))
+    }) {
+        return Err(MissingJsonContentType::default().into());
+    }
+    Ok(())
+}
+
+/// Preserve JSON extraction precedence: reject media type before body-read errors.
+pub fn json_body_error(headers: &HeaderMap, error: BytesRejection) -> JsonRejection {
+    json_content_type(headers)
+        .err()
+        .unwrap_or_else(|| error.into())
+}
+
+/// A request the format rejects; the frontend sends `response` when supplied,
 /// or with [`GenerateFormat::error_body`].
 #[derive(Debug)]
 pub struct ClientError {
     pub status: StatusCode,
     pub message: String,
-    pub body: Option<Value>,
+    pub response: Option<Box<Response>>,
 }
 
 impl ClientError {
@@ -47,7 +82,39 @@ impl ClientError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
-            body: None,
+            response: None,
+        }
+    }
+}
+
+impl From<JsonRejection> for ClientError {
+    fn from(error: JsonRejection) -> Self {
+        // vLLM used Axum's extractor plus the OpenAI 422-to-400 middleware.
+        if error.status() == StatusCode::UNPROCESSABLE_ENTITY {
+            crate::http::service::metrics::record_failure(
+                &DynamoError::builder()
+                    .class(dynamo_runtime::error::ErrorClass::InvalidRequest)
+                    .build(),
+            );
+            let message = error.body_text();
+            return ClientError {
+                status: StatusCode::BAD_REQUEST,
+                response: Some(Box::new(
+                    (
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({
+                            "message": message, "type": "Bad Request", "code": 400,
+                        })),
+                    )
+                        .into_response(),
+                )),
+                message,
+            };
+        }
+        ClientError {
+            status: error.status(),
+            message: error.body_text(),
+            response: Some(Box::new(error.into_response())),
         }
     }
 }
@@ -66,6 +133,9 @@ pub struct Opened {
     pub stream: bool,
     /// The model the client names; the frontend's only one when `None`.
     pub model: Option<String>,
+    pub input_tokens: usize,
+    /// Semantic validation runs after readiness; decoding errors fail in `open`.
+    pub validation: Result<(), ClientError>,
     pub bind: Bind,
 }
 
@@ -103,6 +173,41 @@ pub trait GenerateFormat: Send + Sync + 'static {
 
     /// Frontend: start one client request.
     fn open(&self, request: ClientRequest<'_>) -> Result<Opened, ClientError>;
+
+    /// SGLang accepts POST and PUT; vLLM's native endpoint accepts only POST.
+    fn supports_put(&self) -> bool {
+        true
+    }
+
+    fn ambiguous_model_message(&self) -> &'static str {
+        "multiple models are registered; specify `model` in the request"
+    }
+
+    /// Adapt shared frontend failures, such as readiness or header validation.
+    /// Formats may retain `response` when their legacy API exposed it directly.
+    fn frontend_error(&self, mut error: ClientError) -> ClientError {
+        error.response = None;
+        error
+    }
+
+    /// Preserve the format's HTTP body-extraction errors, including body limits.
+    fn body_error(&self, error: BytesRejection, _headers: &HeaderMap) -> ClientError {
+        ClientError {
+            status: error.status(),
+            message: error.body_text(),
+            response: Some(Box::new(error.into_response())),
+        }
+    }
+
+    /// Classify a worker error before dispatch completes or from its
+    /// response stream. Formats own their existing phase-specific policy.
+    fn worker_error(
+        &self,
+        error: &(dyn std::error::Error + 'static),
+        _phase: ErrorPhase,
+    ) -> WorkerError {
+        WorkerError::dispatch(error, None)
+    }
 
     /// The body of a failed response.
     fn error_body(&self, _status: StatusCode, message: &str) -> Value {

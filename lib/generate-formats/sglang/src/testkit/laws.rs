@@ -262,13 +262,22 @@ impl Harness {
                 let Some(body) = self.shape.body(&scenario.request) else {
                     return Ok(());
                 };
-                let Ok(Opened { bind, .. }) = self.format.open(ClientRequest {
+                let Ok(Opened {
+                    bind, validation, ..
+                }) = self.format.open(ClientRequest {
                     body: &body,
-                    headers: &Default::default(),
+                    headers: &axum::http::HeaderMap::from_iter([(
+                        axum::http::header::CONTENT_TYPE,
+                        axum::http::HeaderValue::from_static("application/json"),
+                    )]),
                     default_request_id: "dynamo-request",
-                }) else {
+                })
+                else {
                     return Ok(());
                 };
+                if validation.is_err() {
+                    return Ok(());
+                }
                 let Ok(bound) = bind(&super::worker()) else {
                     return Ok(());
                 };

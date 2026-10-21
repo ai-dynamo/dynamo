@@ -17,6 +17,9 @@ pub const CAPABILITY: &str = dynamo_llm::local_model::runtime_config::SGLANG_GEN
 pub const PAYLOAD_KEY: &str = "sglang_tito";
 /// `engine_data` key carrying each SGLang response back.
 pub const RESPONSE_KEY: &str = "sglang_response";
+/// The frontend restores public IDs, so workers may isolate engine dispatch IDs.
+/// Older frontends omit this annotation and keep their existing worker IDs.
+pub const PRIVATE_RID_ANNOTATION: &str = "sglang_private_rid";
 
 pub mod response_merge;
 
@@ -25,3 +28,5 @@ pub mod testkit;
 
 #[cfg(test)]
 mod tests;
+
+mod errors;

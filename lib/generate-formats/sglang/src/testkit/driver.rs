@@ -72,14 +72,22 @@ pub fn run(
 
 fn drive(format: &dyn GenerateFormat, body: &[u8], scenario: &Scenario) -> Result<Outcome, String> {
     let truth = &scenario.truth;
-    let Opened { bind, .. } = match format.open(ClientRequest {
+    let Opened {
+        bind, validation, ..
+    } = match format.open(ClientRequest {
         body,
-        headers: &Default::default(),
+        headers: &axum::http::HeaderMap::from_iter([(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        )]),
         default_request_id: "dynamo-request",
     }) {
         Ok(opened) => opened,
         Err(error) => return Ok(Outcome::Rejected(error.message)),
     };
+    if let Err(error) = validation {
+        return Ok(Outcome::Rejected(error.message));
+    }
     let bound = match bind(&super::worker()) {
         Ok(bound) => bound,
         Err(error) => return Ok(Outcome::Rejected(error.message)),
