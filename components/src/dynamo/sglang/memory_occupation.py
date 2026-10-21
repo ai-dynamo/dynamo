@@ -7,6 +7,10 @@ from __future__ import annotations
 
 import logging
 
+from sglang.srt.constants import GPU_MEMORY_ALL_TYPES
+from sglang.srt.managers.io_struct import ResumeMemoryOccupationReqOutput
+from sglang.srt.plugins.hook_registry import HookRegistry, HookType
+
 logger = logging.getLogger(__name__)
 
 _RESUME_MEMORY_OCCUPATION_TARGET = (
@@ -20,28 +24,28 @@ def register_memory_occupation_plugin() -> None:
 
     SGLang's scheduler resume removes every requested tag from
     ``offload_tags`` without checking it, so a second resume (or one that names
-    a tag that was never released) raises ``KeyError`` and kills the scheduler.
+    a tag that was never released, or names a tag twice) raises ``KeyError``
+    and kills the scheduler.
     Only the scheduler knows which regions are released, so the guard runs
     there as a hook rather than in Dynamo's request handlers.
     """
-    from sglang.srt.constants import GPU_MEMORY_ALL_TYPES
-    from sglang.srt.managers.io_struct import ResumeMemoryOccupationReqOutput
-    from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
     def around_resume_memory_occupation(original, manager, recv_req):
-        requested = recv_req.tags or GPU_MEMORY_ALL_TYPES
-        released = [tag for tag in requested if tag in manager.offload_tags]
+        requested = list(recv_req.tags or GPU_MEMORY_ALL_TYPES)
+        unique = list(dict.fromkeys(requested))
+        released = [tag for tag in unique if tag in manager.offload_tags]
         if not released:
             logger.warning(
                 "Ignoring resume_memory_occupation for %s: not released",
-                list(requested),
+                requested,
             )
             return ResumeMemoryOccupationReqOutput()
-        if len(released) != len(requested):
+        if len(released) != len(unique):
             logger.warning(
                 "resume_memory_occupation: skipping %s, not released",
-                [tag for tag in requested if tag not in released],
+                [tag for tag in unique if tag not in released],
             )
+        if released != requested:
             recv_req.tags = released
         return original(manager, recv_req)
 

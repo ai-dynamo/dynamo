@@ -57,7 +57,6 @@ def _manager(offload_tags):
 def test_redundant_resume_is_a_noop(resume_hook):
     manager = _manager([])
 
-    # Without the hook, SGLang's resume crashes the scheduler on this input.
     with pytest.raises(KeyError, match="kv_cache"):
         _ORIGINAL(manager, ResumeMemoryOccupationReqInput())
 
@@ -72,6 +71,25 @@ def test_resume_skips_tags_that_were_not_released(resume_hook):
     manager = _manager(["kv_cache"])
 
     resume_hook(_ORIGINAL, manager, ResumeMemoryOccupationReqInput())
+
+    manager.memory_saver_adapter.resume.assert_called_once_with("kv_cache")
+    assert manager.offload_tags == set()
+
+
+def test_resume_ignores_repeated_tags(resume_hook):
+    manager = _manager(["kv_cache"])
+
+    with pytest.raises(KeyError, match="kv_cache"):
+        _ORIGINAL(
+            _manager(["kv_cache"]),
+            ResumeMemoryOccupationReqInput(tags=["kv_cache", "kv_cache"]),
+        )
+
+    resume_hook(
+        _ORIGINAL,
+        manager,
+        ResumeMemoryOccupationReqInput(tags=["kv_cache", "kv_cache"]),
+    )
 
     manager.memory_saver_adapter.resume.assert_called_once_with("kv_cache")
     assert manager.offload_tags == set()
