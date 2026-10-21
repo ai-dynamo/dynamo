@@ -779,6 +779,8 @@ class Connector:
         self,
         remote_metadata: RdmaMetadata,
         local_descriptors: Descriptor | list[Descriptor],
+        *,
+        nixl_connection_metadata: bytes | str | None = None,
     ) -> ReadOperation:
         """
         Creates a read operation for fulfilling a remote readable operation.
@@ -789,6 +791,8 @@ class Connector:
             RDMA metadata from a remote worker that has created a readable operation.
         local_descriptors : Descriptor | list[Descriptor]
             Local descriptor(s) to receive data from the remote worker described by `remote_metadata`.
+        nixl_connection_metadata : bytes | str | None
+            Optional connection-only metadata to import before the buffer metadata.
 
         Returns
         -------
@@ -820,7 +824,12 @@ class Connector:
             )
 
         conn = await self._create_connection()
-        op = ReadOperation(conn, remote_metadata, local_descriptors)
+        op = ReadOperation(
+            conn,
+            remote_metadata,
+            local_descriptors,
+            nixl_connection_metadata=nixl_connection_metadata,
+        )
         return op
 
     async def begin_write(
@@ -1622,6 +1631,8 @@ class ReadOperation(ActiveOperation):
         connection: Connection,
         remote_metadata: RdmaMetadata,
         local_descriptors: Descriptor | list[Descriptor],
+        *,
+        nixl_connection_metadata: bytes | str | None = None,
     ) -> None:
         """
         Creates a new instance of `ReadOperation`, registers `local_descriptors` with NIXL,
@@ -1636,6 +1647,8 @@ class ReadOperation(ActiveOperation):
             Serialized request from the remote worker.
         local_descriptors : Descriptor | list[Descriptor]
             Local descriptor(s) to to receive the data from the remote worker.
+        nixl_connection_metadata : bytes | str | None
+            Optional connection-only metadata to import before the buffer metadata.
         """
         if not isinstance(connection, Connection):
             raise TypeError(
@@ -1648,7 +1661,11 @@ class ReadOperation(ActiveOperation):
         if remote_metadata.operation_kind != OperationKind.READ.value:
             raise ValueError("Argument `remote_metadata` must be of kind `READ`.")
 
-        remote = Remote(connection, remote_metadata.nixl_metadata)
+        remote = Remote(
+            connection,
+            remote_metadata.nixl_metadata,
+            nixl_connection_metadata=nixl_connection_metadata,
+        )
         remote_descriptors = remote_metadata.to_descriptors()
 
         if not (
@@ -1674,6 +1691,9 @@ class ReadOperation(ActiveOperation):
         )
 
     def __del__(self) -> None:
+        # Metadata import can fail before ActiveOperation owns any resources.
+        if not hasattr(self, "_remote"):
+            return
         super().__del__()
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Deleted {self.__repr__()}"
@@ -1801,41 +1821,63 @@ class Remote:
         self,
         connection: Connection,
         nixl_metadata: bytes | str,
+        *,
+        nixl_connection_metadata: bytes | str | None = None,
     ) -> None:
+        self._released = True
         if not isinstance(connection, Connection):
             raise TypeError(
                 "Argument `connection` must be `dynamo.nixl_connect.Connection`."
             )
-        if not (isinstance(nixl_metadata, bytes) or isinstance(nixl_metadata, str)):
-            raise TypeError("Argument `nixl_metadata` must be `bytes` or `str`.")
-        if len(nixl_metadata) == 0:
-            raise ValueError("Argument `nixl_metadata` cannot be empty.")
-
         self._connection = connection
+        nixl_metadata = self._decode_metadata(nixl_metadata)
+        if nixl_connection_metadata is not None:
+            nixl_connection_metadata = self._decode_metadata(nixl_connection_metadata)
 
-        # When `nixl_metadata` is a string, it is assumed to have come from a remote worker
-        # via a `RdmaMetadata` object and therefore can assumed be a b64-encoded, compressed
-        # representation of the NIXL metadata.
-        if isinstance(nixl_metadata, str):
-            if nixl_metadata.startswith("b64:"):
-                # Decode the b64-encoded string into bytes.
-                nixl_metadata = base64.b64decode(nixl_metadata[4:])
-            else:
-                # fallback for earlier versions of nixl connect
-                nixl_metadata = bytes.fromhex(nixl_metadata)
-            # Decompress the NIXL metadata.
-            nixl_metadata = zlib.decompress(nixl_metadata)
-
-        self._name = connection._nixl.add_remote_agent(nixl_metadata)
+        self._name = connection._nixl.add_remote_agent(
+            nixl_metadata
+            if nixl_connection_metadata is None
+            else nixl_connection_metadata
+        )
         if isinstance(self._name, bytes):
             self._name = self._name.decode("utf-8")
 
         connection.acquire_remote_ref(self._name)
         self._released = False
 
+        if nixl_connection_metadata is not None:
+            # Hold the remote reference across both imports. The connection-only
+            # blob establishes the backend needed to import the selected buffer.
+            try:
+                name = connection._nixl.add_remote_agent(nixl_metadata)
+                if isinstance(name, bytes):
+                    name = name.decode("utf-8")
+                if name != self._name:
+                    raise ValueError(
+                        "Connection and buffer metadata must describe the same NIXL agent."
+                    )
+            except Exception:
+                self._release()
+                raise
+
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
         )
+
+    @staticmethod
+    def _decode_metadata(metadata: bytes | str) -> bytes:
+        if not isinstance(metadata, (bytes, str)):
+            raise TypeError("NIXL metadata must be `bytes` or `str`.")
+        if not metadata:
+            raise ValueError("NIXL metadata cannot be empty.")
+        if isinstance(metadata, str):
+            compressed = (
+                base64.b64decode(metadata[4:])
+                if metadata.startswith("b64:")
+                else bytes.fromhex(metadata)
+            )
+            return zlib.decompress(compressed)
+        return metadata
 
     def __del__(self) -> None:
         self._release()

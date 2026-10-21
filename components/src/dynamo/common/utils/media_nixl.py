@@ -94,7 +94,13 @@ async def read_decoded_media_via_nixl(
     local_descriptor = nixl_connect.Descriptor(tensor)
 
     read_start = time.perf_counter()
-    read_op = await connector.begin_read(rdma_metadata, local_descriptor)
+    read_op = await connector.begin_read(
+        rdma_metadata,
+        local_descriptor,
+        # Compatibility with frontend payloads from v1.4/v1.5 and early v1.6.
+        # TODO(v1.9): Remove the legacy single-blob path from this media reader.
+        nixl_connection_metadata=decoded_meta.get("nixl_connection_metadata"),
+    )
     await read_op.wait_for_completion()
     read_end = time.perf_counter()
 
