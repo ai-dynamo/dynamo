@@ -582,6 +582,7 @@ mod tests {
             description: None,
             parameters: Some(schema),
             strict: Some(true),
+            defer_loading: None,
         })
     }
 
@@ -606,6 +607,7 @@ mod tests {
                 description: None,
                 parameters: None,
                 strict,
+                defer_loading: None,
             };
             validate_strict_function(&function).unwrap();
             function.parameters = Some(json!({}));
@@ -624,6 +626,7 @@ mod tests {
             description: None,
             parameters: Some(json!({"type": "object"})),
             strict: Some(true),
+            defer_loading: None,
         })
         .unwrap_err()
         .to_string();
@@ -638,6 +641,7 @@ mod tests {
             description: None,
             parameters: Some(json!({"type": "object"})),
             strict: Some(true),
+            defer_loading: None,
         })
         .unwrap_err()
         .to_string();

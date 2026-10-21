@@ -324,7 +324,9 @@ mod tests {
     fn sample_tools() -> Vec<ChatCompletionTool> {
         vec![
             ChatCompletionTool {
+                custom: None,
                 r#type: ChatCompletionToolType::Function,
+                defer_loading: None,
                 function: FunctionObject {
                     name: "add_numbers".to_string(),
                     description: Some("Add two integers".to_string()),
@@ -337,10 +339,13 @@ mod tests {
                         "required": ["a", "b"],
                     })),
                     strict: None,
+                    defer_loading: None,
                 },
             },
             ChatCompletionTool {
+                custom: None,
                 r#type: ChatCompletionToolType::Function,
+                defer_loading: None,
                 function: FunctionObject {
                     name: "get_weather".to_string(),
                     description: Some("Get weather".to_string()),
@@ -353,6 +358,7 @@ mod tests {
                         "required": ["location", "unit"],
                     })),
                     strict: None,
+                    defer_loading: None,
                 },
             },
         ]
@@ -360,12 +366,15 @@ mod tests {
 
     fn zero_arg_tool(parameters: Value) -> Vec<ChatCompletionTool> {
         vec![ChatCompletionTool {
+            custom: None,
             r#type: ChatCompletionToolType::Function,
+            defer_loading: None,
             function: FunctionObject {
                 name: "get_server_time".to_string(),
                 description: Some("Get the current server time.".to_string()),
                 parameters: Some(parameters),
                 strict: None,
+                defer_loading: None,
             },
         }]
     }

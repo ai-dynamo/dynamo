@@ -110,6 +110,7 @@ async fn main_loop(
             .build()?;
 
         let req = NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner,
             common: Default::default(),
             nvext: None,

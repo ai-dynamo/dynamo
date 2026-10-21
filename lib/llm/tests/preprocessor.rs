@@ -257,6 +257,7 @@ impl Request {
         let inner = inner.build().unwrap();
 
         NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -946,6 +947,7 @@ mod context_length_validation {
         }
         let inner = builder.build().unwrap();
         NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -1326,6 +1328,7 @@ mod embedding_without_chat_template {
             .build()
             .unwrap();
         NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner,
             common: Default::default(),
             nvext: None,

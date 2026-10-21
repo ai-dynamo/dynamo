@@ -62,9 +62,10 @@ impl OpenAIPreprocessor {
     ///
     /// Structural tags are preferred when enabled and supported by the configured
     /// tool-call parser. When disabled or unavailable, ordinary forced choices
-    /// retain the legacy JSON-schema fallback. Kimi's marker-delimited forced
+    /// retain the legacy JSON-schema fallback. Native marker-delimited forced
     /// formats cannot be represented by that fallback and remain on their
-    /// prompt/parser best-effort path instead.
+    /// prompt/parser best-effort path instead. Muse Spark Open forced choices
+    /// install its native ATEM structural tag without operator opt-in.
     pub(super) fn apply_tool_choice_guided_decoding(
         &self,
         request: &NvCreateChatCompletionRequest,
@@ -76,7 +77,9 @@ impl OpenAIPreprocessor {
             .tool_choice
             .as_ref()
             .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
-        let tools = effective_tools(&request.inner)?;
+        let tools = request
+            .validated_effective_tools()
+            .map_err(|error| invalid_argument(error.to_string(), None))?;
         let is_forced_tool_choice = matches!(
             tool_choice,
             ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
@@ -261,9 +264,12 @@ pub(crate) fn effective_tools(
 }
 
 pub(crate) fn effective_tool_definitions(
-    request: &CreateChatCompletionRequest,
+    request: &NvCreateChatCompletionRequest,
 ) -> Result<Vec<ToolDefinition>, DynamoError> {
-    effective_tools(request).map(|tools| convert_tools(tools.as_ref()))
+    request
+        .validated_effective_tools()
+        .map(|tools| convert_tools(tools.as_ref()))
+        .map_err(|error| invalid_argument(error.to_string(), None))
 }
 
 /// The guided-tool constraint a request implies, given what the structural-tag stage
@@ -283,7 +289,9 @@ pub(crate) fn guided_tool_constraint(
     if uses_structural_tag {
         return Ok(GuidedToolConstraint::StructuralTag);
     }
-    let tools = effective_tools(&request.inner)?;
+    let tools = request
+        .validated_effective_tools()
+        .map_err(|error| invalid_argument(error.to_string(), None))?;
     guided_tool_constraint_with_effective_tools(
         request,
         tool_call_parser,
@@ -348,6 +356,17 @@ pub(crate) fn guided_tool_constraint_with_effective_tools(
         Ok(None) => Ok(GuidedToolConstraint::None),
         Err(e) => Err(invalid_argument(e.to_string(), None)),
     }
+}
+
+/// Whether either configured parser selects the Muse Spark native grammar.
+pub(super) fn uses_muse_spark_parser(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> bool {
+    crate::protocols::openai::chat_completions::unified_parser::configured_family(
+        tool_call_parser,
+        reasoning_parser,
+    ) == Some("muse_spark")
 }
 
 /// Map a forced `tool_choice` onto the guided-JSON parser constraint for its grammar.
@@ -642,6 +661,384 @@ mod tests {
                 name: name.to_string(),
             },
         })
+    }
+
+    fn spark_preprocessor(
+        tool_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> std::sync::Arc<OpenAIPreprocessor> {
+        let mut mdc = crate::model_card::ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.tool_call_parser = tool_parser.map(str::to_owned);
+        mdc.runtime_config.reasoning_parser = reasoning_parser.map(str::to_owned);
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    #[tokio::test]
+    async fn muse_spark_open_forced_requests_keep_native_atem() {
+        let preprocessor = spark_preprocessor(Some("muse_spark_open"), Some("muse_spark_open"));
+        for choice in [
+            json!("required"),
+            serde_json::to_value(named("get_weather")).unwrap(),
+        ] {
+            let request = request(json!({"tools": tools(), "tool_choice": choice}));
+            let (mut common, _, reasoning) = preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, reasoning.unified)
+                    .unwrap(),
+                GuidedToolConstraint::StructuralTag,
+                "forced choices must install native ATEM guidance"
+            );
+            let guidance = common.sampling_options.guided_decoding.as_ref().unwrap();
+            assert!(guidance.structural_tag.is_some());
+            assert!(guidance.json.is_none());
+        }
+    }
+
+    #[test]
+    fn muse_spark_required_constraint_is_native() {
+        let request = request(json!({"tools": tools(), "tool_choice": "required"}));
+        for (tool_parser, reasoning_parser) in [
+            (Some("muse_spark"), None),
+            (None, Some("muse_spark")),
+            (Some("muse_spark"), Some("muse_spark")),
+        ] {
+            assert_eq!(
+                guided_tool_constraint(&request, tool_parser, reasoning_parser, false).unwrap(),
+                GuidedToolConstraint::None,
+                "Muse Spark required output must use the native ATEM parser",
+            );
+        }
+    }
+
+    #[test]
+    fn muse_spark_named_constraint_is_native_including_zero_arg_tools() {
+        for parameters in [
+            json!({"type": "object", "properties": {"location": {"type": "string"}}}),
+            json!({"type": "object", "properties": {}, "additionalProperties": false}),
+        ] {
+            let request = request(json!({
+                "tools": [{"type": "function", "function": {
+                    "name": "get_weather", "parameters": parameters
+                }}],
+                "tool_choice": {"type": "function", "function": {"name": "get_weather"}}
+            }));
+            assert_eq!(
+                guided_tool_constraint(&request, Some("muse_spark"), None, false).unwrap(),
+                GuidedToolConstraint::None,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn muse_spark_forced_choices_install_native_tool_grammars() {
+        let preprocessor = spark_preprocessor(Some("muse_spark"), Some("muse_spark"));
+        for choice in [
+            json!("required"),
+            serde_json::to_value(named("get_weather")).unwrap(),
+        ] {
+            for parallel in [Value::Null, json!(true), json!(false)] {
+                let request = request(json!({
+                    "tools": tools(), "tool_choice": choice, "parallel_tool_calls": parallel
+                }));
+                let (mut common, _, reasoning) = preprocessor
+                    .preprocess_request(&request, None)
+                    .await
+                    .unwrap();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, reasoning.unified)
+                    .unwrap();
+                assert!(
+                    common
+                        .sampling_options
+                        .guided_decoding
+                        .as_ref()
+                        .is_some_and(|gd| gd.json.is_none()
+                            && gd.regex.is_none()
+                            && gd.structural_tag.is_some()),
+                    "Muse Spark must generate native ATEM with structural guidance: {:?}",
+                    common.sampling_options.guided_decoding,
+                );
+                assert_eq!(constraint, GuidedToolConstraint::StructuralTag);
+                assert_eq!(
+                    request.inner.tool_choice.as_ref(),
+                    Some(&serde_json::from_value(choice.clone()).unwrap())
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn muse_spark_bypass_preserves_invalid_tool_choice_errors() {
+        let preprocessor = spark_preprocessor(Some("muse_spark"), None);
+        for extra in [
+            json!({"tool_choice": "required"}),
+            json!({"tools": [], "tool_choice": "required"}),
+            json!({"tools": tools(), "tool_choice": {"type": "function", "function": {"name": "missing"}}}),
+        ] {
+            let request = request(extra);
+            assert!(guided_tool_constraint(&request, Some("muse_spark"), None, false).is_err());
+            let (mut common, _, reasoning) = preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            assert!(
+                preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, reasoning.unified)
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn muse_spark_bypass_preserves_assistant_json_schema() {
+        let preprocessor = spark_preprocessor(Some("muse_spark"), None);
+        let schema = json!({"type": "object", "properties": {"answer": {"type": "integer"}}, "required": ["answer"]});
+        for choice in [json!("auto"), json!("none")] {
+            let request = request(json!({
+                "tools": tools(), "tool_choice": choice,
+                "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}
+            }));
+            let (mut common, _, reasoning) = preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, reasoning.unified)
+                    .unwrap(),
+                GuidedToolConstraint::None
+            );
+            assert_eq!(
+                common
+                    .sampling_options
+                    .guided_decoding
+                    .as_ref()
+                    .and_then(|gd| gd.json.as_ref()),
+                Some(&schema)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn other_parsers_keep_forced_tool_guidance() {
+        for parser in [None, Some("hermes"), Some("muse_glimmer")] {
+            let preprocessor = spark_preprocessor(parser, None);
+            for choice in [
+                json!("required"),
+                serde_json::to_value(named("get_weather")).unwrap(),
+            ] {
+                let request = request(json!({"tools": tools(), "tool_choice": choice}));
+                let (mut common, _, reasoning) = preprocessor
+                    .preprocess_request(&request, None)
+                    .await
+                    .unwrap();
+                let expected =
+                    installed_json_constraint(request.inner.tool_choice.as_ref().unwrap());
+                assert_eq!(
+                    preprocessor
+                        .apply_tool_choice_guided_decoding(&request, &mut common, reasoning.unified)
+                        .unwrap(),
+                    expected
+                );
+                assert!(
+                    common
+                        .sampling_options
+                        .guided_decoding
+                        .as_ref()
+                        .and_then(|gd| gd.json.as_ref())
+                        .is_some()
+                );
+                assert_eq!(
+                    guided_tool_constraint(&request, parser, None, false).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn muse_spark_named_prompt_exposes_only_selected_tool() {
+        let template =
+            serde_json::from_value(json!({"chat_template": "{{ tools | tojson }}"})).unwrap();
+        let dynamo_renderer::PromptFormatter::OAI(formatter) =
+            dynamo_renderer::PromptFormatter::from_parts(template, Default::default(), false)
+                .unwrap();
+        let mut request = request(json!({
+            "tools": [
+                {"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {}}}},
+                {"type": "function", "function": {"name": "get_time", "parameters": {"type": "object", "properties": {}}}}
+            ],
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}}
+        }));
+        for parser in ["muse_spark", "hermes"] {
+            let mut mdc = crate::model_card::ModelDeploymentCard::load_from_disk(
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                None,
+            )
+            .unwrap();
+            mdc.runtime_config.tool_call_parser = Some(parser.to_owned());
+            let tokenizer = mdc.tokenizer().unwrap();
+            let preprocessor =
+                OpenAIPreprocessor::new_with_parts(mdc, formatter.clone(), tokenizer).unwrap();
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            let tools: Value = serde_json::from_str(prompt.as_str()).unwrap();
+            assert_eq!(
+                tools.as_array().unwrap().len(),
+                if parser == "muse_spark" { 1 } else { 2 }
+            );
+            assert_eq!(tools[0]["function"]["name"], "get_weather");
+            assert_eq!(request.inner.tool_choice, Some(named("get_weather")));
+            request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert!(
+                prompt.as_str().contains("get_time"),
+                "required must retain the whole registry"
+            );
+            request.inner.tool_choice = Some(named("get_weather"));
+        }
+        assert_eq!(
+            request.inner.tools.as_ref().unwrap().len(),
+            2,
+            "prompt filtering must not mutate the request registry"
+        );
+    }
+
+    #[test]
+    fn muse_spark_named_responses_prompt_keeps_qualified_name_and_full_schema() {
+        let response: crate::protocols::openai::responses::NvCreateResponse = serde_json::from_value(json!({
+            "model": "test-model", "input": "Get the weather",
+            "tools": [{"type": "namespace", "name": "weather", "defer_loading": true, "tools": [
+                {"type": "function", "name": "get_weather", "parameters": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}},
+                {"type": "function", "name": "get_time", "parameters": {"type": "object", "properties": {}}}
+            ]}],
+            "tool_choice": {"type": "function", "name": "weather.get_weather"}
+        })).unwrap();
+        let mut request: NvCreateChatCompletionRequest = response.try_into().unwrap();
+        request.normalize_responses_tools(true).unwrap();
+        let template = serde_json::from_value(json!({"chat_template": "{% set deferred_render_mode = deferred_render_mode | default('tool_name_and_description') %}{{ tools | tojson }}"})).unwrap();
+        let dynamo_renderer::PromptFormatter::OAI(formatter) =
+            dynamo_renderer::PromptFormatter::from_parts(template, Default::default(), false)
+                .unwrap();
+        let mut mdc = crate::model_card::ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.tool_call_parser = Some("muse_spark".to_owned());
+        let tokenizer = mdc.tokenizer().unwrap();
+        let preprocessor = OpenAIPreprocessor::new_with_parts(mdc, formatter, tokenizer).unwrap();
+        let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+        let tools: Value = serde_json::from_str(prompt.as_str()).unwrap();
+        assert_eq!(tools.as_array().unwrap().len(), 1);
+        assert_eq!(tools[0]["function"]["name"], "weather.get_weather");
+        assert_eq!(
+            tools[0]["function"]["parameters"]["required"],
+            json!(["location"])
+        );
+        assert_eq!(request.inner.tools.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn muse_spark_named_chat_prompt_renders_deferred_function_eagerly() {
+        let template =
+            serde_json::from_value(json!({"chat_template": "{{ tools | tojson }}"})).unwrap();
+        let dynamo_renderer::PromptFormatter::OAI(formatter) =
+            dynamo_renderer::PromptFormatter::from_parts(template, Default::default(), false)
+                .unwrap();
+        let mut mdc = crate::model_card::ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.tool_call_parser = Some("muse_spark".to_owned());
+        let tokenizer = mdc.tokenizer().unwrap();
+        let preprocessor = OpenAIPreprocessor::new_with_parts(mdc, formatter, tokenizer).unwrap();
+        for nested in [true, false] {
+            let mut tool = json!({"type": "function", "function": {
+                "name": "get_weather", "parameters": {"type": "object", "properties": {}}
+            }});
+            if nested {
+                tool["function"]["defer_loading"] = json!(true);
+            } else {
+                tool["defer_loading"] = json!(true);
+            }
+            let mut request =
+                request(json!({"tools": [tool], "tool_choice": named("get_weather")}));
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            let tools: Value = serde_json::from_str(prompt.as_str()).unwrap();
+            assert!(tools[0].get("defer_loading").is_none());
+            assert!(
+                tools[0]["function"].get("defer_loading").is_none(),
+                "a forced function renders eagerly, as on the Responses path"
+            );
+            request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Auto);
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            let tools: Value = serde_json::from_str(prompt.as_str()).unwrap();
+            assert_eq!(tools[0]["function"]["defer_loading"], json!(true));
+            assert_eq!(
+                request.inner.tools.as_ref().unwrap()[0]
+                    .function
+                    .defer_loading,
+                Some(true),
+                "prompt filtering must not mutate the request registry"
+            );
+        }
+    }
+
+    #[test]
+    fn muse_spark_named_deferred_chat_prompt_includes_parameter_schema() {
+        let source = include_str!("../../tests/data/muse_spark_open_deferred_tools.jinja");
+        let template = serde_json::from_value(json!({"chat_template": source})).unwrap();
+        let dynamo_renderer::PromptFormatter::OAI(formatter) =
+            dynamo_renderer::PromptFormatter::from_parts(template, Default::default(), false)
+                .unwrap();
+        for parser in ["muse_spark", "muse_spark_open"] {
+            let mut mdc = crate::model_card::ModelDeploymentCard::load_from_disk(
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                None,
+            )
+            .unwrap();
+            mdc.runtime_config.tool_call_parser = Some(parser.to_owned());
+            let tokenizer = mdc.tokenizer().unwrap();
+            let preprocessor =
+                OpenAIPreprocessor::new_with_parts(mdc, formatter.clone(), tokenizer).unwrap();
+            for nested in [false, true] {
+                let mut tool = json!({"type": "function", "function": {
+                    "name": "get_weather", "parameters": {"type": "object", "properties": {
+                        "forecast_location": {"type": "string", "description": "City to look up"}
+                    }, "required": ["forecast_location"]}
+                }});
+                if nested {
+                    tool["function"]["defer_loading"] = json!(true);
+                } else {
+                    tool["defer_loading"] = json!(true);
+                }
+                let mut request =
+                    request(json!({"tools": [tool], "tool_choice": named("get_weather")}));
+                let named_prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+                assert!(named_prompt.as_str().contains("forecast_location"));
+                assert!(named_prompt.as_str().contains("City to look up"));
+                assert!(!named_prompt.as_str().contains("[deferred:"));
+                request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Auto);
+                let auto_prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+                assert!(auto_prompt.as_str().contains("[deferred:"));
+                assert!(!auto_prompt.as_str().contains("forecast_location"));
+                assert_eq!(
+                    request.inner.tools.as_ref().unwrap()[0]
+                        .function
+                        .defer_loading,
+                    Some(true)
+                );
+            }
+        }
     }
 
     #[test]

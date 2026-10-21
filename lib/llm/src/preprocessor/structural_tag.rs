@@ -64,7 +64,9 @@ pub(crate) enum SelectedStructuralTagBuilder {
 
 impl SelectedStructuralTagBuilder {
     fn for_parser(parser_name: &str) -> Option<Self> {
-        if v2::enabled()
+        // The Muse grammar lives in v2 and describes the same ATEM wire format
+        // consumed by both parser routes; it is required for forced choices.
+        if (v2::enabled() || is_muse_spark_parser(Some(parser_name)))
             && let Some(builder) = v2::StructuralTagBuilder::for_parser(parser_name)
         {
             return Some(Self::V2(builder));
@@ -117,8 +119,12 @@ fn is_kimi_k2_parser(parser_name: Option<&str>) -> bool {
     parser_name == Some("kimi_k2")
 }
 
+fn is_muse_spark_parser(parser_name: Option<&str>) -> bool {
+    matches!(parser_name, Some("muse_spark_open" | "muse_spark"))
+}
+
 fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &ToolChoice) -> bool {
-    // K2 forced calls and K3 named calls cannot use Dynamo's generic JSON-schema
+    // K2/Muse Spark forced calls and K3 named calls cannot use the generic JSON-schema
     // fallback because both families emit native, marker-delimited formats.
     // Treat their structural tags as part of implementing these standard OpenAI
     // request shapes, not as an operator opt-in. K3 required remains on its
@@ -126,6 +132,8 @@ fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &To
     (is_kimi_k2_parser(parser_name)
         && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
         || (is_kimi_k3_parser(parser_name) && matches!(tool_choice, ToolChoice::Named(_)))
+        || (is_muse_spark_parser(parser_name)
+            && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
 }
 
 pub(super) fn requires_native_tool_call_format(
@@ -133,11 +141,14 @@ pub(super) fn requires_native_tool_call_format(
     tool_choice: &ToolChoice,
 ) -> bool {
     // The generic forced-tool JSON grammar describes a different wire format
-    // from Kimi's native marker-delimited calls. This also covers K3 required,
+    // from native marker-delimited calls. Required/named choices use best-effort
+    // prompting when no structural-tag builder is available. This also covers K3 required,
     // which uses its prompt/parser path when structural guidance is off.
     (is_kimi_k2_parser(parser_name)
         && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
         || (is_kimi_k3_parser(parser_name)
+            && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
+        || (matches!(parser_name, Some("muse_spark_open" | "muse_spark"))
             && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
 }
 
@@ -276,12 +287,18 @@ impl OpenAIPreprocessor {
         let explicit_config = self.runtime_config.structural_tag.as_ref();
 
         let config = explicit_config.cloned().unwrap_or_default();
-        let reasoning_boundary = if config.reasoning_boundary
-            == StructuralTagReasoningBoundary::Auto
+        let reasoning_boundary = if is_muse_spark_parser(parser_name) {
+            // Muse's backend reasoner may not leave reasoning until a tool has
+            // already been selected. The native grammar must own the entire
+            // generation to enforce required/named choice. Setting require_reasoning
+            // false below disables SGLang's per-request reasoning gate.
+            ResolvedReasoningBoundary::StructuralTag
+        } else if config.reasoning_boundary == StructuralTagReasoningBoundary::Auto
             && preprocessed_request.require_reasoning
             && self.structural_tag_reasoning_metadata(
                 TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
-            ) {
+            )
+        {
             // SGLang consumes the prefix only for requests that activate its gate.
             ResolvedReasoningBoundary::Backend
         } else {
@@ -331,7 +348,18 @@ impl OpenAIPreprocessor {
 
         let built_tag = match builder.build(&request) {
             Err(error)
-                if !matches!(tool_choice, ToolChoice::None)
+                if is_muse_spark_parser(Some(parser_name))
+                    && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)) =>
+            {
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::InvalidArgument)
+                    .message(format!("cannot constrain native Muse Spark tools: {error}"))
+                    .build());
+            }
+            Err(error)
+                if !(matches!(tool_choice, ToolChoice::None)
+                    || (is_muse_spark_parser(Some(parser_name))
+                        && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_))))
                     && structured_output_schema.is_none() =>
             {
                 tracing::warn!(
@@ -353,7 +381,9 @@ impl OpenAIPreprocessor {
                 .get_or_insert_default()
                 .json = None;
         }
-        if applied
+        if applied && is_muse_spark_parser(Some(parser_name)) {
+            preprocessed_request.require_reasoning = false;
+        } else if applied
             && prompt_injected_reasoning
             && config.reasoning_boundary != StructuralTagReasoningBoundary::Auto
         {
@@ -448,6 +478,13 @@ pub(super) fn validate_runtime_config(
         .map_or(StructuralTagReasoningBoundary::default(), |config| {
             config.reasoning_boundary
         });
+    if is_muse_spark_parser(runtime_config.tool_call_parser.as_deref()) {
+        anyhow::ensure!(
+            !backend_excludes_reasoning
+                && configured_boundary != StructuralTagReasoningBoundary::Backend,
+            "Muse Spark structural tags require grammar-owned reasoning; enable vLLM structured_outputs_config.enable_in_reasoning and use reasoning_boundary=auto or structural_tag"
+        );
+    }
     let reasoning_boundary =
         resolve_reasoning_boundary(configured_boundary, backend_excludes_reasoning)
             .map_err(anyhow::Error::msg)?;
@@ -663,6 +700,134 @@ mod tests {
     }
 
     #[test]
+    fn muse_spark_forced_choices_install_native_grammar_without_operator_opt_in() {
+        let tools = [ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object", "properties": {"city": {"type": "string"}},
+                "required": ["city"], "additionalProperties": false
+            })),
+            strict: Some(true),
+        }];
+        for parser in ["muse_spark_open", "muse_spark"] {
+            let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+            mdc.runtime_config.tool_call_parser = Some(parser.to_string());
+            let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+            for choice in [
+                ToolChoice::Required,
+                ToolChoice::Named("get_weather".into()),
+            ] {
+                let mut request = preprocessed_request();
+                assert!(
+                    preprocessor
+                        .apply_tool_choice_structural_tag(
+                            &choice,
+                            &tools,
+                            Some(false),
+                            false,
+                            None,
+                            &mut request
+                        )
+                        .unwrap(),
+                    "{parser} {choice:?} must be enforced by the native grammar"
+                );
+                let guidance = request.sampling_options.guided_decoding.as_ref().unwrap();
+                assert!(
+                    guidance
+                        .structural_tag
+                        .as_ref()
+                        .unwrap()
+                        .to_string()
+                        .contains("atem:invoke")
+                );
+                assert!(guidance.json.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn muse_spark_grammar_disables_sglang_gate_and_rejects_late_vllm_gate() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.tool_call_parser = Some("muse_spark_open".into());
+        mdc.runtime_config
+            .set_engine_specific(TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, true)
+            .unwrap();
+        let mut late_config = mdc.runtime_config.clone();
+        late_config
+            .set_engine_specific(
+                TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                true,
+            )
+            .unwrap();
+        assert!(
+            validate_runtime_config(&late_config)
+                .unwrap_err()
+                .to_string()
+                .contains("grammar-owned reasoning")
+        );
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let tools = [ToolDefinition {
+            name: "ping".into(),
+            parameters: Some(serde_json::json!({"type":"object", "properties":{}})),
+            strict: Some(true),
+        }];
+        let mut request = preprocessed_request();
+        request.require_reasoning = true;
+        assert!(
+            preprocessor
+                .apply_tool_choice_structural_tag(
+                    &ToolChoice::Required,
+                    &tools,
+                    Some(false),
+                    false,
+                    None,
+                    &mut request
+                )
+                .unwrap()
+        );
+        assert!(
+            !request.require_reasoning,
+            "SGLang must apply the complete ATEM grammar from the first generated token"
+        );
+    }
+
+    #[test]
+    fn muse_spark_unsupported_constraints_do_not_silently_fall_back_to_prompting() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.tool_call_parser = Some("muse_spark_open".into());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let tools = [ToolDefinition {
+            name: "lookup".into(),
+            parameters: Some(
+                serde_json::json!({"type":"object", "properties":{"q":{"type":"string", "pattern":"^A", "minLength":4, "contentMediaType":"text/plain"}}}),
+            ),
+            strict: Some(true),
+        }];
+        let error = preprocessor
+            .apply_tool_choice_structural_tag(
+                &ToolChoice::Required,
+                &tools,
+                None,
+                false,
+                None,
+                &mut preprocessed_request(),
+            )
+            .unwrap_err();
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+        assert!(
+            error
+                .to_string()
+                .contains("cannot constrain native Muse Spark tools")
+        );
+    }
+
+    #[test]
     fn named_kimi_k3_is_intrinsic_even_when_global_mode_is_off() {
         let named = ToolChoice::Named("get_weather".to_string());
         assert!(requires_intrinsic_structural_tag(Some("kimi_k3"), &named));
@@ -696,6 +861,13 @@ mod tests {
             ("kimi_k2", ToolChoice::Named("get_weather".to_string())),
             ("kimi_k3", ToolChoice::Named("get_weather".to_string())),
             ("kimi-k3", ToolChoice::Named("get_weather".to_string())),
+            ("muse_spark", ToolChoice::Required),
+            ("muse_spark", ToolChoice::Named("get_weather".to_string())),
+            ("muse_spark_open", ToolChoice::Required),
+            (
+                "muse_spark_open",
+                ToolChoice::Named("get_weather".to_string()),
+            ),
         ];
         for (parser, choice) in cases {
             assert!(

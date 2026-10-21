@@ -61,6 +61,190 @@ async fn post_json(svc: &HarnessService, path: &str, body: Value) -> reqwest::Re
     bounded(request.send()).await.unwrap()
 }
 
+fn custom_chat_request(streaming: bool) -> Value {
+    json!({"model":MODEL,"messages":[{"role":"user","content":"Calculate and look up"}],
+        "tools":[{"type":"custom","custom":{"name":"run_python","format":{"type":"text"}}},
+                 {"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
+        "tool_choice":"auto","stream":streaming})
+}
+
+fn custom_chat_script(input: &str) -> Script {
+    let arguments = json!({"input":input}).to_string();
+    // Split an escape sequence to prove the JSON wrapper cannot leak into input.
+    let split = arguments
+        .find("\\\"")
+        .map(|i| i + 1)
+        .unwrap_or(arguments.len() / 2);
+    [
+        json!({"tool_calls":[{"index":0,"id":"custom-1","type":"function","function":{"name":"run_python","arguments":&arguments[..split]}}]}),
+        json!({"tool_calls":[{"index":0,"function":{"arguments":&arguments[split..]}},
+                            {"index":1,"id":"function-1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}),
+        json!({})
+    ].into_iter().enumerate().map(|(index,delta)| Annotated::from_data(serde_json::from_value(json!({
+        "id":"chat-custom","object":"chat.completion.chunk","created":1,"model":MODEL,
+        "choices":[{"index":0,"delta":delta,"finish_reason":if index==2 {json!("tool_calls")} else {json!(null)},"logprobs":null}]
+    })).unwrap())).collect()
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_custom_tools_unary_stream_and_replay_preserve_openai_shapes() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let input = "print(\"café 日本語\")\n# \\backslash";
+        for streaming in [false,true] {
+            let final_answer = vec![Annotated::from_data(serde_json::from_value(json!({
+                "id":"chat-final","object":"chat.completion.chunk","created":1,"model":MODEL,
+                "choices":[{"index":0,"delta":{"role":"assistant","content":"5"},"finish_reason":"stop","logprobs":null}]
+            })).unwrap())];
+            let svc = HarnessService::start([custom_chat_script(input), final_answer]).await;
+            let body = custom_chat_request(streaming);
+            let response = post_json(&svc,"/v1/chat/completions",body.clone()).await;
+            assert_eq!(response.status(),reqwest::StatusCode::OK);
+            let call = json!({"id":"custom-1","type":"custom","custom":{"name":"run_python","input":input}});
+            let function = json!({"id":"function-1","type":"function","function":{"name":"lookup","arguments":"{}"}});
+            if streaming {
+                let raw = bounded(response.text()).await.unwrap();
+                let events = http_harness::parse_json_sse(&raw).await.unwrap();
+                assert_eq!(raw.lines().filter_map(|line|line.strip_prefix("data:")).next_back().map(str::trim), Some("[DONE]"));
+                let mut custom_input = String::new();
+                let mut ordinary_arguments = String::new();
+                let mut custom_name = None;
+                let mut terminal = false;
+                for event in &events {
+                    assert_ne!(event.event,"error","{raw}");
+                    for choice in event.data["choices"].as_array().into_iter().flatten() {
+                        terminal |= choice["finish_reason"] == "tool_calls";
+                        for delta in choice["delta"]["tool_calls"].as_array().into_iter().flatten() {
+                            if delta["index"] == 0 {
+                                assert!(delta.get("function").is_none());
+                                if let Some(name) = delta["custom"]["name"].as_str() { custom_name = Some(name.to_owned()); }
+                                if let Some(input) = delta["custom"]["input"].as_str() { custom_input.push_str(input); }
+                            } else if let Some(arguments) = delta["function"]["arguments"].as_str() { ordinary_arguments.push_str(arguments); }
+                        }
+                    }
+                }
+                assert_eq!(custom_name.as_deref(),Some("run_python"));
+                assert_eq!(custom_input,input);
+                assert_eq!(ordinary_arguments,"{}");
+                assert!(terminal);
+            } else {
+                let value: Value = bounded(response.json()).await.unwrap();
+                assert_eq!(value["choices"][0]["message"]["tool_calls"],json!([call.clone(),function.clone()]));
+                assert_eq!(value["choices"][0]["finish_reason"],"tool_calls");
+            }
+            let mut replay = body;
+            replay["stream"] = json!(false);
+            replay["tool_choice"] = json!("none");
+            replay["messages"].as_array_mut().unwrap().extend([
+                json!({"role":"assistant","tool_calls":[call,function]}),
+                json!({"role":"tool","tool_call_id":"custom-1","content":"5"}),
+                json!({"role":"tool","tool_call_id":"function-1","content":"Found"})
+            ]);
+            let response = post_json(&svc,"/v1/chat/completions",replay).await;
+            assert_eq!(response.status(),reqwest::StatusCode::OK);
+            let value: Value = bounded(response.json()).await.unwrap();
+            assert_eq!(value["choices"][0]["message"]["content"],"5");
+            let captured = svc.engine.take_requests().await;
+            assert_eq!(captured.len(),2);
+            for request in &captured {
+                let worker = request.python_chat_processor_request_json(&Default::default()).unwrap();
+                assert_eq!(worker["tools"][0]["type"],"function");
+                assert!(worker["tools"][0].get("custom").is_none());
+                assert_eq!(worker["tools"][0]["function"]["parameters"]["properties"]["input"]["type"],"string");
+            }
+            let replay = serde_json::to_value(&captured[1]).unwrap();
+            let arguments: Value = serde_json::from_str(replay["messages"][1]["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap();
+            assert_eq!(arguments["input"],input);
+            svc.shutdown().await;
+        }
+    }).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_custom_malformed_output_preserves_valid_siblings_over_http() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        for arguments in [r#"{"code":"print(1)"}"#, r#"{"input":42}"#] {
+            for streaming in [false, true] {
+                let script = vec![Annotated::from_data(serde_json::from_value(json!({
+                    "id":"chat-custom","object":"chat.completion.chunk","created":1,"model":MODEL,
+                    "choices":[{"index":0,"delta":{"content":"Checking.","tool_calls":[
+                        {"index":0,"id":"custom-1","type":"function","function":{"name":"run_python","arguments":arguments}},
+                        {"index":1,"id":"function-1","type":"function","function":{"name":"lookup","arguments":"{}"}}
+                    ]},"finish_reason":"tool_calls","logprobs":null}],
+                    "usage":{"prompt_tokens":4,"completion_tokens":3,"total_tokens":7}
+                })).unwrap())];
+                let svc = HarnessService::start([script]).await;
+                let mut body = custom_chat_request(streaming);
+                if streaming {
+                    body["stream_options"] = json!({"include_usage":true});
+                }
+                let response = post_json(&svc, "/v1/chat/completions", body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                if streaming {
+                    let raw = bounded(response.text()).await.unwrap();
+                    assert_eq!(raw.lines().filter_map(|line| line.strip_prefix("data:")).next_back().map(str::trim), Some("[DONE]"));
+                    let events = http_harness::parse_json_sse(&raw).await.unwrap();
+                    assert!(events.iter().all(|event| event.event != "error"), "{raw}");
+                    let choice = events.iter().find_map(|event| event.data["choices"].as_array().and_then(|choices| choices.first())).unwrap();
+                    let calls = choice["delta"]["tool_calls"].as_array().unwrap();
+                    assert_eq!(calls.len(), 2, "one entry per tool-call index: {raw}");
+                    assert_eq!(calls[0]["custom"]["input"], arguments);
+                    assert_eq!(calls[1]["function"]["arguments"], "{}");
+                    assert_eq!(choice["delta"]["content"], "Checking.");
+                    assert_eq!(choice["finish_reason"], "tool_calls");
+                    assert!(events.iter().any(|event| event.data["usage"]["total_tokens"] == 7));
+                } else {
+                    let value: Value = bounded(response.json()).await.unwrap();
+                    assert_eq!(value["choices"][0]["message"]["tool_calls"][0]["custom"]["input"], arguments);
+                    assert_eq!(value["choices"][0]["message"]["tool_calls"][1]["function"]["arguments"], "{}");
+                    assert_eq!(value["choices"][0]["message"]["content"], "Checking.");
+                    assert_eq!(value["usage"]["total_tokens"], 7);
+                }
+                svc.shutdown().await;
+            }
+        }
+    }).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_custom_unsupported_grammar_and_wrong_choice_do_not_reach_engine() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start([]).await;
+        for streaming in [false, true] {
+            let mut grammar = custom_chat_request(streaming);
+            grammar["tools"][0]["custom"]["format"] =
+                json!({"type":"grammar","grammar":{"syntax":"regex","definition":".*"}});
+            assert_openai_error(
+                post_json(&svc, "/v1/chat/completions", grammar).await,
+                ExpectedError::Validation,
+                "grammar formats are not supported",
+            )
+            .await;
+            let mut wrong = custom_chat_request(streaming);
+            wrong["tool_choice"] = json!({"type":"custom","custom":{"name":"lookup"}});
+            assert_openai_error(
+                post_json(&svc, "/v1/chat/completions", wrong).await,
+                ExpectedError::Validation,
+                "not present in tools",
+            )
+            .await;
+            let mut ambiguous = custom_chat_request(streaming);
+            ambiguous["tools"][1]["function"]["name"] = json!("run_python");
+            assert_openai_error(
+                post_json(&svc, "/v1/chat/completions", ambiguous).await,
+                ExpectedError::Validation,
+                "both custom and function",
+            )
+            .await;
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 #[derive(Clone, Copy)]
 enum ExpectedError {
     Validation,

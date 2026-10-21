@@ -717,6 +717,7 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
             let locals = locals.clone();
 
             Box::pin(async move {
+                let runtime_config = card.runtime_config.clone();
                 // Acquire GIL to call Python callback and convert coroutine to future
                 let py_future = Python::with_gil(|py| {
                     let py_instance_id =
@@ -753,7 +754,7 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
                     let engine: PythonAsyncEngine = py_result.extract(py).map_err(|e| {
                         anyhow::anyhow!("Failed to extract PythonAsyncEngine: {}", e)
                     })?;
-                    Ok::<_, anyhow::Error>(Arc::new(engine))
+                    Ok::<_, anyhow::Error>(Arc::new(engine.chat_engine(runtime_config)))
                 })?;
 
                 Ok(engine)

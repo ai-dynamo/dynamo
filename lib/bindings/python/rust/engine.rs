@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::protocols::openai::chat_completions::{
+    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+};
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
@@ -195,8 +199,57 @@ impl PythonAsyncEngine {
 }
 
 impl PythonAsyncEngine {
+    pub(crate) fn chat_engine(
+        &self,
+        runtime_config: dynamo_llm::local_model::runtime_config::ModelRuntimeConfig,
+    ) -> PythonChatEngine {
+        PythonChatEngine {
+            engine: self.0.clone(),
+            runtime_config: Arc::new(runtime_config),
+        }
+    }
+
     pub(crate) fn network_engine(&self) -> PythonNetworkEngine {
         PythonNetworkEngine(self.0.clone())
+    }
+}
+
+/// In-process frontend adapter. The generic/network Python engines retain
+/// their normal serialization contract, including the N-2 worker wire.
+pub(crate) struct PythonChatEngine {
+    engine: PythonServerStreamingEngine,
+    runtime_config: Arc<dynamo_llm::local_model::runtime_config::ModelRuntimeConfig>,
+}
+
+#[async_trait::async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for PythonChatEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let runtime_config = self.runtime_config.clone();
+        generate_python_stream(
+            &self.engine,
+            request,
+            move |py, request| {
+                // Ordinary Chat Completions retain direct typed serialization.
+                if request.responses_tools.is_none() {
+                    return Ok(pythonize(py, &request)?.unbind());
+                }
+                let value = request
+                    .python_chat_processor_request_json(&runtime_config)
+                    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+                Ok(pythonize(py, &value)?.unbind())
+            },
+            buffered_typed_response_stream::<NvCreateChatCompletionStreamResponse>,
+        )
+        .await
     }
 }
 

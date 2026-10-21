@@ -224,17 +224,24 @@ def convert_tools(
     sglang_tools = []
     for tool in tools:
         func = tool.get("function", {})
+        # Retain the chat extension when rebuilding tools for template rendering.
+        # An explicit function-level false takes precedence over the wrapper alias.
+        defer_loading = func.get("defer_loading")
+        if defer_loading is None:
+            defer_loading = tool.get("defer_loading")
         strict = func.get("strict", False)
         if structural_tag_schema is not None:
             strict = effective_tool_strict(func.get("strict"), structural_tag_schema)
         sglang_tools.append(
             SglangTool(
                 type=tool.get("type", "function"),
+                defer_loading=tool.get("defer_loading"),
                 function=SglangFunction(
                     name=func.get("name", ""),
                     description=func.get("description"),
                     parameters=func.get("parameters"),
                     strict=strict,
+                    defer_loading=defer_loading,
                 ),
             )
         )
@@ -439,11 +446,16 @@ def _filter_template_tools(
 
     if _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
-        return [
+        selected = [
             tool.model_dump()
             for tool in sglang_tools
             if tool.function.name == chosen_name
         ]
+        # The forced function renders eagerly, matching the Rust preprocessor.
+        for tool in selected:
+            tool.pop("defer_loading", None)
+            tool["function"].pop("defer_loading", None)
+        return selected
 
     return [tool.model_dump() for tool in sglang_tools]
 

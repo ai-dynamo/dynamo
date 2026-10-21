@@ -165,6 +165,20 @@ def publish_vllm_structural_tag_reasoning_policy(
     )
 
 
+def configure_muse_structural_tag_reasoning(
+    config: Config, vllm_config: VllmConfig
+) -> None:
+    """Activate Muse's native grammar before the model chooses a recipient.
+
+    Muse's engine reasoner leaves reasoning only after a tool channel opens.
+    Deferring a required/named grammar until then cannot force a call. The
+    Dynamo ATEM grammar includes the reasoning channel, so it owns that boundary.
+    Unguided requests are unaffected by this structured-output setting.
+    """
+    if config.dyn_tool_call_parser in ("muse_spark_open", "muse_spark"):
+        vllm_config.structured_outputs_config.enable_in_reasoning = True
+
+
 def should_register_model_ignore_weights(config: Config) -> bool:
     return uses_modelexpress_load_format(config)
 
@@ -739,6 +753,7 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    configure_muse_structural_tag_reasoning(config, vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
@@ -784,9 +799,9 @@ def setup_vllm_engine(
         bench = config._benchmark_additional_config
         if fpm_worker_id and bench["output_path"] == "/tmp/benchmark_results.json":
             short_id = fpm_worker_id[-8:]
-            os.environ[
-                ENV_FPM_BENCHMARK_OUTPUT_PATH
-            ] = f"/tmp/benchmark_results_{short_id}.json"
+            os.environ[ENV_FPM_BENCHMARK_OUTPUT_PATH] = (
+                f"/tmp/benchmark_results_{short_id}.json"
+            )
         vllm_config.additional_config["benchmark"] = bench
         logger.info("Benchmark config injected into additional_config")
 
