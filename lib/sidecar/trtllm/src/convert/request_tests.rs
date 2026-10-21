@@ -321,7 +321,7 @@ fn conversation_identity_follows_session_or_transmitted_rank_hint() {
                 expected
                     .map(|value| prost_types::value::Kind::StringValue(value.to_string()))
                     .as_ref(),
-                "mode={mode:?}, targeting={allow_dp_rank}, rank={dp_rank:?}, prefill_rank={prefill_dp_rank:?}, session={session_id:?}",
+                "mode={mode:?}, targeting={allow_dp_rank}, rank={dp_rank:?}, prefill_rank={prefill_dp_rank:?}",
             );
         }
     }
