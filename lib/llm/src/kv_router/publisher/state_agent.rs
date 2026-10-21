@@ -49,13 +49,14 @@ use dynamo_runtime::{
     discovery::{DiscoveryInstance, DiscoverySpec, EventScope},
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::EventPublisher,
+    transports::event_plane::{EventPublisher, SharedZmqPublisherSocket},
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    direct_zmq_sub_pool::{DirectZmqSubPool, DirectZmqSubRegistration, RawZmqFrames},
     discovery::kv_state_agent::{
         KV_STATE_ATTACHMENT_TOPIC_V2, KV_STATE_EVENT_TOPIC_V2, KV_STATE_SOURCE_TOPIC_V2,
         KvStateAttachmentAdvertisement, KvStateIngressProtocol, KvStateSourceAdvertisement,
@@ -65,7 +66,7 @@ use crate::{
         WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint_with_status,
         metrics::kv_publisher_metrics,
     },
-    utils::zmq::{SubSocket, connect_sub_socket, multipart_message},
+    utils::zmq::{MultipartMessage, SubSocket, connect_sub_socket, multipart_message},
 };
 
 use super::{
@@ -125,6 +126,18 @@ pub struct KvStateAgentConfig {
     pub slot: KvStateAgentSlotConfig,
     pub kv_block_size: u32,
     pub ingress_protocol: KvStateIngressProtocol,
+    /// Sockets shared with sibling slots; `Default::default()` binds dedicated ones.
+    pub sockets: KvStateAgentSockets,
+}
+
+/// Host-wide sockets a slot can share with its siblings.
+#[derive(Clone, Default)]
+pub struct KvStateAgentSockets {
+    /// Output PUB shared with other slots; `None` binds one for this slot.
+    pub(crate) event_socket: Option<SharedZmqPublisherSocket>,
+    /// Pooled raw-input SUBs; `None`, or a source without a topic, connects a
+    /// dedicated SUB.
+    pub(crate) raw_pool: Option<DirectZmqSubPool>,
 }
 
 #[derive(Debug, Clone)]
@@ -804,6 +817,7 @@ pub struct KvStateAgent {
     identity: KvStateAgentIdentity,
     control_tx: mpsc::Sender<ControlCommand>,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
+    raw_pool: Option<DirectZmqSubPool>,
     status: Arc<ArcSwap<KvStateAgentStatus>>,
     cancel: CancellationToken,
     coordinator: StdMutex<Option<tokio::task::JoinHandle<()>>>,
@@ -833,12 +847,24 @@ impl KvStateAgent {
         if config.ingress_protocol != KvStateIngressProtocol::VllmResidencyV1 {
             anyhow::bail!("external state-agent slots require vllm_residency_v1 ingress");
         }
-        let event_publisher = EventPublisher::for_endpoint_id(
-            config.endpoint.drt(),
-            &config.kv_state_endpoint,
-            KV_STATE_EVENT_TOPIC_V2,
-        )
-        .await
+        let event_publisher = match &config.sockets.event_socket {
+            Some(socket) => {
+                EventPublisher::for_endpoint_id_on_shared_socket(
+                    config.endpoint.drt(),
+                    &config.kv_state_endpoint,
+                    socket,
+                )
+                .await
+            }
+            None => {
+                EventPublisher::for_endpoint_id(
+                    config.endpoint.drt(),
+                    &config.kv_state_endpoint,
+                    KV_STATE_EVENT_TOPIC_V2,
+                )
+                .await
+            }
+        }
         .context("failed to create state-agent event publisher")?;
         let publisher_id = event_publisher.publisher_id();
         let identity = KvStateAgentIdentity {
@@ -948,6 +974,7 @@ impl KvStateAgent {
             identity,
             control_tx,
             ingress_tx,
+            raw_pool: config.sockets.raw_pool,
             status,
             cancel,
             coordinator: StdMutex::new(Some(coordinator)),
@@ -1050,6 +1077,8 @@ impl KvStateAgent {
             worker,
             attachment.generation,
             self.kv_block_size,
+            self.raw_pool.as_ref(),
+            self.identity.publisher_id,
             self.ingress_tx.clone(),
             self.control_tx.clone(),
             self.status.clone(),
@@ -1508,12 +1537,24 @@ async fn start_vllm_listener(
     worker: WorkerWithDpRank,
     generation: u64,
     kv_block_size: u32,
+    raw_pool: Option<&DirectZmqSubPool>,
+    route_id: u64,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
     control_tx: mpsc::Sender<ControlCommand>,
     status: Arc<ArcSwap<KvStateAgentStatus>>,
     cancel: CancellationToken,
 ) -> Result<VllmListener> {
-    let socket = connect_sub_socket(&source.endpoint, Some(&source.topic)).await?;
+    let socket = match raw_pool.filter(|_| !source.topic.is_empty()) {
+        Some(pool) => RawSubscription::Pooled(
+            pool.register_raw(route_id, &source.endpoint, &source.topic, generation)
+                .await?,
+        ),
+        // Without a pool, or for a source without a topic (vLLM workers that
+        // predate per-worker topics), connect a dedicated SUB with its own context.
+        None => RawSubscription::Dedicated(
+            connect_sub_socket(&source.endpoint, Some(&source.topic)).await?,
+        ),
+    };
     let listener_cancel = cancel.child_token();
     let task_cancel = listener_cancel.clone();
     let handle = component.drt().runtime().secondary().spawn(async move {
@@ -1563,9 +1604,35 @@ struct VllmListenerTask<'a> {
     generation: u64,
     kv_block_size: u32,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
-    socket: SubSocket,
+    socket: RawSubscription,
     status: Arc<ArcSwap<KvStateAgentStatus>>,
     cancel: CancellationToken,
+}
+
+/// One attachment's raw KV stream: its own SUB, or a route on the host's pooled
+/// SUBs keyed by the source's topic.
+enum RawSubscription {
+    Dedicated(SubSocket),
+    Pooled(DirectZmqSubRegistration<RawZmqFrames>),
+}
+
+impl RawSubscription {
+    async fn next(&mut self) -> Option<Result<MultipartMessage>> {
+        match self {
+            Self::Dedicated(socket) => Some(
+                socket
+                    .next()
+                    .await?
+                    .map(multipart_message)
+                    .map_err(Into::into),
+            ),
+            Self::Pooled(route) => tokio::select! {
+                biased;
+                frames = route.receiver.recv() => frames.map(Ok),
+                _ = route.disconnected.cancelled() => None,
+            },
+        }
+    }
 }
 
 async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
@@ -1600,7 +1667,7 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
             frames = socket.next() => frames,
         };
         let frames = match frames {
-            Some(Ok(frames)) => multipart_message(frames),
+            Some(Ok(frames)) => frames,
             Some(Err(error)) => return Err(error).context("ZMQ receive failed"),
             None => anyhow::bail!("ZMQ stream ended"),
         };
