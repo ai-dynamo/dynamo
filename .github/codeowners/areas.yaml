@@ -241,6 +241,7 @@ areas:
   - examples/common/
   - examples/custom_backend/
   - lib/backend-common/
+  - lib/realtime/
   - lib/backend-common/examples/
   - lib/sidecar/dynamo-sidecar
   - lib/sidecar/README.md

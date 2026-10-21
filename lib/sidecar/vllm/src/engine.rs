@@ -107,6 +107,18 @@ impl VllmSidecarEngine {
         DynamoError,
     > {
         let args = <Args as clap::Parser>::parse();
+        Self::bootstrap(args)
+    }
+
+    pub(crate) fn bootstrap(
+        args: Args,
+    ) -> Result<
+        (
+            RuntimeConfig,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
+        ),
+        DynamoError,
+    > {
         let vllm_http_url = Self::validate_args(&args)?;
         Ok((
             args.sidecar.common.runtime.clone(),

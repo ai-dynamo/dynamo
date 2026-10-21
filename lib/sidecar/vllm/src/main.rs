@@ -2,5 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 fn main() -> anyhow::Result<()> {
-    dynamo_sidecar_common::run(dynamo_vllm_sidecar::VllmSidecarEngine::from_cli()?)
+    dynamo_vllm_sidecar::run(std::env::args().collect()).inspect_err(|error| {
+        if let Some(dynamo_sidecar_common::SidecarStartupError::Cli(cli)) = error.downcast_ref() {
+            cli.exit();
+        }
+    })
 }
