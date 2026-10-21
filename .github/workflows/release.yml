@@ -74,6 +74,10 @@ on:
         required: false
         type: string
         default: ''
+      dev_date_utc:
+        required: false
+        type: string
+        default: ''
       on_demand:
         required: false
         type: boolean
@@ -359,6 +363,7 @@ jobs:
         id: rc_tag
         env:
           INPUT_RC_NUMBER: ${{ inputs.rc_number }}
+          INPUT_DEV_DATE_UTC: ${{ inputs.dev_date_utc }}
           VERSION: ${{ steps.extract.outputs.version }}
           COMMIT_SHA: ${{ steps.extract.outputs.commit_sha }}
           NIGHTLY: ${{ steps.extract.outputs.nightly }}
@@ -385,7 +390,13 @@ jobs:
           fi
 
           if [[ "${NIGHTLY}" == "true" ]]; then
-            DATE_UTC=$(date -u +%Y%m%d)
+            # nightly-ci stamps the wheels at build time and passes that date in, so
+            # a run that crosses UTC midnight still publishes one consistent version.
+            DATE_UTC="${INPUT_DEV_DATE_UTC:-$(date -u +%Y%m%d)}"
+            if [[ ! "${DATE_UTC}" =~ ^[0-9]{8}$ ]]; then
+              echo "Error: nightly date '${DATE_UTC}' is not YYYYMMDD"
+              exit 1
+            fi
             SHORT_SHA="${COMMIT_SHA:0:7}"
             # No `nightly-` prefix on the tag: the NGC repo name itself carries
             # the `-nightly` suffix (e.g. vllm-runtime-nightly), so the tag stays

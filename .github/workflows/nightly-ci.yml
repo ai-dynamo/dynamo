@@ -99,12 +99,14 @@ jobs:
       contents: read
     outputs:
       dev_suffix: ${{ steps.compute.outputs.dev_suffix }}
+      date_utc: ${{ steps.compute.outputs.date_utc }}
     steps:
       - id: compute
         shell: bash
         run: |
           DATE=$(date -u +%Y%m%d)
           echo "dev_suffix=.dev${DATE}" >> $GITHUB_OUTPUT
+          echo "date_utc=${DATE}" >> $GITHUB_OUTPUT
 
   # ============================================================================
   # COMPUTE RELEASE MODE
@@ -1470,6 +1472,7 @@ jobs:
     needs:
       - resolve-source-sha
       - compute-release-mode
+      - compute-dev-version
       - notify-slack-start
       - manual-release-approval
       - vllm-build
@@ -1507,6 +1510,7 @@ jobs:
       nightly: true
       skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
       slack_thread_ts:  ${{ needs.notify-slack-start.outputs.thread_ts }}
+      dev_date_utc: ${{ needs.compute-dev-version.outputs.date_utc }}
       # THIS run's build results — release.yml's copy step skips either image
       # when its build here did not succeed, so a failed build can never
       # republish a previous run's image at an unchanged SHA. (A direct
