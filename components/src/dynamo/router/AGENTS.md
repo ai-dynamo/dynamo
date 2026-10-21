@@ -98,7 +98,8 @@ logic but do not share the same serialization, RPC, or process boundaries.
 |---|---|
 | `../frontend/main.py` | Selects router mode and optional Python chat processor |
 | `../frontend/vllm_processor.py` | vLLM-native Python pre/postprocessor |
-| `__main__.py` | Standalone Python router service |
+| `__main__.py` | Entry point; applies the opt-in jemalloc preload before importing `main.py` |
+| `main.py` | Standalone Python router service |
 | `../thunderagent_router/__main__.py` | Custom registered router facade |
 | `../../../../lib/llm/src/entrypoint/input/common.rs` | Builds embedded Rust routing pipelines |
 | `../../../../lib/llm/src/kv_router/routing_host.rs` | Routed-generation orchestration and router-side tracker updates |
