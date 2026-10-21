@@ -165,7 +165,7 @@ type ObjectiveSpec struct {
 	Mode ObjectiveMode `json:"mode,omitempty"`
 
 	// Metric is the scalar target when mode is Optimize.
-	// When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
+	// When omitted in Optimize mode, admission defaults it to Throughput.
 	// +optional
 	Metric *ObjectiveMetric `json:"metric,omitempty"`
 
@@ -241,6 +241,8 @@ type NativeSearchInput struct {
 	// workload.static: {} opts out of that shape, leaving the workload to
 	// spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the
 	// fields it names.
+	// The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a
+	// KV-load ratio search.
 	// +optional
 	Workload *WorkloadSpec `json:"workload,omitempty"`
 
