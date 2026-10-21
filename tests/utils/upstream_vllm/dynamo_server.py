@@ -2,52 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run inside the upstream pytest process; reuse vLLM's server lifecycle."""
 
-import itertools
-import json
 import os
 import tempfile
 import time
 from pathlib import Path
 
-import httpx
 import requests
 
-from tests.utils import RemoteOpenAIServer, RemoteOpenAIServerCustom, RemoteVLLMServer
-
-_exchanges = itertools.count()
-
-
-async def record_response(response):
-    """Capture the selected unary requests/responses without changing their JSON."""
-    # shortcut: these four cases are unary; add a byte-stream tee before adding SSE.
-    await response.aread()
-    path = Path(os.environ["UPSTREAM_CHAT_OUTPUT"]) / f"exchange-{next(_exchanges):03d}"
-    path.with_suffix(".json").write_text(
-        json.dumps(
-            {
-                "request": json.loads(response.request.content),
-                "status": response.status_code,
-                "content_type": response.headers.get("content-type"),
-            },
-            indent=2,
-        )
-    )
-    path.with_suffix(".body").write_bytes(response.content)
-
-
-class RecordingClient:
-    """Add evidence capture to the inherited upstream OpenAI client."""
-
-    def get_async_client(self, **kwargs):
-        """Return the native client with a recording HTTP transport; no retries."""
-        kwargs["http_client"] = httpx.AsyncClient(
-            timeout=120, trust_env=False, event_hooks={"response": [record_response]}
-        )
-        return super().get_async_client(**kwargs)
-
-
-class ReferenceServer(RecordingClient, RemoteOpenAIServer):
-    """Keep upstream startup and teardown, with unary evidence capture."""
+from tests.utils import RemoteOpenAIServerCustom, RemoteVLLMServer
 
 
 def launch_dynamo(env_dict, model, args):
@@ -70,13 +32,13 @@ def launch_dynamo(env_dict, model, args):
     )
 
 
-class RemoteDynamoServer(RecordingClient, RemoteOpenAIServerCustom):
+class RemoteDynamoServer(RemoteOpenAIServerCustom):
     """Replace only the launcher and readiness of the audited upstream fixtures."""
 
     def __init__(self, model, vllm_serve_args, **kwargs):
         """Start one isolated Dynamo deployment; retain upstream model/CLI handling.
 
-        The runner supplies pinned model arguments for the four selected tests.
+        Selected fixtures supply model and engine arguments; cap the KV cache at 1 GiB.
         The outer Dynamo fixture reserves DYN_SYSTEM_PORT in the Rust i16 range.
         Upstream code owns child creation, timeout cleanup and process-group teardown.
         """
@@ -92,7 +54,19 @@ class RemoteDynamoServer(RecordingClient, RemoteOpenAIServerCustom):
         )
         try:
             super().__init__(
-                model, vllm_serve_args, launch_dynamo, env_dict=env, **kwargs
+                model,
+                [
+                    *vllm_serve_args,
+                    "--served-model-name",
+                    model,
+                    "--max-num-seqs",
+                    "8",
+                    "--kv-cache-memory-bytes",
+                    "1073741824",
+                ],
+                launch_dynamo,
+                env_dict=env,
+                **kwargs,
             )
         except BaseException:
             self.discovery.cleanup()
@@ -115,7 +89,7 @@ class RemoteDynamoServer(RecordingClient, RemoteOpenAIServerCustom):
                     for item in response.json().get("data", [])
                 ):
                     return
-            except requests.ConnectionError:
+            except (requests.ConnectionError, requests.Timeout):
                 pass  # Frontend has not bound its socket yet.
             time.sleep(0.5)
         raise TimeoutError(f"Dynamo did not register {self.model} within {timeout}s")

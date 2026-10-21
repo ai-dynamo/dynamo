@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Check that collection cannot silently expand the upstream GPU workload."""
+"""Keep infrastructure errors outside the known-failure allowance."""
 
-import json
-from types import SimpleNamespace
+import xml.etree.ElementTree as ET
 
 import pytest
 
-from tests.utils.upstream_vllm.run import Selection
+from tests.frontend.test_upstream_vllm import UpstreamTestFailure, check_result
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -17,21 +16,24 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("actual", [["chosen", "extra"], [], ["other"]])
-def test_reject_changed_collection(tmp_path, actual):
-    """Reject added, missing or substituted nodes before server fixture setup."""
-    session = SimpleNamespace(items=[SimpleNamespace(nodeid=node) for node in actual])
-    with pytest.raises(RuntimeError, match="Unexpected upstream collection"):
-        Selection(["chosen"], tmp_path).pytest_collection_finish(session)
-    assert not (tmp_path / "collection.json").exists()
+@pytest.mark.parametrize("tag", ["error", "skipped", "failure"])
+def test_upstream_result_failure_types(tag):
+    """Only test-body failures may match the expected-failure marker."""
+    case = ET.fromstring(f'<testcase><{tag} message="detail"/></testcase>')
+    error = UpstreamTestFailure if tag == "failure" else RuntimeError
+    with pytest.raises(error, match="detail"):
+        check_result(case)
 
 
-def test_record_original_fixture_dependencies(tmp_path):
-    """Retain the fixture names for the exact node set without executing fixtures."""
-    session = SimpleNamespace(
-        items=[SimpleNamespace(nodeid="chosen", fixturenames=["server", "client"])]
+def test_teardown_error_overrides_test_failure():
+    """A known assertion failure must not hide broken server cleanup."""
+    case = ET.fromstring(
+        "<testcase><failure>known</failure><error>cleanup failed</error></testcase>"
     )
-    Selection(["chosen"], tmp_path).pytest_collection_finish(session)
-    assert json.loads((tmp_path / "collection.json").read_text()) == {
-        "chosen": ["server", "client"]
-    }
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        check_result(case)
+
+
+def test_upstream_pass():
+    """A successful upstream case needs no exception or special handling."""
+    check_result(ET.fromstring("<testcase/>"))
