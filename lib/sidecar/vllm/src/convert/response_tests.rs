@@ -101,7 +101,7 @@ fn early_prompt_frames_retain_exact_native_metadata() {
             .num_output_tokens = 1 + u32::from(has_output);
         let result = state.convert(response).unwrap().unwrap();
         assert!(result.finish_reason.is_some());
-        assert_eq!(result.engine_data, has_prompt_logprobs.then(|| json!({"prompt_logprobs": [null, {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}}, {"33": {"logprob": -0.5, "rank": 2}}]})));
+        assert_eq!(result.engine_data, has_prompt_logprobs.then(|| Box::new(json!({"prompt_logprobs": [null, {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}}, {"33": {"logprob": -0.5, "rank": 2}}]}))));
     }
 }
 
@@ -353,11 +353,11 @@ fn prefill_handoff_is_required_only_for_successful_native_terminals() {
                 assert!(terminal.disaggregated_params.is_none());
                 assert_eq!(
                     terminal.engine_data,
-                    Some(json!({"prompt_logprobs": [
+                    Some(Box::new(json!({"prompt_logprobs": [
                         null,
                         {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}},
                         {"33": {"logprob": -0.5, "rank": 2}}
-                    ]}))
+                    ]})))
                 );
                 if !include_handoff {
                     assert!(terminal.token_ids.is_empty());
@@ -373,7 +373,7 @@ fn prefill_handoff_is_required_only_for_successful_native_terminals() {
                     );
                 }
             } else {
-                assert_eq!(terminal.disaggregated_params, Some(handoff));
+                assert_eq!(terminal.disaggregated_params, Some(Box::new(handoff)));
             }
         }
     }

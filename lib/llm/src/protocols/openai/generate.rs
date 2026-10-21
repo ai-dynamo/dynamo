@@ -684,7 +684,7 @@ impl GenerateAggregator {
             && output.finish_reason.is_some()
             && output.disaggregated_params.is_some()
         {
-            self.kv_transfer_params = output.disaggregated_params.clone();
+            self.kv_transfer_params = output.disaggregated_params.as_deref().cloned();
         }
         let index = output.index.unwrap_or(0);
         let choice = self.choices.entry(index).or_insert(GenerateChoiceAcc {
@@ -1197,7 +1197,7 @@ mod tests {
                         bytes: None,
                     },
                 ]]),
-                engine_data: Some(json!({
+                engine_data: Some(Box::new(json!({
                     "prompt_logprobs": [
                         null,
                         {
@@ -1208,7 +1208,7 @@ mod tests {
                             }
                         }
                     ]
-                })),
+                }))),
                 ..Default::default()
             },
             LLMEngineOutput {
@@ -1225,11 +1225,11 @@ mod tests {
                     },
                 ]]),
                 finish_reason: Some(crate::protocols::common::FinishReason::Length),
-                engine_data: Some(json!({
+                engine_data: Some(Box::new(json!({
                     "routed_experts": "encoded-experts",
                     "sampling_mask": [[7, 11], [13, 17, 19]],
                     "kv_transfer_params": {"connector": "x"}
-                })),
+                }))),
                 ..Default::default()
             },
         ];
@@ -1303,14 +1303,14 @@ mod tests {
                 token_ids: vec![201],
                 index: Some(1),
                 finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-                engine_data: Some(json!({"routed_experts": "experts-1"})),
+                engine_data: Some(Box::new(json!({"routed_experts": "experts-1"}))),
                 ..Default::default()
             }),
             Annotated::from_data(LLMEngineOutput {
                 token_ids: vec![100],
                 index: Some(0),
                 finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-                engine_data: Some(json!({"routed_experts": "experts-0"})),
+                engine_data: Some(Box::new(json!({"routed_experts": "experts-0"}))),
                 ..Default::default()
             }),
         ]);
@@ -1343,7 +1343,7 @@ mod tests {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-            engine_data: Some(json!({"routed_experts": payload})),
+            engine_data: Some(Box::new(json!({"routed_experts": payload}))),
             ..Default::default()
         })]);
 
@@ -1369,14 +1369,14 @@ mod tests {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-            engine_data: Some(json!({
+            engine_data: Some(Box::new(json!({
                 "routed_experts": {
                     "data": "AQI=",
                     "shape": [3, 1, 1],
                     "start": 0,
                     "dtype": "uint8"
                 }
-            })),
+            }))),
             ..Default::default()
         })]);
 
@@ -1394,7 +1394,9 @@ mod tests {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-            engine_data: Some(json!({"routed_experts": {"unexpected": "object"}})),
+            engine_data: Some(Box::new(
+                json!({"routed_experts": {"unexpected": "object"}}),
+            )),
             ..Default::default()
         })]);
 
@@ -1415,7 +1417,7 @@ mod tests {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-            engine_data: Some(json!({"sampling_mask": "invalid"})),
+            engine_data: Some(Box::new(json!({"sampling_mask": "invalid"}))),
             ..Default::default()
         })]);
 
@@ -1436,7 +1438,7 @@ mod tests {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-            engine_data: Some(json!({"sampling_mask": [[1], [2]]})),
+            engine_data: Some(Box::new(json!({"sampling_mask": [[1], [2]]}))),
             ..Default::default()
         })]);
 
@@ -1453,7 +1455,7 @@ mod tests {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-            disaggregated_params: Some(json!({"source": "terminal-fallback"})),
+            disaggregated_params: Some(Box::new(json!({"source": "terminal-fallback"}))),
             ..Default::default()
         })]);
 
@@ -1473,15 +1475,15 @@ mod tests {
             Annotated::from_data(LLMEngineOutput {
                 token_ids: vec![100],
                 index: Some(0),
-                engine_data: Some(json!({
+                engine_data: Some(Box::new(json!({
                     "kv_transfer_params": {"source": "engine-data"}
-                })),
+                }))),
                 ..Default::default()
             }),
             Annotated::from_data(LLMEngineOutput {
                 index: Some(0),
                 finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-                disaggregated_params: Some(json!({"source": "terminal-fallback"})),
+                disaggregated_params: Some(Box::new(json!({"source": "terminal-fallback"}))),
                 ..Default::default()
             }),
         ]);
@@ -1569,7 +1571,7 @@ mod tests {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Length),
-            engine_data: Some(json!({"prompt_logprobs": "invalid"})),
+            engine_data: Some(Box::new(json!({"prompt_logprobs": "invalid"}))),
             ..Default::default()
         })]);
 
@@ -1646,7 +1648,7 @@ mod tests {
         let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
             token_ids: vec![100],
             log_probs: Some(vec![-0.25, -0.5]),
-            engine_data: Some(json!({"prompt_logprobs": "invalid"})),
+            engine_data: Some(Box::new(json!({"prompt_logprobs": "invalid"}))),
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Length),
             ..Default::default()
@@ -1678,7 +1680,7 @@ mod tests {
                     bytes: None,
                 },
             ]]),
-            engine_data: Some(json!({
+            engine_data: Some(Box::new(json!({
                 "prompt_logprobs": [
                     null,
                     {
@@ -1689,7 +1691,7 @@ mod tests {
                         }
                     }
                 ]
-            })),
+            }))),
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Length),
             ..Default::default()

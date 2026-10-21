@@ -609,8 +609,8 @@ impl ResponseState {
             // carries the engine's usage -- including cached_prompt_tokens,
             // which the frontend forwards to the decode leg and which cannot be
             // reconstructed client-side.
-            completion_usage: Some(prefill_usage(reported, self.prompt_tokens)),
-            disaggregated_params: Some(disagg::session_to_json(session)?),
+            completion_usage: Some(Box::new(prefill_usage(reported, self.prompt_tokens))),
+            disaggregated_params: Some(Box::new(disagg::session_to_json(session)?)),
             ..Default::default()
         })
     }
@@ -748,10 +748,10 @@ impl ResponseState {
             top_logprobs,
             index: Some(0),
             finish_reason: Some(finish_reason),
-            completion_usage: Some(CompletionUsage {
+            completion_usage: Some(Box::new(CompletionUsage {
                 prompt_tokens_details: cached_prompt_tokens(cached_tokens, self.prompt_tokens),
                 ..usage(self.prompt_tokens, self.completion_tokens)
-            }),
+            })),
             ..Default::default()
         };
         terminal.stop_reason = stop_match.map(|matched| match matched {

@@ -762,12 +762,12 @@ async fn run_kv_hit_attempt(final_frame: LLMEngineOutput) -> (KvHitSnapshot, KvH
 async fn kv_cache_hit_complete_attempt_records_every_stage_once() {
     let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
         finish_reason: Some(FinishReason::Stop),
-        engine_data: Some(serde_json::json!({
+        engine_data: Some(Box::new(serde_json::json!({
             "kv_cache_hit": {
                 "prompt_tokens": 100,
                 "reused_tokens": 85,
             }
-        })),
+        }))),
         ..Default::default()
     })
     .await;
@@ -794,12 +794,12 @@ async fn kv_cache_hit_attempt_without_worker_report_contributes_zero() {
 async fn kv_cache_hit_cancelled_attempt_keeps_reported_reuse() {
     let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
         finish_reason: Some(FinishReason::Cancelled),
-        engine_data: Some(serde_json::json!({
+        engine_data: Some(Box::new(serde_json::json!({
             "kv_cache_hit": {
                 "prompt_tokens": 100,
                 "reused_tokens": 85,
             }
-        })),
+        }))),
         ..Default::default()
     })
     .await;
@@ -849,9 +849,9 @@ async fn kv_cache_hit_counts_immediately_once_in_selection_phase(#[case] reused:
     let _permit = tracker.set_phase(RequestPhase::Decode).await;
     guard
         .on_item(&Annotated::from_data(LLMEngineOutput {
-            engine_data: Some(serde_json::json!({"kv_cache_hit": {
+            engine_data: Some(Box::new(serde_json::json!({"kv_cache_hit": {
                 "prompt_tokens": 1, "reused_tokens": reused
-            }})),
+            }}))),
             ..Default::default()
         }))
         .await;
@@ -864,9 +864,9 @@ async fn kv_cache_hit_counts_immediately_once_in_selection_phase(#[case] reused:
     );
     guard
         .on_item(&Annotated::from_data(LLMEngineOutput {
-            engine_data: Some(serde_json::json!({"kv_cache_hit": {
+            engine_data: Some(Box::new(serde_json::json!({"kv_cache_hit": {
                 "prompt_tokens": 1, "reused_tokens": 9
-            }})),
+            }}))),
             ..Default::default()
         }))
         .await;
@@ -2281,13 +2281,13 @@ async fn classifier_uses_scheduler_token_basis() {
         .unwrap();
     guard.mark_dispatched();
     let output = LLMEngineOutput {
-        completion_usage: Some(dynamo_protocols::types::CompletionUsage {
+        completion_usage: Some(Box::new(dynamo_protocols::types::CompletionUsage {
             prompt_tokens: 5,
             completion_tokens: 6,
             total_tokens: 11,
             prompt_tokens_details: None,
             completion_tokens_details: None,
-        }),
+        })),
         ..Default::default()
     };
     guard.on_item(&Annotated::from_data(output)).await;

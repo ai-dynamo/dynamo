@@ -4922,7 +4922,7 @@ mod tests {
         /// prompt tokens on the final one.
         fn backend_success() -> Vec<Annotated<BackendOutput>> {
             let mut last = backend_output("world", vec![2, 3], Some(FinishReason::Stop));
-            last.completion_usage = Some(dynamo_protocols::types::CompletionUsage {
+            last.completion_usage = Some(Box::new(dynamo_protocols::types::CompletionUsage {
                 prompt_tokens: INPUT_TOKENS as u32,
                 completion_tokens: 3,
                 total_tokens: (INPUT_TOKENS + 3) as u32,
@@ -4931,7 +4931,7 @@ mod tests {
                     ..Default::default()
                 }),
                 ..Default::default()
-            });
+            }));
             vec![
                 Annotated::from_data(backend_output("Hello ", vec![1], None)),
                 Annotated::from_data(last),

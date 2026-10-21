@@ -440,7 +440,7 @@ async fn decode_request_replays_the_prefill_session() {
     let handoff = collect(&prefill, agent_request.clone())
         .await
         .into_iter()
-        .find_map(|output| output.disaggregated_params)
+        .find_map(|output| output.disaggregated_params.map(|params| *params))
         .expect("prefill handoff");
 
     // Phase 2: decode replays it.

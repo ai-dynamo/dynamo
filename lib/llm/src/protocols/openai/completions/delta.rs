@@ -215,7 +215,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             .response_fields
             .validate_metadata_upload_result(
                 delta.finish_reason.as_ref(),
-                delta.engine_data.as_ref(),
+                delta.engine_data.as_deref(),
             )
         {
             self.state.tracker_ref().record_finish();
@@ -264,7 +264,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
         let prompt_logprobs_payload = if self.state.options().response_fields.prompt_logprobs {
-            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?
+            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_deref())?
         } else {
             None
         };
@@ -275,7 +275,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
                 .build_response_nvext(NvExtResponseInput {
                     tracker: Some(self.state.tracker_ref()),
                     finish_reason: delta.finish_reason.as_ref(),
-                    engine_data: delta.engine_data,
+                    engine_data: delta.engine_data.map(|data| *data),
                     stop_reason,
                     completion_token_ids: completion_token_ids_for_nvext.as_deref(),
                     prompt_logprobs: prompt_logprobs_payload,
@@ -380,9 +380,9 @@ mod tests {
             disaggregated_params: None,
             worker_trace_link: None,
             // routed_experts rides the engine's opaque passthrough.
-            engine_data: Some(serde_json::json!({
+            engine_data: Some(Box::new(serde_json::json!({
                 "routed_experts": {"layer_0": [1, 3]}
-            })),
+            }))),
             encoder_result: None,
             routing_data: None,
             jailed_text: None,
@@ -415,14 +415,14 @@ mod tests {
         assert!(generator.tracker().total_time_ms().is_some());
         let mut output = final_backend_output();
         let result = serde_json::json!({"kind": "generation_artifact", "mode": "inline_base64", "inline": {"encoding": "base64", "data": "AQI="}, "backend_specific": {"a": [1, 2]}});
-        output.engine_data = Some(serde_json::json!({"metadata_upload": result}));
+        output.engine_data = Some(Box::new(serde_json::json!({"metadata_upload": result})));
         let response = generator.choice_from_postprocessor(output).unwrap();
         assert_eq!(response.nvext.unwrap()["metadata_upload"], result);
 
         let mut malformed = final_backend_output();
-        malformed.engine_data = Some(
+        malformed.engine_data = Some(Box::new(
             serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "mode": {"inline_base64": null}}}),
-        );
+        ));
         assert!(
             request
                 .response_generator("artifact-malformed".into())
@@ -479,11 +479,11 @@ mod tests {
             disaggregated_params: None,
             encoder_result: None,
             worker_trace_link: None,
-            engine_data: Some(serde_json::json!({
+            engine_data: Some(Box::new(serde_json::json!({
                 "kv_transfer_time_ms": 12.3,
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
-            })),
+            }))),
             routing_data: None,
             jailed_text: None,
         }
@@ -507,7 +507,8 @@ mod tests {
     #[test]
     fn test_malformed_prompt_logprobs_errors_only_when_requested() {
         let mut invalid_output = final_backend_output();
-        invalid_output.engine_data = Some(serde_json::json!({"prompt_logprobs": "invalid"}));
+        invalid_output.engine_data =
+            Some(Box::new(serde_json::json!({"prompt_logprobs": "invalid"})));
 
         create_test_request()
             .response_generator("req-prompt-logprobs-unrequested".to_string())

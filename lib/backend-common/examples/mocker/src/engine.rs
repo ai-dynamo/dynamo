@@ -535,10 +535,10 @@ impl LLMEngine for MockerBackend {
                             // no real KV transfer; the handle is opaque and
                             // exists only to exercise the wire format.
                             if is_prefill {
-                                terminal.disaggregated_params = Some(serde_json::json!({
+                                terminal.disaggregated_params = Some(Box::new(serde_json::json!({
                                     "mocker_handle": uuid.to_string(),
                                     "completed_tokens": [token_id],
-                                }));
+                                })));
                             }
                             yield Ok(terminal);
                             break;

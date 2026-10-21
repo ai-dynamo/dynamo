@@ -55,13 +55,13 @@ impl HasTokenIds for BackendOutput {
         &self.token_ids
     }
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
-        self.worker_trace_link.as_ref()
+        self.worker_trace_link.as_deref()
     }
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
-        self.jailed_text.as_ref()
+        self.jailed_text.as_deref()
     }
     fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage> {
-        self.completion_usage.as_mut()
+        self.completion_usage.as_deref_mut()
     }
 }
 
@@ -70,13 +70,13 @@ impl HasTokenIds for LLMEngineOutput {
         &self.token_ids
     }
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
-        self.worker_trace_link.as_ref()
+        self.worker_trace_link.as_deref()
     }
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
-        self.jailed_text.as_ref()
+        self.jailed_text.as_deref()
     }
     fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage> {
-        self.completion_usage.as_mut()
+        self.completion_usage.as_deref_mut()
     }
 }
 
@@ -296,6 +296,8 @@ where
             session_affinity,
         )
         .await?;
+        // `unfold` moves its state on every chunk; box it so that is a pointer copy.
+        let retry_manager = Box::new(retry_manager);
         let response_stream = stream::unfold(retry_manager, move |mut retry_manager| async move {
             retry_manager
                 .next()
@@ -497,7 +499,8 @@ where
                             MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
                         // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
                         // When no replacement is established, preserve the triggering stream error.
-                        if let Err(err) = self.new_stream(Some(migration_event)).await {
+                        // Boxed so this rare path does not inflate the future built per chunk.
+                        if let Err(err) = Box::pin(self.new_stream(Some(migration_event))).await {
                             tracing::warn!(error = ?err, "Cannot recreate stream");
                         } else {
                             self.release_replay_prompt_if_final();
@@ -3045,7 +3048,7 @@ mod tests {
                     );
                     let responses = stream::iter(vec![
                         Annotated::from_data(BackendOutput {
-                            jailed_text: Some("STOP".to_string().into()),
+                            jailed_text: Some(Box::new("STOP".to_string().into())),
                             ..create_mock_output(10).data.unwrap()
                         }),
                         Annotated::from_err(
@@ -3153,7 +3156,7 @@ mod tests {
                         .build(),
                 ));
             } else if let Some(last) = responses.last_mut().and_then(|r| r.data.as_mut()) {
-                last.completion_usage = Some(CompletionUsage {
+                last.completion_usage = Some(Box::new(CompletionUsage {
                     prompt_tokens,
                     completion_tokens: generated as u32,
                     total_tokens: prompt_tokens + generated as u32,
@@ -3167,7 +3170,7 @@ mod tests {
                             ..Default::default()
                         },
                     ),
-                });
+                }));
             }
             let ctx = Arc::new(Controller::new(self.context_id.clone()));
             Ok(ResponseStream::new(Box::pin(stream::iter(responses)), ctx))
@@ -3212,7 +3215,7 @@ mod tests {
             }
         }
         let prompts = prompts.lock().unwrap().clone();
-        (prompts, usage.expect("the final attempt reports usage"))
+        (prompts, *usage.expect("the final attempt reports usage"))
     }
 
     fn cached_tokens(usage: &CompletionUsage) -> Option<u32> {
@@ -3430,7 +3433,7 @@ mod tests {
                         if i == start
                             && let (Some(link), Some(data)) = (&link, out.data.as_mut())
                         {
-                            data.worker_trace_link = Some(link.clone());
+                            data.worker_trace_link = Some(Box::new(link.clone()));
                         }
                         if tx.send(out).await.is_err() {
                             return;

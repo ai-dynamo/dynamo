@@ -82,7 +82,7 @@ impl PrefillRouter {
                 while let Some(output) = prefill_response.next().await {
                     PrefillTask::check_output(&output)?;
                     if let Some(engine_data) = output.data.and_then(|data| data.engine_data) {
-                        prefill_output = Some(engine_data);
+                        prefill_output = Some(*engine_data);
                     }
                 }
                 // Bootstrap details unblock decode, but do not mean prefill is
@@ -116,7 +116,7 @@ impl PrefillRouter {
                 "Prefill router output has no data field".to_string(),
             ));
         };
-        let Some(disaggregated_params) = output.disaggregated_params.clone() else {
+        let Some(disaggregated_params) = output.disaggregated_params.as_deref().cloned() else {
             return Err(PrefillError::NoDisaggregatedParams(
                 "Prefill router output missing disaggregated_params".to_string(),
             ));
@@ -146,7 +146,7 @@ impl PrefillRouter {
                 disaggregated_params,
                 prompt_tokens_details,
             },
-            worker_link: output.worker_trace_link.clone(),
+            worker_link: output.worker_trace_link.as_deref().cloned(),
             completion,
         })
     }
@@ -195,7 +195,7 @@ mod tests {
 
     fn valid_prefill_output() -> Annotated<LLMEngineOutput> {
         Annotated::from_data(LLMEngineOutput {
-            disaggregated_params: Some(json!({})),
+            disaggregated_params: Some(Box::new(json!({}))),
             ..Default::default()
         })
     }
@@ -208,9 +208,9 @@ mod tests {
             Annotated::from_data(LLMEngineOutput::cancelled()),
         ] {
             let first = Annotated::from_data(LLMEngineOutput {
-                disaggregated_params: Some(json!({
+                disaggregated_params: Some(Box::new(json!({
                     "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
-                })),
+                }))),
                 ..Default::default()
             });
             let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -254,12 +254,12 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_drain_retains_teardown_guard_until_stream_finishes() {
         let first = Annotated::from_data(LLMEngineOutput {
-            disaggregated_params: Some(json!({
+            disaggregated_params: Some(Box::new(json!({
                 "bootstrap_host": "127.0.0.1",
                 "bootstrap_port": 1,
                 "bootstrap_room": "test",
                 "ctx_request_id": 42,
-            })),
+            }))),
             ..Default::default()
         });
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -363,7 +363,7 @@ mod tests {
     async fn length_limited_prefill_still_requires_handoff() {
         let output = LLMEngineOutput {
             finish_reason: Some(FinishReason::Length),
-            disaggregated_params: Some(json!({"ctx_request_id": 42})),
+            disaggregated_params: Some(Box::new(json!({"ctx_request_id": 42}))),
             ..Default::default()
         };
         let result = PrefillRouter::consume_prefill_stream(
@@ -384,7 +384,7 @@ mod tests {
     async fn unfinished_prefill_still_requires_handoff() {
         let output = LLMEngineOutput {
             finish_reason: None,
-            disaggregated_params: Some(json!({"ctx_request_id": 42})),
+            disaggregated_params: Some(Box::new(json!({"ctx_request_id": 42}))),
             ..Default::default()
         };
         let result = PrefillRouter::consume_prefill_stream(
@@ -409,7 +409,7 @@ mod tests {
         ] {
             let output = LLMEngineOutput {
                 finish_reason: None,
-                disaggregated_params: Some(disaggregated_params),
+                disaggregated_params: Some(Box::new(disaggregated_params)),
                 ..Default::default()
             };
             let result = PrefillRouter::consume_prefill_stream(

@@ -849,8 +849,8 @@ fn assert_http_completed(outputs: Outputs, request_id: &str) {
     assert_eq!(outputs[1].finish_reason, Some(FinishReason::Length));
     for (output, expected) in outputs.iter().zip(http::responses(request_id)) {
         assert_eq!(
-            output.engine_data,
-            Some(json!({"sglang_response": expected}))
+            output.engine_data.as_deref(),
+            Some(&json!({"sglang_response": expected}))
         );
     }
 }

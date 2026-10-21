@@ -1665,7 +1665,8 @@ async fn mixed_multimodal_media_is_forwarded_with_image_uuid_only() {
     let prefill_outputs = collect(&prefill, multimodal_request.clone()).await;
     let handoff = prefill_outputs[0]
         .disaggregated_params
-        .clone()
+        .as_deref()
+        .cloned()
         .expect("multimodal handoff");
 
     let mut decode_request = multimodal_request;
@@ -1755,7 +1756,8 @@ async fn assert_encoder_cache_handoff(mut source_request: PreprocessedRequest) {
     assert_eq!(encode_outputs[0].finish_reason, Some(FinishReason::Stop));
     let encoder_result = encode_outputs[0]
         .encoder_result
-        .clone()
+        .as_deref()
+        .cloned()
         .expect("encoder result");
     assert_eq!(encoder_result, expected_ec);
     assert_eq!(
@@ -1829,7 +1831,8 @@ async fn assert_encoder_cache_handoff(mut source_request: PreprocessedRequest) {
             let mut decode_request = downstream_request;
             let mut disaggregated_params = outputs[0]
                 .disaggregated_params
-                .clone()
+                .as_deref()
+                .cloned()
                 .expect("prefill KV handoff");
             disaggregated_params
                 .as_object_mut()
@@ -2651,7 +2654,8 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
         let prefill_outputs = collect(&prefill, request()).await;
         let handoff = prefill_outputs[0]
             .disaggregated_params
-            .clone()
+            .as_deref()
+            .cloned()
             .expect("handoff");
         assert_eq!(prefill_outputs[0].token_ids, Vec::<u32>::new());
         assert_eq!(handoff["nested"]["flags"], json!([true, null, "opaque"]));

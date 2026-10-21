@@ -414,7 +414,7 @@ impl NativeHttp {
                 // successful response headers so decode can rendezvous while
                 // prefill runs.
                 yield Ok(LLMEngineOutput {
-                    disaggregated_params: Some(handoff),
+                    disaggregated_params: Some(Box::new(handoff)),
                     ..Default::default()
                 });
             }
@@ -590,9 +590,9 @@ fn output(
         (None, Some(finish)) => decode_terminal(&response["meta_info"], finish),
         (None, None) => LLMEngineOutput::default(),
     };
-    output.engine_data = Some(serde_json::json!({"sglang_response": response}));
+    output.engine_data = Some(Box::new(serde_json::json!({"sglang_response": response})));
     if finished {
-        output.disaggregated_params = prefill_handoff.take();
+        output.disaggregated_params = prefill_handoff.take().map(Box::new);
     }
     (output, finished)
 }
@@ -633,7 +633,7 @@ fn decode_terminal(meta: &Value, finish: &Value) -> LLMEngineOutput {
                 cached_tokens: Some(cached_tokens),
                 ..Default::default()
             });
-        output.completion_usage = Some(completion_usage);
+        output.completion_usage = Some(Box::new(completion_usage));
     }
     output
 }
@@ -1004,7 +1004,7 @@ mod tests {
         assert!(!is_terminal);
         assert_eq!(
             converted.engine_data,
-            Some(json!({"sglang_response": chunk}))
+            Some(Box::new(json!({"sglang_response": chunk})))
         );
         assert!(converted.finish_reason.is_none());
         assert!(converted.disaggregated_params.is_none());
@@ -1014,7 +1014,7 @@ mod tests {
         assert!(is_terminal);
         assert_eq!(
             converted.engine_data,
-            Some(json!({"sglang_response": terminal}))
+            Some(Box::new(json!({"sglang_response": terminal})))
         );
         assert_eq!(converted.finish_reason, Some(FinishReason::Length));
         assert!(converted.disaggregated_params.is_none());
@@ -1028,7 +1028,7 @@ mod tests {
         );
         assert_eq!(
             converted.engine_data,
-            Some(json!({"sglang_response": failure}))
+            Some(Box::new(json!({"sglang_response": failure})))
         );
     }
 
@@ -1347,7 +1347,7 @@ mod tests {
         let terminal = stream.next().await.unwrap().unwrap();
         assert_eq!(
             terminal.engine_data,
-            Some(json!({"sglang_response": response}))
+            Some(Box::new(json!({"sglang_response": response})))
         );
         assert!(terminal.token_ids.is_empty());
         assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
