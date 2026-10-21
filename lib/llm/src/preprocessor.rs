@@ -7008,7 +7008,8 @@ impl OpenAIPreprocessor {
             saw_terminal_error: false,
         };
 
-        stream::unfold(state, |mut state| async move {
+        // `unfold` moves its state on every chunk; box it so that is a pointer copy.
+        stream::unfold(Box::new(state), |mut state| async move {
             if let Some(response) = state.stream.next().await {
                 // An error is terminal for the flush: latch it so the
                 // end-of-stream branch below stays quiet. The chunk still takes
@@ -7030,7 +7031,7 @@ impl OpenAIPreprocessor {
                         defer_reasoning_for_nonempty_content,
                         finalize_parser_at_finish,
                         ..
-                    } = &mut state;
+                    } = &mut *state;
                     let parser_name = &*parser_name;
                     let prompt_injected_reasoning = *prompt_injected_reasoning;
                     let bypass_bare_guided_json = *bypass_bare_guided_json;
@@ -7628,7 +7629,8 @@ impl OpenAIPreprocessor {
             eof_flushed: false,
         };
 
-        stream::unfold(state, |mut state| async move {
+        // `unfold` moves its state on every chunk; box it so that is a pointer copy.
+        stream::unfold(Box::new(state), |mut state| async move {
             if let Some(mut response) = state.stream.next().await {
                 let Some(mut data) = response.data.take() else {
                     return Some((response, state));
