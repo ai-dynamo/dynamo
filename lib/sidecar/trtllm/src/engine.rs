@@ -4,6 +4,7 @@
 //! Dynamo backend for TensorRT-LLM's OpenEngine (`openengine.v1`) gRPC server.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -14,7 +15,8 @@ use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
 };
 use futures::stream::BoxStream;
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, OnceCell};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
@@ -23,6 +25,12 @@ use crate::convert::{ResponseState, build_generate_request};
 use crate::model::ConfiguredModel;
 
 const ALREADY_STARTED: &str = "TensorRT-LLM sidecar has already started";
+const DISCOVERY_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+struct FailedDiscovery {
+    error: DynamoError,
+    retry_at: Instant,
+}
 
 /// Terminal output emitted when a request is cancelled, carrying the usage
 /// accumulated so far.
@@ -41,6 +49,7 @@ pub struct TrtllmSidecarEngine {
     connection: OnceCell<(TrtllmClient, ModelLimits)>,
     started: OnceCell<()>,
     rediscovered_limits: OnceCell<ModelLimits>,
+    discovery_failure: Mutex<Option<FailedDiscovery>>,
     cancel: CancellationToken,
 }
 
@@ -59,6 +68,7 @@ impl TrtllmSidecarEngine {
             connection: OnceCell::new(),
             started: OnceCell::new(),
             rediscovered_limits: OnceCell::new(),
+            discovery_failure: Mutex::new(None),
             cancel: CancellationToken::new(),
         }
     }
@@ -185,7 +195,17 @@ impl TrtllmSidecarEngine {
             return Ok(initial);
         }
 
-        self.rediscovered_limits
+        // Serialize attempts and retain failures through the retry delay, so waiters
+        // share a failed RPC instead of each spending another RPC timeout.
+        let arrived_at = Instant::now();
+        let mut failure = self.discovery_failure.lock().await;
+        if let Some(failure) = &*failure
+            && arrived_at < failure.retry_at
+        {
+            return Err(failure.error.clone());
+        }
+        let result: Result<ModelLimits, DynamoError> = self
+            .rediscovered_limits
             .get_or_try_init(|| async {
                 match client.model_limits(&self.model.source).await? {
                     ModelInfoResponse::Available(mut reported) => {
@@ -209,7 +229,12 @@ impl TrtllmSidecarEngine {
                 }
             })
             .await
-            .copied()
+            .copied();
+        *failure = result.as_ref().err().map(|error| FailedDiscovery {
+            error: error.clone(),
+            retry_at: Instant::now() + DISCOVERY_RETRY_DELAY,
+        });
+        result
     }
 
     async fn bootstrap(
@@ -356,7 +381,6 @@ impl LLMEngine for TrtllmSidecarEngine {
             .filter(|_| self.started.initialized())
             .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let limits = self.limits_for_request(client, *limits, &request).await?;
         let mut state = ResponseState::new(&request, self.mode);
         // A decode request that took a handoff has KV transferred into it, and
         // the transceiver releases those blocks when the engine finishes the
@@ -367,13 +391,6 @@ impl LLMEngine for TrtllmSidecarEngine {
         // consumer. A decode-mode request without a handoff ran locally and
         // has nothing to strand.
         let needs_cancellation_deferral = self.mode.is_decode() && request.prefill_result.is_some();
-        let proto_request = build_generate_request(
-            request,
-            &request_id,
-            &self.model.source,
-            Some(limits),
-            self.mode,
-        )?;
         let stopped_ctx = ctx.inner_arc();
         // Hoisted: `stopped()` is an async-trait method, so re-creating it per
         // streamed chunk costs a boxed future and a waker registration on every
@@ -381,6 +398,24 @@ impl LLMEngine for TrtllmSidecarEngine {
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
         let shutdown = self.cancel.child_token();
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
+
+        let limits = tokio::select! {
+            biased;
+            _ = &mut request_cancellation, if !needs_cancellation_deferral => None,
+            _ = &mut shutdown_cancellation => None,
+            result = self.limits_for_request(client, *limits, &request) => Some(result?),
+        };
+        let Some(limits) = limits else {
+            let output = cancelled(&state);
+            return Ok(Box::pin(futures::stream::once(async move { Ok(output) })));
+        };
+        let proto_request = build_generate_request(
+            request,
+            &request_id,
+            &self.model.source,
+            Some(limits),
+            self.mode,
+        )?;
 
         // The same deferral applies here, not just to the streaming loop below.
         // `generate` sends the request and then awaits response headers, so

@@ -54,6 +54,7 @@ pub(crate) fn request() -> PreprocessedRequest {
 pub(crate) fn limits(context_length: u32) -> Option<ModelLimits> {
     Some(ModelLimits {
         context_length: Some(context_length),
+        engine_context_length: Some(context_length),
         max_output_tokens: None,
         supported_media: Some(SupportedMedia::default()),
     })
@@ -62,6 +63,7 @@ pub(crate) fn limits(context_length: u32) -> Option<ModelLimits> {
 pub(crate) fn image_limits(context_length: u32) -> Option<ModelLimits> {
     Some(ModelLimits {
         context_length: Some(context_length),
+        engine_context_length: Some(context_length),
         max_output_tokens: None,
         supported_media: Some(SupportedMedia {
             image: true,
@@ -73,6 +75,7 @@ pub(crate) fn image_limits(context_length: u32) -> Option<ModelLimits> {
 pub(crate) fn image_video_limits(context_length: u32) -> Option<ModelLimits> {
     Some(ModelLimits {
         context_length: Some(context_length),
+        engine_context_length: Some(context_length),
         max_output_tokens: None,
         supported_media: Some(SupportedMedia {
             image: true,

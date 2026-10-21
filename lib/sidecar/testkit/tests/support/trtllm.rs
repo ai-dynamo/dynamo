@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
@@ -15,7 +16,7 @@ use dynamo_trtllm_mocker::{MockerServerConfig, ServerMode, TrtllmMockerService};
 use dynamo_trtllm_sidecar::TrtllmSidecarEngine;
 use dynamo_trtllm_sidecar::proto::{
     self as pb,
-    control_server::ControlServer,
+    control_server::{Control, ControlServer},
     inference_server::{Inference, InferenceServer},
 };
 use futures::stream::BoxStream;
@@ -32,9 +33,51 @@ pub struct Fixture {
     service: TrtllmMockerService,
     server: TestServer,
     scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
+    pub discovery: Arc<Discovery>,
+}
+
+#[derive(Default)]
+pub struct Discovery {
+    pub calls: AtomicUsize,
+    pub unavailable: AtomicBool,
+    pub hold: AtomicBool,
+    pub portable_image: AtomicBool,
+    pub advertises_image: AtomicBool,
+    release: tokio::sync::Notify,
 }
 
 impl Fixture {
+    pub fn release_discovery(&self) {
+        self.discovery.hold.store(false, Ordering::SeqCst);
+        self.discovery.release.notify_waiters();
+    }
+
+    pub fn engine_with_context_length(&self, context_length: u32) -> TrtllmSidecarEngine {
+        self.make_engine(Some(context_length))
+    }
+
+    fn make_engine(&self, context_length: Option<u32>) -> TrtllmSidecarEngine {
+        let mut args = vec![
+            "dynamo-trtllm-sidecar".into(),
+            "--grpc-endpoint".into(),
+            self.server.endpoint(),
+            "--model-path".into(),
+            self.config.model.clone(),
+            "--disaggregation-mode".into(),
+            self.config.disaggregation_mode.to_string(),
+            "--grpc-connections".into(),
+            self.config.connections.to_string(),
+            "--grpc-startup-deadline-secs".into(),
+            "5".into(),
+            "--grpc-connect-attempt-timeout-secs".into(),
+            "1".into(),
+        ];
+        if let Some(context_length) = context_length {
+            args.extend(["--context-length".into(), context_length.to_string()]);
+        }
+        TrtllmSidecarEngine::from_args(args).unwrap().0
+    }
+
     pub fn respond(&self, request_id: &str, responses: Vec<pb::GenerateResponse>) {
         assert!(
             self.scripted
@@ -74,7 +117,11 @@ impl SidecarFixture for Fixture {
             inner: service.clone(),
             control,
         };
-        let control_service = service.clone();
+        let discovery = Arc::new(Discovery::default());
+        let control_service = ControlledControl {
+            inner: service.clone(),
+            discovery: discovery.clone(),
+        };
         let server = TestServer::start(move |listener, shutdown| async move {
             tonic::transport::Server::builder()
                 .add_service(InferenceServer::new(controlled))
@@ -92,27 +139,12 @@ impl SidecarFixture for Fixture {
             service,
             server,
             scripted,
+            discovery,
         }
     }
 
     async fn engine(&self) -> Self::Engine {
-        TrtllmSidecarEngine::from_args(vec![
-            "dynamo-trtllm-sidecar".into(),
-            "--grpc-endpoint".into(),
-            self.server.endpoint(),
-            "--model-path".into(),
-            self.config.model.clone(),
-            "--disaggregation-mode".into(),
-            self.config.disaggregation_mode.to_string(),
-            "--grpc-connections".into(),
-            self.config.connections.to_string(),
-            "--grpc-startup-deadline-secs".into(),
-            "5".into(),
-            "--grpc-connect-attempt-timeout-secs".into(),
-            "1".into(),
-        ])
-        .unwrap()
-        .0
+        self.make_engine(None)
     }
 
     fn eof_error() -> BackendError {
@@ -136,6 +168,100 @@ impl SidecarFixture for Fixture {
 
     async fn shutdown(&mut self) {
         self.server.shutdown().await.unwrap();
+    }
+}
+
+struct ControlledControl {
+    inner: TrtllmMockerService,
+    discovery: Arc<Discovery>,
+}
+
+#[tonic::async_trait]
+impl Control for ControlledControl {
+    async fn get_model_info(
+        &self,
+        request: Request<pb::GetModelInfoRequest>,
+    ) -> Result<Response<pb::ModelInfo>, Status> {
+        let released = self.discovery.release.notified();
+        self.discovery.calls.fetch_add(1, Ordering::SeqCst);
+        if self.discovery.hold.load(Ordering::SeqCst) {
+            released.await;
+        }
+        if self.discovery.unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("discovery temporarily unavailable"));
+        }
+        let mut response = self.inner.get_model_info(request).await?;
+        let info = response.get_mut();
+        info.supports_multimodal = Some(self.discovery.portable_image.load(Ordering::SeqCst));
+        let modalities = if self.discovery.advertises_image.load(Ordering::SeqCst) {
+            vec!["image"]
+        } else {
+            vec![]
+        };
+        info.extra = Some(
+            dynamo_sidecar_common::json_to_struct(
+                serde_json::json!({"trtllm_supported_modalities": modalities}),
+                "test capabilities",
+            )
+            .unwrap(),
+        );
+        Ok(response)
+    }
+
+    async fn get_server_info(
+        &self,
+        request: Request<pb::GetServerInfoRequest>,
+    ) -> Result<Response<pb::ServerInfo>, Status> {
+        self.inner.get_server_info(request).await
+    }
+    async fn get_load(
+        &self,
+        request: Request<pb::GetLoadRequest>,
+    ) -> Result<Response<pb::LoadInfo>, Status> {
+        self.inner.get_load(request).await
+    }
+    async fn health(
+        &self,
+        request: Request<pb::HealthRequest>,
+    ) -> Result<Response<pb::HealthResponse>, Status> {
+        self.inner.health(request).await
+    }
+    async fn abort(
+        &self,
+        request: Request<pb::AbortRequest>,
+    ) -> Result<Response<pb::AbortResponse>, Status> {
+        self.inner.abort(request).await
+    }
+    async fn load_lora(
+        &self,
+        request: Request<pb::LoadLoraRequest>,
+    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
+        self.inner.load_lora(request).await
+    }
+    async fn unload_lora(
+        &self,
+        request: Request<pb::UnloadLoraRequest>,
+    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
+        self.inner.unload_lora(request).await
+    }
+    async fn list_loras(
+        &self,
+        request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        self.inner.list_loras(request).await
+    }
+    async fn get_kv_event_sources(
+        &self,
+        request: Request<pb::GetKvEventSourcesRequest>,
+    ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
+        self.inner.get_kv_event_sources(request).await
+    }
+    type SubscribeKvEventsStream = <TrtllmMockerService as Control>::SubscribeKvEventsStream;
+    async fn subscribe_kv_events(
+        &self,
+        request: Request<pb::SubscribeKvEventsRequest>,
+    ) -> Result<Response<Self::SubscribeKvEventsStream>, Status> {
+        self.inner.subscribe_kv_events(request).await
     }
 }
 

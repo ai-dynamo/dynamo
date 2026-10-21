@@ -1033,6 +1033,8 @@ jobs:
       DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
       DD_API_KEY: ${{ secrets.DD_API_KEY }}
 
+  # Serialize checkpoint lifecycles through cleanup: each Snapshot install
+  # reserves resources on the same GPU nodes until its namespace is deleted.
   deploy-operator-checkpoint-vllm:
     name: vLLM Snapshot Operator Setup
     needs: [operator]
@@ -1066,8 +1068,12 @@ jobs:
 
   deploy-operator-checkpoint-sglang:
     name: SGLang Snapshot Operator Setup
-    needs: [operator]
-    if: github.event_name != 'workflow_dispatch'
+    needs: [operator, deploy-cleanup-checkpoint-vllm]
+    if: |
+      always() && !cancelled() &&
+      github.event_name != 'workflow_dispatch' &&
+      needs.operator.result == 'success' &&
+      needs.deploy-cleanup-checkpoint-vllm.result == 'success'
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read
@@ -1095,10 +1101,17 @@ jobs:
         model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
         model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
+  # Check both cleanups so a failed vLLM cleanup cannot be bypassed when
+  # the blocked SGLang lifecycle only runs its no-op cleanup.
   deploy-operator-checkpoint-trtllm:
     name: TRTLLM Snapshot Operator Setup
-    needs: [operator]
-    if: github.event_name != 'workflow_dispatch'
+    needs: [operator, deploy-cleanup-checkpoint-vllm, deploy-cleanup-checkpoint-sglang]
+    if: |
+      always() && !cancelled() &&
+      github.event_name != 'workflow_dispatch' &&
+      needs.operator.result == 'success' &&
+      needs.deploy-cleanup-checkpoint-vllm.result == 'success' &&
+      needs.deploy-cleanup-checkpoint-sglang.result == 'success'
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read
@@ -1179,6 +1192,7 @@ jobs:
     name: SGLang Snapshot Agent Setup
     needs: [deploy-operator-checkpoint-sglang]
     if: |
+      always() && !cancelled() &&
       github.event_name != 'workflow_dispatch' &&
       needs.deploy-operator-checkpoint-sglang.result == 'success'
     runs-on: prod-deploy-tester-v1
@@ -1228,6 +1242,7 @@ jobs:
     name: TRTLLM Snapshot Agent Setup
     needs: [deploy-operator-checkpoint-trtllm]
     if: |
+      always() && !cancelled() &&
       github.event_name != 'workflow_dispatch' &&
       needs.deploy-operator-checkpoint-trtllm.result == 'success'
     runs-on: prod-deploy-tester-v1

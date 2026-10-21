@@ -162,6 +162,26 @@ class BuiltinLoadPredict:
         if math.isfinite(osl):
             self._osl_predictor.add_data_point(osl)
 
+    def prepare_reconfiguration(self, observations: list[TrafficObservation]) -> None:
+        for observation in observations:
+            self._observe_load(observation)
+        for predictor in (
+            self._num_req_predictor,
+            self._isl_predictor,
+            self._osl_predictor,
+        ):
+            predictor.prepare()
+
+    def install_prepared_predictors(self, prepared: BuiltinLoadPredict) -> None:
+        # Keep live KV-hit/speculation metadata owned by this plugin. Only the
+        # forecast state and its request-shape history come from the candidate.
+        self._num_req_predictor = prepared._num_req_predictor
+        self._isl_predictor = prepared._isl_predictor
+        self._osl_predictor = prepared._osl_predictor
+        self._last_observed_isl = prepared._last_observed_isl
+        self._last_observed_osl = prepared._last_observed_osl
+        self._seen_live_traffic = prepared._seen_live_traffic
+
     def _observe_traffic(self, traffic: TrafficObservation) -> None:
         self._observe_load(traffic)
         if traffic.kv_hit_rate is not None and not math.isnan(traffic.kv_hit_rate):

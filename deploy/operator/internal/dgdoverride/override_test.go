@@ -110,6 +110,70 @@ func TestApplyVersionMatrix(t *testing.T) {
 	}
 }
 
+// A v1alpha1 envFromSecret override must reach the v1beta1 main container
+// even when the blueprint's main container already has envFrom.
+func TestApplyAlphaEnvFromSecretKeepsBlueprintEnvFrom(t *testing.T) {
+	t.Parallel()
+
+	blueprint := mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: frontend-image
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  - name: Worker
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: worker-image
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+`)
+	override := mustObject(t, `
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+spec:
+  services:
+    Frontend:
+      envFromSecret: qa-probe-secret
+    Worker:
+      envFromSecret: qa-probe-secret
+`)
+
+	result, _, err := Apply(blueprint, override)
+	require.NoError(t, err)
+	assert.Equal(t, "nvidia.com/v1beta1", result.GetAPIVersion())
+	for _, name := range []string{"Frontend", "Worker"} {
+		component := mustBetaComponent(t, result, name)
+		containers := mustNestedSlice(t, component, "podTemplate", "spec", "containers")
+		main := findNamedObject(t, containers, "main")
+		require.NotNil(t, main, "missing %s main container", name)
+		envFrom, _, err := unstructured.NestedSlice(main, "envFrom")
+		require.NoError(t, err)
+		secrets := []string{}
+		for _, entry := range envFrom {
+			secretName, _, err := unstructured.NestedString(entry.(map[string]interface{}), "secretRef", "name")
+			require.NoError(t, err)
+			secrets = append(secrets, secretName)
+		}
+		assert.Equal(t, []string{"hf-token-secret", "qa-probe-secret"}, secrets, name)
+	}
+}
+
 func TestApplyUsesStructuralListSemantics(t *testing.T) {
 	t.Parallel()
 

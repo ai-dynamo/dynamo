@@ -206,6 +206,11 @@ const testCases = [
     desc: 'shared sidecar test changes trigger the TensorRT-LLM sidecar E2E'
   },
   {
+    file: 'tests/utils/trtllm_media_overlay.py',
+    expect: { sidecar: true, trtllm: true },
+    desc: 'media helper changes trigger the TensorRT-LLM sidecar E2E'
+  },
+  {
     file: 'lib/sidecar/vllm/deploy/agg.yaml',
     expect: { sidecar: true, rust: false, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'sidecar deployment config avoids Rust and E2E checks'

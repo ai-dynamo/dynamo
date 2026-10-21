@@ -266,6 +266,29 @@ fn image_media_requires_the_loaded_models_advertised_capability() {
 }
 
 #[test]
+fn images_reject_unknown_or_overridden_engine_windows() {
+    for engine_window in [None, Some(32768)] {
+        for max_tokens in [None, Some(1)] {
+            let mut req = request();
+            add_images(&mut req, ["https://example.com/image.png"]);
+            req.stop_conditions.max_tokens = max_tokens;
+            let limits = Some(ModelLimits {
+                context_length: Some(4096),
+                engine_context_length: engine_window,
+                supported_media: Some(SupportedMedia {
+                    image: true,
+                    video: true,
+                }),
+                ..Default::default()
+            });
+            let error = build_generate_request(req, "req", "model", limits, AGG)
+                .expect_err("media expansion cannot honor a different window");
+            assert!(error.to_string().contains("--context-length to match"));
+        }
+    }
+}
+
+#[test]
 fn unsupported_media_modalities_and_sources_are_rejected() {
     let mut req = request();
     req.multi_modal_data = Some(HashMap::from([(
@@ -324,6 +347,34 @@ fn image_metadata_that_cannot_be_honored_is_rejected() {
     let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
         .expect_err("media I/O overrides cannot be dropped");
     assert!(error.to_string().contains("media_io_kwargs"));
+}
+
+#[test]
+fn visible_stop_tokens_stop_in_engine_and_stay_in_output() {
+    let mut req = request();
+    req.stop_conditions.stop_token_ids = Some(vec![7]);
+    req.stop_conditions.stop_token_ids_hidden = Some(vec![2, 200002]);
+    req.stop_conditions.stop_token_ids_visible = Some(vec![200012, 7]);
+    let proto = build_generate_request(req, "req", "model", None, AGG).expect("build");
+    let stopping = proto.stopping.unwrap();
+    assert_eq!(stopping.include_stop_in_output, Some(true));
+    let stop_ids: Vec<_> = stopping
+        .conditions
+        .iter()
+        .filter_map(|condition| match condition.condition {
+            Some(pb::stop_condition::Condition::StopTokenId(id)) => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stop_ids, [2, 7, 200002, 200012]);
+}
+
+#[test]
+fn empty_visible_stop_tokens_leave_stop_trimming_on() {
+    let mut req = request();
+    req.stop_conditions.stop_token_ids_visible = Some(Vec::new());
+    let proto = build_generate_request(req, "req", "model", None, AGG).expect("build");
+    assert_eq!(proto.stopping.unwrap().include_stop_in_output, None);
 }
 
 #[test]
@@ -446,6 +497,7 @@ fn the_derived_max_tokens_respects_the_engines_output_cap() {
             context_length: Some(4096),
             max_output_tokens: Some(256),
             supported_media: Some(SupportedMedia::default()),
+            ..Default::default()
         }),
         AGG,
     )

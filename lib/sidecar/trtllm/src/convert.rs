@@ -81,6 +81,7 @@ pub(crate) fn build_generate_request(
         .map(|context| context.session_id.trim())
         .filter(|session_id| !session_id.is_empty())
         .map(str::to_string);
+    let include_stop_in_output = has_visible_stop_tokens(&request).then_some(true);
     let token_ids = Arc::unwrap_or_clone(request.token_ids);
 
     Ok(pb::GenerateRequest {
@@ -113,10 +114,10 @@ pub(crate) fn build_generate_request(
             min_tokens: stop.min_tokens,
             conditions,
             ignore_eos: stop.ignore_eos,
-            // `include_stop_in_output` retains matched stop *strings*; the
-            // request-level flag is rejected in `validate_request`, so leave it
-            // unset (the server strips them).
-            include_stop_in_output: None,
+            // Keeps a matched visible stop token (e.g. Harmony's `<|call|>`) in
+            // the output. A visible token equal to `end_id` finishes as END_ID
+            // and may still be dropped.
+            include_stop_in_output,
         }),
         response: Some(pb::ResponseOptions {
             // A prefill worker streams no tokens to the client, but it must
@@ -275,6 +276,15 @@ fn media(
 
     if total_items == 0 {
         return Ok(Vec::new());
+    }
+    if let Some(limits) = limits
+        && (limits.engine_context_length.is_none()
+            || limits.context_length != limits.engine_context_length)
+    {
+        return Err(client::invalid_argument(
+            "media requests require --context-length to match the window reported by \
+             TensorRT-LLM; the sidecar cannot enforce a different window after media expansion",
+        ));
     }
     let ordered_items: Vec<(MediaKind, usize)> = match request.multi_modal_order.take() {
         Some(order) => {
@@ -500,12 +510,15 @@ fn stop_conditions(request: &PreprocessedRequest) -> Vec<pb::StopCondition> {
     conditions
 }
 
+/// TensorRT-LLM 1.3.0rc29's `min_tokens` holds back only `end_id`, so any of
+/// these can end generation early (NVIDIA/TensorRT-LLM#20188).
 fn stop_token_ids(request: &PreprocessedRequest) -> Vec<u32> {
     let stop = &request.stop_conditions;
     let mut ids = BTreeSet::new();
     for values in [
         stop.stop_token_ids.as_ref(),
         stop.stop_token_ids_hidden.as_ref(),
+        stop.stop_token_ids_visible.as_ref(),
     ]
     .into_iter()
     .flatten()
@@ -513,6 +526,31 @@ fn stop_token_ids(request: &PreprocessedRequest) -> Vec<u32> {
         ids.extend(values.iter().copied());
     }
     ids.into_iter().collect()
+}
+
+fn has_visible_stop_tokens(request: &PreprocessedRequest) -> bool {
+    request
+        .stop_conditions
+        .stop_token_ids_visible
+        .as_ref()
+        .is_some_and(|ids| !ids.is_empty())
+}
+
+/// Stop IDs the engine trims by default but returns once
+/// `include_stop_in_output` is set for visible stops.
+fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
+    let visible = request
+        .stop_conditions
+        .stop_token_ids_visible
+        .as_deref()
+        .unwrap_or_default();
+    if visible.is_empty() {
+        return BTreeSet::new();
+    }
+    stop_token_ids(request)
+        .into_iter()
+        .filter(|id| !visible.contains(id))
+        .collect()
 }
 
 fn guided_decoding(
@@ -602,20 +640,6 @@ fn validate_request(
         ));
     }
     if request
-        .stop_conditions
-        .stop_token_ids_visible
-        .as_ref()
-        .is_some_and(|ids| !ids.is_empty())
-    {
-        // A visible stop token must halt generation *and* stay in the output.
-        // OpenEngine's stop conditions and single `include_stop_in_output` (stop
-        // *strings*) cannot honor that per token, so reject rather than silently
-        // drop or mis-retain them.
-        return Err(client::invalid_argument(
-            "visible stop token IDs are not supported by the TensorRT-LLM sidecar",
-        ));
-    }
-    if request
         .routing
         .as_ref()
         .and_then(|routing| routing.lora_name.as_deref())
@@ -674,10 +698,7 @@ fn validate_request(
     }
     let sampling = &request.sampling_options;
     if sampling.include_stop_str_in_output == Some(true) {
-        // Retaining stop *strings* maps to `include_stop_in_output`, but the
-        // sidecar rejects visible stop token IDs above; honoring string retention
-        // alone would be inconsistent, so reject until both are supported
-        // together.
+        // Would map to `include_stop_in_output`; not yet tested end to end.
         return Err(client::invalid_argument(
             "include_stop_str_in_output is not supported by the TensorRT-LLM sidecar",
         ));
@@ -701,6 +722,14 @@ pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
     output_logprobs: Option<u32>,
+    /// Every stop ID when visible stops are set, empty otherwise. The engine
+    /// stops on these, so one at the end of a delta is held for the terminal.
+    /// OpenEngine sends the matched stop before the `finished` event carrying
+    /// usage, and the frontend decoder drops everything after a visible stop.
+    held_stop_ids: BTreeSet<u32>,
+    /// See [`retained_hidden_stop_ids`]. Dropped when the terminal matched it.
+    hidden_stop_ids: BTreeSet<u32>,
+    pending_stop: Option<pb::TokenInfo>,
     phase: Phase,
 }
 
@@ -737,6 +766,13 @@ impl ResponseState {
             prompt_tokens: request.token_ids.len() as u32,
             completion_tokens: 0,
             output_logprobs: request.output_options.logprobs,
+            held_stop_ids: if has_visible_stop_tokens(request) {
+                stop_token_ids(request).into_iter().collect()
+            } else {
+                BTreeSet::new()
+            },
+            hidden_stop_ids: retained_hidden_stop_ids(request),
+            pending_stop: None,
             phase: if mode.is_prefill() {
                 Phase::Prefill { held: Vec::new() }
             } else {
@@ -838,10 +874,20 @@ impl ResponseState {
             self.completion_tokens = held.len() as u32;
             return Ok(None);
         }
-        let (token_ids, log_probs, top_logprobs) = self.map_tokens(token.tokens)?;
         self.completion_tokens = self
             .completion_tokens
-            .saturating_add(token_ids.len() as u32);
+            .saturating_add(token.tokens.len() as u32);
+        let mut tokens = token.tokens;
+        if let Some(pending) = self.pending_stop.take() {
+            tokens.insert(0, pending);
+        }
+        if tokens
+            .last()
+            .is_some_and(|info| self.held_stop_ids.contains(&info.token_id))
+        {
+            self.pending_stop = tokens.pop();
+        }
+        let (token_ids, log_probs, top_logprobs) = self.map_tokens(tokens)?;
         if token_ids.is_empty() {
             // A text-only delta (e.g. stop-string holdback): the sidecar streams
             // token IDs and lets the frontend detokenize, so there is nothing to
@@ -912,7 +958,7 @@ impl ResponseState {
         // silently truncate the completion. Any other reason is a genuine stop
         // during the context phase, and with no decode leg to run, it is the
         // whole answer.
-        let held = match &mut self.phase {
+        let mut held = match &mut self.phase {
             Phase::Prefill { held } if finish_reason == FinishReason::Length => {
                 return Err(client::protocol_error(format!(
                     "context request ended at its token budget without a kv_session handoff \
@@ -923,8 +969,18 @@ impl ResponseState {
                 )));
             }
             Phase::Prefill { held } => std::mem::take(held),
-            Phase::Stream { .. } => Vec::new(),
+            Phase::Stream { .. } => self.pending_stop.take().into_iter().collect(),
         };
+        let stop_match = finished
+            .stop_match
+            .and_then(|stop_match| stop_match.r#match);
+        if let Some(pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id)) =
+            stop_match
+            && self.hidden_stop_ids.contains(&id)
+            && held.last().is_some_and(|info| info.token_id == id)
+        {
+            held.pop();
+        }
 
         let (token_ids, log_probs, top_logprobs) = if held.is_empty() {
             (Vec::new(), None, None)
@@ -944,15 +1000,12 @@ impl ResponseState {
             }),
             ..Default::default()
         };
-        terminal.stop_reason = finished
-            .stop_match
-            .and_then(|stop_match| stop_match.r#match)
-            .map(|matched| match matched {
-                pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id) => {
-                    StopReason::Int(i64::from(id))
-                }
-                pb::stop_match::Match::StopText(text) => StopReason::String(text),
-            });
+        terminal.stop_reason = stop_match.map(|matched| match matched {
+            pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id) => {
+                StopReason::Int(i64::from(id))
+            }
+            pb::stop_match::Match::StopText(text) => StopReason::String(text),
+        });
         Ok(terminal)
     }
 

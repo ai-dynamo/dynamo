@@ -280,6 +280,10 @@ snapshot:
   - 'tests/deploy/test_dynamocheckpoint.py'
   - '.github/actions/setup-dynamo-operator/action.yml'
   - '.github/actions/setup-snapshot-agent/action.yml'
+  # Exercise the full checkpoint lifecycle when its scheduling or cleanup changes.
+  - '.github/actions/teardown-dynamo-operator/action.yml'
+  - '.github/workflows/pr.yaml'
+  - '.github/workflows/post-merge-ci.yml'
   # Where the pinned github.com/ai-dynamo/snapshot chart version/values live --
   # a version bump or install-config change must trigger the deploy-snapshot-
   # agent-checkpoint-*/deploy-test-checkpoint-* jobs, not just 'operator'.
@@ -368,6 +372,7 @@ sidecar:
   - 'lib/sidecar/**'
   - '.github/workflows/shared-build-sidecar.yml'
   - 'tests/serve/test_sidecar.py'
+  - 'tests/utils/trtllm_media_overlay.py'
   - 'tests/router/common.py'
   - 'tests/router/helper.py'
   - 'tests/router/router_process.py'
@@ -409,6 +414,7 @@ trtllm:
   - 'components/src/dynamo/trtllm/**'
   - 'lib/sidecar/trtllm/**'
   - 'tests/serve/test_sidecar.py'
+  - 'tests/utils/trtllm_media_overlay.py'
   - 'container/templates/trtllm_*'
   - '!**/*.md'
   - '!**/*.rst'
