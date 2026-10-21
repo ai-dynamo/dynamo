@@ -175,6 +175,17 @@ pub mod runtime {
         pub const PREFIX: &str = "DYN_COMPUTE_";
     }
 
+    /// Worker validation gates
+    pub mod validation {
+        /// Comma-separated loopback check URLs that hold the worker's model
+        /// card until each answers 200. Unset adds no gate.
+        pub const DYN_PUBLISH_GATE: &str = "DYN_PUBLISH_GATE";
+        /// Comma-separated loopback check URLs, called once the card is
+        /// published, that hold `/health` until each answers 200. Unset adds
+        /// no gate.
+        pub const DYN_READY_GATE: &str = "DYN_READY_GATE";
+    }
+
     /// Canary deployment configuration
     pub mod canary {
         /// Wait time in seconds for canary deployments

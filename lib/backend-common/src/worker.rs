@@ -1154,18 +1154,21 @@ impl Worker {
             .handler(ingress)
             .metrics_labels(metrics_labels)
             .graceful_shutdown(true);
-        if let Some(payload) = probe {
-            builder = builder.health_check_payload(payload);
-            // The runtime's `HealthCheckManager` fires the canary by looking
-            // up a `LocalAsyncEngine` for this endpoint name. Register the
-            // modality's JSON-shaped probe engine so the probe exercises the
-            // same `generate()` path as real traffic.
+        // The runtime's `HealthCheckManager` fires the canary, and the
+        // validation endpoint sends gate traffic, by looking up a
+        // `LocalAsyncEngine` for this endpoint name. Register the modality's
+        // JSON-shaped probe engine so both exercise the same `generate()` path
+        // as real traffic.
+        if probe.is_some() || endpoint.drt().worker_validation().is_some() {
             builder = builder.register_local_engine(probe_engine).map_err(|e| {
                 err(
                     ErrorType::Backend(BackendError::Unknown),
                     format!("register_local_engine: {e}"),
                 )
             })?;
+        }
+        if let Some(payload) = probe {
+            builder = builder.health_check_payload(payload);
         }
         // Readiness is this worker's to publish: it is not serviceable until every
         // mandatory endpoint is registered and the engine routes are open. The

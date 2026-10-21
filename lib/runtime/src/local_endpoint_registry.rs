@@ -24,10 +24,18 @@ pub type LocalAsyncEngine = Arc<
 ///
 /// This registry stores endpoints that are registered locally (in the same process)
 /// and allows them to be called directly without going through the network transport layer.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LocalEndpointRegistry {
     /// Map of endpoint name to async engine
     engines: Arc<DashMap<String, LocalAsyncEngine>>,
+    /// Number of registrations so far, for callers waiting on the first one
+    registrations: Arc<tokio::sync::watch::Sender<usize>>,
+}
+
+impl Default for LocalEndpointRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LocalEndpointRegistry {
@@ -35,7 +43,13 @@ impl LocalEndpointRegistry {
     pub fn new() -> Self {
         Self {
             engines: Arc::new(DashMap::new()),
+            registrations: Arc::new(tokio::sync::watch::channel(0).0),
         }
+    }
+
+    /// Watch the number of registrations made so far.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<usize> {
+        self.registrations.subscribe()
     }
 
     /// Register a local endpoint
@@ -47,6 +61,7 @@ impl LocalEndpointRegistry {
     pub fn register(&self, endpoint_name: String, engine: LocalAsyncEngine) {
         tracing::debug!("Registering local endpoint: {endpoint_name}");
         self.engines.insert(endpoint_name, engine);
+        self.registrations.send_modify(|count| *count += 1);
     }
 
     /// Get a registered local endpoint

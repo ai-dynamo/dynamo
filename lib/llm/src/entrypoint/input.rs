@@ -19,6 +19,7 @@ pub use common::{PreprocessedRouting, build_preprocessed_routing};
 pub mod endpoint;
 pub mod grpc;
 pub mod http;
+pub mod local_openai;
 pub mod text;
 
 use dynamo_runtime::protocols::ENDPOINT_SCHEME;

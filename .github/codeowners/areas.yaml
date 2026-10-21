@@ -250,6 +250,8 @@ areas:
   - components/src/dynamo/common/tests/
   - components/src/dynamo/common/utils/
   - components/src/dynamo/experimental/
+  - components/src/dynamo/validation/
+  - components/src/dynamo/validation/tests/
   - examples/backends/sample/
   - examples/common/
   - examples/custom_backend/
