@@ -53,6 +53,7 @@ pub struct DeltaGenerator {
     /// Choice indices for which the assistant role has already been emitted.
     emitted_role_choices: HashSet<u32>,
     suppress_top_logprobs: bool,
+    tool_call_eos_enabled: bool,
     /// Whether the unary response should include prompt logprobs at its root.
     should_return_prompt_logprobs: bool,
     /// Prompt logprobs may arrive before the terminal backend delta.
@@ -71,9 +72,15 @@ impl DeltaGenerator {
             service_tier: None,
             emitted_role_choices: HashSet::new(),
             suppress_top_logprobs: false,
+            tool_call_eos_enabled: false,
             should_return_prompt_logprobs: false,
             prompt_logprobs: None,
         }
+    }
+
+    /// Only the installed native turn grammar permits implicit tool termination.
+    pub(crate) fn enable_tool_call_eos(&mut self, enabled: bool) {
+        self.tool_call_eos_enabled = enabled;
     }
 
     /// Returns the request tracker. Tracking is enabled. For sharing with PreprocessedRequest.
@@ -201,6 +208,7 @@ impl DeltaGenerator {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
     }
 
@@ -227,6 +235,7 @@ impl DeltaGenerator {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
     }
 
@@ -301,6 +310,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // Create the streaming response.
         let index = delta.index.unwrap_or(0);
         let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
+        if self.tool_call_eos_enabled && delta.finish_reason == Some(common::FinishReason::EoS) {
+            stream_response.model_eos.push(index);
+        }
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
         // Kept at call site because it's a side effect on the tracker — not a gating decision.
@@ -436,6 +448,28 @@ mod tests {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn model_eos_requires_an_installed_turn_grammar() {
+        for enabled in [false, true] {
+            for reason in [
+                common::FinishReason::EoS,
+                common::FinishReason::Stop,
+                common::FinishReason::Length,
+                common::FinishReason::Cancelled,
+            ] {
+                let mut generator = create_test_request().response_generator("eos".into());
+                generator.enable_tool_call_eos(enabled);
+                let mut output = final_backend_output();
+                output.finish_reason = Some(reason.clone());
+                let response = generator.choice_from_postprocessor(output).unwrap();
+                assert_eq!(
+                    response.model_eos.contains(&0),
+                    enabled && reason == common::FinishReason::EoS
+                );
+            }
         }
     }
 

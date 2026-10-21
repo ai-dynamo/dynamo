@@ -192,6 +192,7 @@ fn make_stream_delta(
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     })
 }
 
@@ -915,6 +916,7 @@ fn make_stream_delta_with_reasoning(
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     })
 }
 

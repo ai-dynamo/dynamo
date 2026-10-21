@@ -40,9 +40,9 @@ use std::sync::LazyLock;
 use async_stream::stream;
 use dynamo_parsers::tool_calling::ToolDefinition;
 use dynamo_parsers_v2::{
-    ArgumentFraming, InvalidGuidedPayloadPolicy, Tool, ToolCallPolicy, UnifiedEvent, UnifiedParser,
-    UnifiedParserEvent, UnifiedParserInit, UnifiedParserOutput, UnifiedParserStartingState,
-    UnifiedToolOutputMode, create_unified_parser_for_family,
+    ArgumentFraming, InvalidGuidedPayloadPolicy, MalformedToolCallPolicy, Tool, ToolCallPolicy,
+    UnifiedEvent, UnifiedParser, UnifiedParserEvent, UnifiedParserInit, UnifiedParserOutput,
+    UnifiedParserStartingState, UnifiedToolOutputMode, create_unified_parser_for_family,
 };
 use dynamo_protocols::types::{
     ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
@@ -1129,12 +1129,17 @@ fn argument_framing(constraint: &GuidedToolConstraint) -> ArgumentFraming {
 }
 
 fn apply_argument_framing(
+    family: &str,
     parser: &mut dyn UnifiedParser,
     argument_framing: ArgumentFraming,
 ) -> anyhow::Result<()> {
-    if argument_framing != ArgumentFraming::default() {
+    if family == BEAM_UNIFIED_FAMILY || argument_framing != ArgumentFraming::default() {
         parser.set_tool_call_policy(ToolCallPolicy {
-            malformed: Default::default(),
+            malformed: if family == BEAM_UNIFIED_FAMILY {
+                MalformedToolCallPolicy::Reject
+            } else {
+                Default::default()
+            },
             argument_framing,
         })?;
     }
@@ -1730,6 +1735,7 @@ pub(crate) struct ChoiceState {
     /// The parser errored. Later chunks pass through as plain text instead of failing
     /// the request — a parser bug must not turn a served answer into a 500.
     failed: bool,
+    parse_error: Option<anyhow::Error>,
 }
 
 impl ChoiceState {
@@ -1765,7 +1771,7 @@ impl ChoiceState {
             tool_output_mode: tool_output_mode.clone(),
             invalid_guided_payload: invalid_guided_payload_policy(guided_streaming),
         })?;
-        apply_argument_framing(parser.as_mut(), argument_framing)?;
+        apply_argument_framing(family, parser.as_mut(), argument_framing)?;
         if let Some(prefix) = prefill.prefix {
             // Replay only consumed structural bytes; the grammar retains ownership
             // of an optional channel label that generation has not completed yet.
@@ -1801,6 +1807,7 @@ impl ChoiceState {
             pending_parsed_tool_calls: HashMap::new(),
             tool_emitted: false,
             failed: false,
+            parse_error: None,
         })
     }
 
@@ -1829,6 +1836,7 @@ impl ChoiceState {
             pending_parsed_tool_calls: HashMap::new(),
             tool_emitted: false,
             failed: false,
+            parse_error: None,
         })
     }
 
@@ -1902,6 +1910,11 @@ impl ChoiceState {
         let mut output = UnifiedParserOutput::default();
         match self.parser.parse_into(text, &mut output) {
             Ok(()) => output.events,
+            Err(error) if self.family == BEAM_UNIFIED_FAMILY => {
+                self.failed = true;
+                self.parse_error = Some(error);
+                Vec::new()
+            }
             Err(error) => {
                 tracing::warn!(
                     error = %error,
@@ -1979,6 +1992,10 @@ impl ChoiceState {
 
     /// Flush buffered partial state at end of stream.
     pub(crate) fn finish(&mut self) -> Vec<UnifiedParserEvent> {
+        self.finish_with_eos(false)
+    }
+
+    fn finish_with_eos(&mut self, confirmed_eos: bool) -> Vec<UnifiedParserEvent> {
         if self.failed {
             return Vec::new();
         }
@@ -2007,10 +2024,20 @@ impl ChoiceState {
         } else {
             self.parse_segment(&pending_qwen_opener)
         };
-        events.extend(match self.parser.finish() {
+        let finished = if confirmed_eos {
+            self.parser.finish_at_eos()
+        } else {
+            self.parser.finish()
+        };
+        events.extend(match finished {
             // `finish` now hands back the whole `UnifiedParserOutput`; this path only ever
             // wants the ordered events out of it.
             Ok(output) => output.events,
+            Err(error) if self.family == BEAM_UNIFIED_FAMILY => {
+                self.failed = true;
+                self.parse_error = Some(error);
+                Vec::new()
+            }
             Err(error) => {
                 tracing::warn!(
                     error = %error,
@@ -2419,6 +2446,30 @@ pub(crate) fn parse_complete_with_policy(
     tool_definitions: &[ToolDefinition],
     policy: UnifiedRequestPolicy,
 ) -> anyhow::Result<CompleteOutput> {
+    parse_complete_with_eos(
+        family,
+        content,
+        guided_tool_constraint,
+        tool_definitions,
+        policy,
+        false,
+    )
+}
+
+pub(crate) fn parse_complete_with_eos(
+    family: &str,
+    content: &str,
+    guided_tool_constraint: &GuidedToolConstraint,
+    tool_definitions: &[ToolDefinition],
+    policy: UnifiedRequestPolicy,
+    model_eos: bool,
+) -> anyhow::Result<CompleteOutput> {
+    let confirmed_eos = model_eos
+        && family == BEAM_UNIFIED_FAMILY
+        && matches!(
+            guided_tool_constraint,
+            GuidedToolConstraint::BeamTurnGrammar { .. }
+        );
     let policy = policy.under(guided_tool_constraint);
     // A remote frontend may reconstruct guided JSON even when the backend returned
     // native reasoning/content without a tool call. Keep that recovery under the
@@ -2431,6 +2482,7 @@ pub(crate) fn parse_complete_with_policy(
         tool_definitions,
         mode.clone(),
         policy,
+        confirmed_eos,
     ) {
         Err(guided_error) if !matches!(mode, UnifiedToolOutputMode::Native) => {
             match parse_complete_in_mode(
@@ -2440,6 +2492,7 @@ pub(crate) fn parse_complete_with_policy(
                 tool_definitions,
                 UnifiedToolOutputMode::Native,
                 policy,
+                confirmed_eos,
             ) {
                 Ok(parsed)
                     if !parsed.tool_calls.is_empty()
@@ -2470,6 +2523,7 @@ fn parse_complete_in_mode(
     tool_definitions: &[ToolDefinition],
     effective_mode: UnifiedToolOutputMode,
     policy: UnifiedRequestPolicy,
+    confirmed_eos: bool,
 ) -> anyhow::Result<CompleteOutput> {
     let tools = to_v2_tools(Some(tool_definitions));
     let mut parser = create_unified_parser_for_family(family, &tools)?;
@@ -2496,14 +2550,25 @@ fn parse_complete_in_mode(
         tool_output_mode: effective_mode,
         ..UnifiedParserInit::default()
     })?;
-    apply_argument_framing(parser.as_mut(), argument_framing(guided_tool_constraint))?;
+    apply_argument_framing(
+        family,
+        parser.as_mut(),
+        argument_framing(guided_tool_constraint),
+    )?;
 
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
     let mut output = UnifiedParserOutput::default();
     parser.parse_into(content, &mut output)?;
-    output.events.extend(parser.finish()?.events);
+    output.events.extend(
+        if confirmed_eos {
+            parser.finish_at_eos()?
+        } else {
+            parser.finish()?
+        }
+        .events,
+    );
     let completed_indices: HashSet<_> = output
         .events
         .iter()
@@ -2615,6 +2680,7 @@ struct PendingQwenReasoningResponse {
 }
 
 enum FinishedStreamChunk {
+    Error(anyhow::Error),
     Choice(ChatChoiceStream),
     Source(Annotated<Box<NvCreateChatCompletionStreamResponse>>),
 }
@@ -2729,6 +2795,10 @@ fn finish_unterminated_choices(
         match states.get_mut(&index) {
             Some(state) => {
                 let deltas = state.finish();
+                if let Some(error) = state.parse_error.take() {
+                    chunks.push(FinishedStreamChunk::Error(error));
+                    continue;
+                }
                 // Native completion evidence remains authoritative; backend-only calls
                 // use the family policy so default-on parsers retain their EOF contract.
                 let mut flushed = state.choices_for(&base, deltas, true, None);
@@ -3131,6 +3201,7 @@ where
                     }
                     for output in finish_unterminated_choices(&mut states, &mut records, family) {
                         match output {
+                            FinishedStreamChunk::Error(error) => { yield Annotated::from_error(error.to_string()); return; }
                             FinishedStreamChunk::Choice(choice) => {
                                 yield response_with_choice(template, choice, &states, &records);
                             }
@@ -3361,6 +3432,10 @@ where
                             .pending_parsed_tool_calls
                             .clone_from(&record.pending_parsed_tool_calls);
                         let deltas = state.finish();
+                        if let Some(error) = state.parse_error.take() {
+                            yield Annotated::from_error(error.to_string());
+                            return;
+                        }
                         let flushed = state.choices_for(
                             &empty_choice(original.index),
                             deltas,
@@ -3369,6 +3444,7 @@ where
                         );
                         for output in qwen_chunks_for_choices(&state, record, flushed) {
                             match output {
+                            FinishedStreamChunk::Error(error) => { yield Annotated::from_error(error.to_string()); return; }
                                 FinishedStreamChunk::Source(response) => {
                                     deferred_qwen_responses.push((emitted.len(), response));
                                 }
@@ -3419,12 +3495,17 @@ where
                     && let Some(mut state) = states.remove(&original.index)
                 {
                         let deltas = state.finish();
+                        if let Some(error) = state.parse_error.take() {
+                            yield Annotated::from_error(error.to_string());
+                            return;
+                        }
                         let flushed = state.choices_for(
                             &empty_choice(original.index), deltas, true, None,
                         );
                         let record = records.entry(original.index).or_default();
                         for output in qwen_chunks_for_choices(&state, record, flushed) {
                             match output {
+                            FinishedStreamChunk::Error(error) => { yield Annotated::from_error(error.to_string()); return; }
                                 FinishedStreamChunk::Source(response) => {
                                     deferred_qwen_responses.push((emitted.len(), response));
                                 }
@@ -3632,11 +3713,19 @@ where
                     .is_some_and(|record| record.finished);
                 if terminal.is_some() {
                     if !already_finished {
-                        deltas.extend(state.finish());
+                        let confirmed_eos = family == BEAM_UNIFIED_FAMILY
+                            && matches!(guided_tool_constraint, GuidedToolConstraint::BeamTurnGrammar { .. })
+                            && terminal == Some(FinishReason::Stop)
+                            && chat.model_eos.contains(&original.index);
+                        deltas.extend(state.finish_with_eos(confirmed_eos));
                     }
                     records.entry(original.index).or_default().finished = true;
                 }
 
+                if let Some(error) = state.parse_error.take() {
+                    yield Annotated::from_error(error.to_string());
+                    return;
+                }
                 let mut choices = state.choices_for(&original, deltas, true, terminal);
                 merge_passthrough_completion(
                     &mut state.parser_call_completion,
@@ -3653,6 +3742,7 @@ where
                 let record = records.entry(original.index).or_default();
                 for output in qwen_chunks_for_choices(state, record, choices) {
                     match output {
+                            FinishedStreamChunk::Error(error) => { yield Annotated::from_error(error.to_string()); return; }
                         FinishedStreamChunk::Source(response) => {
                             deferred_qwen_responses.push((emitted.len() + parsed.len(), response));
                         }
@@ -3734,6 +3824,7 @@ where
                     }
                     for output in finish_unterminated_choices(&mut states, &mut records, family) {
                 match output {
+                            FinishedStreamChunk::Error(error) => { yield Annotated::from_error(error.to_string()); return; }
                     FinishedStreamChunk::Choice(choice) => {
                         yield response_with_choice(template, choice, &states, &records);
                     }
@@ -3808,6 +3899,7 @@ pub(crate) mod tests {
             llm_metrics: None,
             prompt_logprobs: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         Annotated::from_data(response)
     }
@@ -6723,6 +6815,7 @@ pub(crate) mod tests {
                 llm_metrics: None,
                 prompt_logprobs: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             };
             Annotated::from_data(response)
         }
@@ -8297,6 +8390,7 @@ pub(crate) mod tests {
                 llm_metrics: None,
                 prompt_logprobs: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             };
             Annotated::from_data(response)
         }
@@ -8555,6 +8649,7 @@ pub(crate) mod tests {
             pending_parsed_tool_calls: HashMap::new(),
             tool_emitted: false,
             failed: false,
+            parse_error: None,
         };
 
         assert_eq!(
@@ -12405,6 +12500,97 @@ mod beam_routing_tests {
     use super::*;
     use dynamo_runtime::config::ParserVersion;
 
+    #[tokio::test]
+    async fn beam_finalization_requires_installed_grammar_and_confirmed_eos() {
+        let tools = vec![ToolDefinition {
+            name: "weather".into(),
+            parameters: Some(
+                serde_json::json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+            ),
+            strict: None,
+        }];
+        let body = "<|start|>assistant to=weather<|channel|>analysis <|constrain|>xml<|message|><rfl:parameter name=\"city\">Paris</rfl:parameter>";
+        for (suffix, finish, eos, held, succeeds) in [
+            ("", Some(FinishReason::Stop), true, true, true),
+            ("", Some(FinishReason::Stop), false, true, false),
+            ("", Some(FinishReason::Stop), true, false, false),
+            ("", Some(FinishReason::Length), true, true, false),
+            ("", None, false, true, false),
+            ("<|call|>", Some(FinishReason::Stop), false, false, true),
+            ("<|call|>", Some(FinishReason::Length), false, true, true),
+            (
+                "<rfl:parameter name=\"city\">",
+                Some(FinishReason::Stop),
+                true,
+                true,
+                false,
+            ),
+        ] {
+            let constraint = if held {
+                GuidedToolConstraint::BeamTurnGrammar {
+                    frames_answer: false,
+                }
+            } else {
+                GuidedToolConstraint::None
+            };
+            let input = format!("{body}{suffix}");
+            let raw: NvCreateChatCompletionStreamResponse =
+                serde_json::from_value(serde_json::json!({
+                    "id": "test", "object": "chat.completion.chunk", "model": "beam", "created": 0,
+                    "choices": [{"index": 0, "delta": {"content": input}, "finish_reason": finish}],
+                    "model_eos": if eos { vec![0] } else { vec![] },
+                }))
+                .unwrap();
+            let output: Vec<_> = apply_stream_with_constraint(
+                futures::stream::iter([Annotated::from_data(raw)]),
+                Some(tools.clone()),
+                constraint.clone(),
+                UnifiedParserStartingState::None,
+                BEAM_UNIFIED_FAMILY,
+                true,
+            )
+            .collect()
+            .await;
+            assert_eq!(
+                !output.iter().any(|item| item.is_error()),
+                succeeds,
+                "{suffix:?}, {finish:?}, eos={eos}, held={held}"
+            );
+            if succeeds {
+                let choices: Vec<_> = output
+                    .iter()
+                    .flat_map(|item| item.data.iter().flat_map(|data| &data.inner.choices))
+                    .collect();
+                let arguments: String = choices
+                    .iter()
+                    .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                    .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                    .collect();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                    serde_json::json!({"city": "Paris"})
+                );
+                assert_eq!(
+                    choices.last().unwrap().finish_reason,
+                    Some(if finish == Some(FinishReason::Length) {
+                        FinishReason::Length
+                    } else {
+                        FinishReason::ToolCalls
+                    })
+                );
+            }
+            let batch = parse_complete_with_eos(
+                BEAM_UNIFIED_FAMILY,
+                &input,
+                &constraint,
+                &tools,
+                UnifiedRequestPolicy::default(),
+                eos && finish == Some(FinishReason::Stop),
+            );
+            assert_eq!(batch.is_ok(), succeeds);
+        }
+    }
+
     /// The turn grammar writes a held tool's non-string parameters as JSON, so a closing
     /// tag inside one of their strings is data; and it holds a `response_format` answer
     /// in the final channel behind the analysis, so that output is a native turn.
@@ -12451,21 +12637,17 @@ mod beam_routing_tests {
                 .unwrap(),
             expected
         );
-        // Without the grammar a value runs to the first closing tag.
-        let lenient = parse_complete_with_policy(
-            BEAM_UNIFIED_FAMILY,
-            content,
-            &GuidedToolConstraint::None,
-            &tools,
-            UnifiedRequestPolicy::default(),
-        )
-        .unwrap();
+        // Without the installed grammar, the embedded closer makes this body
+        // malformed. Serving must report the error instead of dropping the call.
         assert!(
-            lenient.tool_calls.first().is_none_or(|call| {
-                serde_json::from_str::<serde_json::Value>(&call.function.arguments).ok()
-                    != Some(expected.clone())
-            }),
-            "{lenient:?}"
+            parse_complete_with_policy(
+                BEAM_UNIFIED_FAMILY,
+                content,
+                &GuidedToolConstraint::None,
+                &tools,
+                UnifiedRequestPolicy::default(),
+            )
+            .is_err()
         );
 
         // Streaming frames the same way at every split.
