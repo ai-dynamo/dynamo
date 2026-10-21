@@ -174,29 +174,34 @@ impl<'a> LookupPipeline<'a> {
             .filter(|residency| residency.is_active())
     }
 
-    /// Device match with hybrid workers cut to their last complete boundary.
-    /// Retains the hash chain when a cut may be needed; the chain is dropped
-    /// again unless the caller asked for it.
+    /// The hash chain is retained whenever a cut may be needed, because the
+    /// cut is keyed by positional hash; it is dropped again before returning
+    /// unless the caller asked for hints.
     async fn cut_primary_match_details(
         &self,
         sequence: &HashInput<'_>,
-        retain_kv_transfer_chain: bool,
     ) -> Result<MatchDetails, KvRouterError> {
         let residency = self.group_residency();
         let mut details = self
             .primary
-            .find_match_details_retained_with_options(
-                sequence,
-                retain_kv_transfer_chain || residency.is_some(),
-            )
+            .find_match_details_retained_with_options(sequence, residency.is_some())
             .await?;
         if let Some(residency) = residency {
             residency.cut_device(&mut details);
+        }
+        Ok(details)
+    }
+
+    /// Re-apply the cut after the predict-on-route side merge: the merge takes
+    /// the per-worker maximum, which can lift a hybrid worker back above its
+    /// last recurrent checkpoint. Drops the chain unless hints were requested.
+    fn finish_device_cut(&self, details: &mut MatchDetails, retain_kv_transfer_chain: bool) {
+        if let Some(residency) = self.group_residency() {
+            residency.cut_device(details);
             if !retain_kv_transfer_chain {
                 details.kv_transfer_candidates = None;
             }
         }
-        Ok(details)
     }
 
     async fn find_match_details(
@@ -207,8 +212,10 @@ impl<'a> LookupPipeline<'a> {
             return self.find_primary_match_details(sequence).await;
         }
 
-        let primary_details = self.cut_primary_match_details(&sequence, false).await?;
-        Ok(merge_side_or_warn(self.side, primary_details, sequence).await)
+        let primary_details = self.cut_primary_match_details(&sequence).await?;
+        let mut merged = merge_side_or_warn(self.side, primary_details, sequence).await;
+        self.finish_device_cut(&mut merged, false);
+        Ok(merged)
     }
 
     async fn find_primary_match_details(
@@ -216,7 +223,9 @@ impl<'a> LookupPipeline<'a> {
         sequence: HashInput<'_>,
     ) -> Result<MatchDetails, KvRouterError> {
         if self.group_residency().is_some() {
-            return self.cut_primary_match_details(&sequence, false).await;
+            let mut details = self.cut_primary_match_details(&sequence).await?;
+            self.finish_device_cut(&mut details, false);
+            return Ok(details);
         }
         self.primary.find_match_details(sequence).await
     }
@@ -279,10 +288,8 @@ impl<'a> LookupPipeline<'a> {
                     },
                 );
                 self.cut_lower_tiers(&primary_device, &mut lt, retain_kv_transfer_chain);
-                if cut && !retain_kv_transfer_chain {
-                    primary_device.kv_transfer_candidates = None;
-                }
-                let device = merge_side_or_warn(self.side, primary_device, sequence).await;
+                let mut device = merge_side_or_warn(self.side, primary_device, sequence).await;
+                self.finish_device_cut(&mut device, retain_kv_transfer_chain);
 
                 Ok(TieredMatchDetails {
                     device,
@@ -344,9 +351,7 @@ impl<'a> LookupPipeline<'a> {
                     },
                 );
                 self.cut_lower_tiers(&device, &mut lt, false);
-                if cut {
-                    device.kv_transfer_candidates = None;
-                }
+                self.finish_device_cut(&mut device, false);
                 Ok(TieredMatchDetails {
                     device,
                     lower_tier: lt,
@@ -948,6 +953,97 @@ mod tests {
             !matches.device.overlap_scores.scores.contains_key(&worker),
             "event-driven primary without side overlay should rely on KV events, not route-time writes"
         );
+    }
+
+    /// The predict-on-route side indexer credits a hybrid worker with the full
+    /// attention prefix; the merge takes the maximum, so the cut has to be
+    /// re-applied after it.
+    #[tokio::test]
+    async fn side_merge_does_not_lift_hybrid_worker_above_its_checkpoint() {
+        use crate::protocols::{
+            ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheGroupKind,
+            KvCacheGroupTag, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
+        };
+
+        let primary = Arc::new(ThreadPoolIndexer::new(
+            ConcurrentRadixTreeCompressed::new(),
+            2,
+            4,
+        ));
+        let side = Arc::new(ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTreeCompressed::new(),
+            1,
+            4,
+            PruneConfig {
+                ttl: Duration::from_secs(60),
+            },
+        ));
+        let side_for_flush = side.clone();
+        let indexer = Indexer::Concurrent {
+            primary,
+            lower_tier: LowerTierIndexers::new(2, 4),
+            approx: Some(super::SideIndexer::Concurrent(side)),
+            primary_records_routing_decisions: false,
+            session_updates: None,
+        };
+        let hybrid = WorkerWithDpRank::new(10, 0);
+        let local = [11_u64, 12, 13];
+        indexer
+            .try_apply_event(store_event(10, 0, 1, &[], &local, StorageTier::Device))
+            .await
+            .unwrap();
+        let block_hashes: Vec<LocalBlockHash> = local.iter().copied().map(LocalBlockHash).collect();
+        let chain = compute_seq_hash_for_block(&block_hashes);
+        indexer
+            .try_apply_event(
+                RouterEvent::with_storage_tier(
+                    10,
+                    KvCacheEvent {
+                        event_id: 2,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash: None,
+                            start_position: None,
+                            blocks: vec![KvCacheStoredBlockData {
+                                block_hash: ExternalSequenceBlockHash(chain[0]),
+                                tokens_hash: LocalBlockHash(local[0]),
+                                mm_extra_info: None,
+                            }],
+                        }),
+                        dp_rank: 0,
+                    },
+                    StorageTier::Device,
+                )
+                .with_kv_cache_group(KvCacheGroupTag {
+                    group_idx: 1,
+                    kind: KvCacheGroupKind::Mamba,
+                }),
+            )
+            .await
+            .unwrap();
+        // The side indexer learns the full 3-block prefix for the same worker.
+        indexer
+            .record_hashed_routing_decision(hybrid, block_hashes.clone(), chain.clone())
+            .await
+            .unwrap();
+        flush_indexer(&indexer).await;
+        side_for_flush.flush().await;
+
+        let tiered = indexer
+            .find_matches_by_tier(block_hashes.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            tiered.device.overlap_scores.scores.get(&hybrid).copied(),
+            Some(1)
+        );
+        assert!(tiered.device.kv_transfer_candidates.is_none());
+        let details = indexer
+            .find_match_details(block_hashes.clone())
+            .await
+            .unwrap();
+        assert_eq!(details.overlap_scores.scores.get(&hybrid).copied(), Some(1));
+        let scores = indexer.find_matches(block_hashes).await.unwrap();
+        assert_eq!(scores.scores.get(&hybrid).copied(), Some(1));
     }
 
     #[tokio::test]
