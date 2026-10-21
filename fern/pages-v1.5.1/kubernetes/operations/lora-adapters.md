@@ -24,7 +24,7 @@ Low-Rank Adaptation (LoRA) serves specialized model variants without duplicating
 | SGLang | <Badge intent="warning" minimal>Experimental</Badge> | Dynamic load/unload and aggregated inference; disaggregated serving and feature pairings are not end-to-end validated |
 | TensorRT-LLM | <Badge intent="note" minimal>Not supported</Badge> | — |
 
-See the [feature support matrix](../../reference/general/compatibility.mdx#feature-support) for the backend and interaction matrices.
+See the [feature support matrix](../../../pages-dev/reference/general/compatibility.mdx#feature-support) for the backend and interaction matrices.
 
 <AccordionGroup>
   <Accordion title="Architecture">
