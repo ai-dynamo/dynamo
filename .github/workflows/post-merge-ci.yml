@@ -37,7 +37,7 @@ jobs:
   # ============================================================================
   config:
     name: Config
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       run_vllm:   ${{ steps.flags.outputs.run_vllm }}
       run_sglang: ${{ steps.flags.outputs.run_sglang }}
@@ -1602,7 +1602,7 @@ jobs:
             --image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
 
   deploy-status-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - deploy-operator
       - deploy-test-vllm

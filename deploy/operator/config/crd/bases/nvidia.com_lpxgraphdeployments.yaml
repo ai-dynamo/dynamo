@@ -72,6 +72,24 @@ spec:
                 LPXGraphDeploymentStatus is the LPX controller's durable lifecycle state.
                 Dynamo consumes readiness only for the current generation and input revision.
               properties:
+                checkpointDownload:
+                  description: |-
+                    checkpointDownload retains download progress for the checkpoints that
+                    resolved hybrid workloads project into their Cyborg conductors. Its
+                    presence also records that the deployment adopts build checkpoints.
+                  properties:
+                    checkpoints:
+                      description: |-
+                        checkpoints is the sorted set of checkpoints, as `<model>@<revision>`,
+                        that were successfully downloaded into model-storage.
+                      items:
+                        type: string
+                      type: array
+                    lastCheckedAt:
+                      description: lastCheckedAt is the oldest Model Express confirmation of the listed checkpoints.
+                      format: date-time
+                      type: string
+                  type: object
                 components:
                   additionalProperties:
                     description: LPXComponentStatus reports logical replicas and readiness for one LPX component.
