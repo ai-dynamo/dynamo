@@ -404,7 +404,7 @@ func (r *dgdWorkerRolloutReconciler) probeReplacementInference(ctx context.Conte
 		nvext["prefill_worker_id"] = target.InstanceID
 		nvext["prefill_dp_rank"] = target.DPRank
 	} else {
-		nvext["backend_instance_id"] = target.InstanceID
+		nvext["decode_worker_id"] = target.InstanceID
 		nvext["dp_rank"] = target.DPRank
 	}
 	// A fresh prefill prompt prevents a full-prefix cache hit from skipping the phase being verified.

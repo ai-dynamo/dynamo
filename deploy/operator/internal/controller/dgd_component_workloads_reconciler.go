@@ -53,7 +53,7 @@ func newComponentWorkloadsReconciler(
 	}
 }
 
-// Reconcile returns component readiness and whether inference requires a later retry.
+// The boolean reports whether inference requires a later retry.
 func (r *componentWorkloadsReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,

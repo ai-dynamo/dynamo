@@ -53,26 +53,29 @@ func (s *rolloutProbeServer) ServeHTTP(w http.ResponseWriter, request *http.Requ
 		MaxTokens int    `json:"max_tokens"`
 		Stream    bool   `json:"stream"`
 		Nvext     struct {
-			InstanceID    uint64   `json:"backend_instance_id"`
-			PrefillID     uint64   `json:"prefill_worker_id"`
+			BackendID     *uint64  `json:"backend_instance_id"`
+			DecodeID      *uint64  `json:"decode_worker_id"`
+			PrefillID     *uint64  `json:"prefill_worker_id"`
 			DPRank        *uint32  `json:"dp_rank"`
 			PrefillDPRank *uint32  `json:"prefill_dp_rank"`
 			Fields        []string `json:"extra_fields"`
 		} `json:"nvext"`
 	}
 	if err := json.NewDecoder(request.Body).Decode(&body); err != nil || request.Method != http.MethodPost ||
-		body.Model != "test-model" || body.MaxTokens != 1 || body.Stream || (body.Nvext.InstanceID != 42 && body.Nvext.PrefillID != 42) ||
+		body.Model != "test-model" || body.MaxTokens != 1 || body.Stream || body.Nvext.BackendID != nil ||
 		len(body.Nvext.Fields) != 1 || body.Nvext.Fields[0] != "worker_id" {
 		http.Error(w, "invalid inference probe", http.StatusBadRequest)
 		return
 	}
 
-	// Exact worker targeting must include the rank for only the phase being probed.
+	// Worker and rank targeting must apply only to the phase being probed.
+	worker, otherWorker := body.Nvext.DecodeID, body.Nvext.PrefillID
 	rank, other := body.Nvext.DPRank, body.Nvext.PrefillDPRank
-	if body.Nvext.PrefillID == 42 {
+	if body.Nvext.PrefillID != nil {
+		worker, otherWorker = body.Nvext.PrefillID, body.Nvext.DecodeID
 		rank, other = body.Nvext.PrefillDPRank, body.Nvext.DPRank
 	}
-	if rank == nil || *rank != s.rank || other != nil {
+	if worker == nil || *worker != 42 || otherWorker != nil || rank == nil || *rank != s.rank || other != nil {
 		http.Error(w, "invalid probe DP rank", http.StatusBadRequest)
 		return
 	}
@@ -96,7 +99,7 @@ func (s *rolloutProbeServer) ServeHTTP(w http.ResponseWriter, request *http.Requ
 		_, _ = fmt.Fprint(w, `{"choices":[{"finish_reason":"length"}],"usage":{"completion_tokens":1},"nvext":{"worker_id":{"decode_worker_id":41}}}`)
 	default:
 		phase := "decode_worker_id"
-		if body.Nvext.PrefillID == 42 {
+		if body.Nvext.PrefillID != nil {
 			phase = "prefill_worker_id"
 		}
 		_, _ = fmt.Fprintf(w, `{"choices":[{"finish_reason":"length"}],"usage":{"completion_tokens":1},"nvext":{"worker_id":{"%s":42}}}`, phase)
