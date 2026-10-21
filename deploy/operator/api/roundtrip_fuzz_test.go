@@ -43,6 +43,7 @@ import (
 	"flag"
 	"fmt"
 	"math/rand"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -521,10 +522,17 @@ func fuzzBeta2DGDRStatus(s *v1beta2.DynamoGraphDeploymentRequestStatus, c randfi
 func fuzzBeta2DGDRNativeSpec(s *v1beta2.DynamoGraphDeploymentRequestNativeSpec, c randfill.Continue) {
 	c.FillNoCustom(&s.NativeSearchInput)
 
-	// Keep required model and backend values inside their admitted domains.
+	// Keep the required model and all enum-backed values inside their admitted domains.
 	s.Model = &v1beta2.ModelSpec{Name: fmt.Sprintf("model-%d", c.Uint32())}
-	backendCount := 1 + c.Intn(3)
-	s.Backends = []v1beta2.Backend{v1beta2.BackendVLLM, v1beta2.BackendSGLang, v1beta2.BackendTRTLLM}[:backendCount]
+	if c.Bool() {
+		backendCount := 1 + c.Intn(3)
+		s.Backends = []v1beta2.Backend{v1beta2.BackendVLLM, v1beta2.BackendSGLang, v1beta2.BackendTRTLLM}[:backendCount]
+	} else {
+		s.Backends = nil
+	}
+	fuzzBeta2Hardware(s.Hardware, c)
+	fuzzBeta2Workload(s.Workload, c)
+	fuzzBeta2Objective(s.Objective, c)
 
 	// Keep the optional candidate bound inside its admitted range.
 	if s.Recommendation != nil {
@@ -534,6 +542,115 @@ func fuzzBeta2DGDRNativeSpec(s *v1beta2.DynamoGraphDeploymentRequestNativeSpec, 
 
 func fuzzBeta2DGDRNativeStatus(s *v1beta2.DynamoGraphDeploymentRequestNativeStatus, c randfill.Continue) {
 	c.FillNoCustom(s)
+	for i := range s.Conditions {
+		s.Conditions[i].Type = fmt.Sprintf("Condition%d", i)
+		s.Conditions[i].Status = oneOf(c, metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionUnknown)
+		s.Conditions[i].ObservedGeneration = c.Int63()
+		s.Conditions[i].Reason = fmt.Sprintf("Reason%d", i)
+	}
+}
+
+func fuzzBeta2Hardware(hardware *v1beta2.HardwareSpec, c randfill.Continue) {
+	if hardware == nil || hardware.GPU == nil {
+		return
+	}
+	if hardware.GPU.SKU != nil {
+		*hardware.GPU.SKU = fmt.Sprintf("gpu-%d", c.Uint32())
+	}
+	if hardware.GPU.Budget != nil {
+		*hardware.GPU.Budget = int32(1 + c.Intn(1024))
+	}
+}
+
+func fuzzBeta2Workload(workload *v1beta2.WorkloadSpec, c randfill.Continue) {
+	if workload == nil || workload.Static == nil {
+		return
+	}
+
+	static := workload.Static
+	static.ISL = oneOfPtr(c, int32(1), int32(4000), int32(131072))
+	static.OSL = oneOfPtr(c, int32(1), int32(1000), int32(16384))
+	static.NumRequestRatio = oneOfPtr(c, 0.5, 1.0, 1000.0)
+	static.RequestRate = nil
+	static.Concurrency = nil
+	static.KVLoadRatio = nil
+	switch c.Intn(4) {
+	case 1:
+		static.RequestRate = oneOfPtr(c, 0.1, 1.0, 100.0)
+	case 2:
+		static.Concurrency = oneOfPtr(c, int32(1), int32(32), int32(1024))
+	case 3:
+		if c.Bool() {
+			static.KVLoadRatio = v1beta2.KVLoadRatio{0.5}
+		} else {
+			static.KVLoadRatio = v1beta2.KVLoadRatio{0.0, 1.0}
+		}
+	}
+}
+
+func fuzzBeta2Objective(objective *v1beta2.ObjectiveSpec, c randfill.Continue) {
+	if objective == nil {
+		return
+	}
+
+	metrics := []v1beta2.ObjectiveMetric{
+		"Throughput",
+		"ThroughputPerGPU",
+		"ThroughputPerUser",
+		"TTFT",
+		"E2ELatency",
+		"Goodput",
+		"GoodputPerGPU",
+	}
+	fuzzBeta2SLA(objective.SLA, c)
+	switch c.Intn(3) {
+	case 0:
+		*objective = v1beta2.ObjectiveSpec{}
+	case 1:
+		objective.Mode = v1beta2.ObjectiveModeOptimize
+		objective.Metrics = nil
+		objective.Metric = oneOfPtr(c, metrics...)
+		if objective.Metric != nil && isGoodputMetric(*objective.Metric) {
+			ensureBeta2SLA(objective, c)
+		}
+	case 2:
+		objective.Mode = v1beta2.ObjectiveModePareto
+		objective.Metric = nil
+		metricCount := 2 + c.Intn(len(metrics)-1)
+		objective.Metrics = append(objective.Metrics[:0], metrics[:metricCount]...)
+		if slices.ContainsFunc(objective.Metrics, isGoodputMetric) {
+			ensureBeta2SLA(objective, c)
+		}
+	}
+}
+
+func fuzzBeta2SLA(sla *v1beta2.ObjectiveSLASpec, c randfill.Continue) {
+	if sla == nil {
+		return
+	}
+
+	*sla = v1beta2.ObjectiveSLASpec{}
+	switch c.Intn(3) {
+	case 1:
+		sla.TTFTMs = oneOfPtr(c, 1.0, 2000.0)
+		sla.ITLMs = oneOfPtr(c, 1.0, 30.0)
+	case 2:
+		sla.E2EMs = oneOfPtr(c, 1.0, 30000.0)
+	}
+}
+
+func ensureBeta2SLA(objective *v1beta2.ObjectiveSpec, c randfill.Continue) {
+	if objective.SLA == nil {
+		objective.SLA = &v1beta2.ObjectiveSLASpec{}
+	}
+	if objective.SLA.TTFTMs == nil && objective.SLA.ITLMs == nil && objective.SLA.E2EMs == nil {
+		ttft := oneOf(c, 1.0, 2000.0)
+		objective.SLA.TTFTMs = &ttft
+	}
+}
+
+func isGoodputMetric(metric v1beta2.ObjectiveMetric) bool {
+	return metric == "Goodput" || metric == "GoodputPerGPU"
 }
 
 type fuzzAISimulateParameters struct {
