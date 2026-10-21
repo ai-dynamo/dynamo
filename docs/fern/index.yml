@@ -742,10 +742,13 @@ navigation:
           - page: Agent Simulation
             slug: agent-simulation
             path: pages/use-cases/agents/agent-simulation.mdx
-          - page: ThunderAgent Program Scheduler
+          - section: ThunderAgent Program Scheduler
+            collapsed: true
+            slug: thunderagent-program-scheduler
             path: pages/use-cases/agents/thunderagent-program-scheduler.md
-          - page: ThunderAgent Python Router
-            path: pages/use-cases/agents/thunderagent-python-router.md
+            contents:
+              - page: ThunderAgent Python Router
+                path: pages/use-cases/agents/thunderagent-python-router.md
 
       # ==================== Image Understanding ====================
       - section: Image Understanding
