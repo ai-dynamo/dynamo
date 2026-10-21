@@ -8,7 +8,12 @@ import threading
 
 import pytest
 
-from dynamo.deepinfer.runner import EngineRunner, RunnerClosed, TokenOutput
+from dynamo.deepinfer.runner import (
+    EngineRunner,
+    RequestRejected,
+    RunnerClosed,
+    TokenOutput,
+)
 from dynamo.deepinfer.tests.fake_native import FakeEngine
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -135,6 +140,17 @@ async def test_rejected_request_fails_only_itself(runner, engine):
     good = submit(runner, "good", 2)
 
     assert isinstance(await drain_until_error(bad), ValueError)
+    assert len(await drain_until_finished(good)) == 2
+
+
+async def test_request_deepinfer_drops_is_rejected_not_left_hanging(runner, engine):
+    engine.drop.add("bad")
+    bad = submit(runner, "bad", 2)
+    good = submit(runner, "good", 2)
+
+    error = await asyncio.wait_for(bad.get(), TIMEOUT)
+
+    assert isinstance(error, RequestRejected)
     assert len(await drain_until_finished(good)) == 2
 
 
@@ -268,8 +284,8 @@ async def test_idle_runner_does_not_spin(runner, engine):
     assert (engine.steps, engine.flushes) == (steps, flushes)
 
 
-async def test_request_the_engine_lost_does_not_busy_loop(runner, engine):
-    engine.lose_requests = True
+async def test_request_the_engine_swallowed_does_not_busy_loop(runner, engine):
+    engine.swallow_requests = True
     submit(runner, "lost", 5)
 
     await asyncio.sleep(0.2)

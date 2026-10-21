@@ -45,7 +45,11 @@ class FakeEngine:
         self.step_gate = None
         self.step_started = threading.Event()
         # Accept requests but never schedule them, like an engine that lost one.
-        self.lose_requests = False
+        # add_request returns None, like DeepInfer does for an invalid request.
+        self.drop = set()
+        # add_request accepts the request but the engine never produces output.
+        self.swallow_requests = False
+        self.model_config = SimpleNamespace(get_vocab_size=lambda: 1000)
         self.fail_on_step = None
         self.reject = set()
         self.steps = 0
@@ -59,11 +63,14 @@ class FakeEngine:
         self.add_threads.add(threading.current_thread().name)
         if request_id in self.reject:
             raise ValueError("prompt too long")
+        if request_id in self.drop:
+            return None
         self.added.append((request_id, sampling_params, list(prompt_token_ids)))
-        if self.lose_requests:
-            return
+        if self.swallow_requests:
+            return object()
         max_tokens = getattr(sampling_params, "max_tokens", sampling_params)
         self.pending[request_id] = [0, max_tokens, len(prompt_token_ids)]
+        return object()
 
     def abort_request(self, request_id):
         self.abort_threads.add(threading.current_thread().name)

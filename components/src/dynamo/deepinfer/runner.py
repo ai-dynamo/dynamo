@@ -81,6 +81,10 @@ def snapshot(output: Any) -> TokenOutput:
     )
 
 
+class RequestRejected(ValueError):
+    """DeepInfer's ``add_request`` refused the request (it returns ``None``)."""
+
+
 class RunnerClosed(RuntimeError):
     """Raised by :meth:`EngineRunner.submit` once the runner stopped or failed."""
 
@@ -270,12 +274,19 @@ class EngineRunner:
     # -- worker thread: the only place the native engine is touched ------
 
     def _add_job(self, request_id: str, token_ids: Any, sampling_params: Any) -> None:
-        self._engine.add_request(
+        sequence = self._engine.add_request(
             user_id="0",
             request_id=request_id,
             sampling_params=sampling_params,
             prompt_token_ids=token_ids,
         )
+        # DeepInfer drops an invalid request (bad token ids, a sequence it
+        # cannot build) by logging and returning None, not by raising. Without
+        # this check the stream would wait forever for outputs that never come.
+        if sequence is None:
+            raise RequestRejected(
+                "DeepInfer rejected the request (see the worker log for the reason)"
+            )
 
     def _abort_job(self, request_id: str) -> None:
         self._engine.abort_request(request_id)
