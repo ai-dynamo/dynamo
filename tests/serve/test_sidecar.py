@@ -588,9 +588,7 @@ def test_serve_deployment(
     """Launch a sidecar deployment and run its configured request payloads."""
     if sidecar_config_test.name == "trtllm_aggregated_image":
         runpy.run_path(
-            os.path.join(
-                WORKSPACE_DIR, "container/deps/trtllm/validate_media_overlay.py"
-            ),
+            os.path.join(WORKSPACE_DIR, "tests/utils/trtllm_media_overlay.py"),
             run_name="__main__",
         )
     assert (

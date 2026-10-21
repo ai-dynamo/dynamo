@@ -43,7 +43,7 @@ ARG NIXL_REF
 ARG TRTLLM_SOURCE_REPOSITORY
 ARG TRTLLM_SOURCE_COMMIT
 
-COPY container/deps/trtllm/validate_media_overlay.py /tmp/validate_media_overlay.py
+COPY tests/utils/trtllm_media_overlay.py /tmp/validate_media_overlay.py
 
 # Optional source overlay for cross-repository CI. Keep the base image's server
 # lifecycle entry points, which are coupled to that release's frontend runtime.
