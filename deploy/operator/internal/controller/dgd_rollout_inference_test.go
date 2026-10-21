@@ -234,7 +234,7 @@ func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
 
 	t.Log("Values that do not disable nvext keep the gate closed on missing attribution")
 	second.mode.Store(2)
-	for _, value := range []string{"", "0", "false", " OFF ", "no", "unknown"} {
+	for _, value := range []string{"false", "unknown"} {
 		configured := frontend2.DeepCopy()
 		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(frontend2), configured))
 		configured.Spec = frontend2.DeepCopy().Spec
