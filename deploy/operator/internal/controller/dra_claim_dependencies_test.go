@@ -98,6 +98,28 @@ func TestDRAClaimDependenciesIncludeAllInitContainers(t *testing.T) {
 	assert.True(t, componentUsesDRAClaims(&oneShotInit))
 }
 
+func TestRolePodTemplatesParticipateInDRAClaimDependencies(t *testing.T) {
+	component := testDRAClaimComponent("worker-gpu", true)
+	workerTemplate := component.PodTemplate
+	component.PodTemplate = nil
+	component.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+		{
+			Name: nvidiacomv1beta1.ComponentRoleLeader,
+			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: commonconsts.MainContainerName,
+			}}}},
+		},
+		{
+			Name:        nvidiacomv1beta1.ComponentRoleWorker,
+			PodTemplate: workerTemplate,
+		},
+	}
+
+	assert.True(t, componentReferencesDRAClaim(&component, "worker-gpu", true))
+	assert.True(t, componentUsesDRAClaims(&component))
+	assert.False(t, componentReferencesDRAClaim(&component, "other-gpu", true))
+}
+
 func TestMapResourceClaimToDCDRequests(t *testing.T) {
 	t.Log("Create matching multinode and single-node component deployments")
 	matching := &nvidiacomv1beta1.DynamoComponentDeployment{

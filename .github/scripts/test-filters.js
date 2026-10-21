@@ -60,6 +60,46 @@ function checkFilter(file, patterns) {
 // Test cases: [file, expectations, description]
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
+  {
+    file: 'scripts/protocol_compatibility/composition/openai.py',
+    expect: { ignore: true, rust: false, core: false, frontend: false },
+    desc: 'protocol tooling is covered without unrelated runtime builds'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/storage.py',
+    expect: { core: true, frontend: true, vllm: false },
+    desc: 'generic artifact transport keeps shared runtime CI'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/tests/test_operations.py',
+    expect: { core: true, frontend: true, vllm: false },
+    desc: 'generic artifact tests keep shared runtime CI'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/vllm/capture.py',
+    expect: { core: false, frontend: false, vllm: true },
+    desc: 'vllm artifact capture triggers its backend CI'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/vllm/tests/test_format.py',
+    expect: { core: false, frontend: false, vllm: true },
+    desc: 'vllm artifact codec tests trigger their backend CI'
+  },
+  {
+    file: 'components/src/dynamo/artifacts/README.md',
+    expect: { core: false, frontend: false, vllm: false, ignore: true },
+    desc: 'artifact documentation alone avoids runtime builds'
+  },
+  {
+    file: 'lib/llm/tests/fixtures/openapi/requests.json',
+    expect: { rust: true },
+    desc: 'native request schema fixtures trigger Rust checks'
+  },
+  {
+    file: 'lib/llm/tests/fixtures/openapi/responses.json',
+    expect: { rust: true },
+    desc: 'native response schema fixtures trigger Rust checks'
+  },
   // dev/local-dev templates build only the dev images -- they must NOT pull in
   // `core` (all runtime builds + the GPU test matrix), and must not be silently
   // uncovered the way they were when they sat in `ignore`.
@@ -88,6 +128,21 @@ const testCases = [
     file: 'examples/backends/trtllm/example.py',
     expect: { core: false, vllm: false, sglang: false, trtllm: true },
     desc: 'trtllm script triggers only trtllm'
+  },
+  {
+    file: 'examples/backends/tokenspeed/tests/test_validate_disagg.py',
+    expect: { core: true },
+    desc: 'TokenSpeed validator tests trigger the runtime test lane'
+  },
+  {
+    file: 'examples/backends/tokenspeed/launch_disagg.sh',
+    expect: { core: true },
+    desc: 'TokenSpeed example code triggers runtime validation'
+  },
+  {
+    file: 'examples/backends/tokenspeed/README.md',
+    expect: { core: false },
+    desc: 'TokenSpeed documentation alone avoids runtime builds'
   },
   {
     file: 'recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml',
@@ -119,6 +174,11 @@ const testCases = [
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
   },
+  {
+    file: 'components/src/dynamo/aisimulate/output/dgd/adapter.py',
+    expect: { core: false, planner: true },
+    desc: 'AISimulate Dynamo adapter triggers planner validation'
+  },
 
   // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
   {
@@ -127,7 +187,7 @@ const testCases = [
     desc: 'common sidecar source avoids unrelated build and E2E filters'
   },
   {
-    file: 'lib/sidecar/trtllm/proto/trtllm_service.proto',
+    file: 'lib/sidecar/trtllm/proto/openengine/v1/generation.proto',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'sidecar proto contracts trigger Rust checks without backend E2E'
   },

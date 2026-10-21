@@ -11,11 +11,12 @@ from typing import Annotated, Any, Literal, TypeAlias
 from aisimulate.config.common import Choices, IntegerRange, NumericRange
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from dynamo.planner.config.planner_config import PlannerConfig
+
 PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 PositiveFloat = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
 Policy = Literal["disabled", "enabled"]
-Target = Literal["throughput", "latency", "sla", "load"]
 Predictor = Literal["constant", "arima", "prophet", "kalman"]
 
 
@@ -40,18 +41,6 @@ class ScalingPolicyMapping(BaseModel):
                     "disabled scaling policy requires null adjustment intervals"
                 )
             return self
-        if any(interval is None for interval in intervals):
-            raise ValueError(
-                "enabled scaling policy requires both adjustment intervals"
-            )
-        if (
-            self.enable_load_scaling
-            and self.load_adjustment_interval_seconds is not None
-            and self.throughput_adjustment_interval_seconds is not None
-            and self.load_adjustment_interval_seconds
-            >= self.throughput_adjustment_interval_seconds
-        ):
-            raise ValueError("load interval must be shorter than throughput interval")
         return self
 
 
@@ -86,48 +75,6 @@ class LoadPredictorMapping(BaseModel):
     kalman_q_trend: PositiveFloat
     kalman_r: PositiveFloat
     kalman_min_points: PositiveInt
-
-
-class PlannerPredictionConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    policy: Policy = "disabled"
-    target: Target = "throughput"
-    enable_throughput_scaling: bool = True
-    enable_load_scaling: bool = False
-    throughput_adjustment_interval_seconds: PositiveInt = 180
-    max_throughput_scaling_replicas: PositiveInt = 8
-    load_adjustment_interval_seconds: PositiveInt = 5
-    max_num_fpm_samples: PositiveInt = 64
-    fpm_sample_bucket_size: PositiveInt = 16
-    load_scaling_down_sensitivity: int = Field(default=80, ge=0, le=100)
-    load_min_observations: PositiveInt = 5
-    load_predictor: Predictor = "arima"
-    load_predictor_log1p: bool = False
-    prophet_window_size: PositiveInt = 50
-    kalman_q_level: PositiveFloat = 1.0
-    kalman_q_trend: PositiveFloat = 0.1
-    kalman_r: PositiveFloat = 10.0
-    kalman_min_points: PositiveInt = 5
-    max_num_gpus: PositiveInt = 8
-    min_workers: NonNegativeInt = 1
-    prefill_min_workers: PositiveInt | None = None
-    decode_min_workers: PositiveInt | None = None
-
-    @model_validator(mode="after")
-    def _validate_fields(self) -> PlannerPredictionConfig:
-        root = math.isqrt(self.fpm_sample_bucket_size)
-        if root * root != self.fpm_sample_bucket_size:
-            raise ValueError("fpm_sample_bucket_size must be a perfect square")
-        if (
-            self.enable_load_scaling
-            and self.load_adjustment_interval_seconds
-            >= self.throughput_adjustment_interval_seconds
-        ):
-            raise ValueError(
-                "load adjustment interval must be shorter than throughput interval"
-            )
-        return self
 
 
 class PresetControl(BaseModel):
@@ -169,7 +116,9 @@ class PlannerRecommendationConfig(BaseModel):
     enable_load_scaling: bool | Choices[bool] | None = None
     throughput_adjustment_interval_seconds: IntDomain | None = None
     load_adjustment_interval_seconds: IntDomain | None = None
-    max_throughput_scaling_replicas: PositiveInt = 8
+    max_throughput_scaling_replicas: PositiveInt = PlannerConfig.model_fields[
+        "max_throughput_scaling_replicas"
+    ].default
     max_num_fpm_samples: IntDomain | None = None
     fpm_sample_bucket_size: IntDomain | None = None
     load_scaling_down_sensitivity: NonNegativeIntDomain | None = None
@@ -180,7 +129,7 @@ class PlannerRecommendationConfig(BaseModel):
     kalman_q_trend: FloatDomain | None = None
     kalman_r: FloatDomain | None = None
     kalman_min_points: IntDomain | None = None
-    max_num_gpus: PositiveInt = 8
+    max_num_gpus: PositiveInt = PlannerConfig.model_fields["max_gpu_budget"].default
     min_workers: NonNegativeIntDomain | None = None
     prefill_min_workers: OptionalIntDomain | None = None
     decode_min_workers: OptionalIntDomain | None = None

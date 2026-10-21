@@ -18,7 +18,15 @@
  * Card styles live in PublicationsStyles.tsx, shared with ResearchPublications;
  * a page rendering this must render <BlogStyles /> and <PublicationsStyles />.
  */
-import { PUBLICATIONS, type Publication } from "./publications.data";
+"use client";
+
+import { useState } from "react";
+import {
+  PUBLICATIONS,
+  PUBLICATION_TAGS,
+  type Publication,
+  type PublicationTag,
+} from "./publications.data";
 import { PUBLISHER_LOGOS } from "./publisher-logos.generated";
 import { ExternalMark } from "./PublicationsStyles";
 
@@ -79,17 +87,92 @@ function PublicationCard({ publication }: { publication: Publication }) {
           <ExternalMark />
         </span>
       </span>
+      <span className="dynamo-pubs__tags">{publication.tags.join(" · ")}</span>
+    </a>
+  );
+}
+
+function siteOf(url: string) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+// Title split inline, not in a helper, for the Fern transform reason noted on
+// PublicationCard.
+function FeaturedCard({ publication }: { publication: Publication }) {
+  const { title, url, partner, date, summary } = publication;
+  const words = title.trim().split(/\s+/);
+  const lastWord = words.pop() ?? "";
+  const leadingWords = words.join(" ");
+  return (
+    <a
+      className="dynamo-pubs-featured__card"
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      <span className="dynamo-pubs-featured__top">
+        <PublisherMark partner={partner} />
+        <span className="dynamo-pubs-featured__byline">
+          <span className="dynamo-pubs__partner">{partner}</span>
+          <span className="dynamo-pubs__date">{date}</span>
+        </span>
+      </span>
+      <span className="dynamo-pubs-featured__title">
+        {leadingWords ? `${leadingWords} ` : ""}
+        <span className="dynamo-pubs__title-end">{lastWord}</span>
+      </span>
+      {summary ? (
+        <span className="dynamo-pubs-featured__summary">{summary}</span>
+      ) : null}
+      <span className="dynamo-pubs-featured__cta">
+        Read on {siteOf(url)}
+        <ExternalMark />
+      </span>
     </a>
   );
 }
 
 // Newest first, from `iso`, so ordering does not depend on how the array is
-// maintained by hand.
+// maintained by hand. Pinned entries sit in the featured row instead.
+const pinnedPublications = PUBLICATIONS.filter((p) => p.pinned != null).sort(
+  (a, b) => (a.pinned ?? 0) - (b.pinned ?? 0),
+);
+// Pinned entries also stay in the list, so it remains a complete archive.
 const sortedPublications = [...PUBLICATIONS].sort((a, b) =>
   (b.iso ?? "").localeCompare(a.iso ?? ""),
 );
 
+const PAGE_SIZES = [12, 24, 48] as const;
+
+// Only keywords that some entry carries, in vocabulary order, with counts.
+const tagCounts = PUBLICATION_TAGS.map((tag) => ({
+  tag,
+  count: PUBLICATIONS.filter((p) => p.tags.includes(tag)).length,
+})).filter(({ count }) => count > 0);
+
 export function EcosystemPublications() {
+  const [activeTag, setActiveTag] = useState<PublicationTag | null>(null);
+  const [pageSize, setPageSize] = useState<number>(PAGE_SIZES[0]);
+  const [shown, setShown] = useState<number>(PAGE_SIZES[0]);
+
+  const filtered = activeTag
+    ? sortedPublications.filter((p) => p.tags.includes(activeTag))
+    : sortedPublications;
+  const visible = filtered.slice(0, shown);
+
+  const selectTag = (tag: PublicationTag | null) => {
+    setActiveTag(tag);
+    setShown(pageSize);
+  };
+  const selectPageSize = (size: number) => {
+    setPageSize(size);
+    setShown(size);
+  };
+
   return (
     <div className="dynamo-blog-home">
       <section
@@ -110,11 +193,84 @@ export function EcosystemPublications() {
           </div>
         </div>
 
+        {/* A wrapper rather than a fragment: fragments do not survive Fern's
+            component transform. */}
+        {pinnedPublications.length > 0 ? (
+          <div className="dynamo-pubs-featured-block">
+            <h3 className="dynamo-pubs__group-label">Featured</h3>
+            <div className="dynamo-pubs-featured">
+              {pinnedPublications.map((publication) => (
+                <FeaturedCard key={publication.url} publication={publication} />
+              ))}
+            </div>
+            <h3 className="dynamo-pubs__group-label">All publications</h3>
+          </div>
+        ) : null}
+
+        <div className="dynamo-pubs-toolbar">
+          <div
+            className="dynamo-pubs-filter"
+            role="group"
+            aria-label="Filter publications by keyword"
+          >
+            <button
+              type="button"
+              className="dynamo-pubs-chip"
+              aria-pressed={activeTag === null}
+              onClick={() => selectTag(null)}
+            >
+              All <span className="dynamo-pubs-chip__count">{PUBLICATIONS.length}</span>
+            </button>
+            {tagCounts.map(({ tag, count }) => (
+              <button
+                type="button"
+                key={tag}
+                className="dynamo-pubs-chip"
+                aria-pressed={activeTag === tag}
+                onClick={() => selectTag(activeTag === tag ? null : tag)}
+              >
+                {tag} <span className="dynamo-pubs-chip__count">{count}</span>
+              </button>
+            ))}
+          </div>
+          <div className="dynamo-pubs-toolbar__meta">
+            <span aria-live="polite">
+              Showing {visible.length} of {filtered.length}
+            </span>
+            <label className="dynamo-pubs-pagesize">
+              Per page
+              <select
+                value={pageSize}
+                onChange={(event) => selectPageSize(Number(event.target.value))}
+              >
+                {PAGE_SIZES.map((size) => (
+                  <option key={size} value={size}>
+                    {size}
+                  </option>
+                ))}
+                <option value={PUBLICATIONS.length}>All</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
         <div className="dynamo-pubs">
-          {sortedPublications.map((publication) => (
+          {visible.map((publication) => (
             <PublicationCard key={publication.url} publication={publication} />
           ))}
         </div>
+
+        {visible.length < filtered.length ? (
+          <div className="dynamo-pubs-more">
+            <button
+              type="button"
+              className="dynamo-blog-button dynamo-blog-button--secondary"
+              onClick={() => setShown(shown + pageSize)}
+            >
+              Show {Math.min(pageSize, filtered.length - visible.length)} more
+            </button>
+          </div>
+        ) : null}
       </section>
     </div>
   );

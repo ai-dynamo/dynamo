@@ -42,7 +42,7 @@ events. The SGLang core uses its own token-pool and radix-cache implementation.
 Scheduler state determines the batch and cache-hit inputs to the timing source. Choose one timing
 source for each worker role with `engine.workers.<role>.timing.type`.
 
-The live Mocker CLI options for profile-derived interpolation and direct `--aic-*` configuration
+The live Mocker CLI options for profile-derived interpolation and direct `--ais-*` configuration
 are separate from the unified CLI. In AISimulate configurations, use only the timing types accepted
 by the AISimulate YAML schema.
 

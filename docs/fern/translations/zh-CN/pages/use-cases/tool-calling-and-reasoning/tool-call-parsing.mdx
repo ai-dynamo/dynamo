@@ -105,6 +105,6 @@ Dynamo 会从模型输出中解析出工具调用，并在响应中以兼容 Ope
 > 如果工具调用返回结果不正确，请向单个复现请求添加 `"logprobs": true` 并分享响应。有关报告问题时需要捕获和包含的内容，请参阅
 > [工具调用故障排查](../../../../../pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md)。
 
-## 可选：结构化标签（structural tags）
+## 默认启用结构化标签（structural tags）
 
-你可以启用 **xgrammar 结构化标签**，让引导式解码在 token 粒度上匹配解析器的工具调用格式。参阅 [Structural tag (guided decoding for tool calls)](../../../../../pages/use-cases/tool-calling-and-reasoning/structural-tag.md)。
+对于支持结构化标签的解析器和后端组合，Dynamo 默认启用 **xgrammar 结构化标签**，使引导式解码在 token 粒度上匹配解析器的工具调用格式。有关激活策略、兼容性回退和退出设置，请参阅 [Structural tag (guided decoding for tool calls)](../../../../../pages/use-cases/tool-calling-and-reasoning/structural-tag.md)。

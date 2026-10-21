@@ -214,7 +214,7 @@ def patch_static_state_for_gms() -> None:
         return
 
     try:
-        from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
+        from sglang.srt.managers.scheduler_components import weight_updater
 
         def _export_noop(model):
             """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
@@ -224,8 +224,8 @@ def patch_static_state_for_gms() -> None:
             """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
             pass
 
-        _mixin._export_static_state = _export_noop
-        _mixin._import_static_state = _import_noop
+        weight_updater._export_static_state = _export_noop
+        weight_updater._import_static_state = _import_noop
         _static_state_patched = True
         logger.info(
             "[GMS] Patched _export/_import_static_state -> no-op (pid=%d)",
@@ -233,6 +233,6 @@ def patch_static_state_for_gms() -> None:
         )
     except Exception:
         logger.warning(
-            "[GMS] Could not patch scheduler_update_weights_mixin: ",
+            "[GMS] Could not patch SGLang weight_updater static state: ",
             exc_info=True,
         )

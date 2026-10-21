@@ -159,7 +159,7 @@ The KVIndexer supports two backend implementations, selected via `--router-event
 
 - **Single-threaded RadixTree** (`--router-event-threads 1`): Events are processed in a dedicated single-threaded tokio runtime via channel-based dispatch. Also supports TTL retention and experimental per-rank capacity-bounded LRU retention for `--no-router-kv-events` approximate mode.
 
-- **ConcurrentRadixTree** (default, `--router-event-threads N` where N > 1): A thread-safe radix tree with a pool of N worker threads for event processing and approximate routing-decision writes (default: 4). Uses sticky worker-rank routing so request acquire, output materialization, release, capacity update, and reset operations share one FIFO. Read operations (`find_matches`) execute concurrently with writes.
+- **ConcurrentRadixTreeCompressed** (default, `--router-event-threads N` where N > 1): A thread-safe compressed radix tree with a pool of N worker threads for event processing and approximate routing-decision writes (default: 4). Uses sticky worker-rank routing so request acquire, output materialization, release, capacity update, and reset operations share one FIFO. Read operations (`find_matches`) execute concurrently with writes.
 
 ### Inter-Router Communication
 
@@ -222,8 +222,9 @@ graph TD
 1. Each worker assigns monotonically increasing event IDs starting from 0
 2. The router tracks the last received event ID per worker
 3. If an event arrives with `event_id > last_id + 1`, the router detects a gap
-4. The router resets that worker rank and requests a full snapshot (`start_event_id=None`, `end_event_id=None`)
-5. On worker discovery (Added event), the router dumps the worker's entire local indexer state
+4. The router keeps the existing index entries for that worker rank and requests events from the next expected ID (`start_event_id=last_id + 1`, `end_event_id=None`)
+5. The worker replies with its buffered events if its event buffer still holds that ID, or with a full tree dump that replaces the rank if the buffer no longer holds it
+6. On worker discovery (Added event), the router dumps the worker's entire local indexer state
 
 **Startup behavior:**
 - When a worker is discovered, the router queries and ingests its full local indexer state

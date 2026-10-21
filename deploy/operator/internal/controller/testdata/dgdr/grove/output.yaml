@@ -37,20 +37,16 @@ spec:
                 - "1.0"
                 - --disaggregation-mode
                 - decode
-                - --aic-perf-model
-                - --aic-backend
+                - --ais-perf-model
+                - --ais-backend
                 - vllm
-                - --aic-backend-version
-                - current
-                - --aic-system
+                - --ais-backend-version
+                - 0.24.0
+                - --ais-system
                 - h100_sxm
-                - --aic-tp-size
+                - --ais-tp-size
                 - "1"
-                - --aic-moe-tp-size
-                - "1"
-                - --aic-moe-ep-size
-                - "1"
-                - --aic-attention-dp-size
+                - --ais-attention-dp-size
                 - "1"
                 - --engine-type
                 - vllm
@@ -81,20 +77,16 @@ spec:
                 - "1.0"
                 - --disaggregation-mode
                 - prefill
-                - --aic-perf-model
-                - --aic-backend
+                - --ais-perf-model
+                - --ais-backend
                 - vllm
-                - --aic-backend-version
-                - current
-                - --aic-system
+                - --ais-backend-version
+                - 0.24.0
+                - --ais-system
                 - h100_sxm
-                - --aic-tp-size
+                - --ais-tp-size
                 - "1"
-                - --aic-moe-tp-size
-                - "1"
-                - --aic-moe-ep-size
-                - "1"
-                - --aic-attention-dp-size
+                - --ais-attention-dp-size
                 - "1"
                 - --engine-type
                 - vllm
@@ -241,20 +233,16 @@ spec:
                   - "1.0"
                   - --disaggregation-mode
                   - decode
-                  - --aic-perf-model
-                  - --aic-backend
+                  - --ais-perf-model
+                  - --ais-backend
                   - vllm
-                  - --aic-backend-version
-                  - current
-                  - --aic-system
+                  - --ais-backend-version
+                  - 0.24.0
+                  - --ais-system
                   - h100_sxm
-                  - --aic-tp-size
+                  - --ais-tp-size
                   - "1"
-                  - --aic-moe-tp-size
-                  - "1"
-                  - --aic-moe-ep-size
-                  - "1"
-                  - --aic-attention-dp-size
+                  - --ais-attention-dp-size
                   - "1"
                   - --engine-type
                   - vllm
@@ -381,20 +369,16 @@ spec:
                   - "1.0"
                   - --disaggregation-mode
                   - prefill
-                  - --aic-perf-model
-                  - --aic-backend
+                  - --ais-perf-model
+                  - --ais-backend
                   - vllm
-                  - --aic-backend-version
-                  - current
-                  - --aic-system
+                  - --ais-backend-version
+                  - 0.24.0
+                  - --ais-system
                   - h100_sxm
-                  - --aic-tp-size
+                  - --ais-tp-size
                   - "1"
-                  - --aic-moe-tp-size
-                  - "1"
-                  - --aic-moe-ep-size
-                  - "1"
-                  - --aic-attention-dp-size
+                  - --ais-attention-dp-size
                   - "1"
                   - --engine-type
                   - vllm

@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -66,6 +67,21 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 		FailureThreshold:    3,
 	}
 
+	// Allow dependency connections to finish before liveness can restart the frontend.
+	if runtimefeatures.FrontendStartupProbe.Enabled(context.RuntimeVersion) {
+		container.StartupProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/live",
+					Port: intstr.FromString(commonconsts.DynamoContainerPortName),
+				},
+			},
+			PeriodSeconds:    10,
+			TimeoutSeconds:   1,
+			FailureThreshold: 30,
+		}
+	}
+
 	// Add standard environment variables
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
@@ -81,6 +97,13 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 			Value: context.DynamoNamespace,
 		},
 	}...)
+
+	if runtimefeatures.StrictNamespacePrefix.Enabled(context.RuntimeVersion) {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  commonconsts.DynamoNamespacePrefixStrictEnvVar,
+			Value: "true",
+		})
+	}
 
 	return container, nil
 }

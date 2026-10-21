@@ -9,14 +9,12 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     time::Duration,
 };
 
 use anyhow::{Context, Result};
+use dashmap::DashMap;
 use dynamo_kv_router::{
     identity::CacheOwnerId,
     indexer::{
@@ -31,16 +29,16 @@ use dynamo_kv_router::{
 use dynamo_runtime::{
     component::Component,
     discovery::{
-        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, EventScope,
-        EventSourceInstanceId, EventSourceQuery,
+        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, DiscoveryStream,
+        EventScope, EventSourceInstanceId, EventSourceQuery,
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::EventSubscriber,
+    transports::event_plane::{Codec, EventSubscriber, ValidatedEnvelope, uses_direct_zmq},
 };
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use tokio::{
-    sync::{Mutex, mpsc, oneshot, watch},
+    sync::{Mutex, Semaphore, mpsc, oneshot, watch},
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
@@ -50,6 +48,10 @@ use crate::discovery::kv_state_agent::{
     KvStateAttachmentAdvertisement, KvStateSourceAdvertisement, attachment_record_id,
 };
 use crate::{
+    direct_zmq_fan_in::{
+        ContinuityMode, FanInEvent, FanInObservation, start_direct_zmq_fan_in_async,
+    },
+    direct_zmq_sub_pool::KV_ZMQ_RCVHWM,
     discovery::{KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus},
     kv_router::Indexer,
 };
@@ -62,25 +64,96 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const RECONCILE_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const RECONCILE_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
+/// Concurrent status handshakes per router; snapshots share the recovery lane's
+/// separate budget.
+const STATUS_CONCURRENCY_LIMIT: usize = 64;
 
 #[derive(Clone)]
 struct OwnerRuntime {
     publisher_id: Option<u64>,
-    recovered_cursor: u64,
+    /// Live ingest of `publisher_id`, shared with its event source.
+    ingest: Option<SharedIngest>,
     attachment_generation: Option<u64>,
     last_worker: Option<WorkerWithDpRank>,
     ready: bool,
     attached_worker: Option<WorkerWithDpRank>,
     router_hint_source: Option<RouterHintSourceMetadata>,
     hint_ready: bool,
-    recovery_required: bool,
+    /// Fence revision this state was planned at; it is routable only while
+    /// that revision is current.
+    revision: OwnerRevision,
 }
 
-struct OwnerRecoveryTail {
+/// Live-ingest state of one source publisher bound to its owner.
+///
+/// The publisher's event source applies batches under this lock, and
+/// reconciliation binds, recovers, and retires it under the same lock, so each
+/// batch lands entirely before or after a transition.
+struct OwnerIngest {
+    owner: CacheOwnerId,
     publisher_id: u64,
+    recovered_cursor: u64,
+    attachment_generation: Option<u64>,
+    last_worker: Option<WorkerWithDpRank>,
+    recovery_required: bool,
+    /// Present while recovery is in flight: live events are buffered, then
+    /// replayed after the recovered cursor.
+    tail: Option<OwnerRecoveryTail>,
+    /// Unbound from its owner; late batches are dropped.
+    retired: bool,
+}
+
+type SharedIngest = Arc<Mutex<OwnerIngest>>;
+
+/// Source publishers bound to owners, shared with every event source.
+type IngestBindings = Arc<DashMap<u64, SharedIngest>>;
+
+struct OwnerRecoveryTail {
     attachment_generation: Option<u64>,
     schedule_generation: u64,
     rank: RankState,
+}
+
+/// Applies live state-agent batches on the event source that received them.
+struct LiveIngest {
+    indexer: Indexer,
+    bindings: IngestBindings,
+    /// Owners whose live stream newly requires recovery; reconciliation
+    /// withdraws them from routing.
+    withdrawn: mpsc::UnboundedSender<(CacheOwnerId, u64)>,
+}
+
+impl LiveIngest {
+    async fn apply(&self, publisher_id: u64, events: Vec<RouterEvent>) {
+        // An unbound publisher's events precede its owner's recovery snapshot,
+        // which covers them.
+        let Some(ingest) = self
+            .bindings
+            .get(&publisher_id)
+            .map(|entry| entry.value().clone())
+        else {
+            return;
+        };
+        let mut ingest = ingest.lock().await;
+        if ingest.retired {
+            return;
+        }
+        // Recovery replays the tail even when it was scheduled because the live
+        // stream itself required recovery.
+        if let Some(tail) = ingest.tail.as_mut() {
+            for event in events {
+                tail.rank.buffer_recovery_tail(event);
+            }
+            return;
+        }
+        if ingest.recovery_required {
+            return;
+        }
+        apply_events_for_owner(&self.indexer, events, &mut ingest).await;
+        if ingest.recovery_required {
+            let _ = self.withdrawn.send((ingest.owner, publisher_id));
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -93,7 +166,7 @@ struct OwnerRecoveryPlan {
     previous_publisher_id: Option<u64>,
     previous_cursor: u64,
     recovery_required: bool,
-    observation_revision: u64,
+    revision: OwnerRevision,
     schedule_generation: u64,
 }
 
@@ -101,43 +174,379 @@ struct OwnerRecoveryPlan {
 struct RecoveryRetryFence {
     source: KvStateSourceAdvertisement,
     attachment: Option<KvStateAttachmentAdvertisement>,
-    observation_revision: u64,
+    revision: OwnerRevision,
     activation_expected: bool,
 }
 
-struct RecoveryRetry {
-    fence: Option<RecoveryRetryFence>,
+struct RetryTimer {
     deadline: Option<Instant>,
     next_delay: Duration,
 }
 
-impl RecoveryRetry {
-    fn new() -> Self {
+impl Default for RetryTimer {
+    fn default() -> Self {
         Self {
-            fence: None,
             deadline: None,
             next_delay: RECONCILE_RETRY_INITIAL_BACKOFF,
         }
     }
+}
 
-    fn schedule(&mut self, fence: RecoveryRetryFence) {
+impl RetryTimer {
+    fn schedule(&mut self) {
         if self.deadline.is_some() {
             return;
         }
-        self.fence = Some(fence);
         self.deadline = Some(Instant::now() + self.next_delay);
         self.next_delay = (self.next_delay * 2).min(RECONCILE_RETRY_MAX_BACKOFF);
     }
 
-    fn take_due(&mut self) -> Option<RecoveryRetryFence> {
-        self.deadline = None;
-        self.fence.take()
+    fn take_due(&mut self, now: Instant) -> bool {
+        let due = self.deadline.is_some_and(|deadline| deadline <= now);
+        if due {
+            self.deadline = None;
+        }
+        due
+    }
+}
+
+/// Backoff for reconciling again without a discovery change: per owner after its
+/// recovery fails or misses readiness, and for every owner after activation or
+/// a reconciliation fails.
+#[derive(Default)]
+struct RecoveryRetries {
+    owners: HashMap<CacheOwnerId, (RetryTimer, RecoveryRetryFence)>,
+    all: RetryTimer,
+}
+
+impl RecoveryRetries {
+    fn schedule(&mut self, owner: CacheOwnerId, fence: RecoveryRetryFence) {
+        let (timer, current) = self
+            .owners
+            .entry(owner)
+            .or_insert_with(|| (RetryTimer::default(), fence.clone()));
+        if timer.deadline.is_none() {
+            *current = fence;
+            timer.schedule();
+        }
     }
 
-    fn reset(&mut self) {
-        self.fence = None;
-        self.deadline = None;
-        self.next_delay = RECONCILE_RETRY_INITIAL_BACKOFF;
+    fn reset(&mut self, owner: &CacheOwnerId) {
+        self.owners.remove(owner);
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.owners
+            .values()
+            .filter_map(|(timer, _)| timer.deadline)
+            .chain(self.all.deadline)
+            .min()
+    }
+
+    fn take_due(&mut self) -> (bool, Vec<(CacheOwnerId, RecoveryRetryFence)>) {
+        let now = Instant::now();
+        let all = self.all.take_due(now);
+        let owners = self
+            .owners
+            .iter_mut()
+            .filter_map(|(owner, (timer, fence))| {
+                timer.take_due(now).then(|| (*owner, fence.clone()))
+            })
+            .collect();
+        (all, owners)
+    }
+}
+
+/// Owners waiting for reconciliation.
+#[derive(Default)]
+struct DirtyOwners {
+    owners: HashSet<CacheOwnerId>,
+    all: bool,
+}
+
+impl DirtyOwners {
+    fn mark(&mut self, owner: CacheOwnerId) {
+        self.owners.insert(owner);
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.all && self.owners.is_empty()
+    }
+
+    /// The owners to reconcile now: every known owner after `all`.
+    fn take(
+        &mut self,
+        runtime: &HashMap<CacheOwnerId, OwnerRuntime>,
+        sources: &HashMap<u64, KvStateSourceAdvertisement>,
+        attachments: &HashMap<u64, KvStateAttachmentAdvertisement>,
+    ) -> HashSet<CacheOwnerId> {
+        let mut owners = std::mem::take(&mut self.owners);
+        if std::mem::take(&mut self.all) {
+            owners.extend(runtime.keys().copied());
+            owners.extend(sources.values().map(|source| source.cache_owner_id));
+            owners.extend(
+                attachments
+                    .values()
+                    .map(|attachment| attachment.cache_owner_id),
+            );
+        }
+        owners
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct OwnerRevision {
+    /// Bumped when a discovery event cannot be attributed to owners.
+    epoch: u64,
+    owner: u64,
+}
+
+/// Owners a discovery event may affect.
+#[derive(Debug)]
+enum Affected {
+    Owners(HashSet<CacheOwnerId>),
+    All,
+}
+
+impl Affected {
+    fn merge(&mut self, other: Affected) {
+        match (self, other) {
+            (Affected::All, _) => {}
+            (this, Affected::All) => *this = Affected::All,
+            (Affected::Owners(owners), Affected::Owners(more)) => owners.extend(more),
+        }
+    }
+}
+
+struct PublishedOwner {
+    worker: Option<WorkerWithDpRank>,
+    hint: Option<(RouterHintSourceMetadata, Option<WorkerWithDpRank>)>,
+}
+
+/// The CacheOwner routing projection and the per-owner discovery revisions that
+/// fence it.
+///
+/// The observation fence bumps the revision of every owner a discovery event may
+/// affect and withdraws those owners, even while reconciliation is blocked on a
+/// clear or a snapshot. Reconciliation publishes an owner only from a plan made
+/// at its current revision, so a stale plan can never republish it.
+#[derive(Default)]
+struct ProjectionFence {
+    epoch: u64,
+    owners: HashMap<CacheOwnerId, u64>,
+    published: HashMap<CacheOwnerId, PublishedOwner>,
+}
+
+type SharedFence = Arc<Mutex<ProjectionFence>>;
+
+impl ProjectionFence {
+    fn revision(&self, owner: &CacheOwnerId) -> OwnerRevision {
+        OwnerRevision {
+            epoch: self.epoch,
+            owner: self.owners.get(owner).copied().unwrap_or(0),
+        }
+    }
+
+    /// Advances the affected owners' revisions and withdraws them from routing.
+    fn invalidate(&mut self, indexer: &Indexer, affected: &Affected) {
+        let withdrawn = match affected {
+            Affected::All => {
+                self.epoch = self.epoch.wrapping_add(1);
+                let withdrawn = !self.published.is_empty();
+                self.published.clear();
+                withdrawn
+            }
+            Affected::Owners(owners) => {
+                let mut withdrawn = false;
+                for owner in owners {
+                    let revision = self.owners.entry(*owner).or_default();
+                    *revision = revision.wrapping_add(1);
+                    withdrawn |= self.published.remove(owner).is_some();
+                }
+                withdrawn
+            }
+        };
+        if withdrawn {
+            self.publish(indexer);
+        }
+    }
+
+    /// Fails closed: nothing is routable until owners are planned again.
+    fn withdraw_all(&mut self, indexer: &Indexer) {
+        self.invalidate(indexer, &Affected::All);
+        indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
+    }
+
+    /// Publishes every ready owner whose state was planned at its current revision.
+    fn commit(&mut self, indexer: &Indexer, runtime: &HashMap<CacheOwnerId, OwnerRuntime>) {
+        let published = runtime
+            .iter()
+            .filter(|(owner, state)| state.revision == self.revision(owner))
+            .filter_map(|(owner, state)| {
+                let worker = state.ready.then_some(state.last_worker).flatten();
+                let hint = state
+                    .hint_ready
+                    .then(|| {
+                        state
+                            .router_hint_source
+                            .clone()
+                            .map(|metadata| (metadata, state.attached_worker))
+                    })
+                    .flatten();
+                (worker.is_some() || hint.is_some())
+                    .then_some((*owner, PublishedOwner { worker, hint }))
+            })
+            .collect();
+        self.published = published;
+        self.publish(indexer);
+    }
+
+    fn publish(&self, indexer: &Indexer) {
+        let projection = ResidencyProjection::new(
+            self.published
+                .iter()
+                .filter_map(|(owner, published)| published.worker.map(|worker| (*owner, worker))),
+        )
+        .unwrap_or_default();
+        let hint_sources = self.published.iter().filter_map(|(owner, published)| {
+            published
+                .hint
+                .clone()
+                .map(|(metadata, worker)| (*owner, metadata, worker))
+        });
+        indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::new(
+            projection,
+            hint_sources,
+        ));
+    }
+}
+
+/// What the observation fence knows from its own watches: enough to name the
+/// owners each discovery event can affect.
+#[derive(Default)]
+struct FenceIndex {
+    source_owners: HashMap<u64, CacheOwnerId>,
+    attachments: HashMap<u64, (CacheOwnerId, WorkerWithDpRank)>,
+    attached: HashMap<WorkerWithDpRank, HashSet<CacheOwnerId>>,
+    live_workers: HashSet<WorkerWithDpRank>,
+}
+
+impl FenceIndex {
+    /// Starts from the membership already in the watch, which `changed()` never
+    /// delivers, so a worker present at startup names its owners when it leaves.
+    fn new(membership: &KvSourceMembershipView) -> Self {
+        Self {
+            live_workers: membership.sources.keys().copied().collect(),
+            ..Self::default()
+        }
+    }
+
+    fn source(&mut self, event: Result<DiscoveryEvent>) -> Affected {
+        match event {
+            Ok(DiscoveryEvent::Added(DiscoveryInstance::EventSource {
+                publisher_id,
+                metadata,
+                ..
+            })) => match serde_json::from_value::<KvStateSourceAdvertisement>(metadata) {
+                Ok(source) => {
+                    self.source_owners
+                        .insert(publisher_id, source.cache_owner_id);
+                    Affected::Owners(HashSet::from([source.cache_owner_id]))
+                }
+                Err(_) => Affected::All,
+            },
+            Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::EventSource(
+                EventSourceInstanceId { publisher_id, .. },
+            ))) => self
+                .source_owners
+                .remove(&publisher_id)
+                .map_or(Affected::All, |owner| {
+                    Affected::Owners(HashSet::from([owner]))
+                }),
+            // A resync follows the changes it reconciled, already seen above.
+            Ok(_) => Affected::Owners(HashSet::new()),
+            Err(_) => Affected::All,
+        }
+    }
+
+    /// An attachment also affects every owner attached to the same worker, which
+    /// closes the window where a worker moves between owners.
+    fn attachment(&mut self, event: Result<DiscoveryEvent>) -> Affected {
+        let (owner, worker) = match event {
+            Ok(DiscoveryEvent::Added(DiscoveryInstance::EventSource {
+                publisher_id,
+                metadata,
+                ..
+            })) => {
+                let Ok(attachment) =
+                    serde_json::from_value::<KvStateAttachmentAdvertisement>(metadata)
+                else {
+                    return Affected::All;
+                };
+                let entry = (attachment.cache_owner_id, attachment.worker);
+                self.attachments.insert(publisher_id, entry);
+                self.attached
+                    .entry(attachment.worker)
+                    .or_default()
+                    .insert(attachment.cache_owner_id);
+                entry
+            }
+            Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::EventSource(
+                EventSourceInstanceId { publisher_id, .. },
+            ))) => {
+                let Some((owner, worker)) = self.attachments.remove(&publisher_id) else {
+                    return Affected::All;
+                };
+                if !self
+                    .attachments
+                    .values()
+                    .any(|attached| *attached == (owner, worker))
+                    && let Some(owners) = self.attached.get_mut(&worker)
+                {
+                    owners.remove(&owner);
+                }
+                (owner, worker)
+            }
+            Ok(_) => return Affected::Owners(HashSet::new()),
+            Err(_) => return Affected::All,
+        };
+        let mut owners = self.attached.get(&worker).cloned().unwrap_or_default();
+        owners.insert(owner);
+        Affected::Owners(owners)
+    }
+
+    /// Folds the discovery events already queued on either watch into
+    /// `affected`, so a burst withdraws its owners with one projection rebuild.
+    /// Returns `None` once a watch ends.
+    fn drain_ready(
+        &mut self,
+        sources: &mut DiscoveryStream,
+        attachments: &mut DiscoveryStream,
+        mut affected: Affected,
+    ) -> Option<Affected> {
+        loop {
+            let next = if let Some(event) = sources.next().now_or_never() {
+                event.map(|event| self.source(event))
+            } else if let Some(event) = attachments.next().now_or_never() {
+                event.map(|event| self.attachment(event))
+            } else {
+                return Some(affected);
+            };
+            affected.merge(next?);
+        }
+    }
+
+    /// Workers that joined or left affect the owners attached to them.
+    fn membership(&mut self, view: &KvSourceMembershipView) -> Affected {
+        let live_workers: HashSet<_> = view.sources.keys().copied().collect();
+        let owners = live_workers
+            .symmetric_difference(&self.live_workers)
+            .filter_map(|worker| self.attached.get(worker))
+            .flatten()
+            .copied()
+            .collect();
+        self.live_workers = live_workers;
+        Affected::Owners(owners)
     }
 }
 
@@ -199,18 +608,16 @@ pub(crate) async fn start_state_agent_router(
         cancellation_token.child_token(),
     );
     let (completion_tx, completion_rx) = oneshot::channel();
-    let observation_revision = Arc::new(AtomicU64::new(0));
-    let projection_commit = Arc::new(Mutex::new(()));
-    let (observation_tx, observation_rx) = watch::channel(0u64);
+    let fence = SharedFence::default();
+    let (fenced_tx, fenced_rx) = mpsc::unbounded_channel();
     start_observation_fence(
         component.clone(),
         indexer.clone(),
         membership.clone(),
         endpoint.clone(),
         recognized_tx.clone(),
-        observation_revision.clone(),
-        projection_commit.clone(),
-        observation_tx,
+        fence.clone(),
+        fenced_tx,
         cancellation_token.child_token(),
     )
     .await?;
@@ -223,9 +630,8 @@ pub(crate) async fn start_state_agent_router(
             expected_block_size,
             sources,
             recognized_tx,
-            observation_revision,
-            projection_commit,
-            observation_rx,
+            fence,
+            fenced_rx,
             cancellation_token,
         )
         .await;
@@ -244,9 +650,8 @@ async fn start_observation_fence(
     mut membership: KvSourceMembershipWatch,
     endpoint: EndpointId,
     recognized_tx: watch::Sender<HashSet<WorkerWithDpRank>>,
-    revision: Arc<AtomicU64>,
-    projection_commit: Arc<Mutex<()>>,
-    revision_tx: watch::Sender<u64>,
+    fence: SharedFence,
+    fenced_tx: mpsc::UnboundedSender<Affected>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let discovery = component.drt().discovery();
@@ -269,54 +674,43 @@ async fn start_observation_fence(
         )
         .await?;
     component.drt().runtime().secondary().spawn(async move {
-        // NOTE: This independent watch must invalidate projection while the
+        // NOTE: This independent watch must withdraw affected owners while the
         // reconciliation loop is blocked on acknowledged clears or applying a
-        // snapshot. Temporary loss of KV-aware routing is intentional;
-        // ordinary serving continues without a stale projection.
-        // TODO(#13044): share/index these model-wide watches, and invalidate
-        // only the affected owner, once that preserves the same independent fence.
+        // snapshot. Temporary loss of KV-aware routing for those owners is
+        // intentional; ordinary serving continues without a stale projection.
+        // TODO(#13044): share these model-wide watches.
+        let mut index = FenceIndex::new(&membership.borrow());
         loop {
-            let observed = tokio::select! {
+            let affected = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break,
-                changed = membership.changed() => {
-                    if changed.is_err() { break; }
-                    membership.borrow_and_update();
+                changed = membership.changed() => changed.ok().map(|()| {
+                    let view = membership.borrow_and_update().clone();
                     recognized_tx.send_modify(|recognized| {
-                        recognized.extend(source_mode_suppressed_workers(&membership.borrow()));
+                        recognized.extend(source_mode_suppressed_workers(&view));
                     });
-                    true
-                }
-                event = sources.next() => event.is_some(),
-                event = attachments.next() => event.is_some(),
+                    index.membership(&view)
+                }),
+                event = sources.next() => event.map(|event| index.source(event)),
+                event = attachments.next() => event.map(|event| index.attachment(event)),
             };
-            if !observed {
+            let Some(affected) = affected
+                .and_then(|affected| index.drain_ready(&mut sources, &mut attachments, affected))
+            else {
+                // Dropping `fenced_tx` ends reconciliation, which keeps V2
+                // routing withdrawn.
                 tracing::error!("KV state observation fence lost a discovery watch");
-                let _commit = projection_commit.lock().await;
-                let next = advance_observation_revision(&revision);
-                indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
-                revision_tx.send_replace(next);
+                fence.lock().await.withdraw_all(&indexer);
                 break;
+            };
+            if matches!(&affected, Affected::Owners(owners) if owners.is_empty()) {
+                continue;
             }
-            let _commit = projection_commit.lock().await;
-            indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
-            let next = advance_observation_revision(&revision);
-            revision_tx.send_replace(next);
+            fence.lock().await.invalidate(&indexer, &affected);
+            let _ = fenced_tx.send(affected);
         }
     });
     Ok(())
-}
-
-fn advance_observation_revision(revision: &AtomicU64) -> u64 {
-    revision
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            current.checked_add(1)
-        })
-        .unwrap_or_else(|_| {
-            tracing::error!("KV state observation revision exhausted");
-            u64::MAX
-        })
-        .saturating_add(1)
 }
 
 fn filtered_legacy_membership(
@@ -377,45 +771,45 @@ async fn run_state_agent_router(
     component: Component,
     endpoint: EndpointId,
     expected_block_size: u32,
-    mut source_stream: dynamo_runtime::discovery::DiscoveryStream,
+    mut source_stream: DiscoveryStream,
     recognized_tx: watch::Sender<HashSet<WorkerWithDpRank>>,
-    observation_revision: Arc<AtomicU64>,
-    projection_commit: Arc<Mutex<()>>,
-    mut observation_rx: watch::Receiver<u64>,
+    fence: SharedFence,
+    mut fenced_rx: mpsc::UnboundedReceiver<Affected>,
     cancel: CancellationToken,
 ) {
-    let mut attachment_stream: Option<dynamo_runtime::discovery::DiscoveryStream> = None;
-    let mut event_stream: Option<
-        dynamo_runtime::transports::event_plane::TypedEventSubscriber<Vec<RouterEvent>>,
-    > = None;
+    let mut attachment_stream: Option<DiscoveryStream> = None;
+    let mut ingest_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut transport: Option<Arc<RuntimeWorkerQueryTransport>> = None;
     let mut sources = HashMap::new();
     let mut attachments = HashMap::new();
     let mut runtime: HashMap<CacheOwnerId, OwnerRuntime> = HashMap::new();
+    let mut live_workers: HashSet<WorkerWithDpRank> =
+        membership.borrow().sources.keys().copied().collect();
+    let bindings = IngestBindings::default();
+    let (withdrawn_tx, mut withdrawn_rx) = mpsc::unbounded_channel();
+    let live_ingest = Arc::new(LiveIngest {
+        indexer: indexer.clone(),
+        bindings: bindings.clone(),
+        withdrawn: withdrawn_tx,
+    });
     let recovery_lane = Arc::new(RecoveryLane::new());
+    let status_permits = Arc::new(Semaphore::new(STATUS_CONCURRENCY_LIMIT));
     let (recovery_tx, mut recovery_rx) = mpsc::unbounded_channel();
-    let mut recovery_tails: HashMap<CacheOwnerId, OwnerRecoveryTail> = HashMap::new();
-    let mut recovering_publishers: HashMap<u64, CacheOwnerId> = HashMap::new();
     let mut next_recovery_schedule = 0u64;
-    let mut committed_revision = None;
-    let mut recovery_retry = RecoveryRetry::new();
+    let mut retries = RecoveryRetries::default();
+    let mut dirty = DirtyOwners::default();
 
     loop {
         enum Input {
             Membership,
-            Source(Option<Result<DiscoveryEvent>>),
-            Attachment(Option<Result<DiscoveryEvent>>),
-            Events(
-                Option<
-                    Result<(
-                        dynamo_runtime::transports::event_plane::EventEnvelope,
-                        Vec<RouterEvent>,
-                    )>,
-                >,
-            ),
+            Source(Result<DiscoveryEvent>),
+            Attachment(Result<DiscoveryEvent>),
+            Fenced(Affected),
+            Withdrawn((CacheOwnerId, u64)),
             Recovery(Option<Box<OwnerRecoveryResult>>),
-            Observation,
             Retry,
+            /// An input V2 routing depends on ended; it stays withdrawn.
+            Ended(&'static str),
             Cancelled,
         }
         let input = tokio::select! {
@@ -424,32 +818,31 @@ async fn run_state_agent_router(
             changed = membership.changed() => {
                 if changed.is_err() { Input::Cancelled } else { Input::Membership }
             },
-            event = source_stream.next() => Input::Source(event),
+            event = source_stream.next() => event.map_or(Input::Ended(WATCH_ENDED), Input::Source),
             event = async {
                 match attachment_stream.as_mut() {
                     Some(stream) => stream.next().await,
                     None => std::future::pending().await,
                 }
-            } => Input::Attachment(event),
-            event = async {
-                match event_stream.as_mut() {
-                    Some(stream) => stream.next().await,
+            } => event.map_or(Input::Ended(WATCH_ENDED), Input::Attachment),
+            affected = fenced_rx.recv() => {
+                affected.map_or(Input::Ended("KV state observation fence ended"), Input::Fenced)
+            },
+            Some(withdrawn) = withdrawn_rx.recv() => Input::Withdrawn(withdrawn),
+            _ = async {
+                match ingest_task.as_mut() {
+                    Some(task) => { let _ = task.await; }
                     None => std::future::pending().await,
                 }
-            } => Input::Events(event),
+            } => Input::Ended("V2 KV state event ingest ended"),
             result = recovery_rx.recv() => Input::Recovery(result.map(Box::new)),
-            changed = observation_rx.changed() => {
-                if changed.is_err() { Input::Cancelled } else { Input::Observation }
-            },
-            _ = wait_for_retry_deadline(recovery_retry.deadline) => Input::Retry,
+            _ = wait_for_retry_deadline(retries.next_deadline()) => Input::Retry,
         };
-        let mut reconcile = false;
         match input {
             Input::Cancelled => break,
             Input::Membership => {
-                recovery_retry.reset();
                 membership.borrow_and_update();
-                let snapshot = membership.borrow();
+                let snapshot = membership.borrow().clone();
                 let mut recognized = source_mode_suppressed_workers(&snapshot);
                 recognized.extend(
                     recognized_tx
@@ -459,84 +852,61 @@ async fn run_state_agent_router(
                         .filter(|worker| snapshot.sources.contains_key(worker)),
                 );
                 recognized_tx.send_replace(recognized);
-                reconcile = true;
+                let workers: HashSet<_> = snapshot.sources.keys().copied().collect();
+                let changed: HashSet<_> = workers
+                    .symmetric_difference(&live_workers)
+                    .copied()
+                    .collect();
+                live_workers = workers;
+                for owner in owners_on_workers(&changed, &attachments, &runtime) {
+                    retries.reset(&owner);
+                    dirty.mark(owner);
+                }
             }
-            Input::Observation => {
-                recovery_retry.reset();
-                observation_rx.borrow_and_update();
-                reconcile = true;
-            }
-            Input::Source(Some(event)) => match update_advertisements(
+            Input::Source(event) => apply_discovery_event(
                 event,
                 &endpoint,
                 KV_STATE_SOURCE_TOPIC_V2,
                 &mut sources,
-            ) {
-                Ok(changed) => {
-                    if changed {
-                        recovery_retry.reset();
-                    }
-                    reconcile = changed;
-                }
-                Err(error) => tracing::warn!(%error, "Ignoring invalid V2 KV state source"),
-            },
-            Input::Attachment(Some(event)) => match update_advertisements(
+                &mut retries,
+                &mut dirty,
+            ),
+            Input::Attachment(event) => apply_discovery_event(
                 event,
                 &endpoint,
                 KV_STATE_ATTACHMENT_TOPIC_V2,
                 &mut attachments,
-            ) {
-                Ok(changed) => {
-                    if changed {
-                        recovery_retry.reset();
-                    }
-                    reconcile = changed;
-                }
-                Err(error) => tracing::warn!(%error, "Ignoring invalid V2 KV state attachment"),
-            },
-            Input::Source(None) | Input::Attachment(None) => {
-                tracing::error!(%endpoint, "KV state discovery watch ended; keeping recognized ranks fail-closed");
-                indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
-                // Keep the recognized sender alive so the derived legacy view
-                // continues forwarding membership for unrecognized ranks.
-                cancel.cancelled().await;
+                &mut retries,
+                &mut dirty,
+            ),
+            Input::Ended(reason) => {
+                fail_closed_until_cancelled(&endpoint, reason, &fence, &indexer, &cancel).await;
                 break;
             }
-            Input::Events(Some(Ok((envelope, events)))) => {
-                if let Some(owner) = recovering_publishers.get(&envelope.publisher_id).copied()
-                    && let Some(tail) = recovery_tails.get_mut(&owner)
-                    && tail.publisher_id == envelope.publisher_id
-                {
-                    for event in events {
-                        tail.rank.buffer_recovery_tail(event);
+            Input::Fenced(Affected::All) => dirty.all = true,
+            Input::Fenced(Affected::Owners(owners)) => {
+                // An owner already planned at its new revision needs nothing more.
+                let fence = fence.lock().await;
+                for owner in owners {
+                    if runtime
+                        .get(&owner)
+                        .is_none_or(|state| state.revision != fence.revision(&owner))
+                    {
+                        dirty.mark(owner);
                     }
-                    continue;
-                }
-                if apply_live_events(&indexer, envelope.publisher_id, events, &mut runtime).await
-                    && let Some(revision) = committed_revision
-                    && publish_projection_if_current(
-                        &indexer,
-                        &runtime,
-                        &observation_revision,
-                        &projection_commit,
-                        revision,
-                    )
-                    .await
-                    .is_err()
-                {
-                    committed_revision = None;
                 }
             }
-            Input::Events(Some(Err(error))) => {
-                tracing::warn!(%error, %endpoint, "Failed to decode V2 KV state event batch");
-            }
-            Input::Events(None) => {
-                tracing::error!(%endpoint, "V2 KV state event stream ended");
-                indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
-                // V2 stays fail-closed, but unrelated legacy ranks must keep
-                // receiving membership updates until the router shuts down.
-                cancel.cancelled().await;
-                break;
+            Input::Withdrawn((owner, publisher_id)) => {
+                if withdraw_owner(
+                    owner,
+                    publisher_id,
+                    &mut runtime,
+                    &sources,
+                    &attachments,
+                    &mut retries,
+                ) {
+                    fence.lock().await.commit(&indexer, &runtime);
+                }
             }
             Input::Recovery(Some(result)) => {
                 let owner = result.owner();
@@ -547,118 +917,319 @@ async fn run_state_agent_router(
                     *result,
                     &indexer,
                     transport.as_ref(),
+                    &status_permits,
                     &membership,
                     &sources,
                     &attachments,
                     &mut runtime,
                     &recovery_lane,
                     &recovery_tx,
-                    &mut recovery_tails,
-                    &mut recovering_publishers,
-                    &observation_revision,
-                    &projection_commit,
+                    &fence,
                 )
                 .await
                 {
-                    fail_owner_recovery(
-                        owner,
-                        publisher_id,
-                        &mut runtime,
-                        &mut recovery_tails,
-                        &mut recovering_publishers,
-                    );
+                    fail_owner_recovery(owner, publisher_id, &mut runtime).await;
                     tracing::warn!(%owner, %error, "KV state-source recovery completion failed closed");
                 }
-                if runtime.get(&owner).is_some_and(|state| {
-                    state.publisher_id == Some(publisher_id)
-                        && (state.recovery_required
-                            || (retry_fence.activation_expected && !state.ready))
-                }) {
-                    recovery_retry.schedule(retry_fence);
+                let retry = match runtime
+                    .get(&owner)
+                    .filter(|state| state.publisher_id == Some(publisher_id))
+                {
+                    Some(state) => {
+                        (retry_fence.activation_expected && !state.ready)
+                            || match &state.ingest {
+                                Some(ingest) => ingest.lock().await.recovery_required,
+                                None => true,
+                            }
+                    }
+                    None => false,
+                };
+                if retry {
+                    retries.schedule(owner, retry_fence);
                 }
             }
             Input::Recovery(None) => break,
             Input::Retry => {
-                let Some(fence) = recovery_retry.take_due() else {
-                    continue;
-                };
-                if recovery_retry_is_current(&fence, &sources, &attachments, &observation_revision)
-                {
-                    reconcile = true;
-                } else {
-                    recovery_retry.reset();
+                let (all, due) = retries.take_due();
+                dirty.all |= all;
+                let fence = fence.lock().await;
+                for (owner, retry_fence) in due {
+                    if recovery_retry_is_current(
+                        &retry_fence,
+                        &sources,
+                        &attachments,
+                        fence.revision(&owner),
+                    ) {
+                        dirty.mark(owner);
+                    } else {
+                        retries.reset(&owner);
+                    }
                 }
             }
         }
-        if reconcile {
-            if !sources.is_empty() && transport.is_none() {
-                match start_state_agent_consumers(&component, &endpoint, cancel.child_token()).await
-                {
-                    Ok((attachment_watch, events, state_transport)) => {
-                        attachment_stream = Some(attachment_watch);
-                        event_stream = Some(events);
-                        transport = Some(Arc::new(state_transport));
-                        recovery_retry.reset();
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, %endpoint, "Failed to activate V2 KV state consumers");
-                        indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
-                        recognized_tx
-                            .send_replace(membership.borrow().sources.keys().copied().collect());
-                        if let Some(fence) = source_retry_fence(
-                            &sources,
-                            observation_revision.load(Ordering::Acquire),
-                        ) {
-                            recovery_retry.schedule(fence);
-                        }
-                        continue;
-                    }
-                }
-            }
-            let Some(transport) = transport.as_ref() else {
-                continue;
-            };
-            let membership_snapshot = membership.borrow().clone();
-            let revision = observation_revision.load(Ordering::Acquire);
-            let Some(schedule_generation) = next_recovery_schedule.checked_add(1) else {
-                tracing::error!("KV state recovery schedule generation exhausted");
-                break;
-            };
-            next_recovery_schedule = schedule_generation;
-            recovery_lane.cancel_all().await;
-            if let Err(error) = schedule_state_sources(
-                &indexer,
-                transport.clone(),
-                membership_snapshot,
+        if dirty.is_empty() {
+            continue;
+        }
+        // One reconciliation covers every discovery update already queued: the
+        // initial watch snapshot delivers each source and attachment as its own
+        // event.
+        let watches_open = apply_queued_discovery(
+            &mut source_stream,
+            &endpoint,
+            KV_STATE_SOURCE_TOPIC_V2,
+            &mut sources,
+            &mut retries,
+            &mut dirty,
+        ) && attachment_stream.as_mut().is_none_or(|stream| {
+            apply_queued_discovery(
+                stream,
                 &endpoint,
-                expected_block_size,
-                &sources,
-                &attachments,
-                &mut runtime,
-                &recovery_lane,
-                &recovery_tx,
-                &mut recovery_tails,
-                &mut recovering_publishers,
-                &recognized_tx,
-                &observation_revision,
-                &projection_commit,
-                revision,
-                schedule_generation,
+                KV_STATE_ATTACHMENT_TOPIC_V2,
+                &mut attachments,
+                &mut retries,
+                &mut dirty,
+            )
+        });
+        if !watches_open {
+            fail_closed_until_cancelled(&endpoint, WATCH_ENDED, &fence, &indexer, &cancel).await;
+            break;
+        }
+        if !sources.is_empty() && transport.is_none() {
+            match start_state_agent_consumers(
+                &component,
+                &endpoint,
+                live_ingest.clone(),
+                cancel.child_token(),
             )
             .await
             {
-                tracing::warn!(%error, %endpoint, "KV state-source reconciliation failed closed");
-                committed_revision = None;
-                if let Some(fence) = source_retry_fence(&sources, revision) {
-                    recovery_retry.schedule(fence);
+                Ok((mut attachment_watch, state_transport, task)) => {
+                    ingest_task = Some(task);
+                    transport = Some(Arc::new(state_transport));
+                    // Otherwise every owner is planned once without its
+                    // attachment and again when the snapshot arrives.
+                    let snapshot_applied = apply_initial_discovery(
+                        &mut attachment_watch,
+                        &endpoint,
+                        KV_STATE_ATTACHMENT_TOPIC_V2,
+                        &mut attachments,
+                        &mut retries,
+                        &mut dirty,
+                        &cancel,
+                    )
+                    .await;
+                    attachment_stream = Some(attachment_watch);
+                    if !snapshot_applied {
+                        fail_closed_until_cancelled(
+                            &endpoint,
+                            WATCH_ENDED,
+                            &fence,
+                            &indexer,
+                            &cancel,
+                        )
+                        .await;
+                        break;
+                    }
                 }
-            } else {
-                committed_revision = Some(revision);
+                Err(error) => {
+                    tracing::warn!(%error, %endpoint, "Failed to activate V2 KV state consumers");
+                    fence.lock().await.withdraw_all(&indexer);
+                    recognized_tx
+                        .send_replace(membership.borrow().sources.keys().copied().collect());
+                    retries.all.schedule();
+                    continue;
+                }
             }
+        }
+        let Some(transport) = transport.as_ref() else {
+            continue;
+        };
+        let owners = dirty.take(&runtime, &sources, &attachments);
+        let membership_snapshot = membership.borrow().clone();
+        let Some(schedule_generation) = next_recovery_schedule.checked_add(1) else {
+            tracing::error!("KV state recovery schedule generation exhausted");
+            break;
+        };
+        next_recovery_schedule = schedule_generation;
+        recovery_lane
+            .cancel_where(|(owner, _)| owners.contains(owner))
+            .await;
+        if let Err(error) = schedule_state_sources(
+            &indexer,
+            transport.clone(),
+            &status_permits,
+            membership_snapshot,
+            &endpoint,
+            expected_block_size,
+            &sources,
+            &attachments,
+            &mut runtime,
+            &bindings,
+            &recovery_lane,
+            &recovery_tx,
+            &recognized_tx,
+            &fence,
+            &owners,
+            schedule_generation,
+        )
+        .await
+        {
+            tracing::warn!(%error, %endpoint, "KV state-source reconciliation failed closed");
+            retries.all.schedule();
+        } else {
+            retries.all = RetryTimer::default();
         }
     }
     recovery_lane.cancel_all().await;
-    indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::default());
+    fence.lock().await.withdraw_all(&indexer);
+}
+
+const WATCH_ENDED: &str = "KV state discovery watch ended";
+
+/// Keeps V2 routing withdrawn until shutdown. Waiting keeps the recognized
+/// sender alive, so the derived legacy view continues forwarding membership for
+/// unrecognized ranks.
+async fn fail_closed_until_cancelled(
+    endpoint: &EndpointId,
+    reason: &str,
+    fence: &SharedFence,
+    indexer: &Indexer,
+    cancel: &CancellationToken,
+) {
+    tracing::error!(%endpoint, "{reason}; keeping recognized ranks fail-closed");
+    fence.lock().await.withdraw_all(indexer);
+    cancel.cancelled().await;
+}
+
+/// Applies one discovery event and queues its owner for reconciliation.
+fn apply_discovery_event<T: Advertisement>(
+    event: Result<DiscoveryEvent>,
+    endpoint: &EndpointId,
+    topic: &str,
+    advertisements: &mut HashMap<u64, T>,
+    retries: &mut RecoveryRetries,
+    dirty: &mut DirtyOwners,
+) {
+    match update_advertisements(event, endpoint, topic, advertisements) {
+        Ok(Some(owner)) => {
+            retries.reset(&owner);
+            dirty.mark(owner);
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, topic, "Ignoring invalid V2 KV state advertisement"),
+    }
+}
+
+/// Applies the discovery events already queued on `stream`. Returns false once
+/// the watch has ended.
+fn apply_queued_discovery<T: Advertisement>(
+    stream: &mut DiscoveryStream,
+    endpoint: &EndpointId,
+    topic: &str,
+    advertisements: &mut HashMap<u64, T>,
+    retries: &mut RecoveryRetries,
+    dirty: &mut DirtyOwners,
+) -> bool {
+    loop {
+        match stream.next().now_or_never() {
+            Some(Some(event)) => {
+                apply_discovery_event(event, endpoint, topic, advertisements, retries, dirty)
+            }
+            Some(None) => return false,
+            None => return true,
+        }
+    }
+}
+
+/// Applies a new watch's initial snapshot: its `Added` events up to the first
+/// `Resync`. A backend may still be delivering it when the watch is returned.
+/// Returns false if the watch ends or the router is cancelled first.
+#[allow(clippy::too_many_arguments)]
+async fn apply_initial_discovery<T: Advertisement>(
+    stream: &mut DiscoveryStream,
+    endpoint: &EndpointId,
+    topic: &str,
+    advertisements: &mut HashMap<u64, T>,
+    retries: &mut RecoveryRetries,
+    dirty: &mut DirtyOwners,
+    cancel: &CancellationToken,
+) -> bool {
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return false,
+            event = stream.next() => event,
+        };
+        match event {
+            Some(Ok(DiscoveryEvent::Resync(_))) => return true,
+            Some(event) => {
+                apply_discovery_event(event, endpoint, topic, advertisements, retries, dirty)
+            }
+            None => return false,
+        }
+    }
+}
+
+/// Owners whose plan depends on any of `workers`: attached to one, or last
+/// projected onto one.
+fn owners_on_workers(
+    workers: &HashSet<WorkerWithDpRank>,
+    attachments: &HashMap<u64, KvStateAttachmentAdvertisement>,
+    runtime: &HashMap<CacheOwnerId, OwnerRuntime>,
+) -> HashSet<CacheOwnerId> {
+    if workers.is_empty() {
+        return HashSet::new();
+    }
+    attachments
+        .values()
+        .filter(|attachment| workers.contains(&attachment.worker))
+        .map(|attachment| attachment.cache_owner_id)
+        .chain(runtime.iter().filter_map(|(owner, state)| {
+            [state.last_worker, state.attached_worker]
+                .into_iter()
+                .flatten()
+                .any(|worker| workers.contains(&worker))
+                .then_some(*owner)
+        }))
+        .collect()
+}
+
+/// Withdraws an owner whose live stream now requires recovery and schedules
+/// that recovery. Returns whether its routing changed.
+fn withdraw_owner(
+    owner: CacheOwnerId,
+    publisher_id: u64,
+    runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
+    sources: &HashMap<u64, KvStateSourceAdvertisement>,
+    attachments: &HashMap<u64, KvStateAttachmentAdvertisement>,
+    retries: &mut RecoveryRetries,
+) -> bool {
+    let Some(state) = runtime
+        .get_mut(&owner)
+        .filter(|state| state.publisher_id == Some(publisher_id))
+    else {
+        return false;
+    };
+    // Without its source record, the discovery change re-plans the owner.
+    if let Some(source) = sources.get(&publisher_id) {
+        let attachment = state
+            .attachment_generation
+            .and_then(|generation| attachments.get(&attachment_record_id(publisher_id, generation)))
+            .cloned();
+        retries.schedule(
+            owner,
+            RecoveryRetryFence {
+                source: source.clone(),
+                activation_expected: attachment.is_some() && state.last_worker.is_some(),
+                attachment,
+                revision: state.revision,
+            },
+        );
+    }
+    let was_published = state.ready || state.hint_ready;
+    state.ready = false;
+    state.hint_ready = false;
+    was_published
 }
 
 async fn wait_for_retry_deadline(deadline: Option<Instant>) {
@@ -668,29 +1239,13 @@ async fn wait_for_retry_deadline(deadline: Option<Instant>) {
     }
 }
 
-fn source_retry_fence(
-    sources: &HashMap<u64, KvStateSourceAdvertisement>,
-    observation_revision: u64,
-) -> Option<RecoveryRetryFence> {
-    sources
-        .iter()
-        .min_by_key(|(publisher_id, _)| *publisher_id)
-        .map(|(_, source)| RecoveryRetryFence {
-            source: source.clone(),
-            attachment: None,
-            observation_revision,
-            activation_expected: false,
-        })
-}
-
 fn recovery_retry_is_current(
     fence: &RecoveryRetryFence,
     sources: &HashMap<u64, KvStateSourceAdvertisement>,
     attachments: &HashMap<u64, KvStateAttachmentAdvertisement>,
-    observation_revision: &AtomicU64,
+    revision: OwnerRevision,
 ) -> bool {
-    if observation_revision.load(Ordering::Acquire) != fence.observation_revision
-        || sources.get(&fence.source.publisher_id) != Some(&fence.source)
+    if revision != fence.revision || sources.get(&fence.source.publisher_id) != Some(&fence.source)
     {
         return false;
     }
@@ -705,11 +1260,12 @@ fn recovery_retry_is_current(
 async fn start_state_agent_consumers(
     component: &Component,
     endpoint: &EndpointId,
+    live_ingest: Arc<LiveIngest>,
     cancel: CancellationToken,
 ) -> Result<(
     dynamo_runtime::discovery::DiscoveryStream,
-    dynamo_runtime::transports::event_plane::TypedEventSubscriber<Vec<RouterEvent>>,
     RuntimeWorkerQueryTransport,
+    tokio::task::JoinHandle<()>,
 )> {
     let attachments = component
         .drt()
@@ -719,35 +1275,112 @@ async fn start_state_agent_consumers(
                 endpoint.clone(),
                 KV_STATE_ATTACHMENT_TOPIC_V2,
             )),
-            Some(cancel),
+            Some(cancel.clone()),
         )
         .await
         .context("failed to watch V2 KV state attachments")?;
-    let events = EventSubscriber::for_endpoint_id_with_transport(
+    let ingest = start_live_ingest(component, endpoint, live_ingest, cancel)
+        .await
+        .context("failed to subscribe to V2 KV state events")?;
+    let transport = RuntimeWorkerQueryTransport::new(component).await?;
+    Ok((attachments, transport, ingest))
+}
+
+/// Consumes every slot publisher's events. Direct ZMQ runs one source task per
+/// publisher on the pooled SUB sockets the legacy KV path uses, so publishers
+/// decode and apply concurrently and a full source backpressures its socket
+/// instead of dropping. Brokered transports deliver one merged stream.
+async fn start_live_ingest(
+    component: &Component,
+    endpoint: &EndpointId,
+    live_ingest: Arc<LiveIngest>,
+    cancel: CancellationToken,
+) -> Result<tokio::task::JoinHandle<()>> {
+    let transport_kind = component.drt().default_event_transport_kind();
+    if uses_direct_zmq(transport_kind) {
+        let codec = Codec::default();
+        let handler = move |envelope: ValidatedEnvelope| {
+            let live_ingest = live_ingest.clone();
+            let events = codec.decode_payload::<Vec<RouterEvent>>(&envelope.payload);
+            async move {
+                live_ingest.apply(envelope.publisher_id, events?).await;
+                Ok(())
+            }
+        };
+        return start_direct_zmq_fan_in_async(
+            component.clone(),
+            endpoint.clone(),
+            KV_STATE_EVENT_TOPIC_V2,
+            KV_ZMQ_RCVHWM,
+            None,
+            ContinuityMode::Disabled,
+            true,
+            cancel,
+            handler,
+            |observation: FanInObservation| {
+                if observation.event == FanInEvent::SourceStarted {
+                    tracing::debug!(
+                        publisher_id = observation.publisher_id,
+                        "Consuming KV state-agent publisher"
+                    );
+                }
+            },
+        )
+        .await;
+    }
+
+    let mut events = EventSubscriber::for_endpoint_id_with_transport(
         component.drt(),
         endpoint,
         KV_STATE_EVENT_TOPIC_V2,
-        component.drt().default_event_transport_kind(),
+        transport_kind,
     )
-    .await
-    .context("failed to subscribe to V2 KV state events")?
+    .await?
     .typed::<Vec<RouterEvent>>();
-    let transport = RuntimeWorkerQueryTransport::new(component).await?;
-    Ok((attachments, events, transport))
+    let endpoint = endpoint.clone();
+    Ok(tokio::spawn(async move {
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                event = events.next() => event,
+            };
+            match event {
+                Some(Ok((envelope, batch))) => {
+                    live_ingest.apply(envelope.publisher_id, batch).await
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, %endpoint, "Failed to decode V2 KV state event batch")
+                }
+                None => return,
+            }
+        }
+    }))
 }
 
-trait Advertisement: serde::de::DeserializeOwned + Clone + PartialEq {}
+trait Advertisement: serde::de::DeserializeOwned + Clone + PartialEq {
+    fn owner(&self) -> CacheOwnerId;
+}
 
-impl Advertisement for KvStateSourceAdvertisement {}
+impl Advertisement for KvStateSourceAdvertisement {
+    fn owner(&self) -> CacheOwnerId {
+        self.cache_owner_id
+    }
+}
 
-impl Advertisement for KvStateAttachmentAdvertisement {}
+impl Advertisement for KvStateAttachmentAdvertisement {
+    fn owner(&self) -> CacheOwnerId {
+        self.cache_owner_id
+    }
+}
 
+/// Applies one discovery event and returns the owner it changed.
 fn update_advertisements<T: Advertisement>(
     event: Result<DiscoveryEvent>,
     endpoint: &EndpointId,
     expected_topic: &str,
     values: &mut HashMap<u64, T>,
-) -> Result<bool> {
+) -> Result<Option<CacheOwnerId>> {
     let event = event?;
     let expected_scope = EventScope::Endpoint {
         endpoint: endpoint.clone(),
@@ -760,7 +1393,7 @@ fn update_advertisements<T: Advertisement>(
             metadata,
         }) => {
             if scope != expected_scope || topic != expected_topic {
-                return Ok(false);
+                return Ok(None);
             }
             let value: T = serde_json::from_value(metadata)?;
             if values
@@ -769,8 +1402,9 @@ fn update_advertisements<T: Advertisement>(
             {
                 anyhow::bail!("discovery identity changed its immutable advertisement");
             }
+            let owner = value.owner();
             values.insert(publisher_id, value);
-            Ok(true)
+            Ok(Some(owner))
         }
         DiscoveryEvent::Removed(DiscoveryInstanceId::EventSource(EventSourceInstanceId {
             scope,
@@ -778,15 +1412,15 @@ fn update_advertisements<T: Advertisement>(
             publisher_id,
         })) => {
             if scope == expected_scope && topic == expected_topic {
-                Ok(values.remove(&publisher_id).is_some())
+                Ok(values.remove(&publisher_id).map(|value| value.owner()))
             } else {
-                Ok(false)
+                Ok(None)
             }
         }
         DiscoveryEvent::Added(_)
         | DiscoveryEvent::Removed(_)
         | DiscoveryEvent::ModelTaintsUpdated(_)
-        | DiscoveryEvent::Resync(_) => Ok(false),
+        | DiscoveryEvent::Resync(_) => Ok(None),
     }
 }
 
@@ -794,23 +1428,28 @@ fn update_advertisements<T: Advertisement>(
 async fn schedule_state_sources(
     indexer: &Indexer,
     transport: Arc<RuntimeWorkerQueryTransport>,
+    status_permits: &Arc<Semaphore>,
     membership: KvSourceMembershipView,
     endpoint: &EndpointId,
     expected_block_size: u32,
     sources: &HashMap<u64, KvStateSourceAdvertisement>,
     attachments: &HashMap<u64, KvStateAttachmentAdvertisement>,
     runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
+    bindings: &IngestBindings,
     recovery_lane: &Arc<RecoveryLane<(CacheOwnerId, u64)>>,
     recovery_tx: &mpsc::UnboundedSender<OwnerRecoveryResult>,
-    recovery_tails: &mut HashMap<CacheOwnerId, OwnerRecoveryTail>,
-    recovering_publishers: &mut HashMap<u64, CacheOwnerId>,
     recognized_tx: &watch::Sender<HashSet<WorkerWithDpRank>>,
-    observation_revision: &AtomicU64,
-    projection_commit: &Mutex<()>,
-    expected_revision: u64,
+    fence: &SharedFence,
+    owners: &HashSet<CacheOwnerId>,
     schedule_generation: u64,
 ) -> Result<()> {
-    ensure_observation_revision(observation_revision, expected_revision)?;
+    let revisions: HashMap<_, _> = {
+        let fence = fence.lock().await;
+        owners
+            .iter()
+            .map(|owner| (*owner, fence.revision(owner)))
+            .collect()
+    };
     let live_workers: HashSet<_> = membership.sources.keys().copied().collect();
     let mut source_by_owner: HashMap<CacheOwnerId, Vec<&KvStateSourceAdvertisement>> =
         HashMap::new();
@@ -913,23 +1552,17 @@ async fn schedule_state_sources(
     }
     recognized_tx.send_replace(provisional_recognized.clone());
 
-    let known_owners: HashSet<_> = runtime
-        .keys()
+    // Only the owners whose sources, attachments, or workers changed are planned
+    // again; every other owner keeps its readiness and live ingest.
+    let known_owners: Vec<_> = owners
+        .iter()
         .copied()
-        .chain(source_by_owner.keys().copied())
-        .chain(attachment_by_owner.keys().copied())
+        .filter(|owner| {
+            runtime.contains_key(owner)
+                || source_by_owner.contains_key(owner)
+                || attachment_by_owner.contains_key(owner)
+        })
         .collect();
-    recovery_tails.retain(|owner, tail| {
-        let keep = source_by_owner.get(owner).is_some_and(|sources| {
-            sources
-                .iter()
-                .any(|source| source.publisher_id == tail.publisher_id)
-        });
-        if !keep {
-            recovering_publishers.remove(&tail.publisher_id);
-        }
-        keep
-    });
     for owner in &known_owners {
         if let Some(state) = runtime.get_mut(owner) {
             state.ready = false;
@@ -938,36 +1571,37 @@ async fn schedule_state_sources(
         }
     }
     // Reconciliation performs asynchronous clears and recovery. Withdraw the
-    // affected projection before any fallible work so an early error cannot
-    // leave a stale CacheOwner mapping routable.
-    publish_projection(indexer, runtime);
+    // affected owners before any fallible work so an early error cannot leave a
+    // stale CacheOwner mapping routable.
+    fence.lock().await.commit(indexer, runtime);
     for owner in known_owners {
+        let revision = revisions[&owner];
         let matching_sources = source_by_owner
             .get(&owner)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         if matching_sources.len() > 1 {
-            if let Some(tail) = recovery_tails.remove(&owner) {
-                recovering_publishers.remove(&tail.publisher_id);
-            }
             if let Some(state) = runtime.get_mut(&owner) {
                 // No overlapping source incarnation is authoritative. Fence
                 // live traffic until one exact source wins and recovers.
+                if let Some(ingest) = state.ingest.take() {
+                    retire_ingest(bindings, &ingest).await;
+                }
                 state.publisher_id = None;
                 state.attachment_generation = None;
                 state.ready = false;
                 state.attached_worker = None;
                 state.hint_ready = false;
-                state.recovery_required = true;
+                state.revision = revision;
             }
             tracing::warn!(%owner, "Ambiguous KV state-source incarnations; retaining exact ownership unprojected");
             continue;
         }
         let Some(source) = matching_sources.first().copied() else {
-            if let Some(tail) = recovery_tails.remove(&owner) {
-                recovering_publishers.remove(&tail.publisher_id);
-            }
             if let Some(previous) = runtime.remove(&owner) {
+                if let Some(ingest) = &previous.ingest {
+                    retire_ingest(bindings, ingest).await;
+                }
                 if let Some(worker) = previous.last_worker {
                     clear_worker(indexer, worker, owner).await?;
                 }
@@ -999,6 +1633,37 @@ async fn schedule_state_sources(
             _ => None,
         };
 
+        let previous = runtime.get(&owner).cloned();
+        let expected_generation = attachment.map(|value| value.attachment_generation);
+        let last_worker = attachment
+            .map(|value| value.worker)
+            .or_else(|| previous.as_ref().and_then(|value| value.last_worker));
+        let recognized_worker = last_worker.filter(|worker| live_workers.contains(worker));
+        let attachment_changed = previous.as_ref().is_none_or(|value| {
+            value.publisher_id != Some(source.publisher_id)
+                || value.attachment_generation != expected_generation
+        });
+        // Fence the previous live ingest before clearing anything: a batch it
+        // applied after a clear would survive the recovery snapshot.
+        let mut reused_ingest = None;
+        if let Some(previous) = previous.as_ref()
+            && let Some(ingest) = previous.ingest.as_ref()
+        {
+            if previous.publisher_id == Some(source.publisher_id) {
+                let (cursor, recovery_required) = buffer_live_ingest(
+                    ingest,
+                    expected_generation,
+                    recognized_worker,
+                    attachment_changed,
+                    schedule_generation,
+                )
+                .await;
+                reused_ingest = Some((ingest.clone(), cursor, recovery_required));
+            } else {
+                retire_ingest(bindings, ingest).await;
+            }
+        }
+
         if attachment.is_none() {
             for candidate in matching {
                 if live_workers.contains(&candidate.worker) {
@@ -1006,16 +1671,8 @@ async fn schedule_state_sources(
                 }
             }
         }
-
-        let previous = runtime.get(&owner).cloned();
-        let expected_generation = attachment.map(|value| value.attachment_generation);
-        let last_worker = attachment
-            .map(|value| value.worker)
-            .or_else(|| previous.as_ref().and_then(|value| value.last_worker));
-        if let Some(previous) = previous.as_ref()
-            && (previous.publisher_id != Some(source.publisher_id)
-                || previous.attachment_generation != expected_generation)
-            && let Some(worker) = previous.last_worker
+        if attachment_changed
+            && let Some(worker) = previous.as_ref().and_then(|value| value.last_worker)
         {
             clear_worker(indexer, worker, owner).await?;
         }
@@ -1027,32 +1684,44 @@ async fn schedule_state_sources(
         {
             clear_worker(indexer, worker, owner).await?;
         }
-        let recognized_worker = last_worker.filter(|worker| live_workers.contains(worker));
         if previous.is_none()
             && let Some(worker) = recognized_worker
         {
             clear_worker(indexer, worker, owner).await?;
         }
-        let previous_cursor = previous
-            .as_ref()
-            .filter(|value| value.publisher_id == Some(source.publisher_id))
-            .map_or(0, |value| value.recovered_cursor);
-        let recovery_required = previous.as_ref().is_none_or(|value| {
-            value.publisher_id != Some(source.publisher_id)
-                || value.attachment_generation != expected_generation
-                || value.recovery_required
-        });
 
         let expected = KvStateAgentIdentity {
             cache_owner_id: owner,
             publisher_id: source.publisher_id,
             protocol_version: source.protocol_version,
         };
+        let (ingest, previous_cursor, recovery_required) = match reused_ingest {
+            Some(reused) => reused,
+            None => {
+                // Buffer live events from the first batch until recovery replays them.
+                let ingest = Arc::new(Mutex::new(OwnerIngest {
+                    owner,
+                    publisher_id: source.publisher_id,
+                    recovered_cursor: 0,
+                    attachment_generation: expected_generation,
+                    last_worker: recognized_worker,
+                    recovery_required: attachment_changed,
+                    tail: Some(OwnerRecoveryTail {
+                        attachment_generation: expected_generation,
+                        schedule_generation,
+                        rank: RankState::default(),
+                    }),
+                    retired: false,
+                }));
+                bindings.insert(source.publisher_id, ingest.clone());
+                (ingest, 0, attachment_changed)
+            }
+        };
         runtime.insert(
             owner,
             OwnerRuntime {
                 publisher_id: Some(source.publisher_id),
-                recovered_cursor: previous_cursor,
+                ingest: Some(ingest),
                 attachment_generation: expected_generation,
                 last_worker: recognized_worker,
                 ready: false,
@@ -1061,35 +1730,14 @@ async fn schedule_state_sources(
                     .filter(|worker| live_workers.contains(worker)),
                 router_hint_source: source.router_hint_source.clone(),
                 hint_ready: false,
-                recovery_required,
+                revision,
             },
         );
-        let tail = recovery_tails
-            .entry(owner)
-            .or_insert_with(|| OwnerRecoveryTail {
-                publisher_id: source.publisher_id,
-                attachment_generation: expected_generation,
-                schedule_generation,
-                rank: RankState::default(),
-            });
-        if tail.publisher_id != source.publisher_id
-            || tail.attachment_generation != expected_generation
-        {
-            recovering_publishers.remove(&tail.publisher_id);
-            *tail = OwnerRecoveryTail {
-                publisher_id: source.publisher_id,
-                attachment_generation: expected_generation,
-                schedule_generation,
-                rank: RankState::default(),
-            };
-        } else {
-            tail.schedule_generation = schedule_generation;
-        }
-        recovering_publishers.insert(source.publisher_id, owner);
         launch_initial_recovery(
             recovery_lane,
             recovery_tx,
             transport.clone(),
+            status_permits.clone(),
             OwnerRecoveryPlan {
                 owner,
                 source: source.clone(),
@@ -1099,7 +1747,7 @@ async fn schedule_state_sources(
                 previous_publisher_id: previous.and_then(|value| value.publisher_id),
                 previous_cursor,
                 recovery_required,
-                observation_revision: expected_revision,
+                revision,
                 schedule_generation,
             },
         );
@@ -1108,27 +1756,7 @@ async fn schedule_state_sources(
     let mut recognized = provisional_recognized;
     recognized.extend(runtime.values().filter_map(|value| value.last_worker));
     recognized_tx.send_replace(recognized);
-    publish_projection_if_current(
-        indexer,
-        runtime,
-        observation_revision,
-        projection_commit,
-        expected_revision,
-    )
-    .await?;
-    Ok(())
-}
-
-async fn publish_projection_if_current(
-    indexer: &Indexer,
-    runtime: &HashMap<CacheOwnerId, OwnerRuntime>,
-    observation_revision: &AtomicU64,
-    projection_commit: &Mutex<()>,
-    expected_revision: u64,
-) -> Result<()> {
-    let _commit = projection_commit.lock().await;
-    ensure_observation_revision(observation_revision, expected_revision)?;
-    publish_projection(indexer, runtime);
+    fence.lock().await.commit(indexer, runtime);
     Ok(())
 }
 
@@ -1158,7 +1786,7 @@ impl OwnerRecoveryResult {
         RecoveryRetryFence {
             source: plan.source.clone(),
             attachment: plan.attachment.clone(),
-            observation_revision: plan.observation_revision,
+            revision: plan.revision,
             activation_expected: plan.attachment.is_some() && plan.recognized_worker.is_some(),
         }
     }
@@ -1168,6 +1796,7 @@ fn launch_initial_recovery(
     lane: &Arc<RecoveryLane<(CacheOwnerId, u64)>>,
     tx: &mpsc::UnboundedSender<OwnerRecoveryResult>,
     transport: Arc<RuntimeWorkerQueryTransport>,
+    status_permits: Arc<Semaphore>,
     plan: OwnerRecoveryPlan,
 ) {
     let cancel = CancellationToken::new();
@@ -1177,6 +1806,9 @@ fn launch_initial_recovery(
     let owner = plan.owner;
     let schedule_generation = plan.schedule_generation;
     let handle = tokio::spawn(async move {
+        let Ok(status_permit) = status_permits.acquire_owned().await else {
+            return;
+        };
         let status_query = transport.query_status(
             plan.attachment
                 .as_ref()
@@ -1194,6 +1826,7 @@ fn launch_initial_recovery(
             _ = task_cancel.cancelled() => return,
             result = status_query => result,
         };
+        drop(status_permit);
         let needs_recovery = status.as_ref().is_ok_and(|status| {
             plan.recovery_required
                 || plan.previous_cursor
@@ -1248,6 +1881,7 @@ fn launch_post_status(
     lane: &Arc<RecoveryLane<(CacheOwnerId, u64)>>,
     tx: &mpsc::UnboundedSender<OwnerRecoveryResult>,
     transport: Arc<RuntimeWorkerQueryTransport>,
+    status_permits: Arc<Semaphore>,
     plan: OwnerRecoveryPlan,
     recovered_cursor: u64,
 ) {
@@ -1257,6 +1891,9 @@ fn launch_post_status(
     let owner = plan.owner;
     let schedule_generation = plan.schedule_generation;
     let handle = tokio::spawn(async move {
+        let Ok(_status_permit) = status_permits.acquire_owned().await else {
+            return;
+        };
         let query = transport.query_status(
             plan.attachment
                 .as_ref()
@@ -1288,32 +1925,39 @@ async fn finish_owner_recovery(
     result: OwnerRecoveryResult,
     indexer: &Indexer,
     transport: Option<&Arc<RuntimeWorkerQueryTransport>>,
+    status_permits: &Arc<Semaphore>,
     membership: &KvSourceMembershipWatch,
     sources: &HashMap<u64, KvStateSourceAdvertisement>,
     attachments: &HashMap<u64, KvStateAttachmentAdvertisement>,
     runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
     lane: &Arc<RecoveryLane<(CacheOwnerId, u64)>>,
     tx: &mpsc::UnboundedSender<OwnerRecoveryResult>,
-    tails: &mut HashMap<CacheOwnerId, OwnerRecoveryTail>,
-    recovering_publishers: &mut HashMap<u64, CacheOwnerId>,
-    observation_revision: &AtomicU64,
-    projection_commit: &Mutex<()>,
+    fence: &SharedFence,
 ) -> Result<()> {
     let plan = match &result {
         OwnerRecoveryResult::Initial { plan, .. }
         | OwnerRecoveryResult::PostStatus { plan, .. } => plan,
     };
-    if !owner_recovery_is_current(plan, membership, sources, attachments, observation_revision) {
+    let revision = fence.lock().await.revision(&plan.owner);
+    if !owner_recovery_is_current(plan, membership, sources, attachments, revision) {
         return Ok(());
     }
-    if tails
+    let Some(ingest) = runtime
         .get(&plan.owner)
+        .filter(|state| state.publisher_id == Some(plan.source.publisher_id))
+        .and_then(|state| state.ingest.clone())
+    else {
+        return Ok(());
+    };
+    if ingest
+        .lock()
+        .await
+        .tail
+        .as_ref()
         .is_none_or(|tail| tail.schedule_generation != plan.schedule_generation)
     {
         return Ok(());
     }
-    let expected_revision = plan.observation_revision;
-
     match result {
         OwnerRecoveryResult::Initial {
             plan,
@@ -1323,13 +1967,7 @@ async fn finish_owner_recovery(
             let status = match status {
                 Ok(status) => status,
                 Err(error) => {
-                    fail_owner_recovery(
-                        plan.owner,
-                        plan.source.publisher_id,
-                        runtime,
-                        tails,
-                        recovering_publishers,
-                    );
+                    fail_owner_recovery(plan.owner, plan.source.publisher_id, runtime).await;
                     tracing::warn!(owner = %plan.owner, %error, "KV state-agent status handshake failed");
                     return Ok(());
                 }
@@ -1338,13 +1976,7 @@ async fn finish_owner_recovery(
                 let response = match recovery {
                     Ok(response) => response,
                     Err(error) => {
-                        fail_owner_recovery(
-                            plan.owner,
-                            plan.source.publisher_id,
-                            runtime,
-                            tails,
-                            recovering_publishers,
-                        );
+                        fail_owner_recovery(plan.owner, plan.source.publisher_id, runtime).await;
                         tracing::warn!(owner = %plan.owner, %error, "KV state-agent recovery query failed");
                         return Ok(());
                     }
@@ -1368,24 +2000,24 @@ async fn finish_owner_recovery(
                     response,
                 )
                 .await?;
-                apply_recovery_tail(indexer, &plan, recovered_cursor, runtime, tails).await?;
+                // Keep buffering until the post-recovery status confirms readiness.
+                apply_recovery_tail(indexer, &plan, recovered_cursor, &ingest, false).await?;
                 let Some(transport) = transport else {
                     anyhow::bail!("state-agent recovery transport disappeared");
                 };
-                launch_post_status(lane, tx, (*transport).clone(), plan, recovered_cursor);
+                launch_post_status(
+                    lane,
+                    tx,
+                    (*transport).clone(),
+                    status_permits.clone(),
+                    plan,
+                    recovered_cursor,
+                );
                 return Ok(());
             } else {
-                apply_recovery_tail(indexer, &plan, plan.previous_cursor, runtime, tails).await?
+                apply_recovery_tail(indexer, &plan, plan.previous_cursor, &ingest, true).await?
             };
-            finish_owner_readiness(
-                &plan,
-                status,
-                recovered_cursor,
-                membership,
-                runtime,
-                tails,
-                recovering_publishers,
-            );
+            finish_owner_readiness(&plan, status, recovered_cursor, membership, runtime);
         }
         OwnerRecoveryResult::PostStatus {
             plan,
@@ -1395,38 +2027,18 @@ async fn finish_owner_recovery(
             let status = match status {
                 Ok(status) => status,
                 Err(error) => {
-                    fail_owner_recovery(
-                        plan.owner,
-                        plan.source.publisher_id,
-                        runtime,
-                        tails,
-                        recovering_publishers,
-                    );
+                    fail_owner_recovery(plan.owner, plan.source.publisher_id, runtime).await;
                     tracing::warn!(owner = %plan.owner, %error, "KV state-agent post-recovery status check failed");
                     return Ok(());
                 }
             };
             let recovered_cursor =
-                apply_recovery_tail(indexer, &plan, recovered_cursor, runtime, tails).await?;
-            finish_owner_readiness(
-                &plan,
-                status,
-                recovered_cursor,
-                membership,
-                runtime,
-                tails,
-                recovering_publishers,
-            );
+                apply_recovery_tail(indexer, &plan, recovered_cursor, &ingest, true).await?;
+            finish_owner_readiness(&plan, status, recovered_cursor, membership, runtime);
         }
     }
-    publish_projection_if_current(
-        indexer,
-        runtime,
-        observation_revision,
-        projection_commit,
-        expected_revision,
-    )
-    .await
+    fence.lock().await.commit(indexer, runtime);
+    Ok(())
 }
 
 fn owner_recovery_is_current(
@@ -1434,9 +2046,9 @@ fn owner_recovery_is_current(
     membership: &KvSourceMembershipWatch,
     sources: &HashMap<u64, KvStateSourceAdvertisement>,
     attachments: &HashMap<u64, KvStateAttachmentAdvertisement>,
-    observation_revision: &AtomicU64,
+    revision: OwnerRevision,
 ) -> bool {
-    if observation_revision.load(Ordering::Acquire) != plan.observation_revision
+    if revision != plan.revision
         || sources.get(&plan.source.publisher_id) != Some(&plan.source)
         || plan
             .recognized_worker
@@ -1455,47 +2067,38 @@ fn owner_recovery_is_current(
     }
 }
 
+/// Replays the buffered live tail after `recovered_cursor`. With `finish`, live
+/// events apply directly afterwards; the drain and the switch happen under one
+/// lock, so no event lands between them.
 async fn apply_recovery_tail(
     indexer: &Indexer,
     plan: &OwnerRecoveryPlan,
     recovered_cursor: u64,
-    runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
-    tails: &mut HashMap<CacheOwnerId, OwnerRecoveryTail>,
+    ingest: &SharedIngest,
+    finish: bool,
 ) -> Result<u64> {
-    let events = tails
-        .get_mut(&plan.owner)
-        .filter(|tail| {
-            tail.publisher_id == plan.source.publisher_id
-                && tail.attachment_generation
-                    == plan
-                        .attachment
-                        .as_ref()
-                        .map(|value| value.attachment_generation)
-        })
+    let attachment_generation = plan
+        .attachment
+        .as_ref()
+        .map(|value| value.attachment_generation);
+    let mut ingest = ingest.lock().await;
+    let events = ingest
+        .tail
+        .as_mut()
+        .filter(|tail| tail.attachment_generation == attachment_generation)
         .map_or_else(Vec::new, |tail| {
             tail.rank.drain_advisory_tail_after(recovered_cursor)
         });
-    let state = runtime.entry(plan.owner).or_insert(OwnerRuntime {
-        publisher_id: Some(plan.source.publisher_id),
-        recovered_cursor,
-        attachment_generation: plan
-            .attachment
-            .as_ref()
-            .map(|value| value.attachment_generation),
-        last_worker: plan.recognized_worker,
-        ready: false,
-        attached_worker: plan.attachment.as_ref().map(|attachment| attachment.worker),
-        router_hint_source: plan.source.router_hint_source.clone(),
-        hint_ready: false,
-        recovery_required: false,
-    });
-    state.recovered_cursor = recovered_cursor;
-    state.recovery_required = false;
-    apply_events_for_owner(indexer, plan.owner, plan.source.publisher_id, events, state).await;
-    if state.recovery_required {
+    ingest.recovered_cursor = recovered_cursor;
+    ingest.recovery_required = false;
+    apply_events_for_owner(indexer, events, &mut ingest).await;
+    if ingest.recovery_required {
         anyhow::bail!("buffered state-agent recovery tail was rejected");
     }
-    Ok(state.recovered_cursor)
+    if finish {
+        ingest.tail = None;
+    }
+    Ok(ingest.recovered_cursor)
 }
 
 fn finish_owner_readiness(
@@ -1504,8 +2107,6 @@ fn finish_owner_readiness(
     recovered_cursor: u64,
     membership: &KvSourceMembershipWatch,
     runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
-    tails: &mut HashMap<CacheOwnerId, OwnerRecoveryTail>,
-    recovering_publishers: &mut HashMap<u64, CacheOwnerId>,
 ) {
     let membership = membership.borrow();
     let live_workers = &membership.sources;
@@ -1527,53 +2128,82 @@ fn finish_owner_readiness(
             })
             && recovered_cursor >= attachment.ready_at_outbound_cursor
     });
-    runtime.insert(
-        plan.owner,
-        OwnerRuntime {
-            publisher_id: Some(plan.source.publisher_id),
-            recovered_cursor,
-            attachment_generation: plan
-                .attachment
-                .as_ref()
-                .map(|value| value.attachment_generation),
-            last_worker: plan.recognized_worker,
-            ready,
-            attached_worker: plan
-                .attachment
-                .as_ref()
-                .map(|attachment| attachment.worker)
-                .filter(|worker| live_workers.contains_key(worker)),
-            router_hint_source: plan.source.router_hint_source.clone(),
-            hint_ready,
-            recovery_required: false,
-        },
-    );
-    tails.remove(&plan.owner);
-    recovering_publishers.remove(&plan.source.publisher_id);
+    let Some(state) = runtime
+        .get_mut(&plan.owner)
+        .filter(|state| state.publisher_id == Some(plan.source.publisher_id))
+    else {
+        return;
+    };
+    state.attachment_generation = plan
+        .attachment
+        .as_ref()
+        .map(|value| value.attachment_generation);
+    state.last_worker = plan.recognized_worker;
+    state.ready = ready;
+    state.attached_worker = plan
+        .attachment
+        .as_ref()
+        .map(|attachment| attachment.worker)
+        .filter(|worker| live_workers.contains_key(worker));
+    state.router_hint_source = plan.source.router_hint_source.clone();
+    state.hint_ready = hint_ready;
 }
 
-fn fail_owner_recovery(
+async fn fail_owner_recovery(
     owner: CacheOwnerId,
     publisher_id: u64,
     runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
-    tails: &mut HashMap<CacheOwnerId, OwnerRecoveryTail>,
-    recovering_publishers: &mut HashMap<u64, CacheOwnerId>,
 ) {
-    if let Some(state) = runtime.get_mut(&owner) {
-        state.ready = false;
-        state.attached_worker = None;
-        state.hint_ready = false;
-        state.recovery_required = true;
+    let Some(state) = runtime
+        .get_mut(&owner)
+        .filter(|state| state.publisher_id == Some(publisher_id))
+    else {
+        return;
+    };
+    state.ready = false;
+    state.attached_worker = None;
+    state.hint_ready = false;
+    if let Some(ingest) = &state.ingest {
+        let mut ingest = ingest.lock().await;
+        ingest.tail = None;
+        ingest.recovery_required = true;
     }
-    tails.remove(&owner);
-    recovering_publishers.remove(&publisher_id);
 }
 
-fn ensure_observation_revision(revision: &AtomicU64, expected: u64) -> Result<()> {
-    if revision.load(Ordering::Acquire) != expected {
-        anyhow::bail!("KV state reconciliation was superseded by a newer observation");
+/// Buffers the live events of a reused ingest until recovery replays them, and
+/// returns its recovered cursor and whether recovery must rebuild its state.
+async fn buffer_live_ingest(
+    ingest: &SharedIngest,
+    attachment_generation: Option<u64>,
+    last_worker: Option<WorkerWithDpRank>,
+    attachment_changed: bool,
+    schedule_generation: u64,
+) -> (u64, bool) {
+    let mut ingest = ingest.lock().await;
+    let recovery_required = attachment_changed || ingest.recovery_required;
+    ingest.attachment_generation = attachment_generation;
+    ingest.last_worker = last_worker;
+    ingest.recovery_required = recovery_required;
+    match ingest.tail.as_mut() {
+        Some(tail) if tail.attachment_generation == attachment_generation => {
+            tail.schedule_generation = schedule_generation;
+        }
+        _ => {
+            ingest.tail = Some(OwnerRecoveryTail {
+                attachment_generation,
+                schedule_generation,
+                rank: RankState::default(),
+            });
+        }
     }
-    Ok(())
+    (ingest.recovered_cursor, recovery_required)
+}
+
+async fn retire_ingest(bindings: &IngestBindings, ingest: &SharedIngest) {
+    let mut guard = ingest.lock().await;
+    guard.retired = true;
+    guard.tail = None;
+    bindings.remove_if(&guard.publisher_id, |_, bound| Arc::ptr_eq(bound, ingest));
 }
 
 async fn apply_recovery_response(
@@ -1661,30 +2291,13 @@ fn validate_recovery_events(
     Ok(())
 }
 
-async fn apply_live_events(
-    indexer: &Indexer,
-    publisher_id: u64,
-    events: Vec<RouterEvent>,
-    runtime: &mut HashMap<CacheOwnerId, OwnerRuntime>,
-) -> bool {
-    let Some((owner, state)) = runtime
-        .iter_mut()
-        .find(|(_, state)| state.publisher_id == Some(publisher_id))
-    else {
-        return false;
-    };
-    let was_published = (state.ready, state.hint_ready);
-    apply_events_for_owner(indexer, *owner, publisher_id, events, state).await;
-    was_published != (state.ready, state.hint_ready)
-}
-
 async fn apply_events_for_owner(
     indexer: &Indexer,
-    owner: CacheOwnerId,
-    publisher_id: u64,
     events: Vec<RouterEvent>,
-    state: &mut OwnerRuntime,
+    state: &mut OwnerIngest,
 ) {
+    let owner = state.owner;
+    let publisher_id = state.publisher_id;
     for event in events {
         if state.recovery_required {
             break;
@@ -1727,8 +2340,6 @@ async fn apply_events_for_owner(
                 event_id,
                 "Ignoring incorrectly attributed KV state event"
             );
-            state.ready = false;
-            state.hint_ready = false;
             state.recovery_required = true;
             break;
         }
@@ -1736,34 +2347,12 @@ async fn apply_events_for_owner(
         if let Err(error) = indexer.try_apply_event(event).await {
             tracing::warn!(publisher_id, event_id, %error, "Failed to apply advisory KV state event");
             if is_clear {
-                state.ready = false;
-                state.hint_ready = false;
                 state.recovery_required = true;
                 break;
             }
         }
         state.recovered_cursor = event_id;
     }
-}
-
-fn publish_projection(indexer: &Indexer, runtime: &HashMap<CacheOwnerId, OwnerRuntime>) {
-    let projection = ResidencyProjection::new(runtime.iter().filter_map(|(owner, state)| {
-        state
-            .ready
-            .then_some(state.last_worker)
-            .flatten()
-            .map(|worker| (*owner, worker))
-    }))
-    .unwrap_or_default();
-    let hint_sources = runtime.iter().filter_map(|(owner, state)| {
-        state.hint_ready.then(|| {
-            state
-                .router_hint_source
-                .clone()
-                .map(|metadata| (*owner, metadata, state.attached_worker))
-        })?
-    });
-    indexer.set_residency_routing_snapshot(ResidencyRoutingSnapshot::new(projection, hint_sources));
 }
 
 async fn clear_worker(
@@ -1914,6 +2503,66 @@ mod tests {
         }
     }
 
+    fn bound_ingest(
+        owner: CacheOwnerId,
+        publisher_id: u64,
+        attachment_generation: Option<u64>,
+        last_worker: Option<WorkerWithDpRank>,
+    ) -> SharedIngest {
+        Arc::new(Mutex::new(OwnerIngest {
+            owner,
+            publisher_id,
+            recovered_cursor: 0,
+            attachment_generation,
+            last_worker,
+            recovery_required: false,
+            tail: None,
+            retired: false,
+        }))
+    }
+
+    fn live_ingest(
+        indexer: Indexer,
+        ingests: &[&SharedIngest],
+    ) -> (LiveIngest, mpsc::UnboundedReceiver<(CacheOwnerId, u64)>) {
+        let bindings = IngestBindings::default();
+        for ingest in ingests {
+            let publisher_id = ingest.try_lock().unwrap().publisher_id;
+            bindings.insert(publisher_id, (*ingest).clone());
+        }
+        let (withdrawn, withdrawn_rx) = mpsc::unbounded_channel();
+        (
+            LiveIngest {
+                indexer,
+                bindings,
+                withdrawn,
+            },
+            withdrawn_rx,
+        )
+    }
+
+    fn worker_store(owner: CacheOwnerId, worker: WorkerWithDpRank, event_id: u64) -> RouterEvent {
+        RouterEvent::with_residency_domain(
+            worker.worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(event_id),
+                        tokens_hash: LocalBlockHash(event_id),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: worker.dp_rank,
+            },
+            StorageTier::Device,
+            ResidencyDomain::Worker,
+        )
+        .with_state_source(owner)
+    }
+
     #[tokio::test(start_paused = true)]
     async fn recovery_retry_runs_without_discovery_and_fences_replacement() {
         let owner = owner(4);
@@ -1924,26 +2573,36 @@ mod tests {
             attachment_record_id(attachment.publisher_id, attachment.attachment_generation),
             attachment.clone(),
         )]);
-        let revision = AtomicU64::new(3);
+        let revision = OwnerRevision { epoch: 0, owner: 3 };
         let fence = RecoveryRetryFence {
             source,
             attachment: Some(attachment),
-            observation_revision: 3,
+            revision,
             activation_expected: true,
         };
-        let mut retry = RecoveryRetry::new();
+        let mut retries = RecoveryRetries::default();
 
-        retry.schedule(fence.clone());
+        retries.schedule(owner, fence.clone());
         tokio::time::advance(RECONCILE_RETRY_INITIAL_BACKOFF).await;
-        wait_for_retry_deadline(retry.deadline).await;
-        let due = retry
-            .take_due()
-            .expect("retry should fire without discovery");
+        wait_for_retry_deadline(retries.next_deadline()).await;
+        let (all, due) = retries.take_due();
+        assert!(!all);
+        let [(due_owner, due)] = due.as_slice() else {
+            panic!("the owner's retry should fire without discovery");
+        };
+        assert_eq!(*due_owner, owner);
         assert!(recovery_retry_is_current(
-            &due,
+            due,
             &sources,
             &attachments,
-            &revision,
+            revision,
+        ));
+        // A newer observation of this owner supersedes the retry.
+        assert!(!recovery_retry_is_current(
+            due,
+            &sources,
+            &attachments,
+            OwnerRevision { epoch: 0, owner: 4 },
         ));
 
         attachments.clear();
@@ -1953,10 +2612,48 @@ mod tests {
             replacement,
         );
         assert!(!recovery_retry_is_current(
-            &due,
+            due,
             &sources,
             &attachments,
-            &revision,
+            revision,
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn withdrawn_owner_retries_recovery_without_discovery() {
+        let owner = owner(4);
+        let source = source_advertisement(owner);
+        let attachment = attachment_advertisement(owner, 7);
+        let sources = HashMap::from([(source.publisher_id, source)]);
+        let attachments = HashMap::from([(
+            attachment_record_id(attachment.publisher_id, attachment.attachment_generation),
+            attachment.clone(),
+        )]);
+        let mut runtime = HashMap::from([(owner, ready_runtime(attachment.worker))]);
+        let mut retries = RecoveryRetries::default();
+
+        assert!(withdraw_owner(
+            owner,
+            41,
+            &mut runtime,
+            &sources,
+            &attachments,
+            &mut retries,
+        ));
+        assert!(!runtime[&owner].ready);
+
+        tokio::time::advance(RECONCILE_RETRY_INITIAL_BACKOFF).await;
+        let (_, due) = retries.take_due();
+        let [(due_owner, due)] = due.as_slice() else {
+            panic!("the withdrawn owner's recovery should be retried");
+        };
+        assert_eq!(*due_owner, owner);
+        assert!(due.activation_expected);
+        assert!(recovery_retry_is_current(
+            due,
+            &sources,
+            &attachments,
+            runtime[&owner].revision,
         ));
     }
 
@@ -1980,7 +2677,7 @@ mod tests {
             previous_publisher_id: None,
             previous_cursor: 0,
             recovery_required: true,
-            observation_revision: 1,
+            revision: OwnerRevision::default(),
             schedule_generation: 1,
         };
         let mut rank = RankState::default();
@@ -2002,29 +2699,16 @@ mod tests {
             StorageTier::HostPinned,
             owner,
         ));
-        let mut tails = HashMap::from([(
-            owner,
-            OwnerRecoveryTail {
-                publisher_id: 41,
+        let ingest = bound_ingest(owner, 41, Some(7), Some(worker));
+        {
+            let mut ingest = ingest.try_lock().unwrap();
+            ingest.recovery_required = true;
+            ingest.tail = Some(OwnerRecoveryTail {
                 attachment_generation: Some(7),
                 schedule_generation: 1,
                 rank,
-            },
-        )]);
-        let mut runtime = HashMap::from([(
-            owner,
-            OwnerRuntime {
-                publisher_id: Some(41),
-                recovered_cursor: 0,
-                attachment_generation: Some(7),
-                last_worker: Some(worker),
-                ready: false,
-                attached_worker: Some(worker),
-                router_hint_source: None,
-                hint_ready: false,
-                recovery_required: true,
-            },
-        )]);
+            });
+        }
 
         let status = KvStateAgentStatus {
             identity: identity.clone(),
@@ -2056,12 +2740,11 @@ mod tests {
             KvStateProjectionResolution::Unknown(KvStateUnknownReason::RecoveryBehindBarrier)
         );
 
-        let recovered_cursor =
-            apply_recovery_tail(&Indexer::None, &plan, 9, &mut runtime, &mut tails)
-                .await
-                .unwrap();
+        let recovered_cursor = apply_recovery_tail(&Indexer::None, &plan, 9, &ingest, false)
+            .await
+            .unwrap();
         assert_eq!(recovered_cursor, 10);
-        assert_eq!(runtime[&owner].recovered_cursor, 10);
+        assert_eq!(ingest.lock().await.recovered_cursor, 10);
 
         let receipt_after_tail = KvStateRecoveryReceipt {
             identity,
@@ -2133,7 +2816,7 @@ mod tests {
             owner,
             OwnerRuntime {
                 publisher_id: Some(41),
-                recovered_cursor: 2,
+                ingest: None,
                 attachment_generation: Some(7),
                 last_worker: Some(worker),
                 ready: true,
@@ -2141,11 +2824,13 @@ mod tests {
                 router_hint_source: Some(RouterHintSourceMetadata {
                     source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
                     worker_type: "prefill".to_string(),
+                    topology_domains: Default::default(),
                 }),
                 hint_ready: true,
-                recovery_required: false,
+                revision: OwnerRevision::default(),
             },
         )]);
+        let mut fence = ProjectionFence::default();
         let lookup = || {
             query_lower_tiers_with_options(
                 &lower_tiers,
@@ -2157,7 +2842,7 @@ mod tests {
             )
         };
 
-        publish_projection(&indexer, &runtime);
+        fence.commit(&indexer, &runtime);
         let attached = lookup();
         assert_eq!(
             attached[&StorageTier::HostPinned].hits.get(&worker),
@@ -2168,7 +2853,7 @@ mod tests {
         state.ready = false;
         state.attached_worker = None;
         state.attachment_generation = None;
-        publish_projection(&indexer, &runtime);
+        fence.commit(&indexer, &runtime);
         let detached = lookup();
         let details = &detached[&StorageTier::HostPinned];
         assert!(details.hits.is_empty());
@@ -2187,7 +2872,7 @@ mod tests {
         );
 
         runtime.get_mut(&owner).unwrap().hint_ready = false;
-        publish_projection(&indexer, &runtime);
+        fence.commit(&indexer, &runtime);
         let cleared = lookup();
         assert!(
             cleared[&StorageTier::HostPinned]
@@ -2279,53 +2964,353 @@ mod tests {
         assert!(error.to_string().contains("ownership outside"));
     }
 
+    fn ready_runtime(worker: WorkerWithDpRank) -> OwnerRuntime {
+        OwnerRuntime {
+            publisher_id: Some(41),
+            ingest: None,
+            attachment_generation: Some(7),
+            last_worker: Some(worker),
+            ready: true,
+            attached_worker: Some(worker),
+            router_hint_source: None,
+            hint_ready: false,
+            revision: OwnerRevision::default(),
+        }
+    }
+
+    fn published(fence: &ProjectionFence) -> HashSet<CacheOwnerId> {
+        fence.published.keys().copied().collect()
+    }
+
+    fn event_source_added<T: serde::Serialize>(
+        topic: &str,
+        publisher_id: u64,
+        advertisement: &T,
+    ) -> Result<DiscoveryEvent> {
+        Ok(DiscoveryEvent::Added(DiscoveryInstance::EventSource {
+            scope: EventScope::Endpoint {
+                endpoint: EndpointId::from("ns.worker.generate"),
+            },
+            topic: topic.to_string(),
+            publisher_id,
+            metadata: serde_json::to_value(advertisement).unwrap(),
+        }))
+    }
+
+    fn event_source_removed(topic: &str, publisher_id: u64) -> Result<DiscoveryEvent> {
+        Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::EventSource(
+            EventSourceInstanceId {
+                scope: EventScope::Endpoint {
+                    endpoint: EndpointId::from("ns.worker.generate"),
+                },
+                topic: topic.to_string(),
+                publisher_id,
+            },
+        )))
+    }
+
+    fn membership_view(workers: &[WorkerWithDpRank]) -> KvSourceMembershipView {
+        let endpoint = EndpointId::from("ns.worker.generate");
+        KvSourceMembershipView {
+            serving_endpoint: endpoint.clone(),
+            endpoint_resolution: KvStateEndpointResolution::Resolved(endpoint),
+            sources: workers
+                .iter()
+                .map(|worker| (*worker, KvSourceStatus::Missing))
+                .collect(),
+            kv_event_publishing_enabled: HashMap::new(),
+            kv_event_source_mode: HashMap::new(),
+            recovery_expected: HashMap::new(),
+        }
+    }
+
+    fn owners(affected: Affected) -> HashSet<CacheOwnerId> {
+        match affected {
+            Affected::Owners(owners) => owners,
+            Affected::All => panic!("expected specific owners"),
+        }
+    }
+
+    #[test]
+    fn fence_withdraws_only_affected_owners_and_drops_stale_plans() {
+        let (first, second) = (owner(4), owner(5));
+        let mut runtime = HashMap::from([
+            (first, ready_runtime(WorkerWithDpRank::new(17, 3))),
+            (second, ready_runtime(WorkerWithDpRank::new(18, 0))),
+        ]);
+        let mut fence = ProjectionFence::default();
+        fence.commit(&Indexer::None, &runtime);
+        assert_eq!(published(&fence), HashSet::from([first, second]));
+
+        fence.invalidate(&Indexer::None, &Affected::Owners(HashSet::from([first])));
+        assert_eq!(published(&fence), HashSet::from([second]));
+        // A plan made before the observation can never republish its owner.
+        fence.commit(&Indexer::None, &runtime);
+        assert_eq!(published(&fence), HashSet::from([second]));
+
+        runtime.get_mut(&first).unwrap().revision = fence.revision(&first);
+        fence.commit(&Indexer::None, &runtime);
+        assert_eq!(published(&fence), HashSet::from([first, second]));
+
+        fence.invalidate(&Indexer::None, &Affected::All);
+        assert!(published(&fence).is_empty());
+        fence.commit(&Indexer::None, &runtime);
+        assert!(published(&fence).is_empty());
+    }
+
+    #[test]
+    fn fence_index_names_owners_sharing_a_worker() {
+        let (first, second) = (owner(4), owner(5));
+        let worker = WorkerWithDpRank::new(17, 3);
+        let mut index = FenceIndex::default();
+
+        let added = index.attachment(event_source_added(
+            KV_STATE_ATTACHMENT_TOPIC_V2,
+            1,
+            &attachment_advertisement(first, 7),
+        ));
+        assert_eq!(owners(added), HashSet::from([first]));
+        // The worker moves to another owner before the old attachment is removed:
+        // both owners are affected.
+        let moved = index.attachment(event_source_added(
+            KV_STATE_ATTACHMENT_TOPIC_V2,
+            2,
+            &attachment_advertisement(second, 1),
+        ));
+        assert_eq!(owners(moved), HashSet::from([first, second]));
+        let removed = index.attachment(event_source_removed(KV_STATE_ATTACHMENT_TOPIC_V2, 1));
+        assert_eq!(owners(removed), HashSet::from([first, second]));
+
+        assert_eq!(
+            owners(index.membership(&membership_view(&[worker]))),
+            HashSet::from([second])
+        );
+        assert!(owners(index.membership(&membership_view(&[worker]))).is_empty());
+        assert_eq!(
+            owners(index.membership(&membership_view(&[]))),
+            HashSet::from([second])
+        );
+
+        // An unattributable removal invalidates every owner.
+        assert!(matches!(
+            index.source(event_source_removed(KV_STATE_SOURCE_TOPIC_V2, 99)),
+            Affected::All
+        ));
+    }
+
+    #[test]
+    fn fence_index_names_owners_of_a_worker_present_at_startup() {
+        let owner = owner(4);
+        let worker = WorkerWithDpRank::new(17, 3);
+        let mut index = FenceIndex::new(&membership_view(&[worker]));
+        index.attachment(event_source_added(
+            KV_STATE_ATTACHMENT_TOPIC_V2,
+            1,
+            &attachment_advertisement(owner, 7),
+        ));
+
+        assert_eq!(
+            owners(index.membership(&membership_view(&[]))),
+            HashSet::from([owner])
+        );
+    }
+
+    #[test]
+    fn fence_folds_queued_discovery_events_into_one_withdrawal() {
+        let (first, second) = (owner(4), owner(5));
+        let mut index = FenceIndex::default();
+        let queued = |event| -> DiscoveryStream {
+            Box::pin(futures::stream::iter([event]).chain(futures::stream::pending()))
+        };
+        let mut sources = queued(event_source_added(
+            KV_STATE_SOURCE_TOPIC_V2,
+            41,
+            &source_advertisement(first),
+        ));
+        let mut attachments = queued(event_source_added(
+            KV_STATE_ATTACHMENT_TOPIC_V2,
+            1,
+            &attachment_advertisement(second, 7),
+        ));
+        let affected = index.drain_ready(
+            &mut sources,
+            &mut attachments,
+            Affected::Owners(HashSet::new()),
+        );
+        assert_eq!(owners(affected.unwrap()), HashSet::from([first, second]));
+
+        // A watch that ends fails the fence closed.
+        let mut ended: DiscoveryStream = Box::pin(futures::stream::empty());
+        assert!(
+            index
+                .drain_ready(&mut ended, &mut attachments, Affected::All)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_discovery_waits_for_the_snapshot() {
+        let owner = owner(4);
+        let record_id = attachment_record_id(41, 7);
+        let added = event_source_added(
+            KV_STATE_ATTACHMENT_TOPIC_V2,
+            record_id,
+            &attachment_advertisement(owner, 7),
+        );
+        // Delivered after the watch is returned, as a backend's spawned task does.
+        let mut stream: DiscoveryStream = Box::pin(
+            futures::stream::once(async move {
+                tokio::task::yield_now().await;
+                added
+            })
+            .chain(futures::stream::iter([Ok(DiscoveryEvent::Resync(
+                Vec::new(),
+            ))]))
+            .chain(futures::stream::pending()),
+        );
+        let endpoint = EndpointId::from("ns.worker.generate");
+        let mut attachments = HashMap::<u64, KvStateAttachmentAdvertisement>::new();
+        let mut retries = RecoveryRetries::default();
+        let mut dirty = DirtyOwners::default();
+        let cancel = CancellationToken::new();
+
+        assert!(
+            apply_initial_discovery(
+                &mut stream,
+                &endpoint,
+                KV_STATE_ATTACHMENT_TOPIC_V2,
+                &mut attachments,
+                &mut retries,
+                &mut dirty,
+                &cancel,
+            )
+            .await
+        );
+        assert!(attachments.contains_key(&record_id));
+        assert!(dirty.owners.contains(&owner));
+
+        let mut ended: DiscoveryStream = Box::pin(futures::stream::empty());
+        assert!(
+            !apply_initial_discovery(
+                &mut ended,
+                &endpoint,
+                KV_STATE_ATTACHMENT_TOPIC_V2,
+                &mut attachments,
+                &mut retries,
+                &mut dirty,
+                &cancel,
+            )
+            .await
+        );
+    }
+
+    #[test]
+    fn owners_on_workers_names_attached_and_projected_owners() {
+        let (first, second, third) = (owner(4), owner(5), owner(6));
+        let (attached_worker, projected_worker) =
+            (WorkerWithDpRank::new(17, 3), WorkerWithDpRank::new(18, 0));
+        let attachments = HashMap::from([(1, attachment_advertisement(first, 7))]);
+        let runtime = HashMap::from([
+            (second, ready_runtime(projected_worker)),
+            (third, ready_runtime(WorkerWithDpRank::new(19, 0))),
+        ]);
+        assert_eq!(
+            owners_on_workers(
+                &HashSet::from([attached_worker, projected_worker]),
+                &attachments,
+                &runtime,
+            ),
+            HashSet::from([first, second])
+        );
+    }
+
     #[tokio::test]
     async fn detached_source_ignores_late_worker_events_until_reattached() {
         let owner = owner(4);
         let worker = WorkerWithDpRank::new(17, 3);
         let (primary, indexer) = test_indexer();
-        let mut runtime = HashMap::from([(
-            owner,
-            OwnerRuntime {
-                publisher_id: Some(41),
-                recovered_cursor: 0,
-                attachment_generation: None,
-                last_worker: Some(worker),
-                ready: false,
-                attached_worker: None,
-                router_hint_source: None,
-                hint_ready: false,
-                recovery_required: false,
-            },
-        )]);
-        let event = |event_id| {
-            RouterEvent::with_residency_domain(
-                worker.worker_id,
-                KvCacheEvent {
-                    event_id,
-                    data: KvCacheEventData::Stored(KvCacheStoreData {
-                        parent_hash: None,
-                        start_position: None,
-                        blocks: vec![KvCacheStoredBlockData {
-                            block_hash: ExternalSequenceBlockHash(event_id),
-                            tokens_hash: LocalBlockHash(event_id),
-                            mm_extra_info: None,
-                        }],
-                    }),
-                    dp_rank: worker.dp_rank,
-                },
-                StorageTier::Device,
-                ResidencyDomain::Worker,
-            )
-            .with_state_source(owner)
-        };
+        let ingest = bound_ingest(owner, 41, None, Some(worker));
+        let (live, _withdrawn) = live_ingest(indexer, &[&ingest]);
 
-        apply_live_events(&indexer, 41, vec![event(1)], &mut runtime).await;
+        live.apply(41, vec![worker_store(owner, worker, 1)]).await;
         assert!(primary.dump_events().await.unwrap().is_empty());
 
-        runtime.get_mut(&owner).unwrap().attachment_generation = Some(2);
-        apply_live_events(&indexer, 41, vec![event(2)], &mut runtime).await;
+        ingest.lock().await.attachment_generation = Some(2);
+        live.apply(41, vec![worker_store(owner, worker, 2)]).await;
         assert_eq!(primary.dump_events().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn attachment_change_buffers_old_worker_events_before_clearing() {
+        let (primary, indexer) = test_indexer();
+        let owner = owner(4);
+        let old_worker = WorkerWithDpRank::new(17, 3);
+        let ingest = bound_ingest(owner, 41, Some(7), Some(old_worker));
+        let (live, _withdrawn) = live_ingest(indexer, &[&ingest]);
+
+        buffer_live_ingest(
+            &ingest,
+            Some(8),
+            Some(WorkerWithDpRank::new(18, 3)),
+            true,
+            1,
+        )
+        .await;
+        // A late batch from the old attachment, after the old worker is cleared.
+        live.apply(41, vec![worker_store(owner, old_worker, 1)])
+            .await;
+
+        assert!(primary.dump_events().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn recovery_tail_hands_off_to_live_ingest_and_retirement_drops_late_batches() {
+        let owner = owner(4);
+        let worker = WorkerWithDpRank::new(17, 3);
+        let (primary, indexer) = test_indexer();
+        let ingest = bound_ingest(owner, 41, Some(7), Some(worker));
+        buffer_live_ingest(&ingest, Some(7), Some(worker), true, 1).await;
+        let (live, _withdrawn) = live_ingest(indexer.clone(), &[&ingest]);
+
+        // Recovery is in flight: live batches are buffered, not applied.
+        live.apply(41, vec![worker_store(owner, worker, 1)]).await;
+        live.apply(41, vec![worker_store(owner, worker, 2)]).await;
+        assert!(primary.dump_events().await.unwrap().is_empty());
+
+        let plan = OwnerRecoveryPlan {
+            owner,
+            source: source_advertisement(owner),
+            attachment: Some(attachment_advertisement(owner, 7)),
+            expected: KvStateAgentIdentity {
+                cache_owner_id: owner,
+                publisher_id: 41,
+                protocol_version: KvStateProtocolVersion::V2,
+            },
+            recognized_worker: Some(worker),
+            previous_publisher_id: None,
+            previous_cursor: 0,
+            recovery_required: true,
+            revision: OwnerRevision::default(),
+            schedule_generation: 1,
+        };
+        // The snapshot covered event 1; only event 2 replays.
+        assert_eq!(
+            apply_recovery_tail(&indexer, &plan, 1, &ingest, true)
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(ingest.lock().await.tail.is_none());
+        assert_eq!(primary.dump_events().await.unwrap().len(), 1);
+
+        live.apply(41, vec![worker_store(owner, worker, 3)]).await;
+        assert_eq!(ingest.lock().await.recovered_cursor, 3);
+
+        retire_ingest(&live.bindings, &ingest).await;
+        assert!(live.bindings.is_empty());
+        assert!(ingest.lock().await.retired);
+        live.apply(41, vec![worker_store(owner, worker, 4)]).await;
+        assert_eq!(primary.dump_events().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -2333,20 +3318,8 @@ mod tests {
         let selected = owner(4);
         let other = owner(5);
         let worker = WorkerWithDpRank::new(17, 3);
-        let mut runtime = HashMap::from([(
-            selected,
-            OwnerRuntime {
-                publisher_id: Some(41),
-                recovered_cursor: 0,
-                attachment_generation: None,
-                last_worker: Some(worker),
-                ready: false,
-                attached_worker: None,
-                router_hint_source: None,
-                hint_ready: true,
-                recovery_required: false,
-            },
-        )]);
+        let ingest = bound_ingest(selected, 41, None, Some(worker));
+        let (live, mut withdrawn) = live_ingest(Indexer::None, &[&ingest]);
         let event = RouterEvent::with_cache_owner(
             worker.worker_id,
             KvCacheEvent {
@@ -2360,10 +3333,9 @@ mod tests {
             other,
         );
 
-        assert!(apply_live_events(&Indexer::None, 41, vec![event], &mut runtime).await);
-        let state = runtime.get(&selected).unwrap();
-        assert!(!state.ready);
-        assert!(!state.hint_ready);
+        live.apply(41, vec![event]).await;
+        assert_eq!(withdrawn.try_recv().unwrap(), (selected, 41));
+        let state = ingest.lock().await;
         assert!(state.recovery_required);
         assert_eq!(state.recovered_cursor, 0);
     }

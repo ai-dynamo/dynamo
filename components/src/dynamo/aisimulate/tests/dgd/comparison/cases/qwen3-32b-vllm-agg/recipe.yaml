@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+source: recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml
+requirements:
+  h200-sxm-16gpu:
+    gpus: 16

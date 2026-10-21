@@ -16,6 +16,7 @@ Both modes support priority-based pool overrides from agent hints.
 import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+from dynamo.common.utils.token_ids import normalize_request_token_ids, token_ids_len
 from dynamo.runtime import Client, DistributedRuntime
 
 from .pool_selection import get_priority_retry_order, load_config
@@ -91,6 +92,9 @@ class GlobalRouterHandler:
             pool_priorities=pool_priorities,
             enable_priority_retry=self.config.enable_priority_retry,
         )
+        # The egress codec is chosen per destination; a JSON destination would read
+        # a packed buffer as one id per byte, so forward a list.
+        request = normalize_request_token_ids(dict(request))
 
         for attempt_idx, pool_idx in enumerate(pool_order):
             namespace = namespaces[pool_idx]
@@ -218,9 +222,7 @@ class GlobalRouterHandler:
         assert self.config.prefill_pool_selection_strategy is not None
         assert self.config.prefill_pool_dynamo_namespaces is not None
 
-        # Extract ISL (input sequence length)
-        token_ids = request.get("token_ids", [])
-        isl = len(token_ids)
+        isl = token_ids_len(request.get("token_ids"))
 
         # Extract TTFT target from nvext.router (forwarded by the preprocessor
         # as the `router` field on PreprocessedRequest), fallback to CLI default.
@@ -278,8 +280,7 @@ class GlobalRouterHandler:
 
         # The strategy field retains the context_length name, but decode routing
         # currently sees the request token IDs before generation begins.
-        token_ids = request.get("token_ids", [])
-        context_length = len(token_ids)
+        context_length = token_ids_len(request.get("token_ids"))
 
         router_params = request.get("router") or {}
         itl_target_ms = router_params.get("itl_target")
@@ -335,8 +336,7 @@ class GlobalRouterHandler:
         assert self.config.agg_pool_selection_strategy is not None
         assert self.config.agg_pool_dynamo_namespaces is not None
 
-        token_ids = request.get("token_ids", [])
-        isl = len(token_ids)
+        isl = token_ids_len(request.get("token_ids"))
 
         # Extract SLA targets from nvext.router (forwarded by the preprocessor
         # as the `router` field on PreprocessedRequest), fallback to CLI defaults.

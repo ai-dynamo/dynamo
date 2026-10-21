@@ -35,6 +35,8 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 
 The `simple-filter-score-pick` policy filters on minimum device overlap and scores active requests above the least-loaded worker. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
 
+Custom filters, scorers, and pickers can also read opaque agent headers through `session_context().agent_headers()`, without an additional `WorkerInputs` group. Header values are untrusted observations for the current request. A missing key means no observation was captured. The map preserves unknown names within supported header families and repeated values; plugins own any parsing and cross-agent normalization. See [Agent Harnesses](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/agents/agent-harnesses.mdx#agent-headers) for capture rules and limits.
+
 The [`soft-pin-repin` policy](soft-pin-repin/README.md) documents its load threshold, soft-binding behavior, and two-Mocker `A -> B -> B` walkthrough.
 
 The `disagg-filter-score-pick` policy applies the overlap filter to both worker types. Its factory matches the routing stage and calls separate prefill and decode policy builders. Each builder shows the complete filter, scorer, and picker composition for that stage.
@@ -374,3 +376,11 @@ python3 -m dynamo.mocker \
 ```
 
 Send the same `curl` request from a fourth terminal. The frontend log records separate prefill and decode selections. Each worker set runs its own filter, scorer, and picker.
+
+## Runtime Parameters
+
+The `simple-filter-score-pick` provider supports runtime updates to
+`min_device_overlap_blocks`; the other examples remain startup-only. See the
+[runtime policy API](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#runtime-policy-updates).
+A positive threshold requires usable device-overlap data. Cold or replay requests without
+that data, including in the Mocker walkthrough, can have no eligible workers.

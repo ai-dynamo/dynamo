@@ -35,6 +35,7 @@ class _StreamingResponse:
 def _request_with_stream(*lines: bytes) -> CancellableRequest:
     request = CancellableRequest()
     request.response = _StreamingResponse(*lines)
+    request._response_ready.set()
     return request
 
 

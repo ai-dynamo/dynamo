@@ -10,8 +10,8 @@ use std::collections::VecDeque;
 
 use aisimulate_core::replay::{
     CURRENT_REPLAY_SPEC_VERSION, ProviderSpec, ReplayAdapters, ReplayCaptureOptions,
-    ReplayEngineConfig, ReplayRuntimeInput, ReplayScalingPolicy, ReplaySpec, ReplayTopology,
-    Replayer, WorkerPoolSpec,
+    ReplayComposition, ReplayEngineConfig, ReplayRuntimeInput, ReplayScalingPolicy, ReplaySpec,
+    ReplayTopology, Replayer, WorkerPoolSpec,
 };
 use anyhow::Result;
 
@@ -21,25 +21,97 @@ use super::extensions::kv_router::{
 };
 use super::normalize_trace_requests;
 use crate::common::handoff::NormalizedHandoffConformance;
-use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, SglangArgs, WorkerType};
+use crate::common::protocols::{DirectRequest, EngineType, MockerConfig, WorkerType};
 use crate::engine_adapter::{aggregated_replay_setup, disaggregated_replay_setup};
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::{
-    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayWorkerArtifacts,
-    SlaThresholds, TraceSimulationReport, effective_agentic_lanes,
+    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode,
+    ReplayTelemetryOptions, ReplayWorkerArtifacts, SlaThresholds, TraceSimulationReport,
 };
 use crate::scheduler::RouterEventVisibility;
 
-fn startup_delay_ms(args: &MockEngineArgs) -> f64 {
+fn startup_delay_ms(args: &MockerConfig) -> f64 {
     args.startup_time
         .filter(|seconds| *seconds > 0.0)
         .map_or(0.0, |seconds| seconds * 1_000.0)
 }
 
-fn worker_pool(initial_workers: usize, args: &MockEngineArgs) -> WorkerPoolSpec {
+fn worker_pool(initial_workers: usize, args: &MockerConfig) -> WorkerPoolSpec {
     WorkerPoolSpec {
         initial_workers,
         startup_delay_ms: startup_delay_ms(args),
+    }
+}
+
+fn validate_agentic_host_offload(
+    input: &ReplayRuntimeInput,
+    roles: &[(usize, &MockerConfig)],
+    scaling_enabled: bool,
+) -> Result<()> {
+    let ReplayRuntimeInput::Workload(driver) = input else {
+        return Ok(());
+    };
+    if !driver.is_agentic() {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        roles.iter().all(|(_, args)| args.g3_offload.is_none()),
+        "agentic replay does not support G3"
+    );
+    if !roles
+        .iter()
+        .any(|(_, args)| args.native_host_offload.is_some())
+    {
+        return Ok(());
+    }
+
+    // These entrypoints are offline. Apply the AgentX G2 deployment contract
+    // to every active role, including a P/D role whose own G2 is disabled.
+    anyhow::ensure!(
+        roles.iter().all(|(workers, _)| *workers == 1),
+        "agentic host offload requires one aggregated worker or one prefill and one decode worker"
+    );
+    anyhow::ensure!(
+        !scaling_enabled,
+        "agentic host offload requires static worker pools without a scaling policy"
+    );
+    for (_, args) in roles {
+        anyhow::ensure!(
+            args.backend == EngineType::Vllm
+                && args.ais_perf_config().is_none_or(|config| {
+                    config
+                        .get("backend")
+                        .is_none_or(|backend| backend == "vllm")
+                }),
+            "agentic host offload requires backend=vllm on every role"
+        );
+        anyhow::ensure!(
+            args.dp_size == 1,
+            "agentic host offload requires attention DP=1 on every role"
+        );
+        anyhow::ensure!(
+            args.decode_speedup_ratio == 1.0
+                && args.aic_nextn.is_none()
+                && args.ais_perf_config().is_none_or(|config| {
+                    config
+                        .get("speculation")
+                        .is_none_or(serde_json::Value::is_null)
+                }),
+            "agentic host offload requires speculative decoding disabled"
+        );
+    }
+    Ok(())
+}
+
+fn with_telemetry<C: ReplayComposition>(
+    replayer: Replayer<C>,
+    telemetry: Option<ReplayTelemetryOptions>,
+) -> Result<Replayer<C>> {
+    match telemetry {
+        Some(options) => {
+            Ok(replayer.with_telemetry_observer(options.sample_interval_ms, options.observer)?)
+        }
+        None => Ok(replayer),
     }
 }
 
@@ -82,7 +154,7 @@ fn replay_spec(
 
 #[allow(clippy::too_many_arguments)]
 fn run_aggregated(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     input: ReplayRuntimeInput,
@@ -93,6 +165,7 @@ fn run_aggregated(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let capture_options = ReplayCaptureOptions {
         capture_per_request: record_per_request,
@@ -113,12 +186,13 @@ fn run_aggregated(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn run_aggregated_with_capture_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     input: ReplayRuntimeInput,
@@ -129,8 +203,10 @@ fn run_aggregated_with_capture_options(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
+    validate_agentic_host_offload(&input, &[(num_workers, &args)], scaling_policy.is_some())?;
     let (engine, factory) = aggregated_replay_setup(&args)?;
     let spec = replay_spec(
         ReplayTopology::Aggregated {
@@ -146,28 +222,32 @@ fn run_aggregated_with_capture_options(
     )?;
 
     match router_mode {
-        ReplayRouterMode::RoundRobin => Ok(Replayer::with_composition(
-            spec,
-            factory,
-            RoundRobinReplayComposition::new(scaling_policy),
-        )?
-        .with_capture_options(capture_options)
-        .with_runtime_input(input)
-        .run()?),
-        ReplayRouterMode::KvRouter => Ok(Replayer::with_composition(
-            spec,
-            factory,
-            KvReplayComposition::aggregated(
-                args,
-                num_workers,
-                router_config,
-                prefill_load_estimator,
-                scaling_policy,
-            ),
-        )?
-        .with_capture_options(capture_options)
-        .with_runtime_input(input)
-        .run()?),
+        ReplayRouterMode::RoundRobin => {
+            let replayer = Replayer::with_composition(
+                spec,
+                factory,
+                RoundRobinReplayComposition::new(scaling_policy),
+            )?
+            .with_capture_options(capture_options)
+            .with_runtime_input(input);
+            Ok(with_telemetry(replayer, telemetry)?.run()?)
+        }
+        ReplayRouterMode::KvRouter => {
+            let replayer = Replayer::with_composition(
+                spec,
+                factory,
+                KvReplayComposition::aggregated(
+                    args,
+                    num_workers,
+                    router_config,
+                    prefill_load_estimator,
+                    scaling_policy,
+                ),
+            )?
+            .with_capture_options(capture_options)
+            .with_runtime_input(input);
+            Ok(with_telemetry(replayer, telemetry)?.run()?)
+        }
     }
 }
 
@@ -183,6 +263,7 @@ fn run_disaggregated(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let capture_options = ReplayCaptureOptions {
         capture_per_request: record_per_request,
@@ -202,6 +283,7 @@ fn run_disaggregated(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
@@ -217,8 +299,17 @@ fn run_disaggregated_with_capture_options(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
+    validate_agentic_host_offload(
+        &input,
+        &[
+            (config.num_prefill_workers, &config.prefill_args),
+            (config.num_decode_workers, &config.decode_args),
+        ],
+        scaling_policy.is_some(),
+    )?;
     let (engine, factory) = disaggregated_replay_setup(&config.prefill_args, &config.decode_args)?;
     let spec = replay_spec(
         ReplayTopology::Disaggregated {
@@ -236,30 +327,34 @@ fn run_disaggregated_with_capture_options(
     )?;
 
     match router_mode {
-        ReplayRouterMode::RoundRobin => Ok(Replayer::with_composition(
-            spec,
-            factory,
-            RoundRobinReplayComposition::new(scaling_policy),
-        )?
-        .with_capture_options(capture_options)
-        .with_runtime_input(input)
-        .run()?),
-        ReplayRouterMode::KvRouter => Ok(Replayer::with_composition(
-            spec,
-            factory,
-            KvReplayComposition::disaggregated(
-                config.prefill_args,
-                config.decode_args,
-                config.num_prefill_workers,
-                config.num_decode_workers,
-                router_config,
-                prefill_load_estimator,
-                scaling_policy,
-            ),
-        )?
-        .with_capture_options(capture_options)
-        .with_runtime_input(input)
-        .run()?),
+        ReplayRouterMode::RoundRobin => {
+            let replayer = Replayer::with_composition(
+                spec,
+                factory,
+                RoundRobinReplayComposition::new(scaling_policy),
+            )?
+            .with_capture_options(capture_options)
+            .with_runtime_input(input);
+            Ok(with_telemetry(replayer, telemetry)?.run()?)
+        }
+        ReplayRouterMode::KvRouter => {
+            let replayer = Replayer::with_composition(
+                spec,
+                factory,
+                KvReplayComposition::disaggregated(
+                    config.prefill_args,
+                    config.decode_args,
+                    config.num_prefill_workers,
+                    config.num_decode_workers,
+                    router_config,
+                    prefill_load_estimator,
+                    scaling_policy,
+                ),
+            )?
+            .with_capture_options(capture_options)
+            .with_runtime_input(input);
+            Ok(with_telemetry(replayer, telemetry)?.run()?)
+        }
     }
 }
 
@@ -314,29 +409,22 @@ pub fn run_offline_handoff_conformance(
     engine_type: EngineType,
     transfer_timing_mode: crate::common::protocols::KvTransferTimingMode,
 ) -> Result<NormalizedHandoffConformance> {
-    if engine_type == EngineType::Trtllm {
-        anyhow::bail!("TRT-LLM does not support destination handoff");
-    }
     let build_args = |worker_type| {
-        let mut builder = MockEngineArgs::builder()
-            .engine_type(engine_type)
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(64))
-            .max_num_seqs(Some(2))
-            .worker_type(worker_type)
-            .speedup_ratio(1000.0)
-            .decode_speedup_ratio(1000.0)
-            .kv_transfer_bandwidth(Some(1.0))
-            .kv_bytes_per_token(Some(1_000_000))
-            .kv_transfer_timing_mode(transfer_timing_mode);
-        if engine_type == EngineType::Sglang {
-            builder = builder.sglang(Some(SglangArgs {
-                page_size: Some(4),
-                ..Default::default()
-            }));
-        }
-        builder.build()
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": engine_type,
+                "worker_type": worker_type,
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "max_num_seqs": 2,
+                "speedup_ratio": 1000.0,
+                "decode_speedup_ratio": 1000.0,
+                "kv_transfer_bandwidth": 1.0,
+                "kv_transfer_bytes_per_token": 1_000_000,
+                "kv_transfer_timing_mode": transfer_timing_mode
+            }
+        }))
     };
     let prefill_args = build_args(WorkerType::Prefill)?;
     let decode_args = build_args(WorkerType::Decode)?;
@@ -353,14 +441,14 @@ pub fn run_offline_handoff_conformance(
 }
 
 pub(crate) fn generate_trace_worker_artifacts(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
 ) -> Result<ReplayWorkerArtifacts> {
     generate_trace_worker_artifacts_with_visibility(args, trace, None)
 }
 
 pub(crate) fn generate_trace_worker_artifacts_with_visibility(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
     visibility: Option<RouterEventVisibility>,
 ) -> Result<ReplayWorkerArtifacts> {
@@ -369,7 +457,7 @@ pub(crate) fn generate_trace_worker_artifacts_with_visibility(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_with_scaling_policy(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -380,6 +468,7 @@ pub(crate) fn simulate_trace_with_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
     run_aggregated(
@@ -394,12 +483,13 @@ pub(crate) fn simulate_trace_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_with_scaling_policy(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -410,6 +500,7 @@ pub(crate) fn simulate_concurrency_with_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     run_aggregated(
         args,
@@ -423,25 +514,33 @@ pub(crate) fn simulate_concurrency_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload_with_scaling_policy(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
     emit_session_metadata: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    let mut driver = trace_workload_driver(trace, args.block_size, router_mode, false)?;
+    let mut driver = trace_workload_driver(
+        trace,
+        args.block_size,
+        router_mode,
+        accumulate_session_deltas,
+    )?;
     if !emit_session_metadata {
         driver = driver.without_session_metadata();
     }
@@ -457,12 +556,13 @@ pub(crate) fn simulate_trace_workload_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload_with_capture_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -490,55 +590,34 @@ pub(crate) fn simulate_trace_workload_with_capture_options(
         max_sim_time_ms,
         sla,
         None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn simulate_trace_workload_accumulating_deltas(
-    args: MockEngineArgs,
-    router_config: Option<ReplayKvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace: Trace,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    sla: SlaThresholds,
-) -> Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    let driver = trace_workload_driver(trace, args.block_size, router_mode, true)?;
-    run_aggregated(
-        args,
-        router_config,
-        prefill_load_estimator,
-        ReplayRuntimeInput::Workload(driver),
-        num_workers,
-        None,
-        router_mode,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
         None,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_workload_with_scaling_policy(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    let driver =
-        concurrency_workload_driver(trace, args.block_size, max_in_flight, router_mode, false)?;
+    let driver = concurrency_workload_driver(
+        trace,
+        args.block_size,
+        max_in_flight,
+        router_mode,
+        accumulate_session_deltas,
+    )?;
     run_aggregated(
         args,
         router_config,
@@ -551,43 +630,13 @@ pub(crate) fn simulate_concurrency_workload_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn simulate_concurrency_workload_accumulating_deltas(
-    args: MockEngineArgs,
-    router_config: Option<ReplayKvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace: Trace,
-    max_in_flight: usize,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    sla: SlaThresholds,
-) -> Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    let driver =
-        concurrency_workload_driver(trace, args.block_size, max_in_flight, router_mode, true)?;
-    run_aggregated(
-        args,
-        router_config,
-        prefill_load_estimator,
-        ReplayRuntimeInput::Workload(driver),
-        num_workers,
-        Some(max_in_flight),
-        router_mode,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
-        None,
+        telemetry,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_agentic_trace_workload(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: AgenticTrace,
@@ -596,14 +645,18 @@ pub(crate) fn simulate_agentic_trace_workload(
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     agentic_lanes: Option<usize>,
+    agentic_options: crate::replay::AgenticReplayOptions,
     sla: SlaThresholds,
+    scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    let agentic_lanes = effective_agentic_lanes(agentic_lanes, trace.play_count());
-    let driver = trace.into_trace_driver_with_options(
+    let driver = agentic_options.into_driver(
+        trace,
         args.block_size,
         router_mode == ReplayRouterMode::KvRouter,
         agentic_lanes,
+        max_sim_time_ms,
     )?;
     run_aggregated(
         args,
@@ -616,7 +669,8 @@ pub(crate) fn simulate_agentic_trace_workload(
         record_per_request,
         max_sim_time_ms,
         sla,
-        None,
+        scaling_policy,
+        telemetry,
     )
 }
 
@@ -630,14 +684,18 @@ pub(crate) fn simulate_agentic_trace_workload_disagg(
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     agentic_lanes: Option<usize>,
+    agentic_options: crate::replay::AgenticReplayOptions,
     sla: SlaThresholds,
+    scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
-    let agentic_lanes = effective_agentic_lanes(agentic_lanes, trace.play_count());
-    let driver = trace.into_trace_driver_with_options(
+    let driver = agentic_options.into_driver(
+        trace,
         config.prefill_args.block_size,
         router_mode == ReplayRouterMode::KvRouter,
         agentic_lanes,
+        max_sim_time_ms,
     )?;
     run_disaggregated(
         config,
@@ -649,7 +707,8 @@ pub(crate) fn simulate_agentic_trace_workload_disagg(
         record_per_request,
         max_sim_time_ms,
         sla,
-        None,
+        scaling_policy,
+        telemetry,
     )
 }
 
@@ -665,6 +724,7 @@ pub(crate) fn simulate_trace_disagg_with_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
     run_disaggregated(
@@ -678,6 +738,7 @@ pub(crate) fn simulate_trace_disagg_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
@@ -693,6 +754,7 @@ pub(crate) fn simulate_concurrency_disagg_with_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     run_disaggregated(
         config,
@@ -705,6 +767,7 @@ pub(crate) fn simulate_concurrency_disagg_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
@@ -715,15 +778,21 @@ pub(crate) fn simulate_trace_workload_disagg_with_scaling_policy(
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
     emit_session_metadata: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
-    let mut driver =
-        trace_workload_driver(trace, config.prefill_args.block_size, router_mode, false)?;
+    let mut driver = trace_workload_driver(
+        trace,
+        config.prefill_args.block_size,
+        router_mode,
+        accumulate_session_deltas,
+    )?;
     if !emit_session_metadata {
         driver = driver.without_session_metadata();
     }
@@ -738,6 +807,7 @@ pub(crate) fn simulate_trace_workload_disagg_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
@@ -770,6 +840,7 @@ pub(crate) fn simulate_trace_workload_disagg_with_capture_options(
         max_sim_time_ms,
         sla,
         None,
+        None,
     )
 }
 
@@ -781,10 +852,12 @@ pub(crate) fn simulate_concurrency_workload_disagg_with_scaling_policy(
     trace: Trace,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     let driver = concurrency_workload_driver(
@@ -792,7 +865,7 @@ pub(crate) fn simulate_concurrency_workload_disagg_with_scaling_policy(
         config.prefill_args.block_size,
         max_in_flight,
         router_mode,
-        false,
+        accumulate_session_deltas,
     )?;
     run_disaggregated(
         config,
@@ -805,5 +878,273 @@ pub(crate) fn simulate_concurrency_workload_disagg_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
+}
+
+#[cfg(test)]
+mod agentic_host_offload_tests {
+    use super::*;
+    use crate::loadgen::{
+        AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticHashIdScope,
+        AgenticMooncakeHeader, AgenticMooncakeRow, AgenticSourceProvenance,
+    };
+
+    fn agentic_input() -> ReplayRuntimeInput {
+        let trace = AgenticTrace::from_agentic_mooncake_rows(
+            AgenticMooncakeHeader {
+                schema: AGENTIC_MOONCAKE_SCHEMA.to_string(),
+                version: AGENTIC_MOONCAKE_VERSION,
+                block_size: 4,
+                hash_id_scope: AgenticHashIdScope::Local,
+                source: AgenticSourceProvenance {
+                    format: "test".to_string(),
+                    digest: "agentic-g2-deployment-guard".to_string(),
+                },
+            },
+            vec![AgenticMooncakeRow {
+                request_id: "request".to_string(),
+                play_id: "play".to_string(),
+                session_id: "session".to_string(),
+                model: "model".to_string(),
+                input_length: Some(4),
+                output_length: Some(1),
+                hash_ids: Some(vec![1]),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        ReplayRuntimeInput::Workload(trace.into_trace_driver_with_options(4, true, None).unwrap())
+    }
+
+    fn args(scope: Option<&str>) -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "kv_cache_bytes_per_token": 1024,
+                "native_host_offload": scope.map(|scope| serde_json::json!({
+                    "scope": scope,
+                    "num_host_blocks": 16,
+                    "kv_layout_id": "agentic-g2-test",
+                })),
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn accepts_single_worker_and_independent_pd_g2_scopes() {
+        let input = agentic_input();
+        let scopes = [None, Some("dp_rank_local"), Some("cluster_shared")];
+        for prefill_scope in scopes {
+            let mut prefill = args(prefill_scope);
+            prefill.tensor_parallel_size = 4;
+            validate_agentic_host_offload(&input, &[(1, &prefill)], false).unwrap();
+            for decode_scope in scopes {
+                let decode = args(decode_scope);
+                validate_agentic_host_offload(&input, &[(1, &prefill), (1, &decode)], false)
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_deployment_on_every_active_role() {
+        let input = agentic_input();
+        let offloaded = args(Some("dp_rank_local"));
+        // A role without G2 is still part of the restricted AgentX deployment.
+        let mut invalid_roles = Vec::new();
+        let mut invalid = args(None);
+        invalid.dp_size = 2;
+        invalid_roles.push((
+            invalid,
+            "agentic host offload requires attention DP=1 on every role",
+        ));
+        for backend in [EngineType::Sglang, EngineType::Trtllm] {
+            let mut invalid = args(None);
+            invalid.backend = backend;
+            invalid_roles.push((
+                invalid,
+                "agentic host offload requires backend=vllm on every role",
+            ));
+        }
+        let mut invalid = args(None);
+        invalid.timing_model = aisimulate_core::engine::TimingModelConfig::External {
+            provider: "ais".to_string(),
+            config: serde_json::json!({"backend": "sglang"}),
+        };
+        invalid_roles.push((
+            invalid,
+            "agentic host offload requires backend=vllm on every role",
+        ));
+        let mut invalid = args(None);
+        invalid.aic_nextn = Some(1);
+        invalid_roles.push((
+            invalid,
+            "agentic host offload requires speculative decoding disabled",
+        ));
+        let mut invalid = args(None);
+        invalid.decode_speedup_ratio = 2.0;
+        invalid_roles.push((
+            invalid,
+            "agentic host offload requires speculative decoding disabled",
+        ));
+        let mut invalid = args(None);
+        invalid.timing_model = aisimulate_core::engine::TimingModelConfig::External {
+            provider: "ais".to_string(),
+            config: serde_json::json!({"speculation": {"nextn": 2}}),
+        };
+        invalid_roles.push((
+            invalid,
+            "agentic host offload requires speculative decoding disabled",
+        ));
+        for (invalid, expected) in invalid_roles {
+            for roles in [
+                vec![(1, &offloaded), (1, &invalid)],
+                vec![(1, &invalid), (1, &offloaded)],
+            ] {
+                let error = validate_agentic_host_offload(&input, &roles, false).unwrap_err();
+                assert_eq!(error.to_string(), expected);
+            }
+        }
+        for roles in [
+            vec![(2, &offloaded)],
+            vec![(2, &offloaded), (1, &offloaded)],
+            vec![(1, &offloaded), (2, &offloaded)],
+        ] {
+            let error = validate_agentic_host_offload(&input, &roles, false).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "agentic host offload requires one aggregated worker or one prefill and one decode worker"
+            );
+        }
+        let error = validate_agentic_host_offload(&input, &[(1, &offloaded)], true).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "agentic host offload requires static worker pools without a scaling policy"
+        );
+    }
+
+    #[test]
+    fn native_execution_entrypoints_apply_the_agentic_g2_guard() {
+        let error = run_aggregated(
+            args(Some("cluster_shared")),
+            None,
+            None,
+            agentic_input(),
+            2,
+            None,
+            ReplayRouterMode::RoundRobin,
+            false,
+            None,
+            SlaThresholds::default(),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "agentic host offload requires one aggregated worker or one prefill and one decode worker"
+        );
+
+        let mut decode = args(None);
+        decode.dp_size = 2;
+        let error = run_disaggregated(
+            OfflineDisaggReplayConfig {
+                prefill_args: args(Some("dp_rank_local")),
+                decode_args: decode,
+                num_prefill_workers: 1,
+                num_decode_workers: 1,
+            },
+            None,
+            None,
+            agentic_input(),
+            None,
+            ReplayRouterMode::RoundRobin,
+            false,
+            None,
+            SlaThresholds::default(),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "agentic host offload requires attention DP=1 on every role"
+        );
+    }
+
+    #[test]
+    fn native_execution_rejects_canonical_g3_for_agentic_replay() {
+        for scope in ["worker_local", "cluster_shared"] {
+            let mut offloaded = args(Some("cluster_shared"));
+            offloaded.g3_offload = Some(
+                serde_json::from_value(serde_json::json!({
+                    "scope": scope,
+                    "num_g3_blocks": 8,
+                }))
+                .unwrap(),
+            );
+            // G3 is valid in the canonical engine schema, but remains outside
+            // the qualified AgentX support boundary.
+            let offloaded = offloaded.normalized().unwrap();
+            validate_agentic_host_offload(
+                &ReplayRuntimeInput::Requests(VecDeque::new()),
+                &[(1, &offloaded)],
+                false,
+            )
+            .unwrap();
+            let error = run_aggregated(
+                offloaded,
+                None,
+                None,
+                agentic_input(),
+                1,
+                None,
+                ReplayRouterMode::RoundRobin,
+                false,
+                None,
+                SlaThresholds::default(),
+                None,
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "agentic replay does not support G3");
+        }
+    }
+
+    #[test]
+    fn leaves_hbm_and_non_agentic_g2_deployments_unchanged() {
+        let mut hbm = args(None);
+        hbm.backend = EngineType::Sglang;
+        hbm.dp_size = 2;
+        hbm.decode_speedup_ratio = 2.0;
+        validate_agentic_host_offload(&agentic_input(), &[(2, &hbm)], true).unwrap();
+        hbm.decode_speedup_ratio = 1.0;
+        hbm.aic_nextn = Some(2);
+        validate_agentic_host_offload(&agentic_input(), &[(2, &hbm)], true).unwrap();
+
+        let mut offloaded = args(Some("cluster_shared"));
+        offloaded.dp_size = 2;
+        offloaded.decode_speedup_ratio = 2.0;
+        validate_agentic_host_offload(
+            &ReplayRuntimeInput::Requests(VecDeque::new()),
+            &[(2, &offloaded)],
+            true,
+        )
+        .unwrap();
+        let trace = Trace::from_mooncake_rows(
+            vec![crate::loadgen::MooncakeRow {
+                input_length: Some(4),
+                output_length: Some(1),
+                hash_ids: Some(vec![1]),
+                timestamp: Some(0.0),
+                ..Default::default()
+            }],
+            4,
+        )
+        .unwrap();
+        let input =
+            ReplayRuntimeInput::Workload(trace.into_trace_driver_with_block_size(4).unwrap());
+        validate_agentic_host_offload(&input, &[(2, &offloaded)], true).unwrap();
+    }
 }

@@ -27,13 +27,13 @@ use serde::Serialize;
 use tracing::Instrument;
 
 use super::disconnect::create_connection_monitor;
-use super::error::SanitizedError;
+use super::error::{SanitizedError, find_canonical_error_in_chain};
 use super::metrics::{
     CancellationLabels, ErrorType, HttpQueueGuard, InflightGuard, ResponseMetricCollector,
 };
 use super::openai::{
-    check_model_serving_ready, check_ready, context_from_headers, get_body_limit,
-    get_or_create_request_id, smart_json_error_middleware,
+    check_model_serving_ready, check_ready, get_body_limit, get_or_create_request_id,
+    preprocessed_context_from_headers, smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
@@ -215,6 +215,23 @@ fn generate_internal_error_response() -> Response {
         "internal_error",
         "internal server error".to_string(),
     )
+}
+
+fn generate_invalid_request_response(
+    error: &(dyn std::error::Error + 'static),
+) -> Option<Response> {
+    let error = find_canonical_error_in_chain(error)?;
+    if error.class() != dynamo_runtime::error::ErrorClass::InvalidRequest {
+        return None;
+    }
+    Some(generate_error_response(
+        StatusCode::BAD_REQUEST,
+        "invalid_request_error",
+        error
+            .public_message()
+            .unwrap_or("Invalid request")
+            .to_string(),
+    ))
 }
 
 /// Borrowed worker envelope for vLLM-specific request fields.
@@ -804,8 +821,8 @@ impl GenerateMetricCollector {
         let cached_tokens = output
             .completion_usage
             .as_ref()
-            // A migrated attempt includes already-delivered output tokens in
-            // its prompt. Ignore that attempt-local usage for this logical
+            // RetryManager rebases a migrated attempt's usage onto the client's
+            // prompt. Ignore any usage that still doesn't match this logical
             // request and let the RequestTracker fallback run on drop.
             .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
             .and_then(|usage| usage.prompt_tokens_details.as_ref())
@@ -833,7 +850,7 @@ impl Drop for GenerateMetricCollector {
     fn drop(&mut self) {
         // Matching backend usage is authoritative when present. The response
         // collector latches it during streaming; this logical-request router
-        // estimate fills missing or migration-expanded attempt usage.
+        // estimate fills missing or mismatched usage.
         self.response
             .observe_cached_tokens(self.tracker.cached_tokens());
     }
@@ -973,7 +990,7 @@ async fn handler_generate(
 
     let request_id = request_context.request_id;
     let context: Context<PreprocessedRequest> =
-        match context_from_headers(preprocessed, request_id.clone(), &headers) {
+        match preprocessed_context_from_headers(preprocessed, request_id.clone(), &headers) {
             Ok(context) => context,
             Err(response) => {
                 metric_lifecycle.mark_error(generate_metric_error_type(response.0));
@@ -1056,10 +1073,13 @@ async fn generate_dispatch(
                 || super::metrics::request_was_cancelled(error.as_ref());
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
             let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
+            let invalid_request = generate_invalid_request_response(error.as_ref());
             inflight_guard.mark_error(if deadline_exceeded || was_cancelled {
                 ErrorType::Cancelled
             } else if was_rejected || was_unavailable {
                 ErrorType::Unavailable
+            } else if invalid_request.is_some() {
+                ErrorType::Validation
             } else {
                 ErrorType::Internal
             });
@@ -1087,6 +1107,10 @@ async fn generate_dispatch(
                     "no worker available for generate request"
                 );
                 return generate_unavailable_response();
+            }
+            if let Some(response) = invalid_request {
+                tracing::debug!(%request_id, %error, "invalid generate request");
+                return response;
             }
             tracing::error!(%request_id, error = %format!("{error:#}"), "engine generate call failed");
             return generate_internal_error_response();
@@ -1140,6 +1164,11 @@ async fn generate_dispatch(
                 inflight_guard.mark_error(ErrorType::Unavailable);
                 tracing::warn!(%request_id, %error, "generate stream failed: no worker available");
                 return generate_unavailable_response();
+            }
+            if let Some(response) = generate_invalid_request_response(error.as_ref()) {
+                inflight_guard.mark_error(ErrorType::Validation);
+                tracing::debug!(%request_id, %error, "invalid generate request");
+                return response;
             }
             inflight_guard.mark_error(ErrorType::Internal);
             tracing::error!(%request_id, %error, "failed to fold generate stream");
@@ -1262,10 +1291,22 @@ pub(crate) mod tests {
 
     struct WorkerUnavailableStreamEngine;
 
+    struct InvalidArgumentStreamEngine;
+
     fn worker_unavailable_error() -> dynamo_runtime::error::DynamoError {
         dynamo_runtime::error::DynamoError::builder()
             .error_type(dynamo_runtime::error::ErrorType::WorkerUnavailable)
             .message("Server unavailable: unknown endpoint a/generate")
+            .build()
+    }
+
+    fn invalid_argument_error() -> dynamo_runtime::error::DynamoError {
+        let message = "TITO requests currently require an aggregated vLLM worker";
+        dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::Backend(
+                dynamo_runtime::error::BackendError::InvalidArgument,
+            ))
+            .message(message)
             .build()
     }
 
@@ -1349,6 +1390,19 @@ pub(crate) mod tests {
 
     #[async_trait::async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for InvalidArgumentStreamEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let stream = futures::stream::iter([Annotated::from_err(invalid_argument_error())]);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
         for TerminalEngine
     {
         async fn generate(
@@ -1392,6 +1446,7 @@ pub(crate) mod tests {
                         prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
                             audio_tokens: None,
                             cached_tokens: Some(2),
+                            ..Default::default()
                         }),
                         completion_tokens_details: None,
                     }),
@@ -1446,6 +1501,7 @@ pub(crate) mod tests {
                                     dynamo_protocols::types::PromptTokensDetails {
                                         audio_tokens: None,
                                         cached_tokens: Some(prompt_tokens),
+                                        ..Default::default()
                                     },
                                 ),
                                 completion_tokens_details: None,
@@ -2769,6 +2825,34 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn backend_invalid_argument_stream_returns_400() {
+        let (response, state) =
+            dispatch_engine(Arc::new(InvalidArgumentStreamEngine), "req-invalid").await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read error response");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("parse error response");
+        assert_eq!(body["error"]["message"], "Invalid request");
+        assert!(!body.to_string().contains("aggregated vLLM worker"));
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], 400);
+
+        let metric_model = state.manager().metric_model_for("test-model");
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::Validation,
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn immediate_engine_cancellation_returns_499() {
         let engine: crate::types::openai::generate::GenerateStreamingEngine =
             Arc::new(CancelledEngine);
@@ -3257,8 +3341,10 @@ pub(crate) mod tests {
         );
         let cached_tokens =
             metric_value(&families, "dynamo_frontend_cached_tokens", &model_labels).get_histogram();
+        // The retry's cache hit covers the 3 token prompt, so the rebased backend count wins
+        // over the router's estimate of 1.
         assert_eq!(cached_tokens.get_sample_count(), 1);
-        assert_eq!(cached_tokens.get_sample_sum(), 1.0);
+        assert_eq!(cached_tokens.get_sample_sum(), 3.0);
     }
 
     #[test]

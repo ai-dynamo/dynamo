@@ -31,7 +31,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use arc_swap::ArcSwap;
 use dynamo_kv_router::{
     identity::{CacheOwnerId, CanonicalIdentityMaterial, ExplicitIdentityMap, StableDpSlotId},
     indexer::{
@@ -49,23 +48,25 @@ use dynamo_runtime::{
     discovery::{DiscoveryInstance, DiscoverySpec, EventScope},
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::EventPublisher,
+    transports::event_plane::{EventPublisher, SharedZmqPublisherSocket},
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    direct_zmq_sub_pool::{DirectZmqSubPool, DirectZmqSubRegistration, RawZmqFrames},
     discovery::kv_state_agent::{
         KV_STATE_ATTACHMENT_TOPIC_V2, KV_STATE_EVENT_TOPIC_V2, KV_STATE_SOURCE_TOPIC_V2,
         KvStateAttachmentAdvertisement, KvStateIngressProtocol, KvStateSourceAdvertisement,
         attachment_record_id,
     },
     kv_router::{
-        WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint_with_status,
+        WORKER_KV_INDEXER_BUFFER_SIZE,
+        indexer::{KvStateAgentStatusCell, start_worker_kv_query_endpoint_with_status},
         metrics::kv_publisher_metrics,
     },
-    utils::zmq::{SubSocket, connect_sub_socket, multipart_message},
+    utils::zmq::{MultipartMessage, SubSocket, connect_sub_socket, multipart_message},
 };
 
 use super::{
@@ -125,6 +126,18 @@ pub struct KvStateAgentConfig {
     pub slot: KvStateAgentSlotConfig,
     pub kv_block_size: u32,
     pub ingress_protocol: KvStateIngressProtocol,
+    /// Sockets shared with sibling slots; `Default::default()` binds dedicated ones.
+    pub sockets: KvStateAgentSockets,
+}
+
+/// Host-wide sockets a slot can share with its siblings.
+#[derive(Clone, Default)]
+pub struct KvStateAgentSockets {
+    /// Output PUB shared with other slots; `None` binds one for this slot.
+    pub(crate) event_socket: Option<SharedZmqPublisherSocket>,
+    /// Pooled raw-input SUBs; `None`, or a source without a topic, connects a
+    /// dedicated SUB.
+    pub(crate) raw_pool: Option<DirectZmqSubPool>,
 }
 
 #[derive(Debug, Clone)]
@@ -233,7 +246,7 @@ struct Coordinator<P> {
     local_indexer: Arc<LocalKvIndexer>,
     identity: KvStateAgentIdentity,
     slot_dp_rank: u32,
-    status: Arc<ArcSwap<KvStateAgentStatus>>,
+    status: Arc<KvStateAgentStatusCell>,
     withdrawal_tx: mpsc::UnboundedSender<u64>,
     control_rx: mpsc::Receiver<ControlCommand>,
     ingress_rx: mpsc::UnboundedReceiver<IngressBatch>,
@@ -449,7 +462,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         }
 
         if batch.events.len() > MAX_INGRESS_EVENTS
-            || event_block_count(&batch.events) > MAX_INGRESS_BLOCKS
+            || (batch.events.len() > 1 && event_block_count(&batch.events) > MAX_INGRESS_BLOCKS)
         {
             self.fail_source(batch.generation, "oversized ingress envelope");
             anyhow::bail!("oversized ingress envelope");
@@ -727,7 +740,9 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 return Err(error).context("failed to publish reset barrier");
             }
         }
-        self.publish_status();
+        // Lifecycle changes publish the full snapshot; a chunk only advances
+        // the cursor, still after publish_events.
+        self.status.store_outbound_cursor(self.outbound_cursor());
         if let Some(error) = failed_barrier {
             return Err(error);
         }
@@ -753,10 +768,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             },
         )])
         .await?;
-        Ok(self
-            .next_outbound_id
-            .checked_sub(1)
-            .expect("outbound IDs start at one"))
+        Ok(self.outbound_cursor())
     }
 
     fn fail_domain(&mut self, generation: u64, domain: ResidencyDomain, reason: &'static str) {
@@ -781,15 +793,18 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
     }
 
     fn publish_status(&self) {
-        self.status.store(Arc::new(KvStateAgentStatus {
+        self.status.store(KvStateAgentStatus {
             identity: self.identity.clone(),
             attachment: self.attachment.as_ref().map(Attachment::status),
             cache_owner_ready: !self.cache_owner_domain_failed,
-            outbound_cursor: self
-                .next_outbound_id
-                .checked_sub(1)
-                .expect("next outbound ID is initialized to one"),
-        }));
+            outbound_cursor: self.outbound_cursor(),
+        });
+    }
+
+    fn outbound_cursor(&self) -> u64 {
+        self.next_outbound_id
+            .checked_sub(1)
+            .expect("next outbound ID is initialized to one")
     }
 }
 
@@ -804,7 +819,8 @@ pub struct KvStateAgent {
     identity: KvStateAgentIdentity,
     control_tx: mpsc::Sender<ControlCommand>,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
-    status: Arc<ArcSwap<KvStateAgentStatus>>,
+    raw_pool: Option<DirectZmqSubPool>,
+    status: Arc<KvStateAgentStatusCell>,
     cancel: CancellationToken,
     coordinator: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     withdrawal_supervisor: StdMutex<Option<tokio::task::JoinHandle<()>>>,
@@ -833,12 +849,24 @@ impl KvStateAgent {
         if config.ingress_protocol != KvStateIngressProtocol::VllmResidencyV1 {
             anyhow::bail!("external state-agent slots require vllm_residency_v1 ingress");
         }
-        let event_publisher = EventPublisher::for_endpoint_id(
-            config.endpoint.drt(),
-            &config.kv_state_endpoint,
-            KV_STATE_EVENT_TOPIC_V2,
-        )
-        .await
+        let event_publisher = match &config.sockets.event_socket {
+            Some(socket) => {
+                EventPublisher::for_endpoint_id_on_shared_socket(
+                    config.endpoint.drt(),
+                    &config.kv_state_endpoint,
+                    socket,
+                )
+                .await
+            }
+            None => {
+                EventPublisher::for_endpoint_id(
+                    config.endpoint.drt(),
+                    &config.kv_state_endpoint,
+                    KV_STATE_EVENT_TOPIC_V2,
+                )
+                .await
+            }
+        }
         .context("failed to create state-agent event publisher")?;
         let publisher_id = event_publisher.publisher_id();
         let identity = KvStateAgentIdentity {
@@ -846,7 +874,7 @@ impl KvStateAgent {
             publisher_id,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -948,6 +976,7 @@ impl KvStateAgent {
             identity,
             control_tx,
             ingress_tx,
+            raw_pool: config.sockets.raw_pool,
             status,
             cancel,
             coordinator: StdMutex::new(Some(coordinator)),
@@ -968,7 +997,7 @@ impl KvStateAgent {
     }
 
     pub fn status(&self) -> Arc<KvStateAgentStatus> {
-        self.status.load_full()
+        Arc::new(self.status.load())
     }
 
     pub async fn quarantine_vllm(&self, generation: u64, reason: &'static str) -> Result<()> {
@@ -1050,6 +1079,8 @@ impl KvStateAgent {
             worker,
             attachment.generation,
             self.kv_block_size,
+            self.raw_pool.as_ref(),
+            self.identity.publisher_id,
             self.ingress_tx.clone(),
             self.control_tx.clone(),
             self.status.clone(),
@@ -1508,12 +1539,24 @@ async fn start_vllm_listener(
     worker: WorkerWithDpRank,
     generation: u64,
     kv_block_size: u32,
+    raw_pool: Option<&DirectZmqSubPool>,
+    route_id: u64,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
     control_tx: mpsc::Sender<ControlCommand>,
-    status: Arc<ArcSwap<KvStateAgentStatus>>,
+    status: Arc<KvStateAgentStatusCell>,
     cancel: CancellationToken,
 ) -> Result<VllmListener> {
-    let socket = connect_sub_socket(&source.endpoint, Some(&source.topic)).await?;
+    let socket = match raw_pool.filter(|_| !source.topic.is_empty()) {
+        Some(pool) => RawSubscription::Pooled(
+            pool.register_raw(route_id, &source.endpoint, &source.topic, generation)
+                .await?,
+        ),
+        // Without a pool, or for a source without a topic (vLLM workers that
+        // predate per-worker topics), connect a dedicated SUB with its own context.
+        None => RawSubscription::Dedicated(
+            connect_sub_socket(&source.endpoint, Some(&source.topic)).await?,
+        ),
+    };
     let listener_cancel = cancel.child_token();
     let task_cancel = listener_cancel.clone();
     let handle = component.drt().runtime().secondary().spawn(async move {
@@ -1563,9 +1606,35 @@ struct VllmListenerTask<'a> {
     generation: u64,
     kv_block_size: u32,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
-    socket: SubSocket,
-    status: Arc<ArcSwap<KvStateAgentStatus>>,
+    socket: RawSubscription,
+    status: Arc<KvStateAgentStatusCell>,
     cancel: CancellationToken,
+}
+
+/// One attachment's raw KV stream: its own SUB, or a route on the host's pooled
+/// SUBs keyed by the source's topic.
+enum RawSubscription {
+    Dedicated(SubSocket),
+    Pooled(DirectZmqSubRegistration<RawZmqFrames>),
+}
+
+impl RawSubscription {
+    async fn next(&mut self) -> Option<Result<MultipartMessage>> {
+        match self {
+            Self::Dedicated(socket) => Some(
+                socket
+                    .next()
+                    .await?
+                    .map(multipart_message)
+                    .map_err(Into::into),
+            ),
+            Self::Pooled(route) => tokio::select! {
+                biased;
+                frames = route.receiver.recv() => frames.map(Ok),
+                _ = route.disconnected.cancelled() => None,
+            },
+        }
+    }
 }
 
 async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
@@ -1600,7 +1669,7 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
             frames = socket.next() => frames,
         };
         let frames = match frames {
-            Some(Ok(frames)) => multipart_message(frames),
+            Some(Ok(frames)) => frames,
             Some(Err(error)) => return Err(error).context("ZMQ receive failed"),
             None => anyhow::bail!("ZMQ stream ended"),
         };
@@ -1635,7 +1704,7 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
             &mut cache_owner_normalizer,
         );
 
-        let chunks = bounded_ingress_chunks(events)?;
+        let chunks = bounded_ingress_chunks(events);
         let final_chunk_index = chunks.len().saturating_sub(1);
         for (chunk_index, events) in chunks.into_iter().enumerate() {
             let envelope = IngressBatch {
@@ -1766,18 +1835,17 @@ fn normalize_raw_batch(
     }
 }
 
-fn bounded_ingress_chunks(events: Vec<PlacementEvent>) -> Result<Vec<Vec<PlacementEvent>>> {
+/// Split a raw batch into bounded ingress chunks. An event larger than the block bound is
+/// still interpretable, so it travels alone rather than failing the source.
+fn bounded_ingress_chunks(events: Vec<PlacementEvent>) -> Vec<Vec<PlacementEvent>> {
     if events.is_empty() {
-        return Ok(vec![Vec::new()]);
+        return vec![Vec::new()];
     }
     let mut chunks = Vec::new();
     let mut current = Vec::new();
     let mut current_blocks = 0usize;
     for event in events {
         let blocks = event_block_count(std::slice::from_ref(&event));
-        if blocks > MAX_INGRESS_BLOCKS {
-            anyhow::bail!("one ingress event exceeds the block bound");
-        }
         if !current.is_empty()
             && (current.len() == MAX_INGRESS_EVENTS
                 || current_blocks.saturating_add(blocks) > MAX_INGRESS_BLOCKS)
@@ -1791,7 +1859,7 @@ fn bounded_ingress_chunks(events: Vec<PlacementEvent>) -> Result<Vec<Vec<Placeme
     if !current.is_empty() {
         chunks.push(current);
     }
-    Ok(chunks)
+    chunks
 }
 
 #[cfg(test)]
@@ -1915,6 +1983,34 @@ mod tests {
                 dp_rank: worker.dp_rank,
             },
         )
+    }
+
+    fn oversized_store(worker: WorkerWithDpRank) -> PlacementEvent {
+        let mut event = store(worker, ResidencyDomain::Worker, None, 1, 1);
+        let KvCacheEventData::Stored(data) = &mut event.event.data else {
+            unreachable!("store builds a Stored event");
+        };
+        let first_block = 1_000_000;
+        data.blocks = (first_block..=first_block + MAX_INGRESS_BLOCKS as u64)
+            .map(|block| KvCacheStoredBlockData {
+                block_hash: ExternalSequenceBlockHash(block),
+                tokens_hash: LocalBlockHash(block),
+                mm_extra_info: None,
+            })
+            .collect();
+        event
+    }
+
+    #[test]
+    fn oversized_event_travels_in_its_own_chunk() {
+        let worker = WorkerWithDpRank::new(17, 3);
+        let small = || store(worker, ResidencyDomain::Worker, None, 1, 1);
+        let chunks = bounded_ingress_chunks(vec![small(), oversized_store(worker), small()]);
+        let blocks: Vec<_> = chunks
+            .iter()
+            .map(|chunk| event_block_count(chunk))
+            .collect();
+        assert_eq!(blocks, [1, MAX_INGRESS_BLOCKS + 1, 1]);
     }
 
     fn raw_store(medium: Option<&str>, ownership: Option<&str>, block: u64) -> RawKvEvent {
@@ -2121,7 +2217,7 @@ mod tests {
             publisher_id: 41,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -2320,7 +2416,7 @@ mod tests {
             publisher_id: 41,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -2477,7 +2573,7 @@ mod tests {
             publisher_id: 41,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -2603,7 +2699,7 @@ mod tests {
             publisher_id: 41,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -2640,6 +2736,7 @@ mod tests {
         };
         let mut attachment = test_attachment(worker, "tcp://framework");
         coordinator.attach(&mut attachment).await.unwrap();
+        let attached_snapshot = status.snapshot();
         let stale_event = store(worker, ResidencyDomain::Worker, None, 99, 9);
         assert!(
             coordinator
@@ -2689,6 +2786,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status.load().outbound_cursor, 3);
+        assert!(status.load().attachment.as_ref().unwrap().ready);
+        assert!(
+            Arc::ptr_eq(&attached_snapshot, &status.snapshot()),
+            "ingress chunks advance the cursor without swapping the status snapshot"
+        );
+
+        // A single event above the chunk block bound is interpretable and must not fail closed.
+        coordinator
+            .handle_ingress(IngressBatch {
+                generation: attachment.generation,
+                source_cursor: 4,
+                chunk_index: 0,
+                final_chunk: true,
+                events: vec![oversized_store(worker)],
+                source_fault: None,
+                cache_owner_fault: None,
+            })
+            .await
+            .unwrap();
         assert!(status.load().attachment.as_ref().unwrap().ready);
     }
 }

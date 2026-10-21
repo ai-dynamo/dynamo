@@ -275,7 +275,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=536_870_912,
                 tests=[
-                    MmCase(payload=make_image_payload(["green"])),
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        marks=[pytest.mark.pre_merge],
+                    ),
                     # Rust frontend decode -> NIXL RGB transfer -> Encode ->
                     # Prefill embedding handoff -> Decode generation.
                     MmCase(
@@ -516,13 +519,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             "4",
                             "--multimodal-embedding-cache-capacity-gb",
                             "1",
-                            # Gemma 4 budgets 280 embeddings per image; the
-                            # 512x512 fixture emits 256. A 280-slot GPU cache can
-                            # retain only one, so the second fill evicts the first.
+                            # Cap every modality budget to force image eviction.
                             "--max-num-batched-tokens",
                             "280",
+                            "--mm-processor-kwargs",
+                            '{"audio_seq_length": 280}',
                             "--limit-mm-per-prompt",
-                            '{"image": 1, "video": 0, "audio": 0}',
+                            '{"image": 1, "video": {"count": 0, "num_frames": 1}, "audio": 0}',
                         ],
                         # The connector runs in vLLM's spawned EngineCore, so
                         # its debug hit diagnostic uses vLLM's logger level.

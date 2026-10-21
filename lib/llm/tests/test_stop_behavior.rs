@@ -83,7 +83,14 @@ fn make_decoder(
         stop: stop_sequences.map(|v| v.into_iter().map(String::from).collect()),
         ..Default::default()
     };
-    Decoder::new(decode_stream, stop_conditions, include_stop_str, None, None)
+    Decoder::new(
+        decode_stream,
+        stop_conditions,
+        include_stop_str,
+        false,
+        None,
+        None,
+    )
 }
 
 #[test]
@@ -176,7 +183,7 @@ fn user_stop_token_reports_distinct_trigger() {
         stop_token_ids_hidden: Some(vec![EOS]),
         ..Default::default()
     };
-    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None, None);
+    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, false, None, None);
     let result = decoder.process_token_ids(&[HI, STOP]).unwrap();
 
     assert_eq!(result.text.as_deref(), Some("hi"));
@@ -276,7 +283,7 @@ fn visible_stop_token_flushes_and_orders_prior_jailed_prefix() {
         stop: Some(vec!["hiya".to_string()]),
         ..Default::default()
     };
-    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None, None);
+    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, false, None, None);
     let result = decoder.process_token_ids(&[HI, STOP]).unwrap();
 
     assert_eq!(result.text.as_deref(), Some("hiSTOP"));
@@ -349,4 +356,37 @@ fn hidden_stop_sequence_survives_self_similar_prefix_run() {
         6,
         "one token report per input token id"
     );
+}
+
+#[test]
+fn no_stop_trim_preserves_seed_order_and_special_token_policy() {
+    for (no_stop_trim, skip_special) in [(false, false), (true, false), (true, true)] {
+        let tokenizer: Arc<dyn tokenizer_traits::Tokenizer> = Arc::new(TestTokenizer);
+        let mut decoder = Decoder::new(
+            tokenizers::DecodeStream::new(tokenizer, &[], skip_special),
+            StopConditions {
+                stop_token_ids_hidden: Some(vec![EOS]),
+                stop: Some(vec!["other".into()]),
+                ..Default::default()
+            },
+            false,
+            no_stop_trim,
+            None,
+            Some("o".into()),
+        );
+        let result = decoder.process_token_ids(&[EOS, THERE]).unwrap();
+        assert_eq!(
+            result.text.as_deref(),
+            Some(if no_stop_trim && !skip_special {
+                "o</s>"
+            } else {
+                "o"
+            })
+        );
+        assert_eq!(result.tokens.len(), 1);
+        assert!(matches!(
+            result.stop_trigger,
+            Some(StopTrigger::HiddenStopTokenDetected(EOS))
+        ));
+    }
 }

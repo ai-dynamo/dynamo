@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import pytest
 
 pytest.importorskip(
@@ -170,7 +172,7 @@ def test_public_router_validation_is_owned_by_dynamo_adapter() -> None:
     conditional = plan.fragment.conditional_by_branch["agg"][0]
     assert conditional.selector == "mode"
     assert conditional.values == ["kv_router"]
-    assert conditional.choices["prefill_load_model_type"] == ["none", "aic"]
+    assert conditional.choices["prefill_load_model_type"] == ["none", "ais"]
     assert conditional.choices["temperature"] == [0.0, 0.2, 0.5, 1.0]
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
@@ -179,7 +181,7 @@ def test_public_router_validation_is_owned_by_dynamo_adapter() -> None:
         adapter.compile_recommendation(
             {
                 "policy": "round_robin",
-                "prefill_load_model": {"type": "aic"},
+                "prefill_load_model": {"type": "ais"},
             },
             recommendation_context,
         )
@@ -220,7 +222,7 @@ def test_public_router_search_accepts_custom_values_and_emits_public_config() ->
         "prefill_load_scale": 3.0,
         "temperature": 0.1,
     }
-    assert replay_spec.runtime_hooks[0].config["aic_perf_config"] is None
+    assert replay_spec.runtime_hooks[0].config["ais_perf_config"] is None
 
 
 def test_public_router_prediction_materializes_runtime_hook() -> None:
@@ -246,11 +248,11 @@ def test_public_router_prediction_materializes_runtime_hook() -> None:
     }
 
 
-def test_public_router_aic_load_model_reaches_runtime_config() -> None:
+def test_public_router_ais_load_model_reaches_runtime_config() -> None:
     replay_spec = create_provider().compile_prediction(
         {
             "policy": "kv_router",
-            "prefill_load_model": {"type": "aic"},
+            "prefill_load_model": {"type": "ais"},
         },
         PredictionAdapterContext(
             engine={
@@ -276,17 +278,69 @@ def test_public_router_aic_load_model_reaches_runtime_config() -> None:
     )
 
     hook_config = replay_spec.runtime_hooks[0].config
-    assert hook_config["router_config"]["router_prefill_load_model"] == "aic"
-    assert hook_config["aic_perf_config"] == {
-        "aic_backend": "vllm",
-        "aic_system": "h200_sxm",
-        "aic_model_path": "example/model",
-        "aic_backend_version": "0.11.0",
-        "aic_tp_size": 1,
-        "aic_attention_dp_size": 1,
-        "aic_moe_tp_size": None,
-        "aic_moe_ep_size": None,
+    assert hook_config["router_config"]["router_prefill_load_model"] == "ais"
+    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
+    assert (
+        hook_config["ais_perf_config"]
+        == ForwardPassPerfModelConfig(
+            backend="vllm",
+            system="h200_sxm",
+            model="example/model",
+            backend_version="0.11.0",
+            worker_type="aggregated",
+        ).to_dict()
+    )
+
+
+@pytest.mark.parametrize("nested_path", [None, "matching", "conflicting"])
+def test_public_router_preserves_external_fpm_path_and_controls(
+    tmp_path, nested_path
+) -> None:
+    roots = [tmp_path / "first", tmp_path / "second"]
+    for root in roots:
+        root.mkdir()
+    fpm_path = str(tmp_path / "forward.parquet")
+    controls = {"correction": {"enabled": False}}
+    if nested_path is not None:
+        controls["fpm_interpolation"] = {
+            "fpm_parquet_path": fpm_path
+            if nested_path == "matching"
+            else str(tmp_path / "other.parquet")
+        }
+    engine = {
+        "mode": "disaggregated",
+        "model": "example/model",
+        "hardware": "h200_sxm",
+        "backend": "vllm",
+        "workers": {
+            "prefill": {
+                "timing": {
+                    "estimation_mode": "fpm_interpolation",
+                    "fpm_parquet_path": fpm_path,
+                    "systems_paths": [str(root) for root in roots],
+                    "estimator_config": controls,
+                },
+            }
+        },
     }
+    original = deepcopy(engine)
+    context = PredictionAdapterContext(engine=engine, traffic={}, evaluation={})
+    public = {"policy": "kv_router", "prefill_load_model": {"type": "ais"}}
+    if nested_path == "conflicting":
+        with pytest.raises(ValueError, match="conflicting fpm_parquet_path"):
+            create_provider().compile_prediction(public, context)
+    else:
+        replay_spec = create_provider().compile_prediction(public, context)
+        perf_config = replay_spec.runtime_hooks[0].config["ais_perf_config"]
+        assert perf_config["worker_type"] == "prefill"
+        assert perf_config["systems_paths"] == [str(root) for root in roots]
+        assert perf_config["estimation_mode"] == "fpm_interpolation"
+        assert perf_config["estimator_config"] == {
+            "correction": {"enabled": False},
+            "fpm_interpolation": {"fpm_parquet_path": fpm_path},
+        }
+    assert engine == original
 
 
 def test_router_public_schema_rejects_internal_fields_and_supports_ranges() -> None:
@@ -323,7 +377,7 @@ def test_round_robin_load_model_error_names_the_conflict() -> None:
         create_provider().compile_recommendation(
             {
                 "policy": "round_robin",
-                "prefill_load_model": {"type": "aic"},
+                "prefill_load_model": {"type": "ais"},
             },
             RecommendationAdapterContext(
                 engine={},
@@ -390,12 +444,14 @@ def test_mixed_router_policy_preserves_continuous_and_log_ranges() -> None:
     assert round_robin.runtime_hooks == ()
 
 
-def test_candidate_aic_materialization_defaults_absent_moe_parallelism() -> None:
+def test_candidate_ais_materialization_preserves_independent_router_controls(
+    tmp_path,
+) -> None:
     adapter = create_provider()
     plan = adapter.compile_recommendation(
         {
             "policy": "kv_router",
-            "prefill_load_model": {"type": "aic"},
+            "prefill_load_model": {"type": "ais"},
         },
         RecommendationAdapterContext(
             engine={},
@@ -426,11 +482,38 @@ def test_candidate_aic_materialization_defaults_absent_moe_parallelism() -> None
         ),
     )
 
+    controls = {"fpm_regression": {"sampling": {"bins_per_axis": [2, 8]}}}
+    plan.state["core_search_space"].update(
+        {
+            "systems_paths": [str(tmp_path)],
+            "role_estimator_controls": {
+                "agg": {
+                    "estimation_mode": "fpm_regression",
+                    "estimator_config": controls,
+                }
+            },
+        }
+    )
+    fallback = adapter.materialize_candidate(plan, selection, context)
+    fallback_config = fallback.runtime_hooks[0].config["ais_perf_config"]
+    assert fallback_config["worker_type"] == "aggregated"
+    assert fallback_config["moe_tp_size"] is None
+    assert fallback_config["moe_ep_size"] is None
+    assert fallback_config["systems_paths"] == [str(tmp_path)]
+    assert fallback_config["estimation_mode"] == "fpm_regression"
+    assert fallback_config["estimator_config"] == controls
+    canonical = {
+        "model": "example/model",
+        "system": "h200_sxm",
+        "backend": "vllm",
+        "worker_type": "aggregated",
+        "systems_paths": ["/first", "/second"],
+        "estimator_config": {"correction": {"enabled": False}},
+    }
+    context.sample["forward_pass_estimators"] = {"agg": {"config": canonical}}
     result = adapter.materialize_candidate(plan, selection, context)
-    aic_config = result.runtime_hooks[0].config["aic_perf_config"]
-
-    assert aic_config["aic_moe_tp_size"] is None
-    assert aic_config["aic_moe_ep_size"] is None
+    assert result.runtime_hooks[0].config["ais_perf_config"] == canonical
+    assert result.runtime_hooks[0].config["ais_perf_config"] is not canonical
 
 
 @pytest.mark.parametrize(

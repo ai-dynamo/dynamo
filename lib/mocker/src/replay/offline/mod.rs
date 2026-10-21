@@ -11,11 +11,9 @@ pub(crate) use entrypoints::{
     generate_trace_worker_artifacts, generate_trace_worker_artifacts_with_visibility,
     simulate_agentic_trace_workload, simulate_agentic_trace_workload_disagg,
     simulate_concurrency_disagg_with_scaling_policy, simulate_concurrency_with_scaling_policy,
-    simulate_concurrency_workload_accumulating_deltas,
     simulate_concurrency_workload_disagg_with_scaling_policy,
     simulate_concurrency_workload_with_scaling_policy, simulate_trace_disagg_with_scaling_policy,
-    simulate_trace_with_scaling_policy, simulate_trace_workload_accumulating_deltas,
-    simulate_trace_workload_disagg_with_capture_options,
+    simulate_trace_with_scaling_policy, simulate_trace_workload_disagg_with_capture_options,
     simulate_trace_workload_disagg_with_scaling_policy,
     simulate_trace_workload_with_capture_options, simulate_trace_workload_with_scaling_policy,
 };

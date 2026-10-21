@@ -39,7 +39,7 @@ PLATFORM_ENV = "DYNAMO_WHEEL_SMOKE_PLATFORM"
 PYTHONS_ENV = "DYNAMO_WHEEL_SMOKE_PYTHONS"
 DEFAULT_WHEELHOUSE = "/opt/dynamo/wheelhouse"
 # Core-only versions; 3.12 (image Python) is covered by the combined core+kvbm test.
-DEFAULT_PYTHONS = "3.10,3.11,3.13"
+DEFAULT_PYTHONS = "3.11,3.13"
 
 
 def _target_arch() -> str:
