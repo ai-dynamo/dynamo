@@ -19,7 +19,11 @@ import numpy as np
 
 from dynamo._core import Context
 from dynamo.common.backend.engine import (
-    EngineConfig, GenerateChunk, GenerateRequest, LLMEngine, LlmRegistration,
+    EngineConfig,
+    GenerateChunk,
+    GenerateRequest,
+    LLMEngine,
+    LlmRegistration,
 )
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
@@ -46,12 +50,16 @@ def _unsupported(request: GenerateRequest) -> None:
     stops = request.get("stop_conditions") or {}
     output = request.get("output_options") or {}
     defaults = {
-        "n": 1, "best_of": 1, "presence_penalty": 0,
-        "frequency_penalty": 0, "repetition_penalty": 1, "min_p": 0,
-        "use_beam_search": False, "length_penalty": 1,
+        "n": 1,
+        "best_of": 1,
+        "presence_penalty": 0,
+        "frequency_penalty": 0,
+        "repetition_penalty": 1,
+        "min_p": 0,
+        "use_beam_search": False,
+        "length_penalty": 1,
     }
-    supported = {"temperature", "top_p", "top_k", "seed",
-                 "include_stop_str_in_output"}
+    supported = {"temperature", "top_p", "top_k", "seed", "include_stop_str_in_output"}
     for key, value in sampling.items():
         if value is None or key in supported:
             continue
@@ -60,18 +68,39 @@ def _unsupported(request: GenerateRequest) -> None:
         raise InvalidArgument(f"DeepInfer does not support sampling_options.{key}")
     # String/token stops and visibility are enforced by Dynamo's token decoder.
     for key, value in stops.items():
-        if key in {"max_tokens", "ignore_eos", "stop", "stop_token_ids",
-                   "stop_token_ids_visible", "stop_token_ids_hidden"}:
+        if key in {
+            "max_tokens",
+            "ignore_eos",
+            "stop",
+            "stop_token_ids",
+            "stop_token_ids_visible",
+            "stop_token_ids_hidden",
+        }:
             continue
         if value is not None and not (key == "min_tokens" and value == 0):
             raise InvalidArgument(f"DeepInfer does not support stop_conditions.{key}")
     for key, value in output.items():
-        if key in {"no_stop_trim", "skip_special_tokens", "formatted_prompt",
-                   "return_tokens_as_token_ids"} or value is None:
+        if (
+            key
+            in {
+                "no_stop_trim",
+                "skip_special_tokens",
+                "formatted_prompt",
+                "return_tokens_as_token_ids",
+            }
+            or value is None
+        ):
             continue
         raise InvalidArgument(f"DeepInfer does not support output_options.{key}")
-    for key in ("multi_modal_data", "mm_processor_kwargs", "mm_routing_info",
-                "encoder_result", "prefill_result", "bootstrap_info", "extra_args"):
+    for key in (
+        "multi_modal_data",
+        "mm_processor_kwargs",
+        "mm_routing_info",
+        "encoder_result",
+        "prefill_result",
+        "bootstrap_info",
+        "extra_args",
+    ):
         if request.get(key):
             raise InvalidArgument(f"DeepInfer does not support {key}")
 
@@ -79,12 +108,18 @@ def _unsupported(request: GenerateRequest) -> None:
 def _sampling(request: GenerateRequest) -> dict[str, Any]:
     source = request.get("sampling_options") or {}
     stops = request.get("stop_conditions") or {}
-    params = {key: source[key] for key in ("temperature", "top_p", "top_k")
-              if source.get(key) is not None}
+    params = {
+        key: source[key]
+        for key in ("temperature", "top_p", "top_k")
+        if source.get(key) is not None
+    }
     for key in ("temperature", "top_p"):
         value = params.get(key)
-        if value is not None and (isinstance(value, bool) or
-                not isinstance(value, (int, float)) or not math.isfinite(value)):
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
             raise InvalidArgument(f"{key} must be a finite number")
     if params.get("temperature", 1) < 0:
         raise InvalidArgument("temperature must be nonnegative")
@@ -141,7 +176,9 @@ class DeepInferLLMEngine(LLMEngine):
 
     @classmethod
     async def from_args(cls, argv=None):
-        parser = argparse.ArgumentParser(description="Dynamo DeepInfer backend", allow_abbrev=False)
+        parser = argparse.ArgumentParser(
+            description="Dynamo DeepInfer backend", allow_abbrev=False
+        )
         parser.add_argument("--model", required=True)
         parser.add_argument("--served-model-name")
         parser.add_argument("--trust-remote-code", action="store_true")
@@ -168,38 +205,53 @@ class DeepInferLLMEngine(LLMEngine):
         if not 0 < parsed.gpu_memory_utilization <= 1:
             parser.error("gpu_memory_utilization must be in (0, 1]")
         args = SimpleNamespace(
-            model=parsed.model, tokenizer=parsed.model,
+            model=parsed.model,
+            tokenizer=parsed.model,
             served_model_name=parsed.served_model_name or parsed.model,
             trust_remote_code=parsed.trust_remote_code,
-            max_model_len=parsed.max_model_len, max_num_seqs=parsed.max_num_seqs,
+            max_model_len=parsed.max_model_len,
+            max_num_seqs=parsed.max_num_seqs,
             max_num_batched_tokens=parsed.max_num_batched_tokens,
             gpu_memory_utilization=parsed.gpu_memory_utilization,
-            expert_parallel_size=1, context_parallel_size=1, data_parallel_size=1,
+            expert_parallel_size=1,
+            context_parallel_size=1,
+            data_parallel_size=1,
             stop_preempted_request=False,
         )
         config = WorkerConfig(
-            namespace=parsed.namespace, component=parsed.component, endpoint=parsed.endpoint,
-            model_name=parsed.model, served_model_name=args.served_model_name,
-            discovery_backend=parsed.discovery_backend, request_plane=parsed.request_plane,
-            response_plane=parsed.response_plane, event_plane=parsed.event_plane,
+            namespace=parsed.namespace,
+            component=parsed.component,
+            endpoint=parsed.endpoint,
+            model_name=parsed.model,
+            served_model_name=args.served_model_name,
+            discovery_backend=parsed.discovery_backend,
+            request_plane=parsed.request_plane,
+            response_plane=parsed.response_plane,
+            event_plane=parsed.event_plane,
             disaggregation_mode=DisaggregationMode.AGGREGATED,
-            enable_kv_routing=False, enable_local_indexer=False,
+            enable_kv_routing=False,
+            enable_local_indexer=False,
         )
         return cls(args, config), config
 
     async def _native(self, function, *args):
-        return await asyncio.get_running_loop().run_in_executor(self._executor, function, *args)
+        return await asyncio.get_running_loop().run_in_executor(
+            self._executor, function, *args
+        )
 
     def _initialize(self):
         self._output_type = _load_request_output()
-        self.engine = _load_llm_engine().from_engine_args(_load_engine_args()(**vars(self.args)))
+        self.engine = _load_llm_engine().from_engine_args(
+            _load_engine_args()(**vars(self.args))
+        )
         self._model_max_len = self.engine.model_config.max_model_len
         self._vocab_size = self.engine.model_config.get_vocab_size()
         self._bos_token_id = getattr(self.engine.tokenizer, "bos_token_id", None)
         if self._bos_token_id is None:
             self._bos_token_id = self.engine.eos_id
         return EngineConfig(
-            model=self.args.model, served_model_name=self.args.served_model_name,
+            model=self.args.model,
+            served_model_name=self.args.served_model_name,
             llm=LlmRegistration(
                 context_length=self._model_max_len,
                 max_num_seqs=self.engine.scheduler_config.max_num_seqs,
@@ -212,7 +264,8 @@ class DeepInferLLMEngine(LLMEngine):
         if self._closing or self._closed or self._executor is not None:
             raise EngineShutdown("DeepInfer cannot be started twice")
         self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="deepinfer-driver")
+            max_workers=1, thread_name_prefix="deepinfer-driver"
+        )
         try:
             config = await self._native(self._initialize)
             self._pump_task = asyncio.create_task(self._pump())
@@ -224,16 +277,22 @@ class DeepInferLLMEngine(LLMEngine):
     async def health_check_payload(self):
         if self._bos_token_id is None:
             return None
-        return {"token_ids": [self._bos_token_id],
-                "stop_conditions": {"max_tokens": 1, "ignore_eos": True}}
+        return {
+            "token_ids": [self._bos_token_id],
+            "stop_conditions": {"max_tokens": 1, "ignore_eos": True},
+        }
 
-    async def generate(self, request: GenerateRequest, context: Context) -> AsyncGenerator[GenerateChunk, None]:
+    async def generate(
+        self, request: GenerateRequest, context: Context
+    ) -> AsyncGenerator[GenerateChunk, None]:
         if self._closing or self._failure or self._pump_task is None:
             raise EngineShutdown("DeepInfer is not available") from self._failure
         normalize_request_token_ids(request)
         _unsupported(request)
         tokens = request.get("token_ids", [])
-        if not tokens or any(type(t) is not int or not 0 <= t < 2**31 for t in tokens):
+        if not tokens or any(
+            type(t) is not int or not 0 <= t < 2**31 for t in tokens
+        ):
             raise InvalidArgument("token_ids must be nonempty nonnegative int32 values")
         if self._vocab_size is not None and max(tokens) >= self._vocab_size:
             raise InvalidArgument("token ID is outside the model vocabulary")
@@ -241,7 +300,9 @@ class DeepInferLLMEngine(LLMEngine):
         if self._model_max_len is not None:
             remaining = self._model_max_len - len(tokens)
             if remaining <= 0 or params.get("max_tokens", 1) > remaining:
-                raise InvalidArgument("prompt plus generation exceeds model context length")
+                raise InvalidArgument(
+                    "prompt plus generation exceeds model context length"
+                )
             params.setdefault("max_tokens", remaining)
         rid = str(context.id())
         if context.is_stopped():
@@ -251,7 +312,9 @@ class DeepInferLLMEngine(LLMEngine):
         if len(self._requests) >= self.args.max_num_seqs:
             raise EngineShutdown("DeepInfer admission capacity exceeded")
         self._next_id += 1
-        state = _Request(str(self._next_id), list(tokens), params, asyncio.Queue(_QUEUE_SIZE))
+        state = _Request(
+            str(self._next_id), list(tokens), params, asyncio.Queue(_QUEUE_SIZE)
+        )
         self._requests[rid] = state
         self._wake.set()
         try:
@@ -282,8 +345,11 @@ class DeepInferLLMEngine(LLMEngine):
 
     def _add_native(self, state):
         result = self.engine.add_request(
-            user_id="dynamo", request_id=state.native_id, sampling_params=state.params,
-            prompt_token_ids=np.asarray(state.tokens, dtype=np.int32), multi_modal_data=None,
+            user_id="dynamo",
+            request_id=state.native_id,
+            sampling_params=state.params,
+            prompt_token_ids=np.asarray(state.tokens, dtype=np.int32),
+            multi_modal_data=None,
         )
         if result is None or result is False:
             raise InvalidArgument("DeepInfer rejected request")
@@ -295,8 +361,16 @@ class DeepInferLLMEngine(LLMEngine):
         outputs = []
         for pointer in raw:
             out = self._output_type.clone(int(pointer))
-            outputs.append((str(out.request_id), int(out.token_id), bool(out.finished),
-                            str(out.finish_reason), int(out.prompt_len), int(out.num_output_tokens)))
+            outputs.append(
+                (
+                    str(out.request_id),
+                    int(out.token_id),
+                    bool(out.finished),
+                    str(out.finish_reason),
+                    int(out.prompt_len),
+                    int(out.num_output_tokens),
+                )
+            )
         return outputs, unfinished
 
     async def _pump(self):
@@ -309,7 +383,9 @@ class DeepInferLLMEngine(LLMEngine):
                 for rid, state in list(self._requests.items()):
                     if state.cancelled:
                         if state.submitted:
-                            await self._native(self.engine.abort_request, state.native_id)
+                            await self._native(
+                                self.engine.abort_request, state.native_id
+                            )
                         self._requests.pop(rid, None)
                     elif not state.submitted:
                         try:
@@ -330,24 +406,40 @@ class DeepInferLLMEngine(LLMEngine):
                     if state.cancelled or self._requests.get(rid) is not state:
                         continue
                     if finished and reason not in ("stop", "length", "abort"):
-                        self._fail(state, EngineShutdown(f"DeepInfer terminated request: {reason}"))
+                        self._fail(
+                            state,
+                            EngineShutdown(f"DeepInfer terminated request: {reason}"),
+                        )
                         continue
                     chunk = {"token_ids": [token] if token >= 0 else [], "index": 0}
                     if finished:
-                        chunk["finish_reason"] = "cancelled" if reason == "abort" else reason
-                        chunk["completion_usage"] = {"prompt_tokens": prompt,
-                            "completion_tokens": completion, "total_tokens": prompt + completion}
+                        chunk["finish_reason"] = (
+                            "cancelled" if reason == "abort" else reason
+                        )
+                        chunk["completion_usage"] = {
+                            "prompt_tokens": prompt,
+                            "completion_tokens": completion,
+                            "total_tokens": prompt + completion,
+                        }
                     try:
                         state.queue.put_nowait(chunk)
                     except asyncio.QueueFull:
-                        self._fail(state, EngineShutdown("DeepInfer stream consumer is too slow"))
+                        self._fail(
+                            state,
+                            EngineShutdown("DeepInfer stream consumer is too slow"),
+                        )
                         continue
                     if finished:
                         self._requests.pop(rid, None)
                 if not unfinished:
                     for state in self._requests.values():
                         if state.submitted and not state.cancelled:
-                            self._fail(state, EngineShutdown("DeepInfer stream ended without a terminal output"))
+                            self._fail(
+                                state,
+                                EngineShutdown(
+                                    "DeepInfer stream ended without a terminal output"
+                                ),
+                            )
         except Exception as exc:
             self._failure = exc
             for state in self._requests.values():

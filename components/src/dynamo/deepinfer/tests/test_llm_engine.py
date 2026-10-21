@@ -46,14 +46,23 @@ def load_adapter():
             request["token_ids"] = list(struct.unpack(f"<{len(data)//4}I", data))
 
     module("dynamo._core", Context=object)
-    module("dynamo.common.backend.engine", EngineConfig=SimpleNamespace,
-           GenerateChunk=dict, GenerateRequest=dict, LLMEngine=object,
-           LlmRegistration=SimpleNamespace)
+    module(
+        "dynamo.common.backend.engine",
+        EngineConfig=SimpleNamespace,
+        GenerateChunk=dict,
+        GenerateRequest=dict,
+        LLMEngine=object,
+        LlmRegistration=SimpleNamespace,
+    )
     module("dynamo.common.backend.worker", WorkerConfig=SimpleNamespace)
     module("dynamo.common.constants", DisaggregationMode=Mode)
     module("dynamo.common.utils.token_ids", normalize_request_token_ids=normalize)
-    module("dynamo.llm.exceptions", InvalidArgument=InvalidArgument,
-           EngineShutdown=EngineShutdown, Cancelled=Cancelled)
+    module(
+        "dynamo.llm.exceptions",
+        InvalidArgument=InvalidArgument,
+        EngineShutdown=EngineShutdown,
+        Cancelled=Cancelled,
+    )
     path = Path(__file__).resolve().parents[1] / "llm_engine.py"
     spec = importlib.util.spec_from_file_location("_deepinfer_adapter_test", path)
     adapter = importlib.util.module_from_spec(spec)
@@ -68,8 +77,12 @@ a = load_adapter()
 
 class FakeEngine:
     def __init__(self):
-        self.model_config = SimpleNamespace(max_model_len=128, get_vocab_size=lambda: 100)
-        self.scheduler_config = SimpleNamespace(max_num_seqs=16, max_num_batched_tokens=128)
+        self.model_config = SimpleNamespace(
+            max_model_len=128, get_vocab_size=lambda: 100
+        )
+        self.scheduler_config = SimpleNamespace(
+            max_num_seqs=16, max_num_batched_tokens=128
+        )
         self.tokenizer = SimpleNamespace(bos_token_id=1)
         self.eos_id = 2
         self.active = {}
@@ -111,13 +124,18 @@ class FakeEngine:
         for rid, (request, count) in list(self.active.items()):
             count += 1
             finished = count >= request["sampling_params"]["max_tokens"]
-            out = SimpleNamespace(request_id=rid, token_id=10 + count,
-                finished=finished, finish_reason="length" if finished else "",
-                prompt_len=len(request["prompt_token_ids"]), num_output_tokens=count)
+            out = SimpleNamespace(
+                request_id=rid,
+                token_id=10 + count,
+                finished=finished,
+                finish_reason="length" if finished else "",
+                prompt_len=len(request["prompt_token_ids"]),
+                num_output_tokens=count,
+            )
             if self.defer and finished:
                 self.pending.append(out)
             else:
-                self.pointers[len(self.pointers)+1] = out
+                self.pointers[len(self.pointers) + 1] = out
             if finished:
                 del self.active[rid]
             else:
@@ -126,7 +144,7 @@ class FakeEngine:
 
     def flush_inflight_reqs(self):
         self.record()
-        self.pointers = {i+1: out for i, out in enumerate(self.pending)}
+        self.pointers = {i + 1: out for i, out in enumerate(self.pending)}
         self.pending = []
         return list(self.pointers)
 
@@ -158,9 +176,15 @@ async def collect(engine, req=None, context=None):
 
 class MappingTests(unittest.TestCase):
     def test_sampling_zero_and_seed(self):
-        self.assertEqual(a._sampling({"sampling_options": {"temperature": 0, "seed": 0},
-            "stop_conditions": {"max_tokens": 3, "ignore_eos": False}}),
-            {"temperature": 0, "seq_seed": 0, "max_tokens": 3, "ignore_eos": False})
+        self.assertEqual(
+            a._sampling(
+                {
+                    "sampling_options": {"temperature": 0, "seed": 0},
+                    "stop_conditions": {"max_tokens": 3, "ignore_eos": False},
+                }
+            ),
+            {"temperature": 0, "seq_seed": 0, "max_tokens": 3, "ignore_eos": False},
+        )
 
     def test_invalid_sampling(self):
         for value in [0, True]:
@@ -171,16 +195,22 @@ class MappingTests(unittest.TestCase):
                 a._sampling({"sampling_options": {key: value}})
 
     def test_default_and_frontend_owned_fields(self):
-        a._unsupported({"sampling_options": {"n": 1, "repetition_penalty": 1},
-            "stop_conditions": {"stop_token_ids_hidden": [2], "stop": ["end"]},
-            "output_options": {"skip_special_tokens": True}})
+        a._unsupported(
+            {
+                "sampling_options": {"n": 1, "repetition_penalty": 1},
+                "stop_conditions": {"stop_token_ids_hidden": [2], "stop": ["end"]},
+                "output_options": {"skip_special_tokens": True},
+            }
+        )
 
     def test_unsupported_including_zero_logprobs(self):
-        for req in [{"output_options": {"logprobs": 0}},
-                    {"sampling_options": {"n": 2}},
-                    {"sampling_options": {"guided_decoding": {"json": {}}}},
-                    {"extra_args": {"sampling_options": {"bad_words_token_ids": [[2]]}}},
-                    {"multi_modal_data": {"image": [1]}}]:
+        for req in [
+            {"output_options": {"logprobs": 0}},
+            {"sampling_options": {"n": 2}},
+            {"sampling_options": {"guided_decoding": {"json": {}}}},
+            {"extra_args": {"sampling_options": {"bad_words_token_ids": [[2]]}}},
+            {"multi_modal_data": {"image": [1]}},
+        ]:
             with self.assertRaises(a.InvalidArgument):
                 a._unsupported(req)
 
@@ -190,13 +220,22 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.fake = FakeEngine()
         self.patches = [
             patch.object(a, "_load_engine_args", return_value=SimpleNamespace),
-            patch.object(a, "_load_llm_engine", return_value=SimpleNamespace(
-                from_engine_args=lambda args: self.fake)),
-            patch.object(a, "_load_request_output", return_value=SimpleNamespace(clone=self.fake.clone)),
+            patch.object(
+                a,
+                "_load_llm_engine",
+                return_value=SimpleNamespace(from_engine_args=lambda args: self.fake),
+            ),
+            patch.object(
+                a,
+                "_load_request_output",
+                return_value=SimpleNamespace(clone=self.fake.clone),
+            ),
         ]
         for p in self.patches:
             p.start()
-        self.engine, self.config = await a.DeepInferLLMEngine.from_args(["--model", "local-model"])
+        self.engine, self.config = await a.DeepInferLLMEngine.from_args(
+            ["--model", "local-model"]
+        )
         await self.engine.start(1)
 
     async def asyncTearDown(self):
@@ -208,8 +247,10 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         chunks = await asyncio.wait_for(collect(self.engine), 3)
         self.assertEqual([c["token_ids"] for c in chunks], [[11], [12], [13]])
         self.assertEqual(chunks[-1]["finish_reason"], "length")
-        self.assertEqual(chunks[-1]["completion_usage"],
-                         {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5})
+        self.assertEqual(
+            chunks[-1]["completion_usage"],
+            {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+        )
         self.assertEqual(len(self.fake.threads), 1)
         self.assertNotIn(threading.get_ident(), self.fake.threads)
 
@@ -283,17 +324,27 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fake.calls, [])
 
     async def test_cli_lazy_import_and_disabled_kv(self):
-        with patch.object(a, "_load_engine_args", side_effect=AssertionError("early import")):
-            e, config = await a.DeepInferLLMEngine.from_args(["--model", "m", "--response-plane", "quic"])
+        with patch.object(
+            a, "_load_engine_args", side_effect=AssertionError("early import")
+        ):
+            e, config = await a.DeepInferLLMEngine.from_args(
+                ["--model", "m", "--response-plane", "quic"]
+            )
             self.assertFalse(config.enable_kv_routing)
             self.assertEqual(config.response_plane, "quic")
             await e.cleanup()
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            await a.DeepInferLLMEngine.from_args(["--model", "m", "--data-parallel-size", "2"])
+            await a.DeepInferLLMEngine.from_args(
+                ["--model", "m", "--data-parallel-size", "2"]
+            )
 
     async def test_partial_start_failure(self):
         e, _ = await a.DeepInferLLMEngine.from_args(["--model", "m"])
-        with patch.object(self.fake.model_config, "get_vocab_size", side_effect=RuntimeError("metadata")):
+        with patch.object(
+            self.fake.model_config,
+            "get_vocab_size",
+            side_effect=RuntimeError("metadata"),
+        ):
             with self.assertRaisesRegex(RuntimeError, "metadata"):
                 await e.start(2)
         self.assertTrue(e._closed)
