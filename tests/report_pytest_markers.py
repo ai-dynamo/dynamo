@@ -95,6 +95,9 @@ STUB_MODULES = [
     "transformers.models",
     "transformers.models.qwen2_vl",
     "transformers.models.qwen2_vl.image_processing_qwen2_vl",
+    # Responses replay tests import these; marker collection never tokenizes.
+    "tokenizers",
+    "tokenizers.models",
     "pandas",
     "matplotlib",
     "matplotlib.pyplot",
@@ -254,6 +257,7 @@ STUB_MODULES = [
     "vllm.reasoning.qwen3_engine_reasoning_parser",
     "vllm.renderers",
     "vllm.renderers.embed_utils",
+    "vllm.renderers.hf",
     "vllm.sampling_params",
     "vllm.tokenizers",
     "vllm.tokenizers.mistral",
