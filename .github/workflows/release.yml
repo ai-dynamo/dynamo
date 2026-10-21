@@ -1896,17 +1896,16 @@ jobs:
     # Every SELECTED stage must succeed (a 'none' subset skips the stage and
     # counts as satisfied), so GitLab is never told to scan or promote something
     # that failed to stage. A failed rc is repaired by re-staging at a new rc
-    # round. On-demand also requires crates to have FULLY staged: stage-crates is
+    # round. Crates never gate the trigger (nightly or on-demand): stage-crates is
     # continue-on-error (its job result is masked as success), so crates_status
-    # is the authoritative signal. Nightly crates stay fail-soft (not gated).
+    # is the authoritative signal; a partial/failed crate stage only warns in the
+    # trigger step below.
     # !cancelled() overrides the implicit needs-success().
     needs: [prepare-release, release-publish, stage-wheels-artifactory, stage-crates-artifactory]
     if: >-
       ${{ !cancelled() && needs.prepare-release.result == 'success' && inputs.skip_gitlab_pipeline != true &&
           (needs.release-publish.result == 'success' || (inputs.containers == 'none' && inputs.helm == 'none')) &&
-          (needs.stage-wheels-artifactory.result == 'success' || inputs.wheels == 'none') &&
-          (needs.prepare-release.outputs.on_demand != 'true' || inputs.crates == 'none' || inputs.crates == '' ||
-           needs.stage-crates-artifactory.outputs.crates_status == 'success') }}
+          (needs.stage-wheels-artifactory.result == 'success' || inputs.wheels == 'none') }}
     runs-on:
       group: gitlab_ci_runners
     environment: automated-release
@@ -1994,6 +1993,13 @@ jobs:
             # publish); RELEASE_TYPE=ondemand (no hyphen) matches dynamo.yml's rules.
             PIPELINE_TYPE="security"
             RELEASE_TYPE="ondemand"
+            # Crates do not gate an on-demand trigger. If they did not FULLY stage,
+            # GitLab still runs; STAGED_CRATES/ARTIFACTS reflect only what staged, so
+            # re-stage the rest (rc_round X.1, X.2, ...) and re-run the crate
+            # scan/registration before publishing crates.
+            if [ "${CRATE_SUBSET:-none}" != "none" ] && [ "${CRATES_STATUS}" != "success" ]; then
+              echo "::warning::Crate staging ${CRATES_STATUS:-unknown} (staged=[${STAGED_CRATES:-none}]); triggering GitLab anyway. Re-stage crates, then re-run the crate scan/registration before publishing them."
+            fi
             # Coarse ARTIFACTS list keyed on what ACTUALLY staged (like nightly),
             # not on what was requested: GitLab must never scan or promote a type
             # that did not land. The job-level gate already requires every
@@ -2013,6 +2019,8 @@ jobs:
                      "crate:${CRATE_SUBSET:-none}:${STAGED_CRATES}" \
                      "helm:${HELM_SUBSET:-all}:${STAGED_HELM}"; do
               IFS=':' read -r KIND SEL GOT <<<"${P}"
+              # Crates never block the trigger (see the warning above).
+              [ "${KIND}" = "crate" ] && continue
               if [ "${SEL}" != "none" ] && [ -z "${GOT}" ]; then MISSING="${MISSING} ${KIND}"; fi
             done
             if [ -n "${MISSING}" ]; then
