@@ -150,6 +150,12 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(spoke.Spec.V1Beta1).NotTo(BeNil())
 			Expect(spoke.Spec.NativeSearchInput).To(Equal(nvidiacomv1beta2.NativeSearchInput{}))
 
+			By("Listing the request through the served v1beta2 API")
+			spokeList := &nvidiacomv1beta2.DynamoGraphDeploymentRequestList{}
+			Expect(k8sClient.List(ctx, spokeList, client.InNamespace(envtestNamespace))).Should(Succeed())
+			Expect(spokeList.Items).To(HaveLen(1))
+			Expect(spokeList.Items[0].Spec.V1Beta1).NotTo(BeNil())
+
 			By("Writing the returned envelope carrier back unchanged")
 			Expect(k8sClient.Update(ctx, spoke)).Should(Succeed())
 
@@ -157,6 +163,16 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			storedAfter := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), storedAfter)).Should(Succeed())
 			Expect(storedAfter.Spec).To(Equal(storedBefore.Spec))
+
+			By("Updating the request through its native v1beta1 API")
+			storedAfter.Spec.Model = "Qwen/Qwen3-30B-A3B"
+			Expect(k8sClient.Update(ctx, storedAfter)).Should(Succeed())
+
+			By("Reading the updated native payload through v1beta2")
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), spoke)).Should(Succeed())
+			var updatedCarrier nvidiacomv1beta1.DynamoGraphDeploymentRequestNativeSpec
+			Expect(json.Unmarshal(spoke.Spec.V1Beta1.Raw, &updatedCarrier)).Should(Succeed())
+			Expect(updatedCarrier.Model).To(Equal("Qwen/Qwen3-30B-A3B"))
 		})
 
 		It("Should carry a native v1beta2 request through the v1alpha1 API", func() {
@@ -184,6 +200,16 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(alpha.Spec.V1Beta2).NotTo(BeNil())
 			Expect(alpha.Spec.ProfilingConfig).To(BeNil())
 
+			By("Listing the request through the served v1alpha1 and v1beta1 APIs")
+			alphaList := &dgdv1alpha1.DynamoGraphDeploymentRequestList{}
+			Expect(k8sClient.List(ctx, alphaList, client.InNamespace(envtestNamespace))).Should(Succeed())
+			Expect(alphaList.Items).To(HaveLen(1))
+			Expect(alphaList.Items[0].Spec.V1Beta2).NotTo(BeNil())
+			hubList := &nvidiacomv1beta1.DynamoGraphDeploymentRequestList{}
+			Expect(k8sClient.List(ctx, hubList, client.InNamespace(envtestNamespace))).Should(Succeed())
+			Expect(hubList.Items).To(HaveLen(1))
+			Expect(hubList.Items[0].Spec.V1Beta2).NotTo(BeNil())
+
 			By("Writing the v1alpha1 structural carrier back unchanged")
 			Expect(k8sClient.Update(ctx, alpha)).Should(Succeed())
 
@@ -191,6 +217,17 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			restored := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), restored)).Should(Succeed())
 			Expect(&restored.Spec).To(Equal(nativeSpec))
+
+			By("Updating the request through its native v1beta2 API")
+			restored.Spec.Model.Name = "Qwen/Qwen3-30B-A3B"
+			Expect(k8sClient.Update(ctx, restored)).Should(Succeed())
+
+			By("Reading the updated native payload through v1beta1")
+			hub := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), hub)).Should(Succeed())
+			var updatedCarrier nvidiacomv1beta2.DynamoGraphDeploymentRequestNativeSpec
+			Expect(json.Unmarshal(hub.Spec.V1Beta2.Raw, &updatedCarrier)).Should(Succeed())
+			Expect(updatedCarrier.Model.Name).To(Equal("Qwen/Qwen3-30B-A3B"))
 		})
 
 		It("Should preserve empty native v1beta2 status through its first status update", func() {
@@ -226,6 +263,14 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), updated)).Should(Succeed())
 			Expect(updated.Status.ObservedGeneration).To(Equal(updated.Generation))
 			Expect(updated.Status.V1Beta1).To(BeNil())
+
+			By("Reading the native status through the served v1beta1 and v1alpha1 APIs")
+			hub := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), hub)).Should(Succeed())
+			Expect(hub.Status.V1Beta2).NotTo(BeNil())
+			alpha := &dgdv1alpha1.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), alpha)).Should(Succeed())
+			Expect(alpha.Status.V1Beta2).NotTo(BeNil())
 		})
 
 		It("Should reject changing the API representation of an existing request", func() {
