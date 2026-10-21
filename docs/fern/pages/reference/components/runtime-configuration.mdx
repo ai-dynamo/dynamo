@@ -50,8 +50,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
     # Frontend
     python -m dynamo.frontend \
         --namespace my-cluster \
-        --discovery-backend etcd \
-        --endpoint-types chat
+        --discovery-backend etcd
 
     # vLLM worker
     python -m dynamo.vllm \
