@@ -572,26 +572,30 @@ impl RoutingHost {
         let dispatch = self
             .inner
             .dispatch_kv_admitted(updated_request, selection.worker.worker_id);
-        let route_span = tracing::info_span!(
-            target: "request_span",
-            "kv_router.route_request",
-            otel.kind = "client",
-            request_id = %context_id,
-            worker_id = tracing::field::Empty,
-            dp_rank = selection.worker.dp_rank,
-            overlap_blocks = selection.overlap_amount,
-            phase = ?phase,
-            "request.attempt" = tracing::field::Empty,
-            "request.outcome" = tracing::field::Empty,
-            "migration.is_retry" = tracing::field::Empty,
-            "migration.reason" = tracing::field::Empty,
-            "migration.from_worker_id" = tracing::field::Empty,
-            "migration.tokens_completed" = tracing::field::Empty,
-            "cancellation.signal" = tracing::field::Empty,
-            "error.type" = tracing::field::Empty,
-            otel.status_code = tracing::field::Empty,
-            otel.status_description = tracing::field::Empty,
-        );
+        // Under request.dispatch, as on the built-in path, so worker spans nest
+        // the same way on both. Without a lifecycle root nothing is entered.
+        let route_span = request_dispatch.in_scope(|| {
+            tracing::info_span!(
+                target: "request_span",
+                "kv_router.route_request",
+                otel.kind = "client",
+                request_id = %context_id,
+                worker_id = tracing::field::Empty,
+                dp_rank = selection.worker.dp_rank,
+                overlap_blocks = selection.overlap_amount,
+                phase = ?phase,
+                "request.attempt" = tracing::field::Empty,
+                "request.outcome" = tracing::field::Empty,
+                "migration.is_retry" = tracing::field::Empty,
+                "migration.reason" = tracing::field::Empty,
+                "migration.from_worker_id" = tracing::field::Empty,
+                "migration.tokens_completed" = tracing::field::Empty,
+                "cancellation.signal" = tracing::field::Empty,
+                "error.type" = tracing::field::Empty,
+                otel.status_code = tracing::field::Empty,
+                otel.status_description = tracing::field::Empty,
+            )
+        });
         record_route_span_start(
             &route_span,
             route_trace_context.as_deref(),

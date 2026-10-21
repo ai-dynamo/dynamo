@@ -668,6 +668,14 @@ mod tests {
                 fields["dynamo.router.candidate.filtered.policy"],
                 if case == "filtered" { "1" } else { "0" }
             );
+            assert_eq!(
+                fields["dynamo.router.candidate.eligible.count"],
+                if case == "filtered" {
+                    "1"
+                } else {
+                    fields["dynamo.router.candidate.count"].as_str()
+                }
+            );
             if case == "affinity" {
                 assert_eq!(fields["dynamo.router.candidate.filtered.constraints"], "3");
                 assert_eq!(fields["dynamo.router.selected.dp.rank"], "2");
