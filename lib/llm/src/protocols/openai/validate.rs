@@ -155,7 +155,6 @@ static OPENAI_FE_IGNORED_FIELDS: LazyLock<HashSet<String>> = LazyLock::new(|| {
 /// Unknown top-level fields that are dropped instead of rejected.
 #[derive(Clone, Copy)]
 enum IgnoredFields<'a> {
-    None,
     All,
     Named(&'a HashSet<String>),
 }
@@ -163,7 +162,6 @@ enum IgnoredFields<'a> {
 impl IgnoredFields<'_> {
     fn contains(self, field: &str) -> bool {
         match self {
-            Self::None => false,
             Self::All => true,
             Self::Named(fields) => fields.contains(field),
         }
@@ -1166,7 +1164,7 @@ pub fn validate_chat_only_generation_flags(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use serde_json::json;
 
@@ -1360,7 +1358,11 @@ mod tests {
             "vllm_xargs": {"flag": true},
         }))
         .unwrap();
-        validate_no_unsupported_fields_with_ignore(&fields.fields, IgnoredFields::None).unwrap();
+        validate_no_unsupported_fields_with_ignore(
+            &fields.fields,
+            IgnoredFields::Named(&HashSet::new()),
+        )
+        .unwrap();
         assert_eq!(fields.fields.len(), PASSTHROUGH_EXTRA_FIELDS.len());
         assert_eq!(fields.fields["detokenize"], json!(false));
         assert_eq!(fields.fields["stop_token_ids"], json!([]));
@@ -1377,9 +1379,11 @@ mod tests {
         ] {
             let fields: ExtraFields = serde_json::from_value(json!({field: bad})).unwrap();
             assert_eq!(fields.fields[field], bad);
-            let err =
-                validate_no_unsupported_fields_with_ignore(&fields.fields, IgnoredFields::None)
-                    .unwrap_err();
+            let err = validate_no_unsupported_fields_with_ignore(
+                &fields.fields,
+                IgnoredFields::Named(&HashSet::new()),
+            )
+            .unwrap_err();
             assert!(err.to_string().contains(field), "{err}");
         }
     }
@@ -1387,15 +1391,19 @@ mod tests {
     #[test]
     fn validate_no_unsupported_fields_accepts_logprob_token_ids() {
         let fields = HashMap::from([("logprob_token_ids".to_string(), json!([14, 15]))]);
-        validate_no_unsupported_fields_with_ignore(&fields, IgnoredFields::None).unwrap();
+        validate_no_unsupported_fields_with_ignore(&fields, IgnoredFields::Named(&HashSet::new()))
+            .unwrap();
     }
 
     #[test]
     fn validate_no_unsupported_fields_rejects_malformed_logprob_token_ids() {
         for bad in [json!(["notanint"]), json!(7), json!([[1, 2]]), json!([-1])] {
             let fields = HashMap::from([("logprob_token_ids".to_string(), bad)]);
-            let err = validate_no_unsupported_fields_with_ignore(&fields, IgnoredFields::None)
-                .unwrap_err();
+            let err = validate_no_unsupported_fields_with_ignore(
+                &fields,
+                IgnoredFields::Named(&HashSet::new()),
+            )
+            .unwrap_err();
             assert!(err.to_string().contains("must be an array of token IDs"));
         }
     }
@@ -1419,7 +1427,8 @@ mod tests {
                 "tag": "read",
             }),
         )]);
-        validate_no_unsupported_fields_with_ignore(&fields, IgnoredFields::None).unwrap();
+        validate_no_unsupported_fields_with_ignore(&fields, IgnoredFields::Named(&HashSet::new()))
+            .unwrap();
     }
 
     #[test]
@@ -1440,17 +1449,22 @@ mod tests {
             ),
         ] {
             let fields = HashMap::from([("vllm_xargs".to_string(), bad)]);
-            let err = validate_no_unsupported_fields_with_ignore(&fields, IgnoredFields::None)
-                .unwrap_err();
+            let err = validate_no_unsupported_fields_with_ignore(
+                &fields,
+                IgnoredFields::Named(&HashSet::new()),
+            )
+            .unwrap_err();
             assert!(err.to_string().contains(message), "{err}");
         }
     }
 
     #[test]
     fn validate_no_unsupported_fields_rejects_unknown_fields_by_default() {
-        let err =
-            validate_no_unsupported_fields_with_ignore(&unknown_fields(), IgnoredFields::None)
-                .unwrap_err();
+        let err = validate_no_unsupported_fields_with_ignore(
+            &unknown_fields(),
+            IgnoredFields::Named(&HashSet::new()),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("Unsupported parameter(s)"));
     }
 
