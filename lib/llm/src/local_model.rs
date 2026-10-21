@@ -15,7 +15,9 @@ use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as 
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::frontend_config::{
+    DEFAULT_MIGRATION_REALTIME_BUDGET_MIB, FrontendApiConfig, MetricsConfig,
+};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
@@ -72,6 +74,7 @@ pub struct LocalModelBuilder {
     tls_key_path: Option<PathBuf>,
     tls_client_ca_cert_path: Option<PathBuf>,
     migration_limit: u32,
+    migration_realtime_budget_mib: usize,
     migration_max_seq_len: Option<u32>,
     is_mocker: bool,
     extra_engine_args: Option<PathBuf>,
@@ -106,6 +109,7 @@ impl Default for LocalModelBuilder {
             template_file: Default::default(),
             router_config: Default::default(),
             migration_limit: Default::default(),
+            migration_realtime_budget_mib: DEFAULT_MIGRATION_REALTIME_BUDGET_MIB,
             migration_max_seq_len: Default::default(),
             is_mocker: Default::default(),
             extra_engine_args: Default::default(),
@@ -282,6 +286,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn migration_realtime_budget_mib(&mut self, budget: usize) -> &mut Self {
+        self.migration_realtime_budget_mib = budget;
+        self
+    }
+
     pub fn is_mocker(&mut self, is_mocker: bool) -> &mut Self {
         self.is_mocker = is_mocker;
         self
@@ -386,6 +395,7 @@ impl LocalModelBuilder {
                 namespace: self.namespace.clone(),
                 namespace_prefix: self.namespace_prefix.clone(),
                 migration_limit: self.migration_limit,
+                migration_realtime_budget_mib: self.migration_realtime_budget_mib,
                 migration_max_seq_len: self.migration_max_seq_len,
                 self_host_metadata: self.self_host_metadata,
             });
@@ -450,6 +460,7 @@ impl LocalModelBuilder {
             namespace: self.namespace.clone(),
             namespace_prefix: self.namespace_prefix.clone(),
             migration_limit: self.migration_limit,
+            migration_realtime_budget_mib: self.migration_realtime_budget_mib,
             migration_max_seq_len: self.migration_max_seq_len,
             self_host_metadata: self.self_host_metadata,
         })
@@ -476,6 +487,7 @@ pub struct LocalModel {
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     migration_limit: u32,
+    migration_realtime_budget_mib: usize,
     migration_max_seq_len: Option<u32>,
     self_host_metadata: bool,
 }
@@ -646,6 +658,10 @@ impl LocalModel {
 
     pub fn migration_limit(&self) -> u32 {
         self.migration_limit
+    }
+
+    pub fn migration_realtime_budget_mib(&self) -> usize {
+        self.migration_realtime_budget_mib
     }
 
     pub fn migration_max_seq_len(&self) -> Option<u32> {

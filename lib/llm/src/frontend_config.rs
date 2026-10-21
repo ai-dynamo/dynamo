@@ -16,6 +16,8 @@ use dynamo_runtime::config::{
 
 use crate::reasoning_field::ReasoningField;
 
+pub const DEFAULT_MIGRATION_REALTIME_BUDGET_MIB: usize = 512;
+
 /// Metrics naming controls for frontend-owned services.
 ///
 /// Contains the optional metric name prefix resolved from `--metrics-prefix` or

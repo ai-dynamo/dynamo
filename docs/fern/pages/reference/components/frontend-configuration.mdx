@@ -467,6 +467,20 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
   Environment variable: `DYN_MIGRATION_LIMIT`
 </ParamField>
 
+<ParamField path="--migration-realtime-budget-mib" type="integer" default="512">
+  Shared memory budget in MiB for realtime replay journals across this frontend process.
+  Used when `--migration-limit` is greater than zero. `0` disables realtime replay retention.
+  The 16 MiB and 4,096-event limits per socket still apply.
+
+  Journals reserve memory on demand. If a reservation would exceed the shared budget,
+  the affected session releases its replay input and disables further recovery. Healthy
+  traffic continues; a recovery already in progress can fail. Memory still needed to
+  reconcile in-flight output remains charged until released. This budgets accounted journal
+  storage, including collection capacity, rather than total process memory or transport buffers.
+
+  Environment variable: `DYN_MIGRATION_REALTIME_BUDGET_MIB`
+</ParamField>
+
 <ParamField path="--migration-max-seq-len" type="integer" default="null">
   Maximum prompt-plus-output sequence length that remains eligible for migration. When a request
   strictly exceeds the limit, migration and token tracking stop for that request. Must be from `1`

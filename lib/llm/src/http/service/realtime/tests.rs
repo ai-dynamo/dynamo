@@ -95,7 +95,7 @@ fn session(engine: RealtimeBidirectionalEngine, limit: u32) -> RealtimeSession {
         deadline: None,
         incoming: None,
         cancel: CancellationToken::new(),
-        journal: Journal::new(&configuration()),
+        journal: Journal::new(&configuration(), &Arc::new(Budget::new(16 * 1024 * 1024))),
     }
 }
 

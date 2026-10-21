@@ -213,6 +213,7 @@ async fn run_with_router_plugins(
     http_service_builder = http_service_builder
         .metrics_config(local_model.metrics_config().clone())
         .migration_limit(local_model.migration_limit())
+        .migration_realtime_budget_mib(local_model.migration_realtime_budget_mib())
         .batch_gateway_url(local_model.batch_gateway_url().map(str::to_owned))
         .frontend_api_config(local_model.frontend_api_config().clone());
     // Inject the DRT's metrics registry so that component-scoped metrics

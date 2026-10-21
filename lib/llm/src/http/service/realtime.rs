@@ -53,9 +53,11 @@ use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
+mod budget;
 mod journal;
 #[cfg(test)]
 mod tests;
+pub(super) use budget::Budget;
 use journal::Journal;
 
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -161,7 +163,7 @@ async fn handle_socket(
     };
 
     let journal = (state.migration_limit > 0)
-        .then(|| Journal::new(&session_update))
+        .then(|| Journal::new(&session_update, &state.realtime_budget))
         .flatten();
     let mut session = RealtimeSession {
         engine,

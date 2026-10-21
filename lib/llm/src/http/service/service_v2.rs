@@ -145,6 +145,7 @@ pub struct State {
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
     pub(super) migration_limit: u32,
+    pub(super) realtime_budget: Arc<super::realtime::Budget>,
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -159,6 +160,7 @@ struct StateConfig {
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
     migration_limit: u32,
+    migration_realtime_budget_bytes: usize,
 }
 
 fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
@@ -561,6 +563,9 @@ impl State {
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
             migration_limit: config.migration_limit,
+            realtime_budget: Arc::new(super::realtime::Budget::new(
+                config.migration_realtime_budget_bytes,
+            )),
         }
     }
 
@@ -754,6 +759,10 @@ pub struct HttpServiceConfig {
     /// Replacement worker attempts per eligible realtime transcription socket.
     #[builder(default)]
     migration_limit: u32,
+
+    /// Shared accounted memory for realtime replay journals; zero disables retention.
+    #[builder(default = "crate::frontend_config::DEFAULT_MIGRATION_REALTIME_BUDGET_MIB")]
+    migration_realtime_budget_mib: usize,
 
     #[builder(default = "8787")]
     port: u16,
@@ -1392,6 +1401,10 @@ impl HttpServiceConfigBuilder {
                 sse_keep_alive: config.sse_keep_alive,
                 streaming_backend_error_check: config.streaming_backend_error_check,
                 migration_limit: config.migration_limit,
+                migration_realtime_budget_bytes: config
+                    .migration_realtime_budget_mib
+                    .checked_mul(1024 * 1024)
+                    .ok_or_else(|| anyhow::anyhow!("realtime migration budget exceeds usize"))?,
             },
         ));
         state
