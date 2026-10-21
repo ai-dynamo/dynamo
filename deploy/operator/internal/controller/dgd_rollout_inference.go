@@ -206,8 +206,8 @@ func replacementInferenceTargets(metadata []unstructured.Unstructured, newPods, 
 	selected := make(map[string]rolloutInferenceTarget)
 	surfaces := make(map[string]map[string]bool)
 	for _, object := range metadata {
-		owner := metav1.GetControllerOf(&object)
-		if object.GetDeletionTimestamp() != nil || owner == nil || owner.Kind != "Pod" || (!newPods[owner.UID] && !cohortPods[owner.UID]) {
+		owner := rolloutMetadataPodOwner(&object)
+		if object.GetDeletionTimestamp() != nil || owner == nil || (!newPods[owner.UID] && !cohortPods[owner.UID]) {
 			continue
 		}
 
@@ -449,9 +449,21 @@ func mapDGDServingPodToRequests(ctx context.Context, object client.Object) []ctr
 	return mapDGDWorkerPodToRequests(ctx, object)
 }
 
+func rolloutMetadataPodOwner(object metav1.Object) *metav1.OwnerReference {
+	// Container-scoped metadata keeps a Pod owner without marking it as controlling.
+	owners := object.GetOwnerReferences()
+	for i := range owners {
+		owner := &owners[i]
+		if owner.APIVersion == "v1" && owner.Kind == "Pod" && owner.Name != "" && owner.UID != "" {
+			return owner
+		}
+	}
+	return nil
+}
+
 func (r *DynamoGraphDeploymentReconciler) mapRolloutMetadataToDGDRequests(ctx context.Context, object client.Object) []ctrl.Request {
-	owner := metav1.GetControllerOf(object)
-	if owner == nil || owner.Kind != "Pod" {
+	owner := rolloutMetadataPodOwner(object)
+	if owner == nil {
 		return nil
 	}
 

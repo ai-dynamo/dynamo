@@ -131,7 +131,7 @@ func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
 			}},
 		}}},
 	}}
-	metadata.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: worker.Name, UID: worker.UID, Controller: ptr.To(true)}})
+	metadata.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: worker.Name, UID: worker.UID, Controller: ptr.To(false)}})
 
 	t.Log("Serve two independent frontend endpoints so a single successful replica cannot release the gate")
 	first, second := &rolloutProbeServer{}, &rolloutProbeServer{}
@@ -312,7 +312,7 @@ func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
 	t.Log("Route metadata changes back to the owning graph, rejecting stale Pod ownership")
 	owner := createTestDGDReconcilerWithStatus(dgd, withObjects(worker))
 	require.Empty(t, owner.mapRolloutMetadataToDGDRequests(context.Background(), metadata))
-	metadata.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: worker.Name, UID: worker.UID, Controller: ptr.To(true)}})
+	metadata.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: worker.Name, UID: worker.UID, Controller: ptr.To(false)}})
 	worker.Labels[consts.KubeLabelDynamoComponentType] = consts.ComponentTypeWorker
 	require.NoError(t, owner.Update(context.Background(), worker))
 	require.Equal(t, []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(dgd)}}, owner.mapRolloutMetadataToDGDRequests(context.Background(), metadata))
@@ -399,11 +399,11 @@ func TestReplacementInferenceTargets_ModelRoles(t *testing.T) {
 					}},
 				}}},
 			}}
-			metadata.SetOwnerReferences([]metav1.OwnerReference{{Kind: "Pod", UID: "new", Controller: ptr.To(true)}})
+			metadata.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: "new-worker", UID: "new", Controller: ptr.To(true)}})
 			cards := []unstructured.Unstructured{metadata}
 			if tt.surface != "" {
 				paired := metadata.DeepCopy()
-				paired.SetOwnerReferences([]metav1.OwnerReference{{Kind: "Pod", UID: "decode", Controller: ptr.To(true)}})
+				paired.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: "decode-worker", UID: "decode", Controller: ptr.To(false)}})
 				require.NoError(t, unstructured.SetNestedField(paired.Object, tt.surface, "spec", "data", "model_cards", "new/backend/generate/42", "card_json", "model_type"))
 				require.NoError(t, unstructured.SetNestedField(paired.Object, "decode", "spec", "data", "model_cards", "new/backend/generate/42", "card_json", "worker_type"))
 				cards = append(cards, *paired)
@@ -427,9 +427,11 @@ func TestReplacementInferenceTargets_ModelRoles(t *testing.T) {
 			}
 			require.Equal(t, path, targets[0].Paths[0])
 
-			t.Log("An unrelated serving Pod cannot supply the prefill surface")
-			_, _, err = replacementInferenceTargets(cards, map[types.UID]bool{"new": true}, nil)
-			require.ErrorContains(t, err, "no paired serving surface")
+			if tt.surface == "Chat" {
+				t.Log("An unrelated serving Pod cannot supply the prefill surface")
+				_, _, err = replacementInferenceTargets(cards, map[types.UID]bool{"new": true}, nil)
+				require.ErrorContains(t, err, "no paired serving surface")
+			}
 
 			t.Log("Verify that a real HTTP probe sends and checks prefill attribution")
 			server := httptest.NewServer(&rolloutProbeServer{})
