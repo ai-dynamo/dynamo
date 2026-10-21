@@ -797,6 +797,51 @@ class TestAudioFormatterFormat:
         assert response is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("state_type", [AudioStreamState, AudioAggregateState])
+    async def test_sample_rate_only_frames_preserve_audio(self, state_type):
+        formatter = AudioFormatter("test", None, None)
+        state = state_type()
+        state_arg = (
+            {"audio_stream_state": state}
+            if isinstance(state, AudioStreamState)
+            else {"audio_aggregate_state": state}
+        )
+        samples = np.array([0.25, -0.25], dtype=np.float32)
+
+        assert await formatter.format({"sr": 24000}, "req-1", **state_arg) is None
+        response = await formatter.format(
+            {"audio": samples, "sr": 24000},
+            "req-1",
+            output_format="pcm",
+            **state_arg,
+        )
+        assert await formatter.format({"sr": 24000}, "req-1", **state_arg) is None
+
+        if isinstance(state, AudioAggregateState):
+            assert response is None
+            response = await formatter.finish_aggregate(
+                "req-1", state, output_format="pcm"
+            )
+        assert response["status"] == "completed"
+        pcm = base64.b64decode(response["data"][0]["b64_json"])
+        np.testing.assert_array_equal(np.frombuffer(pcm, dtype="<i2"), [8192, -8192])
+
+    @pytest.mark.asyncio
+    async def test_sample_rate_only_is_not_complete_audio(self):
+        formatter = AudioFormatter("test", None, None)
+        response = await formatter.format({"sr": 24000}, "req-1")
+        assert response["status"] == "failed"
+
+        state = AudioAggregateState()
+        assert (
+            await formatter.format({"sr": 24000}, "req-1", audio_aggregate_state=state)
+            is None
+        )
+        response = await formatter.finish_aggregate("req-1", state)
+        assert response["status"] == "failed"
+        assert response["error"] == "No audio generated"
+
+    @pytest.mark.asyncio
     async def test_streaming_cumulative_chunks_emit_only_new_audio(self):
         formatter = AudioFormatter("test", None, None)
         state = AudioStreamState()
@@ -1163,11 +1208,11 @@ class TestAudioFormatterCumulativeAggregate:
 
     @pytest.mark.asyncio
     async def test_payload_without_audio_reports_failure(self, formatter):
-        """A payload carrying no audio key is a broken engine contract."""
+        """Unknown payloads must not be mistaken for sample-rate-only frames."""
         state = AudioAggregateState(cumulative=True)
 
         response = await formatter.format(
-            {"sr": 24000}, "req-1", audio_aggregate_state=state
+            {"unexpected": "payload"}, "req-1", audio_aggregate_state=state
         )
 
         assert response["status"] == "failed"
