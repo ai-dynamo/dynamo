@@ -1641,8 +1641,9 @@ impl ResponseState {
                 .then_some(StopReason::Int(i64::from(id))),
             pb::finish_info::StopReason::StopString(value) => Some(StopReason::String(value)),
         });
-        mapped.completion_usage =
-            Some(self.completion_usage(completion_tokens, finish.num_cached_tokens));
+        mapped.completion_usage = Some(Box::new(
+            self.completion_usage(completion_tokens, finish.num_cached_tokens),
+        ));
         if self.mode.is_encode() {
             if matches!(
                 mapped.finish_reason,
@@ -1676,7 +1677,8 @@ impl ResponseState {
         mapped.disaggregated_params = finish
             .kv_transfer_params
             .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS))
-            .transpose()?;
+            .transpose()?
+            .map(Box::new);
         if self.mode.is_prefill() && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
                 "prefill terminal is missing kv_transfer_params",
@@ -1690,7 +1692,7 @@ impl ResponseState {
             })?;
             let params = mapped
                 .disaggregated_params
-                .as_mut()
+                .as_deref_mut()
                 .and_then(serde_json::Value::as_object_mut)
                 .ok_or_else(|| {
                     client::protocol_error("prefill kv_transfer_params is not a JSON object")
@@ -1710,7 +1712,11 @@ impl ResponseState {
 
     fn attach_prompt_data(&mut self, output: &mut LLMEngineOutput) {
         if output.engine_data.is_none() {
-            output.engine_data = self.prompt_info.take().map(prompt_logprobs_to_json);
+            output.engine_data = self
+                .prompt_info
+                .take()
+                .map(prompt_logprobs_to_json)
+                .map(Box::new);
         }
     }
 

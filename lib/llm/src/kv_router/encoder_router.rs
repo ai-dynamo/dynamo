@@ -364,9 +364,10 @@ impl EncoderRouter {
         let terminal = terminal.context("Encode worker stream ended without a terminal chunk")?;
         let result = terminal
             .encoder_result
+            .map(|result| *result)
             .filter(serde_json::Value::is_object)
             .context("Encode worker terminal is missing an object-shaped encoder_result")?;
-        Ok((result, terminal.worker_trace_link))
+        Ok((result, terminal.worker_trace_link.map(|link| *link)))
     }
 }
 

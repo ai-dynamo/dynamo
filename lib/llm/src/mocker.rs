@@ -1195,10 +1195,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         // final chunk repeats cumulative totals (OpenAI convention).
                         let output = LLMEngineOutput {
                             token_ids: vec![token_id],
-                            disaggregated_params: is_prefill.then(|| serde_json::json!("dummy")),
+                            disaggregated_params: is_prefill.then(|| Box::new(serde_json::json!("dummy"))),
                             completion_usage: signal.cached_tokens.map(|cached| {
                                 usage_with_cached_tokens(prompt_tokens_count, token_count, cached)
-                            }),
+                            }).map(Box::new),
                             ..Default::default()
                         };
 
@@ -1287,11 +1287,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                     .expect("native SGLang request has a terminal token");
                                 output.finish_reason = Some(FinishReason::Length);
                                 if let Some(cached) = cached_prefix_tokens {
-                                    output.completion_usage = Some(usage_with_cached_tokens(
+                                    output.completion_usage = Some(Box::new(usage_with_cached_tokens(
                                         prompt_tokens_count,
                                         token_count,
                                         cached,
-                                    ));
+                                    )));
                                 }
                                 if !send_response(&stream_tx, output, &async_context) {
                                     break;
@@ -1300,11 +1300,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             } else {
                                 let mut final_output = LLMEngineOutput::length();
                                 if let Some(cached) = cached_prefix_tokens {
-                                    final_output.completion_usage = Some(usage_with_cached_tokens(
+                                    final_output.completion_usage = Some(Box::new(usage_with_cached_tokens(
                                         prompt_tokens_count,
                                         token_count,
                                         cached,
-                                    ));
+                                    )));
                                 }
                                 if !send_response(&stream_tx, final_output, &async_context) {
                                     break;
@@ -1541,7 +1541,7 @@ mod tests {
         assert!(token.finish_reason.is_none());
         assert_eq!(
             token.completion_usage,
-            Some(CompletionUsage {
+            Some(Box::new(CompletionUsage {
                 prompt_tokens: 3,
                 completion_tokens: 1,
                 total_tokens: 4,
@@ -1551,10 +1551,10 @@ mod tests {
                     ..Default::default()
                 }),
                 completion_tokens_details: None,
-            })
+            }))
         );
         let mut expected_finish = LLMEngineOutput::length();
-        expected_finish.completion_usage = Some(usage_with_cached_tokens(3, 1, 0));
+        expected_finish.completion_usage = Some(Box::new(usage_with_cached_tokens(3, 1, 0)));
         assert_eq!(stream.next().await.unwrap().data.unwrap(), expected_finish);
         assert!(stream.next().await.is_none());
     }

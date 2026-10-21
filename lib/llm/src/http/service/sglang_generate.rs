@@ -814,7 +814,9 @@ mod tests {
     async fn unary_dispatch_joins_chunks_and_maps_stream_errors() {
         let chunk = |ids: serde_json::Value| {
             crate::protocols::Annotated::from_data(LLMEngineOutput {
-                engine_data: Some(serde_json::json!({"sglang_response": {"output_ids": ids}})),
+                engine_data: Some(Box::new(
+                    serde_json::json!({"sglang_response": {"output_ids": ids}}),
+                )),
                 ..Default::default()
             })
         };

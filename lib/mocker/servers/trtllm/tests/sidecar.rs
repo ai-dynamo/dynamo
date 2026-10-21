@@ -241,7 +241,11 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
             .is_none()
     );
 
-    let mut handoff = prefill_output.disaggregated_params.clone().unwrap();
+    let mut handoff = prefill_output
+        .disaggregated_params
+        .as_deref()
+        .cloned()
+        .unwrap();
     assert!(
         handoff["session_id"]
             .as_str()
@@ -344,7 +348,7 @@ async fn decode_rejects_a_handoff_with_a_dropped_opaque_field() {
     decode.start(1).await.unwrap();
 
     let outputs = collect(&prefill, request(8)).await;
-    let mut handoff = outputs[0].disaggregated_params.clone().unwrap();
+    let mut handoff = outputs[0].disaggregated_params.as_deref().cloned().unwrap();
     handoff["attributes"]
         .as_object_mut()
         .unwrap()

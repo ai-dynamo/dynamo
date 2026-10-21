@@ -1439,7 +1439,7 @@ pub(crate) mod tests {
                     token_ids: vec![11],
                     index: Some(0),
                     finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-                    completion_usage: Some(dynamo_protocols::types::CompletionUsage {
+                    completion_usage: Some(Box::new(dynamo_protocols::types::CompletionUsage {
                         prompt_tokens: 3,
                         completion_tokens: 2,
                         total_tokens: 5,
@@ -1449,7 +1449,7 @@ pub(crate) mod tests {
                             ..Default::default()
                         }),
                         completion_tokens_details: None,
-                    }),
+                    })),
                     ..Default::default()
                 })
             });
@@ -1493,19 +1493,21 @@ pub(crate) mod tests {
                             token_ids: vec![11],
                             index: Some(0),
                             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-                            completion_usage: Some(dynamo_protocols::types::CompletionUsage {
-                                prompt_tokens,
-                                completion_tokens: 1,
-                                total_tokens: prompt_tokens + 1,
-                                prompt_tokens_details: Some(
-                                    dynamo_protocols::types::PromptTokensDetails {
-                                        audio_tokens: None,
-                                        cached_tokens: Some(prompt_tokens),
-                                        ..Default::default()
-                                    },
-                                ),
-                                completion_tokens_details: None,
-                            }),
+                            completion_usage: Some(Box::new(
+                                dynamo_protocols::types::CompletionUsage {
+                                    prompt_tokens,
+                                    completion_tokens: 1,
+                                    total_tokens: prompt_tokens + 1,
+                                    prompt_tokens_details: Some(
+                                        dynamo_protocols::types::PromptTokensDetails {
+                                            audio_tokens: None,
+                                            cached_tokens: Some(prompt_tokens),
+                                            ..Default::default()
+                                        },
+                                    ),
+                                    completion_tokens_details: None,
+                                },
+                            )),
                             ..Default::default()
                         },
                     )]))
@@ -3170,7 +3172,7 @@ pub(crate) mod tests {
         let mut first = Annotated::from_data(LLMEngineOutput {
             token_ids: vec![10],
             index: Some(0),
-            routing_data: Some(crate::protocols::common::timing::RoutingData {
+            routing_data: Some(Box::new(crate::protocols::common::timing::RoutingData {
                 worker_id: Some(crate::protocols::common::extensions::WorkerIdInfo {
                     prefill_worker_id: Some(8_765_432_101),
                     prefill_dp_rank: Some(4),
@@ -3178,7 +3180,7 @@ pub(crate) mod tests {
                     decode_dp_rank: Some(5),
                 }),
                 ..Default::default()
-            }),
+            })),
             ..Default::default()
         });
         collector.observe(&mut first);
