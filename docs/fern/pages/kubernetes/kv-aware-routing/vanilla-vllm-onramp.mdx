@@ -498,7 +498,7 @@ For a single EPP replica, set `spec.replicas: 1` and remove `DYN_EPP_PEER_SERVIC
 | `POD_NAMESPACE` | Yes | Namespace containing the EPP, pool, and workers; inject with the downward API. |
 | `DYN_MODEL_NAME` | Yes | Served model ID. Requests must use the same `model` value. |
 | `DYN_EPP_TOKENIZER_SERVICE_URL` | Yes | Base URL of the vLLM render Service. |
-| `DYN_EPP_TOKENIZER_PROTOCOL=vllm-render` | Yes | Tokenizer wire protocol; this is the only supported value. |
+| `DYN_EPP_TOKENIZER_PROTOCOL=vllm-render` | Yes | Tokenizer wire protocol. Use `vllm-render` for this on-ramp; `sglang-renderer` and `trtllm-render` select the SGLang renderer and TensorRT-LLM render endpoints for those backends. |
 | `DYN_KV_CACHE_BLOCK_SIZE` | Yes | Must equal vLLM `--block-size`. |
 | `DYN_EPP_KV_EVENT_PORT` | No | Per-pod vLLM KV event port; defaults to `5557`. |
 | `DYN_EPP_KV_EVENT_REPLAY_PORT` | No | Per-pod replay port for KV event gap recovery. |

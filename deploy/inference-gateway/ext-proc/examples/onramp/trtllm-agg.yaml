@@ -1,0 +1,411 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Standalone (selector) on-ramp: aggregated serving with vanilla TensorRT-LLM,
+# single EPP replica.
+#
+# Puts the Dynamo EPP in front of a stock `trtllm-serve` fleet behind a GAIE
+# gateway, with NO Dynamo operator, NO etcd/NATS, and NO Dynamo runtime. The EPP
+# runs the runtime-free selection service in-process, discovers the raw
+# TensorRT-LLM pods from the InferencePool it backs, and on each request asks
+# the selector for a worker, then tells Envoy where to send the request.
+#
+# Tokenization uses TensorRT-LLM's render endpoint (`/v1/chat/completions/render`,
+# NVIDIA/TensorRT-LLM#19964). The example runs it as a separate CPU-only
+# `trtllm-render` Deployment that loads only the tokenizer and model
+# configuration: no weights, no GPU. Start it with the same model, tokenizer,
+# and chat-template options as the workers so both render the same ids
+# (compare `GET /server_info` `render_fingerprint.digest` once if in doubt).
+# Alternatively, run the workers with TRTLLM_ENABLE_RENDER_ENDPOINTS=1 and point
+# the renderer Service at the worker pods, as the vLLM on-ramp does.
+#
+# KV-aware routing uses TensorRT-LLM's native streaming KV event publisher
+# (`kv_cache_config.kv_events_config`, ZeroMQ, three-frame msgpack framing,
+# same wire protocol as vLLM's publisher). It requires the KV cache manager V2,
+# which is the default on current TensorRT-LLM.
+#
+# Prerequisites:
+#   - Gateway API and GAIE CRDs.
+#   - A GAIE-compatible Gateway named `inference-gateway` in the
+#     `agentgateway-system` namespace (the installer script deploys it there),
+#     with a listener that allows routes from other namespaces
+#     (allowedRoutes.namespaces.from: All).
+#   - A standalone-capable Dynamo Rust EPP image.
+#   - A TensorRT-LLM image that includes the render endpoints
+#     (NVIDIA/TensorRT-LLM main after 2026-10-21, or a release built from it).
+#
+# Replace `<TRTLLM_IMAGE>` and `dynamo/dynamo-epp:dev` with images available to
+# the cluster before applying this manifest.
+#
+# Apply with: kubectl apply -n <ns> -f trtllm-agg.yaml
+# Test:
+#   GW=$(kubectl get gateway inference-gateway -n agentgateway-system -o jsonpath='{.status.addresses[0].value}')
+#   The model in the request MUST match DYN_MODEL_NAME below.
+#   curl http://$GW/v1/chat/completions -H 'content-type: application/json' -d '{
+#     "model": "Qwen/Qwen3-0.6B",
+#     "messages": [{"role":"user","content":"hello"}]
+#   }'
+---
+# LLM API options shared by the raw workers.
+# tokens_per_block MUST match the EPP's DYN_KV_CACHE_BLOCK_SIZE.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trtllm-qwen-llm-api
+data:
+  llm_api.yaml: |
+    kv_cache_config:
+      enable_block_reuse: true
+      tokens_per_block: 32
+      free_gpu_memory_fraction: 0.8
+      # Native streaming KV events on a ZMQ PUB socket the embedded selector
+      # subscribes to. Each attention-DP rank binds base_port+rank; the
+      # standalone EPP supports one rank per pod.
+      kv_events_config:
+        enable_kv_cache_events: true
+        publisher: zmq
+        endpoint: "tcp://*:5557"
+---
+# Raw TensorRT-LLM aggregated worker pool. Vanilla image; prefix caching plus
+# native KV-cache events.
+# --max_num_tokens MUST match DYN_EPP_MAX_NUM_BATCHED_TOKENS.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trtllm-qwen
+  labels:
+    app: trtllm-qwen
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: trtllm-qwen
+  template:
+    metadata:
+      labels:
+        app: trtllm-qwen
+    spec:
+      containers:
+        - name: trtllm
+          image: <TRTLLM_IMAGE>
+          command: ["trtllm-serve"]
+          args:
+            - Qwen/Qwen3-0.6B
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --backend
+            - pytorch
+            - --max_num_tokens
+            - "8192"
+            - --extra_llm_api_options
+            - /config/llm_api.yaml
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: kv-events
+              containerPort: 5557
+          # trtllm-serve's /health returns 200 only once the engine is built
+          # and :8000 accepts requests, so the standalone EPP (which registers
+          # Ready=True pods) does not advertise this worker before it can serve.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: llm-api
+              mountPath: /config
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: llm-api
+          configMap:
+            name: trtllm-qwen-llm-api
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+      tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+---
+# CPU-only renderer: the same TensorRT-LLM image, no GPU, tokenizer and config
+# only. Serves /v1/chat/completions/render, /health, and /server_info.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trtllm-qwen-render
+  labels:
+    app: trtllm-qwen-render
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trtllm-qwen-render
+  template:
+    metadata:
+      labels:
+        app: trtllm-qwen-render
+    spec:
+      containers:
+        - name: render
+          image: <TRTLLM_IMAGE>
+          # `import tensorrt_llm` dlopens libcuda.so.1 even though rendering
+          # never touches a GPU. On a node without the NVIDIA driver, expose the
+          # CUDA toolkit's driver stub under that soname; on a GPU node the
+          # driver library is already present and the branch is skipped.
+          command: ["bash", "-ec"]
+          args:
+            - |
+              if ! ldconfig -p | grep -q 'libcuda.so.1'; then
+                STUB=$(find /usr/local/cuda* -path '*stubs/libcuda.so' | head -1)
+                mkdir -p /tmp/cuda-stub && ln -sf "$STUB" /tmp/cuda-stub/libcuda.so.1
+                export LD_LIBRARY_PATH="/tmp/cuda-stub${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              fi
+              exec trtllm-render \
+                --model Qwen/Qwen3-0.6B \
+                --served_model_name Qwen/Qwen3-0.6B \
+                --host 0.0.0.0 \
+                --port 8100
+          env:
+            # Keep the NVIDIA container runtime from exposing GPUs to a
+            # process that does not need them.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+          ports:
+            - name: http
+              containerPort: 8100
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "4"
+              memory: 12Gi
+            limits:
+              memory: 24Gi
+---
+# Stable renderer address used by the EPP for TensorRT-LLM's
+# /v1/chat/completions/render tokenization endpoint.
+apiVersion: v1
+kind: Service
+metadata:
+  name: trtllm-qwen-render
+spec:
+  selector:
+    app: trtllm-qwen-render
+  ports:
+    - name: http
+      port: 8100
+      targetPort: http
+---
+# RBAC: the EPP reads the InferencePool (read-only), lists/watches its pods, and
+# watches EndpointSlices for worker discovery (and for sibling EPP replicas when
+# DYN_EPP_PEER_SERVICE is set).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dynamo-epp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dynamo-epp
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
+  - apiGroups:
+      - inference.networking.k8s.io
+    resources:
+      - inferencepools
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - discovery.k8s.io
+    resources:
+      - endpointslices
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dynamo-epp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dynamo-epp
+subjects:
+  - kind: ServiceAccount
+    name: dynamo-epp
+---
+# GAIE calls the gRPC port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamo-epp
+spec:
+  selector:
+    app: dynamo-epp
+  ports:
+    - name: grpc
+      appProtocol: http2
+      port: 9002
+      targetPort: grpc
+---
+# The Dynamo EPP in standalone mode with the selector EMBEDDED in-process.
+# For replicated EPPs, raise `replicas`, add DYN_EPP_PEER_SERVICE=dynamo-epp
+# and a downward-API POD_IP as in agg.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamo-epp
+  labels:
+    app: dynamo-epp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dynamo-epp
+  template:
+    metadata:
+      labels:
+        app: dynamo-epp
+    spec:
+      serviceAccountName: dynamo-epp
+      containers:
+        - name: epp
+          image: dynamo/dynamo-epp:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DYN_EPP_MODE
+              value: standalone
+            - name: DYN_EPP_INFERENCE_POOL_NAME
+              value: trtllm-qwen-pool
+            - name: DYN_MODEL_NAME
+              value: Qwen/Qwen3-0.6B
+            # Tokenizer service base URL + wire protocol. Points at the
+            # TensorRT-LLM renderer's /v1/chat/completions/render endpoint.
+            - name: DYN_EPP_TOKENIZER_SERVICE_URL
+              value: http://trtllm-qwen-render:8100
+            - name: DYN_EPP_TOKENIZER_PROTOCOL
+              value: trtllm-render
+            # Must match kv_cache_config.tokens_per_block above.
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "32"
+            # Must match kv_events_config.endpoint above.
+            - name: DYN_EPP_KV_EVENT_PORT
+              value: "5557"
+            # Per-worker max batched tokens. REQUIRED: the router's
+            # queue-threshold admission is on by default, and a worker missing
+            # this is left unschedulable. Set it to trtllm-serve --max_num_tokens.
+            - name: DYN_EPP_MAX_NUM_BATCHED_TOKENS
+              value: "8192"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: grpc
+              containerPort: 9002
+            - name: grpc-health
+              containerPort: 9003
+          readinessProbe:
+            grpc:
+              port: 9003
+              service: inference-extension
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+---
+# InferencePool selects the raw TensorRT-LLM pods and delegates endpoint
+# selection to the EPP.
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: trtllm-qwen-pool
+spec:
+  selector:
+    matchLabels:
+      app: trtllm-qwen
+  targetPorts:
+    - number: 8000
+  endpointPickerRef:
+    name: dynamo-epp
+    port:
+      number: 9002
+---
+# Route gateway traffic to the pool. See agg.yaml for the parentRef notes.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: trtllm-qwen-route
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: inference-gateway
+      namespace: agentgateway-system
+      sectionName: http
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: trtllm-qwen-pool
+          port: 8000
+          weight: 1
+      timeouts:
+        request: 300s

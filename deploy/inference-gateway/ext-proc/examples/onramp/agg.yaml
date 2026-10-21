@@ -260,8 +260,9 @@ spec:
             - name: DYN_MODEL_NAME
               value: Qwen/Qwen3-0.6B
             # Tokenizer service base URL + wire protocol. Points at vLLM's
-            # /v1/chat/completions/render endpoint; "vllm-render" is the only
-            # supported protocol today. Both are required.
+            # /v1/chat/completions/render endpoint. Supported protocols are
+            # "vllm-render", "sglang-renderer", and "trtllm-render" (see
+            # trtllm-agg.yaml). Both are required.
             - name: DYN_EPP_TOKENIZER_SERVICE_URL
               value: http://vllm-qwen-render:8000
             - name: DYN_EPP_TOKENIZER_PROTOCOL

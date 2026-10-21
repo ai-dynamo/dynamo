@@ -27,6 +27,7 @@ pub mod selector;
 pub mod server;
 pub mod sglang_renderer_client;
 pub mod topology_adapter;
+pub mod trtllm_render_client;
 pub mod vllm_render_client;
 
 pub use epp::Router;
@@ -43,4 +44,5 @@ pub use selector::{OverlapSummary, SelectRequest, SelectResponse, Selector};
 pub use server::ExtProcServer;
 pub use sglang_renderer_client::SglangRendererClient;
 pub use topology_adapter::{RegistrationDefaults, TopologyAdapter};
+pub use trtllm_render_client::TrtllmRenderClient;
 pub use vllm_render_client::VllmRenderClient;

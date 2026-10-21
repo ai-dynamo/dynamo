@@ -44,6 +44,7 @@ use crate::render_http::RenderError;
 use crate::selector::{SelectRequest, Selector};
 use crate::sglang_renderer_client::SglangRendererClient;
 use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
+use crate::trtllm_render_client::TrtllmRenderClient;
 use crate::vllm_render_client::VllmRenderClient;
 
 /// Resolve the request's scheduling policy class from the Dynamo metadata
@@ -63,6 +64,7 @@ pub(crate) fn requested_policy_class(
 enum RenderClient {
     Vllm(VllmRenderClient),
     Sglang(SglangRendererClient),
+    Trtllm(TrtllmRenderClient),
 }
 
 impl RenderClient {
@@ -70,6 +72,7 @@ impl RenderClient {
         match self {
             Self::Vllm(c) => c.render_chat(body).await,
             Self::Sglang(c) => c.render_chat(body).await,
+            Self::Trtllm(c) => c.render_chat(body).await,
         }
     }
 }
@@ -117,6 +120,11 @@ impl EppRouter {
                 max_response_bytes,
             )?),
             RendererProtocol::SglangRenderer => RenderClient::Sglang(SglangRendererClient::new(
+                &cfg.tokenizer_service_url,
+                timeout,
+                max_response_bytes,
+            )?),
+            RendererProtocol::TrtllmRender => RenderClient::Trtllm(TrtllmRenderClient::new(
                 &cfg.tokenizer_service_url,
                 timeout,
                 max_response_bytes,

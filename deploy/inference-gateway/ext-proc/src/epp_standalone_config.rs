@@ -74,6 +74,11 @@ pub enum RendererProtocol {
     VllmRender,
     /// SGLang renderer's `/v1/chat/completions/render` endpoint; response shape `{"input_ids": [...]}`.
     SglangRenderer,
+    /// TensorRT-LLM's `/v1/chat/completions/render` endpoint, served by the
+    /// CPU-only `trtllm-render` process or by a `trtllm-serve` worker started
+    /// with `TRTLLM_ENABLE_RENDER_ENDPOINTS=1`; response is a `RenderedRequest`
+    /// whose `token_ids` field carries the prompt tokens.
+    TrtllmRender,
 }
 
 impl std::str::FromStr for RendererProtocol {
@@ -83,9 +88,10 @@ impl std::str::FromStr for RendererProtocol {
         match value {
             "vllm-render" => Ok(Self::VllmRender),
             "sglang-renderer" => Ok(Self::SglangRenderer),
+            "trtllm-render" => Ok(Self::TrtllmRender),
             other => anyhow::bail!(
                 "DYN_EPP_TOKENIZER_PROTOCOL has invalid value {other:?}; \
-                 expected \"vllm-render\" or \"sglang-renderer\""
+                 expected \"vllm-render\", \"sglang-renderer\", or \"trtllm-render\""
             ),
         }
     }
@@ -784,5 +790,19 @@ mod tests {
         ])
         .expect("sglang-renderer protocol should be accepted");
         assert_eq!(cfg.renderer_protocol, RendererProtocol::SglangRenderer);
+    }
+
+    #[test]
+    fn trtllm_render_protocol_is_accepted() {
+        let cfg = parse_cfg(&[
+            ("DYN_EPP_INFERENCE_POOL_NAME", "trtllm-qwen-pool"),
+            ("POD_NAMESPACE", "inference"),
+            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://trtllm-render:8100"),
+            ("DYN_EPP_TOKENIZER_PROTOCOL", "trtllm-render"),
+            ("DYN_KV_CACHE_BLOCK_SIZE", "32"),
+        ])
+        .expect("trtllm-render protocol should be accepted");
+        assert_eq!(cfg.renderer_protocol, RendererProtocol::TrtllmRender);
     }
 }

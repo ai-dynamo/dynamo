@@ -92,3 +92,23 @@ flowchart LR
    currently-Ready worker (booking its load via select-and-reserve), and returns
    the worker's endpoint to Envoy as routing headers. The selected
    worker processes the original forwarded request.
+
+## TensorRT-LLM
+
+`trtllm-agg.yaml` is the same on-ramp for a stock `trtllm-serve` fleet. Two things differ from
+the vLLM manifest:
+
+- **Tokenization** uses TensorRT-LLM's render endpoint (`/v1/chat/completions/render`, added in
+  [NVIDIA/TensorRT-LLM#19964](https://github.com/NVIDIA/TensorRT-LLM/pull/19964)) with
+  `DYN_EPP_TOKENIZER_PROTOCOL=trtllm-render`. The example runs it as a separate CPU-only
+  `trtllm-render` Deployment that loads only the tokenizer and model configuration. A worker can
+  serve the same endpoint when started with `TRTLLM_ENABLE_RENDER_ENDPOINTS=1`. The renderer
+  echoes the request body in its response, so leave `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` at or
+  above your largest request.
+- **KV events** come from TensorRT-LLM's native streaming publisher
+  (`kv_cache_config.kv_events_config` in the LLM API options file), which uses the same ZeroMQ
+  wire protocol as vLLM's publisher. `tokens_per_block` plays the role of vLLM's `--block-size`
+  and must equal `DYN_KV_CACHE_BLOCK_SIZE`; `--max_num_tokens` must equal
+  `DYN_EPP_MAX_NUM_BATCHED_TOKENS`.
+
+Use a TensorRT-LLM image that includes the render endpoints; releases up to `1.4.0rc1` do not.
