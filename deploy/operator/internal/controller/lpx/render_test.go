@@ -199,8 +199,11 @@ func serveFromAgent(dgd *v1beta1.DynamoGraphDeployment) {
 		Name: consts.RuntimeContainerName, Image: lpxSidecarImage, RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 		Args:         []string{"lpx", "--model-path", "$(LPX_MODEL_PATH)/tokenizer"},
 		Env:          []corev1.EnvVar{{Name: "DYN_SYSTEM_PORT", Value: "18090"}},
-		Ports:        []corev1.ContainerPort{{Name: "system", ContainerPort: 18090}},
 		VolumeMounts: []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs", ReadOnly: true}},
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromInt(18090)}},
+			PeriodSeconds: 5, TimeoutSeconds: 4, FailureThreshold: 3,
+		},
 	})
 }
 
@@ -240,7 +243,7 @@ func renderLPXServing(t *testing.T, dgd *v1beta1.DynamoGraphDeployment) ([]*grov
 
 // TestLPXAgentRuntimeSidecarRendering pins the runtime sidecar of an LPU-only
 // model, whose Agent hosts the engine: it runs after the authored init
-// containers and owns the shared Dynamo runtime env, port, and health probes.
+// containers with shared runtime env and an authored host-network readiness probe.
 func TestLPXAgentRuntimeSidecarRendering(t *testing.T) {
 	t.Log("Render an LPU-only model with graph env; its only clique, the Agent, serves")
 	dgd := loadLPXInput(t, "node-local-v3-hx-lpu-only")
@@ -252,6 +255,7 @@ func TestLPXAgentRuntimeSidecarRendering(t *testing.T) {
 
 	t.Log("The sidecar stays after the authored init container, restarts as a sidecar, and brings its pull secret")
 	pod := serving.Spec.PodSpec
+	require.True(t, pod.HostNetwork)
 	require.Len(t, pod.InitContainers, 2)
 	require.Equal(t, "prepare-lp30", pod.InitContainers[0].Name)
 	main, runtime := pod.Containers[0], pod.InitContainers[1]
@@ -294,18 +298,12 @@ func TestLPXAgentRuntimeSidecarRendering(t *testing.T) {
 		{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
 	}, runtime.Env)
 
-	t.Log("The authored system port serves the default startup, liveness, and readiness probes")
-	require.Equal(t, []corev1.ContainerPort{{Name: "system", ContainerPort: 18090}}, runtime.Ports)
+	t.Log("The host-network sidecar declares no ports and keeps only its authored numeric readiness probe")
+	require.Empty(t, runtime.Ports)
+	require.Nil(t, runtime.StartupProbe)
+	require.Nil(t, runtime.LivenessProbe)
 	require.Equal(t, &corev1.Probe{
-		ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString("system")}},
-		PeriodSeconds: 2, TimeoutSeconds: 1, FailureThreshold: 30,
-	}, runtime.StartupProbe)
-	require.Equal(t, &corev1.Probe{
-		ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString("system")}},
-		PeriodSeconds: 5, TimeoutSeconds: 4, FailureThreshold: 3,
-	}, runtime.LivenessProbe)
-	require.Equal(t, &corev1.Probe{
-		ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromString("system")}},
+		ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromInt(18090)}},
 		PeriodSeconds: 5, TimeoutSeconds: 4, FailureThreshold: 3,
 	}, runtime.ReadinessProbe)
 }

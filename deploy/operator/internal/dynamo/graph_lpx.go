@@ -428,6 +428,28 @@ func renderSelectedLPXRole(
 	// The shared renderer's filesystem-group fallback is not part of the LPX template contract.
 	basePodSpec.SecurityContext = component.PodTemplate.Spec.SecurityContext
 
+	// LPX places host-network Pods itself and refuses declared host ports, so templates own sidecar ports and probes.
+	if basePodSpec.HostNetwork {
+		for i := range basePodSpec.InitContainers {
+			runtime := &basePodSpec.InitContainers[i]
+			if runtime.Name != commonconsts.RuntimeContainerName {
+				continue
+			}
+			runtime.Ports = slices.DeleteFunc(runtime.Ports, func(port corev1.ContainerPort) bool {
+				return port.Name == commonconsts.DynamoSystemPortName
+			})
+			for _, probe := range []**corev1.Probe{&runtime.StartupProbe, &runtime.LivenessProbe, &runtime.ReadinessProbe} {
+				if *probe == nil {
+					continue
+				}
+				if (*probe).HTTPGet != nil && (*probe).HTTPGet.Port.StrVal == commonconsts.DynamoSystemPortName ||
+					(*probe).TCPSocket != nil && (*probe).TCPSocket.Port.StrVal == commonconsts.DynamoSystemPortName {
+					*probe = nil
+				}
+			}
+		}
+	}
+
 	// LPX supplies the generated config volume after merging; discard only inferred PVCs.
 	explicitVolumes := component.PodTemplate.Spec.Volumes
 	basePodSpec.Volumes = slices.DeleteFunc(basePodSpec.Volumes, func(volume corev1.Volume) bool {
