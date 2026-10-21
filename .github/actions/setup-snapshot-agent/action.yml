@@ -70,6 +70,9 @@ runs:
           exit 1
         fi
 
+        # CI reserves less CPU than the chart default (pagebroker 8, agent 2):
+        # observed use is well under 1 CPU, and one agent pod per GPU node per
+        # concurrent run otherwise exhausts node CPU. Limits are unchanged.
         helm upgrade --install "${RELEASE_NAME}" oci://ghcr.io/ai-dynamo/snapshot/snapshot \
           --version "${CHART_VERSION}" \
           --namespace "${NAMESPACE}" \
@@ -80,6 +83,8 @@ runs:
           --set storage.pvc.create=true \
           --set storage.pvc.size="${STORAGE_SIZE}" \
           --set-string storage.pvc.storageClass="${STORAGE_CLASS}" \
+          --set pageBroker.resources.requests.cpu=1 \
+          --set daemonset.resources.requests.cpu=500m \
           --debug
 
         kubectl wait --for=condition=Established \
