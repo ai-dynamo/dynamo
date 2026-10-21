@@ -77,7 +77,7 @@ The matrix below shows which TensorRT-LLM feature pairs are validated to work to
 | `vllm-runtime:1.4.0` | vLLM `v0.26.0` | `v13.0` | `580+` |
 | `sglang-runtime:1.4.0` | SGLang `v0.5.16` | `v13.0` | `580+` |
 
-Source of truth: [`docs/fern/pages/reference/general/compatibility.mdx`](../../../../../reference/general/compatibility.mdx#release-support-matrix) and [`docs/fern/pages/reference/general/release-artifacts.mdx`](../../../../../reference/general/release-artifacts.mdx). If those differ from the values above, the source-of-truth files win.
+Source of truth: [`docs/fern/pages/reference/general/compatibility.mdx`](../../../../../../pages-dev/reference/general/compatibility.mdx#release-support-matrix) and [`docs/fern/pages/reference/general/release-artifacts.mdx`](../../../../../../pages-dev/reference/general/release-artifacts.mdx). If those differ from the values above, the source-of-truth files win.
 
 ## Quick Start
 
