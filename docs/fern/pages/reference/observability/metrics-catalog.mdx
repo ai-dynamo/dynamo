@@ -151,6 +151,8 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 
 `dynamo_frontend_worker_*` gauges appear once workers register and begin serving. They live on the frontend's local registry (not component-scoped) and do **not** carry `dynamo_namespace` or `dynamo_component` labels. Frontend-only — not available on the standalone router. Labeled by `worker_id`, `dp_rank`, and `worker_type`.
 
+At each HTTP scrape, these six gauges include only workers in the current committed router membership that pass hard availability checks, and only their current data-parallel (DP) ranks. The timing gauges also allow `dp_rank="none"` when the rank is unknown, provided the worker remains available. The `worker_type` label describes serving attribution: an Encode worker serving Chat/Completions reports its load and timing samples as `decode`, while the inventory metrics below retain its `encode` topology role. Removed or excluded workers disappear from the output; late request completions or load updates cannot restore their exposed series.
+
 <ParamField path="dynamo_frontend_worker_active_decode_blocks" type="gauge">
   Active KV cache decode blocks per worker.
 </ParamField>
@@ -174,6 +176,69 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 <ParamField path="dynamo_frontend_worker_last_inter_token_latency_seconds" type="gauge">
   Last observed inter-token latency per worker, in seconds.
 </ParamField>
+
+### Router Worker Inventory
+
+These frontend-only metrics describe each Frontend's independent view of normalized base model-card discovery and router admission. They do not report Kubernetes Pod existence, and LoRA overlays do not count as additional workers. Both metrics carry `model`, `target_namespace`, `target_component`, `target_endpoint`, and `worker_type` labels. The target labels identify the discovered serving endpoint.
+
+Admission uses first-wins semantics within each Frontend's model and target group. The first observed checksum cohort remains the incumbent; later incompatible worker IDs are excluded individually and do not remove or replace it. If the incumbent cohort disappears, the next remaining cohort can become its successor after initialization.
+
+<ParamField path="dynamo_frontend_router_workers" type="gauge">
+  Number of unique physical worker IDs in a model and target group, labeled by `state`. DP ranks do not increase the count. The `available`, `pending`, and `excluded` states are disjoint; `discovered` is their sum. `available` requires successfully committed worker-set membership and current hard availability; `pending` means discovery has observed the worker but initialization has not completed; `excluded` means discovered but currently unavailable for routing.
+</ParamField>
+
+Hard availability uses the committed group's client and, when a prefill or encode hop targets that group, the hop's local availability. A matching hop that is still activating reports no available workers. If no hop targets the group, its own client availability applies. These counts describe individual worker groups; use `dynamo_frontend_model_ready` to check whether the frontend has a complete routable serving topology.
+
+Each currently observed group emits all four counts, including zero values for states with no workers. When discovery withdraws a group after its last worker disappears, its count and per-worker state series disappear on the next scrape. Retired rolling-update namespaces are not retained as permanent zero-count groups. Groups never observed by that frontend also have no series. Do not aggregate these counts across Frontends as worker-global readiness; separate Frontends can choose different incumbents from the same discovered workers.
+
+<ParamField path="dynamo_frontend_router_worker_state" type="gauge">
+  One sample with value `1` for each discovered worker, additionally labeled by `router_worker_id`, `state`, and `reason`. The state is `available`, `pending`, or `excluded`. The sample changes with the worker's current state and disappears when discovery removes the ID.
+</ParamField>
+
+The bounded `reason` values describe the current admission or availability condition:
+
+| Reason | Meaning |
+|--------|---------|
+| `none` | Available for routing |
+| `initializing` | Waiting for initialization |
+| `checksum_mismatch` | The individual worker's Model Deployment Card checksum differs from the incumbent; emitted only for rejected worker IDs |
+| `materialization_failed` | Creating the serving configuration failed |
+| `commit_blocked` | The serving configuration could not be committed |
+| `invalid_config` | The discovered configuration is invalid |
+| `unavailable` | Absent from the current availability view; includes local inhibition and other availability changes without identifying their exact cause |
+
+When an incumbent is still initializing and an incompatible newcomer is discovered, counts are `discovered=2`, `available=0`, `pending=1`, and `excluded=1`. The incumbent carries `state="pending",reason="initializing"`; only the newcomer carries `state="excluded",reason="checksum_mismatch"`. Once the incumbent is healthy, the same group reports `discovered=2`, `available=1`, `pending=0`, and `excluded=1`. Rejection of the newcomer never makes the incumbent pending or excluded.
+
+To detect an unexpected absence of workers, select one frontend, model, worker role, and the namespaces belonging to one deployment. The following expression alerts when the frontend is being scraped successfully but no selected group has a positive discovered-worker count. It handles both explicit zero counts and series disappearing after group withdrawal:
+
+```promql
+(up{job="<frontend-job>", instance="<frontend-instance>"} == 1)
+unless on (job, instance)
+(
+  sum by (job, instance) (
+    dynamo_frontend_router_workers{
+      job="<frontend-job>",
+      instance="<frontend-instance>",
+      model="<model>",
+      target_namespace=~"<deployment-namespace-pattern>",
+      worker_type="<worker-role>",
+      state="discovered"
+    }
+  ) > 0
+)
+```
+
+Replace the selectors with your scrape labels and a namespace pattern that includes only the rolling versions of one deployment. Enable the rule only for deployments expected to have workers, and use an alert duration such as `for: 3m` to tolerate startup and brief rollout transitions. To alert when no selected worker is available for routing, use `state="available"` instead of `state="discovered"`. Monitor `up == 0` separately for frontend scrape failures. A raw `sum(...) == 0` expression does not match when all selected group series have disappeared.
+
+Preserve `target_namespace` when diagnosing an individual namespace. Do not aggregate independent deployments or different frontend instances.
+
+Inspect workers still discovered but excluded from routing:
+
+```promql
+dynamo_frontend_router_worker_state{state="excluded"} == 1
+```
+
+Scope these queries to the target frontend and deployment. Evaluate each Frontend separately because discovery order and first-wins admission can produce different incumbents. A missing series does not mean zero workers; check Prometheus `up` separately for scrape health. These metrics reflect updates after the frontend processes discovery and routing state changes, not at the instant a worker process terminates.
 
 ### Model metrics
 
@@ -264,6 +329,10 @@ Specialized components expose additional families under their own prefix, e.g. `
 ## Router metrics
 
 The router exposes metrics for routing decisions and overhead. Not every metric appears in every deployment — see [Availability by configuration](#availability-by-configuration).
+
+<ParamField path="dynamo_component_router_worker_registered" type="gauge">
+  A sample with value `1` for each worker and DP rank in the scheduler's current registration and hard-availability view. Carries `router_worker_id`, `dp_rank`, and `worker_type` labels in addition to the component labels. The sample can appear during scheduler preparation before worker-set materialization commits, so it does not indicate committed model readiness. Removed or unavailable workers disappear from the output, rather than emitting `0`; late request bookkeeping cannot restore their exposed series. Prefer the [Router Worker Inventory](#router-worker-inventory) metrics for committed available-worker counts and exclusion reasons on the frontend.
+</ParamField>
 
 ### Router request metrics
 

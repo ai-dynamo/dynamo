@@ -17,7 +17,7 @@ from urllib.parse import unquote, urlparse
 
 GLIBC_FLOOR = (2, 28)
 MANYLINUX_POLICY = "manylinux_2_28"
-RUNTIME_PY_TAGS = {"cp310", "cp311", "cp312"}
+RUNTIME_PY_TAGS = {"cp311", "cp312"}
 # First-party optional wheel that must ship with the core wheels.
 REQUIRED_OPTIONAL_DIST = "kvbm"
 # Wheels we ship but do not own / do not validate as manylinux: nixl lives under the
@@ -264,7 +264,7 @@ def assert_glibc_floor(wheelhouse: Path) -> None:
 
 
 def create_venv(python_spec: str) -> Path:
-    # python_spec is a version ("3.10") or an interpreter path; uv fetches the
+    # python_spec is a version ("3.11") or an interpreter path; uv fetches the
     # interpreter if needed and --seed installs pip into the fresh venv.
     venv_dir = Path(tempfile.mkdtemp(prefix="dynamo-wheel-venv-"))
     run(["uv", "venv", "--seed", "--python", python_spec, str(venv_dir)])

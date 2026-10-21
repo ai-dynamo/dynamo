@@ -19,9 +19,33 @@
  * TelecomTV, Deloitte on LinkedIn), and keying on the host credited the wrong
  * company. A partner absent from PUBLISHER_LOGOS falls back to its initials.
  *
+ * `tags` drive the keyword filter. They were chosen by reading each article,
+ * so tag a new entry by what it covers, not by its title alone.
+ *
  * To feature an entry, give it `pinned` and a `summary`. Keep the row to three:
  * the cards are sized for one row of three on desktop.
  */
+
+export const PUBLICATION_TAGS = [
+  "Reinforcement learning",
+  "Agentic",
+  "Multimodal",
+  "Disaggregated serving",
+  "Routing",
+  "KV cache offloading",
+  "Storage",
+  "Kubernetes",
+  "Autoscaling",
+  "Fast startup",
+  "Benchmarks & performance",
+  "Wide EP / MoE",
+  "NIXL",
+  "Deployment guide",
+  "Case study",
+  "Announcements",
+] as const;
+
+export type PublicationTag = (typeof PUBLICATION_TAGS)[number];
 
 export interface Publication {
   title: string;
@@ -36,7 +60,7 @@ export interface Publication {
   updated?: boolean;
   /**
    * Pins the entry to the featured row above the list; lower numbers come
-   * first. A pinned entry is shown only there, not repeated in the list.
+   * first. A pinned entry still appears in the list below.
    */
   pinned?: number;
   /**
@@ -44,15 +68,34 @@ export interface Publication {
    * cards. Paraphrase; do not quote the article.
    */
   summary?: string;
+  /** Filter keywords, from PUBLICATION_TAGS, most relevant first. */
+  tags: PublicationTag[];
 }
 
 export const PUBLICATIONS: Publication[] = [
+  {
+    title: "Session-Aware Agentic Inference with NVIDIA Dynamo",
+    url: "https://pytorch.org/blog/session-aware-agentic-inference-with-nvidia-dynamo/",
+    partner: "PyTorch",
+    date: "Oct 8, 2026",
+    iso: "2026-10-08",
+    tags: ["Agentic", "Routing"],
+  },
+  {
+    title: "Turning GPU-Hours Into Tokens: How Viettel Cloud Serves Multiple LLM Families With NVIDIA Dynamo",
+    url: "https://viettelcloud.vn/en/tech-blog/4/142",
+    partner: "Viettel Cloud",
+    date: "Oct 4, 2026",
+    iso: "2026-10-04",
+    tags: ["Case study", "Agentic", "Routing", "Autoscaling", "Disaggregated serving"],
+  },
   {
     title: "Prime Inference: Fast, Reliable Serving for Frontier Open Models",
     url: "https://www.primeintellect.ai/blog/prime-inference",
     partner: "Prime Intellect",
     date: "Oct 2, 2026",
     iso: "2026-10-02",
+    tags: ["Case study", "Disaggregated serving", "Agentic"],
     pinned: 3,
     summary:
       "How Prime Intellect serves frontier open models in production, with Dynamo routing and orchestrating disaggregated prefill and decode on top of vLLM.",
@@ -63,6 +106,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "CoreWeave",
     date: "Sep 30, 2026",
     iso: "2026-09-30",
+    tags: ["Reinforcement learning"],
     pinned: 1,
     summary:
       "CoreWeave's platform for turning model iteration into compounding gains, with RL rollouts built on the same Dynamo foundation as CoreWeave Inference.",
@@ -73,6 +117,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Hao AI Lab / UCSD",
     date: "Sep 29, 2026",
     iso: "2026-09-29",
+    tags: ["Multimodal", "Benchmarks & performance"],
   },
   {
     title: "Taking vLLM Apart: A Practical Guide to Disaggregated Serving",
@@ -80,6 +125,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "vLLM",
     date: "Sep 29, 2026",
     iso: "2026-09-29",
+    tags: ["Disaggregated serving"],
   },
   {
     title: "Red Hat Delivers Peak Performance on Kubernetes and CPUs in MLPerf Inference v6.1",
@@ -87,6 +133,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Red Hat",
     date: "Sep 29, 2026",
     iso: "2026-09-29",
+    tags: ["Benchmarks & performance", "Kubernetes", "Multimodal"],
   },
   {
     title: "Crusoe's MLPerf Inference v6.1 Results on NVIDIA GB200 NVL72",
@@ -94,6 +141,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Crusoe",
     date: "Sep 16, 2026",
     iso: "2026-09-16",
+    tags: ["Benchmarks & performance", "Disaggregated serving"],
   },
   {
     title: "One Model, Two GPU Vendors: Disaggregated Inference from H100 to MI300X",
@@ -101,6 +149,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "NeuReality",
     date: "Sep 15, 2026",
     iso: "2026-09-15",
+    tags: ["Disaggregated serving", "NIXL"],
   },
   {
     title: "Pinterest Builds a New Foundation for Multimodal AI With NVIDIA",
@@ -108,6 +157,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Pinterest",
     date: "Sep 14, 2026",
     iso: "2026-09-14",
+    tags: ["Multimodal", "Announcements"],
   },
   {
     title: "Building Pinterest's VLM Serving Stack on NVIDIA Dynamo",
@@ -115,6 +165,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Pinterest",
     date: "Sep 11, 2026",
     iso: "2026-09-11",
+    tags: ["Case study", "Multimodal", "Disaggregated serving", "Routing"],
   },
   {
     title: "DeepSeek-V4.1-Flash: More Efficient Prefill for Coding Agents",
@@ -122,6 +173,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Baseten",
     date: "Sep 11, 2026",
     iso: "2026-09-11",
+    tags: ["Agentic", "Routing"],
   },
   {
     title: "Reproducing (and Beating) a Published Inference Benchmark: A DeepSeek V4 Pro Debugging Story",
@@ -129,6 +181,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "NeuReality",
     date: "Sep 6, 2026",
     iso: "2026-09-06",
+    tags: ["Benchmarks & performance"],
   },
   {
     title: "Get Started with Kimi K3 on CoreWeave Dedicated Inference",
@@ -136,6 +189,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "CoreWeave",
     date: "Aug 26, 2026",
     iso: "2026-08-26",
+    tags: ["Deployment guide"],
   },
   {
     title: "Optimizing LLM Serving Efficiency: Moving Beyond KV Cache Reuse to Token-Load Awareness with Ray Serve LLM",
@@ -143,6 +197,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Anyscale",
     date: "Aug 25, 2026",
     iso: "2026-08-25",
+    tags: ["Routing"],
   },
   {
     title: "AgentX - InferenceXv3: Does the CUDA Moat Hold Up in Agentic Inferencing?",
@@ -150,6 +205,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "SemiAnalysis / InferenceX",
     date: "Aug 24, 2026",
     iso: "2026-08-24",
+    tags: ["Agentic", "Benchmarks & performance"],
   },
   {
     title: "Accelerate Inference on AKS with Azure Blob Storage and NVIDIA Dynamo",
@@ -157,6 +213,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Microsoft Azure",
     date: "Aug 11, 2026",
     iso: "2026-08-11",
+    tags: ["Storage", "KV cache offloading", "Fast startup", "NIXL"],
   },
   {
     title: "The Case for Disaggregated LLM Serving",
@@ -164,6 +221,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Doubleword",
     date: "Aug 11, 2026",
     iso: "2026-08-11",
+    tags: ["Disaggregated serving"],
   },
   {
     title: "Faster at Every Context Length: How KV Cache Offloading to Object Storage Transforms AI Inference",
@@ -171,6 +229,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Cloudian",
     date: "Jul 28, 2026",
     iso: "2026-07-28",
+    tags: ["KV cache offloading", "Storage"],
   },
   {
     title: "How to Build a Day-0 API for Kimi K3",
@@ -178,6 +237,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Baseten",
     date: "Jul 27, 2026",
     iso: "2026-07-27",
+    tags: ["Routing", "Agentic"],
   },
   {
     title: "How We Cut Inference Cold Start to Seconds With NVIDIA Dynamo",
@@ -185,6 +245,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Photoroom",
     date: "Jul 23, 2026",
     iso: "2026-07-23",
+    tags: ["Case study", "Fast startup"],
   },
   {
     title: "NVIDIA Vera Rubin NVL72 on CoreWeave: 10x More Tokens per Megawatt",
@@ -192,6 +253,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "CoreWeave",
     date: "Jul 21, 2026",
     iso: "2026-07-21",
+    tags: ["Benchmarks & performance", "Disaggregated serving"],
   },
   {
     title: "Gcore Introduces Global Inference Routing Accelerated by NVIDIA Dynamo",
@@ -199,6 +261,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Gcore",
     date: "Jul 20, 2026",
     iso: "2026-07-20",
+    tags: ["Routing"],
   },
   {
     title: "SWE-1.7: Frontier Intelligence at a Fraction of the Cost",
@@ -206,6 +269,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Cognition",
     date: "Jul 8, 2026",
     iso: "2026-07-08",
+    tags: ["Case study", "Reinforcement learning", "Agentic"],
     pinned: 2,
     summary:
       "How Cognition trained SWE-1.7 with RL across clusters on three continents, using Dynamo to manage inference engine lifecycles and reroute work when a replica fails.",
@@ -216,6 +280,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "H Company",
     date: "Jul 8, 2026",
     iso: "2026-07-08",
+    tags: ["Case study", "Fast startup"],
   },
   {
     title: "Introducing and a Deep Dive Into Dynamo with vCluster",
@@ -223,6 +288,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "vCluster",
     date: "Jul 7, 2026",
     iso: "2026-07-07",
+    tags: ["Kubernetes"],
   },
   {
     title: "Lowering Multimodal Inference Cost with Heterogeneous E/PD Disaggregation",
@@ -230,6 +296,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Intel",
     date: "Jun 26, 2026",
     iso: "2026-06-26",
+    tags: ["Multimodal", "Disaggregated serving"],
   },
   {
     title: "How We Built the World's Fastest API for GLM-5.2",
@@ -237,6 +304,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Baseten",
     date: "Jun 23, 2026",
     iso: "2026-06-23",
+    tags: ["Disaggregated serving", "Routing"],
   },
   {
     title: "RL at 1T Scale: prime-rl Performance Deep Dive",
@@ -244,6 +312,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Prime Intellect",
     date: "Jun 21, 2026",
     iso: "2026-06-21",
+    tags: ["Reinforcement learning", "Wide EP / MoE"],
   },
   {
     title: "Keynote: Plug in and Scale: Serving LLM Models on Kubernetes Made Simple",
@@ -251,6 +320,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "AstraZeneca",
     date: "Jun 18, 2026",
     iso: "2026-06-18",
+    tags: ["Kubernetes", "Autoscaling"],
   },
   {
     title: "Deploy a Dynamo Inference Service with PD Disaggregation",
@@ -258,6 +328,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Alibaba Cloud / ACK",
     date: "Jun 15, 2026",
     iso: "2026-06-15",
+    tags: ["Disaggregated serving", "Kubernetes", "Deployment guide", "NIXL"],
   },
   {
     title: "Deploying NVIDIA Dynamo PD Disaggregation With dstack",
@@ -265,6 +336,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "dstack",
     date: "Jun 10, 2026",
     iso: "2026-06-10",
+    tags: ["Disaggregated serving", "Deployment guide"],
   },
   {
     title: "How the UK Is Turning Sovereign AI Ambition Into Action With NVIDIA Technologies",
@@ -272,6 +344,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Doubleword",
     date: "Jun 8, 2026",
     iso: "2026-06-08",
+    tags: ["Announcements"],
   },
   {
     title: "What Is Context Memory? The New Infrastructure Layer Powering AI Inference",
@@ -279,6 +352,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "WEKA",
     date: "May 28, 2026",
     iso: "2026-05-28",
+    tags: ["KV cache offloading", "Storage"],
   },
   {
     title: "NVIDIA Dynamo on AKS - Autoscaling LLM Inference",
@@ -286,6 +360,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Microsoft Azure",
     date: "May 13, 2026",
     iso: "2026-05-13",
+    tags: ["Autoscaling", "Kubernetes"],
   },
   {
     title: "Serving DeepSeek-V4: Why Million-Token Context Is an Inference Systems Problem",
@@ -293,6 +368,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Together AI",
     date: "May 11, 2026",
     iso: "2026-05-11",
+    tags: ["Wide EP / MoE"],
   },
   {
     title: "NVIDIA Dynamo on AKS: Disaggregated LLM Inference with H100 GPUs",
@@ -300,6 +376,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Azure Global Black Belt",
     date: "May 8, 2026",
     iso: "2026-05-08",
+    tags: ["Kubernetes", "Disaggregated serving", "Deployment guide"],
   },
   {
     title: "GB200 NVL72 vs B200 on Kimi K2.5: 3.1x from Wide EP vLLM",
@@ -307,6 +384,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "SemiAnalysis / InferenceX",
     date: "Apr 23, 2026",
     iso: "2026-04-23",
+    tags: ["Wide EP / MoE", "Benchmarks & performance"],
   },
   {
     title: "Amazon SageMaker AI Now Supports Optimized Generative AI Inference Recommendations",
@@ -314,6 +392,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "AWS",
     date: "Apr 22, 2026",
     iso: "2026-04-22",
+    tags: ["Benchmarks & performance"],
   },
   {
     title: "ClearML + NVIDIA Dynamo: A Production Control Plane for Distributed AI Inference at Scale",
@@ -321,6 +400,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "ClearML",
     date: "Apr 9, 2026",
     iso: "2026-04-09",
+    tags: ["Autoscaling", "Kubernetes"],
   },
   {
     title: "NVIDIA Dynamo: Turning Disaggregated Inference Into a Production System",
@@ -328,6 +408,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Rafay",
     date: "Apr 7, 2026",
     iso: "2026-04-07",
+    tags: ["Disaggregated serving", "Kubernetes"],
   },
   {
     title: "Introduction to Disaggregated Inference: Why It Matters",
@@ -335,6 +416,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Rafay",
     date: "Mar 29, 2026",
     iso: "2026-03-29",
+    tags: ["Disaggregated serving"],
   },
   {
     title: "NVIDIA Dynamo 1.0: Disaggregated LLM Inference Deployment Guide (2026)",
@@ -342,6 +424,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Spheron",
     date: "Mar 25, 2026",
     iso: "2026-03-25",
+    tags: ["Disaggregated serving", "Deployment guide", "NIXL"],
   },
   {
     title: "San Jose GTC 2026 Wrap-Up",
@@ -349,6 +432,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "GMI Cloud",
     date: "Mar 24, 2026",
     iso: "2026-03-24",
+    tags: ["Announcements"],
   },
   {
     title: "NVIDIA Dynamo 1.0 Is Now Available to DigitalOcean Customers",
@@ -356,6 +440,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "DigitalOcean",
     date: "Mar 19, 2026",
     iso: "2026-03-19",
+    tags: ["Announcements"],
   },
   {
     title: "Infrastructure for Enterprise AI Inference With Vultr, DDN, NVIDIA Dynamo and Nemotron",
@@ -363,6 +448,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Vultr",
     date: "Mar 17, 2026",
     iso: "2026-03-17",
+    tags: ["Announcements", "Storage"],
   },
   {
     title: "How Rafay and NVIDIA Help Neoclouds Monetize Accelerated Computing",
@@ -370,6 +456,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Rafay",
     date: "Mar 17, 2026",
     iso: "2026-03-17",
+    tags: ["Kubernetes", "Announcements"],
   },
   {
     title: "Running GenAI at Amazon Ads Scale: Lessons from Building and Operating LLM Inference Systems",
@@ -377,6 +464,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Amazon Ads",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
+    tags: ["Case study"],
   },
   {
     title: "LMCache + NVIDIA Dynamo 1.0: A Match Made in Inference Heaven",
@@ -384,6 +472,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "LMCache",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
+    tags: ["KV cache offloading"],
   },
   {
     title: "2x Faster Inference With KV Cache-Aware Routing",
@@ -391,6 +480,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Baseten",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
+    tags: ["Routing"],
   },
   {
     title: "Reducing TTFT by CPUMaxxing Tokenization",
@@ -398,6 +488,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Crusoe",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
+    tags: ["Benchmarks & performance"],
   },
   {
     title: "Crusoe Expands NVIDIA Collaboration Across the Full AI Factory Stack",
@@ -405,6 +496,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Crusoe",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
+    tags: ["Announcements"],
   },
   {
     title: "GMI Cloud Supports NVIDIA Dynamo 1.0 and OpenShell",
@@ -412,6 +504,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "GMI Cloud",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
+    tags: ["Announcements"],
   },
   {
     title: "Google Cloud AI Infrastructure at NVIDIA GTC 2026",
@@ -419,6 +512,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Google Cloud",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
+    tags: ["Announcements"],
   },
   {
     title: "Together AI at NVIDIA GTC 2026",
@@ -426,6 +520,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Together AI",
     date: "Mar 16, 2026",
     iso: "2026-03-16",
+    tags: ["Announcements"],
   },
   {
     title: "How DigitalOcean's Agentic Inference Cloud Achieved 67% Lower Inference Costs for Workato",
@@ -433,6 +528,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "DigitalOcean / Workato",
     date: "Mar 4, 2026",
     iso: "2026-03-04",
+    tags: ["Case study", "Routing", "Agentic"],
     updated: true,
   },
   {
@@ -441,6 +537,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Alibaba Cloud community",
     date: "Mar 1, 2026",
     iso: "2026-03-01",
+    tags: ["Disaggregated serving", "KV cache offloading", "Autoscaling"],
   },
   {
     title: "Deloitte Drives AI Transformations With NVIDIA Dynamo and Nemotron",
@@ -448,6 +545,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Deloitte",
     date: "Mar 2026",
     iso: "2026-03-01",
+    tags: ["Announcements"],
   },
   {
     title: "Deployment of NVIDIA Dynamo",
@@ -455,6 +553,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "OpenNebula",
     date: "Mar 2026",
     iso: "2026-03-01",
+    tags: ["Deployment guide", "Kubernetes"],
   },
   {
     title: "Introducing Faster, Lower-Cost LLM Inference With NVIDIA Dynamo",
@@ -462,6 +561,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Gcore",
     date: "Feb 25, 2026",
     iso: "2026-02-25",
+    tags: ["Announcements", "Disaggregated serving"],
   },
   {
     title: "Gcore Integrates NVIDIA Dynamo as a Fully Managed Service",
@@ -469,6 +569,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Gcore",
     date: "Feb 24, 2026",
     iso: "2026-02-24",
+    tags: ["Announcements"],
   },
   {
     title: "Unlocking 25x Inference Performance with SGLang on NVIDIA GB300 NVL72",
@@ -476,6 +577,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "LMSYS / SGLang",
     date: "Feb 20, 2026",
     iso: "2026-02-20",
+    tags: ["Benchmarks & performance", "Wide EP / MoE", "Disaggregated serving"],
   },
   {
     title: "The Baseten Inference Stack at NVIDIA Dynamo Day",
@@ -483,6 +585,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Baseten",
     date: "Feb 3, 2026",
     iso: "2026-02-03",
+    tags: ["Disaggregated serving", "Routing", "KV cache offloading"],
   },
   {
     title: "CoreWeave Achieves NVIDIA Exemplar Cloud Validation for Inference",
@@ -490,6 +593,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "CoreWeave",
     date: "Jan 28, 2026",
     iso: "2026-01-28",
+    tags: ["Benchmarks & performance"],
   },
   {
     title: "Scaling WideEP Mixture-of-Experts Inference with Google Cloud A4X (GB200) and NVIDIA Dynamo",
@@ -497,6 +601,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Google Cloud",
     date: "Jan 22, 2026",
     iso: "2026-01-22",
+    tags: ["Wide EP / MoE", "Kubernetes"],
   },
   {
     title: "Supercharging AI Inference: Pure KVA Now Integrates with NVIDIA Dynamo for Scalable, Low-Latency LLM Inference",
@@ -504,6 +609,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Everpure / Pure Storage",
     date: "Jan 14, 2026",
     iso: "2026-01-14",
+    tags: ["KV cache offloading", "Storage"],
   },
   {
     title: "NVIDIA Dynamo + VAST = Scalable, Optimized Inference",
@@ -511,6 +617,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "VAST Data",
     date: "Dec 16, 2025",
     iso: "2025-12-16",
+    tags: ["KV cache offloading", "Storage"],
   },
   {
     title: "Disaggregated Inference: 18 Months Later",
@@ -518,6 +625,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Hao AI Lab / UCSD",
     date: "Nov 3, 2025",
     iso: "2025-11-03",
+    tags: ["Disaggregated serving"],
   },
   {
     title: "Scaling Multi-Node LLM Inference with NVIDIA Dynamo and ND GB200 NVL72 GPUs on AKS",
@@ -525,6 +633,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Microsoft Azure / AKS",
     date: "Oct 24, 2025",
     iso: "2025-10-24",
+    tags: ["Kubernetes", "Disaggregated serving", "Wide EP / MoE"],
   },
   {
     title: "Fast and Efficient AI Inference with New NVIDIA Dynamo Recipe on AI Hypercomputer",
@@ -532,6 +641,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "Google Cloud",
     date: "Sep 10, 2025",
     iso: "2025-09-10",
+    tags: ["Disaggregated serving", "Deployment guide"],
   },
   {
     title: "Accelerate Generative AI Inference with NVIDIA Dynamo and Amazon EKS",
@@ -539,6 +649,7 @@ export const PUBLICATIONS: Publication[] = [
     partner: "AWS",
     date: "Jul 15, 2025",
     iso: "2025-07-15",
+    tags: ["Kubernetes", "Disaggregated serving", "Routing"],
   },
   {
     title: "Run Nvidia Dynamo on Any Cloud or Kubernetes with SkyPilot",
@@ -546,5 +657,6 @@ export const PUBLICATIONS: Publication[] = [
     partner: "SkyPilot",
     date: "Undated",
     iso: null,
+    tags: ["Deployment guide", "Kubernetes"],
   },
 ];

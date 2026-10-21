@@ -199,11 +199,13 @@ pub fn cache_hit_estimates_from_tiered_matches(
     block_size: u32,
     tiered_matches: &TieredMatchDetails,
 ) -> CacheHitEstimates {
-    let mut effective_overlap_blocks = FxHashMap::default();
-
-    for (worker, overlap) in &tiered_matches.device.overlap_scores.scores {
-        effective_overlap_blocks.insert(*worker, *overlap as f64);
-    }
+    let mut effective_overlap_blocks: FxHashMap<_, _> = tiered_matches
+        .device
+        .overlap_scores
+        .scores
+        .iter()
+        .map(|(worker, overlap)| (*worker, *overlap as f64))
+        .collect();
 
     for (storage_tier, tier_matches) in &tiered_matches.lower_tier {
         let weight = cache_hit_weight_for_tier(config, *storage_tier);

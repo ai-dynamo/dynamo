@@ -39,6 +39,7 @@ type graphReconciler struct {
 	modelRegistry         lpx.ModelRegistry
 	config                *configv1alpha1.OperatorConfiguration
 	dockerSecretRetriever dynamo.SecretsRetriever
+	apiReader             client.Reader
 
 	client.Client
 }
@@ -54,6 +55,7 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 		runtimeConfig:         runtimeConfig,
 		config:                config,
 		dockerSecretRetriever: secrets,
+		apiReader:             mgr.GetAPIReader(),
 		Client:                mgr.GetClient(),
 	}
 
@@ -84,6 +86,7 @@ func (r *graphReconciler) GetRecorder() events.EventRecorder {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets/finalizers,verbs=update
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale;podcliquescalinggroups/scale,verbs=update
 // +kubebuilder:rbac:groups=scheduling.lpu.nvidia.com,resources=lpupipelinerequests,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;delete
 
 // Reconcile observes dependencies once, then persists the final child status.
 // Workload observations use the cache; Grove validates writes against its installed API.
@@ -98,8 +101,18 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return ctrl.Result{}, nil
 	}
 
-	// Persist the workload outcome before converting errors into deadline retries.
+	var cleanupErr error
+
+	// Persist the combined outcome before converting errors into bounded retries.
 	defer func(previous *v1alpha1.LPXGraphDeploymentStatus) {
+		if cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+			// A later workload wakeup must not postpone failed release cleanup.
+			if result.RequeueAfter > 0 {
+				result.RequeueAfter = min(result.RequeueAfter, pipelineRequestDeadlineRetryInterval)
+			}
+		}
+
 		if err != nil {
 			setReadyCondition(deployment, v1beta1.DGDStateFailed, err.Error())
 		} else {
@@ -112,9 +125,9 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			return
 		}
 
-		// Workload errors retain a retry delay only while a scheduling deadline is active.
+		// Preserve bounded wakeups after reporting the failure; otherwise use error backoff.
 		if err != nil && result.RequeueAfter > 0 {
-			log.FromContext(ctx).Error(err, "retrying reconciliation under the pipeline request scheduling deadline")
+			log.FromContext(ctx).Error(err, "retrying reconciliation after a bounded delay")
 			err = nil
 		}
 	}(deployment.Status.DeepCopy())
@@ -124,6 +137,8 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		component.Conditions = nil
 		deployment.Status.Components[name] = component
 	}
+
+	markBuildCheckpointAdoption(r.config.Infrastructure.ModelExpressURL, deployment)
 
 	if !r.runtimeConfig.Gate.Enabled(features.Grove) {
 		setReadyCondition(deployment, v1beta1.DGDStateFailed, "Grove is disabled")
@@ -182,6 +197,11 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		}
 	}
 
+	// Cleanup follows DGD handoff and owned Grove observations, but precedes downloads
+	// and desired workload resolution. Before PCS synchronization, Grove may recreate
+	// Agents from the old template, requiring another release cycle.
+	cleanupErr = r.removeReleasedAgentPods(ctx, pcsgs, requests)
+
 	if result, err := r.reconcileModelDownloads(ctx, deployment, dgd); err != nil || result.RequeueAfter > 0 {
 		return result, err
 	}
@@ -193,6 +213,8 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 // A nil pcs means initial creation, with no pcsgs, pclqs or requests. Otherwise
 // pcsgs contains every configured group; pclqs contains owned, non-deleting cliques.
 // On error, Reconcile persists status before applying deadline retries.
+//
+//nolint:gocyclo // Keep lifecycle ordering explicit in one reconciliation path.
 func (r *graphReconciler) reconcileWorkloads(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
@@ -209,12 +231,18 @@ func (r *graphReconciler) reconcileWorkloads(
 	}
 
 	// Share the rendered identities with capacity management and request publication.
-	desiredPCS, resources, err := r.renderPodCliqueSet(ctx, deployment, dgd, workloads, plans, pcs)
+	desiredPCS, resources, err := r.renderDesiredPodCliqueSet(ctx, deployment, dgd, workloads, plans, pcs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Grove rolls compatible layouts; immutable structure or OnDelete builds replace the PCS.
+	// Hold every write that replaces or updates the running PCS until Cyborg
+	// checkpoints are downloaded. Release cleanup has already run in Reconcile.
+	if result, err := r.reconcileCheckpointDownloads(ctx, deployment, workloads); err != nil || result.RequeueAfter > 0 {
+		return result, err
+	}
+
+	// Grove rolls compatible layouts; immutable structure changes replace the PCS.
 	if pcs != nil && !podCliqueSetLayoutMatches(pcs, desiredPCS) {
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the previous PodCliqueSet and its requests to be deleted")
 		return ctrl.Result{}, deletePodCliqueSet(ctx, r, pcs)
@@ -581,11 +609,28 @@ func (r *graphReconciler) reconcileReadiness(
 
 	setReadyCondition(deployment, v1beta1.DGDStateSuccessful, readiness.Message)
 
-	if download := deployment.Status.ModelDownload; download != nil && download.LastCheckedAt != nil {
-		return ctrl.Result{RequeueAfter: max(modelDownloadRequeueAfter, time.Until(download.LastCheckedAt.Add(modelDownloadRefreshInterval)))}
+	if refreshAt, found := downloadRefreshAt(&deployment.Status); found {
+		return ctrl.Result{RequeueAfter: max(modelDownloadRequeueAfter, time.Until(refreshAt))}
 	}
 
 	return ctrl.Result{}
+}
+
+// downloadRefreshAt returns when the earlier of the recorded build and
+// checkpoint download checks expires. found is false when neither check is
+// recorded. status is non-nil.
+func downloadRefreshAt(status *v1alpha1.LPXGraphDeploymentStatus) (refreshAt time.Time, found bool) {
+	var lastChecks []time.Time
+	if download := status.ModelDownload; download != nil && download.LastCheckedAt != nil {
+		lastChecks = append(lastChecks, download.LastCheckedAt.Time)
+	}
+	if download := status.CheckpointDownload; download != nil && download.LastCheckedAt != nil {
+		lastChecks = append(lastChecks, download.LastCheckedAt.Time)
+	}
+	if len(lastChecks) == 0 {
+		return time.Time{}, false
+	}
+	return slices.MinFunc(lastChecks, time.Time.Compare).Add(modelDownloadRefreshInterval), true
 }
 
 // deleteUnusedConfigMaps runs only after readiness so existing pods keep their
@@ -634,9 +679,7 @@ func (r *graphReconciler) deleteUnusedConfigMaps(ctx context.Context, deployment
 }
 
 // podCliqueSetLayoutMatches compares the variable immutable fields emitted by LPX.
-// OnDelete also fixes the workload digests; the desired strategy governs transitions.
 func podCliqueSetLayoutMatches(observed, desired *grovev1alpha1.PodCliqueSet) bool {
-	onDelete := desired.Spec.UpdateStrategy != nil && desired.Spec.UpdateStrategy.Type == grovev1alpha1.OnDeleteStrategy
 	layout := func(pcs *grovev1alpha1.PodCliqueSet) grovev1alpha1.PodCliqueSetTemplateSpec {
 		result := grovev1alpha1.PodCliqueSetTemplateSpec{TopologyConstraint: pcs.Spec.Template.TopologyConstraint}
 		for _, clique := range pcs.Spec.Template.Cliques {
@@ -646,11 +689,8 @@ func podCliqueSetLayoutMatches(observed, desired *grovev1alpha1.PodCliqueSet) bo
 			})
 		}
 		for _, group := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
-			// Grove defaults this mutable rollout policy; it does not change the layout.
-			group.RollingUpdate = nil
-			if !onDelete {
-				group.Annotations = nil
-			}
+			// Grove defaults the rollout policy and rolls workload digests; neither changes the layout.
+			group.RollingUpdate, group.Annotations = nil, nil
 			result.PodCliqueScalingGroupConfigs = append(result.PodCliqueScalingGroupConfigs, group)
 		}
 		return result

@@ -73,6 +73,20 @@ def _load_vllm_main() -> ModuleType:
 
 
 @pytest.mark.parametrize(
+    "configured", ["not-json", "{}", "[[1, 0, 1]]", "[[1, 8, 2], [1, 8, 2]]"]
+)
+def test_invalid_artifact_router_profile_fails_startup(configured):
+    handlers = importlib.import_module("dynamo.vllm.handlers")
+    with pytest.raises(ValueError, match="DYNAMO_ARTIFACT_ROUTER_PROFILE"):
+        handlers._configured_artifact_router_profile(configured)
+
+
+def test_artifact_router_profile_is_validated_once():
+    handlers = importlib.import_module("dynamo.vllm.handlers")
+    assert handlers._configured_artifact_router_profile("[[3, 8, 2]]") == ((3, 8, 2),)
+
+
+@pytest.mark.parametrize(
     "enable_lora, model_type, expected",
     [
         (True, dynamo_llm.ModelType.Prefill, 3),
@@ -359,6 +373,19 @@ def test_uses_nixl_connector_direct_and_nested():
     assert _uses_nixl_connector(_make_engine_cfg("LMCacheMPConnector")) is False
     assert _uses_nixl_connector(_make_engine_cfg("FlexKVConnectorV1")) is False
     assert _uses_nixl_connector(_make_engine_cfg()) is False
+
+
+@pytest.mark.parametrize(
+    "connector_names, expected",
+    [
+        (("NixlConnector", "OffloadingConnector"), True),
+        (("OffloadingConnector", "NixlConnector"), True),
+        (("OffloadingConnector",), False),
+    ],
+)
+def test_uses_nixl_connector_multi(connector_names, expected):
+    extra = {"connectors": [{"kv_connector": name} for name in connector_names]}
+    assert _uses_nixl_connector(_make_engine_cfg("MultiConnector", extra)) is expected
 
 
 def test_uses_dynamo_connector_direct_and_nested():
@@ -991,6 +1018,8 @@ class TestBenchmarkConfig:
             "decode_max_batch_size_samples": 128,
             "prefix_max_batch_size_samples": 3,
             "collect_imbalanced": False,
+            "worker_extension_installed": True,
+            "cudagraph_metrics_auto_enabled": True,
         }
 
     def test_random_kda_config_selects_worker_and_reaches_scheduler(
@@ -1939,6 +1968,159 @@ class TestForwardPassMetricsActivation:
         )
         assert "Forward pass metrics enabled" in caplog.text
         assert "Benchmark mode: auto-enabling InstrumentedScheduler" not in caplog.text
+
+
+@pytest.mark.parametrize("benchmark_mode", [None, "prefill", "decode", "agg"])
+@pytest.mark.parametrize("initial_metrics", [False, True])
+def test_cuda_graph_dispatch_metrics_enabled_only_for_benchmark(
+    benchmark_mode, initial_metrics
+):
+    dynamo_cfg = _make_dynamo_config(benchmark_mode=benchmark_mode)
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=initial_metrics
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert engine_cfg.cudagraph_metrics is (
+        True if benchmark_mode is not None else initial_metrics
+    )
+
+
+def test_benchmark_cudagraph_metrics_auto_enabled_is_recorded_for_restore():
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=False
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert engine_cfg.cudagraph_metrics is True
+    bench = dynamo_cfg._benchmark_additional_config
+    assert bench["cudagraph_metrics_auto_enabled"] is True
+
+
+def test_benchmark_cudagraph_metrics_user_enabled_is_left_alone_and_not_recorded():
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=True
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert engine_cfg.cudagraph_metrics is True
+    bench = dynamo_cfg._benchmark_additional_config
+    assert "cudagraph_metrics_auto_enabled" not in bench
+
+
+@pytest.mark.parametrize(
+    "gc_policy, configured, expected",
+    [
+        (
+            None,
+            "",
+            "dynamo.vllm.benchmark_worker_extension.FpmBenchmarkWorkerExtension",
+        ),
+        ("freeze", "", "dynamo.vllm.gc_policy.FpmGcWorkerExtension"),
+        (None, "user.Extension", "user.Extension"),
+    ],
+)
+def test_benchmark_cudagraph_metrics_restore_reaches_workers_by_extension(
+    monkeypatch, gc_policy, configured, expected
+):
+    if gc_policy is None:
+        monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    else:
+        monkeypatch.setenv("DYN_FPM_GC_POLICY", gc_policy)
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=False, worker_extension_cls=configured
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    # Both Dynamo classes provide the restore method; a user's class is kept.
+    assert engine_cfg.worker_extension_cls == expected
+    bench = dynamo_cfg._benchmark_additional_config
+    assert bench["cudagraph_metrics_auto_enabled"] is True
+
+
+@pytest.mark.parametrize(
+    "gc_policy, configured, installed, user_class",
+    [
+        pytest.param(None, "", True, None, id="benchmark-extension-injected"),
+        pytest.param("freeze", "", True, None, id="gc-extension-injected"),
+        pytest.param(
+            None, "user.Extension", False, "user.Extension", id="users-own-class"
+        ),
+        pytest.param(
+            None,
+            "dynamo.vllm.benchmark_worker_extension.FpmBenchmarkWorkerExtension",
+            True,
+            None,
+            id="benchmark-extension-named-by-the-user",
+        ),
+        pytest.param(
+            "freeze",
+            "dynamo.vllm.gc_policy.FpmGcWorkerExtension",
+            True,
+            None,
+            id="gc-extension-named-by-the-user",
+        ),
+    ],
+)
+def test_benchmark_cudagraph_metrics_worker_extension_installed_is_recorded(
+    monkeypatch, gc_policy, configured, installed, user_class
+):
+    """The launcher calls the model workers by name only when the class they
+    load is one of Dynamo's; for a user's own class it records which one."""
+    if gc_policy is None:
+        monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    else:
+        monkeypatch.setenv("DYN_FPM_GC_POLICY", gc_policy)
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=False, worker_extension_cls=configured
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    bench = dynamo_cfg._benchmark_additional_config
+    assert bench["worker_extension_installed"] is installed
+    assert bench.get("user_worker_extension_cls") == user_class
+
+
+def test_benchmark_cudagraph_metrics_user_enabled_still_gets_the_worker_extension(
+    monkeypatch,
+):
+    """The engine probe needs the extension in every benchmark run, not only
+    when Dynamo turned cudagraph_metrics on."""
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=True, worker_extension_cls=""
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert engine_cfg.worker_extension_cls == (
+        "dynamo.vllm.benchmark_worker_extension.FpmBenchmarkWorkerExtension"
+    )
+    bench = dynamo_cfg._benchmark_additional_config
+    assert "cudagraph_metrics_auto_enabled" not in bench
+    assert bench["worker_extension_installed"] is True
+
+
+def test_benchmark_cudagraph_metrics_absent_option_is_not_recorded():
+    """A vLLM without the option: nothing is enabled, so nothing is restored."""
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert not hasattr(engine_cfg, "cudagraph_metrics")
+    bench = dynamo_cfg._benchmark_additional_config
+    assert "cudagraph_metrics_auto_enabled" not in bench
 
 
 class TestEmbeddingWorkerFlag:

@@ -330,7 +330,7 @@ func validateComponentValue(root map[string]json.RawMessage, target string) []Va
 		availabilityKey = "spec"
 		availabilityPath = "spec.minAvailable"
 	}
-	errs := rejectUnknown(root, "", "topologyConstraint", availabilityKey)
+	errs := rejectUnknown(root, "", "topologyConstraint", availabilityKey, "rollingUpdate")
 	if _, exists := root["topologyConstraint"]; exists {
 		_, valueErr := requiredObject(root, "topologyConstraint", "topologyConstraint")
 		if valueErr != nil {
@@ -340,9 +340,27 @@ func validateComponentValue(root map[string]json.RawMessage, target string) []Va
 
 	// Keep sparse topology-only fragments valid, but reject empty fragments.
 	_, hasAvailability := root[availabilityKey]
-	if _, topology := root["topologyConstraint"]; !topology && !hasAvailability {
-		errs = append(errs, ValueError{Path: "topologyConstraint", Detail: "topologyConstraint or minAvailable is required"})
+	_, hasRollingUpdate := root["rollingUpdate"]
+	if _, topology := root["topologyConstraint"]; !topology && !hasAvailability && !hasRollingUpdate {
+		errs = append(errs, ValueError{Path: "topologyConstraint", Detail: "topologyConstraint, minAvailable or rollingUpdate is required"})
 	}
+	// Validate maxUnavailable independently from the optional minimum and topology.
+	if _, exists := root["rollingUpdate"]; exists {
+		rolling, valueErr := requiredObject(root, "rollingUpdate", "rollingUpdate")
+		if valueErr != nil {
+			errs = append(errs, *valueErr)
+		} else {
+			errs = append(errs, rejectUnknown(rolling, "rollingUpdate", "maxUnavailable")...)
+			var budget int32
+			raw, exists := rolling["maxUnavailable"]
+			if !exists || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				errs = append(errs, ValueError{Path: "rollingUpdate.maxUnavailable", Detail: "is required"})
+			} else if err := json.Unmarshal(raw, &budget); err != nil || budget <= 0 {
+				errs = append(errs, ValueError{Path: "rollingUpdate.maxUnavailable", Detail: "must be a positive 32-bit integer"})
+			}
+		}
+	}
+
 	if !hasAvailability {
 		return errs
 	}

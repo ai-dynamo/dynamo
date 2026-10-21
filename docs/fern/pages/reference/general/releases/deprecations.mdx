@@ -33,7 +33,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 ## v1.5.0 — Sep 18, 2026
 
-<span className="dynref-badge dynref-badge--amber">Deprecated</span> **KVBM (KV Block Manager) is deprecated in v1.5.0 and removal is targeted for v1.6.0; the `kvbm` wheel and the vLLM KVBM launch and deploy examples ship unchanged for this release**.
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **KVBM (KV Block Manager) is deprecated in v1.5.0 and removal is targeted for v1.7.0; the `kvbm` wheel and the vLLM KVBM launch and deploy examples ship unchanged for this release**.
 
   > **Migrate:** Use the engine's native KV offloading for host and disk tiering. Cross-node KV cache sharing is the scope of the separate, early-stage KV Cache Runner (KVCR) project, which does not replace KVBM.
 

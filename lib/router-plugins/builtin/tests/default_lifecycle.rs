@@ -64,10 +64,75 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
         .await
         .unwrap();
     assert!(partition.scheduler().has_request("request"));
+    // Replacing scorer/picker state must leave active reservations intact.
+    use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
+    let control = partition.scheduler().policy_control();
+    let initial = control.get().await.unwrap();
+    control
+        .update(RuntimePolicyUpdate::patch(
+            initial.revision(),
+            serde_json::json!({"prefill_load_scale": 2.0})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ))
+        .await
+        .unwrap();
+    assert!(partition.scheduler().has_request("request"));
     core.prefill_complete("request").await.unwrap();
     core.free_reservation("request").await.unwrap();
     assert!(!partition.scheduler().has_request("request"));
     assert!(core.free_reservation("request").await.is_err());
+    core.shutdown();
+}
+
+#[tokio::test]
+async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
+    use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
+    let core = SelectionCore::try_new_local(
+        KvRouterConfig {
+            use_kv_events: false,
+            ..Default::default()
+        },
+        1,
+        Default::default(),
+        SelectionCacheConfig::default(),
+        default_factory(),
+    )
+    .unwrap();
+    core.upsert_worker(worker(1)).await.unwrap();
+    let partition = core
+        .partition(&RoutingPartitionId::new("model", "default"))
+        .unwrap();
+    let control = partition.scheduler().policy_control();
+    let patch = || {
+        serde_json::json!({"prefill_load_scale": 3.0})
+            .as_object()
+            .unwrap()
+            .clone()
+    };
+    let (a, b) = tokio::join!(
+        control.update(RuntimePolicyUpdate::patch(0, patch())),
+        control.update(RuntimePolicyUpdate::patch(0, patch()))
+    );
+    assert!(matches!(
+        (&a, &b),
+        (Ok(_), Err(RuntimePolicyError::Conflict { .. }))
+            | (Err(RuntimePolicyError::Conflict { .. }), Ok(_))
+    ));
+
+    // Poll once on the current-thread runtime to enqueue, then abandon the receiver before
+    // the actor can process the command. A following get is an actor-ordering barrier.
+    let mut abandoned = Box::pin(control.update(RuntimePolicyUpdate::reset(1)));
+    std::future::poll_fn(|cx| {
+        assert!(abandoned.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(abandoned);
+    let current = control.get().await.unwrap();
+    assert_eq!(current.revision(), 1);
+    assert_eq!(current.parameters()["prefill_load_scale"], 3.0);
     core.shutdown();
 }
 
@@ -127,6 +192,10 @@ async fn scoring_error_does_not_book_and_allows_retry() {
     let partition = core
         .partition(&RoutingPartitionId::new("model", "default"))
         .unwrap();
+    assert!(matches!(
+        partition.scheduler().policy_control().get().await,
+        Err(dynamo_kv_router::plugins::worker_selection::RuntimePolicyError::Unsupported)
+    ));
     let error = core
         .select_and_reserve(reserve_request("request"))
         .await
