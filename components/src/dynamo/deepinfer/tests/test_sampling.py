@@ -3,7 +3,7 @@
 
 import pytest
 
-from dynamo.deepinfer.sampling import build_sampling_kwargs
+from dynamo.deepinfer.sampling import build_sampling_kwargs, validate_prompt
 from dynamo.llm.exceptions import InvalidArgument
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -135,3 +135,37 @@ def test_prompt_logprobs_are_rejected():
 def test_logprobs_above_limit_are_rejected():
     with pytest.raises(InvalidArgument, match="logprobs"):
         build({"token_ids": [1], "output_options": {"logprobs": 1001}})
+
+
+def test_valid_prompt_is_accepted():
+    validate_prompt([0, 5, 999], vocab_size=1000, max_model_len=3)
+
+
+def test_empty_prompt_is_rejected():
+    with pytest.raises(InvalidArgument, match="empty"):
+        validate_prompt([], vocab_size=1000, max_model_len=10)
+
+
+@pytest.mark.parametrize("token_ids", [[1, "2"], [1, 2.5], [True], [None]])
+def test_non_integer_token_ids_are_rejected(token_ids):
+    with pytest.raises(InvalidArgument, match="integers"):
+        validate_prompt(token_ids, vocab_size=1000, max_model_len=10)
+
+
+@pytest.mark.parametrize("token_ids", [[-1, 5], [5, 1000], [5, 10**12]])
+def test_out_of_vocabulary_token_ids_are_rejected(token_ids):
+    with pytest.raises(InvalidArgument, match=r"\[0, 1000\)"):
+        validate_prompt(token_ids, vocab_size=1000, max_model_len=10)
+
+
+def test_vocab_upper_bound_is_skipped_when_unknown():
+    validate_prompt([5, 10**6], vocab_size=None, max_model_len=10)
+
+
+def test_prompt_longer_than_context_is_rejected():
+    with pytest.raises(InvalidArgument, match="context length"):
+        validate_prompt([1] * 11, vocab_size=1000, max_model_len=10)
+
+
+def test_prompt_exactly_filling_the_context_is_accepted():
+    validate_prompt([1] * 10, vocab_size=1000, max_model_len=10)

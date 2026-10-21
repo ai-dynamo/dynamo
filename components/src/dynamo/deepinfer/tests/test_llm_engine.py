@@ -282,6 +282,23 @@ async def test_empty_prompt_is_invalid_argument(engine):
         await run(engine, {"token_ids": []})
 
 
+@pytest.mark.parametrize("token_ids", [[-1], [1000], [1, 2**40]])
+async def test_out_of_vocabulary_prompt_never_reaches_the_engine(
+    engine, native, token_ids
+):
+    with pytest.raises(InvalidArgument, match="token ids"):
+        await run(engine, {"token_ids": token_ids})
+
+    assert native.added == []
+
+
+async def test_prompt_longer_than_the_context_never_reaches_the_engine(engine, native):
+    with pytest.raises(InvalidArgument, match="context length"):
+        await run(engine, {"token_ids": [1] * 65})  # --max-model-len is 64
+
+    assert native.added == []
+
+
 async def test_request_deepinfer_drops_fails_instead_of_hanging(engine, native):
     native.drop.add("dyn-bad")
 

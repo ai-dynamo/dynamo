@@ -82,3 +82,26 @@ def build_sampling_kwargs(
             raise InvalidArgument(f"logprobs must be <= {MAX_TOP_LOGPROBS}")
         kwargs["top_logprobs"] = logprobs
     return kwargs
+
+
+def validate_prompt(
+    token_ids: Sequence[Any],
+    *,
+    vocab_size: Optional[int],
+    max_model_len: Optional[int],
+) -> None:
+    """Reject a prompt DeepInfer would drop or ignore, with a precise message."""
+    if not token_ids:
+        raise InvalidArgument("token_ids must not be empty")
+    if any(type(token) is not int for token in token_ids):
+        raise InvalidArgument("token_ids must be integers")
+    low, high = min(token_ids), max(token_ids)
+    if low < 0 or (vocab_size is not None and high >= vocab_size):
+        raise InvalidArgument(
+            f"token ids must be in [0, {vocab_size}); got min={low}, max={high}"
+        )
+    if max_model_len is not None and len(token_ids) > max_model_len:
+        raise InvalidArgument(
+            f"prompt of {len(token_ids)} tokens exceeds the model context "
+            f"length ({max_model_len})"
+        )

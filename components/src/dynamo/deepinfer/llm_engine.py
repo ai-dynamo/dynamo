@@ -36,7 +36,7 @@ from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.deepinfer.args import Config, parse_args
 from dynamo.deepinfer.runner import EngineRunner, RunnerClosed, TokenOutput
-from dynamo.deepinfer.sampling import build_sampling_kwargs
+from dynamo.deepinfer.sampling import build_sampling_kwargs, validate_prompt
 from dynamo.llm import ModelInput
 from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, Unknown
 
@@ -87,6 +87,7 @@ class DeepInferLLMEngine(LLMEngine):
         self.config = config
         self._runner: Optional[EngineRunner] = None
         self._sampling_params_cls: Any = None
+        self._vocab_size: Optional[int] = None
         self._bos_token_id = 1
         # request id -> that request's queue; only touched on the event loop.
         self._streams: dict[str, asyncio.Queue] = {}
@@ -166,6 +167,7 @@ class DeepInferLLMEngine(LLMEngine):
             lookahead_tokens=min(1, int(os.environ["DEEPINFER_USE_NEXTN_DECODE"])),
         )
         self._sampling_params_cls = SamplingParams
+        self._vocab_size = llm.llm_engine.model_config.get_vocab_size()
         return llm.llm_engine, RequestOutput.clone
 
     async def generate(
@@ -176,8 +178,11 @@ class DeepInferLLMEngine(LLMEngine):
             raise EngineShutdown("DeepInfer engine is not running")
         normalize_request_token_ids(request)
         token_ids = request.get("token_ids") or []
-        if not token_ids:
-            raise InvalidArgument("token_ids must not be empty")
+        validate_prompt(
+            token_ids,
+            vocab_size=self._vocab_size,
+            max_model_len=self.config.max_model_len,
+        )
 
         try:
             params = self._sampling_params_cls(
