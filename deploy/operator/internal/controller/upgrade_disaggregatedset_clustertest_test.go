@@ -16,9 +16,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
 // Exercise a populated DS graph without fabricating released historical provenance.
@@ -79,12 +81,14 @@ func testUpgradeDisaggregatedSetReplay(t *testing.T) {
 		require.NoError(t, upgradeSafetyError(false, before, after))
 		checkUpgradeWorkloadMatrix(t, "latest/sglang/disaggregated/multi/disaggregatedset", getOnlyClusterDGD(t, t.Context(), env.Client(), namespace), after)
 
-		t.Log("The upstream DS admission handler rejects a role rollout strategy accepted by the LWS schema")
+		t.Log("The upstream DS admission handler rejects a schema-valid rollout that cannot make progress")
 		var workloads disaggregatedsetv1.DisaggregatedSetList
 		require.NoError(t, env.Client().List(t.Context(), &workloads, client.InNamespace(namespace)))
 		require.Len(t, workloads.Items, 1)
 		invalid := workloads.Items[0].DeepCopy()
-		invalid.Spec.Roles[0].Spec.RolloutStrategy.Type = "Recreate"
+		invalid.Spec.Roles[0].Spec.RolloutStrategy.RollingUpdateConfiguration = &leaderworkersetv1.RollingUpdateConfiguration{
+			MaxSurge: intstr.FromInt(0), MaxUnavailable: intstr.FromInt(0),
+		}
 		require.ErrorContains(t, env.Client().Update(t.Context(), invalid), "vdisaggregatedset.kb.io")
 
 		t.Log("The independent assertion rejects changed DS worker templates without a golden comparison")
