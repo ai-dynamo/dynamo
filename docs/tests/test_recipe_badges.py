@@ -23,6 +23,7 @@ CERT = {
 # only shrink from this set; a new recipe ships with its badges instead.
 BACKFILL_BASELINE = {
     "ax-k2",
+    "beam-1-0-501b",
     "deepseek-v4-1-flash",
     "deepseek-v4-flash",
     "deepseek-v4-pro",
@@ -39,7 +40,9 @@ BACKFILL_BASELINE = {
     "kimi-k3",
     "minimax-m3",
     "motif-3",
+    "muse-spark-open-816b-a42b",
     "nemotron-3-5-lightning",
+    "nemotron-3-5-super-vl-120b-a12b",
     "nemotron-3-super",
     "nemotron-3-ultra",
     "qwen-3-8-2-4t-a95b-fp8",
@@ -51,6 +54,7 @@ BACKFILL_BASELINE = {
     "qwen3-6-35b",
     "qwen3-6-35b-a3b",
     "qwen3-vl-30b",
+    "solar-open2-250b",
 }
 
 
