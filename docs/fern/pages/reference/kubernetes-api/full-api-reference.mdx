@@ -2016,12 +2016,12 @@ RuntimeNamespace is the effective Dynamo runtime namespace for this component. W
 </ParamField>
 
 <ParamField path="servedModelName" type="string">
-ServedModelName is the effective primary model identity exposed by this component's serving role. During rolling updates, worker status keeps the old active revision value until cutover completes.
+ServedModelName is the effective primary model identity exposed by this component's serving role in combined mode. Native sidecars omit this field; Kubernetes Planner reads their registered model identity. During rolling updates, worker status keeps the old active revision until cutover completes.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="runtimeComponentName" type="string">
-RuntimeComponentName is an explicit Dynamo runtime component identity resolved from the serving role's endpoint override. Omission means the backend default applies. During rolling updates, worker status keeps the old active revision value until cutover completes.
+RuntimeComponentName is an explicit Dynamo runtime component identity resolved from the serving role's endpoint override in combined mode. Native sidecars omit this field; Kubernetes Planner reads their registered component identity. During rolling updates, worker status keeps the old active revision value until cutover completes.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2395,12 +2395,12 @@ runtimeNamespace is the effective Dynamo runtime namespace for this component. W
 </ParamField>
 
 <ParamField path="servedModelName" type="string">
-servedModelName is the effective primary model identity exposed by this component's serving role. During rolling updates, worker status keeps the old active revision value until cutover completes.
+servedModelName is the effective primary model identity exposed by this component's serving role in combined mode. Native sidecars omit this field; Kubernetes Planner reads their registered model identity. During rolling updates, worker status keeps the old active revision until cutover completes.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="runtimeComponentName" type="string">
-runtimeComponentName is an explicit Dynamo runtime component identity resolved from the serving role's endpoint override. Omission means the backend default applies. During rolling updates, worker status keeps the old active revision value until cutover completes.
+runtimeComponentName is an explicit Dynamo runtime component identity resolved from the serving role's endpoint override in combined mode. Native sidecars omit this field; Kubernetes Planner reads their registered component identity. During rolling updates, worker status keeps the old active revision value until cutover completes.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 

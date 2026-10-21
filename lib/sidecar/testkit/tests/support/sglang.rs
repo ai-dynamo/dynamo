@@ -6,6 +6,9 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
+use dynamo_llm::local_model::runtime_config::{
+    TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
+};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::common::preprocessor::RoutingHints;
 use dynamo_mocker::common::protocols::EngineType;
@@ -25,8 +28,8 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
 use super::{
-    FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture, SidecarFixture, WireFixture,
-    fast_engine_args, sidecar_command, wait_scheduler_idle,
+    DiscoveryFixture, FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture,
+    SidecarFixture, WireFixture, fast_engine_args, sidecar_command, wait_scheduler_idle,
 };
 
 pub struct Fixture {
@@ -512,7 +515,7 @@ impl Protocol for Adapter {
     }
 }
 
-impl ProcessFixture for Fixture {
+impl DiscoveryFixture for Fixture {
     fn set_served_model_name(&self, name: &str) {
         self.override_discovery(
             Value::Null,
@@ -537,12 +540,14 @@ impl ProcessFixture for Fixture {
     fn assert_unhealthy_startup(logs: &str) {
         assert!(logs.contains("did not become healthy"), "{logs}");
     }
+}
 
+impl ProcessFixture for Fixture {
     fn endpoint(&self) -> String {
         self.server.endpoint()
     }
 
-    fn command() -> Command {
+    fn command(_model: &str) -> Command {
         let mut command = sidecar_command("dynamo-sglang-sidecar", "DYNAMO_SGLANG_SIDECAR");
         command.env("SGLANG_DISAGGREGATION_BOOTSTRAP_HOST", "127.0.0.1");
         command
@@ -572,10 +577,27 @@ impl ProcessFixture for Fixture {
         assert!(card.runtime_config.tool_call_parser.is_none());
         assert!(card.runtime_config.reasoning_parser.is_none());
         assert_eq!(card.effective_context_length(), 32_768);
+        assert_eq!(
+            card.runtime_config
+                .get_engine_specific::<TokenBudget>(TOKEN_BUDGET_RUNTIME_KEY)
+                .unwrap(),
+            Some(TokenBudget {
+                combined_limit: 32_768,
+                reject_prompt_overflow: true,
+                reject_total_overflow: true,
+            })
+        );
+        assert!(
+            !card
+                .runtime_config
+                .runtime_data
+                .contains_key(TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY)
+        );
     }
 }
 
 impl HandoffFixture for Fixture {
+    const KV_BLOCK_SIZE: u32 = 4;
     const HAS_BOOTSTRAP: bool = true;
 
     fn assert_handoff(

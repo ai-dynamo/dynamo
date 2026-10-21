@@ -37,6 +37,27 @@ AISimulate supplies the engine configuration, defaults, validation, and scheduli
 Dynamo supplies transport, event publishing, and Router/Planner adapters. Python replay entry points
 accept the same canonical mapping; no Dynamo engine-argument constructor classes are required.
 
+## Session Lineage in Offline Replay
+
+Set `enable_session_prefix_index=True` on the replay's `KvRouterConfig` to enable
+Dynamo's shared `SessionPrefixIndexer`. It records selected-worker G1 matches at
+admission and applies attributed G1 stores, removals, clears, and worker removal
+after the physical index update. Queued requests recheck G1 residency at admission;
+configured KV-event lag delays both indexes together. This is opt-in and does not
+change placement or eviction policy.
+
+Session IDs come from replay request metadata and `RouterEvent.session_id`.
+Unattributed stores and lower-tier events do not create session lineage. Replay
+forwards AISimulate stored-block attribution into router events. The adapter never
+infers a store's session from whichever requests happen to be running.
+Disaggregated decode placement remains load-only; prefill observes the cache events.
+
+Session lineage uses the production indexer's five-minute wall-clock cleanup
+interval, not simulated replay time. Unreferenced nodes can remain until a later
+update triggers cleanup or the replay ends. Cleanup timing can affect lineage
+reconstructed by later requests, but does not affect current placement or eviction
+decisions.
+
 ## Further Reading
 
 - [Mocker CLI reference](../../docs/fern/pages/reference/components/mocker-cli-reference.mdx)

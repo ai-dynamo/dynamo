@@ -8,8 +8,6 @@ package lpx
 import (
 	"crypto/sha256"
 	"fmt"
-	"net/url"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -82,25 +80,9 @@ func lpuModelStoragePath(spec corev1.PodSpec) (string, error) {
 	return mount.MountPath, nil
 }
 
-func lpuRuntimeBuildRef(projection *ModelProjection, modelStoragePath string) string {
-	buildRef := projection.configuredBuild.Path
-	snapshotRef, snapshotErr := url.Parse(buildRef)
-	runtimeRef := strings.TrimSpace(projection.runtimeBuildRef)
-	runtimeURL, runtimeErr := url.Parse(runtimeRef)
-	if snapshotErr != nil || runtimeErr != nil || snapshotRef.Scheme != BuildSchemeFile ||
-		runtimeRef == "" || runtimeURL.Scheme != "" || filepath.IsAbs(runtimeRef) {
-		return buildRef
-	}
-	cleaned := filepath.Clean(runtimeRef)
-	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-		return buildRef
-	}
-	return (&url.URL{Scheme: BuildSchemeFile, Path: filepath.Join(modelStoragePath, cleaned)}).String()
-}
-
 func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 	keys := [...]string{"nodes_per_partition", "partition_indices", "partition_ids", "partition_models",
-		"partition_node_offsets", "partition_paths", "topologies"}
+		"partition_node_offsets", "partition_paths"}
 
 	var columns [len(keys)]strings.Builder
 
@@ -108,11 +90,11 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 	for _, projection := range projections {
 		// Render runtime partitions, including XT's collapsed prop-sync chains.
 		offset := int64(0)
-		for index, partition := range projection.configuredBuild.Partitions {
+		for index, partition := range projection.configuredBuild.partitions {
 			endpointCount := int64(partition.effectiveNodeCount())
 			row := [len(keys)]string{strconv.FormatInt(endpointCount, 10), strconv.Itoa(index),
-				strconv.FormatUint(uint64(uint32(partition.SourcePartitionID)), 10), projection.model,
-				strconv.FormatInt(offset, 10), partition.PartPath, partition.Topology.Raw}
+				strconv.FormatUint(uint64(uint32(partition.sourcePartitionID)), 10), projection.model,
+				strconv.FormatInt(offset, 10), partition.partPath}
 
 			// Preserve compiler order across the parallel runtime columns.
 			for column := range row {

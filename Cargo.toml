@@ -59,7 +59,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 [workspace.dependencies]
 dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.6.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.13.0-dev.2" }
+aisimulate-core = { version = "=0.13.0-dev.202610160000000073" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.6.0" }
@@ -153,10 +153,11 @@ serde_json = { version = "1" }
 serde_path_to_error = "0.1"
 smallvec = "1"
 strum = { version = "0.27", features = ["derive"] }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 tempfile = "3"
 thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
-tokio = { version = "=1.52.4", features = ["full"] }
+tokio = { version = "=1.54.0", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.17", features = ["codec", "net", "rt", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
