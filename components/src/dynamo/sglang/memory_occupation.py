@@ -13,10 +13,18 @@ from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
 logger = logging.getLogger(__name__)
 
+# Tags come from the client unchecked, so warnings show a bounded sample.
+_LOGGED_TAGS = 8
+_LOGGED_TAG_CHARS = 64
+
 _RESUME_MEMORY_OCCUPATION_TARGET = (
     "sglang.srt.managers.scheduler_components.weight_updater."
     "SchedulerWeightUpdaterManager.resume_memory_occupation"
 )
+
+
+def _sample(tags: list[str]) -> list[str]:
+    return [str(tag)[:_LOGGED_TAG_CHARS] for tag in tags[:_LOGGED_TAGS]]
 
 
 def register_memory_occupation_plugin() -> None:
@@ -36,14 +44,17 @@ def register_memory_occupation_plugin() -> None:
         released = [tag for tag in unique if tag in manager.offload_tags]
         if not released:
             logger.warning(
-                "Ignoring resume_memory_occupation for %s: not released",
-                requested,
+                "Ignoring resume_memory_occupation for %d tags %s: not released",
+                len(unique),
+                _sample(unique),
             )
             return ResumeMemoryOccupationReqOutput()
         if len(released) != len(unique):
+            skipped = [tag for tag in unique if tag not in released]
             logger.warning(
-                "resume_memory_occupation: skipping %s, not released",
-                [tag for tag in unique if tag not in released],
+                "resume_memory_occupation: skipping %d tags %s, not released",
+                len(skipped),
+                _sample(skipped),
             )
         if released != requested:
             recv_req.tags = released
