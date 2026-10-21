@@ -97,10 +97,20 @@ func TestClusterHistoryStorage(t *testing.T) {
 				require.ErrorContains(t, prepareErr, "unresolved owner")
 			} else {
 				require.NoError(t, prepareErr)
-				require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(&record), &record))
-				_, found, err := unstructured.NestedString(record.Object, "spec", "removedHistoricalField")
-				require.NoError(t, err)
-				require.False(t, found, "candidate schema should now prune the historical field on reads")
+				t.Log("Wait for the restored candidate schema to prune historical fields on reads")
+				require.Eventually(t, func() bool {
+					current := &unstructured.Unstructured{}
+					current.SetGroupVersionKind(record.GroupVersionKind())
+					if err := c.Get(t.Context(), client.ObjectKeyFromObject(&record), current); err != nil {
+						return false
+					}
+					_, found, err := unstructured.NestedString(current.Object, "spec", "removedHistoricalField")
+					if err != nil || found {
+						return false
+					}
+					record = *current
+					return true
+				}, 20*time.Second, 100*time.Millisecond, "candidate schema should prune the historical field on reads")
 				require.Equal(t, map[string]any{"observed": "historical"}, record.Object["status"])
 				require.NotEqual(t, "old-parent", string(record.GetUID()))
 				require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(&child), &child))
