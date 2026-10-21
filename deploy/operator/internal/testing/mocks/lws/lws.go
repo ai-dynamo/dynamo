@@ -10,6 +10,7 @@ import (
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	lwswebhooks "sigs.k8s.io/lws/pkg/webhooks"
+	dswebhooks "sigs.k8s.io/lws/pkg/webhooks/disaggregatedset"
 )
 
 const (
@@ -21,13 +22,16 @@ const (
 	lwsValidatingPath = "/validate-leaderworkerset-x-k8s-io-v1-leaderworkerset"
 )
 
-// Setup registers the production LeaderWorkerSet admission handlers.
+// Setup registers the production LeaderWorkerSet and DisaggregatedSet admission handlers.
 func Setup(mgr ctrl.Manager) error {
-	return lwswebhooks.SetupLeaderWorkerSetWebhook(mgr)
+	if err := lwswebhooks.SetupLeaderWorkerSetWebhook(mgr); err != nil {
+		return err
+	}
+	return dswebhooks.SetupDisaggregatedSetWebhook(mgr)
 }
 
-// Configurations returns the admission registrations generated from the
-// LeaderWorkerSet webhook markers, restricted to LeaderWorkerSet.
+// Configurations returns the workload admission registrations from upstream markers.
+// Pod webhooks stay excluded because these tests stop at immediate workloads.
 func Configurations() webhookconfig.Configurations {
 	fail := admissionregistrationv1.Fail
 	none := admissionregistrationv1.SideEffectClassNone
@@ -62,6 +66,15 @@ func Configurations() webhookconfig.Configurations {
 				SideEffects:             &none,
 				Rules:                   []admissionregistrationv1.RuleWithOperations{rule},
 				ClientConfig:            serviceClientConfig(lwsValidatingPath),
+			}, {
+				Name:                    "vdisaggregatedset.kb.io",
+				AdmissionReviewVersions: []string{"v1"},
+				FailurePolicy:           &fail,
+				SideEffects:             &none,
+				Rules: []admissionregistrationv1.RuleWithOperations{{Operations: operations, Rule: admissionregistrationv1.Rule{
+					APIGroups: []string{"disaggregatedset.x-k8s.io"}, APIVersions: []string{"v1"}, Resources: []string{"disaggregatedsets"},
+				}}},
+				ClientConfig: serviceClientConfig("/validate-disaggregatedset-x-k8s-io-v1-disaggregatedset"),
 			}},
 		}},
 	}
