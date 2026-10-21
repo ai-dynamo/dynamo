@@ -75,7 +75,7 @@ export const CURRENT_WHEEL = "1.5.1";
 
 export const MAIN_TOT: BackendPins = {
   sglang: "0.5.22",
-  trtllm: "1.3.0rc29",
+  trtllm: "1.4.0rc0",
   vllm: "0.31.0",
   nixlSglang: "1.5.0",
   nixlTrtllm: "1.3.1",
