@@ -125,17 +125,17 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
     fi
 
 {% if device != "cuda" %}
-# Copy UCX and NIXL from wheel_builder for CPU/XPU devices
+# Copy UCX and NIXL from nixl_builder for CPU/XPU devices
 # (CUDA devices use NIXL from upstream vLLM wheels)
-COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo:0 --from=wheel_builder ${NIXL_PREFIX} ${NIXL_PREFIX}
+COPY --from=nixl_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo:0 --from=nixl_builder ${NIXL_PREFIX} ${NIXL_PREFIX}
 {% if device == "xpu" %}
 # XPU NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated
-COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+COPY --chown=dynamo:0 --from=nixl_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
 {% endif %}
 # Copy NIXL Python wheels
-COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=nixl_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=nixl_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 # Install RDMA libraries required for UCX to find RDMA devices
 RUN apt-get update && \
@@ -209,7 +209,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 {% endif %}
 
 # Install device-specific NIXL wheels for non-CUDA devices.
-# These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
+# These are custom-built in nixl_builder and required for dev builds to link against NIXL libraries.
 {% if device != "cuda" %}
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \

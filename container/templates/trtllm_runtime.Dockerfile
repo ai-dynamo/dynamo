@@ -207,7 +207,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         "/usr/local/cuda/lib64" \
         "/usr/local/ucx/lib" \
         "/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu" \
-        "/opt/nvidia/nvda_nixl/lib64" \
         > /etc/ld.so.conf.d/00-dynamo-trtllm.conf && \
     ldconfig && \
     ldconfig -p | grep -q 'libturbojpeg.so.0' && \

@@ -160,8 +160,8 @@ def log_nixl_layout(pod) -> None:
     """Record where NIXL actually lives in the worker image. Diagnostic only.
 
     Deliberately not asserted on. The layout moves between framework images and
-    between releases -- vLLM and TRT-LLM expose the canonical
-    /opt/nvidia/nvda_nixl tree via NIXL_PLUGIN_DIR, while the CUDA SGLang image
+    between releases -- the TRT-LLM EFA image points NIXL_PLUGIN_DIR at a
+    PyPI NIXL copy under /opt/dynamo/nixl-efa, while the CUDA SGLang image
     gets NIXL from the pip wheel and exports no NIXL_* variables at all -- so a
     test that pins the layout breaks on the next repackaging without any EFA
     regression having occurred. Logging it keeps a failed run diagnosable

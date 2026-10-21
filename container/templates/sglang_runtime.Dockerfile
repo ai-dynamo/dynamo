@@ -85,19 +85,18 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
 
 {% if device == "xpu" %}
 {# XPU runtime: NIXL + UCX are needed for P2P transport on Intel GPUs.
-   CUDA sglang runtime does NOT include NIXL/UCX (matching upstream main);
-   those are only added in the dev stage for build-time linking. #}
+   CUDA sglang runtime uses the NIXL wheel from upstream lmsysorg/sglang. #}
 ENV NIXL_PREFIX=/opt/intel/intel_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/x86_64-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
-# Copy UCX and NIXL from wheel_builder
-COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo:0 --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+# Copy UCX and NIXL from nixl_builder
+COPY --from=nixl_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo:0 --from=nixl_builder $NIXL_PREFIX $NIXL_PREFIX
+COPY --chown=dynamo:0 --from=nixl_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
 
-COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=nixl_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=nixl_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 ENV PATH=/usr/local/ucx/bin:$PATH
 

@@ -39,26 +39,22 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 ENV EFA_VERSION="${EFA_VERSION}"
 
 {% if framework == "trtllm" %}
-# After the upstream mesonpy refactor, libplugin_LIBFABRIC.so lands under the
-# Dynamo venv while the rest of the NIXL plugin set (GDS/UCX/POSIX) remains at
-# the canonical arch-specific location. Copy LIBFABRIC alongside the others so
-# NIXL_PLUGIN_DIR resolves every backend from a single directory, and expose a
-# stable arch-agnostic alias at /opt/nvidia/nvda_nixl/plugins.
-#
-# Also clear LD_PRELOAD (the upstream trtllm_runtime stage's ai-dynamo/nixl#1668
-# workaround force-loads TRT-LLM's bundled NIXL 0.9.0; that conflicts with the
-# Dynamo-built NIXL 0.10.1 plugins). LIBFABRIC goes through libfabric directly
-# (not UCX), so it is unaffected by the UCX 1.20.0 hang that LD_PRELOAD works
-# around — and LIBFABRIC is the recommended backend for EFA.
-RUN --mount=from=wheel_builder,source=/opt/nvidia/nvda_nixl,target=/tmp/nvda_nixl \
-    rm -rf /opt/nvidia/nvda_nixl && \
-    cp -Pfr /tmp/nvda_nixl /opt/nvidia/nvda_nixl && \
-    export LD_PRELOAD=/opt/nvidia/nvda_nixl/lib64/libnixl.so && \
-    export NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins && \
-    ldconfig
+# EFA uses NIXL's LIBFABRIC backend from the PyPI build, against the EFA
+# installer's libfabric. Preload it in place of TRT-LLM's bundled NIXL; the
+# UCX hang that the runtime's preload works around (ai-dynamo/nixl#1668) does
+# not affect LIBFABRIC. libcuda.so.1 comes from the host driver at runtime.
+ARG NIXL_REF
+RUN echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
+    /opt/uv/bin/uv pip install --no-deps --target /opt/dynamo/nixl-efa "nixl-cu13==${NIXL_REF#v}" && \
+    NIXL_EFA_LIB_DIR=/opt/dynamo/nixl-efa/.nixl_cu13.mesonpy.libs && \
+    test -f "${NIXL_EFA_LIB_DIR}/libnixl.so" && \
+    test -f "${NIXL_EFA_LIB_DIR}/plugins/libplugin_LIBFABRIC.so" && \
+    if ldd "${NIXL_EFA_LIB_DIR}/plugins/libplugin_LIBFABRIC.so" | grep -v 'libcuda\.so' | grep 'not found'; then \
+        echo "libplugin_LIBFABRIC.so has unresolved dependencies" >&2; exit 1; \
+    fi
 
-ENV LD_PRELOAD=/opt/nvidia/nvda_nixl/lib64/libnixl.so
-ENV NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
+ENV LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/opt/dynamo/nixl-efa/.nixl_cu13.mesonpy.libs/libnixl.so
+ENV NIXL_PLUGIN_DIR=/opt/dynamo/nixl-efa/.nixl_cu13.mesonpy.libs/plugins
 {% endif %}
 
 {% if target == "runtime" %}
