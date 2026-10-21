@@ -3,23 +3,39 @@
 
 //! Property tests for SGLang-backed `/generate` formats.
 //!
-//! Each law generates requests, ground truths, chunk boundaries, and topologies,
-//! runs them through [`driver`](super::driver), and
+//! Each law generates requests, ground truths, chunk boundaries, topologies,
+//! and failure points, runs them through [`driver`](super::driver), and
 //! compares what the client receives. Failures shrink to a minimal scenario.
 
 use std::sync::Arc;
 
-use crate::response_merge::{Assembler, RuleSet};
+use crate::response_merge::{Assembler, FieldClass, RuleSet};
 use dynamo_llm::generate_format::{ClientRequest, Opened, SharedFormat};
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use proptest::collection::vec;
 use proptest::prelude::*;
+use proptest::sample::Index;
 use proptest::test_runner::{Config, TestCaseError, TestRunner};
 use serde_json::{Value, json};
 
 use super::driver::{self, Outcome, Scenario, Topology};
 use super::sim::Truth;
 use super::{ClientShape, NativeShape, RequestSpec};
+
+/// Request fields whose engine state a retry cannot rebuild, as
+/// `(in sampling_params, name, value)`.
+pub fn blocking_fields() -> Vec<(bool, &'static str, Value)> {
+    vec![
+        (true, "frequency_penalty", json!(0.5)),
+        (true, "repetition_penalty", json!(1.2)),
+        (true, "sampling_seed", json!(7)),
+        (true, "json_schema", json!("{}")),
+        (false, "session_params", json!({"id": "s"})),
+        (false, "return_hidden_states", json!(true)),
+        (false, "return_flat_raw_output_top_logprobs", json!(true)),
+        (false, "return_not_yet_classified", json!(true)),
+    ]
+}
 
 fn budget(n: usize, stop: bool) -> BoxedStrategy<(Option<u32>, Value)> {
     let n = n as u32;
@@ -29,6 +45,7 @@ fn budget(n: usize, stop: bool) -> BoxedStrategy<(Option<u32>, Value)> {
             (0u32..4).prop_map(move |extra| (Some(n + extra), Value::Null)),
             Just((None, json!({}))),
             (0u32..4).prop_map(move |extra| (None, preferred(n + extra))),
+            // Migration is blocked: the engine default is unknown.
             Just((None, Value::Null)),
         ]
         .boxed()
@@ -47,7 +64,7 @@ fn budget(n: usize, stop: bool) -> BoxedStrategy<(Option<u32>, Value)> {
     }
 }
 
-/// Requests, ground truths, chunking, and topology.
+/// Requests, ground truths, chunking, topology, and failures.
 pub fn scenarios() -> impl Strategy<Value = Scenario> {
     (1usize..6, 1usize..10, any::<bool>(), 1usize..4)
         .prop_flat_map(|(p, n, stop, row_bytes)| {
@@ -70,6 +87,8 @@ pub fn scenarios() -> impl Strategy<Value = Scenario> {
                     any::<bool>(),
                 ),
                 prop_oneof![Just(Topology::Aggregated), Just(Topology::Disaggregated)],
+                vec(any::<Index>(), 0..4),
+                any::<bool>(),
                 Just((stop, row_bytes)),
             )
         })
@@ -78,11 +97,16 @@ pub fn scenarios() -> impl Strategy<Value = Scenario> {
                 (prompt, prompt_lps, output, experts, cuts, cached),
                 ((max, engine_info), min, stream, logprob, start, top, routed),
                 topology,
+                failures,
+                lose_terminal,
                 (stop, row_bytes),
             )| {
                 let n = output.len();
                 let mut ends: Vec<usize> = (1..n).filter(|&i| cuts[i - 1]).collect();
                 ends.push(n);
+                let mut failures: Vec<usize> =
+                    failures.iter().map(|i| i.index(ends.len())).collect();
+                failures.sort_unstable();
                 let prompt_logprobs = prompt_lps.iter().map(|&lp| f64::from(lp) / 8.0).collect();
                 Scenario {
                     truth: Truth {
@@ -111,6 +135,8 @@ pub fn scenarios() -> impl Strategy<Value = Scenario> {
                     },
                     topology,
                     engine_info,
+                    failures,
+                    lose_terminal: lose_terminal && !stop,
                 }
             },
         )
@@ -158,11 +184,39 @@ fn observed(outcome: &Outcome) -> (Vec<Value>, Option<Value>, Option<&str>) {
     match outcome {
         Outcome::Rejected(reason) => (Vec::new(), None, Some(reason)),
         Outcome::Delivered { chunks, unary } => (chunks.clone(), unary.clone(), None),
+        Outcome::Failed { chunks, reason } => (chunks.clone(), None, Some(reason)),
     }
 }
 
+/// What a synthetic finish must still get right: the output, its counts,
+/// identity, and termination. It ends an attempt the engine never ran, so it
+/// has no per-attempt or final-chunk values.
+fn essentials(rules: &RuleSet, value: &Value) -> Value {
+    let mut kept = json!({});
+    for (path, class) in rules.fields() {
+        let keep = matches!(class, FieldClass::Delta | FieldClass::OutputOffset)
+            || path == "/meta_info/id"
+            || path == "/meta_info/finish_reason";
+        if let Some(found) = value.pointer(path).filter(|_| keep) {
+            let mut target = &mut kept;
+            let (parent, key) = path.rsplit_once('/').expect("pointer");
+            for segment in parent.split('/').skip(1) {
+                target = target
+                    .as_object_mut()
+                    .expect("object")
+                    .entry(segment)
+                    .or_insert_with(|| json!({}));
+            }
+            if let Some(object) = target.as_object_mut() {
+                object.insert(key.to_string(), found.clone());
+            }
+        }
+    }
+    kept
+}
+
 fn join(rules: &Arc<RuleSet>, chunks: &[Value]) -> Option<Value> {
-    let mut assembler = Assembler::new(rules.clone());
+    let mut assembler = Assembler::new(rules.clone(), false);
     chunks
         .iter()
         .cloned()
@@ -183,6 +237,8 @@ impl Harness {
     pub fn check_all(&self) {
         self.stream_join_equals_unary();
         self.disaggregated_equals_aggregated();
+        self.migration_is_invisible();
+        self.blocked_requests_fail_cleanly();
         self.malformed_responses_never_panic();
     }
 
@@ -218,6 +274,26 @@ impl Harness {
         }
     }
 
+    fn migratable(&self, scenario: &Scenario) -> bool {
+        let Some(body) = self.shape.body(&scenario.request) else {
+            return false;
+        };
+        self.format
+            .open(ClientRequest {
+                body: &body,
+                headers: &axum::http::HeaderMap::from_iter([(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("application/json"),
+                )]),
+                default_request_id: "dynamo-request",
+            })
+            .is_ok_and(|opened| {
+                let worker = super::worker(&scenario.engine_info);
+                opened.validation.is_ok()
+                    && (opened.bind)(&worker).is_ok_and(|bound| bound.migration.is_ok())
+            })
+    }
+
     /// A client that joins the streamed chunks gets the unary response.
     pub fn stream_join_equals_unary(&self) {
         let Some(rules) = self.shape.client_rules() else {
@@ -242,7 +318,9 @@ impl Harness {
 
     /// Prefill/decode disaggregation returns what aggregated serving returns.
     pub fn disaggregated_equals_aggregated(&self) {
-        self.law("P/D equals aggregated", scenarios(), |scenario| {
+        self.law("P/D equals aggregated", scenarios(), |mut scenario| {
+            // A synthetic finish carries no final-chunk values in either.
+            scenario.lose_terminal = false;
             let mut aggregated = scenario.clone();
             aggregated.topology = Topology::Aggregated;
             let mut disaggregated = scenario;
@@ -252,6 +330,107 @@ impl Harness {
             prop_assert_eq!(observed(&disaggregated), observed(&aggregated));
             Ok(())
         });
+    }
+
+    /// A migrated request delivers what the unmigrated one does, or fails
+    /// only when its plan said it cannot migrate, after a prefix of it.
+    pub fn migration_is_invisible(&self) {
+        let rules = self.shape.client_rules();
+        self.law("migration is invisible", scenarios(), |scenario| {
+            prop_assume!(!scenario.failures.is_empty() || scenario.lose_terminal);
+            let baseline = self.outcome(&scenario.without_failures())?;
+            let migrated = self.outcome(&scenario)?;
+            let (base_chunks, base_unary, base_error) = observed(&baseline);
+            prop_assert!(base_error.is_none() || matches!(baseline, Outcome::Rejected(_)));
+            match &migrated {
+                Outcome::Rejected(_) => prop_assert_eq!(&migrated, &baseline),
+                Outcome::Failed { chunks, reason } => {
+                    prop_assert!(
+                        !self.migratable(&scenario),
+                        "a migratable request failed: {}",
+                        reason
+                    );
+                    prop_assert!(base_chunks.starts_with(chunks));
+                }
+                Outcome::Delivered { chunks, unary } if scenario.lose_terminal => {
+                    // The final attempt is a synthetic finish.
+                    if let Some(n) = base_chunks.len().checked_sub(1) {
+                        prop_assert_eq!(chunks.len(), n + 2);
+                        prop_assert_eq!(&chunks[..n], &base_chunks[..n]);
+                    }
+                    if let Some(rules) = &rules {
+                        let essential = |v: Option<Value>| v.map(|v| essentials(rules, &v));
+                        prop_assert_eq!(
+                            essential(join(rules, chunks)),
+                            essential(join(rules, &base_chunks))
+                        );
+                        prop_assert_eq!(essential(unary.clone()), essential(base_unary));
+                    }
+                }
+                Outcome::Delivered { chunks, unary } => {
+                    prop_assert_eq!(chunks, &base_chunks);
+                    prop_assert_eq!(unary, &base_unary);
+                }
+            }
+            Ok(())
+        });
+    }
+
+    /// A request whose engine state a retry cannot rebuild fails after an
+    /// attempt fails, instead of continuing with wrong output.
+    pub fn blocked_requests_fail_cleanly(&self) {
+        // A client that cannot send these fields cannot misuse them.
+        let expressible = blocking_fields()
+            .into_iter()
+            .any(|(sampling, name, value)| {
+                let mut spec = RequestSpec {
+                    input_ids: vec![1],
+                    ..Default::default()
+                };
+                let target = if sampling {
+                    &mut spec.extra_sampling
+                } else {
+                    &mut spec.extra
+                };
+                target.insert(name.to_string(), value);
+                self.shape.body(&spec).is_some()
+            });
+        if !expressible {
+            return;
+        }
+        let strategy = (scenarios(), any::<Index>(), any::<Index>(), any::<bool>());
+        self.law(
+            "blocked requests fail cleanly",
+            strategy,
+            |(scenario, field, at, engine_default)| {
+                let fields = blocking_fields();
+                let (sampling, name, value) = fields[field.index(fields.len())].clone();
+                let mut scenario = scenario;
+                if sampling && engine_default {
+                    if !scenario.engine_info.is_object() {
+                        scenario.engine_info = json!({});
+                    }
+                    scenario.engine_info["preferred_sampling_params"] = json!({name: value});
+                } else {
+                    let target = if sampling {
+                        &mut scenario.request.extra_sampling
+                    } else {
+                        &mut scenario.request.extra
+                    };
+                    target.insert(name.to_string(), value);
+                }
+                scenario.failures = vec![at.index(scenario.truth.cuts.len())];
+                scenario.lose_terminal = false;
+                prop_assume!(self.shape.body(&scenario.request).is_some());
+                prop_assert!(!self.migratable(&scenario), "`{}` allows migration", name);
+                match self.outcome(&scenario)? {
+                    Outcome::Failed { .. } | Outcome::Rejected(_) => Ok(()),
+                    outcome => Err(TestCaseError::fail(format!(
+                        "`{name}` continued after a failure: {outcome:?}"
+                    ))),
+                }
+            },
+        );
     }
 
     /// Malformed native responses are errors, never panics.
@@ -285,9 +464,10 @@ impl Harness {
                 if validation.is_err() {
                     return Ok(());
                 }
-                let Ok(bound) = bind(&super::worker()) else {
+                let Ok(bound) = bind(&super::worker(&scenario.engine_info)) else {
                     return Ok(());
                 };
+                let mut request = bound.request;
                 let mut exchange = bound.exchange;
                 for value in values {
                     let output = LLMEngineOutput {
@@ -296,6 +476,7 @@ impl Harness {
                     };
                     let _ = exchange.chunk(output, prefill, &mut |_| {});
                 }
+                let _ = exchange.migrate(0, &mut request);
                 let _ = exchange.finish();
                 Ok(())
             },

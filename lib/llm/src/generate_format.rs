@@ -4,9 +4,9 @@
 //! Engine-native `/generate` formats.
 //!
 //! A [`GenerateFormat`] owns one `/generate` wire format end to end: it turns
-//! a client body into the routed request and assembles the worker's responses
-//! into unary or streamed client output. The frontend reads no request or
-//! response field.
+//! a client body into the routed request, joins the worker's responses into
+//! client responses, and continues migrated requests. The frontend reads no
+//! request or response field.
 //!
 //! Formats are statically linked plugins. A host builds a registry through its
 //! catalog and calls [`install`]; `DYN_GENERATE_FORMAT` selects
@@ -19,13 +19,18 @@ use axum::extract::rejection::{BytesRejection, JsonRejection, MissingJsonContent
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use dynamo_runtime::error::DynamoError;
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 
+use crate::migration::RequestContinuation;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 
 mod error;
 pub use error::{ErrorPhase, WorkerError};
 
+/// Runtime-config key under which a worker advertises engine facts its
+/// format needs, such as engine-side defaults. Absent on older workers.
+pub const ENGINE_INFO_KEY: &str = "generate_engine_info";
 /// Names the format the frontend serves.
 pub const FORMAT_ENV: &str = "DYN_GENERATE_FORMAT";
 
@@ -122,6 +127,8 @@ impl From<JsonRejection> for ClientError {
 /// The worker set chosen to serve a request.
 pub struct Worker<'a> {
     pub model: &'a str,
+    /// What it advertises under [`ENGINE_INFO_KEY`]; `Null` when nothing.
+    pub engine_info: &'a Value,
     pub kv_cache_block_size: u32,
     pub lora_name: Option<&'a str>,
     pub tower_connector_lora_enabled: bool,
@@ -142,13 +149,16 @@ pub struct Opened {
 /// Build the request and exchange once the worker set is known. Consumed once.
 pub type Bind = Box<dyn FnOnce(&Worker<'_>) -> Result<Bound, ClientError> + Send>;
 
-/// A request ready for dispatch and its response exchange.
+/// A request ready for dispatch and its migration admission decision.
 pub struct Bound {
     pub request: PreprocessedRequest,
+    pub migration: Result<(), String>,
     pub exchange: Box<dyn GenerateExchange>,
 }
 
-/// One client request. Output callbacks run in stream order, never concurrently.
+/// One client request across every attempt. Dynamo calls these in stream
+/// order and never concurrently; [`Self::migrate`] runs only after every
+/// delivered output has passed through [`Self::chunk`].
 pub trait GenerateExchange: Send {
     /// One item of the worker stream; `prefill` marks prefill's final output
     /// in P/D. Streaming passes each client chunk to `emit`, which serializes
@@ -160,8 +170,28 @@ pub trait GenerateExchange: Send {
         emit: &mut dyn FnMut(&Value),
     ) -> Result<(), DynamoError>;
 
+    /// Continue after a failed attempt, atomically: rewrite `request` for the
+    /// next attempt, whose prompt Dynamo has already extended with the
+    /// `delivered_tokens`, or return the output that ends the request; and
+    /// rebase this exchange so later outputs continue the earlier ones.
+    fn migrate(
+        &mut self,
+        delivered_tokens: usize,
+        request: &mut PreprocessedRequest,
+    ) -> Result<Option<LLMEngineOutput>, String>;
+
     /// Unary: the client response. Streaming: an optional final chunk.
     fn finish(&mut self) -> Result<Option<Value>, DynamoError>;
+}
+
+impl RequestContinuation for Mutex<Box<dyn GenerateExchange>> {
+    fn next_attempt(
+        &self,
+        delivered_tokens: usize,
+        request: &mut PreprocessedRequest,
+    ) -> Result<Option<LLMEngineOutput>, String> {
+        self.lock().migrate(delivered_tokens, request)
+    }
 }
 
 /// One client-facing `/generate` wire format, linked into the frontend.
