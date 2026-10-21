@@ -2439,6 +2439,7 @@ pub(crate) fn parse_complete(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn parse_complete_with_policy(
     family: &str,
     content: &str,
