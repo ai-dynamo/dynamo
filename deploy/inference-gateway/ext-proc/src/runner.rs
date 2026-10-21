@@ -443,10 +443,8 @@ async fn serve<P: crate::EndpointPicker>(
                     Err(error) => break Err(error.into()),
                 },
             };
-            // Every response chunk goes back to the gateway as a small gRPC
-            // message; with Nagle on, one can wait for the gateway's delayed
-            // ACK of the previous one. tonic's own listener (the plaintext
-            // path) sets TCP_NODELAY; this hand-built one has to as well.
+            // tonic's own listener (the plaintext path) sets TCP_NODELAY; this
+            // hand-built one has to as well.
             if let Err(error) = tcp_stream.set_nodelay(true) {
                 tracing::debug!(%remote_addr, %error, "Failed to set TCP_NODELAY");
             }
