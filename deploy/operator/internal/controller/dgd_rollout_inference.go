@@ -287,7 +287,7 @@ func rolloutPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
-// TLS credentials and opaque environment sources cannot be used by the operator's HTTP client.
+// TLS, disabled nvext, and opaque environment sources cannot support attributed HTTP probes.
 func rolloutFrontendProbeUnsupported(pod *corev1.Pod) bool {
 	for _, containers := range [][]corev1.Container{pod.Spec.Containers, pod.Spec.InitContainers} {
 		for _, container := range containers {
@@ -298,6 +298,16 @@ func rolloutFrontendProbeUnsupported(pod *corev1.Pod) bool {
 				return true
 			}
 			for _, env := range container.Env {
+				// Match the frontend's truthy vocabulary; referenced values cannot be resolved here.
+				if env.Name == "DYN_DISABLE_FRONTEND_NVEXT" {
+					switch strings.ToLower(strings.TrimSpace(env.Value)) {
+					case "1", "true", "on", "yes":
+						return true
+					}
+					if env.ValueFrom != nil {
+						return true
+					}
+				}
 				if (env.Name == "DYN_TLS_CERT_PATH" || env.Name == "DYN_TLS_KEY_PATH" || env.Name == "DYN_TLS_CLIENT_CA_CERT_PATH") &&
 					(env.Value != "" || env.ValueFrom != nil) {
 					return true

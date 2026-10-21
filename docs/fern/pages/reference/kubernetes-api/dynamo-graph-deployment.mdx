@@ -64,7 +64,8 @@ metadata retains the old prefill replica. A surface-less encoder remains outside
 
 The gate reuses the existing nvext API, including the API in frontend 1.5.0. The operator
 must be able to reach each frontend Pod's named `http` port, and frontend nvext must remain
-enabled. Failed requests, timeouts, disabled nvext, missing metadata, or missing attribution
+enabled. Probes connect directly to Pod IPs without using the operator's HTTP proxy settings.
+Failed requests, timeouts, missing metadata, or missing attribution
 retain the last old replica and log the pending reason. Only a blocked inference gate
 schedules a retry after ten seconds; Kubernetes resource changes can trigger earlier
 reconciliation. Other rollout steps do not add periodic inference retries. The gate does
@@ -78,9 +79,12 @@ Frontends configured with HTTP TLS or mutual TLS retain the existing rollout beh
 the operator does not load frontend certificates or send plaintext probes to TLS listeners.
 This exclusion recognizes `DYN_TLS_CERT_PATH`, `DYN_TLS_KEY_PATH`, and
 `DYN_TLS_CLIENT_CA_CERT_PATH`, including `valueFrom` entries, and their frontend CLI flags
-in the `main` or sidecar-mode `runtime` container. Frontends using `envFrom` also retain
-the existing behavior because their HTTP transport configuration is not visible in the
-Pod spec. These deployments do not receive the replacement-inference protection.
+in the `main` or sidecar-mode `runtime` container. The same exclusion applies when
+`DYN_DISABLE_FRONTEND_NVEXT` is set to `1`, `true`, `on`, or `yes` (case-insensitive,
+ignoring surrounding whitespace), or supplied through `valueFrom`, because worker
+attribution cannot be assured. Frontends using `envFrom` also retain the existing behavior
+because their probe configuration is not visible in the Pod spec. These deployments do
+not receive the replacement-inference protection.
 
 Embedding and other non-text models, external frontends, non-Kubernetes discovery,
 `Recreate`, and provider-native Grove updates retain their existing behavior. Replica

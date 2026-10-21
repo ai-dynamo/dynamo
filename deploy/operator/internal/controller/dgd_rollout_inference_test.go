@@ -200,12 +200,17 @@ func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, pending)
 
-	t.Log("TLS and opaque environments keep legacy retirement without plaintext probes")
+	t.Log("TLS, disabled nvext, and opaque environments keep legacy retirement without probes")
 	for _, container := range []corev1.Container{
 		{Name: consts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_TLS_CERT_PATH", Value: "/tls/server.crt"}}},
 		{Name: consts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_TLS_CLIENT_CA_CERT_PATH", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "tls"}, Key: "ca"}}}}},
 		{Name: consts.RuntimeContainerName, Args: []string{"--tls-cert-path=/tls/server.crt", "--tls-key-path=/tls/server.key"}},
 		{Name: consts.MainContainerName, EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "frontend-env"}}}}},
+		{Name: consts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_DISABLE_FRONTEND_NVEXT", Value: "1"}}},
+		{Name: consts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_DISABLE_FRONTEND_NVEXT", Value: "true"}}},
+		{Name: consts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_DISABLE_FRONTEND_NVEXT", Value: "on"}}},
+		{Name: consts.RuntimeContainerName, Env: []corev1.EnvVar{{Name: "DYN_DISABLE_FRONTEND_NVEXT", Value: " YES "}}},
+		{Name: consts.MainContainerName, Env: []corev1.EnvVar{{Name: "DYN_DISABLE_FRONTEND_NVEXT", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "frontend-env"}, Key: "disable-nvext"}}}}},
 	} {
 		configured := frontend2.DeepCopy()
 		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(frontend2), configured))
@@ -223,6 +228,20 @@ func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
 		require.False(t, pending)
 		require.Zero(t, rollout.OldWorkerReplicaTargetsByDCD[oldDCD.Name])
 		require.Equal(t, before, first.chat.Load()+second.chat.Load())
+	}
+
+	t.Log("Values that do not disable nvext keep the gate closed on missing attribution")
+	second.mode.Store(2)
+	for _, value := range []string{"", "0", "false", " OFF ", "no", "unknown"} {
+		configured := frontend2.DeepCopy()
+		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(frontend2), configured))
+		configured.Spec = frontend2.DeepCopy().Spec
+		configured.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "DYN_DISABLE_FRONTEND_NVEXT", Value: value}}
+		require.NoError(t, r.Update(t.Context(), configured))
+		rollout, pending, err = r.buildRollingUpdateContext(t.Context(), dgd)
+		require.NoError(t, err)
+		require.True(t, pending, "value %q", value)
+		require.Equal(t, int32(1), rollout.OldWorkerReplicaTargetsByDCD[oldDCD.Name])
 	}
 	restored := frontend2.DeepCopy()
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(frontend2), restored))
@@ -298,6 +317,43 @@ func TestBuildRollingUpdateContext_ReplacementInference(t *testing.T) {
 	require.NoError(t, owner.Update(context.Background(), worker))
 	require.Equal(t, []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(dgd)}}, owner.mapRolloutMetadataToDGDRequests(context.Background(), metadata))
 	require.Equal(t, []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(dgd)}}, mapDGDServingPodToRequests(context.Background(), frontend1))
+}
+
+func TestRolloutInferenceClient_BypassesProxy(t *testing.T) {
+	t.Log("Configure a proxy on the default transport and serve a replacement frontend directly")
+	var proxyRequests atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxyRequests.Add(1)
+		http.Error(w, "Pod IP is unreachable through proxy", http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+	proxyURL, err := url.Parse(proxy.URL)
+	require.NoError(t, err)
+	defaultTransport := http.DefaultTransport
+	defer func() { http.DefaultTransport = defaultTransport }()
+	transport := defaultTransport.(*http.Transport).Clone()
+	transport.Proxy = http.ProxyURL(proxyURL)
+	defer transport.CloseIdleConnections()
+	http.DefaultTransport = transport
+	frontend := httptest.NewServer(&rolloutProbeServer{})
+	defer frontend.Close()
+
+	t.Log("Verify the control request reaches the proxy even for the local target")
+	control := &http.Client{Transport: transport, Timeout: time.Second}
+	response, err := control.Get(frontend.URL)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusBadGateway, response.StatusCode)
+	require.Equal(t, int32(1), proxyRequests.Load())
+
+	t.Log("The production rollout client reaches the frontend without changing the default transport")
+	r := newDGDWorkerRolloutReconciler(nil, nil)
+	defer r.inferenceClient.CloseIdleConnections()
+	err = r.probeReplacementInference(t.Context(), frontend.URL, "/v1/chat/completions",
+		rolloutInferenceTarget{Model: "test-model", InstanceID: 42})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), proxyRequests.Load())
+	require.NotNil(t, transport.Proxy)
 }
 
 func rolloutTestFrontendPod(t *testing.T, dgd *nvidiacomv1beta1.DynamoGraphDeployment, name, address string) *corev1.Pod {

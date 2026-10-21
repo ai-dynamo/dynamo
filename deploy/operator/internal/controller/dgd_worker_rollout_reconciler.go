@@ -76,9 +76,14 @@ func newDGDWorkerRolloutReconciler(
 	kubeClient client.Client,
 	recorder events.EventRecorder,
 ) *dgdWorkerRolloutReconciler {
+	// Pod-IP probes must dial the selected frontend directly, regardless of operator proxy settings.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+
 	return &dgdWorkerRolloutReconciler{
 		dgdResourceSyncer: newDGDResourceSyncer(kubeClient, recorder),
 		inferenceClient: &http.Client{
+			Transport:     transport,
 			Timeout:       5 * time.Second,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 		},
