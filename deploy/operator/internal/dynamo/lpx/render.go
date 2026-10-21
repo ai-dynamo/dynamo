@@ -176,9 +176,12 @@ func RenderNodeLocal(
 			}
 
 			// The serving Agent hosts the engine and its runtime sidecar in place of a conductor.
-			if common.FindContainerByName(template.Spec.InitContainers, commonconsts.RuntimeContainerName) != nil {
-				if err := configureServingAgent(&template.Spec, projections, modelStoragePath); err != nil {
-					return nil, fmt.Errorf("stage %s: %w", stage, err)
+			if sidecar := common.FindContainerByName(template.Spec.InitContainers, commonconsts.RuntimeContainerName); sidecar != nil {
+				main := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
+				for _, container := range []*corev1.Container{sidecar, main} {
+					if err := applyModelPaths(container, projections, modelStoragePath); err != nil {
+						return nil, fmt.Errorf("stage %s: %w", stage, err)
+					}
 				}
 			}
 

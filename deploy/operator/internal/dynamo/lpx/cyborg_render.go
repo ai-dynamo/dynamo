@@ -48,9 +48,9 @@ func configureHybridCyborg(
 	applyLocalPartitionIDs(container, projection)
 	applyCyborgWeightsPath(container, projection, modelStoragePath)
 
-	// A runtime sidecar fronting Cyborg reads the model path beneath the same mount.
-	if common.FindContainerByName(cyborg.Spec.PodSpec.InitContainers, commonconsts.RuntimeContainerName) != nil {
-		if err := configureRuntimeSidecar(&cyborg.Spec.PodSpec, []*ModelProjection{projection}, modelStoragePath); err != nil {
+	// Publish the model path before the Cyborg sidecar's authored environment.
+	if sidecar := common.FindContainerByName(cyborg.Spec.PodSpec.InitContainers, commonconsts.RuntimeContainerName); sidecar != nil {
+		if err := applyModelPaths(sidecar, []*ModelProjection{projection}, modelStoragePath); err != nil {
 			return err
 		}
 	}

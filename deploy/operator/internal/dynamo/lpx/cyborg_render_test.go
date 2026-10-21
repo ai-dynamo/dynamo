@@ -123,6 +123,11 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	}
 	decode.Spec.PodSpec.Containers[0].Env = authoredEnv
 
+	t.Log("Give the runtime sidecar no model-path reference or storage mount")
+	decode.Spec.PodSpec.InitContainers = []corev1.Container{{
+		Name: "runtime", Env: []corev1.EnvVar{{Name: "KEEP", Value: "unchanged"}},
+	}}
+
 	t.Log("Use independently provisioned Cyborg model storage at the shared runtime path")
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ClaimName = "cyborg-models"
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ReadOnly = true
@@ -146,6 +151,12 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	})
 	require.Equal(t, []string{"/custom-cyborg", "--wrapper-option"}, cyborg.Spec.PodSpec.Containers[0].Command)
 	require.Equal(t, []string{"argument with spaces", "literal $HOME", ""}, cyborg.Spec.PodSpec.Containers[0].Args)
+
+	t.Log("Publish the model path first even when the sidecar does not read it")
+	require.Equal(t, []corev1.EnvVar{
+		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
+		{Name: "KEEP", Value: "unchanged"},
+	}, cyborg.Spec.PodSpec.InitContainers[0].Env)
 
 	t.Log("Preserve an image-owned entrypoint")
 	imageEntrypointPCS := renderTestPCS(true)
