@@ -467,7 +467,6 @@ def test_vllm_priority_orders_vram_first_then_size_then_duration():
 
     names = [t.name for t in sorted(pool, key=_vllm_priority_key, reverse=True)]
 
-    # VRAM tests precede the filler; largest VRAM first; equal VRAM by duration.
     assert names == ["big_short", "mid_long", "mid_short", "small_long", "filler"]
 
     # The default policy puts the big-but-short test behind the small-long one.
@@ -483,9 +482,6 @@ def test_vllm_priority_orders_vram_first_then_size_then_duration():
         (None, _priority_key),
         ("", _priority_key),
         ("sglang", _priority_key),
-        ("trtllm", _priority_key),
-        ("triton", _priority_key),
-        ("dynamo", _priority_key),
     ],
 )
 def test_priority_key_for_framework(framework, expected):

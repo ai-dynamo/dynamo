@@ -350,11 +350,6 @@ def _vllm_priority_key(test: _TestEntry) -> tuple[bool, float, float]:
 def _priority_key_for(
     framework: str | None,
 ) -> Callable[[_TestEntry], tuple[bool, float, float]]:
-    """Return the sort key for ``DYNAMO_TEST_FRAMEWORK``.
-
-    ``vllm`` uses ``_vllm_priority_key``; every other value, and unset, keeps
-    the default ``_priority_key``.
-    """
     if (framework or "").strip().lower() == "vllm":
         return _vllm_priority_key
     return _priority_key
