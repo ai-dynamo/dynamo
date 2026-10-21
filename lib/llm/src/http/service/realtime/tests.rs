@@ -189,3 +189,38 @@ async fn client_close_and_shutdown_cancel_a_connecting_replacement() {
         assert!(engine.contexts.lock().iter().all(|ctx| ctx.is_stopped()));
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn blocked_socket_write_cannot_keep_a_disconnected_worker_running() {
+    let engine = Arc::new(FailingEngine::new(ErrorType::InvalidRequest, None));
+    let mut session = session(engine.clone(), 0);
+    session.journal = None;
+    let (tx, rx) = mpsc::channel(2);
+    let mut incoming = ReceiverStream::new(rx).map(Ok);
+    let writing = Notify::new();
+    let outgoing = futures::sink::unfold((), |(), _: Message| async {
+        writing.notify_one();
+        std::future::pending::<Result<(), axum::Error>>().await
+    });
+    tokio::pin!(outgoing);
+    let reason = Mutex::new(None);
+    let task = session.run(&mut incoming, &mut outgoing, &reason, configuration());
+    tokio::pin!(task);
+    tokio::select! {
+        _ = &mut task => panic!("session ended before writing"),
+        _ = writing.notified() => {},
+    }
+    tx.try_send(Message::Text(
+        json!({"type": "input_audio_buffer.append", "audio": "AAAA"})
+            .to_string()
+            .into(),
+    ))
+    .unwrap();
+    tx.try_send(Message::Close(None)).unwrap();
+    tokio::time::timeout(Duration::from_secs(6), task)
+        .await
+        .expect("blocked output must not retain a disconnected session")
+        .unwrap();
+    assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
+    assert!(engine.contexts.lock().iter().all(|ctx| ctx.is_stopped()));
+}

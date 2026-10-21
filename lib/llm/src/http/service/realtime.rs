@@ -59,6 +59,7 @@ mod tests;
 use journal::Journal;
 
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bound on the per-connection request queue. Picks backpressure over
 /// unbounded growth so a fast client cannot drive memory exhaustion against
@@ -348,14 +349,19 @@ impl RealtimeSession {
                         if !forward { continue; }
                     }
                     let payload = serde_json::to_string(&event)?;
-                    let writing = ws_tx.send(Message::Text(payload.into()));
+                    // Bounded input buffering can hide a Close behind a text frame
+                    // while output is blocked, so every write needs a deadline.
+                    let writing = tokio::time::timeout(
+                        SOCKET_WRITE_TIMEOUT,
+                        ws_tx.send(Message::Text(payload.into())),
+                    );
                     tokio::pin!(writing);
                     loop {
                         tokio::select! {
                             _ = cancel.cancelled() => return Ok(()),
                             _ = recovery_deadline(*deadline) => anyhow::bail!("realtime recovery timed out"),
                             result = &mut writing => {
-                                if result.is_err() { return Ok(()); }
+                                if !matches!(result, Ok(Ok(()))) { return Ok(()); }
                                 break;
                             }
                             msg = ws_rx.next(), if incoming.is_none() => {

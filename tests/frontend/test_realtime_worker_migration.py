@@ -316,3 +316,42 @@ async def disconnect_during_replay(deployment):
 
 def test_client_disconnect_stops_replacement(migration_frontend):
     asyncio.run(disconnect_during_replay(migration_frontend))
+
+
+async def application_error_then_valid_turn(deployment):
+    _, _, _, audit_dir = deployment
+    async with aiohttp.ClientSession() as client:
+        ws, active = await ready_session(client, deployment)
+        async with ws:
+            await append(ws, "partial")
+            partial = ""
+            while partial != "partial":
+                event = await _recv_json(ws, 5)
+                assert event["type"].endswith(".delta"), event
+                partial += event["delta"]
+            canceled_item = event["item_id"]
+            abort = audit_dir / f"{active}.abort_turn"
+            abort.touch()
+            await append(ws, "overflow")
+            error = await _recv_json(ws, 5)
+            assert error["type"] == "error", error
+            assert error["error"]["code"] == "invalid_audio", error
+            abort.unlink()
+            await append(ws, "next turn")
+            await ws.send_json({"type": "input_audio_buffer.commit"})
+            events = await finish_turns(ws, ["next turn"])
+            assert all(event["item_id"] != canceled_item for event in events)
+            assert len({event["item_id"] for event in events}) == 1
+            assert (
+                "".join(
+                    event["delta"]
+                    for event in events
+                    if event["type"].endswith(".delta")
+                )
+                == "next turn"
+            )
+
+
+@pytest.mark.parametrize("migration_frontend", [0, 1], indirect=True)
+def test_recoverable_audio_error_preserves_session(migration_frontend):
+    asyncio.run(application_error_then_valid_turn(migration_frontend))

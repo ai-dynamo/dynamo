@@ -232,6 +232,9 @@ impl Journal {
             }
             Error(_) => {
                 self.disable("worker application error");
+                // An ordered error can cancel replay before the replacement assigns an item ID.
+                self.turns
+                    .retain(|turn| turn.client_item.is_none() || turn.worker_item.is_some());
                 return Ok(true);
             }
             InputAudioBufferCleared(_) => {
@@ -265,6 +268,16 @@ impl Journal {
                 return Ok(true);
             }
         };
+        // A recoverable application error may abort a turn without a final event.
+        // Once replay is disabled, a new item retires that stale binding.
+        while self.session.is_none()
+            && self
+                .turns
+                .front()
+                .is_some_and(|turn| turn.worker_item.as_ref().is_some_and(|id| id != item_id))
+        {
+            self.turns.pop_front();
+        }
         let Some(turn) = self.turns.front_mut() else {
             if self.session.is_some() {
                 return Err("transcription output without an input turn");
@@ -623,6 +636,13 @@ mod tests {
             !journal.can_recover(),
             "commit exceeds the injected event limit"
         );
+        server(
+            &mut journal,
+            json!({"type": "error", "event_id": "invalid", "error": {
+                "type": "invalid_request_error", "message": "unsupported event"
+            }}),
+        )
+        .unwrap();
         assert_eq!(
             server(&mut journal, committed("new")).unwrap().unwrap()["item_id"],
             "old"
@@ -660,5 +680,55 @@ mod tests {
         record(&mut journal, json!({"type": "input_audio_buffer.commit"}));
         assert!(server(&mut journal, committed("early")).unwrap().is_some());
         assert!(journal.turns.is_empty());
+    }
+
+    #[test]
+    fn application_error_allows_a_new_turn_after_the_worker_cancels_an_open_turn() {
+        for stage in ["original", "replacement-unbound", "replacement-bound"] {
+            let mut journal = Journal::new(&configuration()).unwrap();
+            acknowledge(&mut journal);
+            record(
+                &mut journal,
+                json!({"type": "input_audio_buffer.append", "audio": "AAAA"}),
+            );
+            server(&mut journal, delta("original", "partial")).unwrap();
+            if stage != "original" {
+                journal.start_replay().unwrap();
+                acknowledge(&mut journal);
+                while journal.next_replay().is_some() {}
+            }
+            if stage == "replacement-bound" {
+                assert!(
+                    server(&mut journal, delta("replacement", "partial"))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            server(
+                &mut journal,
+                json!({"type": "error", "event_id": "invalid", "error": {
+                    "type": "invalid_request_error", "code": "invalid_audio",
+                    "message": "input audio exceeds 60 seconds"
+                }}),
+            )
+            .unwrap();
+            assert!(!journal.can_recover());
+            record(
+                &mut journal,
+                json!({"type": "input_audio_buffer.append", "audio": "AAAA"}),
+            );
+            record(&mut journal, json!({"type": "input_audio_buffer.commit"}));
+            for value in [
+                committed("fresh"),
+                delta("fresh", "next"),
+                completed("fresh", "next"),
+            ] {
+                let mut event: RealtimeServerEvent = serde_json::from_value(value).unwrap();
+                let expected = serde_json::to_value(&event).unwrap();
+                assert!(journal.reconcile(&mut event).unwrap());
+                assert_eq!(serde_json::to_value(event).unwrap(), expected);
+            }
+            assert!(journal.turns.is_empty());
+        }
     }
 }

@@ -83,6 +83,14 @@ async def main() -> None:
                     if (args.audit_dir / f"{args.worker_id}.hang_replay").exists():
                         await context.async_killed_or_stopped()
                         return
+                    if (args.audit_dir / f"{args.worker_id}.abort_turn").exists():
+                        connection.cancel_active_turn()
+                        connection.emit(
+                            invalid_request_error_event(
+                                "invalid_audio", "input audio exceeds 60 seconds"
+                            )
+                        )
+                        return
                     turn = await connection.ensure_turn(Turn)
                     turn.audio.put_nowait(event["audio"])
                 case "input_audio_buffer.commit":
