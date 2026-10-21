@@ -8902,10 +8902,8 @@ spec:
 
                           LPX components each require an agent role. A DGD may contain independent
                           LPX components, each with its own conductor role, or a shared draft and
-                          target pair with a conductor role only on the target. An independent
-                          LPU-only component may instead declare a restartable `runtime` init
-                          container in its agent template and omit the conductor role. Every LPX
-                          role requires its own podTemplate.
+                          target pair with a conductor role only on the target. Every LPX role
+                          requires its own podTemplate.
                         items:
                           description: |-
                             ComponentRoleSpec configures one named Pod-producing role inside a compound component.

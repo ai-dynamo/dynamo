@@ -37,7 +37,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -674,8 +673,6 @@ type componentRoleSpecValidationOptions struct {
 
 // validateComponentRoleSpec validates role. role and fldPath must not be nil;
 // options.component and optional role fields may be nil.
-//
-//nolint:gocyclo // Role validation reports the upstream, LPX, and LPX runtime sidecar contracts in one pass.
 func (v *sharedValidation) validateComponentRoleSpec(
 	role *nvidiacomv1beta1.ComponentRoleSpec,
 	fldPath *field.Path,
@@ -687,7 +684,6 @@ func (v *sharedValidation) validateComponentRoleSpec(
 	if role.PodTemplate != nil {
 		lpx := options.component != nil && options.component.IsLPX()
 		hostsEngine := lpx && role.Name == dynamolpx.RuntimeSidecarRole(options.component)
-		hasRuntimeSidecar := false
 		for i := range role.PodTemplate.Spec.InitContainers {
 			container := &role.PodTemplate.Spec.InitContainers[i]
 			if container.Name != consts.RuntimeContainerName {
@@ -704,55 +700,12 @@ func (v *sharedValidation) validateComponentRoleSpec(
 				allErrs = append(allErrs, field.Forbidden(runtimePath.Child("name"), detail))
 				continue
 			}
-			hasRuntimeSidecar = true
 			if k8sptr.Deref(container.RestartPolicy, "") != corev1.ContainerRestartPolicyAlways {
 				allErrs = append(allErrs, field.Invalid(
 					runtimePath.Child("restartPolicy"),
 					k8sptr.Deref(container.RestartPolicy, ""),
 					"must be Always for the LPX runtime init container",
 				))
-			}
-		}
-
-		// The runtime sidecar owns the system port, so main receives no generated port for its probes to name.
-		mainIndex := mainContainerIndex(role.PodTemplate.Spec.Containers)
-		if hasRuntimeSidecar && mainIndex >= 0 {
-			engine := &role.PodTemplate.Spec.Containers[mainIndex]
-			enginePath := fldPath.Child("podTemplate", "spec", "containers").Index(mainIndex)
-
-			// main must not claim the system port name or number the runtime declares.
-			for j, port := range engine.Ports {
-				switch {
-				case port.Name == consts.DynamoSystemPortName:
-					allErrs = append(allErrs, field.Invalid(enginePath.Child("ports").Index(j).Child("name"), port.Name,
-						"is reserved for the runtime init container in Dynamo sidecar mode"))
-				case port.ContainerPort == consts.DynamoSystemPort:
-					allErrs = append(allErrs, field.Invalid(enginePath.Child("ports").Index(j).Child("containerPort"), port.ContainerPort,
-						"is reserved for the runtime init container in Dynamo sidecar mode"))
-				}
-			}
-			for _, probe := range []struct {
-				name  string
-				probe *corev1.Probe
-			}{
-				{"startupProbe", engine.StartupProbe}, {"livenessProbe", engine.LivenessProbe}, {"readinessProbe", engine.ReadinessProbe},
-			} {
-				var portPath *field.Path
-				var port intstr.IntOrString
-				switch {
-				case probe.probe == nil:
-					continue
-				case probe.probe.HTTPGet != nil:
-					portPath, port = enginePath.Child(probe.name, "httpGet", "port"), probe.probe.HTTPGet.Port
-				case probe.probe.TCPSocket != nil:
-					portPath, port = enginePath.Child(probe.name, "tcpSocket", "port"), probe.probe.TCPSocket.Port
-				default:
-					continue
-				}
-				if port.Type == intstr.String && !slices.ContainsFunc(engine.Ports, func(declared corev1.ContainerPort) bool { return declared.Name == port.StrVal }) {
-					allErrs = append(allErrs, field.Invalid(portPath, port.StrVal,
-						"must name a port declared by the main container; in Dynamo sidecar mode the runtime init container owns the system port"))
-				}
 			}
 		}
 	}

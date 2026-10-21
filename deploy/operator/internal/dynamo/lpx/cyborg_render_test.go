@@ -123,11 +123,6 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	}
 	decode.Spec.PodSpec.Containers[0].Env = authoredEnv
 
-	t.Log("Give the runtime sidecar no model-path reference or storage mount")
-	decode.Spec.PodSpec.InitContainers = []corev1.Container{{
-		Name: "runtime", Env: []corev1.EnvVar{{Name: "KEEP", Value: "unchanged"}},
-	}}
-
 	t.Log("Use independently provisioned Cyborg model storage at the shared runtime path")
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ClaimName = "cyborg-models"
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ReadOnly = true
@@ -141,10 +136,11 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	cyborg := namedClique(t, rendered, "cond")
 
 	t.Log("Keep runtime environment opaque while supplying its manifest before authored references")
-	manifestEnv := corev1.EnvVar{
-		Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin",
+	modelEnv := []corev1.EnvVar{
+		{Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin"},
+		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
 	}
-	require.Equal(t, append([]corev1.EnvVar{manifestEnv}, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
+	require.Equal(t, append(modelEnv, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
 	require.Equal(t, &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cyborg-models", ReadOnly: true}, cyborg.Spec.PodSpec.Volumes[0].PersistentVolumeClaim)
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
 		Name: "model-storage", MountPath: "/models", SubPath: "cyborg", ReadOnly: true,
@@ -152,19 +148,13 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	require.Equal(t, []string{"/custom-cyborg", "--wrapper-option"}, cyborg.Spec.PodSpec.Containers[0].Command)
 	require.Equal(t, []string{"argument with spaces", "literal $HOME", ""}, cyborg.Spec.PodSpec.Containers[0].Args)
 
-	t.Log("Publish the model path first even when the sidecar does not read it")
-	require.Equal(t, []corev1.EnvVar{
-		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
-		{Name: "KEEP", Value: "unchanged"},
-	}, cyborg.Spec.PodSpec.InitContainers[0].Env)
-
 	t.Log("Preserve an image-owned entrypoint")
 	imageEntrypointPCS := renderTestPCS(true)
 	imageEntrypointCyborg := namedClique(t, imageEntrypointPCS, "cond")
 	imageEntrypointCyborg.Spec.Replicas = 4
 	imageEntrypointCyborg.Spec.MinAvailable = ptr.To[int32](4)
 	imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args = []string{"serve"}
-	imageEntrypointEnv := append([]corev1.EnvVar{manifestEnv}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env...)
+	imageEntrypointEnv := append(modelEnv, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env...)
 
 	t.Log("Leave the image ENTRYPOINT selected when command is omitted")
 	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}

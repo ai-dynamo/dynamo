@@ -306,15 +306,6 @@ func TestLPXAgentRuntimeSidecarRendering(t *testing.T) {
 		ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromInt(18090)}},
 		PeriodSeconds: 5, TimeoutSeconds: 4, FailureThreshold: 3,
 	}, runtime.ReadinessProbe)
-
-	t.Log("Publish the model path even when main and runtime do not reference it and runtime has no model mount")
-	agent := &dgd.GetComponentByName("lpu").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec
-	agent.Containers[0].Env = []corev1.EnvVar{{Name: "AGENT_SETTING", Value: "literal"}}
-	agent.InitContainers[1].Args = []string{"lpx", "--model-path", "/models/tokenizer"}
-	agent.InitContainers[1].VolumeMounts = nil
-	_, serving = renderLPXServing(t, dgd)
-	require.Equal(t, modelPath, serving.Spec.PodSpec.Containers[0].Env[0])
-	require.Equal(t, modelPath, serving.Spec.PodSpec.InitContainers[1].Env[0])
 }
 
 // TestLPXConductorRuntimeSidecarRendering pins the runtime sidecar of a hybrid

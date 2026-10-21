@@ -333,13 +333,24 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	t.Log("Preserve companion containers with the workload's model paths before authored references")
+	companions := conductorTemplate.Spec.DeepCopy()
+	for _, containers := range [][]corev1.Container{companions.Containers[1:], companions.InitContainers} {
+		for i := range containers {
+			containers[i].Env = append([]corev1.EnvVar{
+				{Name: "LPX_DRAFT_MODEL_PATH", Value: "/models/draft-build"},
+				{Name: "LPX_TARGET_MODEL_PATH", Value: "/models/target-build"},
+			}, containers[i].Env...)
+		}
+	}
+
 	t.Log("Preserve container identity and references while materializing distinct Pod roles")
 	for _, clique := range templates.Cliques {
 		spec := &clique.Spec.PodSpec
 		require.Equal(t, "main", spec.Containers[0].Name)
 		require.Equal(t, "main", testContainerEnvValue(spec.Containers[0].Env, "CONTAINER_NAME"))
-		require.Equal(t, conductorTemplate.Spec.Containers[1:], spec.Containers[1:])
-		require.Equal(t, conductorTemplate.Spec.InitContainers, spec.InitContainers)
+		require.Equal(t, companions.Containers[1:], spec.Containers[1:])
+		require.Equal(t, companions.InitContainers, spec.InitContainers)
 		require.Contains(t, spec.Volumes, conductorTemplate.Spec.Volumes[len(conductorTemplate.Spec.Volumes)-1])
 		require.Contains(t, []string{lpxv1alpha1.PodRoleAgent, lpxv1alpha1.PodRoleConductor}, clique.Annotations[lpxv1alpha1.PodRoleAnnotation])
 	}

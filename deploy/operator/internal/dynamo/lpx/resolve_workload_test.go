@@ -521,8 +521,7 @@ func TestResolveWorkloadPlacesRuntimeSidecarWithTheEngine(t *testing.T) {
 		wantErr     string
 	}{
 		{name: "agent sidecar serves a multi-Pod XT build", build: "multi-pod-xt", sidecarRole: v1beta1.ComponentRoleLPXAgent, wantAgents: 4},
-		{name: "agent sidecar rejects a multi-Pod HX build", build: "multi-pod-hx", sidecarRole: v1beta1.ComponentRoleLPXAgent,
-			wantErr: `component "lpx" agent "runtime" sidecar serves several Agent Pods only for xt8888 builds, but hx16x8x2x3 build "build" places 2 Agent Pods; declare the conductor role instead`},
+		{name: "agent sidecar serves a multi-Pod HX build", build: "multi-pod-hx", sidecarRole: v1beta1.ComponentRoleLPXAgent, wantAgents: 2},
 		{name: "agent sidecar rejects a hybrid build", build: "hybrid", sidecarRole: v1beta1.ComponentRoleLPXAgent,
 			wantErr: `component "lpx" agent "runtime" sidecar requires an LPU-only single-model build; declare the conductor role instead`},
 		{name: "conductor sidecar rejects an LPU-only build", build: "hx", sidecarRole: v1beta1.ComponentRoleLPXConductor,

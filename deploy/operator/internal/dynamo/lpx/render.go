@@ -11,8 +11,6 @@ import (
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -91,6 +89,23 @@ func RenderNodeLocal(
 	if err != nil {
 		return nil, err
 	}
+
+	// Publish model paths to every container before role-specific bindings are prepended.
+	containerLists := make([][]corev1.Container, 0, 2*(len(input.Stages)+2))
+	if conductorTemplate != nil {
+		containerLists = append(containerLists, conductorTemplate.Spec.Containers, conductorTemplate.Spec.InitContainers)
+	}
+	if hybrid {
+		containerLists = append(containerLists, cyborg.Spec.PodSpec.Containers, cyborg.Spec.PodSpec.InitContainers)
+	}
+	for _, template := range input.Stages {
+		containerLists = append(containerLists, template.Spec.Containers, template.Spec.InitContainers)
+	}
+	if err := applyModelPaths(containerLists, projections, modelStoragePath); err != nil {
+		return nil, err
+	}
+
+	// Share partition configuration across the workload's roles.
 	configMap, configHash, err := renderRuntimeConfigMap(plan.ResourcePrefix+"-lpu", resolvedPartitionData(projections))
 	if err != nil {
 		return nil, err
@@ -116,10 +131,6 @@ func RenderNodeLocal(
 	// Consume the independently rendered conductor without copying Agent startup or placement.
 	var conductor *grovev1alpha1.PodCliqueTemplateSpec
 	if conductorTemplateName != "" {
-		container := common.FindContainerByName(conductorTemplate.Spec.Containers, commonconsts.MainContainerName)
-		if err := applyModelPaths(container, projections, modelStoragePath); err != nil {
-			return nil, err
-		}
 		annotations := roleAnnotations(conductorTemplate.Annotations, lpxv1alpha1.PodRoleConductor, workloadDigest)
 		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
 		conductor = &grovev1alpha1.PodCliqueTemplateSpec{
@@ -151,7 +162,7 @@ func RenderNodeLocal(
 
 			// A component's projections share one partition selection. When it
 			// leaves no partition on LPUs, shape only the conductor; the unused
-			// Agent template is neither mutated nor validated.
+			// Agent template needs no placement or storage validation.
 			if agent.Replicas == 0 {
 				if conductorSpec != nil {
 					configureLPUConductorPod(conductorSpec, configMap.Name, allocation)
@@ -159,29 +170,14 @@ func RenderNodeLocal(
 				continue
 			}
 
-			// Publish the model path before template-owned hybrid Agent bindings.
-			if hybrid {
-				container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
-				if err := applyModelPaths(container, projections, modelStoragePath); err != nil {
-					return nil, fmt.Errorf("stage %s: %w", stage, err)
-				}
-			} else {
+			// Agent and conductor storage must agree on the published model paths.
+			if !hybrid {
 				storagePath, err := lpuModelStoragePath(template.Spec)
 				if err != nil {
 					return nil, fmt.Errorf("stage %s: %w", stage, err)
 				}
 				if storagePath != modelStoragePath {
 					return nil, fmt.Errorf("stage %s must use the Conductor model-storage mount path %q", stage, modelStoragePath)
-				}
-			}
-
-			// The serving Agent hosts the engine and its runtime sidecar in place of a conductor.
-			if sidecar := common.FindContainerByName(template.Spec.InitContainers, commonconsts.RuntimeContainerName); sidecar != nil {
-				main := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
-				for _, container := range []*corev1.Container{sidecar, main} {
-					if err := applyModelPaths(container, projections, modelStoragePath); err != nil {
-						return nil, fmt.Errorf("stage %s: %w", stage, err)
-					}
 				}
 			}
 

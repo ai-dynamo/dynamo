@@ -9,7 +9,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	k8sptr "k8s.io/utils/ptr"
 )
 
@@ -529,8 +528,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		},
 		// The Dynamo runtime sidecar runs on the role whose Pods host the engine:
 		// the conductor when the component declares one, otherwise the agent.
-		// The port and probe row below expects only port and probe errors,
-		// so it also proves that both hosting roles accept the sidecar.
 		{
 			name: "LPX rejects an agent runtime sidecar beside a conductor role",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -541,18 +538,13 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{"spec.components[0].roles[0].podTemplate.spec.initContainers[0].name: " + sidecarRoleErr},
 		},
 		{
-			name: "LPX admits an agent runtime sidecar without a conductor role, with its own availability and main's ports and probes",
+			name: "LPX admits an agent runtime sidecar without a conductor role, with its own availability",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.Roles = component.Roles[:1]
-				agent := &component.Roles[0].PodTemplate.Spec
-				agent.InitContainers = []corev1.Container{
+				component.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{
 					{Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways)},
 				}
-				agent.Containers[0].Ports = []corev1.ContainerPort{{Name: "status", ContainerPort: 9091}}
-				agent.Containers[0].ReadinessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromString("status")},
-				}}
 				component.MinAvailable = k8sptr.To(int32(1))
 				component.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":1}}`)
 			}),
@@ -588,44 +580,12 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{`spec.components[1].roles: Forbidden: a shared draft and target pair requires the target's conductor role; the agent "runtime" sidecar serves only a single model`},
 		},
 		{
-			name: "LPX conductor and agent Dynamo sidecars reserve the system port and require main probes to name main ports",
+			name: "LPX admits a conductor runtime sidecar",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				conductor := &dgd.Spec.Components[0].Roles[1].PodTemplate.Spec
-				conductor.InitContainers = []corev1.Container{{
+				dgd.Spec.Components[0].Roles[1].PodTemplate.Spec.InitContainers = []corev1.Container{{
 					Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
 				}}
-				conductor.Containers[0].Ports = []corev1.ContainerPort{
-					{Name: consts.DynamoSystemPortName, ContainerPort: 9091},
-					{Name: "readiness", ContainerPort: consts.DynamoSystemPort},
-				}
-				conductor.Containers[0].StartupProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString("metrics")},
-				}}
-				conductor.Containers[0].LivenessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
-					TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("metrics")},
-				}}
-				conductor.Containers[0].ReadinessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromString("readiness")},
-				}}
-
-				// Keep the same failures in an independent Agent-served workload.
-				agent := dgd.Spec.Components[0].DeepCopy()
-				agent.ComponentName = "agent"
-				agent.Roles = []nvidiacomv1beta1.ComponentRoleSpec{{
-					Name: nvidiacomv1beta1.ComponentRoleLPXAgent, PodTemplate: dgd.Spec.Components[0].Roles[1].PodTemplate.DeepCopy(),
-				}}
-				dgd.Spec.Components = append(dgd.Spec.Components, *agent)
 			}),
-			wantWebhookErrs: []string{
-				`spec.components[0].roles[1].podTemplate.spec.containers[0].ports[0].name: Invalid value: "system": is reserved for the runtime init container in Dynamo sidecar mode`,
-				`spec.components[0].roles[1].podTemplate.spec.containers[0].ports[1].containerPort: Invalid value: 9090: is reserved for the runtime init container in Dynamo sidecar mode`,
-				`spec.components[0].roles[1].podTemplate.spec.containers[0].startupProbe.httpGet.port: Invalid value: "metrics": must name a port declared by the main container; in Dynamo sidecar mode the runtime init container owns the system port`,
-				`spec.components[0].roles[1].podTemplate.spec.containers[0].livenessProbe.tcpSocket.port: Invalid value: "metrics": must name a port declared by the main container; in Dynamo sidecar mode the runtime init container owns the system port`,
-				`spec.components[1].roles[0].podTemplate.spec.containers[0].ports[0].name: Invalid value: "system": is reserved for the runtime init container in Dynamo sidecar mode`,
-				`spec.components[1].roles[0].podTemplate.spec.containers[0].ports[1].containerPort: Invalid value: 9090: is reserved for the runtime init container in Dynamo sidecar mode`,
-				`spec.components[1].roles[0].podTemplate.spec.containers[0].startupProbe.httpGet.port: Invalid value: "metrics": must name a port declared by the main container; in Dynamo sidecar mode the runtime init container owns the system port`,
-				`spec.components[1].roles[0].podTemplate.spec.containers[0].livenessProbe.tcpSocket.port: Invalid value: "metrics": must name a port declared by the main container; in Dynamo sidecar mode the runtime init container owns the system port`,
-			},
 		},
 		{
 			name: "physical LPU rejects Grove opt out",

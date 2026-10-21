@@ -48,13 +48,6 @@ func configureHybridCyborg(
 	applyLocalPartitionIDs(container, projection)
 	applyCyborgWeightsPath(container, projection, modelStoragePath)
 
-	// Publish the model path before the Cyborg sidecar's authored environment.
-	if sidecar := common.FindContainerByName(cyborg.Spec.PodSpec.InitContainers, commonconsts.RuntimeContainerName); sidecar != nil {
-		if err := applyModelPaths(sidecar, []*ModelProjection{projection}, modelStoragePath); err != nil {
-			return err
-		}
-	}
-
 	cyborg.Annotations = roleAnnotations(
 		cyborg.Annotations,
 		lpxv1alpha1.PodRoleCyborgWorker,
