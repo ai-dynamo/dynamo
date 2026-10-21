@@ -402,10 +402,55 @@ async fn overlapping_public_ids_have_independent_cancellation_contexts() {
         .await
         .unwrap()
         .unwrap();
-    assert_ne!(first.id(), second.id());
+    assert_eq!(first.id(), "same-public-id");
+    assert_eq!(second.id(), "same-public-id");
+    assert!(!Arc::ptr_eq(&first, &second));
     first.stop_generating();
     assert!(!second.is_stopped());
     second.stop_generating();
     a.abort();
     b.abort();
+}
+
+#[tokio::test]
+async fn format_request_id_reaches_the_runtime_context() {
+    struct IdentityEngine;
+    #[async_trait::async_trait]
+    impl AsyncEngine<Input, Output, Error> for IdentityEngine {
+        async fn generate(&self, request: Input) -> Result<Output, Error> {
+            assert_eq!(request.context().id(), "client-id");
+            let output = LLMEngineOutput {
+                token_ids: vec![7],
+                finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Length),
+                engine_data: Some(serde_json::json!({"sglang_response": {
+                    "output_ids": [7], "meta_info": {"id": "engine-private"}
+                }})),
+                ..Default::default()
+            };
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::iter([Annotated::from_data(output)])),
+                request.context(),
+            ))
+        }
+    }
+    for (format, body, header_id) in [
+        (
+            sglang(),
+            serde_json::json!({"input_ids": [1], "rid": "client-id"}),
+            "header-id",
+        ),
+        (
+            Arc::new(dynamo_vllm_generate::VllmFormat) as SharedFormat,
+            serde_json::json!({"token_ids": [1], "sampling_params": {}, "request_id": "body-id"}),
+            "client-id",
+        ),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", header_id.parse().unwrap());
+        let response = respond(state(), format, Arc::new(IdentityEngine), body, headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+    }
 }

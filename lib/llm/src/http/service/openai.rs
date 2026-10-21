@@ -1141,13 +1141,12 @@ where
 /// so without this every native generate request is classified as session-less.
 pub(super) fn preprocessed_context_from_headers(
     mut request: crate::preprocessor::PreprocessedRequest,
+    request_id: String,
     headers: &HeaderMap,
 ) -> Result<Context<crate::preprocessor::PreprocessedRequest>, ErrorResponse> {
     let agent_context = agent_context_from_headers(headers);
     request.agent_context = agent_context.clone();
-    // Public IDs may repeat concurrently; cancellation and retries need a private identity.
-    let context_id = uuid::Uuid::new_v4().to_string();
-    context_from_headers_with_agent_context(request, context_id, headers, agent_context, |_| None)
+    context_from_headers_with_agent_context(request, request_id, headers, agent_context, |_| None)
 }
 
 fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
@@ -6642,7 +6641,10 @@ mod tests {
         headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
         headers.insert("x-dynamo-parent-session-id", "parent-456".parse().unwrap());
         headers.insert("x-dynamo-session-final", "true".parse().unwrap());
-        let context = preprocessed_context_from_headers(request(), &headers).unwrap();
+        let context =
+            preprocessed_context_from_headers(request(), "request-123".into(), &headers).unwrap();
+
+        assert_eq!(context.id(), "request-123");
 
         // The router reads the request field; the context key must carry the same identity.
         let on_request = context
@@ -6668,7 +6670,10 @@ mod tests {
             "session affinity still keyed from the same headers"
         );
 
-        let context = preprocessed_context_from_headers(request(), &HeaderMap::new()).unwrap();
+        let context =
+            preprocessed_context_from_headers(request(), "request-456".into(), &HeaderMap::new())
+                .unwrap();
+        assert_eq!(context.id(), "request-456");
         assert!(context.content().agent_context.is_none());
     }
 

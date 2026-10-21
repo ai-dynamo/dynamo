@@ -215,6 +215,7 @@ pub struct RoutingData {
 }
 
 impl RequestTracker {
+    /// Apply metadata forwarded by a standalone router to this request's tracker.
     pub(crate) fn ingest_routing_data(&self, data: RoutingData) {
         if let Some(timing) = data.timing {
             self.set_external_timing(timing);

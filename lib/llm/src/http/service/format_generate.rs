@@ -350,7 +350,7 @@ async fn handler(
     request.tracker = Some(tracker.clone());
     let exchange: SharedExchange = Arc::new(Mutex::new(exchange));
     let context: Context<PreprocessedRequest> =
-        match preprocessed_context_from_headers(request, &headers) {
+        match preprocessed_context_from_headers(request, request_id.clone(), &headers) {
             Ok(context) => context,
             Err(response) => return adapt_openai_error(format, response),
         };
