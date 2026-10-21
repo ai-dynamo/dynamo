@@ -236,10 +236,14 @@ pub struct RemoveWorkerSender {
 }
 
 impl RemoveWorkerSender {
+    /// Wraps the indexer's FIFO mutation queue so removals share ordering with KV events.
     pub(crate) fn new(mutation_tx: mpsc::Sender<MutationRequest>) -> Self {
         Self { mutation_tx }
     }
 
+    /// Enqueues removal of every rank of `worker`, ordered after mutations already queued.
+    ///
+    /// Returns once the request is queued, not once it has been applied.
     pub async fn send(&self, worker: WorkerId) -> Result<(), mpsc::error::SendError<WorkerId>> {
         self.mutation_tx
             .send(MutationRequest::RemoveWorker { worker_id: worker })
@@ -250,10 +254,12 @@ impl RemoveWorkerSender {
             })
     }
 
+    /// Capacity of the shared mutation queue (events and removals combined).
     pub fn max_capacity(&self) -> usize {
         self.mutation_tx.max_capacity()
     }
 
+    /// Test helper: reserves `n` slots in the mutation queue to simulate backpressure.
     #[cfg(all(test, feature = "standalone-indexer"))]
     pub(crate) async fn reserve_many(
         &self,
@@ -263,6 +269,10 @@ impl RemoveWorkerSender {
     }
 }
 
+/// Applies one queued mutation (KV event or worker/rank removal) to the tree.
+///
+/// Every tree mutation flows through here in queue order, so removals can never
+/// overtake events enqueued before them.
 fn apply_mutation(
     trie: &mut RadixTree,
     approximate_lru_lane: &mut ApproximateLruLane,
@@ -301,6 +311,7 @@ fn apply_mutation(
     }
 }
 
+/// Applies every queued mutation and routing decision so a flush/dump sees the complete tail.
 fn drain_pending_mutations(
     trie: &mut RadixTree,
     approximate_lru_lane: &mut ApproximateLruLane,
@@ -1106,6 +1117,7 @@ mod fifo_reset_tests {
         assert_eq!(new_scores.scores.get(&worker), Some(&1));
     }
 
+    /// Removing one dp_rank must apply after already-queued stores and keep sibling ranks.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn remove_worker_dp_rank_does_not_overtake_queued_stores() {
         use crate::test_utils::make_store_event_with_dp_rank;
@@ -1157,6 +1169,7 @@ mod fifo_reset_tests {
         assert_eq!(sibling_lost, 0, "sibling dp_rank was removed");
     }
 
+    /// Removing a worker must apply after already-queued stores, so it cannot be resurrected.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn remove_worker_does_not_overtake_queued_stores() {
         use crate::test_utils::create_store_event;
