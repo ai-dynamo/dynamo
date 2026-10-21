@@ -338,8 +338,6 @@ impl From<OtlpTlsError> for opentelemetry_otlp::ExporterBuildError {
     }
 }
 
-/// Read a PEM file pointed at by a per-signal env var, falling back to the
-/// generic OTLP variable when the signal-specific one is unset.
 fn read_otlp_pem(
     signal_var: &'static str,
     generic_var: &'static str,
@@ -417,8 +415,6 @@ fn check_cert_key_match(
     Ok(())
 }
 
-/// Read OTEL_EXPORTER_OTLP_{SIGNAL}_{CERTIFICATE, CLIENT_CERTIFICATE, CLIENT_KEY}
-/// for one signal, defaulting each to the generic form when unset.
 fn otlp_tls_material_for(
     signal_ca_var: &'static str,
     signal_cert_var: &'static str,
@@ -462,7 +458,11 @@ fn build_tonic_tls_config(
     endpoint: &str,
     material: &OtlpTlsMaterial,
 ) -> Result<Option<tonic::transport::ClientTlsConfig>, OtlpTlsError> {
-    if !endpoint.starts_with("https://") {
+    // URI schemes are case-insensitive; "HTTPS://…" must also get TLS.
+    let is_https = endpoint
+        .get(..5)
+        .is_some_and(|s| s.eq_ignore_ascii_case("https"));
+    if !is_https {
         return Ok(None);
     }
     let mut config = tonic::transport::ClientTlsConfig::new().with_webpki_roots();
@@ -475,9 +475,6 @@ fn build_tonic_tls_config(
     Ok(Some(config))
 }
 
-/// Returns `None` when nothing needs to be overridden and the default client
-/// (rustls-tls with webpki roots) is sufficient.
-///
 /// The OTLP SDK's batch processors export on an SDK-owned thread with no
 /// Tokio reactor, so this builds a `reqwest::blocking::Client`, not async.
 /// Because the SDK does not enforce the exporter timeout around a supplied
@@ -3784,6 +3781,12 @@ pub mod tests {
             );
             assert!(
                 build_tonic_tls_config("https://collector:4317", &traces)
+                    .unwrap()
+                    .is_some()
+            );
+            // URI schemes are case-insensitive; HTTPS:// must also attach TLS.
+            assert!(
+                build_tonic_tls_config("HTTPS://collector:4317", &traces)
                     .unwrap()
                     .is_some()
             );
