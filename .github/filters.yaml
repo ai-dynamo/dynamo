@@ -172,6 +172,7 @@ core:
   - 'container/templates/args.Dockerfile'
   - 'container/templates/dynamo_*'
   - 'container/templates/wheel_builder.Dockerfile'
+  - 'container/templates/nixl_source.Dockerfile'
   - 'container/templates/compliance.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
