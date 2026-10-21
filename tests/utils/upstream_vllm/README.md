@@ -3,7 +3,8 @@
 
 # Discover upstream vLLM chat tests
 
-The suite discovers every pytest case under upstream
+The suite uses tests from the release tag matching the vLLM package installed in
+the Dynamo image, then discovers every pytest case under upstream
 `tests/entrypoints/openai/chat_completion/`, including parametrized cases.
 `allow_failures.json` controls only which known failures are tolerated; it never
 selects tests. Newly added tests run without a manifest change.
@@ -39,12 +40,14 @@ the original outcomes before the outer wrapper applies allowances.
 
 ## Run
 
-Use a Dynamo vLLM test image compatible with the pinned upstream tests and include
+Use tests from the same vLLM release as the Dynamo image and include
 the upstream examples used by fixtures. Exclude upstream `vllm/` from the Python
 path so the installed runtime remains authoritative.
 
 ```bash
-# Checkout vLLM at 817fa3518cd4bcc94b31e044c534c002e701c801 first.
+# In the Dynamo image, select the matching upstream release.
+version="$(python -c 'from importlib.metadata import version; print(version("vllm").split("+", 1)[0])')"
+git -C /path/to/pinned-vllm checkout "v${version}"
 git -C /path/to/pinned-vllm archive HEAD tests examples pyproject.toml | tar -x -C /path/to/tests-only
 uv venv --python "$(command -v python)" --system-site-packages /path/to/client-env
 uv pip install --python /path/to/client-env/bin/python --no-deps tblib==3.1.0 pytest-mock==3.15.1
@@ -55,7 +58,9 @@ python -m pytest tests/frontend/test_upstream_vllm.py -m upstream_vllm -v -rxX
 ```
 
 The manual `upstream-vllm-chat.yml` workflow reuses Dynamo's shared single-GPU
-job and retrieves the pinned tests at job time. Supply a full Dynamo SHA with
+job and retrieves the matching release's tests at job time. It records the resolved
+upstream commit and rejects development-version wheels without a release tag.
+Supply a full Dynamo SHA with
 an existing matching `vllm-runtime-test` image. Other lanes skip this suite when
 `VLLM_TESTS_DIR` is unset.
 
@@ -64,9 +69,9 @@ that image and hardware. The folder includes a 7B LoRA model, gated models and
 a 35B two-GPU case. Upstream hardware skips remain visible as failed coverage.
 Models follow upstream default revisions; the adapter caps each server's KV
 cache at 1 GiB and sequences at eight. Unsupported server options fail setup.
-The vLLM 0.28 validation runtime cannot collect the full pinned folder because
-several vLLM-internal imports have changed; its import guard only covers the
-shutdown helper used by the original small subset.
+Do not combine tests from a newer development commit with an older runtime:
+upstream tests also import vLLM internals. Earlier exploratory runs used that
+combination; their import errors are setup failures, not Dynamo incompatibilities.
 
 Chat tests elsewhere in `tests/entrypoints/openai/` and outside that directory
 remain candidates for later discovery expansion.
