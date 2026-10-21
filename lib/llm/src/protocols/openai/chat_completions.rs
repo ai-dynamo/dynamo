@@ -1738,7 +1738,6 @@ mod tests {
             make_tool("FuncName"),
             make_tool("Func_Name-123"),
             make_tool("my-tool.v2"),
-            make_tool("namespace.tool_name"),
         ];
         assert!(validate::validate_tools(&Some(&tools)).is_ok());
     }

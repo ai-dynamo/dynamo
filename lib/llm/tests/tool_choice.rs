@@ -1067,6 +1067,7 @@ async fn test_nemotron_deci_tool_choice_named_wrong_tool_filtered() {
 
 const HARMONY_GET_WEATHER: &str = "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"Paris\"}<|call|>";
 const HARMONY_SEARCH: &str = "<|channel|>commentary to=functions.search <|constrain|>json<|message|>{\"query\":\"Paris weather\"}<|call|>";
+const HARMONY_DOTTED: &str = "<|channel|>commentary to=functions.my-tool.v2 <|constrain|>json<|message|>{\"location\":\"Paris\"}<|call|>";
 
 #[tokio::test]
 async fn test_harmony_tool_choice_auto() {
@@ -1081,6 +1082,24 @@ async fn test_harmony_tool_choice_auto() {
     assert_eq!(calls[0].0, "get_weather");
     let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
     assert_eq!(args["location"], "Paris");
+}
+
+#[tokio::test]
+async fn test_harmony_tool_choice_auto_dotted_name() {
+    let responses = apply_jail_with_parser_and_choice(HARMONY_DOTTED, "harmony", None).await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
+}
+
+#[tokio::test]
+async fn test_harmony_tool_choice_named_dotted_name_passes() {
+    let responses =
+        apply_jail_with_parser_and_choice(HARMONY_DOTTED, "harmony", named_choice("my-tool.v2"))
+            .await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
 }
 
 #[tokio::test]
