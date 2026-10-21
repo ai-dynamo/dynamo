@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, TypeAlias
 
+from sglang.srt.entrypoints.openai.protocol import (
+    ChatCompletionRequest as SglangChatCompletionRequest,
+)
 from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
 from sglang.srt.entrypoints.openai.protocol import Tool as SglangTool
 from sglang.srt.entrypoints.openai.protocol import ToolChoice as SglangToolChoice
@@ -315,10 +318,28 @@ def create_parsers(
     )
     if reasoning_parser_name and (not guided_decoding_active or force_reasoning):
         reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
+        parser_request = None
+        if _continuation_template_kwargs(request).get("continue_final_message"):
+            messages = _materialize_messages((request.get("messages") or [])[-1:])
+            if messages and messages[0].get("role") == "assistant":
+                parser_request = SglangChatCompletionRequest(
+                    messages=[
+                        {
+                            "role": "assistant",
+                            "content": _flatten_message_content(
+                                messages[0].get("content")
+                            )
+                            or "",
+                        }
+                    ],
+                    add_generation_prompt=False,
+                    continue_final_message=True,
+                )
         reasoning_parser = ReasoningParser(
             model_type=reasoning_parser_name,
             stream_reasoning=True,
             force_reasoning=force_reasoning,
+            request=parser_request,
         )
 
     return tool_call_parser, reasoning_parser

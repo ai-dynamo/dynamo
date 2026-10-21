@@ -875,7 +875,9 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
                 self.tool_call_parser = tool_call_parser
 
         class FakeReasoningParser:
-            def __init__(self, *, model_type, stream_reasoning, force_reasoning):
+            def __init__(
+                self, *, model_type, stream_reasoning, force_reasoning, request=None
+            ):
                 self.model_type = model_type
                 self.stream_reasoning = stream_reasoning
                 self.force_reasoning = force_reasoning
@@ -1322,7 +1324,7 @@ def test_structured_response_generator_forwards_reasoning_gate(
 
 
 class _CapturingReasoningParser:
-    def __init__(self, *, model_type, stream_reasoning, force_reasoning):
+    def __init__(self, *, model_type, stream_reasoning, force_reasoning, request=None):
         self.model_type = model_type
         self.stream_reasoning = stream_reasoning
         self.force_reasoning = force_reasoning
@@ -4947,6 +4949,69 @@ class TestChatTemplateKwargsForwarding:
 
 
 class TestContinuationFlags:
+    @pytest.mark.core
+    @pytest.mark.timeout(60)
+    @pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
+    @pytest.mark.parametrize("reasoning_closed", [False, True])
+    @pytest.mark.parametrize(
+        "flag_location", ["top_level", "chat_template_kwargs", "chat_template_args"]
+    )
+    def test_continued_reasoning_state(
+        self, tokenizer, monkeypatch, use_pool, reasoning_closed, flag_location
+    ):
+        prefix = "<think>\nCount carefully."
+        if reasoning_closed:
+            prefix += "\n</think>\n\nOne, two,"
+        flags = {"add_generation_prompt": False, "continue_final_message": True}
+        request = {
+            "model": MODEL,
+            "messages": [
+                {"role": "user", "content": "Count to three."},
+                {"role": "assistant", "content": prefix},
+            ],
+            **(flags if flag_location == "top_level" else {flag_location: flags}),
+        }
+        engine = FakeRoutedEngine(
+            items=[
+                {"token_ids": [token], "finish_reason": None}
+                for token in tokenizer.encode(" three.", add_special_tokens=False)
+            ]
+            + [{"token_ids": [], "finish_reason": "length"}]
+        )
+        if use_pool:
+            for name, value in {
+                "_w_tokenizer": tokenizer,
+                "_w_tool_call_parser_name": None,
+                "_w_reasoning_parser_name": "qwen3",
+                "_w_exclude_tools_when_tool_choice_none": True,
+                "_w_template_force_reasoning": False,
+                "_w_default_thinking_mode": None,
+            }.items():
+                monkeypatch.setattr(sglang_processor_module, name, value)
+
+        with ThreadPoolExecutor(max_workers=1) if use_pool else nullcontext() as pool:
+            processor = SglangProcessor(
+                tokenizer, engine, None, "qwen3", None, preprocess_pool=pool
+            )
+
+            async def collect():
+                return [item async for item in processor.generator(request)]
+
+            output = asyncio.run(collect())
+
+        fields = {
+            field: "".join(
+                choice["delta"].get(field) or ""
+                for item in output
+                for choice in item.get("data", {}).get("choices", [])
+            )
+            for field in ("content", "reasoning_content")
+        }
+        assert fields == {
+            "content": " three." if reasoning_closed else "",
+            "reasoning_content": "" if reasoning_closed else " three.",
+        }
+
     @pytest.mark.parametrize(
         "flags, add_prompt, continue_final",
         [
