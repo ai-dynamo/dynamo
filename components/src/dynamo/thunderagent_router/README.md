@@ -11,7 +11,7 @@ requests. It wraps Dynamo's native KV router and adds a program-level scheduler
 with tool-boundary pause/resume, porting the scheduler from the ThunderAgent
 paper.
 
-**Conceptual docs live in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md)** — the scheduler model, tool-boundary pause/resume semantics, the utilization-driven control loop, and observability. This README contains the source build and the complete Harbor/Pi A/B walkthrough.
+**Conceptual docs live in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-python-router.md)** — the scheduler model, tool-boundary pause/resume semantics, the utilization-driven control loop, and observability. This README contains the source build and the complete Harbor/Pi A/B walkthrough.
 
 ## Install
 
@@ -255,7 +255,7 @@ ThunderAgent paper:
 
 ## References
 
-- Conceptual docs: [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md)
+- Conceptual docs: [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-python-router.md)
 - ThunderAgent paper: <https://arxiv.org/abs/2602.13692>
 - Upstream ThunderAgent reference: <https://github.com/HaoKang-Timmy/ThunderAgent>
 - Pi Dynamo provider: <https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin>

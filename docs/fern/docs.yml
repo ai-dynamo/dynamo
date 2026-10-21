@@ -3072,7 +3072,7 @@ redirects:
   - source: "/dynamo/dev/other-features/parsing"
     destination: "/dynamo/dev/knowledge-base/modular-components/frontend/tool-calling/tool-call-parsing"
   - source: "/dynamo/dev/other-features/parsing/:slug*"
-    destination: "/dynamo/dev/knowledge-base/modular-components/frontend/tool-calling/tool-call-parsing/:slug*"
+    destination: "/dynamo/dev/knowledge-base/modular-components/frontend/tool-calling/:slug*"
   - source: "/dynamo/dev/other-features/fastokens-tokenizer"
     destination: "/dynamo/dev/advanced-customizations/fastokens-tokenizer"
   - source: "/dynamo/dev/other-features/lo-ra-adapters"
