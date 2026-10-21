@@ -818,15 +818,15 @@ jobs:
       run_cpu_only_tests: true
       # Keep the fast CPU pool parallel and isolate deployment-level tests so a
       # slow startup cannot consume the whole pool's retry budget.
-      cpu_only_test_markers: pre_merge and vllm and gpu_0 and not e2e
+      cpu_only_test_markers: vllm and gpu_0 and not e2e
       run_cpu_e2e_tests: true
-      cpu_e2e_test_markers: pre_merge and vllm and gpu_0 and e2e
+      cpu_e2e_test_markers: vllm and gpu_0 and e2e
       # Keep the outer step budget above the test's 450s timeout so pytest can
       # finish teardown and upload diagnostics instead of being killed first.
       cpu_e2e_test_timeout_minutes: 15
       # Plain runtime images do not include sidecar binaries.
-      gpu_test_markers: pre_merge and vllm and gpu_1 and not sidecar
-      gpu_test_timeout_minutes: 45
+      gpu_test_markers: vllm and gpu_1 and not sidecar
+      gpu_test_timeout_minutes: 240
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
@@ -852,8 +852,30 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and vllm and gpu_2 and not sidecar
+      gpu_test_markers: vllm and gpu_2 and not h100 and not sidecar
       gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  vllm-h100-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
+      test_type: H100 Test
+      # 2x 80 GiB H100 lane; runs vllm single- and dual-GPU tests, incl. h100-only cases.
+      amd_runner: aws-dev-02-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: vllm and (gpu_1 or gpu_2) and not sidecar
+      gpu_test_timeout_minutes: 240
+      # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '80'
     secrets: inherit
 
   sglang-test:
@@ -871,14 +893,15 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and sglang and gpu_0
+      cpu_only_test_markers: sglang and gpu_0
       # Plain runtime images do not include sidecar binaries.
-      gpu_test_markers: pre_merge and sglang and gpu_1 and not sidecar
+      gpu_test_markers: sglang and gpu_1 and not h100 and not sidecar
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
+      gpu_test_timeout_minutes: 240
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -900,8 +923,30 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and sglang and gpu_2 and not sidecar
+      gpu_test_markers: sglang and gpu_2 and not h100 and not sidecar
       gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  sglang-h100-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
+      test_type: H100 Test
+      # 2x 80 GiB H100 lane; runs sglang single- and dual-GPU tests, incl. h100-only cases.
+      amd_runner: aws-dev-02-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: sglang and (gpu_1 or gpu_2) and not sidecar
+      gpu_test_timeout_minutes: 240
+      # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '80'
     secrets: inherit
 
   trtllm-test:
@@ -919,14 +964,15 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and trtllm and gpu_0
+      cpu_only_test_markers: trtllm and gpu_0
       # Plain runtime images do not include sidecar binaries.
-      gpu_test_markers: pre_merge and trtllm and gpu_1 and not sidecar
+      gpu_test_markers: trtllm and gpu_1 and not sidecar
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
+      gpu_test_timeout_minutes: 240
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -948,8 +994,30 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and trtllm and gpu_2
+      gpu_test_markers: trtllm and gpu_2 and not h100
       gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  trtllm-h100-test:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [changed-files, trtllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
+      test_type: H100 Test
+      # 2x 80 GiB H100 lane; runs trtllm single- and dual-GPU tests, incl. h100-only cases.
+      amd_runner: aws-dev-02-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: trtllm and (gpu_1 or gpu_2) and not sidecar
+      gpu_test_timeout_minutes: 240
+      # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '80'
     secrets: inherit
 
   triton-test:
