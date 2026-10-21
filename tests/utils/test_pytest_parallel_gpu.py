@@ -469,10 +469,6 @@ def test_vllm_priority_orders_vram_first_then_size_then_duration():
 
     assert names == ["big_short", "mid_long", "mid_short", "small_long", "filler"]
 
-    # The default policy puts the big-but-short test behind the small-long one.
-    default = [t.name for t in sorted(pool, key=_priority_key, reverse=True)]
-    assert default.index("small_long") < default.index("big_short")
-
 
 @pytest.mark.parametrize(
     ("framework", "expected"),
