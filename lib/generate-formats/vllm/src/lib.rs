@@ -404,6 +404,10 @@ fn preprocessed_from_generate(
         );
     }
     let mm_routing_info = mm_routing.map(|projection| projection.info);
+    let has_opaque_multimodal_input = request
+        .passthrough
+        .get("features")
+        .is_some_and(|features| !features.is_null());
     let cache_salt = request.cache_salt;
 
     PreprocessedRequest::builder()
@@ -413,6 +417,7 @@ fn preprocessed_from_generate(
         .sampling_options(sampling_options)
         .output_options(output_options)
         .mm_routing_info(mm_routing_info)
+        .has_opaque_multimodal_input(has_opaque_multimodal_input)
         .routing(Some(
             dynamo_llm::protocols::common::preprocessor::RoutingHints {
                 dp_rank: data_parallel_rank,

@@ -34,8 +34,9 @@ pub use config::{
     is_enabled, policy,
 };
 pub(crate) use integration::{
-    build_request_end_trace_state, finish_reason_metadata_handle, wrap_chat_request_end_stream,
-    wrap_completion_request_end_stream,
+    RequestEndTraceState, build_request_end_trace_state, finish_reason_metadata_handle,
+    wrap_chat_request_end_stream, wrap_completion_request_end_stream,
+    wrap_engine_output_request_end_stream,
 };
 pub(crate) use record::{emit_router_selection, publish_tool_record, validate_tool_record};
 pub(crate) use replay::replay_metrics;
