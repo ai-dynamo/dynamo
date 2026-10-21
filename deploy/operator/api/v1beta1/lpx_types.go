@@ -13,6 +13,61 @@ type LPXConfig struct {
 	// Omission means no deadline.
 	// +optional
 	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
+
+	// experimental groups opt-in LPX options whose API shape may change in
+	// breaking ways between v1beta1 releases.
+	// +optional
+	Experimental *LPXExperimentalSpec `json:"experimental,omitempty"`
+}
+
+// LPXExperimentalSpec groups experimental LPX options.
+type LPXExperimentalSpec struct {
+	// localPartitions selects partitions of a hybrid build that the Cyborg
+	// conductor runs on its own GPU. The operator schedules LPU Agents only for
+	// the remaining partitions, and schedules none when every partition is
+	// local. Omission runs every partition on LPUs.
+	// +optional
+	LocalPartitions *LPXLocalPartitions `json:"localPartitions,omitempty"`
+}
+
+// LocalPartitions returns the experimental local-partition selection, or nil
+// when none is set. The receiver may be nil.
+func (c *LPXConfig) LocalPartitions() *LPXLocalPartitions {
+	if c == nil || c.Experimental == nil {
+		return nil
+	}
+	return c.Experimental.LocalPartitions
+}
+
+// LPXLocalPartitionsMode selects how LPXLocalPartitions chooses partitions.
+// +kubebuilder:validation:Enum=All;IDs
+type LPXLocalPartitionsMode string
+
+const (
+	// LPXLocalPartitionsModeAll runs every partition on the Cyborg GPU.
+	LPXLocalPartitionsModeAll LPXLocalPartitionsMode = "All"
+	// LPXLocalPartitionsModeIDs runs the partitions listed in ids on the Cyborg GPU.
+	LPXLocalPartitionsModeIDs LPXLocalPartitionsMode = "IDs"
+)
+
+// LPXLocalPartitions selects the runtime partitions that run on the Cyborg GPU.
+// Partition IDs are the compiler partition IDs of the build's runtime
+// partitions. A selected prop-sync chain is identified by its first partition.
+// +kubebuilder:validation:XValidation:rule="self.mode == 'IDs' ? has(self.ids) : !has(self.ids)",message="ids is required when mode is IDs and forbidden otherwise"
+type LPXLocalPartitions struct {
+	// mode selects the partitions that run on the Cyborg GPU. `All` runs every
+	// partition; `IDs` runs the partitions listed in ids.
+	// +required
+	Mode LPXLocalPartitionsMode `json:"mode"`
+
+	// ids lists the compiler partition IDs that run on the Cyborg GPU.
+	// Required when mode is `IDs` and forbidden otherwise.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:Minimum=0
+	// +kubebuilder:validation:items:Maximum=4294967295
+	IDs []int64 `json:"ids,omitempty"`
 }
 
 // SchedulingSpec configures LPX scheduling attempts.

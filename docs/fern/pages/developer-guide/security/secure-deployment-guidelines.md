@@ -269,6 +269,30 @@ Apply standard Docker hardening: restrict container network access to the truste
 segment, set CPU/memory limits, avoid `--privileged`, drop unneeded capabilities,
 and run as a non-root user.
 
+## LPX Client Identity
+
+For every LPX DynamoGraphDeployment (DGD), the operator creates Secret
+`lpx-id-<DGD UID>` once. The DGD owns it, it is immutable, and the operator never
+rewrites it or adopts a Secret the DGD does not control. It holds:
+
+- `client.key` and `client.pem`: an Ed25519 key and a self-signed client certificate
+  (client authentication only, not a CA, valid for 10 years). Only the `main`
+  container of agent Pods mounts them, read-only at `/etc/lpx/identity`, together with
+  the optional platform CA from Secret `lpx-server-ca`. Agent Pods also publish the certificate in the annotation
+  `lpx.nvidia.com/client-cert`, so software on the LPU node can authenticate them.
+- `private.key` and `private.key.pub`: the DGD's own SSH key pair. It replaces the
+  cluster-wide MPI SSH Secret in the DGD's LPX Pods, so one DGD's key does not open
+  another DGD's Pods.
+
+Treat these Secrets as credentials: in workload namespaces, do not grant tenants
+Secret read, Pod exec or Pod update.
+
+The key is not rotated during the DGD's life. To rotate it, or after a suspected
+leak, delete and recreate the DGD; the new DGD gets a new UID and so a new Secret,
+key and certificate. Node-side software should accept the certificate only for the
+hardware the DGD currently holds, so a leaked key stops working when the DGD ends,
+whatever the certificate's validity period.
+
 ## Reporting a Vulnerability
 
 To report a potential security vulnerability in Dynamo, follow the process in

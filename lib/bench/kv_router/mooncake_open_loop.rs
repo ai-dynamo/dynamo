@@ -17,6 +17,7 @@ use dynamo_kv_router::protocols::{KvCacheEventData, RouterEvent};
 use serde::Serialize;
 use tokio::sync::{Notify, oneshot};
 
+pub use dynamo_bench::kv_router_common::issuer::parse_cpu_list;
 use dynamo_bench::kv_router_common::issuer::{contiguous_worker_issuer, pin_current_thread};
 
 use super::mooncake_shared::{MooncakeTraceTotals, PreparedMooncakeBenchmark, WorkerTraceEntry};
@@ -1604,32 +1605,6 @@ fn thread_cpu_time_ns() -> u64 {
         }
     }
     0
-}
-
-pub fn parse_cpu_list(value: &str) -> anyhow::Result<Vec<usize>> {
-    let mut cpus = Vec::new();
-    for part in value
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        let Some((start, end)) = part.split_once('-') else {
-            cpus.push(part.parse()?);
-            continue;
-        };
-        let start: usize = start.parse()?;
-        let end: usize = end.parse()?;
-        if start > end {
-            anyhow::bail!("invalid descending CPU range {part}");
-        }
-        cpus.extend(start..=end);
-    }
-    cpus.sort_unstable();
-    cpus.dedup();
-    if cpus.is_empty() {
-        anyhow::bail!("CPU list must not be empty");
-    }
-    Ok(cpus)
 }
 
 pub fn validate_cpu_partition(

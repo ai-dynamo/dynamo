@@ -10,7 +10,9 @@ use super::{
     MaterializedSelectionInput, WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
 
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult};
+use crate::protocols::{
+    SelectionTrace, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerSelectionResult,
+};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
@@ -19,6 +21,10 @@ use crate::plugins::worker_selection::{
     CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCandidate,
     WorkerCandidates, WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
     WorkerSelectionContext,
+};
+use crate::plugins::worker_selection::{
+    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyState,
+    RuntimePolicyUpdate,
 };
 
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
@@ -57,6 +63,7 @@ pub struct WorkerSelectionPolicy {
     worker_label: &'static str,
     state: WorkerSelectionPolicyState,
     exclusive_affinity: bool,
+    runtime: Option<Box<RuntimePolicyState>>,
 }
 
 impl WorkerSelectionPolicy {
@@ -107,6 +114,7 @@ impl WorkerSelectionPolicy {
         Self {
             worker_label,
             exclusive_affinity: false,
+            runtime: None,
             state: WorkerSelectionPolicyState::Composed(RefCell::new(ComposedPolicyState {
                 filters,
                 scorers,
@@ -130,6 +138,68 @@ impl WorkerSelectionPolicy {
         self
     }
 
+    /// Opt in to runtime parameter updates with a pure replacement builder.
+    /// The initial parameters define the patchable keys and reset values. Replacements must
+    /// require no new worker-input groups and preserve affinity behavior; queue and tracking state are retained.
+    pub fn with_runtime_config(
+        mut self,
+        parameters: serde_json::Map<String, serde_json::Value>,
+        builder: RuntimePolicyBuilder,
+    ) -> Self {
+        self.runtime = Some(Box::new(RuntimePolicyState::new(
+            parameters,
+            builder,
+            self.input_requirements(),
+        )));
+        self
+    }
+
+    /// Return the current complete parameters for this policy instance.
+    pub fn runtime_config(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        self.runtime
+            .as_deref()
+            .map(RuntimePolicyState::config)
+            .ok_or(RuntimePolicyError::Unsupported)
+    }
+
+    /// Validate and replace the policy. Hosts must serialize this with selection.
+    pub fn update_runtime_config(
+        &mut self,
+        update: RuntimePolicyUpdate,
+    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or(RuntimePolicyError::Unsupported)?;
+        let (mut replacement, state) = runtime.prepare(update)?;
+        // Hosts freeze these requirements when constructing their routing pipeline.
+        if !runtime
+            .available_inputs
+            .contains(replacement.input_requirements())
+            || self.exclusive_affinity != replacement.exclusive_affinity
+            || self.worker_label != replacement.worker_label
+        {
+            return Err(RuntimePolicyError::InvalidParameters(
+                "replacement changes routing requirements".into(),
+            ));
+        }
+        let response = state.config();
+        replacement.runtime = Some(Box::new(state));
+        *self = replacement;
+        Ok(response)
+    }
+
+    fn input_requirements(&self) -> WorkerInputs {
+        match &self.state {
+            #[cfg(any(test, feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(..) => WorkerInputs::CACHE | WorkerInputs::LOAD,
+            WorkerSelectionPolicyState::Composed(state) => {
+                let state = state.borrow();
+                state.filter_inputs | state.scorer_picker_inputs
+            }
+        }
+    }
+
     /// Construct the native reference implementation for parity tests and benchmarks.
     ///
     /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
@@ -140,6 +210,7 @@ impl WorkerSelectionPolicy {
         Self {
             worker_label,
             exclusive_affinity: false,
+            runtime: None,
             state: WorkerSelectionPolicyState::Reference(Box::new(kv_router_config), picker),
         }
     }
@@ -262,6 +333,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
                 preferred_taint_multiplier,
                 state.scorer_picker_inputs,
             );
+            input.track_kept_candidate(worker);
             state.push_candidate(candidate);
             false
         });
@@ -317,6 +389,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             additional_inputs,
         );
         let candidate = filter_candidate.with_inputs_from(&additional, state.scorer_picker_inputs);
+        input.track_kept_candidate(worker);
         state.push_candidate(candidate);
         false
     });
@@ -328,6 +401,16 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
+    fn runtime_config(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        self.runtime_config()
+    }
+
+    fn update_runtime_config(
+        &mut self,
+        update: RuntimePolicyUpdate,
+    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        self.update_runtime_config(update)
+    }
     fn uses_exclusive_affinity_target(&self) -> bool {
         #[cfg(any(test, feature = "bench"))]
         if matches!(&self.state, WorkerSelectionPolicyState::Reference(..)) {
@@ -337,14 +420,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     }
 
     fn required_worker_inputs(&self) -> WorkerInputs {
-        match &self.state {
-            #[cfg(any(test, feature = "bench"))]
-            WorkerSelectionPolicyState::Reference(..) => WorkerInputs::CACHE | WorkerInputs::LOAD,
-            WorkerSelectionPolicyState::Composed(state) => {
-                let state = state.borrow();
-                state.filter_inputs | state.scorer_picker_inputs
-            }
-        }
+        self.input_requirements()
     }
 
     #[inline(always)]
@@ -352,6 +428,15 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
         &self,
         input: WorkerSelectionInput<'_, C>,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        self.select_worker_traced(input, None)
+            .map(|(result, _)| result)
+    }
+
+    fn select_worker_traced(
+        &self,
+        input: WorkerSelectionInput<'_, C>,
+        trace: Option<SelectionTraceSpec>,
+    ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
         let (workers, request, eligibility, block_size) = input.into_configured()?;
         let state = match &self.state {
             #[cfg(any(test, feature = "bench"))]
@@ -369,6 +454,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
             request,
             eligibility,
             block_size,
+            trace,
         )
     }
 }
@@ -452,6 +538,131 @@ mod tests {
             actual.potential_decode_blocks,
             expected.potential_decode_blocks
         );
+    }
+
+    #[test]
+    fn custom_picker_counts_tracked_blocks_without_worker_projection() {
+        struct LoadPicker;
+
+        impl WorkerPicker for LoadPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::LOAD
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                let load = &input.load().expect("requested load inputs")[0];
+                assert!(!load.is_available());
+                assert_eq!(load.decode_cost_blocks(), 2.0);
+                assert_eq!(load.active_prefill_tokens(), 0);
+                assert_eq!(load.active_requests(), 0);
+                Ok(0)
+            }
+        }
+
+        let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
+        let mut request = base_request(33);
+        request.token_seq = Some(vec![0, 1]);
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            Vec::new(),
+            Box::new(LoadPicker),
+        );
+
+        policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn selection_trace_is_captured_only_when_requested() {
+        struct DecodeLoadScorer;
+
+        impl WorkerScorer for DecodeLoadScorer {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::LOAD
+            }
+
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for (candidate, cost) in candidates.iter().zip(costs) {
+                    *cost = candidate.load().unwrap().decode_cost_blocks();
+                }
+                Ok(())
+            }
+        }
+
+        /// Picks the costliest candidate so the selected row falls outside the top-k.
+        struct HighestCostPicker;
+
+        impl WorkerPicker for HighestCostPicker {
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(input
+                    .candidates()
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.cost().total_cmp(&b.1.cost()))
+                    .map(|(row, _)| row)
+                    .unwrap())
+            }
+        }
+
+        let workers: HashMap<_, _> = (0..8u64)
+            .map(|id| (id, TaintedWorkerConfig::default()))
+            .collect();
+        let mut request = base_request(16);
+        request.worker_loads = worker_loads_with_active_decode(FxHashMap::from_iter(
+            (0..8u64).map(|id| (WorkerWithDpRank::from_worker_id(id), id as usize)),
+        ));
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            vec![Box::new(DecodeLoadScorer)],
+            Box::new(HighestCostPicker),
+        );
+
+        let input =
+            || WorkerSelectionInput::configured(&workers, &request, request.eligibility(), 16);
+        let (untraced, no_trace) = policy.select_worker_traced(input(), None).unwrap();
+        assert_eq!(untraced.worker.worker_id, 7);
+        assert!(no_trace.is_none());
+
+        let (traced, trace) = policy
+            .select_worker_traced(
+                input(),
+                Some(crate::protocols::SelectionTraceSpec { top_k: 3 }),
+            )
+            .unwrap();
+        assert_eq!(traced.worker.worker_id, 7);
+        let trace = trace.expect("trace requested");
+        assert_eq!(trace.candidate_count, 8);
+        assert!(!trace.pinned);
+        let mut rows = trace.rows.clone();
+        rows.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+        let ids: Vec<u64> = rows.iter().map(|row| row.worker.worker_id).collect();
+        assert_eq!(
+            ids,
+            vec![0, 1, 2, 7],
+            "three cheapest plus the selected worker"
+        );
+        assert_eq!(rows[3].cost, 7.0);
     }
 
     #[test]
@@ -893,6 +1104,71 @@ mod tests {
             )),
             Err(KvSchedulerError::AllEligibleWorkersFiltered)
         ));
+    }
+
+    #[test]
+    fn best_eligible_cache_reuse_skips_filtered_workers() {
+        struct RejectWorker(WorkerWithDpRank);
+        impl WorkerFilter for RejectWorker {
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: WorkerCandidate<'_>,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                Ok(candidate.worker() != self.0)
+            }
+        }
+
+        struct ZeroScorer;
+        impl WorkerScorer for ZeroScorer {
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                _candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                costs.fill(0.0);
+                Ok(())
+            }
+        }
+
+        let rejected = WorkerWithDpRank::from_worker_id(0);
+        let kept = WorkerWithDpRank::from_worker_id(1);
+        let workers = HashMap::from([
+            (0, TaintedWorkerConfig::default()),
+            (1, TaintedWorkerConfig::default()),
+        ]);
+        let mut request = base_request(128);
+        request.mode = crate::scheduling::ScheduleMode::Tracked {
+            request_id: "test".into(),
+        };
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(rejected, 6);
+        request.overlap.tier_overlap_blocks.device.insert(kept, 1);
+        let policy = WorkerSelectionPolicy::new_with_filters(
+            KvRouterConfig::default(),
+            "test",
+            vec![Box::new(RejectWorker(rejected))],
+            vec![Box::new(ZeroScorer)],
+            Box::new(FirstPicker),
+        );
+
+        let selected = policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+
+        assert_eq!(selected.worker, kept);
+        // The rejected worker's 96 cached tokens must not count as available reuse.
+        assert_eq!(selected.max_raw_cached_tokens, Some(16));
+        assert_eq!(selected.selected_raw_cached_tokens, Some(16));
     }
 
     #[test]

@@ -16,7 +16,7 @@ pytest.importorskip(
 
 import dynamo.planner.offline.replay_adapter as replay_adapter_module
 import dynamo.replay.planner as replay_planner
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -75,7 +75,9 @@ def test_planner_replay_passes_configured_dynamo_warmup_observations(
     )
 
     result = replay_planner.prepare_planner_replay(
-        extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
+        extra_engine_args=normalize_mocker_config(
+            {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
+        ),
         prefill_engine_args=None,
         decode_engine_args=None,
         planner_config_arg=json.dumps(

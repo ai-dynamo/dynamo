@@ -18,12 +18,15 @@
 package validation_test
 
 import (
+	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -62,6 +65,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		wantImage          string
 		wantSchemaErr      string
 		wantCELErr         string
+		wantStatusErr      string
 		wantWebhook        []string
 		wantWarnings       []string
 	}{
@@ -73,7 +77,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				request.Spec.RuntimeVersionOverride = ""
 			}),
 			gpuDiscovery: true,
-			wantImage:    "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0",
+			wantImage:    "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.6.0",
 		},
 		{
 			name: "custom image requires runtime version override",
@@ -99,12 +103,36 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 		},
 		{
-			name: "v1beta1 empty model is rejected by source schema",
+			name:    "v1beta2 create bypasses legacy v1beta1 validation",
+			request: beta2DGDRForAdmission(nil),
+		},
+		{
+			name:       "v1beta2 update bypasses legacy v1beta1 validation",
+			oldRequest: beta2DGDRForAdmission(nil),
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name: "v1beta1 empty native representation is rejected by envelope validation",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Model = ""
 			}),
-			gpuDiscovery:  true,
-			wantSchemaErr: `spec.model: Invalid value: "": spec.model in body should be at least 1 chars long`,
+			gpuDiscovery: true,
+			wantCELErr:   `spec: Invalid value: exactly one of native v1beta1 fields or v1beta2 must be specified`,
+		},
+		{
+			name: "v1beta2 envelope rejects runtime version override",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec = nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					RuntimeVersionOverride: "1.1.0",
+					V1Beta2: &apiextensionsv1.JSON{
+						Raw: []byte(`{"model":{"name":"Qwen/Qwen3-0.6B"}}`),
+					},
+				}
+			}),
+			gpuDiscovery: true,
+			wantCELErr:   `spec: Invalid value: v1beta2 is mutually exclusive with native v1beta1 fields`,
 		},
 		{
 			name: "v1beta1 SLA optimization enum is rejected by source schema",
@@ -168,6 +196,18 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "Vera Rubin NVL72 hardware is admitted",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeVRNVL72}
+			}),
+		},
+		{
+			name: "canonical GB200 hardware is admitted",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeGB200}
+			}),
+		},
+		{
 			name: "independent create failures aggregate in API declaration order",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Backend = nvidiacomv1beta1.BackendTypeAuto
@@ -180,6 +220,17 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		},
 
 		// Compatibility warnings.
+		{
+			name: "deprecated GB200 SXM SKU warns",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				//nolint:staticcheck // SA1019: Exercise admission of the deprecated API value.
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeGB200SXM}
+			}),
+			gpuDiscovery: true,
+			wantWarnings: []string{
+				`spec.hardware.gpuSku: "gb200_sxm" is deprecated; use "gb200". The legacy value will be removed in a future release`,
+			},
+		},
 		{
 			name: "deprecated v1beta1 DGD override component names warn",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
@@ -493,9 +544,11 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				seedWithoutWebhook: tt.seedWithoutWebhook,
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
+				wantStatusError:    tt.wantStatusErr,
 				wantWebhookErrors:  tt.wantWebhook,
 				wantWarnings:       tt.wantWarnings,
 			}
+
 			if tt.oldRequest != nil && !tt.gpuDiscovery {
 				seedGates := gates
 				seedGates.GPUDiscovery = true
@@ -512,6 +565,135 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDynamoGraphDeploymentRequestStatusRepresentationMatchesSpec(t *testing.T) {
+	tests := []struct {
+		name         string
+		createObject runtime.Object
+		statusObject runtime.Object
+		status       map[string]any
+	}{
+		{
+			name:         "v1alpha1 native spec rejects v1beta2 status",
+			createObject: alphaDGDRForAdmission(nil),
+			statusObject: alphaDGDRForAdmission(nil),
+			status:       map[string]any{"v1beta2": map[string]any{"observedGeneration": int64(1)}},
+		},
+		{
+			name:         "v1alpha1 v1beta2 spec rejects native status",
+			createObject: beta2DGDRForAdmission(nil),
+			statusObject: alphaDGDRForAdmission(nil),
+			status:       map[string]any{"state": string(nvidiacomv1alpha1.DGDRStatePending)},
+		},
+		{
+			name:         "v1beta1 native spec rejects v1beta2 status",
+			createObject: betaDGDRForAdmission(nil),
+			statusObject: betaDGDRForAdmission(nil),
+			status:       map[string]any{"v1beta2": map[string]any{"observedGeneration": int64(1)}},
+		},
+		{
+			name:         "v1beta1 v1beta2 spec rejects native status",
+			createObject: beta2DGDRForAdmission(nil),
+			statusObject: betaDGDRForAdmission(nil),
+			status:       map[string]any{"phase": string(nvidiacomv1beta1.DGDRPhasePending)},
+		},
+		{
+			name:         "v1beta2 native spec rejects v1beta1 status",
+			createObject: beta2DGDRForAdmission(nil),
+			statusObject: beta2DGDRForAdmission(nil),
+			status:       map[string]any{"v1beta1": map[string]any{"phase": string(nvidiacomv1beta1.DGDRPhasePending)}},
+		},
+		{
+			name:         "v1beta2 v1beta1 spec rejects native status",
+			createObject: betaDGDRForAdmission(nil),
+			statusObject: beta2DGDRForAdmission(nil),
+			status:       map[string]any{"observedGeneration": int64(1)},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Create a request through the production API and conversion path")
+			env := admissionEnv.ForTest(t)
+			admissionGate.set(features.Gates{GPUDiscovery: true})
+			warnings := &warningRecorder{}
+			createClient := newAdmissionResourceClient(t, env, test.createObject, "", warnings)
+			object, _ := admissionObject(t, test.createObject, env.Namespace(), nil)
+			created, err := createClient.Create(t.Context(), object, metav1.CreateOptions{})
+			if err != nil {
+				t.Fatalf("create request: %v", err)
+			}
+
+			t.Log("Read the request through the API version used for the status update")
+			statusClient := newAdmissionResourceClient(t, env, test.statusObject, "", warnings)
+			converted, err := statusClient.Get(t.Context(), created.GetName(), metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("get request for status update: %v", err)
+			}
+
+			t.Log("Replace status with the representation opposite to spec")
+			if err := unstructured.SetNestedMap(converted.Object, test.status, "status"); err != nil {
+				t.Fatalf("set mismatched status: %v", err)
+			}
+			_, err = statusClient.UpdateStatus(t.Context(), converted, metav1.UpdateOptions{})
+			if err == nil || !strings.Contains(err.Error(), "nonempty status must use the representation selected by spec") {
+				t.Fatalf("status update error = %v, want representation mismatch", err)
+			}
+		})
+	}
+}
+
+func TestDynamoGraphDeploymentRequestV1Beta2EmptyStatusSurvivesV1Alpha1(t *testing.T) {
+	t.Log("Create a native v1beta2 request with empty status")
+	env := admissionEnv.ForTest(t)
+	admissionGate.set(features.Gates{GPUDiscovery: true})
+	warnings := &warningRecorder{}
+	beta2Fixture := beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+		request.Name = "empty-status-alpha-bridge"
+	})
+	beta2Client := newAdmissionResourceClient(t, env, beta2Fixture, "", warnings)
+	object, _ := admissionObject(t, beta2Fixture, env.Namespace(), nil)
+	created, err := beta2Client.Create(t.Context(), object, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create v1beta2 request: %v", err)
+	}
+
+	t.Log("Read and write the empty status through v1alpha1")
+	alphaClient := newAdmissionResourceClient(t, env, alphaDGDRForAdmission(nil), "", warnings)
+	alpha, err := alphaClient.Get(t.Context(), created.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get request as v1alpha1: %v", err)
+	}
+	assertEmptyDGDRStatus(t, alpha)
+	alpha, err = alphaClient.UpdateStatus(t.Context(), alpha, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("write empty v1alpha1 status: %v", err)
+	}
+
+	t.Log("Read the request as v1beta2 and prove native status can still be written")
+	converted, err := beta2Client.Get(t.Context(), alpha.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get request as v1beta2: %v", err)
+	}
+	assertEmptyDGDRStatus(t, converted)
+	if err := unstructured.SetNestedField(converted.Object, int64(1), "status", "observedGeneration"); err != nil {
+		t.Fatalf("set native v1beta2 status: %v", err)
+	}
+	if _, err := beta2Client.UpdateStatus(t.Context(), converted, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("write native v1beta2 status after v1alpha1 round-trip: %v", err)
+	}
+}
+
+func assertEmptyDGDRStatus(t *testing.T, object *unstructured.Unstructured) {
+	t.Helper()
+	status, found, err := unstructured.NestedMap(object.Object, "status")
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if found && len(status) != 0 {
+		t.Fatalf("status = %v, want empty", status)
 	}
 }
 
@@ -551,8 +733,29 @@ func alphaDGDRForAdmission(
 			Model:                  "Qwen/Qwen3-0.6B",
 			Backend:                "vllm",
 			RuntimeVersionOverride: "1.1.0",
-			ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+			ProfilingConfig: &nvidiacomv1alpha1.ProfilingConfigSpec{
 				ProfilerImage: "profiler:latest",
+			},
+		},
+	}
+	if mutate != nil {
+		mutate(request)
+	}
+	return request
+}
+
+func beta2DGDRForAdmission(
+	mutate func(*nvidiacomv1beta2.DynamoGraphDeploymentRequest),
+) *nvidiacomv1beta2.DynamoGraphDeploymentRequest {
+	request := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: nvidiacomv1beta2.GroupVersion.String(),
+			Kind:       "DynamoGraphDeploymentRequest",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
+			NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
+				Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"},
 			},
 		},
 	}

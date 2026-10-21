@@ -20,6 +20,7 @@ package v1alpha1
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +149,39 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 	}
 	got := roundTripFromV1beta1(t, src)
 	if diff := cmp.Diff(src, got); diff != "" {
+		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGD_RoundTrip_RolePodTemplates(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "roles", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				Roles: []v1beta1.ComponentRoleSpec{
+					{
+						Name: v1beta1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main", Image: "leader:1.5.0",
+						}}}},
+					},
+					{
+						Name: v1beta1.ComponentRoleWorker,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main", Image: "worker:1.5.0",
+						}}}},
+					},
+				},
+			}},
+		},
+	}
+
+	got := roundTripFromV1beta1(t, src)
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -964,15 +998,18 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 			},
 			Components: map[string]v1beta1.ComponentReplicaStatus{
 				"worker": {
-					ComponentKind:     v1beta1.ComponentKindDeployment,
-					ComponentNames:    []string{"dgd-worker-0", "dgd-worker-1"},
-					RuntimeNamespace:  "ns-status-worker-abc123",
-					GPUsPerEngine:     ptr.To(int64(2)),
-					GPUsPerReplica:    ptr.To(int64(3)),
-					Replicas:          2,
-					UpdatedReplicas:   2,
-					ReadyReplicas:     ptr.To(int32(2)),
-					AvailableReplicas: ptr.To(int32(2)),
+					ComponentKind:        v1beta1.ComponentKindDeployment,
+					ComponentNames:       []string{"dgd-worker-0", "dgd-worker-1"},
+					RuntimeNamespace:     "ns-status-worker-abc123",
+					ServedModelName:      "Qwen/Qwen3-8B",
+					RuntimeComponentName: "custom-worker",
+					GPUPowerLimitWatts:   ptr.To(int64(300)),
+					GPUsPerEngine:        ptr.To(int64(2)),
+					GPUsPerReplica:       ptr.To(int64(3)),
+					Replicas:             2,
+					UpdatedReplicas:      2,
+					ReadyReplicas:        ptr.To(int32(2)),
+					AvailableReplicas:    ptr.To(int32(2)),
 				},
 			},
 			Restart: &v1beta1.RestartStatus{
@@ -1390,6 +1427,202 @@ func TestDGD_FromV1alpha1_EnvFromSecretRoundTrip(t *testing.T) {
 	got := roundTripFromV1alpha1(t, src)
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// envFromSecretRef constructs the native source for a dedicated alpha Secret.
+func envFromSecretRef(name string) corev1.EnvFromSource {
+	return corev1.EnvFromSource{SecretRef: &corev1.SecretEnvSource{
+		LocalObjectReference: corev1.LocalObjectReference{Name: name},
+	}}
+}
+
+// The v1alpha1 controller rendered extraPodSpec.mainContainer.envFrom first and
+// then appended envFromSecret, so the v1beta1 main container keeps that order,
+// duplicates included, because the last source wins for a repeated key.
+func TestDGD_FromV1alpha1_EnvFromSecretWithMainContainerEnvFrom(t *testing.T) {
+	tests := []struct {
+		name        string
+		mainEnvFrom []corev1.EnvFromSource
+		wantBeta    []corev1.EnvFromSource
+	}{
+		{
+			name:        "different secrets",
+			mainEnvFrom: []corev1.EnvFromSource{envFromSecretRef("hf-token-secret")},
+			wantBeta:    []corev1.EnvFromSource{envFromSecretRef("hf-token-secret"), envFromSecretRef("qa-probe-secret")},
+		},
+		{
+			name:        "repeated secret keeps the trailing copy",
+			mainEnvFrom: []corev1.EnvFromSource{envFromSecretRef("qa-probe-secret"), envFromSecretRef("hf-token-secret")},
+			wantBeta:    []corev1.EnvFromSource{envFromSecretRef("qa-probe-secret"), envFromSecretRef("hf-token-secret"), envFromSecretRef("qa-probe-secret")},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "env-from-secret", Namespace: "ns"},
+				Spec: DynamoGraphDeploymentSpec{
+					Services: map[string]*DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							ComponentType: "worker",
+							EnvFromSecret: ptr.To("qa-probe-secret"),
+							ExtraPodSpec:  &ExtraPodSpec{MainContainer: &corev1.Container{EnvFrom: tt.mainEnvFrom}},
+						},
+					},
+				},
+			}
+
+			t.Log("convert to v1beta1 and check the main container envFrom")
+			hub := &v1beta1.DynamoGraphDeployment{}
+			if err := src.ConvertTo(hub); err != nil {
+				t.Fatalf("ConvertTo: %v", err)
+			}
+			main, ok := findContainerByName(hub.Spec.Components[0].PodTemplate.Spec.Containers, mainContainerName)
+			if !ok {
+				t.Fatalf("missing main container: %#v", hub.Spec.Components[0].PodTemplate)
+			}
+			if diff := cmp.Diff(tt.wantBeta, main.EnvFrom); diff != "" {
+				t.Fatalf("main container envFrom mismatch (-want +got):\n%s", diff)
+			}
+
+			t.Log("round-trip back to v1alpha1 unchanged")
+			got := roundTripFromV1alpha1(t, src)
+			if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A saved envFromSecret is restored only from an exactly matching trailing
+// v1beta1 entry; every other entry comes from the current v1beta1 list, not
+// from the main-container list saved in the annotation.
+func TestDGD_FromV1beta1_EnvFromSecretAfterHubEdit(t *testing.T) {
+	prefixedA := envFromSecretRef("secret-a")
+	prefixedA.Prefix = "A_"
+	optionalA := envFromSecretRef("secret-a")
+	optionalA.SecretRef.Optional = ptr.To(true)
+	tests := []struct {
+		name              string
+		hubEnvFrom        []corev1.EnvFromSource
+		wantMainEnvFrom   []corev1.EnvFromSource
+		wantEnvFromSecret *string
+	}{
+		{
+			name:              "unchanged",
+			hubEnvFrom:        []corev1.EnvFromSource{envFromSecretRef("secret-b"), envFromSecretRef("secret-a")},
+			wantMainEnvFrom:   []corev1.EnvFromSource{envFromSecretRef("secret-b")},
+			wantEnvFromSecret: ptr.To("secret-a"),
+		},
+		{
+			name:              "other entry edited",
+			hubEnvFrom:        []corev1.EnvFromSource{envFromSecretRef("secret-c"), envFromSecretRef("secret-a")},
+			wantMainEnvFrom:   []corev1.EnvFromSource{envFromSecretRef("secret-c")},
+			wantEnvFromSecret: ptr.To("secret-a"),
+		},
+		{
+			name:              "only the trailing duplicate is consumed",
+			hubEnvFrom:        []corev1.EnvFromSource{envFromSecretRef("secret-a"), envFromSecretRef("secret-b"), envFromSecretRef("secret-a")},
+			wantMainEnvFrom:   []corev1.EnvFromSource{envFromSecretRef("secret-a"), envFromSecretRef("secret-b")},
+			wantEnvFromSecret: ptr.To("secret-a"),
+		},
+		{
+			name:              "only the dedicated entry remains",
+			hubEnvFrom:        []corev1.EnvFromSource{envFromSecretRef("secret-a")},
+			wantEnvFromSecret: ptr.To("secret-a"),
+		},
+		{
+			name:            "trailing entry deleted",
+			hubEnvFrom:      []corev1.EnvFromSource{envFromSecretRef("secret-b")},
+			wantMainEnvFrom: []corev1.EnvFromSource{envFromSecretRef("secret-b")},
+		},
+		{
+			name:            "entry appended after the dedicated entry",
+			hubEnvFrom:      []corev1.EnvFromSource{envFromSecretRef("secret-a"), envFromSecretRef("secret-c")},
+			wantMainEnvFrom: []corev1.EnvFromSource{envFromSecretRef("secret-a"), envFromSecretRef("secret-c")},
+		},
+		{
+			name:            "trailing entry gained a prefix",
+			hubEnvFrom:      []corev1.EnvFromSource{envFromSecretRef("secret-b"), prefixedA},
+			wantMainEnvFrom: []corev1.EnvFromSource{envFromSecretRef("secret-b"), prefixedA},
+		},
+		{
+			name:            "trailing entry became optional",
+			hubEnvFrom:      []corev1.EnvFromSource{envFromSecretRef("secret-b"), optionalA},
+			wantMainEnvFrom: []corev1.EnvFromSource{envFromSecretRef("secret-b"), optionalA},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "env-from-secret", Namespace: "ns"},
+				Spec: DynamoGraphDeploymentSpec{
+					Services: map[string]*DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							ComponentType: "worker",
+							EnvFromSecret: ptr.To("secret-a"),
+							ExtraPodSpec: &ExtraPodSpec{MainContainer: &corev1.Container{
+								EnvFrom: []corev1.EnvFromSource{envFromSecretRef("secret-b")},
+							}},
+						},
+					},
+				},
+			}
+
+			t.Log("convert to v1beta1; the annotation keeps both alpha fields for older readers")
+			hub := &v1beta1.DynamoGraphDeployment{}
+			if err := src.ConvertTo(hub); err != nil {
+				t.Fatalf("ConvertTo: %v", err)
+			}
+			saved := mustRestoreDGDSpokeServiceSave(t, hub, "worker")
+			if saved.EnvFromSecret == nil || *saved.EnvFromSecret != "secret-a" {
+				t.Fatalf("saved envFromSecret = %v, want secret-a", saved.EnvFromSecret)
+			}
+			if saved.ExtraPodSpec == nil || saved.ExtraPodSpec.MainContainer == nil {
+				t.Fatalf("saved extraPodSpec.mainContainer missing: %#v", saved.ExtraPodSpec)
+			}
+			if diff := cmp.Diff([]corev1.EnvFromSource{envFromSecretRef("secret-b")}, saved.ExtraPodSpec.MainContainer.EnvFrom); diff != "" {
+				t.Fatalf("saved main container envFrom mismatch (-want +got):\n%s", diff)
+			}
+
+			t.Log("edit the v1beta1 main container envFrom")
+			containers := hub.Spec.Components[0].PodTemplate.Spec.Containers
+			idx := slices.IndexFunc(containers, func(c corev1.Container) bool { return c.Name == mainContainerName })
+			if idx < 0 {
+				t.Fatalf("missing main container: %#v", containers)
+			}
+			containers[idx].EnvFrom = tt.hubEnvFrom
+
+			t.Log("convert back to v1alpha1 and check field placement")
+			got := &DynamoGraphDeployment{}
+			if err := got.ConvertFrom(hub); err != nil {
+				t.Fatalf("ConvertFrom: %v", err)
+			}
+			worker := got.Spec.Services["worker"]
+			if diff := cmp.Diff(tt.wantEnvFromSecret, worker.EnvFromSecret); diff != "" {
+				t.Fatalf("envFromSecret mismatch (-want +got):\n%s", diff)
+			}
+			var gotMainEnvFrom []corev1.EnvFromSource
+			if worker.ExtraPodSpec != nil && worker.ExtraPodSpec.MainContainer != nil {
+				gotMainEnvFrom = worker.ExtraPodSpec.MainContainer.EnvFrom
+			}
+			if diff := cmp.Diff(tt.wantMainEnvFrom, gotMainEnvFrom, cmpopts.EquateEmpty()); diff != "" {
+				t.Fatalf("main container envFrom mismatch (-want +got):\n%s", diff)
+			}
+
+			t.Log("convert to v1beta1 again; the effective list is unchanged")
+			again := &v1beta1.DynamoGraphDeployment{}
+			if err := got.ConvertTo(again); err != nil {
+				t.Fatalf("ConvertTo: %v", err)
+			}
+			main, ok := findContainerByName(again.Spec.Components[0].PodTemplate.Spec.Containers, mainContainerName)
+			if !ok {
+				t.Fatalf("missing main container: %#v", again.Spec.Components[0].PodTemplate)
+			}
+			if diff := cmp.Diff(tt.hubEnvFrom, main.EnvFrom); diff != "" {
+				t.Fatalf("effective envFrom mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
@@ -2084,4 +2317,17 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 			t.Errorf("v1beta1 empty experimental round-trip mismatch (-want +got):\n%s", diff)
 		}
 	})
+}
+
+func TestDGD_RoundTrip_NativeGroveAvailability(t *testing.T) {
+	for _, fragment := range []string{`{"spec":{"minAvailable":2}}`, `{"minAvailable":2}`} {
+		t.Run(fragment, func(t *testing.T) {
+			t.Log("Represent provider availability without restoring the deprecated typed field")
+			src := &v1beta1.DynamoGraphDeployment{Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, ProviderOverride: &v1beta1.ProviderOverride{APIVersion: "grove.io/v1alpha1", Value: apiextensionsv1.JSON{Raw: []byte(fragment)}}}}}}
+			got := roundTripFromV1beta1(t, src)
+			if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("native round-trip mismatch (-want +got): %s", diff)
+			}
+		})
+	}
 }

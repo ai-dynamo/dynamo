@@ -99,6 +99,7 @@ impl Inner {
         input_tokens: usize,
         progress: RequestProgress,
         session_final: bool,
+        pinned_worker: Option<dynamo_kv_router::protocols::WorkerWithDpRank>,
     ) -> Result<Arc<Notify>, ThunderAgentError> {
         let capacities = self.capacity_provider.snapshot();
         self.state.lock().register(
@@ -108,7 +109,8 @@ impl Inner {
                 input_tokens,
                 progress,
                 session_final,
-            ),
+            )
+            .with_pinned_worker(pinned_worker),
             &capacities,
             Instant::now(),
         )
@@ -294,12 +296,14 @@ impl RequestClassifier for ThunderAgentClassifier {
         let session_final = session.session_final() == Some(true);
         let input_tokens = request.input_tokens();
         let progress = request.progress().clone();
+        let pinned_worker = request.pinned_worker();
         let notify = match self.inner.register(
             request_id.clone(),
             session_id,
             input_tokens,
             progress,
             session_final,
+            pinned_worker,
         ) {
             Ok(notify) => notify,
             Err(error) => {
@@ -533,6 +537,7 @@ mod tests {
                 tokens,
                 progress,
                 session_final,
+                None,
             )
             .unwrap();
     }
@@ -1178,6 +1183,7 @@ mod tests {
             100,
             RequestProgress::new(100).0,
             false,
+            None,
         );
         assert!(matches!(
             result,

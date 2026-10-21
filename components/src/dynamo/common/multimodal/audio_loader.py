@@ -12,6 +12,7 @@ from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_by
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
+    describe_media_source,
     validate_media_url,
 )
 from dynamo.common.multimodal.codec_errors import (
@@ -153,7 +154,8 @@ class AudioLoader:
             waveform, sr = await self._load_audio_with_vllm(audio_url)
             if waveform.size == 0:
                 raise ValueError(
-                    f"Failed to decode audio from {audio_url}. Decoded waveform is empty."
+                    f"Failed to decode audio from {describe_media_source(audio_url)}. "
+                    "Decoded waveform is empty."
                 )
             return waveform, sr
         except FileNotFoundError:
@@ -162,7 +164,9 @@ class AudioLoader:
             # Preserve deliberate client-error verdicts. UrlValidationError is
             # a ValueError, so the generic handler below would otherwise erase
             # its type and prevent the frontend from returning a 4xx.
-            logger.error("URL rejected loading audio: '%s'", audio_url)
+            logger.error(
+                "URL rejected loading audio: '%s'", describe_media_source(audio_url)
+            )
             raise
         except ImportError as exc:
             # The image ships no audio decoder (PyAV is deliberately omitted).
@@ -170,11 +174,18 @@ class AudioLoader:
             # an unpinned stack; point at the validated bounded install
             # instead. NVDEC never decodes audio, so there is no hardware
             # alternative to mention.
-            logger.error("No audio decoder available loading '%s'", audio_url)
+            logger.error(
+                "No audio decoder available loading '%s'",
+                describe_media_source(audio_url),
+            )
             raise audio_decoder_missing("vllm", cause=str(exc)) from exc
         except Exception as exc:
-            logger.error("Error loading audio from %s: %s", audio_url, exc)
-            raise ValueError(f"Failed to load audio from {audio_url}: {exc}") from exc
+            # Bound the URL like the branches above: a signed URL (GCS, S3,
+            # Azure SAS) is a bearer credential, and its signature must reach
+            # neither the log nor the client's error body.
+            source = describe_media_source(audio_url)
+            logger.error("Error loading audio from %s: %s", source, exc)
+            raise ValueError(f"Failed to load audio from {source}: {exc}") from exc
 
     async def _load_decoded_audio(
         self, decoded_metadata: Dict[str, Any]
@@ -214,7 +225,11 @@ class AudioLoader:
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
                 audio_futures.append(self.load_audio(url))
-                logger.debug("Preparing to load audio from URL: %s...", url[:80])
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "Preparing to load audio from URL: %s",
+                        describe_media_source(url),
+                    )
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 if self._enable_frontend_decoding:
                     metadata = item[DECODED_VARIANT_KEY]
@@ -240,10 +255,12 @@ class AudioLoader:
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
                     raise result
-                source = media_item.get(URL_VARIANT_KEY, "decoded")
-                logger.error("Failed to load audio from %s...: %s", source[:80], result)
+                source = describe_media_source(
+                    media_item.get(URL_VARIANT_KEY, "decoded")
+                )
+                logger.error("Failed to load audio from %s: %s", source, result)
                 collective_exceptions.append(
-                    f"Failed to load audio from {source[:80]}...: {result}\n"
+                    f"Failed to load audio from {source}: {result}\n"
                 )
                 if status_error is None and isinstance(result, HttpStatusError):
                     status_error = result

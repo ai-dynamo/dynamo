@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, List, Literal, Optional, Tuple, Union
+from typing import Annotated, Any, List, Literal, Optional, Tuple, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 from dynamo.common.multimodal import TransferRequest
 from dynamo.common.protocols.image_protocol import ImageNvExt
+from dynamo.common.utils.token_ids import token_ids_to_list
 
 TokenIdType = int
 
@@ -23,6 +24,9 @@ class StopConditions(BaseModel):
     stop_token_ids_hidden: Optional[List[TokenIdType]] = None
     min_tokens: Optional[int] = None
     ignore_eos: Optional[bool] = None
+    max_thinking_tokens: Annotated[
+        int, Field(strict=True, ge=0, le=2**32 - 1)
+    ] | None = None
 
 
 class SamplingOptions(BaseModel):
@@ -48,6 +52,11 @@ class PreprocessedRequest(BaseModel):
     eos_token_ids: List[TokenIdType] = Field(default_factory=list)
     mdc_sum: Optional[str] = None
     annotations: List[str] = Field(default_factory=list)
+
+    @field_validator("token_ids", mode="before")
+    @classmethod
+    def _unpack_token_ids(cls, value: Any) -> Any:
+        return token_ids_to_list(value)
 
 
 EmbeddingInput = Union[str, List[str], List[int], List[List[int]]]

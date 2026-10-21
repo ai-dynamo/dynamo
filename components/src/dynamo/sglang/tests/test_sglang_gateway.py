@@ -37,6 +37,49 @@ def not_a_child(monkeypatch):
     monkeypatch.delenv(gateway.ENV_CHILD_INDEX, raising=False)
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_decode_gateway_parent_freezes_gc_before_children(
+    not_a_child, monkeypatch, enabled
+):
+    from dynamo.sglang import init_llm
+
+    events = []
+    server_args = _server_args(2)
+    engine = SimpleNamespace(
+        server_args=server_args, shutdown=lambda: events.append("shutdown")
+    )
+    config = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=_dyn(
+            namespace="test",
+            component="worker",
+            endpoint="generate",
+            freeze_gc_after_init=enabled,
+        ),
+        use_resolved_server_args=lambda args: args,
+    )
+    runtime = SimpleNamespace(endpoint=lambda name: object())
+    monkeypatch.setattr(init_llm.sgl, "Engine", lambda **kwargs: engine)
+    monkeypatch.setattr(
+        init_llm, "set_forward_pass_metrics_worker_id", lambda *args: None
+    )
+    monkeypatch.setattr(init_llm.gc, "collect", lambda: events.append("collect") or 0)
+    monkeypatch.setattr(init_llm.gc, "freeze", lambda: events.append("freeze"))
+
+    async def serve_children(actual_engine, count, shutdown_event, **kwargs):
+        assert actual_engine is engine
+        assert count == 2
+        events.append("children")
+
+    monkeypatch.setattr(init_llm, "serve_via_gateway_children", serve_children)
+    asyncio.run(init_llm.init_decode(runtime, config, asyncio.Event(), []))
+    assert events == (
+        ["collect", "freeze", "children", "shutdown"]
+        if enabled
+        else ["children", "shutdown"]
+    )
+
+
 def test_effective_count_from_either_flag(not_a_child):
     assert gateway.effective_gateway_workers(_server_args(1), _dyn()) == 1
     assert gateway.effective_gateway_workers(_server_args(8), _dyn()) == 8

@@ -26,7 +26,7 @@ from dynamo.common.configuration.groups.router_args import (
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.model_fetch import fetch_model
+from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.snapshot.lifecycle import (
     configure_snapshot_capture_env,
     is_snapshot_enabled,
@@ -35,13 +35,15 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import (
     ConfigArgumentMerger,
-    ensure_sglang_tensor_image_size,
-    get_sglang_model_config,
+    add_sglang_cli_compat,
     resolved_server_args,
+    sglang_default_mla_attention_backend,
     sglang_uses_mla_backend,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
+from dynamo.sglang.capacity import sglang_dp_layout
 from dynamo.sglang.elastic_ep_preflight import check_elastic_ep_backend
+from dynamo.sglang.gateway import effective_gateway_workers
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -49,6 +51,15 @@ PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 # Non-MLA attention backends that read the DCP parallel state in their forward
 # path. `aiter` is here because SGLang itself allows dcp_size > 1 on ROCm.
 DCP_CAPABLE_ATTENTION_BACKENDS = frozenset({"triton", "aiter"})
+
+# MLA backends whose decode returns no log-sum-exp, which SGLang's DCP decode needs.
+# Drop entries once the SGLang pin has #35384/#37735, or #33325 adds fa3 DCP decode.
+MLA_DCP_UNSUPPORTED_DECODE_BACKENDS = frozenset(
+    {"fa3", "fa4", "flashmla", "dsa", "nsa"}
+)
+
+# Sparse-attention MLA backends; DSA models need them, so only --dcp-size 1 helps.
+MLA_SPARSE_ATTENTION_BACKENDS = frozenset({"dsa", "nsa"})
 
 ATTENTION_BACKEND_CLI_FIELDS = (
     "attention_backend",
@@ -62,6 +73,8 @@ class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
 
     component: str
     diffusion_worker: bool = False
+    # Preserve NGC identity for registration while SGLang loads the local path.
+    model_source_uri: Optional[str] = None
     # Whether this worker publishes KV events. Distinct from the router-side
     # `use_kv_events` on `router_advertisement`, which means the router
     # subscribes to them -- the reason the two live on separate objects.
@@ -92,6 +105,24 @@ class Config:
         # SGLang chose the value or the user did.
         self.attention_backend_from_cli = attention_backend_from_cli
         self.serving_mode = self._set_serving_strategy()
+        if getattr(dynamo_args, "freeze_gc_after_init", False) and (
+            self.serving_mode == DisaggregationMode.PREFILL
+            or any(
+                getattr(dynamo_args, role, False)
+                for role in (
+                    "embedding_worker",
+                    "rerank_worker",
+                    "image_diffusion_worker",
+                    "video_generation_worker",
+                    "multimodal_encode_worker",
+                    "multimodal_worker",
+                    "diffusion_worker",
+                )
+            )
+        ):
+            raise ValueError(
+                "--freeze-gc-after-init is supported only for LLM decode or aggregated workers"
+            )
 
     def _set_serving_strategy(self):
         if self.server_args.disaggregation_mode == "null":
@@ -139,6 +170,31 @@ def _diffusion_generator_kwargs(server_args: Any) -> dict[str, Any]:
         kwargs["master_port"] = master_port
 
     return kwargs
+
+
+CUDA_COREDUMP_WAIT_ENV = "SGLANG_CUDA_COREDUMP_BEFORE_CRASH_WAIT_SECS"
+
+
+def _default_cuda_coredump_wait(server_args: Any) -> None:
+    """Skip SGLang's pre-crash coredump wait when no coredump can be triggered.
+
+    On SIGQUIT (e.g. a dead detokenizer) SGLang's TokenizerManager tries a CUDA
+    user-triggered coredump and then sleeps this many seconds (default 60) even
+    when the trigger was a no-op, delaying worker exit and pod restart. Leave an
+    explicit value, CUDA_ENABLE_USER_TRIGGERED_COREDUMP=1, or --crash-dump-folder
+    (which makes SGLang enable user-triggered coredumps) untouched.
+    """
+    if CUDA_COREDUMP_WAIT_ENV in os.environ:
+        return
+    if os.environ.get("CUDA_ENABLE_USER_TRIGGERED_COREDUMP") == "1":
+        return
+    if getattr(server_args, "crash_dump_folder", None):
+        return
+    os.environ[CUDA_COREDUMP_WAIT_ENV] = "0"
+    logging.info(
+        "CUDA user-triggered coredumps are disabled; setting %s=0",
+        CUDA_COREDUMP_WAIT_ENV,
+    )
 
 
 def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
@@ -194,10 +250,16 @@ def is_object_storage_path(model_path: str) -> bool:
 
 
 def should_fetch_model(args: Any, model_path: str) -> bool:
+    """Prefetch NGC and native-loader models, leaving HF P2P to ModelExpress."""
     if os.path.exists(model_path):
         return False
     if is_object_storage_path(model_path):
         return False
+    # SGLang resolves config/tokenizer files before invoking its weight loader.
+    # NGC therefore needs a local directory even with the ModelExpress plugin;
+    # fetch weights too so the plugin's native fallback can read that directory.
+    if needs_local_model_path(model_path):
+        return True
     return not use_modelexpress_remote_instance(args)
 
 
@@ -251,7 +313,7 @@ def _validate_dcp_attention_backend(
     Call this twice: once on the arguments the CLI produced, which catches a
     backend the user named, and once on the engine's own configuration, which
     is the only place a backend SGLang chose for itself can be read. SGLang
-    0.5.19 keeps ``ServerArgs`` at what the caller asked for and resolves in a
+    SGLang keeps ``ServerArgs`` at what the caller asked for and resolves in a
     separate pass, so at CLI time an automatic backend is still ``None``.
     """
     # Diffusion/video argument stubs and older SGLang releases omit dcp_size.
@@ -259,9 +321,10 @@ def _validate_dcp_attention_backend(
     if dcp_size <= 1:
         return
 
-    # MLA KV pools have no per-rank KV head split to disagree about, and every
-    # MLA attention backend consumes the DCP parallel state.
     if sglang_uses_mla_backend(server_args):
+        _validate_mla_dcp_decode_backend(
+            server_args, dcp_size=dcp_size, backend_from_cli=backend_from_cli
+        )
         return
 
     # Read the effective backend, not the flag the user typed: fa3 is the
@@ -300,6 +363,56 @@ def _validate_dcp_attention_backend(
         "Use --dcp-size 1, or an attention backend that implements decode "
         "context parallel (--attention-backend triton), or an MLA model with "
         "one of SGLang's MLA attention backends."
+    )
+
+
+def _validate_mla_dcp_decode_backend(
+    server_args: Any, *, dcp_size: int, backend_from_cli: bool
+) -> None:
+    """Reject MLA decode context parallel on a backend with no DCP decode path.
+
+    MLA KV pools have no per-rank KV head split to disagree about, but the DCP
+    decode branch needs the backend to return ``(output, lse)`` so it can merge
+    the ranks' partial results. A backend that returns only the output makes
+    the worker crash at decode CUDA graph capture with ``too many values to
+    unpack``, deep inside engine startup.
+    """
+    resolved = resolved_server_args(server_args)
+    # Prefill workers never run the DCP decode branch.
+    if getattr(resolved, "disaggregation_mode", None) == "prefill":
+        return
+
+    backend = getattr(resolved, "decode_attention_backend", None) or getattr(
+        resolved, "attention_backend", None
+    )
+    automatic = backend is None
+    if automatic:
+        # SGLang has not chosen yet; predict its choice (fa3 for MLA on Hopper)
+        # so the worker fails here, before sgl.Engine captures CUDA graphs.
+        # The prediction covers SGLang's dsa override for DSA models and defers
+        # Kimi-K3 to engine resolution. Other model overrides are not predicted.
+        backend = sglang_default_mla_attention_backend(server_args)
+    if backend not in MLA_DCP_UNSUPPORTED_DECODE_BACKENDS:
+        return
+
+    selected = (
+        " SGLang selects it automatically for this model and GPU because no "
+        "attention backend was passed."
+        if automatic or not backend_from_cli
+        else ""
+    )
+    remedy = (
+        "Use --dcp-size 1."
+        if backend in MLA_SPARSE_ATTENTION_BACKENDS
+        else "Use --attention-backend flashinfer (or trtllm_mla / cutedsl_mla "
+        "on Blackwell), or --dcp-size 1."
+    )
+    raise ValueError(
+        f"--dcp-size {dcp_size} is not supported with the decode attention "
+        f"backend '{backend}' for this MLA model.{selected} This backend does "
+        "not return the log-sum-exp that decode context parallel needs to merge "
+        "results across DCP ranks, so the worker would crash during decode CUDA "
+        f"graph capture. {remedy}"
     )
 
 
@@ -482,6 +595,7 @@ async def parse_args(args: list[str]) -> Config:
 
     sglang_only_parser = argparse.ArgumentParser(add_help=False)
     ServerArgs.add_cli_args(sglang_only_parser)
+    add_sglang_cli_compat(sglang_only_parser)
 
     # Add "gms" to --load-format choices so it passes argparse validation.
     # The actual loader class is set in main.py when load_format == "gms".
@@ -561,7 +675,7 @@ async def parse_args(args: list[str]) -> Config:
     # the supported SGLang releases.
     check_elastic_ep_backend(
         parsed_args.elastic_ep_backend,
-        parsed_args.enable_dp_attention,
+        sglang_dp_layout(parsed_args)[1],
     )
 
     # Dynamo argument processing
@@ -581,6 +695,15 @@ async def parse_args(args: list[str]) -> Config:
         or getattr(parsed_args, "dllm_algorithm", None)
     ):
         raise ValueError("--rerank-worker requires aggregated cross-encoder serving")
+    if dynamo_config.rerank_worker:
+        # Cross-encoders attend bidirectionally: SGLang's XLM-Roberta forward fails
+        # with a cached prefix or chunked prefill, so run each sequence in one pass.
+        if not parsed_args.disable_radix_cache:
+            logging.info("Disabling radix cache for --rerank-worker")
+        parsed_args.disable_radix_cache = True
+        if parsed_args.chunked_prefill_size != -1:
+            logging.info("Disabling chunked prefill for --rerank-worker")
+        parsed_args.chunked_prefill_size = -1
 
     # Enable encoder_only mode for multimodal encode workers to load only vision encoder
     # This significantly reduces memory usage by avoiding loading the full LLM weights
@@ -665,19 +788,30 @@ async def parse_args(args: list[str]) -> Config:
                 served_names[1:],
             )
 
+    if needs_local_model_path(model_path) and (
+        not served_names or ":" in served_names[0]
+    ):
+        raise ValueError(
+            "NGC models require a served model name without ':' in SGLang. "
+            "Pass --served-model-name my-model."
+        )
+
     # Name the model — falls back to model_path only if neither
     # --served-model-name nor an env var supplied one.
     if not parsed_args.served_model_name:
         parsed_args.served_model_name = model_path
     # Download the model if necessary using modelexpress.
-    # We don't set `parsed_args.model_path` to the local path fetch_model returns
-    # because sglang will send this to its pipeline-parallel workers, which may
-    # not have the local path.
+    # For HF names we don't set `parsed_args.model_path` to the local path
+    # fetch_model returns, because sglang will send this to its pipeline-parallel
+    # workers, which may not have the local path.
     # sglang will attempt to download the model again, but find it in the HF cache.
-    # For non-HF models use a path instead of an HF name, and ensure all workers have
-    # that path (ideally via a shared folder).
+    # sglang cannot resolve `ngc://` names, so those use the local path instead;
+    # every worker needs that path (ideally via a shared folder).
     if should_fetch_model(parsed_args, model_path):
-        await fetch_model(model_path)
+        local_path = await fetch_model(model_path)
+        if needs_local_model_path(model_path):
+            dynamo_config.model_source_uri = model_path
+            parsed_args.model_path = model_path = local_path
 
     snapshot_enabled = is_snapshot_enabled()
     if snapshot_enabled:
@@ -763,9 +897,13 @@ async def parse_args(args: list[str]) -> Config:
     else:
         # Dynamo expects disjoint output_ids; ServerArgs is read-only after resolution.
         parsed_args.incremental_streaming_output = True
+        # SGLang's PortArgs.init_new reads the raw tokenizer_worker_num; setting
+        # only the resolved value leaves the leader without a tokenizer IPC socket.
+        gateway_count = effective_gateway_workers(parsed_args, dynamo_config)
+        if gateway_count > 1 and parsed_args.tokenizer_worker_num != gateway_count:
+            parsed_args.tokenizer_worker_num = gateway_count
         server_args = ServerArgs.from_cli_args(parsed_args)
-        if get_sglang_model_config(server_args).is_multimodal:
-            ensure_sglang_tensor_image_size()
+        _default_cuda_coredump_wait(server_args)
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(

@@ -119,6 +119,24 @@ class DistributedRuntime:
         """
         ...
 
+    def register_engine_http_handler(
+        self,
+        name: str,
+        callback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    ) -> None:
+        """Register `/engine/{name}/...` on an enabled system server.
+
+        The async callback receives `method`, the relative `path`, and JSON
+        `body` (None for an empty body), and returns `status` and JSON `body`.
+        Registration fails if the name is already registered. No authentication
+        is added; callers must restrict access to the system listener.
+        """
+        ...
+
+    def unregister_engine_http_handler(self, name: str) -> None:
+        """Remove a handler; already dispatched requests may still finish."""
+        ...
+
     def register_engine_route(
         self,
         route_name: str,
@@ -895,6 +913,7 @@ class ModelRuntimeConfig:
     tool_call_parser: str | None
     reasoning_parser: str | None
     tokenizer_backend: str | None
+    structural_tag: dict[str, Any] | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
@@ -923,16 +942,8 @@ class ModelRuntimeConfig:
         """Get an engine-specific runtime configuration value"""
         ...
 
-    def set_structural_tag_mode(self, mode: str) -> None:
-        """Set structural tag mode ("off" or "on")."""
-        ...
-
-    def set_structural_tag_scope(self, scope: str) -> None:
-        """Set structural tag scope ("auto" or "always")."""
-        ...
-
-    def set_structural_tag_schema(self, schema: str) -> None:
-        """Set structural tag schema mode ("auto" or "strict")."""
+    def set_structural_tag(self, structural_tag: dict[str, Any] | None) -> None:
+        """Set the structural-tag policy, or disable it with ``None``."""
         ...
 
     def set_disaggregated_endpoint(
@@ -1380,6 +1391,17 @@ class FpmDirectPublisher:
         ...
 
 
+class FpmHealthSnapshot:
+    @property
+    def snapshot(self) -> dict[tuple[str, int], bytes]: ...
+    @property
+    def unjoined_worker_ids(self) -> list[str]: ...
+    @property
+    def stale_rank_count(self) -> int: ...
+    @property
+    def missing_rank_count(self) -> int: ...
+
+
 class FpmEventSubscriber:
     """
     Subscriber for ForwardPassMetrics from the Dynamo event plane.
@@ -1419,9 +1441,12 @@ class FpmEventSubscriber:
         """
         ...
 
-    def start_tracking(self) -> None:
+    def start_tracking(self, max_age_seconds: float = 15.0) -> None:
         """
         Start background tracking of the latest FPM per (worker_id, dp_rank).
+
+        ``max_age_seconds`` fixes the freshness and cleanup window for this
+        subscription. It must be finite and positive.
 
         Spawns two background tasks:
 
@@ -1451,11 +1476,20 @@ class FpmEventSubscriber:
         """
         ...
 
+    def get_recent_stats_with_health(self) -> FpmHealthSnapshot:
+        """Return fresh samples, unjoined IDs, stale count, and missing rank count.
+
+        Age is measured from local receive time, including idle heartbeats.
+        The age limit is set once by ``start_tracking()``.
+        Missing ranks include discovered workers that have not published a sample.
+        """
+        ...
+
     def get_model_cards(self) -> dict[str, str]:
         """
         Snapshot of model deployment cards keyed by worker id.
 
-        The snapshot is filtered against the known-workers set so entries
+        The snapshot is filtered against the active worker lifecycle so entries
         for already-removed workers are not returned.  Values are the raw
         ``ModelDeploymentCard`` serialized as a JSON string; callers parse
         whichever fields they need (e.g. ``runtime_config``,
@@ -1480,13 +1514,18 @@ class HttpService:
     """
 
     def __init__(
-        self, port: Optional[int] = None, *, wait_for_first_item: bool = False
+        self,
+        port: Optional[int] = None,
+        *,
+        wait_for_first_item: bool = False,
+        batch_gateway_url: Optional[str] = None,
     ) -> None:
         """
         Create a new HTTP service.
 
         Args:
             port: Optional port number to bind the service to (default: 8080)
+            batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
             wait_for_first_item: When True, a streaming chat, completions,
                 responses, or Anthropic messages request waits for the engine's
                 first item before the HTTP status is committed, so an exception
@@ -1965,212 +2004,10 @@ class ReasoningConfig:
     ) -> None:
         ...
 
-class SglangArgs:
-    def __init__(
-        self,
-        schedule_policy: Optional[str] = None,
-        page_size: Optional[int] = None,
-        max_prefill_tokens: Optional[int] = None,
-        chunked_prefill_size: Optional[int] = None,
-        clip_max_new_tokens: Optional[int] = None,
-        schedule_conservativeness: Optional[float] = None,
-    ) -> None:
-        ...
+def _normalize_mocker_config(config: Mapping[str, Any] | str) -> Dict[str, Any]:
+    """Validate canonical AISimulate config and materialize Dynamo runtime options."""
+    ...
 
-class TrtllmArgs:
-    def __init__(
-        self,
-        capacity_scheduler_policy: Optional[str] = None,
-    ) -> None:
-        ...
-
-class MockEngineArgs:
-    def __init__(
-        self,
-        engine_type: str = "vllm",
-        num_gpu_blocks: Optional[int] = None,
-        block_size: int = 0,
-        max_num_seqs: Optional[int] = 256,
-        max_num_batched_tokens: Optional[int] = 8192,
-        enable_prefix_caching: bool = True,
-        enable_chunked_prefill: bool = True,
-        speedup_ratio: float = 1.0,
-        decode_speedup_ratio: float = 1.0,
-        dp_size: int = 1,
-        startup_time: Optional[float] = None,
-        worker_type: str = "aggregated",
-        planner_profile_data: Optional[str | os.PathLike[str]] = None,
-        ais_nextn: Optional[int] = None,
-        ais_nextn_accept_rates: Optional[str] = None,
-        ais_mtp_seed: Optional[int] = None,
-        gpu_memory_utilization: Optional[float] = None,
-        mem_fraction_static: Optional[float] = None,
-        free_gpu_memory_fraction: Optional[float] = None,
-        enable_local_indexer: bool = False,
-        bootstrap_port: Optional[int] = None,
-        handoff_session_timeout_ms: int = 300000,
-        kv_bytes_per_token: Optional[int] = None,
-        kv_transfer_bandwidth: Optional[float] = None,
-        kv_transfer_timing_mode: str = "full_prompt",
-        reasoning: Optional[ReasoningConfig] = None,
-        response_replay_trace_path: Optional[str | os.PathLike[str]] = None,
-        zmq_kv_events_port: Optional[int] = None,
-        zmq_replay_port: Optional[int] = None,
-        preemption_mode: str = "lifo",
-        router_queue_policy: Optional[str] = None,
-        sglang: Optional[SglangArgs] = None,
-        trtllm: Optional[TrtllmArgs] = None,
-        max_model_len: Optional[int] = None,
-        ais_perf_config: Optional[Mapping[str, Any]] = None,
-    ) -> None:
-        ...
-
-    @staticmethod
-    def from_json(config_json: str) -> "MockEngineArgs":
-        ...
-
-    def copy(self) -> "MockEngineArgs": ...
-
-    @property
-    def block_size(self) -> int: ...
-
-    @property
-    def num_gpu_blocks(self) -> int: ...
-
-    @num_gpu_blocks.setter
-    def num_gpu_blocks(self, value: int) -> None: ...
-
-    @property
-    def max_model_len(self) -> Optional[int]: ...
-
-    @property
-    def max_num_seqs(self) -> Optional[int]: ...
-
-    @property
-    def max_num_batched_tokens(self) -> Optional[int]: ...
-
-    @property
-    def enable_prefix_caching(self) -> bool: ...
-
-    @enable_prefix_caching.setter
-    def enable_prefix_caching(self, value: bool) -> None: ...
-
-    @property
-    def enable_local_indexer(self) -> bool: ...
-
-    @property
-    def dp_size(self) -> int: ...
-
-    @property
-    def bootstrap_port(self) -> Optional[int]: ...
-
-    @property
-    def handoff_session_timeout_ms(self) -> int: ...
-
-    @property
-    def kv_transfer_timing_mode(self) -> str: ...
-
-    @property
-    def engine_type(self) -> str: ...
-
-    @property
-    def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...
-
-    @property
-    def ais_perf_config(self) -> Optional[Dict[str, Any]]: ...
-
-    @property
-    def ais_backend(self) -> Optional[str]: ...
-
-    @property
-    def ais_system(self) -> Optional[str]: ...
-
-    @property
-    def ais_backend_version(self) -> Optional[str]: ...
-
-    @property
-    def ais_tp_size(self) -> Optional[int]: ...
-
-    @property
-    def ais_model_path(self) -> Optional[str]: ...
-
-    @property
-    def ais_moe_tp_size(self) -> Optional[int]: ...
-
-    @property
-    def ais_moe_ep_size(self) -> Optional[int]: ...
-
-    @property
-    def ais_attention_dp_size(self) -> Optional[int]: ...
-
-    @property
-    def ais_gemm_dtype(self) -> Optional[str]: ...
-
-    @property
-    def ais_moe_dtype(self) -> Optional[str]: ...
-
-    @property
-    def ais_fmha_dtype(self) -> Optional[str]: ...
-
-    @property
-    def ais_kv_cache_dtype(self) -> Optional[str]: ...
-
-    @property
-    def ais_comm_dtype(self) -> Optional[str]: ...
-
-    @property
-    def ais_nextn(self) -> Optional[int]: ...
-
-    @property
-    def ais_nextn_accept_rates(self) -> Optional[str]: ...
-
-    @property
-    def ais_mtp_seed(self) -> int: ...
-
-    @property
-    def gpu_memory_utilization(self) -> Optional[float]: ...
-
-    @gpu_memory_utilization.setter
-    def gpu_memory_utilization(self, value: Optional[float]) -> None: ...
-
-    @property
-    def mem_fraction_static(self) -> Optional[float]: ...
-
-    @mem_fraction_static.setter
-    def mem_fraction_static(self, value: Optional[float]) -> None: ...
-
-    @property
-    def free_gpu_memory_fraction(self) -> Optional[float]: ...
-
-    @free_gpu_memory_fraction.setter
-    def free_gpu_memory_fraction(self, value: Optional[float]) -> None: ...
-
-    @property
-    def worker_type(self) -> str: ...
-
-    @worker_type.setter
-    def worker_type(self, value: str) -> None: ...
-
-    def is_prefill(self) -> bool: ...
-
-    def is_decode(self) -> bool: ...
-
-    def with_overrides(
-        self,
-        bootstrap_port: Optional[int] = None,
-        zmq_kv_events_port: Optional[int] = None,
-        zmq_replay_port: Optional[int] = None,
-        kv_bytes_per_token: Optional[int] = None,
-        num_gpu_blocks: Optional[int] = None,
-        ais_nextn: Optional[int] = None,
-        ais_nextn_accept_rates: Optional[str] = None,
-        ais_mtp_seed: Optional[int] = None,
-        gpu_memory_utilization: Optional[float] = None,
-        mem_fraction_static: Optional[float] = None,
-        free_gpu_memory_fraction: Optional[float] = None,
-        enable_prefix_caching: Optional[bool] = None,
-        worker_type: Optional[str] = None,
-    ) -> "MockEngineArgs": ...
 
 class WorkerType:
     """
@@ -2401,12 +2238,12 @@ class FrontendResponse:
 
     def __init__(self, status_code: int, body: object) -> None: ...
 
-async def run_input(
+def run_input(
     distributed_runtime: DistributedRuntime,
     input: str,
     engine_config: EngineConfig,
     frontend_route_extensions: Optional[Sequence[FrontendRoute]] = None,
-) -> None:
+) -> asyncio.Future[None]:
     """Start an engine, connect it to an input, and run until stopped.
 
     ``frontend_route_extensions`` supplies additional HTTP routes to the
@@ -2502,9 +2339,9 @@ def run_mocker_trace_replay(
 @overload
 def run_mocker_trace_replay(
     trace_files: Sequence[str | os.PathLike[str]],
-    extra_engine_args: Optional[MockEngineArgs] = None,
-    prefill_engine_args: Optional[MockEngineArgs] = None,
-    decode_engine_args: Optional[MockEngineArgs] = None,
+    extra_engine_args: Optional[Mapping[str, Any]] = None,
+    prefill_engine_args: Optional[Mapping[str, Any]] = None,
+    decode_engine_args: Optional[Mapping[str, Any]] = None,
     router_config: Optional[KvRouterConfig] = None,
     ais_perf_config: Optional[AisPerfConfig] = None,
     num_workers: int = 1,
@@ -2543,6 +2380,10 @@ def run_mocker_trace_replay(
     telemetry_sample_interval_ms: float = 1_000.0,
     telemetry_callback: Optional[ReplayTelemetryCallback] = None,
     telemetry_jsonl_path: Optional[str | os.PathLike[str]] = None,
+    kv_event_lag_ms: Optional[float] = None,
+    agentic_snapshot: Optional[Dict[str, Any]] = None,
+    agentic_warmup: bool = False,
+    agentic_profile: Optional[Dict[str, Any]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2578,6 +2419,12 @@ def run_mocker_trace_replay(
     ``wall_time_ms``; time the outer call for end-to-end persistence overhead.
     The JSONL target is opened on the first sample; after a write failure,
     completed prior lines remain and the failing final line may be partial.
+
+    ``kv_event_lag_ms`` delays the KV cache events (blocks stored and removed)
+    the router's indexer observes by that much simulated time. Prefill and
+    request completions stay immediate, as a live router observes them in-band
+    on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
+    KV-router replay only.
     """
     ...
 
@@ -2606,9 +2453,9 @@ def run_mocker_synthetic_trace_replay(
     input_tokens: int,
     output_tokens: int,
     request_count: int,
-    extra_engine_args: Optional[MockEngineArgs] = None,
-    prefill_engine_args: Optional[MockEngineArgs] = None,
-    decode_engine_args: Optional[MockEngineArgs] = None,
+    extra_engine_args: Optional[Mapping[str, Any]] = None,
+    prefill_engine_args: Optional[Mapping[str, Any]] = None,
+    decode_engine_args: Optional[Mapping[str, Any]] = None,
     router_config: Optional[KvRouterConfig] = None,
     ais_perf_config: Optional[AisPerfConfig] = None,
     num_workers: int = 1,
@@ -2636,6 +2483,7 @@ def run_mocker_synthetic_trace_replay(
     telemetry_sample_interval_ms: float = 1_000.0,
     telemetry_callback: Optional[ReplayTelemetryCallback] = None,
     telemetry_jsonl_path: Optional[str | os.PathLike[str]] = None,
+    kv_event_lag_ms: Optional[float] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
 
@@ -2921,7 +2769,9 @@ class KvDcRelay:
         ...
 
 class KvStateAgentHost:
-    def __init__(self, endpoint: Endpoint, max_slots: int = 8) -> None:
+    def __init__(
+        self, endpoint: Endpoint, max_slots: int = 8, slots_per_socket: int = 1
+    ) -> None:
         ...
 
     async def start(self) -> None:
@@ -3043,6 +2893,7 @@ class KvRouter:
         self,
         request: JsonLike,
         response_buffer_size: int = 100,
+        context: Context | None = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate from a preprocessed request dict (PreprocessedRequest format).
@@ -3050,6 +2901,8 @@ class KvRouter:
         Accepts a full request dict with token_ids, model, stop_conditions, etc.
         Set response_buffer_size to 0 for demand-driven direct Python consumption;
         negative values are rejected.
+        Pass context to preserve request metadata, cancellation, and distributed
+        tracing across the Python/Rust boundary.
         Returns an async iterator yielding generation responses.
         """
         ...
@@ -3225,7 +3078,7 @@ class EntrypointArgs:
         tls_cert_path: Optional[str] = None,
         tls_key_path: Optional[str] = None,
         extra_engine_args: Optional[str] = None,
-        mocker_engine_args: Optional[MockEngineArgs] = None,
+        mocker_engine_args: Optional[Mapping[str, Any]] = None,
         runtime_config: Optional[ModelRuntimeConfig] = None,
         namespace: Optional[str] = None,
         namespace_prefix: Optional[str] = None,
@@ -3244,6 +3097,7 @@ class EntrypointArgs:
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
         tokenizer_backend: Optional[str] = None,
         tokenizer_fallback: Optional[bool] = None,
+        batch_gateway_url: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3263,7 +3117,8 @@ class EntrypointArgs:
             tls_key_path: TLS key path (PEM format)
             tls_client_ca_cert_path: Client CA certificate path for mutual TLS (PEM format)
             extra_engine_args: Optional path to mocker engine arguments JSON
-            mocker_engine_args: Typed mocker engine arguments
+            mocker_engine_args: Canonical mocker configuration mapping with an ``engine``
+                section and optional ``dynamo`` runtime options
             runtime_config: Optional runtime configuration for discovery registration
             namespace: Dynamo namespace for model discovery scoping
             namespace_prefix: Optional namespace prefix
@@ -3280,6 +3135,7 @@ class EntrypointArgs:
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
             tokenizer_backend: Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer")
             tokenizer_fallback: Whether alternate tokenizer load failures fall back to HuggingFace
+            batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
         """
         ...
 
@@ -3398,6 +3254,20 @@ class StreamIncomplete(DynamoException):
 
     ...
 
+class WorkerOverloaded(DynamoException):
+    """The worker temporarily cannot admit another request."""
+
+    ...
+
+class WorkerUnavailable(DynamoException):
+    """No worker on the request's route can serve it yet (HTTP 503).
+
+    Raised by `RoutedEngine.generate`, for example while prefill routing is
+    still activating. Re-raise it unchanged to keep the 503.
+    """
+
+    ...
+
 class SelectionServiceError(DynamoException):
     """
     Raised by `SelectionService` for selector failures that are not malformed
@@ -3419,6 +3289,32 @@ class SelectionServiceError(DynamoException):
 # ---------------------------------------------------------------------------
 
 class backend:
+    class EngineMetrics:
+        """Metrics handle provided to an engine's registration hook."""
+
+        def register_prometheus_expfmt_callback(
+            self, callback: Callable[[], str]
+        ) -> None: ...
+
+        def register_prometheus_typed_callback(
+            self,
+            callback: Callable[
+                [],
+                list[
+                    tuple[
+                        str,
+                        str,
+                        str,
+                        str,
+                        list[tuple[str, list[tuple[str, str]], float, float | None]],
+                    ]
+                ],
+            ],
+        ) -> None: ...
+
+        @property
+        def auto_labels(self) -> Dict[str, str]: ...
+
     @staticmethod
     def _run_sglang_sidecar(argv: Optional[List[str]] = None) -> None:
         """Run the native SGLang sidecar with CLI-style arguments."""
@@ -3508,6 +3404,8 @@ class backend:
             discovery_backend: Optional[str] = None,
             request_plane: Optional[str] = None,
             event_plane: Optional[str] = None,
+            *,
+            response_plane: Optional[str] = None,
         ) -> None: ...
 
     class WorkerConfig:
@@ -3530,9 +3428,7 @@ class backend:
             runtime: Optional["backend.RuntimeConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,
             health_check_payload: Optional[Dict[str, Any]] = None,
-            structural_tag_mode: str = ...,
-            structural_tag_scope: str = ...,
-            structural_tag_schema: str = ...,
+            structural_tag: Optional[Dict[str, Any]] = None,
             route_to_encoder: bool = ...,
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,

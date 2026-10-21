@@ -20,6 +20,9 @@ from pydantic import BaseModel, Field
 class AudioNvExt(BaseModel):
     """NVIDIA extensions for audio generation requests."""
 
+    annotations: Optional[list[str]] = None
+    """Annotations for SSE stream events."""
+
     frontend_accepts_audio_chunks: Optional[bool] = None
     """Internal compatibility signal for frontends that accept audio chunks.
 
@@ -62,15 +65,15 @@ class NvCreateAudioSpeechRequest(BaseModel):
     Note: image and video generation use 'response_format' for this; audio uses a
     separate field because OpenAI's audio API already uses 'response_format' for codec."""
 
-    response_format: Optional[str] = "wav"
-    """Output format."""
+    response_format: Optional[str] = None
+    """Output codec. If unset, handlers default to 'wav'."""
 
-    speed: Optional[float] = Field(default=1.0, ge=0.25, le=4.0)
-    """Speed factor."""
+    speed: Optional[float] = Field(default=None, ge=0.25, le=4.0)
+    """Speed factor. If unset, handlers default to 1.0."""
 
     # Qwen3-TTS specific params (top-level, matching vLLM-Omni)
-    task_type: Optional[Literal["CustomVoice", "VoiceDesign", "Base"]] = None
-    """TTS task type."""
+    task_type: Optional[str] = None
+    """TTS task type. The handler for the model validates the value."""
 
     language: Optional[str] = None
     """Language: Auto, Chinese, English, Japanese, Korean, etc."""
@@ -86,6 +89,9 @@ class NvCreateAudioSpeechRequest(BaseModel):
 
     max_new_tokens: Optional[int] = None
     """Maximum tokens to generate (default: 2048)."""
+
+    user: Optional[str] = None
+    """Optional user identifier."""
 
     nvext: Optional[AudioNvExt] = None
     """NVIDIA extensions."""

@@ -73,10 +73,14 @@ class _CommonReplayOptions(TypedDict, total=False):
     capture_per_request: bool
     capture_planner_details: bool
     telemetry_options: TelemetryOptions | None
+    kv_event_lag_ms: float | None
 
 
 class _TraceReplayOptions(_CommonReplayOptions, total=False):
     agentic_lanes: int | None
+    agentic_snapshot: dict[str, Any] | None
+    agentic_warmup: bool
+    agentic_profile: dict[str, Any] | None
     execution_model: str | None
     weka_nested_timestamp_basis: Literal["auto", "absolute", "relative"] | None
     trace_block_size: int | None
@@ -239,6 +243,9 @@ def run_trace_replay(
     num_decode_workers=1,
     replay_concurrency=None,
     agentic_lanes=None,
+    agentic_snapshot=None,
+    agentic_warmup=False,
+    agentic_profile=None,
     replay_mode="offline",
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
@@ -260,6 +267,7 @@ def run_trace_replay(
     execution_model=None,
     weka_nested_timestamp_basis=None,
     telemetry_options=None,
+    kv_event_lag_ms=None,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
 
@@ -267,6 +275,16 @@ def run_trace_replay(
     and execution. Planner creation and bootstrap happen before that boundary.
     ``weka_nested_timestamp_basis`` overrides Weka nested timestamp interpretation;
     omitting it retains AISimulate's automatic selection.
+
+    ``kv_event_lag_ms`` delays the KV cache events (blocks stored and removed)
+    the router's indexer observes by that much simulated time. Prefill and
+    request completions stay immediate, as a live router observes them in-band
+    on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
+    KV-router replay only.
+
+    ``agentic_snapshot``, ``agentic_warmup`` and ``agentic_profile`` use AISimulate
+    workload controls on the existing offline trace path. Native validation owns
+    their schemas and lifecycle constraints.
 
     Pass ``TelemetryOptions`` to enable policy-neutral sampling; omitting it
     leaves telemetry disabled. Callbacks and JSONL writes run synchronously on
@@ -303,6 +321,9 @@ def run_trace_replay(
         "num_decode_workers": num_decode_workers,
         "replay_concurrency": replay_concurrency,
         "agentic_lanes": agentic_lanes,
+        "agentic_snapshot": agentic_snapshot,
+        "agentic_warmup": agentic_warmup,
+        "agentic_profile": agentic_profile,
         "replay_mode": replay_mode,
         "router_mode": router_mode,
         "arrival_speedup_ratio": arrival_speedup_ratio,
@@ -320,6 +341,7 @@ def run_trace_replay(
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
+        "kv_event_lag_ms": kv_event_lag_ms,
     }
     replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":
@@ -451,8 +473,17 @@ def run_synthetic_trace_replay(
     capture_per_request=False,
     capture_planner_details=True,
     telemetry_options=None,
+    kv_event_lag_ms=None,
 ) -> ReplayReport | dict[str, Any]:
-    """Run synthetic replay with the same optional ``TelemetryOptions`` contract."""
+    """Run synthetic replay with the same optional ``TelemetryOptions`` and
+    ``kv_event_lag_ms`` contracts as :func:`run_trace_replay`.
+
+    ``arrival_seed`` seeds request-arrival generation only, not KV-router worker
+    selection. With ``router_mode="kv_router"``, equal-cost workers are selected
+    randomly even at router temperature zero. A fixed arrival seed therefore
+    does not guarantee identical routing, prefix reuse, or latency across runs,
+    including offline replay.
+    """
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
@@ -479,6 +510,7 @@ def run_synthetic_trace_replay(
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
+        "kv_event_lag_ms": kv_event_lag_ms,
     }
     replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":

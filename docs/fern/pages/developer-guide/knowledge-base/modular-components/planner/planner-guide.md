@@ -238,6 +238,50 @@ The same diagnostic signals surfaced in these reports are also exported as Prome
 
 The Replica Counts plot overlays actual prefill/decode replicas with discrete recommendation markers for the Planner's recommended prefill/decode replicas. When `advisory: true`, these recommended counts are suggestions only; the Planner records what it would do without applying the change.
 
+### Unavailable Scaling Inputs
+
+`dynamo_planner_signal_unavailable{component,signal}` reports missing inputs on
+their most recent scheduled observation. After the consecutive-observation
+threshold defined by `SIGNAL_DEGRADATION_OBSERVATIONS` in
+[planner_metrics.py](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/monitoring/planner_metrics.py)
+is reached, the Planner logs `Planner degraded signal` and increments
+`dynamo_planner_degraded_signals_total{component,signal}` once for that episode.
+A successful observation clears the gauge and allows a later outage to produce
+a new alert. Ticks that do not request a signal do not count as missing samples.
+
+The signals distinguish missing FPM, stale FPM, worker discovery join failures,
+missing speculative accept length, and unavailable traffic observations.
+`load_inputs` and `throughput_inputs` report `missing_engine_metadata` from the
+scaling paths' own metadata checks, such as missing KV capacity or batching
+limits. Normal performance-model warmup (`insufficient_data` or
+`model_not_ready`) remains visible in decision diagnostics and does not trigger
+a degraded-input alert. For a pool with ready workers, metadata health changes
+only when a scaling path actually evaluates that metadata; skipped, idle, or
+zero-demand decisions do not clear an existing metadata alarm. An explicitly
+empty pool clears its metadata alarm.
+Runtime FPM samples expire after three load-adjustment
+intervals measured from local receipt. Idle heartbeats refresh that receipt
+time. Samples from workers absent from discovery are excluded and logged with
+their worker IDs.
+Each discovered worker must provide a fresh sample for every DP rank declared
+in its model card. A worker or rank that has never published is unavailable;
+the Planner does not use a partial component snapshot to infer idle capacity.
+A snapshot is also unavailable if any rank's payload is malformed or uses an
+unsupported FPM schema version.
+
+Missing, non-finite, or failed router request-counter queries produce unavailable
+demand, matching the frontend collection behavior. An explicit counter value of
+zero remains a valid idle observation.
+
+Fresh idle FPM can reduce an SLA pool without waiting for a cold performance
+model. A valid zero-demand throughput prediction can also reduce a pool without
+a capacity estimate. Missing observations do not count as idle. Replica floors,
+GPU budgets, pending rollout checks, and downstream actuation constraints still
+apply. A restarted Planner uses observed deployment counts to resume decisions.
+These model-independent idle paths retain at least one worker per active role,
+even when `min_endpoint: 0`: without a publisher or a ready capacity model, they
+cannot independently wake a fully stopped pool.
+
 ### Scheduling / plugin pipeline
 
 The planner runs through the builtin plugin pipeline by default. The base

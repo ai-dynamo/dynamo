@@ -12,7 +12,7 @@ use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
 use std::collections::HashSet;
 
 use super::{KvReplayMetadata, KvRouterPlacement};
-use crate::common::protocols::MockEngineArgs;
+use crate::common::protocols::MockerConfig;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventObservation;
 
@@ -76,12 +76,12 @@ impl ReplayComposition for RoundRobinReplayComposition {
 
 enum KvTopologyConfig {
     Aggregated {
-        args: Box<MockEngineArgs>,
+        args: Box<MockerConfig>,
         num_workers: usize,
     },
     Disaggregated {
-        prefill_args: Box<MockEngineArgs>,
-        decode_args: Box<MockEngineArgs>,
+        prefill_args: Box<MockerConfig>,
+        decode_args: Box<MockerConfig>,
         num_prefill_workers: usize,
         num_decode_workers: usize,
     },
@@ -94,12 +94,16 @@ pub(in crate::replay) struct KvReplayComposition {
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     scaling_enabled: bool,
+    // TODO: Expose opt-in, per-replay selector seeding through the public CLI/Python
+    // APIs, separate from arrival_seed, and retain stable ordering for seeded ties.
     determinism: ReplayDeterminism,
+    /// Captured from [`crate::replay::with_kv_event_lag_ms`] at construction.
+    kv_event_lag_ms: f64,
 }
 
 impl KvReplayComposition {
     pub(in crate::replay) fn aggregated(
-        args: MockEngineArgs,
+        args: MockerConfig,
         num_workers: usize,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -116,12 +120,13 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
+            kv_event_lag_ms: crate::replay::kv_event_lag_ms(),
         }
     }
 
     pub(in crate::replay) fn disaggregated(
-        prefill_args: MockEngineArgs,
-        decode_args: MockEngineArgs,
+        prefill_args: MockerConfig,
+        decode_args: MockerConfig,
         num_prefill_workers: usize,
         num_decode_workers: usize,
         router_config: Option<KvRouterConfig>,
@@ -141,6 +146,7 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
+            kv_event_lag_ms: crate::replay::kv_event_lag_ms(),
         }
     }
 }
@@ -177,7 +183,8 @@ impl ReplayComposition for KvReplayComposition {
             self.prefill_load_estimator.take(),
             topology.len(),
             self.determinism.selector_seed(),
-        )
+        )?
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)
     }
 
     fn create_disaggregated_placements(
@@ -221,7 +228,8 @@ impl ReplayComposition for KvReplayComposition {
             prefill_topology.len(),
             self.determinism.selector_seed(),
         )
-        .context("constructing prefill KV Router placement")?;
+        .context("constructing prefill KV Router placement")?
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)?;
         let decode = KvRouterPlacement::new_with_selector_seed(
             decode_args,
             Some(derive_decode_router_config(decode_args, router_config)),
@@ -229,7 +237,8 @@ impl ReplayComposition for KvReplayComposition {
             decode_topology.len(),
             self.determinism.selector_seed(),
         )
-        .context("constructing decode KV Router placement")?;
+        .context("constructing decode KV Router placement")?
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)?;
         Ok((prefill, decode))
     }
 
@@ -290,7 +299,7 @@ fn validate_adapter_descriptors(
 
 fn validate_runtime_topology(
     stage: &str,
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     expected_workers: usize,
     dp_size: u32,
     topology: &[WorkerTopology],
@@ -334,18 +343,18 @@ fn validate_runtime_topology(
 }
 
 fn base_router_config(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
     let mut config = router_config.unwrap_or_default();
-    if let Some(policy) = args.router_queue_policy {
+    if let Some(policy) = args.runtime.router_queue_policy {
         config.router_queue_policy = policy;
     }
     config
 }
 
 pub(in crate::replay) fn derive_prefill_router_config(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
     let mut config = base_router_config(args, router_config);
@@ -354,7 +363,7 @@ pub(in crate::replay) fn derive_prefill_router_config(
 }
 
 pub(in crate::replay) fn derive_decode_router_config(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
     let mut config = base_router_config(args, router_config);
@@ -410,7 +419,7 @@ mod tests {
 
     #[test]
     fn runtime_topology_must_match_dynamo_dp_and_worker_shape() {
-        let args = MockEngineArgs::builder().dp_size(2).build().unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({"dp_size":2})).unwrap();
         let error = validate_runtime_topology(
             "aggregated",
             &args,
@@ -427,14 +436,16 @@ mod tests {
 
     #[test]
     fn native_vllm_kv_router_does_not_observe_blocks_before_pass_completion() {
-        let args = MockEngineArgs::builder()
-            .block_size(64)
-            .num_gpu_blocks(64)
-            .max_num_seqs(Some(4))
-            .max_num_batched_tokens(Some(256))
-            .speedup_ratio(0.001)
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "num_gpu_blocks": 64,
+                "max_num_seqs": 4,
+                "max_num_batched_tokens": 256,
+                "speedup_ratio": 0.001
+            }
+        }))
+        .unwrap();
         let router_config = KvRouterConfig {
             // If the first pass were published at pass start, this deliberately
             // strong credit would route the matching mid-pass request back to
@@ -487,11 +498,105 @@ mod tests {
         assert_eq!(mid_pass_route.reported_overlap_tokens, Some(0));
     }
 
+    #[test]
+    fn kv_event_lag_hides_a_finished_requests_blocks_until_due() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "num_gpu_blocks": 64,
+                "max_num_seqs": 4,
+                "max_num_batched_tokens": 256,
+            },
+        }))
+        .unwrap();
+        let router_config = KvRouterConfig {
+            overlap_score_credit: 100.0,
+            overlap_score_credit_decay: 0.0,
+            router_temperature: 0.0,
+            ..KvRouterConfig::default()
+        };
+        let shared_prompt = vec![7; 128];
+        let request = |uuid, arrival_timestamp_ms| DirectRequest {
+            tokens: shared_prompt.clone(),
+            max_output_tokens: 2,
+            uuid: Some(uuid::Uuid::from_u128(uuid)),
+            arrival_timestamp_ms: Some(arrival_timestamp_ms),
+            ..DirectRequest::default()
+        };
+        // Request 2 arrives 10 s after request 1, long after it finished. Request 1's cached
+        // blocks attract it unless the KV event lag exceeds that gap.
+        let routes = |lag_ms: f64| {
+            let report = crate::replay::with_kv_event_lag_ms(lag_ms, || {
+                crate::replay::offline::entrypoints::simulate_trace_with_scaling_policy(
+                    args.clone(),
+                    Some(router_config.clone()),
+                    None,
+                    vec![request(1, 0.0), request(2, 10_000.0)],
+                    2,
+                    1.0,
+                    ReplayRouterMode::KvRouter,
+                    true,
+                    None,
+                    Default::default(),
+                    None,
+                    None,
+                )
+            })
+            .unwrap()
+            .unwrap();
+            [1, 2].map(|uuid| {
+                let record = report
+                    .per_request
+                    .iter()
+                    .find(|record| record.uuid == uuid::Uuid::from_u128(uuid).to_string())
+                    .unwrap();
+                let route = record.routing_history.first().unwrap();
+                (route.logical_worker_id, route.reported_overlap_tokens)
+            })
+        };
+
+        for lag_ms in [0.0, 5_000.0] {
+            let [first, second] = routes(lag_ms);
+            assert_eq!(second.0, first.0, "lag {lag_ms} ms");
+            assert!(second.1.is_some_and(|tokens| tokens > 0), "lag {lag_ms} ms");
+        }
+
+        let [_, stale_second] = routes(60_000.0);
+        assert_eq!(stale_second.1, Some(0));
+    }
+
+    #[test]
+    fn kv_event_lag_reaches_both_disaggregated_routers() {
+        let topology = || {
+            vec![WorkerTopology {
+                worker_id: 0,
+                scheduler_ids: vec![0],
+            }]
+        };
+        let mut composition = crate::replay::with_kv_event_lag_ms(25.0, || {
+            KvReplayComposition::disaggregated(
+                MockerConfig::default(),
+                MockerConfig::default(),
+                1,
+                1,
+                None,
+                None,
+                None,
+            )
+        })
+        .unwrap();
+        let (prefill, decode) = composition
+            .create_disaggregated_placements(1, topology(), 1, topology())
+            .unwrap();
+        assert_eq!(prefill.router.kv_event_lag_ms, 25.0);
+        assert_eq!(decode.router.kv_event_lag_ms, 25.0);
+    }
+
     #[cfg(feature = "replay-bench")]
     #[test]
     fn kv_composition_uses_only_explicit_canonical_determinism() {
         let mut composition =
-            KvReplayComposition::aggregated(MockEngineArgs::default(), 1, None, None, None);
+            KvReplayComposition::aggregated(MockerConfig::default(), 1, None, None, None);
         assert_eq!(composition.determinism.selector_seed(), None);
 
         composition
