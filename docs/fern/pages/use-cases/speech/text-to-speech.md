@@ -103,17 +103,19 @@ bash examples/backends/vllm/launch/agg_omni_audio.sh --model Qwen/Qwen3-TTS-12Hz
 ```
 
 In another terminal, pass the reference audio as a URL or base64 data URI, and
-optionally its transcript:
+optionally its exact transcript. This example encodes a local recording,
+`reference-voice.wav`, as a data URI. Set `REF_TEXT` to the words spoken in it:
 
 ```bash
+REF_TEXT="The exact words spoken in reference-voice.wav."
+jq -n \
+  --arg input "This sentence is spoken in the reference voice." \
+  --arg ref_audio "data:audio/wav;base64,$(base64 < reference-voice.wav | tr -d '\n')" \
+  --arg ref_text "$REF_TEXT" \
+  '{input: $input, task_type: "Base", ref_audio: $ref_audio, ref_text: $ref_text}' |
 curl -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
-  -d '{
-    "input": "This sentence is spoken in the reference voice.",
-    "task_type": "Base",
-    "ref_audio": "https://example.com/reference-voice.wav",
-    "ref_text": "Transcript of the reference recording."
-  }' --output cloned.wav
+  -d @- --output cloned.wav
 ```
 
 Sending `ref_audio` or `ref_text` without `task_type` also selects the Base task.

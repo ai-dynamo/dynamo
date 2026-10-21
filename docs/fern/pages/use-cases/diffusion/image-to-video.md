@@ -104,17 +104,18 @@ start the worker directly with an image-to-video checkpoint:
 ```bash
 python3 -m dynamo.frontend --http-port 8000 &
 python3 -m dynamo.sglang \
-  --model-path <image-to-video-model> \
-  --served-model-name <image-to-video-model> \
+  --model-path Wan-AI/Wan2.1-I2V-14B-480P-Diffusers \
+  --served-model-name Wan-AI/Wan2.1-I2V-14B-480P-Diffusers \
   --video-generation-worker \
   --media-output-fs-url file:///tmp/dynamo_media \
   --trust-remote-code \
   --skip-tokenizer-init
 ```
 
-Replace `<image-to-video-model>` with an image-to-video Diffusers checkpoint
-that SGLang's `DiffGenerator` supports. Check SGLang's diffusion model list for
-your installed version.
+`Wan-AI/Wan2.1-I2V-14B-480P-Diffusers` is an image-to-video checkpoint in
+SGLang's [diffusion model list](https://docs.sglang.io/diffusion/compatibility_matrix.html).
+To use another checkpoint, pick one that your installed SGLang version supports
+and use the same ID in the launch command and the request.
 
 ### Generate a Video from an Image
 
@@ -126,7 +127,7 @@ image inputs.
 curl http://localhost:8000/v1/videos \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "<image-to-video-model>",
+    "model": "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
     "prompt": "The cat slowly turns its head and blinks",
     "input_reference": "https://example.com/cat.png",
     "seconds": 2,

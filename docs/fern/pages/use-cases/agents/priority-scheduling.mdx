@@ -35,7 +35,9 @@ Add `nvext.agent_hints` to the request body:
 | `priority` | Soft priority. Higher values mean higher priority. The router uses it to order its queue, and supported backends use it for engine scheduling and cache eviction. |
 | `strict_priority` | Router-only pending-queue tier, an unsigned integer. A higher tier always goes ahead of a lower tier. It is not forwarded to the backend engine. |
 
-For HTTP requests you can send the same values as `x-dynamo-request-priority` and `x-dynamo-request-strict-priority`. Header values override the matching `nvext.agent_hints` fields.
+For HTTP requests you can send the same values as `x-dynamo-request-priority` and `x-dynamo-request-strict-priority`. Header values override the matching `nvext.agent_hints` fields. Both methods need the frontend to accept NvExt inputs: they have no effect if you start it with `DYN_DISABLE_FRONTEND_NVEXT=true`.
+
+Sending a priority changes nothing until you turn on a layer below. The `agg_agent.sh` launcher enables priority-aware cache eviction only; it does not enable the router queue or engine priority scheduling.
 
 ## Turn On Priority in Each Layer
 
@@ -69,8 +71,9 @@ python -m dynamo.frontend \
 
 A request waits while every eligible worker's active prefill tokens exceed `prefill_busy_threshold_frac` times its `max_num_batched_tokens`. Lower the fraction to queue sooner. See [Policy-Class Queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) for the full schema, including `wspt` ordering and per-worker queue limits.
 
-> [!NOTE]
-> The older `--router-queue-threshold` and `--router-queue-policy` flags are deprecated and are planned for removal in v1.7. Use the policy file instead.
+<Note>
+The older `--router-queue-threshold` and `--router-queue-policy` flags are deprecated and are planned for removal in v1.7. Use the policy file instead.
+</Note>
 
 ### 2. Backend engine
 

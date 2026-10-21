@@ -73,19 +73,21 @@
   <text x="728.0" y="333.0" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">A</text>
   <rect x="754" y="314" width="52" height="30" rx="4" fill="#F7C873" stroke="#D97706" stroke-width="1.5"/>
   <text x="780.0" y="333.0" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">B</text>
-  <rect x="924" y="186" width="150" height="96" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="924" y="186" width="150" height="104" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
   <text x="938" y="213" font-size="13" font-weight="700" fill="#4C7A00">Model A</text>
   <circle cx="943" cy="230" r="2.2" fill="#1A1A1A"/>
   <text x="952" y="234" font-size="12.5" fill="#1A1A1A">Half the memory</text>
   <circle cx="943" cy="248" r="2.2" fill="#1A1A1A"/>
-  <text x="952" y="252" font-size="12.5" fill="#1A1A1A">Half the SMs</text>
-  <rect x="1084" y="186" width="150" height="96" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="952" y="252" font-size="12.5" fill="#1A1A1A">Up to half the</text>
+  <text x="952" y="270" font-size="12.5" fill="#1A1A1A">SMs</text>
+  <rect x="1084" y="186" width="150" height="104" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
   <text x="1098" y="213" font-size="13" font-weight="700" fill="#4C7A00">Model B</text>
   <circle cx="1103" cy="230" r="2.2" fill="#1A1A1A"/>
   <text x="1112" y="234" font-size="12.5" fill="#1A1A1A">Half the memory</text>
   <circle cx="1103" cy="248" r="2.2" fill="#1A1A1A"/>
-  <text x="1112" y="252" font-size="12.5" fill="#1A1A1A">Half the SMs</text>
-  <text x="924" y="306" font-size="12" font-weight="700" fill="#4B5563">SMs, split and running concurrently</text>
+  <text x="1112" y="252" font-size="12.5" fill="#1A1A1A">Up to half the</text>
+  <text x="1112" y="270" font-size="12.5" fill="#1A1A1A">SMs</text>
+  <text x="924" y="306" font-size="12" font-weight="700" fill="#4B5563">SMs, capped at half each, running concurrently</text>
   <rect x="924" y="314" width="156" height="30" rx="4" fill="#DCEFB5" stroke="#76B900" stroke-width="1.5"/>
   <text x="1002.0" y="333.0" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">A</text>
   <rect x="1080" y="314" width="156" height="30" rx="4" fill="#C6E58A" stroke="#76B900" stroke-width="1.5"/>

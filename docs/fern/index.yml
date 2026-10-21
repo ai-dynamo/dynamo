@@ -736,7 +736,7 @@ navigation:
           - page: Maintain Session Affinity
             path: pages/use-cases/agents/session-affinity.md
           - page: Prioritize Requests
-            path: pages/use-cases/agents/priority-scheduling.md
+            path: pages/use-cases/agents/priority-scheduling.mdx
           - page: Agent Tracing
             path: pages/use-cases/agents/agent-tracing.md
           - page: Agent Simulation

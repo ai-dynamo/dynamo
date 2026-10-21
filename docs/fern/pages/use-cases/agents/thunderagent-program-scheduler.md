@@ -19,7 +19,7 @@ Agentic workloads (SWE-bench, browser-use, anything with a tool loop) make many 
 - **Cache-occupancy blowup.** With N agents at step K, the working set is `N × step_K_context`, most of it idle between turns. The engine evicts useful blocks under pressure or refuses admission, and every next turn pays a re-prefill tax.
 - **No tool-boundary backpressure.** The router can't defer a hot session at a natural pause point — it can only cancel in-flight requests or queue them, both worse than waiting until the agent is between turns.
 
-If your agents run few concurrent sessions, or KV cache is never under pressure, you do not need this. Start with [session affinity](session-affinity.md) and [priority](priority-scheduling.md).
+If your agents run few concurrent sessions, or KV cache is never under pressure, you do not need this. Start with [session affinity](session-affinity.md) and [priority](priority-scheduling.mdx).
 
 ## Native Frontend Plugin
 

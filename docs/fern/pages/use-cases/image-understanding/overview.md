@@ -20,7 +20,7 @@ image workloads, see [VLM Performance Optimization](vlm-performance-optimization
 | Input | vLLM | SGLang | TensorRT-LLM |
 | --- | --- | --- | --- |
 | `https://` image URL | Yes | Yes | Yes |
-| `data:` (base64) image | Yes | No | Yes |
+| `data:` (base64) image | Yes | Yes | Yes |
 | Pre-computed embeddings (`.safetensors`) | No | No | Yes |
 
 Plain `http://` URLs and hosts that resolve to private or loopback addresses are
@@ -28,8 +28,11 @@ refused by default. See [Media URL Policy](#media-url-policy).
 
 ## Set up the backend
 
-Every multimodal worker must be started with `--enable-multimodal`. Without it,
-media requests are rejected. The launchers below set the flag for you.
+The vLLM and TensorRT-LLM launchers below start the worker with
+`--enable-multimodal`. The SGLang aggregated launcher (`agg_vision.sh`) does not
+pass it, while the SGLang disaggregated launchers do. See
+[SGLang Multimodal](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md)
+for the flags each worker role needs.
 
 Run the commands from the root of a Dynamo repository checkout. Each launcher
 starts a frontend on port 8000 and one aggregated worker on GPU 0.
@@ -92,8 +95,8 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-To send a local file, base64-encode it as a `data:` URL on vLLM or
-TensorRT-LLM: `"url": "data:image/jpeg;base64,<encoded bytes>"`.
+To send a local file, base64-encode it as a `data:` URL:
+`"url": "data:image/jpeg;base64,<encoded bytes>"`.
 
 ## Media URL Policy
 

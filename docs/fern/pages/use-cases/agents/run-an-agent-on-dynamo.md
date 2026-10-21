@@ -21,7 +21,7 @@ This serves `zai-org/GLM-4.7-Flash` with SGLang at TP2 on port 8000. It also tur
 |---|---|
 | `--router-mode kv` | Sends each request to the worker that already holds the most reusable KV cache. |
 | `--kv-events-config` | Lets the worker report its cached blocks so the router can find reuse. |
-| `--radix-eviction-policy priority` | When GPU cache fills, evicts low-priority entries first. It only has an effect once you [send priorities](priority-scheduling.md). |
+| `--radix-eviction-policy priority` | When GPU cache fills, evicts low-priority entries first. It only has an effect once you [send priorities](priority-scheduling.mdx). |
 | `--dyn-tool-call-parser`, `--dyn-reasoning-parser` | Turn model output into structured tool calls and reasoning. The values (`glm47`, `glm45`) are specific to GLM; change them with the model. |
 | `--enable-anthropic-api` | Serves `/v1/messages` so Claude Code can connect. |
 | `DYN_REQUEST_TRACE=1` | Records every request so you can analyze the run. |

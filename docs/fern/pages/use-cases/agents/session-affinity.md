@@ -9,7 +9,7 @@ By the end of this guide, the frontend keeps every turn of an agent session on t
 
 An agent turn repeats the whole conversation so far. If the turn lands on the worker that already holds that prefix, it skips most of the prefill. KV-aware routing (`--router-mode kv`) already prefers workers with cache overlap. Session affinity goes further: it binds a session to one worker for a while, so reuse does not depend on the router's scoring on every turn.
 
-Use it when your agents run many turns on a growing context and you have more than one worker. Pinning can unbalance load, so start with `soft` mode if your sessions vary a lot in length.
+Use it when your agents run many turns on a growing context and you have more than one worker. Pinning can unbalance load. `soft` mode does not fix that on its own: with the default selector it keeps the bound worker while that worker is eligible. Use it with a custom or [ThunderAgent](thunderagent-program-scheduler.md) policy that can choose another worker.
 
 ![Each turn of a session repeats a growing prefix. With affinity on, the frontend binds the session to one worker and sends later turns there so they reuse its KV cache. Hard mode always uses the bound worker; soft mode treats it as a preference.](../../../assets/img/session-affinity.svg)
 
@@ -30,7 +30,14 @@ python -m dynamo.frontend \
   --router-session-affinity-ttl-secs 300
 ```
 
-The same setting is available as `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS`. The value is the idle timeout in seconds, from `1` through `31536000`. A binding expires when the session has had no active requests for that long, so choose a value longer than the pauses between your agent's turns (tool runs, human review).
+The same setting is available as `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS`. If you started the endpoint with `agg_agent.sh` in [Run an agent on Dynamo](run-an-agent-on-dynamo.md), stop it and start it again with the TTL in its environment:
+
+```bash
+DYN_ROUTER_SESSION_AFFINITY_TTL_SECS=300 \
+  bash examples/backends/sglang/launch/agg_agent.sh
+```
+
+The The value is the idle timeout in seconds, from `1` through `31536000`. A binding expires when the session has had no active requests for that long, so choose a value longer than the pauses between your agent's turns (tool runs, human review).
 
 The first successfully dispatched request binds the session to its selected worker and, when available, its data-parallel rank. Later requests from the same session follow that binding.
 
@@ -63,7 +70,7 @@ gzip -cd "${DYN_REQUEST_TRACE_FILE_PATH:-/tmp/dynamo-request-trace}".*.jsonl.gz 
 
 If you started the endpoint with `agg_agent.sh`, it writes plain JSONL instead; use the path it prints at startup with `jq` directly.
 
-With `hard` affinity, every row for one session shows the same worker, and `cached_tokens` grows as the conversation grows.
+This check needs at least two eligible workers. With one worker, every row shows that worker whether or not affinity is on, and KV routing alone can raise `cached_tokens`. To confirm affinity, run the same multi-turn session once without the TTL and once with it. With `hard` affinity, every row for the session shows the same worker. Without it, rows can spread across workers.
 
 ## Subagents
 
@@ -87,4 +94,4 @@ For the full binding rules, including how soft rebinding commits and LoRA behavi
 
 ## Next
 
-[Prioritize requests](priority-scheduling.md) lets interactive requests go ahead of background work on the same workers.
+[Prioritize requests](priority-scheduling.mdx) lets interactive requests go ahead of background work on the same workers.

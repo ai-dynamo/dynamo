@@ -85,6 +85,8 @@ container/run.sh \
   -it
 ```
 
+To use a FastH3 adapter, export `DYN_H3_FASTH3_LORA_PATH` (and optionally `DYN_H3_FASTH3_VARIANT`) as described below **before** you run the launcher. The launcher reads them at startup, so stop and relaunch the worker to change adapters or variants.
+
 Launch the profile inside the container. It uses four-way Ulysses and text-encoder tensor
 parallelism while keeping VAE patch parallelism at one, so small supported
 resolutions such as 448x256 still have at least one tile per participating
@@ -101,7 +103,7 @@ When an offline cache contains only H3's `FL2VA/` partition, set
 `DYN_H3_MODEL` as the public API model name and passes the local partition as
 the engine path.
 
-To use the four-step Dense FastH3 adapter, download and pin the startup adapter:
+To use the four-step Dense FastH3 adapter, download and pin the startup adapter before you launch the worker:
 
 ```bash
 export DYN_H3_FASTH3_LORA_PATH="$(hf download \

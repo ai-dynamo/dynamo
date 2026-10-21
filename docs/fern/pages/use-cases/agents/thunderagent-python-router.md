@@ -162,4 +162,4 @@ The maintained end-to-end path uses upstream Harbor to create SWE-bench containe
 - Upstream ThunderAgent reference: [HaoKang-Timmy/ThunderAgent](https://github.com/HaoKang-Timmy/ThunderAgent)
 - Pi Dynamo provider: [ai-dynamo/agent-plugins](https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin)
 - Dynamo KV router: [Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md)
-- [Identify agent sessions](session-ids.mdx), [Agent Tracing](agent-tracing.md), and [Prioritize requests](priority-scheduling.md)
+- [Identify agent sessions](session-ids.mdx), [Agent Tracing](agent-tracing.md), and [Prioritize requests](priority-scheduling.mdx)

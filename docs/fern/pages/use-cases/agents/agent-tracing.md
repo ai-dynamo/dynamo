@@ -32,7 +32,7 @@ export DYN_REQUEST_TRACE=1
 export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 ```
 
-Traces do not include prompts, responses, or tool-call arguments. They do include client-supplied agent headers, so keep secrets out of those headers. See [What a Trace Contains](#what-a-trace-contains).
+Default request traces do not include prompts, responses, or tool-call arguments. The optional [`request_payload` record](../../reference/observability/request-traces.mdx#request_payload) does, so enable it only if you need it. Traces do include client-supplied agent headers, so keep secrets out of those headers. See [What a Trace Contains](#what-a-trace-contains).
 
 </Step>
 
@@ -188,4 +188,4 @@ For chat streams, Dynamo records finish metadata after parser and jail rewrites.
 ## Next
 
 - [Agent simulation](agent-simulation.mdx) turns a capture into a replayable benchmark.
-- [Maintain session affinity](session-affinity.md) and [Prioritize requests](priority-scheduling.md) are changes you can now measure with a trace.
+- [Maintain session affinity](session-affinity.md) and [Prioritize requests](priority-scheduling.mdx) are changes you can now measure with a trace.
