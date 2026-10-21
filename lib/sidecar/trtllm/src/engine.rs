@@ -129,6 +129,9 @@ impl TrtllmSidecarEngine {
             // Absent unless `--context-length` supplied one; `start` falls back
             // to the server's `Control.GetModelInfo` report.
             context_length: args.context_length,
+            // No flag: `start` takes it from the server's `Control.GetServerInfo`
+            // report.
+            kv_cache_block_size: None,
         };
         let engine = Self::new(endpoint, transport, model.clone(), mode);
         // Off by default: TensorRT-LLM's xgrammar rejects several tag formats (NVIDIA/TensorRT-LLM#19913).
@@ -264,7 +267,33 @@ impl TrtllmSidecarEngine {
                     })?
             }
         };
-        Ok((client, limits))
+
+        // The block size is a registration hint for the frontend: KV-aware
+        // routing hashes prompts at the registered granularity, and the
+        // in-process worker registers the engine's `tokens_per_block`. Left
+        // unset, the card falls back to Dynamo's default of 16, so the same
+        // engine would route at a different granularity depending on how it is
+        // driven. Tolerated on failure like `GetModelInfo` above: a server
+        // without Control, or with an older contract, keeps the default rather
+        // than failing startup.
+        let kv_cache_block_size = match client.kv_cache_block_size().await {
+            Ok(size) => size,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Control.GetServerInfo failed; registering Dynamo's default KV cache \
+                     block size, so KV-aware routing granularity may not match the engine"
+                );
+                None
+            }
+        };
+        Ok((
+            client,
+            ModelLimits {
+                kv_cache_block_size,
+                ..limits
+            },
+        ))
     }
 }
 
@@ -282,12 +311,14 @@ impl LLMEngine for TrtllmSidecarEngine {
             .map_err(|_| client::engine_shutdown(ALREADY_STARTED))?;
         let mut model = self.model.clone();
         model.context_length = limits.context_length;
+        model.kv_cache_block_size = limits.kv_cache_block_size;
         tracing::info!(
             endpoint = %self.endpoint,
             connections = client.connection_count(),
             model = %model.source,
             context_length = ?limits.context_length,
             max_output_tokens = ?limits.max_output_tokens,
+            kv_cache_block_size = ?limits.kv_cache_block_size,
             "TensorRT-LLM gRPC is ready"
         );
         Ok(model.engine_config())

@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{
@@ -50,6 +50,12 @@ struct FakeTrtllm {
     /// Answers `UNAVAILABLE`, the shape of an engine that is not serving yet.
     unavailable_model_info: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
+    /// Tokens per KV block advertised in `GetServerInfo.capacity`; zero leaves
+    /// `capacity` unset, like a server that does not report one.
+    kv_block_size: Arc<AtomicU32>,
+    /// Simulates a server whose `GetServerInfo` is not implemented.
+    no_server_info: Arc<AtomicBool>,
+    server_info_calls: Arc<AtomicUsize>,
 }
 
 fn prompt_len(request: &pb::GenerateRequest) -> u32 {
@@ -214,7 +220,19 @@ impl pb::control_server::Control for FakeTrtllm {
         &self,
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
-        Err(Status::unimplemented("GetServerInfo is not used"))
+        self.server_info_calls.fetch_add(1, Ordering::SeqCst);
+        if self.no_control.load(Ordering::SeqCst) || self.no_server_info.load(Ordering::SeqCst) {
+            return Err(Status::unimplemented("GetServerInfo is not implemented"));
+        }
+        let kv_block_size = self.kv_block_size.load(Ordering::SeqCst);
+        Ok(Response::new(pb::ServerInfo {
+            engine_name: "tensorrt_llm".to_string(),
+            capacity: (kv_block_size > 0).then_some(pb::DeploymentCapacity {
+                kv_block_size: Some(kv_block_size),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
     }
 
     async fn get_load(
@@ -358,6 +376,7 @@ fn engine_with(
         ConfiguredModel {
             source: "model-source".to_string(),
             context_length,
+            kv_cache_block_size: None,
         },
         mode,
     )
@@ -838,6 +857,52 @@ async fn a_configured_context_length_survives_a_server_without_control() {
     );
 }
 
+/// The engine's KV-cache block size rides on the registration so the frontend's
+/// KV-aware routing hashes prompts at the engine's granularity, as it does for
+/// the in-process worker. It comes from `GetServerInfo`, asked once at
+/// discovery alongside `GetModelInfo`.
+#[tokio::test]
+async fn the_engines_kv_block_size_is_registered() {
+    let service = FakeTrtllm::default();
+    service.kv_block_size.store(128, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, 1);
+
+    let config = engine.start(0).await.expect("start");
+    let llm = config.llm.expect("llm registration");
+    assert_eq!(llm.kv_cache_block_size, Some(128));
+    assert_eq!(llm.context_length, Some(4096));
+    assert_eq!(server.service.server_info_calls.load(Ordering::SeqCst), 1);
+}
+
+/// A server that answers `GetServerInfo` without `capacity`, or one with no
+/// `GetServerInfo` at all, is not a startup problem: the block size is only a
+/// routing hint, so the registration leaves it unset and the worker falls back
+/// to Dynamo's default, exactly as it did before the sidecar asked.
+#[tokio::test]
+async fn a_server_without_a_kv_block_size_keeps_the_default() {
+    for no_server_info in [false, true] {
+        let service = FakeTrtllm::default();
+        service
+            .no_server_info
+            .store(no_server_info, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let engine = engine(&server.endpoint, 1);
+
+        let config = engine.start(0).await.expect("start");
+        let llm = config.llm.expect("llm registration");
+        assert_eq!(
+            llm.kv_cache_block_size, None,
+            "no_server_info = {no_server_info}"
+        );
+        assert_eq!(
+            llm.context_length,
+            Some(4096),
+            "GetModelInfo still decides the window (no_server_info = {no_server_info})"
+        );
+    }
+}
+
 /// Shutdown has to terminate in-flight requests: the worker cannot drain if a
 /// stream waits forever on an engine that will never answer.
 #[tokio::test]
@@ -941,6 +1006,7 @@ async fn bootstrap_discovers_once_but_requires_start_before_serving() {
     .unwrap();
     let (engine, _) = bootstrap.1.await.unwrap();
     assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(server.service.server_info_calls.load(Ordering::SeqCst), 1);
     let context = dynamo_backend_common::testing::mock_context();
     let result = engine
         .generate(request(), GenerateContext::new(context, None))
@@ -961,6 +1027,7 @@ async fn bootstrap_discovers_once_but_requires_start_before_serving() {
     let config = engine.start(0).await.unwrap();
     assert_eq!(config.llm.unwrap().context_length, Some(4096));
     assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(server.service.server_info_calls.load(Ordering::SeqCst), 1);
     let outputs = collect(&engine, request()).await;
     assert_eq!(outputs[0].token_ids, [42]);
     assert_eq!(

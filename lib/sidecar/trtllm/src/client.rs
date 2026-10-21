@@ -27,8 +27,8 @@ use crate::proto::inference_client::InferenceClient;
 /// `--grpc-startup-deadline-secs` instead.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The engine's limits, resolved at startup from `--context-length` and
-/// `Control.GetModelInfo`.
+/// The engine's limits, resolved at startup from `--context-length`,
+/// `Control.GetModelInfo` and `Control.GetServerInfo`.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ModelLimits {
     /// Maximum input + output tokens; backs both the registered context window
@@ -38,6 +38,11 @@ pub(crate) struct ModelLimits {
     /// Cap on generated tokens, when the engine reports one. A context window
     /// alone can imply a larger budget than the engine will accept.
     pub(crate) max_output_tokens: Option<u32>,
+    /// Tokens per KV-cache block, when the engine reports one
+    /// (`ServerInfo.capacity.kv_block_size`). Registered so the frontend's
+    /// KV-aware routing hashes prompts at the engine's granularity; absent, the
+    /// worker registers Dynamo's default block size instead.
+    pub(crate) kv_cache_block_size: Option<u32>,
 }
 
 pub(crate) struct TrtllmClient {
@@ -104,6 +109,7 @@ impl TrtllmClient {
         Ok(ModelLimits {
             context_length: info.max_context_length.filter(|len| *len > 0),
             max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
+            kv_cache_block_size: None,
         })
     }
 
@@ -119,6 +125,33 @@ impl TrtllmClient {
                 ))
             })?
             .map_err(|status| status_to_dynamo("GetModelInfo", status))
+    }
+
+    /// Reads the deployed KV-cache block size from `Control.GetServerInfo`,
+    /// keeping a positive value.
+    ///
+    /// `None` means the server did not say: `capacity` is absent from older
+    /// OpenEngine builds, and the engine's `tokens_per_block` has no other
+    /// portable source here. Startup tolerates a failed call the way it
+    /// tolerates a failed `GetModelInfo`; the block size is a routing hint, not
+    /// something the sidecar needs in order to serve.
+    pub(crate) async fn kv_cache_block_size(&self) -> Result<Option<u32>, DynamoError> {
+        let info = tokio::time::timeout(
+            RPC_TIMEOUT,
+            self.control().get_server_info(pb::GetServerInfoRequest {}),
+        )
+        .await
+        .map_err(|_| {
+            connection_timeout(format!(
+                "GetServerInfo did not respond within {RPC_TIMEOUT:?}"
+            ))
+        })?
+        .map_err(|status| status_to_dynamo("GetServerInfo", status))?
+        .into_inner();
+        Ok(info
+            .capacity
+            .and_then(|capacity| capacity.kv_block_size)
+            .filter(|size| *size > 0))
     }
 
     /// Polls `GetModelInfo` until the engine reports a usable context length or

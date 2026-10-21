@@ -52,6 +52,7 @@ pub(crate) fn limits(context_length: u32) -> Option<ModelLimits> {
     Some(ModelLimits {
         context_length: Some(context_length),
         max_output_tokens: None,
+        kv_cache_block_size: None,
     })
 }
 

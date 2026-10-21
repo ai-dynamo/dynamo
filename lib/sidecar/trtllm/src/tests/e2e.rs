@@ -28,6 +28,7 @@ async fn e2e_real_disagg_handoff() {
     let configured = |source: String| ConfiguredModel {
         source,
         context_length: None,
+        kv_cache_block_size: None,
     };
     let prefill = TrtllmSidecarEngine::new(
         GrpcEndpoint::parse(&prefill_endpoint, "--grpc-endpoint").expect("valid endpoint"),
@@ -134,6 +135,7 @@ async fn e2e_real_openengine_server() {
         ConfiguredModel {
             source: model.clone(),
             context_length: None,
+            kv_cache_block_size: None,
         },
         AGG,
     );
@@ -141,7 +143,11 @@ async fn e2e_real_openengine_server() {
         .start(0)
         .await
         .expect("start against the live server");
-    eprintln!("[e2e] connected; registered model = {}", config.model);
+    eprintln!(
+        "[e2e] connected; registered model = {}, kv_cache_block_size = {:?}",
+        config.model,
+        config.llm.as_ref().and_then(|llm| llm.kv_cache_block_size)
+    );
 
     // "<s> Hello, my name is" in the Llama tokenizer; any valid token IDs work.
     let request = PreprocessedRequest::builder()

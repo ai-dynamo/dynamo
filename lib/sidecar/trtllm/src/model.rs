@@ -14,6 +14,9 @@ pub(crate) struct ConfiguredModel {
     /// argument if it was supplied, else from a server `GetModelInfo` report,
     /// if known.
     pub context_length: Option<u32>,
+    /// Tokens per KV-cache block, from the server's `GetServerInfo` report, if
+    /// known. Unset, the worker registers Dynamo's default.
+    pub kv_cache_block_size: Option<u32>,
 }
 
 impl ConfiguredModel {
@@ -31,6 +34,7 @@ impl ConfiguredModel {
             runtime_data,
             llm: Some(LlmRegistration {
                 context_length: self.context_length,
+                kv_cache_block_size: self.kv_cache_block_size,
                 ..Default::default()
             }),
         }

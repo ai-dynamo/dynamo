@@ -193,6 +193,7 @@ fn the_derived_max_tokens_respects_the_engines_output_cap() {
         Some(ModelLimits {
             context_length: Some(4096),
             max_output_tokens: Some(256),
+            kv_cache_block_size: None,
         }),
         AGG,
     )
