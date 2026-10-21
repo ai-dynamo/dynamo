@@ -6,24 +6,26 @@
 import threading
 
 import pytest
+from _deps import HAS_GMS
 
-try:
-    from gpu_memory_service.snapshot.backends.nixl_common import (
-        NixlFileGroup,
-        NixlWorkGroup,
-        split_work_groups,
-    )
-    from gpu_memory_service.snapshot.backends.nixl_staging import (
-        _NixlPosixStagingTransferSession,
-    )
-    from gpu_memory_service.snapshot.transfer import FileTransferSource
-except ModuleNotFoundError:
+if not HAS_GMS:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
         allow_module_level=True,
     )
 
 from _fake_vmm import FakeVMM
+from blake3 import blake3
+from gpu_memory_service.snapshot.backends.nixl_common import (
+    NixlFileGroup,
+    NixlWorkGroup,
+    split_work_groups,
+)
+from gpu_memory_service.snapshot.backends.nixl_staging import (
+    _NixlPosixStagingTransferSession,
+    restore_file_groups_with_nixl_staging,
+)
+from gpu_memory_service.snapshot.transfer import FileTransferSource, GMSTransferTarget
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -132,3 +134,102 @@ def test_staging_prep_starts_before_restore(monkeypatch):
     finally:
         allow_finish.set()
         session.close()
+
+
+def _restore_staged_bytes(
+    monkeypatch,
+    data: bytes,
+    expected_digest: str,
+    *,
+    hash_name: str = "blake3",
+):
+    from gpu_memory_service.snapshot.backends import nixl_staging
+
+    class Slot:
+        def __init__(self):
+            self._buffer = bytearray(len(data))
+            self.view = memoryview(self._buffer)
+            self.ptr = 123
+            self.copies = []
+
+        def wait(self):
+            pass
+
+        def copy_to_device_async(self, dst_ptr, size):
+            self.copies.append((dst_ptr, bytes(self.view[:size])))
+
+    slot = Slot()
+    sources = [
+        FileTransferSource(
+            allocation_id="weight-0",
+            file_path="/checkpoint/shard.bin",
+            file_offset=0,
+            byte_count=4,
+            file_byte_count=8,
+            file_hash_name=hash_name,
+            file_hash_digest=expected_digest,
+        ),
+        FileTransferSource(
+            allocation_id="weight-1",
+            file_path="/checkpoint/shard.bin",
+            file_offset=4,
+            byte_count=4,
+            file_byte_count=8,
+            file_hash_name=hash_name,
+            file_hash_digest=expected_digest,
+        ),
+    ]
+    targets = {
+        "weight-0": GMSTransferTarget("weight-0", 100, 0, 4),
+        "weight-1": GMSTransferTarget("weight-1", 200, 0, 4),
+    }
+
+    def fake_read(
+        _agent,
+        _agent_name,
+        _fd,
+        _file_path,
+        file_offset,
+        _host_ptr,
+        size,
+        _backend_name,
+    ):
+        slot._buffer[:size] = data[file_offset : file_offset + size]
+
+    monkeypatch.setattr(
+        nixl_staging, "open_direct_read_fd", lambda *_args, **_kwargs: 9
+    )
+    monkeypatch.setattr(nixl_staging, "_read_file_to_dram", fake_read)
+    monkeypatch.setattr(nixl_staging.os, "close", lambda _fd: None)
+
+    transferred = restore_file_groups_with_nixl_staging(
+        backend_name="nixl",
+        agent=object(),
+        agent_name="test-agent",
+        file_groups=[("/checkpoint/shard.bin", sources)],
+        targets=targets,
+        slots=[slot],
+    )
+    return transferred, slot.copies
+
+
+def test_staging_restore_hashes_the_exact_transferred_bytes(monkeypatch):
+    data = b"abcdefgh"
+
+    transferred, copies = _restore_staged_bytes(
+        monkeypatch,
+        data,
+        blake3(data).hexdigest(),
+    )
+
+    assert transferred == len(data)
+    assert copies == [(100, b"abcd"), (200, b"efgh")]
+
+
+def test_staging_restore_rejects_same_length_mutation(monkeypatch):
+    with pytest.raises(RuntimeError, match="BLAKE3 mismatch"):
+        _restore_staged_bytes(
+            monkeypatch,
+            b"xbcdefgh",
+            blake3(b"abcdefgh").hexdigest(),
+        )
