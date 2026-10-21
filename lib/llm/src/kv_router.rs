@@ -980,6 +980,12 @@ impl KvRouter {
         &self.kv_router_config
     }
 
+    pub fn policy_control(
+        &self,
+    ) -> &Arc<dynamo_kv_router::scheduling::queue::RuntimePolicyControl> {
+        self.selection.scheduler().policy_control()
+    }
+
     pub fn required_worker_inputs(&self) -> dynamo_kv_router::selector::WorkerInputs {
         self.required_worker_inputs
     }

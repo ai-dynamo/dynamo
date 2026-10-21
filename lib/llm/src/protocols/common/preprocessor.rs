@@ -428,7 +428,9 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_uuids: Option<MultimodalUuidMap>,
 
-    /// Media references in the order used to render the prompt.
+    /// Media references in gather order: content parts, after the formatter's
+    /// message ordering. A chat template that regroups media by modality
+    /// renders a different placeholder order.
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_order: Option<Vec<MultimodalItemRef>>,

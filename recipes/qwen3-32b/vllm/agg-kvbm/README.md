@@ -1,5 +1,8 @@
 # Qwen3-32B: Aggregated + KVBM (single GPU)
 
+> [!NOTE]
+> Requires Dynamo <= 1.6.x: later releases no longer ship KVBM.
+
 Single-GPU aggregated deployment of `Qwen/Qwen3-32B` with the KV Block Manager
 (KVBM) enabled. KVBM offloads cold KV cache blocks to host memory so the
 effective cache footprint extends beyond GPU HBM, which improves prefix-reuse

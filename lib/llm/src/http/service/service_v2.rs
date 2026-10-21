@@ -837,8 +837,8 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_nvext: bool,
 
-    /// Master switch for the frontend admin API surface (`GET` /
-    /// `POST /busy_threshold`). Default `true`; env-truthy
+    /// Master switch for `/router_policy` (including its busy-threshold subresource)
+    /// and the legacy `/busy_threshold` API. Default `true`; env-truthy
     /// `DYN_DISABLE_FRONTEND_ADMIN_API` overrides to `false`.
     #[builder(default = "true")]
     enable_admin_api: bool,
@@ -1481,7 +1481,11 @@ impl HttpServiceConfigBuilder {
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
+        // TODO: Revisit admin write exposure: listener separation, authentication, and default enablement.
         if admin_api_enabled {
+            system_routes.push(super::router_policy::router_policy_router(
+                state.manager_clone(),
+            ));
             system_routes.push(super::busy_threshold::busy_threshold_router(
                 state.clone(),
                 None,
@@ -1489,7 +1493,7 @@ impl HttpServiceConfigBuilder {
         } else {
             tracing::info!(
                 env = env_llm::DYN_DISABLE_FRONTEND_ADMIN_API,
-                "frontend admin API disabled — busy_threshold routes not registered"
+                "frontend admin API disabled — admin routes not registered"
             );
         }
         for extension in &config.frontend_route_extensions {
@@ -2586,11 +2590,8 @@ mod tests {
         assert_eq!(observer.inflight_count(), 0);
     }
 
-    /// `enable_admin_api=false` ⇒ `GET /busy_threshold` is not registered and
-    /// returns 404, not 503 or 405. Inference is unaffected (covered by other
-    /// tests).
     #[tokio::test]
-    async fn test_admin_api_disabled_404s_busy_threshold() {
+    async fn test_admin_api_disabled_404s_router_management() {
         let cancel_token = Arc::new(CancellationToken::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -2609,14 +2610,24 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        let resp = reqwest::Client::new()
-            .get(format!("http://localhost:{}/busy_threshold", port))
-            .send()
-            .await
-            .expect("request failed");
-        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+        let client = reqwest::Client::new();
+        for (method, path) in [
+            (reqwest::Method::GET, "/busy_threshold"),
+            (reqwest::Method::POST, "/busy_threshold"),
+            (reqwest::Method::GET, "/router_policy/busy_threshold"),
+            (reqwest::Method::POST, "/router_policy/busy_threshold"),
+            (reqwest::Method::GET, "/router_policy"),
+            (reqwest::Method::PATCH, "/router_policy"),
+        ] {
+            let response = client
+                .request(method, format!("http://localhost:{port}{path}"))
+                .json(&serde_json::json!({"model": "missing"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
+        }
 
-        // And /live still works (sanity: only the admin surface is gated).
         let live = reqwest::Client::new()
             .get(format!("http://localhost:{}/live", port))
             .send()
