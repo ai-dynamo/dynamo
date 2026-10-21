@@ -623,7 +623,9 @@ class Connection:
         self._nixl = nixl_api.nixl_agent(self._name)
 
         self._remote_refs: dict[str, int] = {}  # ref-count remote agents
-        self._remote_refs_lock = threading.Lock()
+        # Remote holds this across native metadata changes and reference-count
+        # updates; the public reference helpers re-enter the same lock.
+        self._remote_refs_lock = threading.RLock()
 
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
@@ -1802,6 +1804,7 @@ class Remote:
         connection: Connection,
         nixl_metadata: bytes | str,
     ) -> None:
+        self._released = True
         if not isinstance(connection, Connection):
             raise TypeError(
                 "Argument `connection` must be `dynamo.nixl_connect.Connection`."
@@ -1826,12 +1829,15 @@ class Remote:
             # Decompress the NIXL metadata.
             nixl_metadata = zlib.decompress(nixl_metadata)
 
-        self._name = connection._nixl.add_remote_agent(nixl_metadata)
-        if isinstance(self._name, bytes):
-            self._name = self._name.decode("utf-8")
+        # loadRemoteMD releases the GIL. An older Remote's finalizer must not
+        # remove this metadata before the new reference has been counted.
+        with connection._remote_refs_lock:
+            self._name = connection._nixl.add_remote_agent(nixl_metadata)
+            if isinstance(self._name, bytes):
+                self._name = self._name.decode("utf-8")
 
-        connection.acquire_remote_ref(self._name)
-        self._released = False
+            connection.acquire_remote_ref(self._name)
+            self._released = False
 
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
@@ -1861,9 +1867,12 @@ class Remote:
     def _release(self) -> None:
         if self._released:
             return
-        self._released = True
-        if self._connection.release_remote_ref(self._name):
-            self._connection._nixl.remove_remote_agent(self._name)
+        with self._connection._remote_refs_lock:
+            if self._released:
+                return
+            self._released = True
+            if self._connection.release_remote_ref(self._name):
+                self._connection._nixl.remove_remote_agent(self._name)
 
     @property
     def connection(self) -> Connection:
