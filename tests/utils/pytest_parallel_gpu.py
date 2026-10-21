@@ -366,8 +366,8 @@ def _select_launches(
 
     Pure (no NVML / no subprocesses): the caller passes the live per-GPU budget
     state and the actual free VRAM (from nvidia-smi). ``pending`` must already be
-    in scheduling-priority order (VRAM tests by longest est_duration / largest
-    VRAM first, zero-VRAM fillers last -- see the sort in ``run_parallel``).
+    in scheduling-priority order (VRAM tests first, zero-VRAM fillers last --
+    see ``_priority_key_for`` and the sort in ``run_parallel``).
 
     Returns a list of ``(pending_index, gpu_index)`` to launch now, honoring:
 
