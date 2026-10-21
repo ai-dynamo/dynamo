@@ -295,6 +295,20 @@ impl ZmqEventNormalizer {
             }
             _ => {}
         }
+        if self.kv_cache_group_tag(metadata, worker.dp_rank).is_some() {
+            // Recurrent-group events share positional hashes with the
+            // attention group but are not part of its namespace chain: a
+            // Mamba store or removal must not mark or delete attention
+            // namespace state. Only normalise the empty-string namespace.
+            if let RawKvEvent::BlockStored {
+                cache_namespace, ..
+            } = &mut raw
+                && cache_namespace.as_deref() == Some("")
+            {
+                *cache_namespace = None;
+            }
+            return Ok(raw);
+        }
         if !is_lower_tier {
             self.propagate_cache_namespace(&mut raw, worker)?;
         }

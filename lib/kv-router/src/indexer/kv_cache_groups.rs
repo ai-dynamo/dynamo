@@ -235,10 +235,16 @@ impl KvCacheGroupResidency {
             else {
                 continue;
             };
+            let start = end - *hits;
+            if end > chain.len() {
+                // The chain does not cover this tier's extension (device
+                // candidates were truncated below it): nothing to verify.
+                continue;
+            }
             if let Some(p) = self.reusable_blocks(*worker, &chain, end)
                 && p < end
             {
-                cuts.push((*worker, p.max(end - *hits)));
+                cuts.push((*worker, p.max(start)));
             }
         }
         if cuts.is_empty() {
@@ -407,8 +413,6 @@ mod tests {
     fn match_is_cut_to_last_boundary_with_every_group() {
         let residency = KvCacheGroupResidency::new();
         let worker = WorkerWithDpRank::new(1, 0);
-        // Two recurrent groups: group 1 has states at blocks 1 and 3, group 2
-        // only at block 1. Attention matched 3 blocks.
         residency.apply(&stored(worker, StorageTier::Device, 1, &[1, 3]));
         residency.apply(&stored(worker, StorageTier::HostPinned, 2, &[1]));
         assert_eq!(residency.reusable_blocks(worker, &chain(3), 3), Some(1));
@@ -443,7 +447,6 @@ mod tests {
         let worker = WorkerWithDpRank::new(1, 0);
         residency.apply(&stored(worker, StorageTier::Device, 1, &[2]));
         residency.apply(&stored(worker, StorageTier::HostPinned, 1, &[2]));
-        // Evicted from the device: still on the host.
         residency.apply(&removed(worker, StorageTier::Device, 1, &[2]));
         assert_eq!(residency.reusable_blocks(worker, &chain(2), 2), Some(2));
         residency.apply(&removed(worker, StorageTier::HostPinned, 1, &[2]));
