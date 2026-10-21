@@ -417,3 +417,132 @@ async fn distinct_response_context_retains_operator_graph() {
     assert!(backend_weak.upgrade().is_none());
     assert!(operator_weak.upgrade().is_none());
 }
+
+/// Holds every request inside `generate` until the test adds permits, so requests overlap in the
+/// frontend's in-flight map. Echoes the request content back as its only output.
+struct GatedEchoBackend {
+    gate: Arc<tokio::sync::Semaphore>,
+    arrived: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+#[async_trait::async_trait]
+impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for GatedEchoBackend {
+    async fn generate(
+        &self,
+        request: SingleIn<String>,
+    ) -> Result<ManyOut<Annotated<String>>, Error> {
+        let _ = self.arrived.send(request.content().clone());
+        self.gate.acquire().await?.forget();
+        let ctx = request.context();
+        let content = request.content().clone();
+        Ok(ResponseStream::new(
+            Box::pin(stream::iter([Annotated::Data(content)])),
+            ctx,
+        ))
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn make_gated_service() -> (
+    ServiceEngine<SingleIn<String>, ManyOut<Annotated<String>>>,
+    Arc<tokio::sync::Semaphore>,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+) {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let (arrived, arrivals) = tokio::sync::mpsc::unbounded_channel();
+    let frontend = ServiceFrontend::<SingleIn<String>, ManyOut<Annotated<String>>>::new();
+    let backend = ServiceBackend::from_engine(Arc::new(GatedEchoBackend {
+        gate: gate.clone(),
+        arrived,
+    }));
+    let service = frontend
+        .link(backend)
+        .unwrap()
+        .link_terminal(frontend)
+        .unwrap();
+    (service, gate, arrivals)
+}
+
+fn request_with_id(content: &str, id: &str) -> SingleIn<String> {
+    Context::with_id_and_metadata(content.to_string(), id.to_string(), Default::default())
+}
+
+async fn collect_data(stream: ManyOut<Annotated<String>>) -> Vec<String> {
+    stream
+        .filter_map(|item| async move {
+            match item {
+                Annotated::Data(data) => Some(data),
+                _ => None,
+            }
+        })
+        .collect()
+        .await
+}
+
+#[tokio::test]
+async fn frontend_refuses_duplicate_in_flight_request_id() {
+    let (service, gate, mut arrivals) = make_gated_service();
+
+    let first_service = service.clone();
+    let first = tokio::spawn(async move {
+        let stream = first_service
+            .generate(request_with_id("first", "same-id"))
+            .await?;
+        Ok::<_, Error>(collect_data(stream).await)
+    });
+    assert_eq!(arrivals.recv().await.as_deref(), Some("first"));
+
+    // The first request is parked in the backend, so its id is still in flight. The gate stays
+    // closed until the duplicate has been answered, otherwise the first id could be released first.
+    let second_service = service.clone();
+    let second = tokio::spawn(async move {
+        second_service
+            .generate(request_with_id("second", "same-id"))
+            .await
+            .map(|_| ())
+    });
+    let second = tokio::time::timeout(Duration::from_secs(5), second).await;
+    gate.add_permits(2);
+
+    let second_err = second
+        .expect("duplicate request must not wait for the first one")
+        .unwrap()
+        .expect_err("duplicate in-flight id must be refused")
+        .try_into_pipeline_error()
+        .expect("duplicate refusal is a PipelineError");
+    assert!(
+        matches!(&second_err, PipelineError::DuplicateRequestId(id) if id == "same-id"),
+        "unexpected error: {second_err:?}"
+    );
+    assert_eq!(first.await.unwrap().unwrap(), vec!["first".to_string()]);
+
+    // Once the first request has completed, the id can be reused.
+    let stream = service
+        .generate(request_with_id("third", "same-id"))
+        .await
+        .unwrap();
+    assert_eq!(collect_data(stream).await, vec!["third".to_string()]);
+}
+
+#[tokio::test]
+async fn frontend_routes_concurrent_distinct_ids_to_their_callers() {
+    let (service, gate, mut arrivals) = make_gated_service();
+
+    let spawn_request = |content: &'static str, id: &'static str| {
+        let service = service.clone();
+        tokio::spawn(async move {
+            let stream = service.generate(request_with_id(content, id)).await?;
+            Ok::<_, Error>(collect_data(stream).await)
+        })
+    };
+    let a = spawn_request("a", "id-a");
+    let b = spawn_request("b", "id-b");
+
+    // Release the backend only after both requests are in flight together.
+    arrivals.recv().await.unwrap();
+    arrivals.recv().await.unwrap();
+    gate.add_permits(2);
+
+    assert_eq!(a.await.unwrap().unwrap(), vec!["a".to_string()]);
+    assert_eq!(b.await.unwrap().unwrap(), vec!["b".to_string()]);
+}

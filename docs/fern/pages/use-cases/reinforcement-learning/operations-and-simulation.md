@@ -30,7 +30,7 @@ X-Dynamo-Session-ID: rollout-run42-sample7
 X-Dynamo-Parent-Session-ID: rollout-run42-parent2
 ```
 
-Use `x-request-id` for cross-component logs and distributed traces. Native SGLang `/generate` gives a body `rid` precedence over that header, so use one stable `rid` or omit it.
+Use `x-request-id` for cross-component logs and distributed traces. Dynamo always generates its own internal request ID, so concurrent requests can reuse the same client value. Client-supplied IDs are correlation values only: native SGLang `/generate` returns the body `rid` (or `x-request-id` when `rid` is omitted) in the response, and `/inference/v1/generate` returns `x-request-id` (or the body `request_id`) as the response `request_id`.
 
 Dynamo does not define typed RL rollout, trainer-step, or policy-version fields. Keep those values in the framework and join them through opaque request or session identity. Session identity supports correlation; it does not enable affinity unless the router is configured for it and does not validate policy freshness.
 

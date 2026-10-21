@@ -1031,43 +1031,24 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 
 /// Return the request ID for the current request.
 ///
-/// The canonical request ID is set by `make_inference_request_span()` and stored
+/// The canonical request ID is minted by `make_inference_request_span()` and stored
 /// in the `DistributedTraceContext` via `DistributedTraceIdLayer`. This function
-/// retrieves it, falling back to a validated `x-dynamo-request-id` header value
-/// (deprecated, DEP #7812) or a new UUID.
+/// retrieves it, or generates a new UUID when no request span is active.
 ///
-/// **Deprecation (DEP #7812):** The `x-dynamo-request-id` header is deprecated.
-/// Clients should rely on server-generated request IDs instead of supplying their own.
+/// Client-supplied ids never become the internal request id: in-flight request state
+/// is keyed on this value, so two requests sharing a client id would collide. Clients
+/// correlate requests with `x-request-id` instead.
+///
+/// **Deprecation (DEP #7812):** the `x-dynamo-request-id` and `request-id` headers are
+/// ignored on HTTP requests; a warning is logged when either is present.
 pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
-    // Validate x-dynamo-request-id header if present, warn on invalid values.
-    // DEP #7812: x-dynamo-request-id is deprecated — clients should rely on
-    // server-generated request IDs instead of supplying their own.
-    let validated_header = if let Some(raw) = headers.get(DYNAMO_REQUEST_ID_HEADER) {
-        tracing::warn!(
-            "{} header is deprecated (DEP #7812); server-generated request IDs should be used instead",
-            DYNAMO_REQUEST_ID_HEADER
-        );
-        match raw.to_str() {
-            Err(_) => {
-                tracing::warn!(
-                    "{} header must be a valid UTF-8 string",
-                    DYNAMO_REQUEST_ID_HEADER
-                );
-                None
-            }
-            Ok(s) if uuid::Uuid::parse_str(s).is_err() => {
-                tracing::warn!(
-                    "{} header must be a valid UUID, got: {}",
-                    DYNAMO_REQUEST_ID_HEADER,
-                    s
-                );
-                None
-            }
-            Ok(s) => Some(s.to_string()),
+    for header in [DYNAMO_REQUEST_ID_HEADER, "request-id"] {
+        if headers.contains_key(header) {
+            tracing::warn!(
+                "{header} header is deprecated and ignored (DEP #7812); the server generates the request ID. Use x-request-id for client correlation"
+            );
         }
-    } else {
-        None
-    };
+    }
 
     // Prefer trace context (set by make_inference_request_span via DistributedTraceIdLayer)
     if let Some(trace_context) = get_distributed_tracing_context()
@@ -1076,8 +1057,7 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
         return request_id;
     }
 
-    // Fallback: use validated header for backwards compat, or generate new UUID
-    validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    uuid::Uuid::new_v4().to_string()
 }
 
 pub(super) fn context_from_headers<T: Send + Sync + 'static>(
