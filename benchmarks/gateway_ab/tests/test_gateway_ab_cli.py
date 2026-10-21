@@ -138,21 +138,21 @@ def test_measure_alternates_order_and_resumes(tmp_path, monkeypatch):
     monkeypatch.setattr(bench.loadgen, "run", fake_run)
     assert bench.measure_topology("agg", tmp_path) == 0
     # Both sides are primed once, unrecorded, before round 0.
-    assert calls[:2] == ["/results/agg/frontend/prime", "/results/agg/gateway/prime"]
+    assert calls[:2] == ["/results/agg/frontend/prime", "/results/agg/epp/prime"]
     assert not (tmp_path / "runs/agg/frontend/prime").exists()
     sides = [c.split("/")[3] for c in calls[2:]]
     # (round 0, c=4): A,B  (round 0, c=16): B,A  (round 1, c=4): B,A  (round 1, c=16): A,B
     assert sides == [
         "frontend",
-        "gateway",
-        "gateway",
+        "epp",
+        "epp",
         "frontend",
-        "gateway",
+        "epp",
         "frontend",
         "frontend",
-        "gateway",
+        "epp",
     ]
-    saved = json.loads((tmp_path / "runs/agg/gateway/c16/r1.json").read_text())
+    saved = json.loads((tmp_path / "runs/agg/epp/c16/r1.json").read_text())
     assert saved["expected_requests"] == 200
     # One seed per round and load point, the same for both sides: a later
     # point must not replay an earlier point's prompts.
@@ -166,7 +166,7 @@ def test_measure_alternates_order_and_resumes(tmp_path, monkeypatch):
     }
     for label in ("c4", "c16"):
         for rnd in range(2):
-            assert seeds[("frontend", label, rnd)] == seeds[("gateway", label, rnd)]
+            assert seeds[("frontend", label, rnd)] == seeds[("epp", label, rnd)]
     assert sorted(
         seeds[("frontend", lb, r)] for lb in ("c4", "c16") for r in range(2)
     ) == [
@@ -179,6 +179,71 @@ def test_measure_alternates_order_and_resumes(tmp_path, monkeypatch):
     calls.clear()
     assert bench.measure_topology("agg", tmp_path) == 0
     assert calls == []
+
+
+def test_direct_arm_runs_next_to_a_with_the_same_seeds(tmp_path, monkeypatch):
+    bench = _bench(
+        tmp_path,
+        "--concurrency",
+        "4,16",
+        "--rounds",
+        "2",
+        "--topologies",
+        "agg",
+        "--with-direct",
+    )
+    monkeypatch.setattr(bench, "url", lambda topology, side: f"http://{side}")
+    calls = []
+
+    def fake_run(cmd, artifact_dir, timeout_s):
+        calls.append((artifact_dir.split("/")[3], cmd[cmd.index("--random-seed") + 1]))
+        return _fake_result(200)
+
+    monkeypatch.setattr(bench.loadgen, "run", fake_run)
+    assert bench.measure_topology("agg", tmp_path) == 0
+    assert [side for side, _ in calls[:3]] == ["direct", "frontend", "epp"]
+    measured = calls[3:]
+    # Each point runs every arm with one seed; A is always in the middle, so
+    # it runs right next to both arms it is compared with.
+    for i in range(0, len(measured), 3):
+        arms = [side for side, _ in measured[i : i + 3]]
+        assert arms[1] == "frontend"
+        assert sorted(arms) == ["direct", "epp", "frontend"]
+        assert len({seed for _, seed in measured[i : i + 3]}) == 1
+    firsts = [measured[i][0] for i in range(0, len(measured), 3)]
+    assert firsts == ["direct", "epp", "epp", "direct"]
+
+
+def test_a_and_b_requests_differ_only_in_the_route_header(tmp_path, monkeypatch):
+    bench = _bench(
+        tmp_path,
+        "--concurrency",
+        "4",
+        "--rounds",
+        "1",
+        "--no-prime",
+        "--gateway-url",
+        "http://gw:80",
+        "--with-direct",
+    )
+    commands = {}
+
+    def fake_run(cmd, artifact_dir, timeout_s):
+        commands[artifact_dir.split("/")[3]] = cmd
+        return _fake_result(200)
+
+    monkeypatch.setattr(bench.loadgen, "run", fake_run)
+    bench.measure_topology("agg", tmp_path)
+    a, b, direct = commands["frontend"], commands["epp"], commands["direct"]
+    target = manifests.TARGET_HEADER
+    assert len(a) == len(b)
+    assert [(x, y) for x, y in zip(a, b) if x != y] == [
+        ("/results/agg/frontend/c4/r0", "/results/agg/epp/c4/r0"),
+        (f"{target}:ab-agg-fe", f"{target}:ab-agg-epp"),
+    ]
+    # Both through the gateway; only the direct arm reaches its Frontend itself.
+    assert a[a.index("--url") + 1] == "http://gw:80"
+    assert direct[direct.index("--url") + 1] == "http://ab-agg-dir-frontend:8000"
 
 
 def test_failed_point_is_retried_then_recorded(tmp_path, monkeypatch):
@@ -249,7 +314,7 @@ def test_all_reports_remaining_topologies_after_a_failure(tmp_path, monkeypatch)
 
     assert cli.cmd_all(bench) == 1
     assert torn_down == ["agg", "disagg"]
-    assert (tmp_path / "runs/disagg/gateway/c4/r0.json").exists()
+    assert (tmp_path / "runs/disagg/epp/c4/r0.json").exists()
     assert "## disagg" in (tmp_path / "report.md").read_text()
 
 
@@ -314,7 +379,7 @@ def test_invalid_run_is_retried_and_remeasured_on_resume(tmp_path, monkeypatch):
     bench = _bench(tmp_path, "--concurrency", "4", "--rounds", "1", "--no-prime")
     monkeypatch.setattr(bench, "url", lambda topology, side: "http://x")
     bad = dict(_fake_result(200), errors=3)
-    replies = {"frontend": [bad, bad], "gateway": [bad, _fake_result(200)]}
+    replies = {"frontend": [bad, bad], "epp": [bad, _fake_result(200)]}
 
     def fake_run(cmd, artifact_dir, timeout_s):
         return replies[artifact_dir.split("/")[3]].pop(0)
@@ -441,7 +506,7 @@ def test_flags_for_the_other_backend_are_rejected(argv):
 
 
 def test_report_does_not_pass_a_gate_it_could_not_evaluate(tmp_path):
-    for side, ttft in (("frontend", 50.0), ("gateway", 80.0)):
+    for side, ttft in (("frontend", 50.0), ("epp", 80.0)):
         path = tmp_path / "runs" / "agg" / side / "c8" / "r0.json"
         path.parent.mkdir(parents=True)
         path.write_text(

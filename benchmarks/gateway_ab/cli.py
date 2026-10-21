@@ -3,6 +3,9 @@
 
 """A/B benchmark: Dynamo Frontend (no EPP) vs Gateway + EPP in Dynamo runtime mode.
 
+Both sides sit behind the same gateway. --with-direct adds a copy of the
+Frontend side reached without it, to measure what the gateway itself costs.
+
 Run from the repository root::
 
     python3 -m benchmarks.gateway_ab --context <ctx> all
@@ -42,8 +45,8 @@ EXIT_PREFLIGHT = 2
 EXIT_REGRESSION = 3
 # Bumped when a change makes new rounds incomparable with stored ones, so a
 # resume refuses to mix them. 2: a seed per load point, --isl includes the
-# shared prefix.
-HARNESS_VERSION = 2
+# shared prefix. 3: A reaches its Frontend through the gateway.
+HARNESS_VERSION = 3
 # Flags that only one backend reads, with their argparse destinations.
 KUBERNETES_ONLY = {
     "context": "--context",
@@ -87,7 +90,9 @@ class Bench:
             image_pull_secret=args.image_pull_secret,
             gateway_name=args.gateway_name,
             gateway_namespace=args.gateway_namespace,
+            with_direct=args.with_direct,
         )
+        self.arms = manifests.arms(self.cfg)
         self.workload = Workload(
             # --concurrency switches to closed loop; otherwise open loop at
             # --request-rate or the Workload's default rates.
@@ -164,10 +169,10 @@ class Bench:
         return self.backend.url(topology, side)
 
     def _smoke(self, topology: str) -> None:
-        """One request per side through the full path, retried while it comes up."""
-        for side in manifests.SIDES:
+        """One request per arm through the full path, retried while it comes up."""
+        for side in self.arms:
             url = self.url(topology, side)
-            headers = manifests.request_headers(self.cfg, topology)
+            headers = manifests.request_headers(self.cfg, topology, side)
             try:
                 latency = retry(
                     lambda: self.loadgen.smoke(url, self.cfg.model, headers),
@@ -182,15 +187,17 @@ class Bench:
     # -- measure -----------------------------------------------------------
 
     def measure_topology(self, topology: str, results: pathlib.Path) -> int:
-        """Run every (round, load point, side); return the failure count."""
+        """Run every (round, load point, arm); return the failure count."""
         w = self.workload
         pending = []
         for rnd in range(w.rounds):
             for i, point in enumerate(w.points()):
                 seed = w.seed_for(rnd, i)
                 # Alternate which side goes first so slow drift (cache warmth,
-                # neighbours, thermal) does not land on one side.
-                order = manifests.SIDES if (rnd + i) % 2 == 0 else manifests.SIDES[::-1]
+                # neighbours, thermal) does not land on one side. With the
+                # direct arm, A stays in the middle, next to both arms it is
+                # compared with.
+                order = self.arms if (rnd + i) % 2 == 0 else self.arms[::-1]
                 for side in order:
                     out = (
                         results
@@ -207,15 +214,18 @@ class Bench:
         if not pending:
             return 0
         self._check_deployed(topology)
-        urls = {side: self.url(topology, side) for side in manifests.SIDES}
-        headers = manifests.request_headers(self.cfg, topology)
+        urls = {side: self.url(topology, side) for side in self.arms}
+        headers = {
+            side: manifests.request_headers(self.cfg, topology, side)
+            for side in self.arms
+        }
         if not self.args.no_prime:
-            for side in manifests.SIDES:
-                self._prime(topology, side, urls[side], headers)
+            for side in self.arms:
+                self._prime(topology, side, urls[side], headers[side])
         failures = 0
         for rnd, point, seed, side, out in pending:
             if not self._measure_point(
-                topology, side, point, rnd, seed, urls[side], headers, out
+                topology, side, point, rnd, seed, urls[side], headers[side], out
             ):
                 failures += 1
         return failures
@@ -400,6 +410,7 @@ class Bench:
             },
             "workload": self._workload_meta(),
             "rounds": self.workload.rounds,
+            "arms": list(self.arms),
             "config": json.loads(json.dumps(dataclasses.asdict(self.cfg))),
             "identity": self._identity(),
         }
@@ -585,7 +596,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     k.add_argument("--keep", action="store_true", help="all: leave deployments up")
 
-    d = p.add_argument_group("deployment (identical on both sides)")
+    d = p.add_argument_group("deployment (identical on every arm)")
     d.add_argument(
         "--topologies",
         type=_csv(str, manifests.TOPOLOGIES),
@@ -605,6 +616,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="ab",
         help="names this run's objects; give concurrent runs distinct prefixes",
     )
+    d.add_argument(
+        "--with-direct",
+        action="store_true",
+        help="also deploy a copy of A and measure it without the gateway, to "
+        "report what the gateway itself costs",
+    )
     d.add_argument("--agg-workers", type=_positive(int), default=2)
     d.add_argument("--prefill-workers", type=_positive(int), default=2)
     d.add_argument("--decode-workers", type=_positive(int), default=2)
@@ -620,7 +637,7 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--sidecar-cpu", help="kubernetes: CPU request per sidecar (1)")
     d.add_argument("--loadgen-cpu", help="kubernetes: CPU request of the loadgen (4)")
 
-    w = p.add_argument_group("workload (identical on both sides)")
+    w = p.add_argument_group("workload (identical on every arm)")
     w.add_argument(
         "--request-rate",
         type=_csv(_positive(float)),

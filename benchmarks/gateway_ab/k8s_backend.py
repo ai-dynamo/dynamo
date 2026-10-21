@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Kubernetes backend: DynamoGraphDeployments, an HTTPRoute, and a loadgen pod.
+"""Kubernetes backend: DynamoGraphDeployments, HTTPRoutes, and a loadgen pod.
 
 Side B runs exactly as in production: the Gateway, the EPP in Dynamo runtime
 mode with its Kubernetes pod reflector, and a direct-mode Frontend sidecar in
-every worker pod.
+every worker pod. Side A's Frontend sits behind the same Gateway through a
+plain HTTPRoute to its Service.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from .loadgen import LoadGen
 
 log = logging.getLogger("gateway_ab")
 
-# Stamped on both DGDs at deploy time; `run` refuses a mismatch.
+# Stamped on every DGD at deploy time; `run` refuses a mismatch.
 FINGERPRINT = "gateway-ab/fingerprint"
 REQUIRED_CRDS = (
     "dynamographdeployments.nvidia.com",
@@ -144,7 +145,9 @@ class K8sBackend:
         self.kube.wait(f"pod/{pod}", "Ready", 600)
 
     def deploy_topology(self, topology: str, fingerprint: str) -> None:
-        names = [manifests.dgd_name(self.cfg, topology, s) for s in manifests.SIDES]
+        # Every arm, deployed now or not: a direct arm left by an earlier run
+        # must not keep its pods alongside this one.
+        names = [manifests.dgd_name(self.cfg, topology, s) for s in manifests.ARMS]
         if any(self.kube.exists(["dynamographdeployment", n]) for n in names):
             # Always start from fresh deployments. An in-place update that
             # rolls the EPP and the workers together can bind the new EPP to
@@ -154,12 +157,16 @@ class K8sBackend:
             log.info("Recreating %s for a clean start", topology)
             self.teardown_topology(topology)
             self._wait_pods_gone(names)
-        log.info("Deploying %s (frontend and gateway sides)", topology)
-        dgds = [manifests.build_dgd(self.cfg, topology, s) for s in manifests.SIDES]
+        arms = manifests.arms(self.cfg)
+        log.info("Deploying %s (%s)", topology, ", ".join(arms))
+        dgds = [manifests.build_dgd(self.cfg, topology, s) for s in arms]
         for dgd in dgds:
             dgd["metadata"]["annotations"] = {FINGERPRINT: fingerprint}
-        self.kube.apply([*dgds, manifests.build_httproute(self.cfg, topology)])
-        for side in manifests.SIDES:
+        routes = [
+            manifests.build_httproute(self.cfg, topology, s) for s in manifests.SIDES
+        ]
+        self.kube.apply([*dgds, *routes])
+        for side in arms:
             name = manifests.dgd_name(self.cfg, topology, side)
             log.info("Waiting for DynamoGraphDeployment %s to settle", name)
             retry(
@@ -170,9 +177,9 @@ class K8sBackend:
             )
 
     def deployed_fingerprint(self, topology: str) -> str | None:
-        """The fingerprint both of a topology's DGDs carry, or None."""
+        """The fingerprint all of a topology's DGDs carry, or None."""
         prints = set()
-        for side in manifests.SIDES:
+        for side in manifests.arms(self.cfg):
             dgd = self.kube.get_json(
                 ["dynamographdeployment", manifests.dgd_name(self.cfg, topology, side)]
             )
@@ -232,9 +239,13 @@ class K8sBackend:
 
     def diagnose(self, topology: str, side: str) -> str:
         """Best-effort hint for the failure modes seen in practice."""
-        if side != "gateway":
-            return "Check the Frontend and worker logs."
         dgd = manifests.dgd_name(self.cfg, topology, side)
+        if side != "epp":
+            route = "the HTTPRoute status and " if side == "frontend" else ""
+            return (
+                f"Check {route}the Frontend and worker logs: kubectl logs -l "
+                f"nvidia.com/dynamo-graph-deployment-name={dgd}"
+            )
         logs = self.kube.kubectl(
             [
                 "logs",
@@ -262,7 +273,7 @@ class K8sBackend:
 
     def teardown_topology(self, topology: str) -> None:
         log.info("Tearing down %s", topology)
-        names = [manifests.dgd_name(self.cfg, topology, s) for s in manifests.SIDES]
+        names = [manifests.dgd_name(self.cfg, topology, s) for s in manifests.ARMS]
         self.kube.kubectl(
             [
                 "delete",
@@ -277,7 +288,7 @@ class K8sBackend:
             [
                 "delete",
                 "httproute",
-                manifests.route_name(self.cfg, topology),
+                *(manifests.route_name(self.cfg, topology, s) for s in manifests.SIDES),
                 "--ignore-not-found",
             ]
         )
@@ -289,8 +300,9 @@ class K8sBackend:
         )
 
     def url(self, topology: str, side: str) -> str:
-        if side == "frontend":
-            return f"http://{manifests.frontend_service(self.cfg, topology)}:8000"
+        """A and B share the Gateway's URL; the target header picks the route."""
+        if side == "direct":
+            return f"http://{manifests.frontend_service(self.cfg, topology, side)}:8000"
         if self.args.gateway_url:
             return self.args.gateway_url.rstrip("/")
         svcs = self.kube.get_json(

@@ -37,7 +37,11 @@ class _RecordingDocker(local_backend.Docker):
         elif args[:2] == ["run", "--rm"]:
             # The model-card count: report every worker registered.
             out = json.dumps(
-                {"ab-agg-fe": 2, "ab-agg-gw": 2, "ab-disagg-fe": 4, "ab-disagg-gw": 4}
+                {
+                    f"ab-{topology}-{tag}": 2 if topology == "agg" else 4
+                    for topology in manifests.TOPOLOGIES
+                    for tag in manifests.TAGS.values()
+                }
             )
         elif args[:1] == ["ps"]:
             out = ""
@@ -70,19 +74,33 @@ def _command(call, image):
 
 
 @pytest.mark.parametrize("topology", manifests.TOPOLOGIES)
-def test_both_sides_run_identical_workers(topology):
-    backend, docker = _backend()
+def test_every_arm_runs_identical_workers(topology):
+    backend, docker = _backend("--with-direct")
     backend.deploy_topology(topology, "fp")
     runs = _runs(docker)
     cfg = backend.cfg
     for ctype, replicas, mode in manifests.worker_roles(cfg, topology):
         for i in range(replicas):
             a = runs[f"gwab-ab-{topology}-fe-{ctype}{i}"]
-            b = runs[f"gwab-ab-{topology}-gw-{ctype}{i}"]
-            assert _command(a, cfg.worker_image) == _command(b, cfg.worker_image)
             assert _command(a, cfg.worker_image)[3:] == manifests.mocker_args(cfg, mode)
-            assert _env(a)["DYN_NAMESPACE"] == f"ab-{topology}-fe"
-            assert _env(b)["DYN_NAMESPACE"] == f"ab-{topology}-gw"
+            for tag in manifests.TAGS.values():
+                other = runs[f"gwab-ab-{topology}-{tag}-{ctype}{i}"]
+                assert _command(other, cfg.worker_image) == _command(
+                    a, cfg.worker_image
+                )
+                # Each arm in its own Dynamo namespace, so none shares a cache.
+                assert _env(other)["DYN_NAMESPACE"] == f"ab-{topology}-{tag}"
+    # The direct arm's Frontend is A's, in the direct arm's namespace.
+    a_fe = runs[f"gwab-ab-{topology}-frontend"]
+    direct_fe = runs[f"gwab-ab-{topology}-dir-frontend"]
+    assert _command(a_fe, cfg.frontend_image) == _command(direct_fe, cfg.frontend_image)
+    assert _env(direct_fe) == dict(_env(a_fe), DYN_NAMESPACE=f"ab-{topology}-dir")
+
+
+def test_direct_arm_is_deployed_only_when_asked():
+    backend, docker = _backend()
+    backend.deploy_topology("agg", "fp")
+    assert not any("-dir-" in name for name in _runs(docker))
 
 
 def test_epp_points_at_the_direct_frontend_without_kubernetes():
@@ -93,11 +111,11 @@ def test_epp_points_at_the_direct_frontend_without_kubernetes():
     env = _env(epp)
     assert env["DYN_EPP_STATIC_ENDPOINT"] == "172.18.0.9:8000"
     assert env["DYN_SECURE_SERVING"] == "false"
-    assert env["DYN_NAMESPACE"] == "ab-agg-gw"
+    assert env["DYN_NAMESPACE"] == "ab-agg-epp"
     # A Dynamo-mode EPP reads the model and block size from the model cards.
     assert "DYN_KV_CACHE_BLOCK_SIZE" not in env and "DYN_MODEL_NAME" not in env
     assert "/tmp/epp:/epp-dev:ro" in epp and "/epp-dev" in epp
-    direct = runs["gwab-ab-agg-direct"]
+    direct = runs["gwab-ab-agg-epp-frontend"]
     assert _command(direct, backend.cfg.frontend_image)[-2:] == [
         "--router-mode",
         "direct",
@@ -122,8 +140,14 @@ def test_deploy_starts_from_a_clean_slate():
     ] in docker.calls
 
 
+def _address(cluster):
+    endpoint = cluster["load_assignment"]["endpoints"][0]["lb_endpoints"][0]
+    return endpoint["endpoint"]["address"]["socket_address"]["address"]
+
+
 def test_envoy_config_matches_what_the_epp_requires():
-    config = json.loads(local_backend.envoy_config("gwab-agg-epp"))
+    cfg = manifests.BenchConfig()
+    config = json.loads(local_backend.envoy_config(cfg, "agg"))
     listener = config["static_resources"]["listeners"][0]
     hcm = listener["filter_chains"][0]["filters"][0]["typed_config"]
     ext_proc = hcm["http_filters"][0]["typed_config"]
@@ -141,16 +165,40 @@ def test_envoy_config_matches_what_the_epp_requires():
         picked["original_dst_lb_config"]["http_header_name"]
         == "x-gateway-destination-endpoint"
     )
-    epp_addr = clusters["epp"]["load_assignment"]["endpoints"][0]["lb_endpoints"][0]
-    assert (
-        epp_addr["endpoint"]["address"]["socket_address"]["address"] == "gwab-agg-epp"
+    assert _address(clusters["epp"]) == "gwab-ab-agg-epp"
+    assert _address(clusters["frontend"]) == "gwab-ab-agg-frontend"
+
+
+def test_envoy_routes_a_past_the_epp_and_b_through_it():
+    cfg = manifests.BenchConfig()
+    config = json.loads(local_backend.envoy_config(cfg, "disagg"))
+    listener = config["static_resources"]["listeners"][0]
+    hcm = listener["filter_chains"][0]["filters"][0]["typed_config"]
+    routes = {}
+    for route in hcm["route_config"]["virtual_hosts"][0]["routes"]:
+        (header,) = route["match"]["headers"]
+        assert header["name"] == manifests.TARGET_HEADER
+        routes[header["string_match"]["exact"]] = route
+    # The same header values select the HTTPRoutes on Kubernetes.
+    a, b = (
+        routes[manifests.request_headers(cfg, "disagg", side)[manifests.TARGET_HEADER]]
+        for side in manifests.SIDES
     )
+    assert len(routes) == 2
+    assert a["route"]["cluster"] == "frontend"
+    assert a["typed_per_filter_config"][local_backend.EXT_PROC]["disabled"] is True
+    assert b["route"]["cluster"] == "picked_endpoint"
+    assert "typed_per_filter_config" not in b
+    assert a["route"]["timeout"] == b["route"]["timeout"]
 
 
 def test_urls_use_container_names():
     backend, _ = _backend()
-    assert backend.url("agg", "frontend") == "http://gwab-ab-agg-frontend:8000"
-    assert backend.url("disagg", "gateway") == "http://gwab-ab-disagg-gateway:8080"
+    gateway = "http://gwab-ab-disagg-gateway:8080"
+    # A and B share the gateway; the target header picks the route.
+    assert backend.url("disagg", "frontend") == gateway
+    assert backend.url("disagg", "epp") == gateway
+    assert backend.url("agg", "direct") == "http://gwab-ab-agg-dir-frontend:8000"
 
 
 def test_waits_until_every_worker_registered(monkeypatch):
@@ -158,7 +206,7 @@ def test_waits_until_every_worker_registered(monkeypatch):
     monkeypatch.setattr(
         local_backend.retry.__globals__["time"], "sleep", lambda s: None
     )
-    replies = [{"ab-agg-fe": 2, "ab-agg-gw": 1}, {"ab-agg-fe": 2, "ab-agg-gw": 2}]
+    replies = [{"ab-agg-fe": 2, "ab-agg-epp": 1}, {"ab-agg-fe": 2, "ab-agg-epp": 2}]
 
     def run(args, **kwargs):
         if args[:2] == ["run", "--rm"]:
@@ -227,7 +275,7 @@ def test_loadgen_recreated_when_its_spec_changes(monkeypatch):
 def test_runs_with_different_prefixes_do_not_touch_each_other():
     one, docker_one = _backend("--name-prefix", "u1")
     two, _ = _backend("--name-prefix", "u2")
-    assert one.url("agg", "gateway") != two.url("agg", "gateway")
+    assert one.url("agg", "epp") != two.url("agg", "epp")
     assert local_backend.loadgen_name(one.cfg) != local_backend.loadgen_name(two.cfg)
     one.teardown_topology("agg")
     filters = [c[c.index("--filter") + 1] for c in docker_one.calls if "--filter" in c]
@@ -289,7 +337,7 @@ def _diagnose(monkeypatch, state, logs, topology="disagg"):
         return subprocess.CompletedProcess(args, 0, out, "")
 
     monkeypatch.setattr(docker, "run", run)
-    return backend.diagnose(topology, "gateway")
+    return backend.diagnose(topology, "epp")
 
 
 def test_diagnose_tells_a_static_capable_epp_from_an_old_one(monkeypatch):

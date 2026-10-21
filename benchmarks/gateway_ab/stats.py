@@ -159,9 +159,14 @@ def _pct(log_ratio: float) -> float:
 
 
 def verdict(
-    ci: tuple[float, float], min_effect_pct: float, higher_is_better: bool
+    ci: tuple[float, float],
+    min_effect_pct: float,
+    higher_is_better: bool,
+    subject: str = "B",
 ) -> str:
     """Classify a B-vs-A delta from its confidence interval.
+
+    ``subject`` names B in the verdict.
 
     - ``B better`` / ``B worse``: the whole interval is beyond
       ``min_effect_pct`` in one direction.
@@ -178,13 +183,12 @@ def verdict(
     if math.isnan(lo) or math.isnan(hi):
         return "n/a"
     if lo > min_effect_pct:
-        return "B better" if higher_is_better else "B worse"
+        return f"{subject} better" if higher_is_better else f"{subject} worse"
     if hi < -min_effect_pct:
-        return "B worse" if higher_is_better else "B better"
+        return f"{subject} worse" if higher_is_better else f"{subject} better"
     if lo > 0 or hi < 0:
-        return (
-            "B slightly better" if (lo > 0) == higher_is_better else "B slightly worse"
-        )
+        better = (lo > 0) == higher_is_better
+        return f"{subject} slightly {'better' if better else 'worse'}"
     if lo >= -min_effect_pct and hi <= min_effect_pct:
         return "same"
     return "inconclusive"
@@ -195,6 +199,7 @@ def _compare(
     values_b: Sequence[float],
     higher_is_better: bool,
     min_effect_pct: float,
+    subject: str,
 ) -> dict[str, Any] | None:
     """One comparison row from per-round values matched by index.
 
@@ -217,7 +222,7 @@ def _compare(
         "b": statistics.geometric_mean(b),
         "delta_pct": delta,
         "ci_pct": ci,
-        "verdict": verdict(ci, min_effect_pct, higher_is_better),
+        "verdict": verdict(ci, min_effect_pct, higher_is_better, subject),
         "rounds": len(kept),
     }
 
@@ -233,12 +238,13 @@ def compare_latency(
     rounds_b: Mapping[int, Sequence[float]],
     quantiles: Sequence[Stat] = ("mean", 50.0, 90.0, 99.0),
     min_effect_pct: float = 2.0,
+    subject: str = "B",
 ) -> dict[str, dict[str, Any]]:
     """Per-statistic comparison of one latency metric. Lower is better.
 
     ``rounds_a`` and ``rounds_b`` map a round index to that round's
     per-request samples. Rounds are matched by index; a round missing or
-    empty on either side is left out.
+    empty on either side is left out. ``subject`` names B in the verdicts.
 
     The mean is reported next to the percentiles because latency under
     batching is often multi-modal, and a percentile that sits between two
@@ -254,6 +260,7 @@ def compare_latency(
             [_stat(sorted_b[r], q) for r in pairs],
             higher_is_better=False,
             min_effect_pct=min_effect_pct,
+            subject=subject,
         )
         if row is not None:
             out[q if q == "mean" else f"p{q:g}"] = row
@@ -265,12 +272,13 @@ def compare_scalar(
     values_b: Mapping[int, float],
     higher_is_better: bool = True,
     min_effect_pct: float = 2.0,
+    subject: str = "B",
 ) -> dict[str, Any] | None:
     """Compare a per-run scalar (throughput), with rounds matched by index."""
     pairs = _matched(values_a, values_b)
     va = [values_a[r] for r in pairs]
     vb = [values_b[r] for r in pairs]
-    row = _compare(va, vb, higher_is_better, min_effect_pct)
+    row = _compare(va, vb, higher_is_better, min_effect_pct, subject)
     if row is not None:
         row["a_cv_pct"] = cv(va)
         row["b_cv_pct"] = cv(vb)

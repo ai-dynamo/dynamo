@@ -10,14 +10,19 @@ mocker workers, for both aggregated and disaggregated serving.
 
 | Side | Request path | Who picks the worker |
 |---|---|---|
-| **A: `frontend`** | client → Dynamo Frontend → worker | KV router inside the Frontend (`DYN_ROUTER_MODE=kv`) |
-| **B: `gateway`** | client → Gateway (agentgateway) → EPP → Frontend sidecar (direct mode) in the chosen pod → worker | KV router inside the EPP, Dynamo runtime mode |
+| **A: `frontend`** | client → Gateway (agentgateway) → Dynamo Frontend → worker | KV router inside the Frontend (`DYN_ROUTER_MODE=kv`) |
+| **B: `epp`** | client → Gateway (agentgateway) → EPP → Frontend sidecar (direct mode) in the chosen pod → worker | KV router inside the EPP, Dynamo runtime mode |
+
+Both sides sit behind the same Gateway, so what separates them is the EPP, not the gateway hop. A
+production Frontend usually sits behind an ingress or gateway too. With `--with-direct`, a third arm
+measures what the gateway itself costs; see
+[Measuring the gateway's cost](#measuring-the-gateways-cost).
 
 It reports TTFT, inter-token latency (ITL), end-to-end latency, output-token throughput and request
 throughput for each side, plus B's delta against A with a confidence interval and a verdict.
 
 ```text
-A  aiperf ──HTTP──▶ Frontend (tokenize + KV route) ──TCP──▶ mocker
+A  aiperf ──HTTP──▶ Gateway ──HTTP──▶ Frontend (tokenize + KV route) ──TCP──▶ mocker
 B  aiperf ──HTTP──▶ Gateway ──ext_proc──▶ EPP (tokenize + KV route)
                       └──HTTP──▶ sidecar Frontend (tokenize, direct) ──TCP──▶ mocker
 ```
@@ -35,8 +40,9 @@ report:
 | | `--backend kubernetes` (default) | `--backend local` |
 |---|---|---|
 | Needs | A cluster (minikube or kind is enough), `kubectl`, `helm` | Docker only |
-| Side A | DGD: Frontend + mocker workers | Containers: Frontend + mocker workers |
-| Side B | DGD with an EPP, agentgateway, HTTPRoute, InferencePool, a direct-mode sidecar per worker pod | Envoy, the EPP, one direct-mode Frontend, mocker workers |
+| Gateway | agentgateway, one HTTPRoute per side, selected by the `X-Dynamo-AB-Target` header | Envoy, one route per side, selected by the same header |
+| Side A | DGD: Frontend + mocker workers, HTTPRoute to the Frontend's Service | Containers: Frontend + mocker workers, Envoy route with `ext_proc` off |
+| Side B | DGD with an EPP, InferencePool, a direct-mode sidecar per worker pod | The EPP, one direct-mode Frontend, mocker workers |
 | Worker id → address | The EPP's Kubernetes pod reflector | `DYN_EPP_STATIC_ENDPOINT` |
 | Setup per topology | Minutes | Seconds |
 | Use it for | Numbers you publish; anything that touches the operator, the Gateway, or pod discovery | Fast iteration on EPP and Frontend code, and frequent regression runs |
@@ -94,7 +100,7 @@ EPP builds up to and including 1.5.1 recognize a prefill worker only by the lega
 `ModelType::Prefill` marker bit on its model card. vLLM still emits that bit for compatibility,
 but the mocker registers its prefill workers with `worker_type: prefill` alone. Against mocker
 workers, those EPP builds therefore never activate prefill routing. Every disaggregated request
-through the Gateway then fails at the decode sidecar with `Prefill worker ID required in Direct
+through the EPP then fails at the decode sidecar with `Prefill worker ID required in Direct
 routing mode`. The aggregated topology and the whole `frontend` side are unaffected, because the
 Frontend resolves the worker role from `worker_type`.
 
@@ -131,14 +137,16 @@ exits `1`.
 topology gets its own Docker network and its own file-discovery volume:
 
 ```text
-A  aiperf ─▶ Frontend (KV router) ─▶ mocker workers
+A  aiperf ─▶ Envoy ─▶ Frontend (KV router) ─▶ mocker workers
 B  aiperf ─▶ Envoy ─ext_proc─▶ EPP (Dynamo runtime mode, KV router)
                └─▶ direct-mode Frontend ─▶ the mocker worker the EPP picked
 ```
 
-- **Envoy** is configured the way Gateway API Inference Extension gateways program it:
-  full-duplex streamed `ext_proc` in both directions, and an original-destination cluster that
-  forwards to the address the EPP returns in `x-gateway-destination-endpoint`.
+- **Envoy** stands in for the shared Gateway, with one route per side selected by the
+  `X-Dynamo-AB-Target` header. B's route is configured the way Gateway API Inference Extension
+  gateways program it: full-duplex streamed `ext_proc` in both directions, and an
+  original-destination cluster that forwards to the address the EPP returns in
+  `x-gateway-destination-endpoint`. A's route turns `ext_proc` off and forwards to A's Frontend.
 - **The EPP** runs its production code: tokenization, KV-aware selection from the workers' KV
   events, prefill routing, load bookkeeping from the response stream, and the `ext_proc` protocol.
 - **The one substitution:** the EPP runs with `DYN_EPP_STATIC_ENDPOINT` set to the direct-mode
@@ -170,6 +178,8 @@ different prefixes can share a Docker host. Two runs with the same prefix tear e
 Compared with the Kubernetes backend:
 
 - **Not exercised:** the pod reflector, the operator, InferencePool, HTTPRoute, and agentgateway.
+  Envoy and agentgateway can differ in how they pool connections and acknowledge data, so a cost
+  seen behind one gateway may not appear behind the other.
 - **One Frontend instead of a sidecar per pod:** a single direct-mode Frontend serves every B worker.
 - **Shared CPU:** the load generator and every container share the host's CPUs. Trust the deltas,
   and measure on a cluster for published absolute numbers.
@@ -183,7 +193,7 @@ Compared with the Kubernetes backend:
 ```bash
 B="python3 -m benchmarks.gateway_ab --context gateway-ab"
 $B render                       # write the manifests to benchmarks/results/gateway_ab/manifests/
-$B deploy                       # loadgen pod + both sides of every topology, smoke-tested
+$B deploy                       # loadgen pod + every arm of every topology, smoke-tested
 $B --results out/run1 run       # measure; re-running the same command resumes
 $B --results out/run1 report    # recompute summary.json and report.md
 $B teardown                     # delete this prefix's objects (app.kubernetes.io/instance=<prefix>)
@@ -193,7 +203,7 @@ $B teardown                     # delete this prefix's objects (app.kubernetes.i
 compete for CPU. With `--keep`, it leaves everything running.
 
 `deploy` stamps each deployment with a fingerprint of the flags that shape it: images, worker
-counts, mocker arguments, and, locally, the EPP binary's content. `run` refuses to measure a
+counts, mocker arguments, `--with-direct`, and, locally, the EPP binary's content. `run` refuses to measure a
 deployment whose fingerprint differs from its own flags, so results are never labeled with flags
 other than the ones deployed. Give each step the same flags, as `$B` does above.
 
@@ -211,7 +221,11 @@ version. Kubernetes image tags are compared by name, so do not re-push a tag mid
 
 ## What makes the comparison fair
 
-- **Identical workers.** One function builds both DynamoGraphDeployments. Mocker arguments, worker
+- **Same gateway.** Both sides go through the same Gateway. Their routes differ only in the backend
+  and in the value of the `X-Dynamo-AB-Target` header that selects them, so the gateway's own cost,
+  which a Frontend behind an ingress pays as well, cancels out of the comparison. A unit test checks
+  the routes.
+- **Identical workers.** One function builds every DynamoGraphDeployment. Mocker arguments, worker
   counts, images, and resource requests match, and B adds only the direct-mode sidecar and the EPP.
   A unit test enforces this.
 - **Same router, when built from one commit.** On Kubernetes the Frontend and the EPP both run the
@@ -219,9 +233,9 @@ version. Kubernetes image tags are compared by name, so do not re-push a tag mid
   block size from the workers' model cards, so their prefix hashes agree. An EPP taken from another
   build (`--epp-binary`, or an image with a swapped `/epp`) runs that build's router, and the
   deltas then include the difference between the two builds.
-- **Same client.** One loadgen pod runs aiperf against both sides with the same arguments. Only the
-  URL differs, and a unit test enforces that too. Both sides receive the routing headers. A ignores
-  them.
+- **Same client.** One loadgen pod runs aiperf against both sides with the same arguments and the
+  same URL, the Gateway's. Only the target header's value differs, and a unit test enforces that
+  too.
 - **Same requests.** Each round and load point has its own seed, the same for both sides, so A and
   B see the same prompts. Seeds differ across load points because aiperf draws its prompts in order
   from the seed; with a shared seed the second load point would replay the first one's prompts and
@@ -231,7 +245,7 @@ version. Kubernetes image tags are compared by name, so do not re-push a tag mid
 - **Drift cancellation.** Within a round, the side that runs first alternates by load point, and it
   flips each round (ABBA). Slow drift such as cache warmth, noisy neighbours, or node temperature
   cannot land on only one side.
-- **Primed before measuring.** Before round 0, each side gets one unrecorded run at the highest
+- **Primed before measuring.** Before round 0, each arm gets one unrecorded run at the highest
   load point. Its seed is far from every measured one, so it warms connections and code paths
   but not the prefixes those rounds use. Without it, the first measured point carries a
   cold-start cost, which lands on whichever side runs first. Pass `--no-prime` to skip it.
@@ -240,6 +254,26 @@ version. Kubernetes image tags are compared by name, so do not re-push a tag mid
 - **Valid runs only.** A run counts only if every request succeeded and none went missing. Failed or
   partial runs appear under "Excluded runs" and are left out of the statistics. A failed measurement
   is retried once, then recorded as missing.
+
+## Measuring the gateway's cost
+
+`--with-direct` adds a third arm, `direct`: a second copy of A's deployment that aiperf reaches
+without the Gateway. The report then adds a "Gateway cost" table that compares A through the
+Gateway with this copy. Its Δ is what the gateway hop costs a Frontend deployment.
+
+- **Why a copy.** Every arm replays the same prompts in a round. Against A's own workers, whichever
+  arm ran second would find those prompts in A's prefix caches and look faster.
+- **Order.** A runs between the other two arms, and the order reverses at every point, so A always
+  runs right next to both arms it is compared with.
+- **Cost.** One more deployment per topology, which adds about half again as many runs and, on
+  Kubernetes, A's CPU requests once more.
+
+Earlier versions of this harness compared B with A reached directly, which charged the gateway's
+cost to the EPP. That comparison is also how the harness found a Frontend bug: the Frontend's HTTP
+server left Nagle's algorithm on, and behind agentgateway about a quarter of disaggregated first
+tokens were held for about 40 ms
+([#16859](https://github.com/ai-dynamo/dynamo/issues/16859)). With both sides behind the gateway,
+both would show a problem like that, and the A/B table would not. The gateway-cost table would.
 
 ## Choosing the load
 
@@ -303,6 +337,10 @@ Verdicts read the interval against `--min-effect` (default 2%):
 
 Under each table, the coefficient of variation of the per-round TTFT mean shows the A/A noise floor
 for that cluster. Treat any Δ smaller than it with suspicion.
+
+With `--with-direct`, a "Gateway cost" section follows, with the same columns for the direct arm
+against A through the gateway. Its verdicts read `gateway worse`, `gateway better`, and so on. The
+regression gate and `trend` cover only B against A.
 
 `summary.json` holds the same data in machine-readable form, along with `meta.json`: images,
 aiperf version, repository commit, node list, and the full configuration.
@@ -377,6 +415,7 @@ To compare two builds, run each and compare their reports. Run them back to back
 | `--mocker-arg` | — | Extra mocker flag, repeatable, for example `--mocker-arg=--num-gpu-blocks-override --mocker-arg=4096`. |
 | `--router-cpu` / `--worker-cpu` / `--sidecar-cpu` / `--loadgen-cpu` | `2` / `1` / `1` / `4` | Kubernetes backend: CPU requests. |
 | `--name-prefix` | `ab` | Names this run's deployments, containers, and labels. Give concurrent runs distinct prefixes. |
+| `--with-direct` | off | Also deploy a copy of A and measure it without the gateway. See [Measuring the gateway's cost](#measuring-the-gateways-cost). |
 | `--dynamo-version` | `1.5.1` | Sets the default `dynamo-frontend` and `dynamo-planner` image tags. |
 | `--min-effect` | `2.0` | Percent below which a Δ is reported as `same`. |
 
@@ -386,11 +425,11 @@ To compare two builds, run each and compare their reports. Run them back to back
   against a GPU number. The mocker does not model GPU contention between prefill and decode, so
   treat absolute headroom as an upper bound.
 - **B has more CPU in total.** B tokenizes in the EPP and again in each sidecar, while A tokenizes
-  once in the Frontend. B also has a sidecar per worker pod and a gateway proxy. This difference is
-  part of the architecture, and the benchmark measures it rather than hiding it. Keep it in mind
-  when reading throughput.
-- **The Gateway is shared.** All B-side pools use the Gateway in `--gateway-namespace`, and routes
-  select a pool by the `X-Dynamo-AB-Target` header. Other traffic through that Gateway adds noise.
+  once in the Frontend. B also has a sidecar per worker pod. This difference is part of the
+  architecture, and the benchmark measures it rather than hiding it. Keep it in mind when reading
+  throughput.
+- **The Gateway is shared.** Both sides use the Gateway in `--gateway-namespace`, and routes select a
+  side by the `X-Dynamo-AB-Target` header. Other traffic through that Gateway adds noise to both.
 - **Local clusters are for wiring and trends.** On minikube or kind, the load generator, the
   gateway, and every pod share the host's cores. Use a real cluster for numbers you publish.
 - **EPP log volume.** In aggregated mode, the EPP polls discovery for prefill workers once a
@@ -402,8 +441,8 @@ To compare two builds, run each and compare their reports. Run them back to back
 | Symptom | Cause and fix |
 |---|---|
 | Preflight: CRD or Gateway missing | Run `setup_cluster.sh`. |
-| Smoke to `gateway` fails with 404 | The HTTPRoute is not attached. Check `kubectl get httproute -n <ns> -o yaml` for `Accepted`, and confirm the Gateway's listener allows routes from your namespace. |
-| Smoke to `gateway` fails with 500 or 503 | The EPP is not ready or found no workers. Check `kubectl logs -l nvidia.com/dynamo-component-type=epp`. |
+| Smoke to `frontend` or `epp` fails with 404 | The HTTPRoute is not attached. Check `kubectl get httproute -n <ns> -o yaml` for `Accepted`, and confirm the Gateway's listener allows routes from your namespace. |
+| Smoke to `epp` fails with 500 or 503 | The EPP is not ready or found no workers. Check `kubectl logs -l nvidia.com/dynamo-component-type=epp`. |
 | DGD never becomes Ready | Usually an image pull or Hugging Face download failure. Check `kubectl describe pod` and the worker logs, and pass `--hf-secret` when rate-limited. |
 | Local: an EPP container exits with `Too many open files` | File discovery ran out of inotify instances, which are capped per user across the host. Raise them with `sudo sysctl fs.inotify.max_user_instances=1024`. Preflight warns when the limit is below 512. |
 | Local: the EPP exits mentioning `POD_NAMESPACE` | The EPP lacks `DYN_EPP_STATIC_ENDPOINT`: an EPP that has it logs `DYN_EPP_STATIC_ENDPOINT is set` at startup. Pass `--epp-binary` with a build from this branch. |
@@ -416,9 +455,9 @@ To compare two builds, run each and compare their reports. Run them back to back
 |---|---|
 | `setup_cluster.sh` | Installs the Dynamo platform and the Gateway API Inference Extension stack. |
 | `cli.py` | Commands and orchestration. |
-| `k8s_backend.py` | Kubernetes backend: DGDs, HTTPRoute, loadgen pod, rollout checks. |
+| `k8s_backend.py` | Kubernetes backend: DGDs, HTTPRoutes, loadgen pod, rollout checks. |
 | `local_backend.py` | Docker backend: containers, Envoy config, EPP with a static endpoint. |
-| `manifests.py` | DynamoGraphDeployment, HTTPRoute, and loadgen manifests for both sides. |
+| `manifests.py` | DynamoGraphDeployment, HTTPRoute, and loadgen manifests for every arm. |
 | `loadgen.py` | aiperf command and in-pod result extraction. |
 | `stats.py` | Percentiles, paired t-intervals, verdicts. Standard library only. |
 | `report.py` | `summary.json` and `report.md`. |

@@ -22,7 +22,10 @@ from . import stats
 from .loadgen import LoadPoint
 
 SIDE_A = "frontend"
-SIDE_B = "gateway"
+SIDE_B = "epp"
+# The optional copy of A reached without the gateway. Against A, it gives
+# what the gateway itself costs.
+SIDE_DIRECT = "direct"
 # Fewer rounds measured validly on both sides than this and no verdict is given.
 MIN_ROUNDS = 2
 GATED_STATS = ("mean", "p50", "p90")
@@ -70,84 +73,101 @@ def build_summary(results: pathlib.Path, min_effect_pct: float = 2.0) -> dict[st
     failures = load_failures(results)
     meta_path = results / "meta.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-    points: list[dict[str, Any]] = []
-    invalid: list[dict[str, Any]] = []
-    # A point whose every run failed has only markers, and must still show.
-    keys = sorted(
-        {(t, lp) for (t, lp, _) in runs} | {(t, lp) for t, lp, _, _ in failures}
-    )
-    for topology, load in keys:
-        sides = {}
-        for side in (SIDE_A, SIDE_B):
-            all_runs = runs.get((topology, load, side), [])
-            for r in all_runs:
-                if not is_valid(r):
-                    invalid.append(
-                        {
-                            "topology": topology,
-                            "load": load.describe(),
-                            "side": side,
-                            "round": r.get("round"),
-                            "errors": r.get("errors"),
-                            "records": r.get("records"),
-                            "expected": r.get("expected_requests"),
-                        }
-                    )
-            sides[side] = [r for r in all_runs if is_valid(r)]
-        a_runs, b_runs = sides[SIDE_A], sides[SIDE_B]
-        a_by_round = {r["round"]: r for r in a_runs}
-        b_by_round = {r["round"]: r for r in b_runs}
-        paired = sorted(set(a_by_round) & set(b_by_round))
-        point: dict[str, Any] = {
+    invalid = [
+        {
             "topology": topology,
-            "load": load.label,
-            "load_desc": load.describe(),
-            "rounds": {"a": len(a_runs), "b": len(b_runs), "paired": len(paired)},
-            "ttft_round_cv_pct": {
-                "a": _round_mean_cv(a_runs),
-                "b": _round_mean_cv(b_runs),
-            },
-            "latency": {},
-            "throughput": {},
+            "load": load.describe(),
+            "side": side,
+            "round": r.get("round"),
+            "errors": r.get("errors"),
+            "records": r.get("records"),
+            "expected": r.get("expected_requests"),
         }
-        # Rounds pair up by index: both sides replayed the same seed in them.
-        for metric in stats.LATENCY_METRICS:
-            rows = stats.compare_latency(
-                {r: a_by_round[r]["samples"].get(metric, []) for r in paired},
-                {r: b_by_round[r]["samples"].get(metric, []) for r in paired},
-                min_effect_pct=min_effect_pct,
-            )
-            if rows:
-                point["latency"][metric] = rows
-        for metric in stats.THROUGHPUT_METRICS:
-            row = stats.compare_scalar(
-                {r: a_by_round[r].get(metric) for r in paired},
-                {r: b_by_round[r].get(metric) for r in paired},
-                higher_is_better=True,
-                min_effect_pct=min_effect_pct,
-            )
-            if row is None:
-                continue
-            if load.kind == "rps":
-                # Below saturation an open-loop run delivers what it offers,
-                # so throughput cannot tell the sides apart.
-                row["verdict"] = "n/a (open loop)"
-            point["throughput"][metric] = row
-        for row in _rows(point):
-            if row["rounds"] < MIN_ROUNDS:
-                # One pair has no spread to estimate an interval from.
-                row["verdict"] = "n/a (too few rounds)"
-        points.append(point)
+        for (topology, load, side), arm_runs in sorted(runs.items())
+        for r in arm_runs
+        if not is_valid(r)
+    ]
+    # A point whose every run failed has only markers, and must still show.
+    found = set(runs) | {(t, lp, side) for t, lp, side, _ in failures}
+    keys = sorted({(t, lp) for t, lp, _ in found})
+    direct_keys = sorted({(t, lp) for t, lp, side in found if side == SIDE_DIRECT})
     return {
         "meta": meta,
         "min_effect_pct": min_effect_pct,
-        "points": points,
+        "points": [
+            _point(runs, t, lp, SIDE_A, SIDE_B, min_effect_pct, "B") for t, lp in keys
+        ],
+        # A through the gateway against its direct copy: the gateway's cost.
+        "gateway_points": [
+            _point(runs, t, lp, SIDE_DIRECT, SIDE_A, min_effect_pct, "gateway")
+            for t, lp in direct_keys
+        ],
         "invalid_runs": invalid,
         "failed_runs": [
             {"topology": t, "load": lp.describe(), "side": side, "round": rnd}
             for t, lp, side, rnd in failures
         ],
     }
+
+
+def _point(
+    runs: dict[tuple[str, LoadPoint, str], list[dict[str, Any]]],
+    topology: str,
+    load: LoadPoint,
+    side_a: str,
+    side_b: str,
+    min_effect_pct: float,
+    subject: str,
+) -> dict[str, Any]:
+    """One load point's comparison of two arms; ``subject`` names B in verdicts."""
+    a_runs = [r for r in runs.get((topology, load, side_a), []) if is_valid(r)]
+    b_runs = [r for r in runs.get((topology, load, side_b), []) if is_valid(r)]
+    a_by_round = {r["round"]: r for r in a_runs}
+    b_by_round = {r["round"]: r for r in b_runs}
+    paired = sorted(set(a_by_round) & set(b_by_round))
+    point: dict[str, Any] = {
+        "topology": topology,
+        "load": load.label,
+        "load_desc": load.describe(),
+        "sides": {"a": side_a, "b": side_b},
+        "rounds": {"a": len(a_runs), "b": len(b_runs), "paired": len(paired)},
+        "ttft_round_cv_pct": {
+            "a": _round_mean_cv(a_runs),
+            "b": _round_mean_cv(b_runs),
+        },
+        "latency": {},
+        "throughput": {},
+    }
+    # Rounds pair up by index: both arms replayed the same seed in them.
+    for metric in stats.LATENCY_METRICS:
+        rows = stats.compare_latency(
+            {r: a_by_round[r]["samples"].get(metric, []) for r in paired},
+            {r: b_by_round[r]["samples"].get(metric, []) for r in paired},
+            min_effect_pct=min_effect_pct,
+            subject=subject,
+        )
+        if rows:
+            point["latency"][metric] = rows
+    for metric in stats.THROUGHPUT_METRICS:
+        row = stats.compare_scalar(
+            {r: a_by_round[r].get(metric) for r in paired},
+            {r: b_by_round[r].get(metric) for r in paired},
+            higher_is_better=True,
+            min_effect_pct=min_effect_pct,
+            subject=subject,
+        )
+        if row is None:
+            continue
+        if load.kind == "rps":
+            # Below saturation an open-loop run delivers what it offers,
+            # so throughput cannot tell the arms apart.
+            row["verdict"] = "n/a (open loop)"
+        point["throughput"][metric] = row
+    for row in _rows(point):
+        if row["rounds"] < MIN_ROUNDS:
+            # One pair has no spread to estimate an interval from.
+            row["verdict"] = "n/a (too few rounds)"
+    return point
 
 
 def _rows(point: dict[str, Any]) -> list[dict[str, Any]]:
@@ -180,10 +200,13 @@ def _round_mean_cv(runs: list[dict[str, Any]]) -> float:
 def incomplete(summary: dict[str, Any]) -> list[str]:
     """Points that lack a comparison, and runs excluded as invalid."""
     out = [
-        f"{p['topology']} {p['load_desc']}: no comparison "
-        f"(valid rounds A={p['rounds']['a']} B={p['rounds']['b']}, "
-        f"{p['rounds'].get('paired', 0)} on both sides)"
+        _no_comparison(p, "no comparison", "A", "B")
         for p in summary["points"]
+        if not p["latency"]
+    ]
+    out += [
+        _no_comparison(p, "no gateway-cost comparison", "direct", "A")
+        for p in summary.get("gateway_points", [])
         if not p["latency"]
     ]
     out += [
@@ -196,6 +219,15 @@ def incomplete(summary: dict[str, Any]) -> list[str]:
         for r in summary.get("failed_runs", [])
     ]
     return out
+
+
+def _no_comparison(point: dict[str, Any], what: str, a: str, b: str) -> str:
+    rounds = point["rounds"]
+    return (
+        f"{point['topology']} {point['load_desc']}: {what} "
+        f"(valid rounds {a}={rounds['a']} {b}={rounds['b']}, "
+        f"{rounds.get('paired', 0)} on both sides)"
+    )
 
 
 def regressions(summary: dict[str, Any], max_pct: float) -> list[str]:
@@ -237,19 +269,22 @@ def render_markdown(summary: dict[str, Any]) -> str:
     meta = summary.get("meta", {})
     lines = ["# Frontend vs Gateway+EPP A/B", ""]
     if meta.get("backend") == "local":
-        side_b = (
-            "B = Envoy + EPP (KV router, Dynamo runtime mode, static endpoint) + "
-            "one direct-mode Frontend, in Docker without Kubernetes. "
+        gateway = "Envoy"
+        sides = (
+            "A = Dynamo Frontend (KV router), no EPP, behind Envoy on a route with "
+            "ext_proc off. B = Envoy + EPP (KV router, Dynamo runtime mode, static "
+            "endpoint) + one direct-mode Frontend. Both run in Docker without "
+            "Kubernetes. "
         )
     else:
-        side_b = (
-            "B = Gateway + EPP (KV router, Dynamo runtime mode) + "
+        gateway = "the Gateway"
+        sides = (
+            "A = Dynamo Frontend (KV router), no EPP, behind the Gateway through a "
+            "plain HTTPRoute. B = Gateway + EPP (KV router, Dynamo runtime mode) + "
             "direct-mode Frontend sidecars. "
         )
     lines += [
-        "A = Dynamo Frontend (KV router), no EPP. "
-        + side_b
-        + "Workers are mocker in both, built from the same spec.",
+        sides + "Workers are mocker in every arm, built from the same spec.",
         "",
         "Each round gives one value per side; A and B are their geometric means "
         "over the rounds measured on both sides. Δ is B relative to A; negative "
@@ -261,40 +296,19 @@ def render_markdown(summary: dict[str, Any]) -> str:
     ]
     if meta:
         lines += _meta_table(meta)
-    by_topology: dict[str, list[dict[str, Any]]] = {}
-    for p in summary["points"]:
-        by_topology.setdefault(p["topology"], []).append(p)
-    for topology, pts in by_topology.items():
-        lines += [f"## {topology}", ""]
+    lines += _tables(summary["points"], ("A", "B"), "##")
+    gateway_points = summary.get("gateway_points", [])
+    if gateway_points:
         lines += [
-            "| Load | Metric | A | B | Δ | 95% CI | Verdict |",
-            "|---:|---|---:|---:|---:|---|---|",
+            "## Gateway cost",
+            "",
+            f"A second copy of A's deployment, reached without {gateway} "
+            "(`--with-direct`), compared with A through it. Δ is A through the "
+            "gateway relative to the copy: what the gateway costs a Frontend "
+            "deployment. Rounds pair the same way as above.",
+            "",
         ]
-        for p in pts:
-            c = p["load_desc"]
-            if not p["latency"] and not p["throughput"]:
-                lines.append(
-                    f"| {c} | — | — | — | — | — | missing data "
-                    f"(valid rounds A={p['rounds']['a']} B={p['rounds']['b']}) |"
-                )
-                continue
-            for metric, label in stats.LATENCY_METRICS.items():
-                for q, row in p["latency"].get(metric, {}).items():
-                    lines.append(_row(c, f"{label} {q} (ms)", row, "{:.2f}"))
-            for metric, label in stats.THROUGHPUT_METRICS.items():
-                row = p["throughput"].get(metric)
-                if row:
-                    lines.append(_row(c, label, row, "{:.1f}"))
-        lines.append("")
-        noise = [(p["load_desc"], p["ttft_round_cv_pct"]) for p in pts if p["latency"]]
-        if noise:
-            lines += [
-                "Run-to-run noise (coefficient of variation of the per-round TTFT mean):",
-                "",
-            ]
-            for c, cv in noise:
-                lines.append(f"- {c}: A {_fmt_pct(cv['a'])}, B {_fmt_pct(cv['b'])}")
-            lines.append("")
+        lines += _tables(gateway_points, ("Direct", "Via gateway"), "###")
     failed = summary.get("failed_runs", [])
     if summary["invalid_runs"] or failed:
         lines += ["## Excluded runs", ""]
@@ -312,6 +326,49 @@ def render_markdown(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _tables(
+    points: list[dict[str, Any]], labels: tuple[str, str], heading: str
+) -> list[str]:
+    """A table per topology comparing two arms, each with its noise line."""
+    a, b = labels
+    by_topology: dict[str, list[dict[str, Any]]] = {}
+    for p in points:
+        by_topology.setdefault(p["topology"], []).append(p)
+    lines = []
+    for topology, pts in by_topology.items():
+        lines += [f"{heading} {topology}", ""]
+        lines += [
+            f"| Load | Metric | {a} | {b} | Δ | 95% CI | Verdict |",
+            "|---:|---|---:|---:|---:|---|---|",
+        ]
+        for p in pts:
+            c = p["load_desc"]
+            if not p["latency"] and not p["throughput"]:
+                lines.append(
+                    f"| {c} | — | — | — | — | — | missing data "
+                    f"(valid rounds {a}={p['rounds']['a']} {b}={p['rounds']['b']}) |"
+                )
+                continue
+            for metric, label in stats.LATENCY_METRICS.items():
+                for q, row in p["latency"].get(metric, {}).items():
+                    lines.append(_row(c, f"{label} {q} (ms)", row, "{:.2f}"))
+            for metric, label in stats.THROUGHPUT_METRICS.items():
+                row = p["throughput"].get(metric)
+                if row:
+                    lines.append(_row(c, label, row, "{:.1f}"))
+        lines.append("")
+        noise = [(p["load_desc"], p["ttft_round_cv_pct"]) for p in pts if p["latency"]]
+        if noise:
+            lines += [
+                "Run-to-run noise (coefficient of variation of the per-round TTFT mean):",
+                "",
+            ]
+            for c, cv in noise:
+                lines.append(f"- {c}: {a} {_fmt_pct(cv['a'])}, {b} {_fmt_pct(cv['b'])}")
+            lines.append("")
+    return lines
+
+
 def render_trend(
     history: pathlib.Path,
     metric: str = "time_to_first_token",
@@ -322,8 +379,8 @@ def render_trend(
     Each subdirectory holding a ``summary.json`` is one run, ordered by its
     start time. Watching this column drift catches slow regressions that stay
     under a per-run threshold. A run measured with another backend, workload,
-    or worker shape than the newest one is marked, since its deltas are not
-    comparable with the rest of its column.
+    worker shape, or harness version than the newest one is marked, since its
+    deltas are not comparable with the rest of its column.
     """
     runs = []
     for path in history.glob("*/summary.json"):
@@ -367,18 +424,21 @@ def render_trend(
     if any(_setup(s) != newest for _, _, s in runs):
         lines += [
             "",
-            "† Measured with a different backend, workload, or worker shape than "
-            "the newest run; not comparable with the rest of its column.",
+            "† Measured with a different backend, workload, worker shape, or "
+            "harness version than the newest run; not comparable with the rest of "
+            "its column.",
         ]
     return "\n".join(lines)
 
 
-def _setup(summary: dict[str, Any]) -> tuple[str, str, str]:
+def _setup(summary: dict[str, Any]) -> tuple[str, ...]:
     meta = summary.get("meta", {})
     return (
         meta.get("backend", "kubernetes"),
         json.dumps(meta.get("workload"), sort_keys=True),
         json.dumps(meta.get("workers"), sort_keys=True),
+        # Harness version 3 moved A behind the gateway, which changes every B delta.
+        json.dumps(meta.get("identity", {}).get("harness")),
     )
 
 
@@ -407,6 +467,7 @@ def _meta_table(meta: dict[str, Any]) -> list[str]:
         ("workers", "Workers"),
         ("workload", "Workload"),
         ("rounds", "Rounds"),
+        ("arms", "Arms"),
         ("nodes", "Nodes"),
     ]
     out = ["| | |", "|---|---|"]

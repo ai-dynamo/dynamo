@@ -3,13 +3,16 @@
 
 """Kubernetes manifests for the Frontend vs Gateway+EPP A/B benchmark.
 
-Both sides of a comparison are built by the same function from the same
-``BenchConfig``, so the mocker workers are identical by construction and the
-only difference is the routing path:
+Every deployment is built by the same function from the same ``BenchConfig``,
+so the mocker workers are identical by construction and the only difference
+is the routing path. Both sides go through the same Gateway:
 
-* ``frontend`` (A): client -> Dynamo Frontend (KV router) -> mocker workers.
-* ``gateway`` (B): client -> Gateway -> EPP (KV router, Dynamo runtime mode)
+* ``frontend`` (A): client -> Gateway -> Dynamo Frontend (KV router) -> mocker
+  workers, through a plain HTTPRoute to the Frontend's Service.
+* ``epp`` (B): client -> Gateway -> EPP (KV router, Dynamo runtime mode)
   -> Frontend sidecar in direct mode inside the chosen worker pod -> worker.
+* ``direct`` (optional): a copy of A's deployment that the client reaches
+  without the Gateway, to measure what the Gateway itself costs.
 
 Manifests are plain dicts so they can be applied as JSON with no YAML
 dependency.
@@ -23,10 +26,18 @@ import json
 from typing import Any
 
 TOPOLOGIES = ("agg", "disagg")
-SIDES = ("frontend", "gateway")
+# A and B, both behind the Gateway.
+SIDES = ("frontend", "epp")
+# With the direct copy of A. A sits in the middle, so the measuring order,
+# which reverses every other point, keeps A next to both arms it is
+# compared with.
+ARMS = ("direct", "frontend", "epp")
+# Suffix of each arm's deployment name.
+TAGS = {"frontend": "fe", "epp": "epp", "direct": "dir"}
 
-# Route header that pins load to one B-side pool. Every pool shares the
-# Gateway, so the model-name header alone cannot tell agg from disagg.
+# Route header that selects one deployment's route on the shared Gateway.
+# Every route serves the same model there, so the model-name header alone
+# cannot tell them apart.
 TARGET_HEADER = "X-Dynamo-AB-Target"
 MODEL_HEADER = "X-Gateway-Model-Name"
 
@@ -88,6 +99,11 @@ class BenchConfig:
     gateway_name: str = "inference-gateway"
     gateway_namespace: str = "agentgateway-system"
 
+    # Also deploy the direct arm. It is a copy of A rather than A itself:
+    # both replay the same prompts, and whichever ran second would find them
+    # in A's prefix caches.
+    with_direct: bool = False
+
     def __post_init__(self) -> None:
         if not self.frontend_image:
             self.frontend_image = (
@@ -104,18 +120,23 @@ class BenchConfig:
                 raise ValueError(f"{field} must be at least 1")
 
 
+def arms(cfg: BenchConfig) -> tuple[str, ...]:
+    """The deployments of each topology, in measuring order."""
+    return ARMS if cfg.with_direct else SIDES
+
+
 def dgd_name(cfg: BenchConfig, topology: str, side: str) -> str:
     _check(topology, side)
-    return f"{cfg.name_prefix}-{topology}-{'fe' if side == 'frontend' else 'gw'}"
+    return f"{cfg.name_prefix}-{topology}-{TAGS[side]}"
 
 
-def frontend_service(cfg: BenchConfig, topology: str) -> str:
-    """Service the operator creates for the A-side Frontend component."""
-    return f"{dgd_name(cfg, topology, 'frontend')}-frontend"
+def frontend_service(cfg: BenchConfig, topology: str, side: str = "frontend") -> str:
+    """Service the operator creates for the Frontend of A or the direct arm."""
+    return f"{dgd_name(cfg, topology, side)}-frontend"
 
 
-def route_name(cfg: BenchConfig, topology: str) -> str:
-    return f"{dgd_name(cfg, topology, 'gateway')}-route"
+def route_name(cfg: BenchConfig, topology: str, side: str) -> str:
+    return f"{dgd_name(cfg, topology, side)}-route"
 
 
 def loadgen_pod_name(cfg: BenchConfig) -> str:
@@ -127,14 +148,16 @@ def labels(cfg: BenchConfig) -> dict[str, str]:
     return {PART_OF: "gateway-ab", INSTANCE: cfg.name_prefix}
 
 
-def request_headers(cfg: BenchConfig, topology: str) -> dict[str, str]:
-    """Headers sent on every request, identical for A and B.
+def request_headers(cfg: BenchConfig, topology: str, side: str) -> dict[str, str]:
+    """Headers sent on every request to one arm.
 
-    The A side ignores them; sending them anyway keeps request bytes equal.
+    The target header selects the arm's route on the Gateway, so it is the
+    only header that differs between A and B. The direct arm reaches its
+    Frontend without the Gateway and ignores both.
     """
     return {
         MODEL_HEADER: cfg.model,
-        TARGET_HEADER: dgd_name(cfg, topology, "gateway"),
+        TARGET_HEADER: dgd_name(cfg, topology, side),
     }
 
 
@@ -158,14 +181,34 @@ def build_dgd(cfg: BenchConfig, topology: str, side: str) -> dict[str, Any]:
     }
 
 
-def build_httproute(cfg: BenchConfig, topology: str) -> dict[str, Any]:
-    """Route from the shared Gateway to the B-side InferencePool."""
-    name = dgd_name(cfg, topology, "gateway")
+def build_httproute(cfg: BenchConfig, topology: str, side: str) -> dict[str, Any]:
+    """Route from the shared Gateway to B's InferencePool or to A's Frontend.
+
+    The two routes differ only in their backend and the target header value.
+    """
+    if side not in SIDES:
+        raise ValueError(f"only {SIDES} go through the Gateway, not {side!r}")
+    name = dgd_name(cfg, topology, side)
+    if side == "epp":
+        backend = {
+            "group": "inference.networking.k8s.io",
+            "kind": "InferencePool",
+            # The operator names the pool after the DGD.
+            "name": f"{name}-pool",
+            "port": 8000,
+        }
+    else:
+        backend = {
+            "group": "",
+            "kind": "Service",
+            "name": frontend_service(cfg, topology),
+            "port": 8000,
+        }
     return {
         "apiVersion": "gateway.networking.k8s.io/v1",
         "kind": "HTTPRoute",
         "metadata": {
-            "name": route_name(cfg, topology),
+            "name": route_name(cfg, topology, side),
             "labels": labels(cfg),
         },
         "spec": {
@@ -187,15 +230,7 @@ def build_httproute(cfg: BenchConfig, topology: str) -> dict[str, Any]:
                             "path": {"type": "PathPrefix", "value": "/"},
                         }
                     ],
-                    "backendRefs": [
-                        {
-                            "group": "inference.networking.k8s.io",
-                            "kind": "InferencePool",
-                            # The operator names the pool after the DGD.
-                            "name": f"{name}-pool",
-                            "port": 8000,
-                        }
-                    ],
+                    "backendRefs": [backend],
                     "timeouts": {"request": "300s"},
                 }
             ],
@@ -204,9 +239,9 @@ def build_httproute(cfg: BenchConfig, topology: str) -> dict[str, Any]:
 
 
 def build_loadgen_pod(cfg: BenchConfig) -> dict[str, Any]:
-    """Long-lived pod that runs aiperf against both sides.
+    """Long-lived pod that runs aiperf against every arm.
 
-    One pod for the whole experiment: A and B are measured from the same
+    One pod for the whole experiment: every arm is measured from the same
     client, on the same node, with the same aiperf and tokenizer cache.
     """
     container: dict[str, Any] = {
@@ -252,14 +287,13 @@ def build_all(cfg: BenchConfig, topologies: tuple[str, ...]) -> list[dict[str, A
     """Every manifest for the given topologies, loadgen pod first."""
     out: list[dict[str, Any]] = [build_loadgen_pod(cfg)]
     for topology in topologies:
-        out.append(build_dgd(cfg, topology, "frontend"))
-        out.append(build_dgd(cfg, topology, "gateway"))
-        out.append(build_httproute(cfg, topology))
+        out += [build_dgd(cfg, topology, side) for side in arms(cfg)]
+        out += [build_httproute(cfg, topology, side) for side in SIDES]
     return out
 
 
 def _router_component(cfg: BenchConfig, side: str) -> dict[str, Any]:
-    if side == "frontend":
+    if side != "epp":
         container: dict[str, Any] = {
             "name": "main",
             "image": cfg.frontend_image,
@@ -335,7 +369,7 @@ def _worker_component(
         "type": ctype,
         "replicas": replicas,
     }
-    if side == "gateway":
+    if side == "epp":
         # The EPP picks the worker before the request reaches the pod, so the
         # sidecar forwards without a second selection. It runs the same
         # Frontend image as the A side so the HTTP and tokenizer code match.
@@ -372,5 +406,5 @@ def _add_pull_secret(cfg: BenchConfig, spec: dict[str, Any]) -> None:
 def _check(topology: str, side: str) -> None:
     if topology not in TOPOLOGIES:
         raise ValueError(f"unknown topology {topology!r}; expected one of {TOPOLOGIES}")
-    if side not in SIDES:
-        raise ValueError(f"unknown side {side!r}; expected one of {SIDES}")
+    if side not in ARMS:
+        raise ValueError(f"unknown side {side!r}; expected one of {ARMS}")

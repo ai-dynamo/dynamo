@@ -170,10 +170,10 @@ def test_summary_and_regression(tmp_path):
             tmp_path, "agg", "frontend", 8, rnd, [rng.gauss(50, 2) for _ in range(200)]
         )
         _write_run(
-            tmp_path, "agg", "gateway", 8, rnd, [rng.gauss(65, 2) for _ in range(200)]
+            tmp_path, "agg", "epp", 8, rnd, [rng.gauss(65, 2) for _ in range(200)]
         )
     # An invalid run is reported and excluded, not averaged in.
-    _write_run(tmp_path, "agg", "gateway", 8, 3, [1.0] * 200, errors=5)
+    _write_run(tmp_path, "agg", "epp", 8, 3, [1.0] * 200, errors=5)
     (tmp_path / "meta.json").write_text(json.dumps({"model": "m"}))
 
     summary = report.build_summary(tmp_path)
@@ -213,7 +213,7 @@ def test_trend_orders_runs_and_fills_gaps(tmp_path):
             _write_run(
                 run,
                 "agg",
-                "gateway",
+                "epp",
                 8,
                 rnd,
                 [rng.gauss(b_mean, 1) for _ in range(100)],
@@ -241,7 +241,7 @@ def test_mean_reported_next_to_percentiles(tmp_path):
     fast_slow = [40.0] * 120 + [80.0] * 80
     for rnd in range(2):
         _write_run(tmp_path, "agg", "frontend", 8, rnd, fast_slow)
-        _write_run(tmp_path, "agg", "gateway", 8, rnd, fast_slow)
+        _write_run(tmp_path, "agg", "epp", 8, rnd, fast_slow)
     (point,) = report.build_summary(tmp_path)["points"]
     ttft = point["latency"]["time_to_first_token"]
     assert list(ttft) == ["mean", "p50", "p90", "p99"]
@@ -252,7 +252,7 @@ def test_mean_reported_next_to_percentiles(tmp_path):
 
 def test_single_round_gets_no_verdict_and_no_gate(tmp_path):
     _write_run(tmp_path, "agg", "frontend", 8, 0, [50.0] * 100)
-    _write_run(tmp_path, "agg", "gateway", 8, 0, [80.0] * 100)
+    _write_run(tmp_path, "agg", "epp", 8, 0, [80.0] * 100)
     summary = report.build_summary(tmp_path)
     (point,) = summary["points"]
     p50 = point["latency"]["time_to_first_token"]["p50"]
@@ -264,7 +264,7 @@ def test_single_round_gets_no_verdict_and_no_gate(tmp_path):
 
 def test_incomplete_flags_missing_and_excluded(tmp_path):
     _write_run(tmp_path, "agg", "frontend", 8, 0, [50.0] * 100)
-    _write_run(tmp_path, "agg", "gateway", 8, 0, [50.0] * 100, errors=100)
+    _write_run(tmp_path, "agg", "epp", 8, 0, [50.0] * 100, errors=100)
     gaps = report.incomplete(report.build_summary(tmp_path))
     assert len(gaps) == 2
     assert "no comparison" in gaps[0] and "excluded" in gaps[1]
@@ -303,7 +303,7 @@ def _write_rps_run(root, side, rnd, samples):
 def test_open_loop_throughput_gets_no_verdict(tmp_path):
     for rnd in range(2):
         _write_rps_run(tmp_path, "frontend", rnd, [50.0] * 50)
-        _write_rps_run(tmp_path, "gateway", rnd, [52.0] * 50)
+        _write_rps_run(tmp_path, "epp", rnd, [52.0] * 50)
     (point,) = report.build_summary(tmp_path)["points"]
     assert (
         point["throughput"]["output_token_throughput"]["verdict"] == "n/a (open loop)"
@@ -314,7 +314,7 @@ def test_open_loop_throughput_gets_no_verdict(tmp_path):
 
 
 def test_point_with_only_failure_markers_is_reported(tmp_path):
-    for side in ("frontend", "gateway"):
+    for side in ("frontend", "epp"):
         marker = tmp_path / "runs" / "disagg" / side / "c8" / "r0.error"
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("failed twice\n")
@@ -336,7 +336,7 @@ def test_failure_marker_superseded_by_valid_run_is_ignored(tmp_path):
 def test_noise_line_uses_per_round_ttft_means(tmp_path):
     for rnd, mean in enumerate((50.0, 60.0)):
         _write_run(tmp_path, "agg", "frontend", 8, rnd, [mean] * 20)
-        _write_run(tmp_path, "agg", "gateway", 8, rnd, [55.0] * 20)
+        _write_run(tmp_path, "agg", "epp", 8, rnd, [55.0] * 20)
     (point,) = report.build_summary(tmp_path)["points"]
     assert point["ttft_round_cv_pct"]["a"] == pytest.approx(12.856, abs=0.01)
     assert point["ttft_round_cv_pct"]["b"] == 0.0
@@ -344,7 +344,7 @@ def test_noise_line_uses_per_round_ttft_means(tmp_path):
 
 def test_report_header_names_the_backend(tmp_path):
     _write_run(tmp_path, "agg", "frontend", 8, 0, [50.0] * 10)
-    _write_run(tmp_path, "agg", "gateway", 8, 0, [50.0] * 10)
+    _write_run(tmp_path, "agg", "epp", 8, 0, [50.0] * 10)
     (tmp_path / "meta.json").write_text(json.dumps({"backend": "local"}))
     md = report.render_markdown(report.build_summary(tmp_path))
     assert "without Kubernetes" in md and "sidecars" not in md
@@ -369,7 +369,7 @@ def test_trend_marks_runs_with_another_setup(tmp_path):
         run = tmp_path / name
         for rnd in range(2):
             _write_run(run, "agg", "frontend", 8, rnd, [50.0 + rnd] * 20)
-            _write_run(run, "agg", "gateway", 8, rnd, [55.0 + rnd] * 20)
+            _write_run(run, "agg", "epp", 8, rnd, [55.0 + rnd] * 20)
         (run / "meta.json").write_text(
             json.dumps({"started": started, "workload": {"isl": isl}})
         )
@@ -381,7 +381,65 @@ def test_trend_marks_runs_with_another_setup(tmp_path):
 
 def test_summary_json_is_strict(tmp_path):
     _write_run(tmp_path, "agg", "frontend", 8, 0, [50.0] * 10)
-    _write_run(tmp_path, "agg", "gateway", 8, 0, [55.0] * 10)
+    _write_run(tmp_path, "agg", "epp", 8, 0, [55.0] * 10)
     summary = report.build_summary(tmp_path)
     text = json.dumps(report.json_safe(summary), allow_nan=False)
     assert json.loads(text)["points"][0]["ttft_round_cv_pct"]["a"] is None
+
+
+def test_verdict_names_its_subject():
+    assert stats.verdict((5.0, 9.0), 2.0, False, "gateway") == "gateway worse"
+    assert stats.verdict((0.5, 1.5), 2.0, False, "gateway") == "gateway slightly worse"
+    assert stats.verdict((-1.0, 1.0), 2.0, False, "gateway") == "same"
+
+
+def test_gateway_cost_compares_a_with_its_direct_copy(tmp_path):
+    rng = random.Random(6)
+    for rnd in range(3):
+        shift = rng.gauss(0, 1)
+        for side, mean in (("direct", 50.0), ("frontend", 55.0), ("epp", 56.1)):
+            samples = [rng.gauss(mean + shift, 0.5) for _ in range(200)]
+            _write_run(tmp_path, "agg", side, 8, rnd, samples)
+    summary = report.build_summary(tmp_path)
+    (point,) = summary["points"]
+    (cost,) = summary["gateway_points"]
+    assert point["sides"] == {"a": "frontend", "b": "epp"}
+    assert cost["sides"] == {"a": "direct", "b": "frontend"}
+    a_vs_b = point["latency"]["time_to_first_token"]["mean"]
+    gateway = cost["latency"]["time_to_first_token"]["mean"]
+    assert a_vs_b["delta_pct"] == pytest.approx(2, abs=1)
+    assert gateway["delta_pct"] == pytest.approx(10, abs=1)
+    assert gateway["verdict"] == "gateway worse"
+    # The gate judges B against A only; the gateway's own cost is not B's.
+    assert report.regressions(summary, 5.0) == []
+    md = report.render_markdown(summary)
+    assert "## Gateway cost" in md and "| Direct | Via gateway |" in md
+    assert report.incomplete(summary) == []
+
+
+def test_gateway_cost_appears_only_with_the_direct_arm(tmp_path):
+    for rnd in range(2):
+        _write_run(tmp_path, "agg", "frontend", 8, rnd, [50.0 + rnd] * 20)
+        _write_run(tmp_path, "agg", "epp", 8, rnd, [51.0 + rnd] * 20)
+    summary = report.build_summary(tmp_path)
+    assert summary["gateway_points"] == []
+    assert "Gateway cost" not in report.render_markdown(summary)
+    # A direct arm that failed outright still leaves a gap to report.
+    marker = tmp_path / "runs" / "agg" / "direct" / "c8" / "r0.error"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("failed twice\n")
+    gaps = report.incomplete(report.build_summary(tmp_path))
+    assert any("no gateway-cost comparison" in g for g in gaps)
+
+
+def test_trend_marks_runs_from_another_harness_version(tmp_path):
+    for name, started, harness in (("v2", "2026-01-01", 2), ("v3", "2026-02-01", 3)):
+        run = tmp_path / name
+        for rnd in range(2):
+            _write_run(run, "agg", "frontend", 8, rnd, [50.0 + rnd] * 20)
+            _write_run(run, "agg", "epp", 8, rnd, [55.0 + rnd] * 20)
+        meta = {"started": started, "identity": {"harness": harness}}
+        (run / "meta.json").write_text(json.dumps(meta))
+        (run / "summary.json").write_text(json.dumps(report.build_summary(run)))
+    table = report.render_trend(tmp_path)
+    assert "| v2 † |" in table and "| v3 |" in table

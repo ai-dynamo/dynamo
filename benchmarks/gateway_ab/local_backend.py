@@ -5,12 +5,17 @@
 
 Each topology gets its own Docker network and discovery volume. Workers are
 the same mocker processes as on Kubernetes, discovering each other through
-the file discovery backend.
+the file discovery backend. One Envoy stands in for the shared Gateway, with
+a route per side selected by the target header, as on Kubernetes.
 
-- Side A: mocker workers and a Dynamo Frontend with the KV router.
-- Side B: mocker workers, Envoy configured the way Gateway API Inference
+- Side A: mocker workers and a Dynamo Frontend with the KV router, behind
+  Envoy on a route with ext_proc turned off.
+- Side B: mocker workers, the EPP in Dynamo runtime mode, and one direct-mode
+  Frontend, behind Envoy on a route configured the way Gateway API Inference
   Extension gateways are (ext_proc to the EPP, original-destination
-  forwarding), the EPP in Dynamo runtime mode, and one direct-mode Frontend.
+  forwarding).
+- Direct arm (optional): a copy of side A that the client reaches without
+  Envoy.
 
 Kubernetes is replaced in exactly one place. A Dynamo-mode EPP maps a picked
 worker id to its pod's address through a Kubernetes pod reflector; here it
@@ -20,8 +25,9 @@ in the routing headers. Selection, KV events, load bookkeeping, and the
 ext_proc protocol are the production code paths.
 
 What differs from the Kubernetes topology: one direct-mode Frontend serves
-every B worker instead of a sidecar per worker pod, and all containers share
-the host's CPUs with the load generator.
+every B worker instead of a sidecar per worker pod, Envoy stands in for
+agentgateway, and all containers share the host's CPUs with the load
+generator.
 
 Every container, network, and volume is named after ``--name-prefix`` and
 labeled with it, so two runs with different prefixes can share a Docker host.
@@ -64,6 +70,13 @@ MIN_INOTIFY_INSTANCES = 512
 FRONTEND_PORT = 8000
 GATEWAY_PORT = 8080
 EPP_PORT = 9002
+# The container of each arm's Frontend. B's runs in direct mode behind the EPP.
+FRONTEND_ROLES = {
+    "frontend": "frontend",
+    "direct": "dir-frontend",
+    "epp": "epp-frontend",
+}
+EXT_PROC = "envoy.filters.http.ext_proc"
 
 
 class Docker:
@@ -112,8 +125,8 @@ class Docker:
 
 
 def namespace(cfg: manifests.BenchConfig, topology: str, side: str) -> str:
-    """Dynamo namespace of one side's workers."""
-    return f"{cfg.name_prefix}-{topology}-{'fe' if side == 'frontend' else 'gw'}"
+    """Dynamo namespace of one arm's workers: its Kubernetes deployment's name."""
+    return manifests.dgd_name(cfg, topology, side)
 
 
 def network(cfg: manifests.BenchConfig, topology: str) -> str:
@@ -133,14 +146,44 @@ def loadgen_name(cfg: manifests.BenchConfig) -> str:
     return f"gwab-{cfg.name_prefix}-loadgen"
 
 
-def envoy_config(epp_host: str) -> str:
+def envoy_config(cfg: manifests.BenchConfig, topology: str) -> str:
     """Envoy bootstrap in JSON (valid YAML), passed inline via --config-yaml.
 
-    Mirrors what Gateway API Inference Extension gateways program: ext_proc to
-    the EPP with full-duplex streamed bodies in both directions, and an
-    original-destination cluster that forwards to the address the EPP returns
-    in ``x-gateway-destination-endpoint``. The EPP refuses any other body mode.
+    One listener with a route per side, selected by the target header:
+
+    - B's route is what Gateway API Inference Extension gateways program:
+      ext_proc to the EPP with full-duplex streamed bodies in both
+      directions, and an original-destination cluster that forwards to the
+      address the EPP returns in ``x-gateway-destination-endpoint``. The EPP
+      refuses any other body mode.
+    - A's route turns ext_proc off and forwards to A's Frontend, as a plain
+      HTTPRoute to its Service does on Kubernetes.
     """
+
+    def route(side: str, cluster: str) -> dict[str, Any]:
+        return {
+            "match": {
+                "prefix": "/",
+                "headers": [
+                    {
+                        "name": manifests.TARGET_HEADER,
+                        "string_match": {
+                            "exact": manifests.dgd_name(cfg, topology, side)
+                        },
+                    }
+                ],
+            },
+            "route": {"cluster": cluster, "timeout": "300s"},
+        }
+
+    frontend_route = route("frontend", "frontend")
+    frontend_route["typed_per_filter_config"] = {
+        EXT_PROC: {
+            "@type": "type.googleapis.com/envoy.extensions.filters.http."
+            "ext_proc.v3.ExtProcPerRoute",
+            "disabled": True,
+        }
+    }
     hcm = {
         "@type": "type.googleapis.com/envoy.extensions.filters.network."
         "http_connection_manager.v3.HttpConnectionManager",
@@ -151,18 +194,13 @@ def envoy_config(epp_host: str) -> str:
                 {
                     "name": "all",
                     "domains": ["*"],
-                    "routes": [
-                        {
-                            "match": {"prefix": "/"},
-                            "route": {"cluster": "picked_endpoint", "timeout": "300s"},
-                        }
-                    ],
+                    "routes": [frontend_route, route("epp", "picked_endpoint")],
                 }
             ]
         },
         "http_filters": [
             {
-                "name": "envoy.filters.http.ext_proc",
+                "name": EXT_PROC,
                 "typed_config": {
                     "@type": "type.googleapis.com/envoy.extensions.filters.http."
                     "ext_proc.v3.ExternalProcessor",
@@ -228,10 +266,13 @@ def envoy_config(epp_host: str) -> str:
                         "http_header_name": "x-gateway-destination-endpoint",
                     },
                 },
+                _dns_cluster(
+                    "frontend",
+                    container(cfg, topology, FRONTEND_ROLES["frontend"]),
+                    FRONTEND_PORT,
+                ),
                 {
-                    "name": "epp",
-                    "type": "STRICT_DNS",
-                    "connect_timeout": "5s",
+                    **_dns_cluster("epp", container(cfg, topology, "epp"), EPP_PORT),
                     "typed_extension_protocol_options": {
                         "envoy.extensions.upstreams.http.v3.HttpProtocolOptions": {
                             "@type": "type.googleapis.com/envoy.extensions.upstreams."
@@ -239,30 +280,39 @@ def envoy_config(epp_host: str) -> str:
                             "explicit_http_config": {"http2_protocol_options": {}},
                         }
                     },
-                    "load_assignment": {
-                        "cluster_name": "epp",
-                        "endpoints": [
-                            {
-                                "lb_endpoints": [
-                                    {
-                                        "endpoint": {
-                                            "address": {
-                                                "socket_address": {
-                                                    "address": epp_host,
-                                                    "port_value": EPP_PORT,
-                                                }
-                                            }
-                                        }
-                                    }
-                                ]
-                            }
-                        ],
-                    },
                 },
             ],
         }
     }
     return json.dumps(config)
+
+
+def _dns_cluster(name: str, host: str, port: int) -> dict[str, Any]:
+    """A cluster of one container, found by its name on the Docker network."""
+    return {
+        "name": name,
+        "type": "STRICT_DNS",
+        "connect_timeout": "5s",
+        "load_assignment": {
+            "cluster_name": name,
+            "endpoints": [
+                {
+                    "lb_endpoints": [
+                        {
+                            "endpoint": {
+                                "address": {
+                                    "socket_address": {
+                                        "address": host,
+                                        "port_value": port,
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            ],
+        },
+    }
 
 
 # Counts the model cards each Dynamo namespace has registered in the file
@@ -484,14 +534,14 @@ class LocalBackend:
                 cmd += ["-e", f"{key}={value}"]
             self.docker.run([*cmd, *docker_args, image, *command])
 
-        log.info("Starting %s workers (both sides)", topology)
-        for side in manifests.SIDES:
+        arms = manifests.arms(self.cfg)
+        log.info("Starting %s workers (%s)", topology, ", ".join(arms))
+        for side in arms:
             ns = namespace(self.cfg, topology, side)
-            tag = "fe" if side == "frontend" else "gw"
             for ctype, replicas, mode in manifests.worker_roles(self.cfg, topology):
                 for i in range(replicas):
                     start(
-                        f"{tag}-{ctype}{i}",
+                        f"{manifests.TAGS[side]}-{ctype}{i}",
                         self.cfg.worker_image,
                         {"DYN_NAMESPACE": ns},
                         command=[
@@ -501,37 +551,27 @@ class LocalBackend:
                             *manifests.mocker_args(self.cfg, mode),
                         ],
                     )
-        # The frontend image's entrypoint is the EPP binary.
-        start(
-            "frontend",
-            self.cfg.frontend_image,
-            {
-                "DYN_NAMESPACE": namespace(self.cfg, topology, "frontend"),
-                "DYN_ROUTER_MODE": "kv",
-            },
-            docker_args=["--entrypoint", "python3"],
-            command=["-m", "dynamo.frontend", "--http-port", str(FRONTEND_PORT)],
-        )
-        start(
-            "direct",
-            self.cfg.frontend_image,
-            {"DYN_NAMESPACE": namespace(self.cfg, topology, "gateway")},
-            docker_args=["--entrypoint", "python3"],
-            command=[
-                "-m",
-                "dynamo.frontend",
-                "--http-port",
-                str(FRONTEND_PORT),
-                "--router-mode",
-                "direct",
-            ],
-        )
-        direct_ip = self.docker.run(
+        for side in arms:
+            env = {"DYN_NAMESPACE": namespace(self.cfg, topology, side)}
+            command = ["-m", "dynamo.frontend", "--http-port", str(FRONTEND_PORT)]
+            if side == "epp":
+                command += ["--router-mode", "direct"]
+            else:
+                env["DYN_ROUTER_MODE"] = "kv"
+            # The frontend image's entrypoint is the EPP binary.
+            start(
+                FRONTEND_ROLES[side],
+                self.cfg.frontend_image,
+                env,
+                docker_args=["--entrypoint", "python3"],
+                command=command,
+            )
+        epp_frontend_ip = self.docker.run(
             [
                 "inspect",
                 "--format",
                 f'{{{{(index .NetworkSettings.Networks "{net}").IPAddress}}}}',
-                container(self.cfg, topology, "direct"),
+                container(self.cfg, topology, FRONTEND_ROLES["epp"]),
             ]
         ).stdout.strip()
         epp_args = ["--entrypoint", "/epp"]
@@ -546,10 +586,10 @@ class LocalBackend:
             "epp",
             self.cfg.frontend_image,
             {
-                "DYN_NAMESPACE": namespace(self.cfg, topology, "gateway"),
+                "DYN_NAMESPACE": namespace(self.cfg, topology, "epp"),
                 # Envoy reaches the EPP over plaintext h2 on the private network.
                 "DYN_SECURE_SERVING": "false",
-                "DYN_EPP_STATIC_ENDPOINT": f"{direct_ip}:{FRONTEND_PORT}",
+                "DYN_EPP_STATIC_ENDPOINT": f"{epp_frontend_ip}:{FRONTEND_PORT}",
             },
             docker_args=epp_args,
         )
@@ -565,7 +605,7 @@ class LocalBackend:
                 *NOFILE,
                 self.envoy_image,
                 "--config-yaml",
-                envoy_config(container(self.cfg, topology, "epp")),
+                envoy_config(self.cfg, topology),
             ]
         )
         self._wait_for_workers(topology, kv)
@@ -594,13 +634,13 @@ class LocalBackend:
         )
 
     def _wait_for_workers(self, topology: str, kv: str) -> None:
-        """Wait until every worker of both sides has registered its model card."""
+        """Wait until every worker of every arm has registered its model card."""
         want = {
             namespace(self.cfg, topology, side): sum(
                 replicas
                 for _, replicas, _ in manifests.worker_roles(self.cfg, topology)
             )
-            for side in manifests.SIDES
+            for side in manifests.arms(self.cfg)
         }
 
         def check() -> None:
@@ -669,11 +709,11 @@ class LocalBackend:
             )
 
     def diagnose(self, topology: str, side: str) -> str:
-        if side != "gateway":
-            return (
-                "Check the logs: docker logs "
-                f"{container(self.cfg, topology, 'frontend')}"
-            )
+        if side != "epp":
+            logs = f"docker logs {container(self.cfg, topology, FRONTEND_ROLES[side])}"
+            if side == "frontend":
+                logs += f"; docker logs {container(self.cfg, topology, 'gateway')}"
+            return f"Check the logs: {logs}"
         epp = container(self.cfg, topology, "epp")
         state = self.docker.run(
             ["inspect", "--format", "{{.State.Status}}", epp], check=False
@@ -704,7 +744,7 @@ class LocalBackend:
                 "The EPP has not discovered a prefill worker, so the direct-mode "
                 "Frontend rejects requests without a prefill worker id. Check that "
                 "the prefill workers registered: docker logs "
-                f"{container(self.cfg, topology, 'gw-prefill0')}; docker logs {epp}"
+                f"{container(self.cfg, topology, 'epp-prefill0')}; docker logs {epp}"
             )
         return (
             f"Check: docker logs {epp}; docker logs "
@@ -739,6 +779,8 @@ class LocalBackend:
         self.docker.run(["rm", "-f", loadgen_name(self.cfg)], check=False)
 
     def url(self, topology: str, side: str) -> str:
-        if side == "frontend":
-            return f"http://{container(self.cfg, topology, 'frontend')}:{FRONTEND_PORT}"
+        """A and B share Envoy's URL; the target header picks the route."""
+        if side == "direct":
+            role = FRONTEND_ROLES[side]
+            return f"http://{container(self.cfg, topology, role)}:{FRONTEND_PORT}"
         return f"http://{container(self.cfg, topology, 'gateway')}:{GATEWAY_PORT}"
