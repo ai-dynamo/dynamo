@@ -675,7 +675,6 @@ pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
     let version = format!("{:?}", req.version());
     let (trace_parent, otel_context) = extract_trace_parent(req.headers());
 
-    // Every system request gets a server-minted request_id on the span.
     let request_id = Uuid::new_v4().to_string();
 
     let span = tracing::debug_span!(

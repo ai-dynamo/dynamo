@@ -1521,7 +1521,6 @@ async fn test_request_id_annotation() {
         "Should have received the request ID in the annotation"
     );
 
-    // The deprecated header is ignored: the annotation carries a server-minted UUID.
     let received_uuid_str = received_request_id.unwrap();
     assert!(
         uuid::Uuid::parse_str(&received_uuid_str).is_ok(),

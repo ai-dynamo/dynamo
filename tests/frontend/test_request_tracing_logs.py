@@ -405,7 +405,6 @@ def test_agg_invalid_uuid_warn(tracing_services) -> None:
 
     req_logs = get_request_logs(tracing_services["frontend"], rid)
 
-    # One WARN log says the deprecated header is ignored
     warn_logs = [
         e
         for e in req_logs
@@ -415,7 +414,6 @@ def test_agg_invalid_uuid_warn(tracing_services) -> None:
     ]
     assert len(warn_logs) == 1
 
-    # The request gets a server-generated request_id, not the client's value
     received = [e for e in req_logs if e.get("message") == "request received"]
     assert len(received) == 1
     request_id = received[0].get("request_id", "")
