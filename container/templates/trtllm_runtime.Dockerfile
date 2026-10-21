@@ -807,9 +807,6 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # has the same doubling problem. Dropping them here is free: the overlay restores
 # whatever runtime_full holds, so listing one that did not move costs nothing and
 # omitting one that did would leave stale metadata behind.
-#
-# certifi is here for the aiohttp reason: runtime_full upgrades it in system site
-# and the upgrade renames its version-stamped dist-info.
 RUN rm -rf /workspace /home/ubuntu \
     /usr/local/bin/etcd \
     /usr/local/bin/etcdctl \
