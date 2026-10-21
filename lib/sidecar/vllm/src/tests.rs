@@ -756,10 +756,9 @@ async fn try_engine_from_args_with_world_size(
     if let Some(world_size) = world_size {
         argv.extend(["--vllm-rl-world-size".to_string(), world_size.to_string()]);
     }
-    VllmSidecarEngine::try_from_args_async(argv)
-        .map_err(dynamo_sidecar_common::SidecarStartupError::into_dynamo)?
-        .1
+    tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
         .await
+        .expect("bootstrap task")
 }
 
 async fn collect(
@@ -923,10 +922,9 @@ async fn encode_startup_rejects_non_multimodal_engine() {
         "--disaggregation-mode".to_string(),
         "encode".to_string(),
     ];
-    let result = VllmSidecarEngine::try_from_args_async(argv)
-        .unwrap()
-        .1
-        .await;
+    let result = tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
+        .await
+        .expect("bootstrap task");
     let error = result.err().expect("text-only Encode startup must fail");
     assert!(
         error
@@ -1256,11 +1254,11 @@ async fn excludes_reasoning_policy_follows_engine_gating() {
             "--grpc-startup-deadline-secs".to_string(),
             "5".to_string(),
         ];
-        let (engine, _) = VllmSidecarEngine::try_from_args_async(argv)
-            .unwrap()
-            .1
-            .await
-            .expect("bootstrap discovery");
+        let (engine, _) =
+            tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
+                .await
+                .expect("bootstrap task")
+                .expect("bootstrap discovery");
         let config = engine.start(0).await.expect("start");
         assert_eq!(
             config.runtime_data.get(
@@ -2708,11 +2706,10 @@ async fn component_honors_config_for_aggregated_but_fixes_disagg_roles() {
             "custom".to_string(),
         ];
         argv.extend(extra.into_iter().map(str::to_string));
-        let config = VllmSidecarEngine::try_from_args_async(argv)
-            .unwrap()
-            .1
+        let config = tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
             .await
-            .unwrap()
+            .expect("bootstrap task")
+            .expect("from_args")
             .1;
         assert_eq!(config.component, expected_component);
         assert_eq!(config.route_to_encoder, expected_route_to_encoder);
@@ -2728,7 +2725,7 @@ async fn pool_uses_each_configured_connection() {
     };
     let endpoint = GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").unwrap();
     let deadline = crate::client::startup_deadline(transport.startup_deadline).unwrap();
-    let client = VllmClient::connect(&endpoint, transport, deadline)
+    let client = VllmClient::connect(&endpoint, transport, deadline, false)
         .await
         .expect("connect pool");
     assert_eq!(client.connection_count(), 2);

@@ -1099,10 +1099,6 @@ shared:
   owners:
   - frontend
   - diffusion
-- glob: lib/mocker/servers/vllm/tests/sidecar.rs
-  owners:
-  - performance
-  - backend-vllm
 - glob: lib/mocker/servers/sglang/
   owners:
   - performance

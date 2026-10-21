@@ -94,12 +94,9 @@ async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> SglangSidecarEngin
     if mode.is_prefill() {
         argv.extend(["--bootstrap-host".to_string(), "127.0.0.1".to_string()]);
     }
-    SglangSidecarEngine::try_from_args_async(argv)
-        .unwrap()
-        .1
+    tokio::task::spawn_blocking(move || SglangSidecarEngine::from_args(Some(argv)).unwrap().0)
         .await
         .unwrap()
-        .0
 }
 
 fn request(max_tokens: u32) -> PreprocessedRequest {

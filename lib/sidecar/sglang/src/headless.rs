@@ -80,7 +80,8 @@ impl HeadlessSidecar {
         &self,
     ) -> Result<(client::Client, NodeMetadata, DisaggregationMode)> {
         let deadline = Instant::now() + self.transport.startup_deadline;
-        let mut client = client::connect(&self.grpc_endpoint, &self.transport, deadline).await?;
+        let mut client =
+            client::connect(&self.grpc_endpoint, &self.transport, deadline, false).await?;
         let info = client::get_server_info(&mut client, deadline).await?;
         let (metadata, mode) = follower_metadata(&info)?;
         Ok((client, metadata, mode))
@@ -440,7 +441,7 @@ mod tests {
                 startup_deadline: Duration::from_secs(5),
                 ..Default::default()
             };
-            let result = client::bootstrap_discover(&endpoint, &transport).await;
+            let result = client::bootstrap_discover(&endpoint, &transport, false).await;
             let mut expected = vec!["/sglang.runtime.v1.SglangService/GetServerInfo"];
             if follower {
                 assert!(matches!(

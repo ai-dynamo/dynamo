@@ -70,6 +70,7 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
             let discovery = client::bootstrap_discover(
                 &args.sidecar.grpc_endpoint,
                 &args.sidecar.grpc.config(),
+                false,
             )
             .await
             .map_err(SidecarStartupError::from)?;

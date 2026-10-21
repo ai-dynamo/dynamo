@@ -260,9 +260,10 @@ pub(crate) enum StartupDiscovery {
 pub(crate) async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: &GrpcTransportConfig,
+    bootstrap: bool,
 ) -> Result<StartupDiscovery, DynamoError> {
     let deadline = Instant::now() + transport.startup_deadline;
-    let mut client = connect(endpoint, transport, deadline).await?;
+    let mut client = connect(endpoint, transport, deadline, bootstrap).await?;
     let server_info = get_server_info(&mut client, deadline).await?;
     if json_u32(&server_info, "node_rank").is_some_and(|rank| rank > 0) {
         // Followers expose metadata only. Their local KV sources are
@@ -275,16 +276,19 @@ pub(crate) async fn bootstrap_discover(
     }
 }
 
+/// `bootstrap`: true for synchronous constructors before logging setup;
+/// false for deferred launcher discovery and `LLMEngine::start`.
 pub async fn connect(
     uri: &GrpcEndpoint,
     cfg: &GrpcTransportConfig,
     deadline: Instant,
+    bootstrap: bool,
 ) -> Result<Client, DynamoError> {
     let cfg = GrpcTransportConfig {
         connections: NonZeroUsize::MIN,
         ..*cfg
     };
-    let pool = connect_pool(uri, cfg, deadline).await?;
+    let pool = connect_pool(uri, cfg, deadline, bootstrap).await?;
     Ok(client_from_channel(pool.next_channel()))
 }
 
@@ -295,10 +299,11 @@ async fn connect_pool(
     uri: &GrpcEndpoint,
     cfg: GrpcTransportConfig,
     deadline: Instant,
+    bootstrap: bool,
 ) -> Result<GrpcChannelPool, DynamoError> {
     timeout_at(
         deadline,
-        GrpcChannelPool::connect("SGLang", uri, cfg, false),
+        GrpcChannelPool::connect("SGLang", uri, cfg, bootstrap),
     )
     .await
     .map_err(|_| {
@@ -322,12 +327,15 @@ pub struct Pool {
 }
 
 impl Pool {
+    // bootstrap=false: Pool::connect's only call site is LLMEngine::start
+    // (lib/sidecar/sglang/src/engine.rs), after the tracing subscriber is
+    // installed. See connect()'s own doc comment.
     pub async fn connect(
         uri: &GrpcEndpoint,
         cfg: &GrpcTransportConfig,
         deadline: Instant,
     ) -> Result<Self, DynamoError> {
-        let pool = connect_pool(uri, *cfg, deadline).await?;
+        let pool = connect_pool(uri, *cfg, deadline, false).await?;
         let clients = (0..pool.len())
             .map(|_| client_from_channel(pool.next_channel()))
             .collect();
