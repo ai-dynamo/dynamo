@@ -747,9 +747,17 @@ pub enum WireResidencyDomain {
     #[default]
     Missing,
     Known(ResidencyDomain),
+    /// A known domain on an event that carries a `kv_cache_group` tag. It is
+    /// written as `<domain>+kv_cache_group`, which consumers that predate the
+    /// tag decode as [`Self::Unknown`] and drop through their existing
+    /// unsupported-domain path instead of indexing recurrent state as
+    /// attention blocks. Consumers that know the tag parse it as the domain.
+    KnownTagged(ResidencyDomain),
     Unknown(Box<str>),
     Invalid,
 }
+
+const KV_CACHE_GROUP_DOMAIN_SUFFIX: &str = "+kv_cache_group";
 
 impl WireResidencyDomain {
     pub fn explicit(domain: ResidencyDomain) -> Self {
@@ -763,9 +771,33 @@ impl WireResidencyDomain {
     pub fn parse(&self) -> Result<Option<ResidencyDomain>, UnsupportedResidencyDomain> {
         match self {
             Self::Missing => Ok(None),
-            Self::Known(domain) => Ok(Some(*domain)),
+            Self::Known(domain) | Self::KnownTagged(domain) => Ok(Some(*domain)),
             Self::Unknown(_) | Self::Invalid => Err(UnsupportedResidencyDomain),
         }
+    }
+
+    fn tagged(self) -> Self {
+        match self {
+            Self::Known(domain) => Self::KnownTagged(domain),
+            other => other,
+        }
+    }
+
+    fn from_wire_str(value: &str) -> Option<Self> {
+        let (name, tagged) = match value.strip_suffix(KV_CACHE_GROUP_DOMAIN_SUFFIX) {
+            Some(name) => (name, true),
+            None => (value, false),
+        };
+        let domain = match name {
+            "worker" => ResidencyDomain::Worker,
+            "cache_owner" => ResidencyDomain::CacheOwner,
+            _ => return None,
+        };
+        Some(if tagged {
+            Self::KnownTagged(domain)
+        } else {
+            Self::Known(domain)
+        })
     }
 }
 
@@ -778,6 +810,12 @@ impl Serialize for WireResidencyDomain {
             Self::Missing | Self::Invalid => serializer.serialize_none(),
             Self::Known(ResidencyDomain::Worker) => serializer.serialize_str("worker"),
             Self::Known(ResidencyDomain::CacheOwner) => serializer.serialize_str("cache_owner"),
+            Self::KnownTagged(ResidencyDomain::Worker) => {
+                serializer.serialize_str("worker+kv_cache_group")
+            }
+            Self::KnownTagged(ResidencyDomain::CacheOwner) => {
+                serializer.serialize_str("cache_owner+kv_cache_group")
+            }
             Self::Unknown(value) => serializer.serialize_str(value),
         }
     }
@@ -793,19 +831,13 @@ impl<'de> Visitor<'de> for WireResidencyDomainVisitor {
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(match value {
-            "worker" => WireResidencyDomain::Known(ResidencyDomain::Worker),
-            "cache_owner" => WireResidencyDomain::Known(ResidencyDomain::CacheOwner),
-            value => WireResidencyDomain::Unknown(value.into()),
-        })
+        Ok(WireResidencyDomain::from_wire_str(value)
+            .unwrap_or_else(|| WireResidencyDomain::Unknown(value.into())))
     }
 
     fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        Ok(match value.as_str() {
-            "worker" => WireResidencyDomain::Known(ResidencyDomain::Worker),
-            "cache_owner" => WireResidencyDomain::Known(ResidencyDomain::CacheOwner),
-            _ => WireResidencyDomain::Unknown(value.into_boxed_str()),
-        })
+        Ok(WireResidencyDomain::from_wire_str(&value)
+            .unwrap_or_else(|| WireResidencyDomain::Unknown(value.into_boxed_str())))
     }
 
     fn visit_char<E>(self, _value: char) -> Result<Self::Value, E> {
@@ -1003,7 +1035,9 @@ impl PlacementEvent {
             self.placement.residency_domain,
         );
         event.session_id = self.session_id;
-        event.kv_cache_group = self.placement.kv_cache_group;
+        if let Some(kv_cache_group) = self.placement.kv_cache_group {
+            event = event.with_kv_cache_group(kv_cache_group);
+        }
         Some(event)
     }
 }
@@ -1611,8 +1645,13 @@ impl RouterEvent {
         }
     }
 
+    /// Tag the event as belonging to a non-main-attention KV cache group. The
+    /// wire residency domain becomes `<domain>+kv_cache_group`, so consumers
+    /// that do not know the tag drop the event instead of indexing it as
+    /// attention residency.
     pub fn with_kv_cache_group(mut self, kv_cache_group: KvCacheGroupTag) -> Self {
         self.kv_cache_group = Some(kv_cache_group);
+        self.residency_domain = std::mem::take(&mut self.residency_domain).tagged();
         self
     }
 
@@ -1983,6 +2022,59 @@ mod tests {
                     blocks: Vec::new(),
                 }),
             )
+        }
+
+        /// A consumer that predates `kv_cache_group` (modelled by a RouterEvent
+        /// whose domain parser knows only `worker` / `cache_owner`) must not
+        /// turn a recurrent-group store into an attention store.
+        #[derive(Deserialize)]
+        struct PreTagRouterEvent {
+            #[allow(dead_code)]
+            worker_id: WorkerId,
+            #[serde(default)]
+            residency_domain: Option<String>,
+            #[allow(dead_code)]
+            event: KvCacheEvent,
+        }
+
+        #[test]
+        fn tagged_events_are_unsupported_for_pre_tag_consumers_and_parsed_by_new_ones() {
+            let tagged = RouterEvent::with_storage_tier(7, stored(1), StorageTier::HostPinned)
+                .with_kv_cache_group(KvCacheGroupTag {
+                    group_idx: 1,
+                    kind: KvCacheGroupKind::Mamba,
+                });
+            let bytes = rmp_serde::to_vec_named(&tagged).unwrap();
+
+            let old: PreTagRouterEvent = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(
+                old.residency_domain.as_deref(),
+                Some("worker+kv_cache_group")
+            );
+            // The pre-tag parser maps that string to Unknown, i.e. unsupported.
+            assert!(
+                WireResidencyDomain::from_wire_str("worker").is_some()
+                    && !matches!(
+                        serde_json::from_value::<WireResidencyDomain>(serde_json::json!(
+                            "worker+something_else"
+                        ))
+                        .unwrap(),
+                        WireResidencyDomain::Known(_) | WireResidencyDomain::KnownTagged(_)
+                    )
+            );
+
+            let new: RouterEvent = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(
+                new.resolved_residency_domain().unwrap(),
+                ResidencyDomain::Worker
+            );
+            assert_eq!(new.kv_cache_group, tagged.kv_cache_group);
+            assert!(!new.targets_primary().unwrap());
+
+            let untagged = RouterEvent::with_storage_tier(7, stored(1), StorageTier::HostPinned);
+            let bytes = rmp_serde::to_vec_named(&untagged).unwrap();
+            let old: PreTagRouterEvent = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(old.residency_domain.as_deref(), Some("worker"));
         }
 
         #[test]

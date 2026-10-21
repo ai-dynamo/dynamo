@@ -1041,6 +1041,68 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
 }
 
 #[test]
+fn test_mamba_events_do_not_touch_attention_cache_namespaces() {
+    let worker = WorkerWithDpRank::new(3, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    // Attention store in a namespace, then a Mamba store and removal at the
+    // same positional hash: the attention namespace state must be unchanged.
+    let attention = RawKvEvent::BlockStored {
+        block_hashes: vec![BlockHashValue::Unsigned(21)],
+        parent_block_hash: None,
+        token_ids: vec![10, 11],
+        block_size: 2,
+        medium: None,
+        lora_name: None,
+        cache_namespace: Some("tenant-a".to_string()),
+        block_mm_infos: None,
+        is_eagle: None,
+        group_idx: Some(0),
+        kv_cache_spec_kind: Some(KvCacheSpecKind::FullAttention),
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+        session_id: None,
+    };
+    assert!(normalizer.preprocess(attention, worker).is_some());
+    let before = normalizer.cache_namespaces.clone();
+
+    let mamba_store = RawKvEvent::BlockStored {
+        block_hashes: vec![BlockHashValue::Unsigned(21)],
+        parent_block_hash: None,
+        token_ids: vec![10, 11],
+        block_size: 2,
+        medium: None,
+        lora_name: None,
+        cache_namespace: Some(String::new()),
+        block_mm_infos: None,
+        is_eagle: None,
+        group_idx: Some(1),
+        kv_cache_spec_kind: Some(KvCacheSpecKind::Mamba),
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+        session_id: None,
+    };
+    let kept = normalizer.preprocess(mamba_store, worker).expect("kept");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = &kept
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(
+        cache_namespace, &None,
+        "empty namespace is still normalised"
+    );
+    assert_eq!(normalizer.cache_namespaces, before);
+
+    let mamba_remove: RawKvEvent =
+        from_slice(&block_removed_sequence(Some(1), None)).expect("valid remove event");
+    assert!(normalizer.preprocess(mamba_remove, worker).is_some());
+    assert_eq!(normalizer.cache_namespaces, before);
+}
+
+#[test]
 fn test_normalizer_tags_mamba_group_store_and_learned_removal() {
     let raw_event: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
         TestEventKind::BlockStored,

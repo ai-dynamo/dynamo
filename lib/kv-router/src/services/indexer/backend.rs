@@ -354,18 +354,8 @@ impl Indexer {
             }
         };
         let is_clear = matches!(&event.event.data, KvCacheEventData::Cleared);
-        if let Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. } = self {
-            // Recurrent-group events never enter the attention tree: they are
-            // per-position state presence. An untagged clear also forgets the
-            // rank's recurrent presence.
-            if lower_tier.group_residency().apply(&event) {
-                return Ok(());
-            }
-            if is_clear {
-                lower_tier
-                    .group_residency()
-                    .clear_worker(WorkerWithDpRank::new(event.worker_id, event.event.dp_rank));
-            }
+        if self.apply_group_residency(&event) {
+            return Ok(());
         }
         match self {
             Indexer::Single {
@@ -442,7 +432,29 @@ impl Indexer {
     /// device event waits for the primary's queue to accept it, and a lower-tier
     /// event is enqueued. Unlike [`Self::apply_event_routed`], the first failure
     /// stops the fan-out.
+    /// Recurrent-group events never enter the attention tree: they are
+    /// per-position state presence. Returns true when the event was consumed
+    /// here. An untagged clear also forgets the rank's recurrent presence and
+    /// then continues to the tier indexes.
+    fn apply_group_residency(&self, event: &RouterEvent) -> bool {
+        let (Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. }) = self else {
+            return false;
+        };
+        if lower_tier.group_residency().apply(event) {
+            return true;
+        }
+        if matches!(&event.event.data, KvCacheEventData::Cleared) {
+            lower_tier
+                .group_residency()
+                .clear_worker(WorkerWithDpRank::new(event.worker_id, event.event.dp_rank));
+        }
+        false
+    }
+
     pub async fn try_apply_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        if self.apply_group_residency(&event) {
+            return Ok(());
+        }
         let targets_primary = match event.targets_primary() {
             Ok(targets_primary) => targets_primary,
             Err(_) => {
@@ -613,6 +625,11 @@ impl Indexer {
         worker_id: WorkerId,
         dp_rank: DpRank,
     ) -> Result<(), KvRouterError> {
+        if let Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. } = self {
+            lower_tier
+                .group_residency()
+                .clear_worker(WorkerWithDpRank::new(worker_id, dp_rank));
+        }
         match self {
             Self::Single {
                 primary,
@@ -1045,6 +1062,72 @@ mod tests {
             Some(1),
             "host-pinned should report 1 additional matched block beyond device"
         );
+    }
+
+    /// Tagged events on the recovery ingest path go to recurrent presence,
+    /// not into the attention tree, and a rank reset forgets them.
+    #[tokio::test]
+    async fn try_apply_event_routes_tagged_events_to_group_residency() {
+        use crate::protocols::{
+            ExternalSequenceBlockHash, KvCacheGroupKind, KvCacheGroupTag, KvCacheStoreData,
+            KvCacheStoredBlockData,
+        };
+
+        let indexer = create_indexer(4, 1);
+        let worker = WorkerWithDpRank::new(9, 0);
+        let tagged = RouterEvent::with_storage_tier(
+            worker.worker_id,
+            KvCacheEvent {
+                event_id: 1,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(77),
+                        tokens_hash: LocalBlockHash(11),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: worker.dp_rank,
+            },
+            StorageTier::Device,
+        )
+        .with_kv_cache_group(KvCacheGroupTag {
+            group_idx: 2,
+            kind: KvCacheGroupKind::Mamba,
+        });
+        indexer.try_apply_event(tagged).await.unwrap();
+        if let Indexer::Single {
+            primary,
+            lower_tier,
+            ..
+        } = &indexer
+        {
+            let _ = primary.flush().await;
+            assert!(lower_tier.group_residency().is_active());
+            assert_eq!(
+                lower_tier.group_residency().reusable_blocks(
+                    worker,
+                    &[ExternalSequenceBlockHash(77)],
+                    1
+                ),
+                Some(1)
+            );
+        }
+        // The attention tree never saw the hash.
+        let scores = indexer
+            .find_matches(vec![LocalBlockHash(11)])
+            .await
+            .unwrap();
+        assert!(scores.scores.is_empty());
+
+        indexer
+            .reset_worker_dp_rank_and_wait(worker.worker_id, worker.dp_rank)
+            .await
+            .unwrap();
+        if let Indexer::Single { lower_tier, .. } = &indexer {
+            assert!(!lower_tier.group_residency().is_active());
+        }
     }
 
     /// Dump every tier's events from a populated indexer, replay through a

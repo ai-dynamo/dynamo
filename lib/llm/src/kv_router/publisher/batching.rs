@@ -190,9 +190,13 @@ impl BatchingState {
     ) {
         let tier = placement_event.placement.tier;
         let domain = placement_event.placement.residency_domain;
+        let kv_cache_group = placement_event.placement.kv_cache_group;
         let session_id = placement_event.session_id;
         let mut event = placement_event.event;
+        // Recurrent-group events are set-like presence at hashes the attention
+        // group also uses; keep them out of the attention reference counts.
         event.data = match event.data {
+            data if kv_cache_group.is_some() => data,
             KvCacheEventData::Removed(data) => {
                 let Some(filtered) = dedup.filter_remove_in_domain(
                     event.dp_rank,
@@ -227,6 +231,7 @@ impl BatchingState {
             domain,
             event,
             session_id,
+            kv_cache_group,
             output,
         )
         .await;

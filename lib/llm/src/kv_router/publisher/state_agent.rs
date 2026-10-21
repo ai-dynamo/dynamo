@@ -581,6 +581,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 exact_owner,
                 self.identity.cache_owner_id,
                 placement_event.placement.tier,
+                placement_event.placement.kv_cache_group,
             );
             coalesced.extend(coalescer.push(key, placement_event).into_iter().flatten());
         }
@@ -598,6 +599,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 ResidencyDomain::CacheOwner => EventDedupPolicy::SetLike,
             };
             let session_id = placement_event.session_id;
+            let kv_cache_group = placement_event.placement.kv_cache_group;
             let mut event = placement_event.event;
             if event.dp_rank != self.slot_dp_rank {
                 self.fail_source(
@@ -614,7 +616,11 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 );
             }
             let tier = placement_event.placement.tier;
+            // Recurrent-group events are set-like presence at hashes the
+            // attention group also uses; they must not touch the attention
+            // group's reference counts.
             event.data = match event.data {
+                data if kv_cache_group.is_some() => data,
                 KvCacheEventData::Removed(data) => {
                     let Some(filtered) = self.dedup.filter_remove_in_domain(
                         event.dp_rank,
@@ -672,6 +678,9 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 ),
             };
             router_event.session_id = session_id;
+            if let Some(kv_cache_group) = kv_cache_group {
+                router_event = router_event.with_kv_cache_group(kv_cache_group);
+            }
             // NOTE: Stored/Removed intentionally use the legacy lossy contract: queue
             // admission and one best-effort publish, with no completion acknowledgement.
             // Cleared is stronger and completes every affected tier before publication.
