@@ -87,9 +87,16 @@ def recipe(*targets: dict[str, object], maintainer: str | None = None) -> dict:
         recipe(target("functional", benchmark=None)),
         recipe(target("optimized")),
         recipe(target("nvidia-certified", certification=CERT)),
-        recipe(target("community"), target("community", id="b"), maintainer="Jane Doe"),
+        recipe(target("community", maintainer="Jane Doe")),
+        recipe(
+            target("nvidia-certified", certification=CERT),
+            target("optimized", id="b"),
+            target("functional", id="c", benchmark=None),
+            target("community", id="d", maintainer="Jane Doe"),
+            target("community", id="e", maintainer="John Roe"),
+        ),
     ),
-    ids=["functional", "optimized", "certified", "community"],
+    ids=["functional", "optimized", "certified", "community", "mixed"],
 )
 def test_badge_with_its_evidence_passes(obj: dict) -> None:
     assert catalog_validate.recipe_badge_errors(obj, "recipe:model") == []
@@ -128,14 +135,10 @@ def test_badge_with_its_evidence_passes(obj: dict) -> None:
             recipe(target("optimized", certification=CERT)),
             "has a certification record but badge is optimized",
         ),
-        (recipe(target("community")), "community badge needs a named maintainer"),
+        (recipe(target("community")), "community needs a maintainer on the target"),
         (
-            recipe(
-                target("community"),
-                target("functional", id="b"),
-                maintainer="Jane Doe",
-            ),
-            "community badge must apply to every target or none",
+            recipe(target("community"), maintainer="Jane Doe"),
+            "community needs a maintainer on the target",
         ),
     ),
     ids=[
@@ -149,7 +152,7 @@ def test_badge_with_its_evidence_passes(obj: dict) -> None:
         "certified-no-benchmark",
         "certification-on-optimized",
         "community-no-maintainer",
-        "community-partial",
+        "community-recipe-maintainer-only",
     ],
 )
 def test_badge_without_its_evidence_fails(obj: dict, expected_error: str) -> None:

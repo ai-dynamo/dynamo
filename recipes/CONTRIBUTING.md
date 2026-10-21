@@ -433,6 +433,6 @@ Before submitting a recipe contribution, confirm that:
 - the target-cluster composition was rendered, checked with a server-side dry run, and exercised on its intended cluster;
 - matrix-backed changes pass `python3 scripts/kustomize-matrix.py check`;
 - generated matrix files were regenerated, reviewed, and not hand-edited; and
-- every target in the recipe's catalog entry has a [lifecycle badge](../docs/fern/pages/recipes/_catalog/README.md#lifecycle-badges). Contributors outside NVIDIA use `community`.
+- every target in the recipe's catalog entry has a [lifecycle badge](../docs/fern/pages/recipes/_catalog/README.md#lifecycle-badges). Contributors outside NVIDIA use `community` and set `maintainer` on each such target.
 
 Static rendering, schema, and matrix checks do not prove runtime correctness or performance. Include the relevant target-cluster qualification when requesting review.

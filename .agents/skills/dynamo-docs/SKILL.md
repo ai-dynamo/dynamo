@@ -258,8 +258,9 @@ targets:                          # >= 1 item
     workload: { type: chat }
     deploy: { asset: recipes/llama-3-1-8b/vllm/agg/deploy.yaml }
     expected_performance: { available: false }   # add summary: when numbers exist
-    badge: functional             # required; enum: functional | optimized |
-                                  # nvidia-certified | community (outside contributors)
+    badge: functional             # required, per target; enum: functional | optimized |
+                                  # nvidia-certified | community (outside contributors;
+                                  # community also needs maintainer: on the target)
 ```
 
 **Benchmarks use a different schema.** A `docs/fern/pages/recipes/feature-benchmarks/_catalog/benchmarks/<id>.yaml` entry

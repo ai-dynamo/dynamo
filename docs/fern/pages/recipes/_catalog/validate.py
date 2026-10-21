@@ -22,7 +22,8 @@ Checks, for BOTH catalogs:
   8. Every recipe target has a badge with the evidence it claims:
      optimized needs a benchmark asset and published performance;
      nvidia-certified also needs a NIM Factory certification record; community
-     needs a named maintainer and must cover every target of the recipe.
+     needs a maintainer named on the target. Targets of one recipe may carry
+     different badges.
      Recipes listed in badge_backfill.yaml predate required badges and may
      leave targets without one until they are backfilled.
 
@@ -489,8 +490,9 @@ BADGE_BACKFILL = os.path.join(RECIPES_CAT, "badge_backfill.yaml")
 def recipe_badge_errors(obj, label, pending=False):
     """Return badge errors for each target of a recipe.
 
-    Every target needs a badge backed by its evidence. A recipe still listed
-    in badge_backfill.yaml (``pending``) may leave targets without one.
+    Every target needs a badge backed by its evidence. Badges are per target,
+    so one recipe can mix them. A recipe still listed in badge_backfill.yaml
+    (``pending``) may leave targets without one.
     """
     errors = []
     targets = [t for t in obj.get("targets") or [] if isinstance(t, dict)]
@@ -532,14 +534,10 @@ def recipe_badge_errors(obj, label, pending=False):
             errors.append(
                 "%s has a certification record but badge is %s" % (where, badge)
             )
-    community = [t for t in targets if t.get("badge") == "community"]
-    if community:
-        if not obj.get("maintainer"):
-            errors.append("[%s] community badge needs a named maintainer" % label)
-        if len(community) != len(targets):
-            errors.append(
-                "[%s] community badge must apply to every target or none" % label
-            )
+        # The recipe maintainer may be NVIDIA's, so it does not stand in for a
+        # community target's own.
+        if badge == "community" and not t.get("maintainer"):
+            errors.append("%s community needs a maintainer on the target" % where)
     return errors
 
 
