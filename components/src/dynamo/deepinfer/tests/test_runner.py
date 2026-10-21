@@ -4,109 +4,25 @@
 """Runner contract tests; the native engine is replaced by a scripted fake."""
 
 import queue
-import threading
-import time
-from types import SimpleNamespace
 
 import pytest
 
 from dynamo.deepinfer.runner import EngineRunner, RunnerClosed, TokenOutput
+from dynamo.deepinfer.tests.fake_native import FakeEngine
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 TIMEOUT = 5
 
 
-class Slot:
-    """Mimics a native output buffer that the next step overwrites."""
-
-    def __init__(self):
-        self.request_id = ""
-        self.token_id = 0
-        self.finished = False
-        self.finish_reason = ""
-        self.prompt_len = 0
-        self.token_logprobs = None
-        self.top_logprobs = []
-        self.top_token_ids = []
-
-
-class FakeEngine:
-    """Generates ``max_tokens`` tokens per request, one per step."""
-
-    def __init__(self):
-        self.slots = {}
-        self.pending = {}
-        self.added = []
-        self.aborted = []
-        self.closed = threading.Event()
-        self.step_threads = set()
-        self.fail_on_step = None
-        self.reject = set()
-        self.steps = 0
-
-    def add_request(self, *, user_id, request_id, sampling_params, prompt_token_ids):
-        if request_id in self.reject:
-            raise ValueError("prompt too long")
-        self.added.append((request_id, sampling_params, list(prompt_token_ids)))
-        self.pending[request_id] = [0, sampling_params]
-
-    def abort_request(self, request_id):
-        self.aborted.append(request_id)
-        self.pending.pop(request_id, None)
-
-    def has_unfinished_requests(self):
-        return bool(self.pending)
-
-    def step(self):
-        self.steps += 1
-        time.sleep(0.001)  # keep long requests in flight while tests act
-        self.step_threads.add(threading.current_thread().name)
-        if self.fail_on_step is not None and self.steps >= self.fail_on_step:
-            raise RuntimeError("cuda error")
-        pointers = []
-        for request_id in list(self.pending):
-            produced, max_tokens = self.pending[request_id]
-            slot = self.slots.setdefault(request_id, Slot())
-            slot.request_id = request_id
-            slot.token_id = 100 + produced
-            slot.prompt_len = 3
-            slot.token_logprobs = -0.5
-            slot.finished = produced + 1 >= max_tokens
-            slot.finish_reason = "length" if slot.finished else ""
-            self.pending[request_id][0] += 1
-            if slot.finished:
-                del self.pending[request_id]
-            pointers.append(request_id)
-        return pointers
-
-    def flush_inflight_reqs(self):
-        return []
-
-    def close(self):
-        self.closed.set()
-
-
-def clone(request_id):
-    """Like RequestOutput.clone: an owned copy that survives the next step."""
-    return SimpleNamespace(**vars(engine_slots[request_id]))
-
-
-engine_slots = {}
-
-
 @pytest.fixture
 def engine():
-    fake = FakeEngine()
-    engine_slots.clear()
-    engine_slots.update(fake.slots)
-    fake.slots = engine_slots
-    return fake
+    return FakeEngine()
 
 
 @pytest.fixture
 def runner(engine):
-    runner = EngineRunner(engine, clone)
+    runner = EngineRunner(engine, engine.clone)
     runner.start()
     yield runner
     runner.stop(TIMEOUT)
