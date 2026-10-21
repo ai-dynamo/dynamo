@@ -23,10 +23,10 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 	t.Log("Project a hybrid workload at the combined name limit and maximum scheduling replica count")
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	projection := projectRenderFixture(t, PipelineLPX, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+	projection := projectRenderFixture(t, PipelineHybrid, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
 	projection.stage = testRenderComponentName
-	projection.configuredBuild.IOFPGACount = 1
-	projection.configuredBuild.IOFanoutFactor = 1
+	projection.configuredBuild.ioFPGACount = 1
+	projection.configuredBuild.ioFanoutFactor = 1
 	workload := &Workload{
 		modelProjections:     []*ModelProjection{projection},
 		scalingGroupReplicas: 2496,
@@ -84,13 +84,13 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	fixture.partitions[0].numChips = 8
 	fixture.partitions[0].devicesPerNode = 8
 	fixture.architecture = "polaris"
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
-	build := normalized.build
-	build.IOFPGACount = 2
-	build.IOFanoutFactor = 2
+	normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
+	build := normalized
+	build.ioFPGACount = 2
+	build.ioFanoutFactor = 2
 	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: PipelineLPX, Models: []string{"default"},
-		BuildSnapshot:   normalized,
+		Pipeline: PipelineHybrid, Models: []string{"default"},
+		Build:           normalized,
 		RuntimeBuildRef: "model-build",
 	})
 	require.NoError(t, err)

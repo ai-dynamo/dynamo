@@ -40,7 +40,9 @@ Structural tags are enabled by default. Configure the tool-call parser on the
 > Its `--guided-decoding-backend` default is unset, so default deployments ignore
 > structural tags and do not enforce their tool argument schemas. For affected
 > deployments using `--guided-decoding-backend xgrammar`, pass
-> `--no-dyn-enable-structural-tag` until a supported upgrade resolves the issue.
+> `--dyn-structural-tag false` until a supported upgrade resolves the issue.
+> The TensorRT-LLM sidecar publishes no structural tags unless you pass
+> `--dyn-structural-tag`.
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -130,6 +132,7 @@ To disable optional structural guidance, pass `false` to the worker:
 python3 -m dynamo.vllm ... --dyn-structural-tag false
 python3 -m dynamo.sglang ... --dyn-structural-tag false
 python3 -m dynamo.trtllm ... --dyn-structural-tag false
+dynamo-sglang-sidecar ... --dyn-structural-tag false
 ```
 
 Or set the equivalent environment variable before starting the worker:
@@ -138,8 +141,9 @@ Or set the equivalent environment variable before starting the worker:
 export DYN_STRUCTURAL_TAG=false
 ```
 
-Rust preprocessing still applies native tags to Kimi K2 `required`/named
-choices and Kimi K3 named choices when optional structural tags are disabled.
+Rust preprocessing, including the native sidecars, still applies native tags to
+Kimi K2 `required`/named choices and Kimi K3 named choices when optional
+structural tags are disabled.
 A lookahead pattern can still be rejected by XGrammar
 0.2.1 or 0.2.7 unless the tool sets `strict: false` under schema mode `auto`.
 Global schema mode `strict` overrides that workaround. Kimi K2/K3 automatic
@@ -160,6 +164,14 @@ sets `parallel_tool_calls` to `false`.
 The legacy `--dyn-enable-structural-tag`, `--no-dyn-enable-structural-tag`,
 `--dyn-structural-tag-scope`, and `--dyn-structural-tag-schema` flags and their
 environment variables remain accepted with a deprecation warning.
+
+The native Rust sidecars accept `--dyn-structural-tag` and `DYN_STRUCTURAL_TAG`
+as described in [CLI Flags](#cli-flags), but not the legacy flags or their
+environment variables. The SGLang sidecar uses the same default-on policy. The
+vLLM and TensorRT-LLM sidecars default to `false`: vLLM's gRPC server compiles
+structured outputs with guidance, which rejects these tags until
+vllm-project/vllm#61892, and the xgrammar version TensorRT-LLM pins rejects
+several tool-call tag formats.
 
 Setting `strict: false` on a tool relaxes its argument schema. On vLLM
 0.30.0, pinned by Dynamo's CUDA image, auto choice with every tool explicitly
@@ -191,13 +203,6 @@ This list describes Dynamo's Rust parser registry. The Python vLLM and SGLang
 frontend processors apply the same mode, scope, and schema policy through the
 tool parser supplied by their installed engine version. Parser availability can
 therefore differ by backend and engine version.
-
-> [!NOTE]
-> Native Rust sidecars retain their existing conservative `off`/`auto`
-> settings, including the native Kimi forced-tool exception described above,
-> and are not included in this default change. The default-on policy
-> applies when regular vLLM, SGLang, or TensorRT-LLM workers publish the
-> deployment runtime configuration consumed by frontend preprocessing.
 
 ## Activation Scope
 
