@@ -1296,7 +1296,7 @@
       "name": "vllm-runtime",
       "description": "vLLM backend runtime",
       "meta": "vLLM v0.28.0 · CUDA 13.0 · AMD64/ARM64",
-      "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/vllm-runtime/tags",
+      "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime/tags",
       "tags": [
         {
           "label": "1.5.1",
@@ -1315,7 +1315,7 @@
       "name": "sglang-runtime",
       "description": "SGLang backend runtime",
       "meta": "SGLang v0.5.18 · CUDA 13.0 · AMD64/ARM64",
-      "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/sglang-runtime/tags",
+      "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime/tags",
       "tags": [
         {
           "label": "1.5.1",
@@ -1334,7 +1334,7 @@
       "name": "tensorrtllm-runtime",
       "description": "TensorRT-LLM backend runtime",
       "meta": "TRT-LLM v1.3.0rc25 · CUDA 13.1 · AMD64/ARM64",
-      "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/tensorrtllm-runtime/tags",
+      "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime/tags",
       "tags": [
         {
           "label": "1.5.1",
@@ -1353,7 +1353,7 @@
       "name": "dynamo-frontend",
       "description": "OpenAI-compatible API gateway with Endpoint Prediction Protocol (EPP)",
       "meta": "AMD64/ARM64",
-      "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/dynamo-frontend/tags",
+      "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend/tags",
       "tags": [
         {
           "label": "1.5.1",
@@ -1367,7 +1367,7 @@
       "name": "dynamo-planner",
       "description": "Standalone Planner used by Profiler jobs and Planner pods",
       "meta": "AMD64/ARM64",
-      "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/dynamo-planner/tags",
+      "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-planner/tags",
       "tags": [
         {
           "label": "1.5.1",
@@ -1381,7 +1381,7 @@
       "name": "kubernetes-operator",
       "description": "Operator that manages Dynamo deployments and CRDs",
       "meta": "AMD64/ARM64",
-      "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/kubernetes-operator/tags",
+      "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator/tags",
       "tags": [
         {
           "label": "1.5.1",
@@ -1786,7 +1786,7 @@
       "gaLabel": "Dev-only · v1.4.0 line",
       "statusLine": "First build on the v1.4.0 line; targets the next stable release.",
       "recipeLabel": "Inkling recipe (main)",
-      "recipeHref": "https://github.com/ai-dynamo/dynamo/blob/main/docs/recipes/inkling.mdx",
+      "recipeHref": "/dynamo/dev/recipes/inkling",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.4.0-inkling-dev.1",
       "coverage": {
         "images": true,
