@@ -39,7 +39,6 @@ import (
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -332,33 +331,39 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(err.Error()).To(ContainSubstring("the conversion carrier is immutable"))
 		})
 
-		It("Should leave the carrier and child resources untouched", func() {
+		It("Should leave a converted v1beta2 request and child resources untouched", func() {
 			ctx := context.Background()
-			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+			dgdr := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "v1beta2-storage-carrier",
 					Namespace: envtestNamespace,
 				},
-				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					V1Beta2: &apiextensionsv1.JSON{
-						Raw: []byte(`{"model":{"name":"Qwen/Qwen3-32B"}}`),
+				Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
+					NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
+						Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-32B"},
 					},
 				},
 			}
 
-			By("Creating the v1beta1 storage representation of a native v1beta2 request")
+			By("Creating the request through its native v1beta2 API")
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
+			By("Reading the request through the v1beta1 conversion view")
+			converted := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), converted)).Should(Succeed())
+			Expect(converted.Spec.V1Beta2).NotTo(BeNil())
+
 			By("Reconciling before the v1beta2 runtime controller exists")
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: client.ObjectKeyFromObject(dgdr),
+				NamespacedName: client.ObjectKeyFromObject(converted),
 			})
 			Expect(err).NotTo(HaveOccurred())
 
 			By("Verifying the legacy controller added no finalizer or status")
 			stored := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), stored)).Should(Succeed())
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(converted), stored)).Should(Succeed())
+			Expect(stored.Spec.V1Beta2).NotTo(BeNil())
 			Expect(stored.Finalizers).To(BeEmpty())
 			Expect(stored.Status).To(Equal(nvidiacomv1beta1.DynamoGraphDeploymentRequestStatus{}))
 
