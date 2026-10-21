@@ -3,19 +3,21 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any, Generator, Optional
 
 import pytest
 import requests
 
-from tests.utils.constants import QWEN
+from tests.conftest import EtcdServer, NatsServer
+from tests.utils.constants import QWEN, DynamoPortRange
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
-from tests.utils.port_utils import ServicePorts
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
@@ -175,45 +177,182 @@ def _collect_tool_calls(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [merged[idx] for idx in sorted(merged)]
 
 
+# Key of one service group: (discovery_backend, request_plane, event_plane).
+_ServiceConfig = tuple[str, str, Optional[str]]
+
+
+class _PrepostServiceGroup:
+    """NATS/etcd, frontend and mock worker for one runtime configuration.
+
+    Owns its runtime-service ports, frontend port and capture directory, so it
+    does not depend on any function-scoped fixture and can outlive one case.
+    """
+
+    def __init__(self, request, config: _ServiceConfig, capture_dir: Path) -> None:
+        self.config = config
+        self.capture_path = capture_dir / "captured_request.json"
+        self.frontend_port = 0
+        # Same NATS_SERVER / ETCD_ENDPOINTS values that runtime_services_dynamic_ports
+        # would set for this configuration; None means "unset".
+        self.env: dict[str, Optional[str]] = {}
+        self._processes: list[ManagedProcess] = []
+        self._stack = contextlib.ExitStack()
+        try:
+            self._start(request)
+        except BaseException:
+            self._stack.close()
+            raise
+
+    def _start(self, request) -> None:
+        discovery_backend, request_plane, event_plane = self.config
+        # Mirrors the branch logic of runtime_services_dynamic_ports in tests/conftest.py.
+        nats_required = request_plane == "nats" or event_plane == "nats"
+        nats_free = event_plane == "zmq" and not nats_required
+        start_nats = nats_required or (discovery_backend == "etcd" and not nats_free)
+        start_etcd = discovery_backend == "etcd"
+
+        if nats_free:
+            self.env["NATS_SERVER"] = None
+        if start_nats:
+            nats = self._stack.enter_context(
+                NatsServer(request, port=0, disable_jetstream=True)
+            )
+            self._processes.append(nats)
+            self.env["NATS_SERVER"] = f"nats://localhost:{nats.port}"
+        if start_etcd:
+            etcd = self._stack.enter_context(EtcdServer(request, port=0))
+            self._processes.append(etcd)
+            self.env["ETCD_ENDPOINTS"] = f"http://localhost:{etcd.port}"
+
+        self.frontend_port = allocate_port(DynamoPortRange.FRONTEND.value)
+        self._stack.callback(deallocate_port, self.frontend_port)
+
+        # The children copy os.environ when they are constructed, so the group's
+        # environment only has to be in place while they are spawned. Restoring it
+        # right away leaves nothing for the function-scoped monkeypatch to unwind.
+        with pytest.MonkeyPatch.context() as mp:
+            for name, value in self.env.items():
+                if value is None:
+                    mp.delenv(name, raising=False)
+                else:
+                    mp.setenv(name, value)
+
+            frontend = self._stack.enter_context(
+                DynamoFrontendProcess(
+                    request,
+                    frontend_port=self.frontend_port,
+                    extra_args=[
+                        "--dyn-chat-processor",
+                        "vllm",
+                        "--discovery-backend",
+                        "etcd",  # Started by the group
+                        "--request-plane",
+                        "tcp",
+                        "--enable-auto-tool-choice",
+                        "--tool-call-parser",
+                        "hermes",
+                        "--reasoning-parser",
+                        "qwen3",
+                    ],
+                    extra_env={"DYN_VLLM_STREAM_INTERVAL": "20"},
+                    terminate_all_matching_process_names=False,
+                )
+            )
+            self._processes.append(frontend)
+            logger.info("Frontend started on port %s", self.frontend_port)
+
+            worker = self._stack.enter_context(
+                MockVllmPrepostWorkerProcess(
+                    request,
+                    frontend_port=self.frontend_port,
+                    capture_path=self.capture_path,
+                )
+            )
+            self._processes.append(worker)
+            logger.info("vLLM pre/post test worker registered model %s", TEST_MODEL)
+
+    def is_healthy(self) -> bool:
+        return all(process.is_running() for process in self._processes)
+
+    def close(self) -> None:
+        # Worker, frontend, etcd, NATS, then the frontend port reservation.
+        self._stack.close()
+
+
+class _PrepostServiceManager:
+    """Module-owned holder of at most one live _PrepostServiceGroup.
+
+    Cases with the same runtime configuration share a group. A case with a
+    different configuration (for example request_plane=tcp, event_plane=zmq)
+    closes the live group and gets its own, so it never reuses services that
+    were started for another transport.
+    """
+
+    def __init__(self, request, tmp_path_factory: pytest.TempPathFactory) -> None:
+        self._request = request
+        self._tmp_path_factory = tmp_path_factory
+        self._group: Optional[_PrepostServiceGroup] = None
+
+    def get(self, config: _ServiceConfig) -> _PrepostServiceGroup:
+        group = self._group
+        if group is not None and group.config == config and group.is_healthy():
+            logger.info("Reusing vLLM pre/post services for config %s", config)
+            return group
+        if group is not None:
+            if group.config == config:
+                logger.warning(
+                    "vLLM pre/post services for config %s exited; restarting", config
+                )
+            self.close()
+        logger.info("Starting vLLM pre/post services for config %s", config)
+        capture_dir = self._tmp_path_factory.mktemp("vllm_prepost_capture")
+        self._group = _PrepostServiceGroup(self._request, config, capture_dir)
+        return self._group
+
+    def close(self) -> None:
+        group, self._group = self._group, None
+        if group is not None:
+            group.close()
+
+
+@pytest.fixture(scope="module")
+def prepost_service_manager(
+    request, tmp_path_factory: pytest.TempPathFactory
+) -> Generator[_PrepostServiceManager, None, None]:
+    manager = _PrepostServiceManager(request, tmp_path_factory)
+    try:
+        yield manager
+    finally:
+        manager.close()
+
+
 @pytest.fixture(scope="function")
 def start_services(
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports: ServicePorts,
-    tmp_path: Path,
+    discovery_backend,
+    request_plane,
+    event_plane,
+    monkeypatch,
+    prepost_service_manager: _PrepostServiceManager,
 ) -> Generator[tuple[int, Path], None, None]:
-    _ = runtime_services_dynamic_ports
+    # event_plane has already set DYN_EVENT_PLANE through this case's monkeypatch,
+    # so a newly started group inherits it.
+    group = prepost_service_manager.get((discovery_backend, request_plane, event_plane))
 
-    frontend_port = dynamo_dynamic_ports.frontend_port
-    capture_path = tmp_path / "captured_request.json"
+    # The worker writes <capture>.tmp and then renames it onto the capture path.
+    # Remove both so this case cannot read the previous case's request.
+    group.capture_path.unlink(missing_ok=True)
+    group.capture_path.with_suffix(group.capture_path.suffix + ".tmp").unlink(
+        missing_ok=True
+    )
 
-    with DynamoFrontendProcess(
-        request,
-        frontend_port=frontend_port,
-        extra_args=[
-            "--dyn-chat-processor",
-            "vllm",
-            "--discovery-backend",
-            "etcd",  # Started by the fixture
-            "--request-plane",
-            "tcp",
-            "--enable-auto-tool-choice",
-            "--tool-call-parser",
-            "hermes",
-            "--reasoning-parser",
-            "qwen3",
-        ],
-        extra_env={"DYN_VLLM_STREAM_INTERVAL": "20"},
-        terminate_all_matching_process_names=False,
-    ):
-        logger.info("Frontend started on port %s", frontend_port)
-        with MockVllmPrepostWorkerProcess(
-            request,
-            frontend_port=frontend_port,
-            capture_path=capture_path,
-        ):
-            logger.info("vLLM pre/post test worker registered model %s", TEST_MODEL)
-            yield frontend_port, capture_path
+    # Same per-case environment that runtime_services_dynamic_ports provides.
+    for name, value in group.env.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+    yield group.frontend_port, group.capture_path
 
 
 @pytest.mark.timeout(180)  # 0-GiB unit test, floor 180s (3x observed 43s)
