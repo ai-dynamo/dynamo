@@ -273,7 +273,18 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			}
 			err := k8sClient.Update(ctx, spoke)
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("request representation is immutable"))
+			Expect(err.Error()).To(ContainSubstring("the conversion carrier is immutable"))
+
+			By("Attempting to edit the foreign-version carrier")
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), spoke)).Should(Succeed())
+			var carrier nvidiacomv1beta1.DynamoGraphDeploymentRequestNativeSpec
+			Expect(json.Unmarshal(spoke.Spec.V1Beta1.Raw, &carrier)).Should(Succeed())
+			carrier.Model = "Qwen/Qwen3-30B-A3B"
+			spoke.Spec.V1Beta1.Raw, err = json.Marshal(carrier)
+			Expect(err).NotTo(HaveOccurred())
+			err = k8sClient.Update(ctx, spoke)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("the conversion carrier is immutable"))
 		})
 
 		It("Should leave the carrier and child resources untouched", func() {
