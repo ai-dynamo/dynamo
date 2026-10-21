@@ -24,6 +24,7 @@ import (
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/aisimulate"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -47,12 +48,16 @@ func validateDynamoGraphDeploymentRequestEnvelopeV1beta2(
 }
 
 // validateDynamoGraphDeploymentRequestV1beta2 validates a defaulted v1beta2 Request spec: the
-// typed fields, then that spec.aisimulate.parameters is an object. The content of the
-// parameters is not validated here; the AISimulate input schema owns it.
+// typed fields, that spec.aisimulate.parameters is an object, and that the effective AISimulate
+// input names the hardware. The rest of the parameters content is not validated here; the
+// AISimulate input schema owns it. Update calls this only when the spec changed, so objects
+// stored before this check keep working until they are edited.
 func validateDynamoGraphDeploymentRequestV1beta2(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) field.ErrorList {
 	errs := validateDynamoGraphDeploymentRequestSpecV1beta2(spec, field.NewPath("spec"))
 	if _, err := aisimulate.Parameters(spec); err != nil {
 		errs = append(errs, field.Invalid(parametersPath, "<redacted>", err.Error()))
+	} else {
+		errs = append(errs, validateEffectiveHardwareV1beta2(spec)...)
 	}
 	return errs
 }
@@ -122,4 +127,37 @@ func validateAISimulateSpecV1beta2(spec *nvidiacomv1beta2.AISimulateSpec, fldPat
 			"is required when spec.aisimulate.image has no parseable version tag")}
 	}
 	return nil
+}
+
+// validateEffectiveHardwareV1beta2 requires the AISimulate input that a Run would execute to name
+// the GPU SKU and budget. The input is the typed spec lowered and then patched by
+// spec.aisimulate.parameters, so hardware given only in the parameters satisfies it, and a
+// parameters null that deletes discovered hardware does not. Errors are reported at the typed
+// spec.hardware.gpu fields, which is where the user fixes them.
+func validateEffectiveHardwareV1beta2(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) field.ErrorList {
+	input, err := aisimulate.Lower(spec)
+	if err != nil {
+		return field.ErrorList{field.Invalid(parametersPath, "<redacted>", err.Error())}
+	}
+	gpuPath := field.NewPath("spec", "hardware", "gpu")
+	var errs field.ErrorList
+	if !effectiveValuePresent(input, aisimulate.SearchSpaceHardwareSKU) {
+		errs = append(errs, field.Required(gpuPath.Child("sku"),
+			"the effective AISimulate input has no hardware SKU: set it, enable GPU discovery, or set spec.aisimulate.parameters.search_space.hardware_sku"))
+	}
+	if !effectiveValuePresent(input, aisimulate.SearchSpaceGPUBudget) {
+		errs = append(errs, field.Required(gpuPath.Child("budget"),
+			"the effective AISimulate input has no GPU budget: set it, enable GPU discovery, or set spec.aisimulate.parameters.search_space.gpu_budget"))
+	}
+	return errs
+}
+
+// effectiveValuePresent reports whether input holds a non-null, non-empty value at path.
+func effectiveValuePresent(input map[string]any, path []string) bool {
+	value, found, err := unstructured.NestedFieldNoCopy(input, path...)
+	if err != nil || !found || value == nil {
+		return false
+	}
+	text, isString := value.(string)
+	return !isString || text != ""
 }

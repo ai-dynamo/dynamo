@@ -18,17 +18,19 @@
 // Package aisimulate lowers a v1beta2 DynamoGraphDeploymentRequest spec into the native
 // AISimulate input that a Run executes.
 //
-// Lowering sits below the Request reconciler. Admission calls it as a second validation
-// stage, after the typed spec has been defaulted and validated on its own, and the
-// reconciler freezes its output into the Run, so both see the same bytes.
+// Lowering sits below the Request reconciler. Admission calls Parameters to check that
+// spec.aisimulate.parameters is an object, and Lower to check the effective input, for
+// example that it names the hardware. The reconciler freezes the output of Lower into the Run,
+// so admission and the Run see the same bytes.
 //
-// The typed spec (model, backends, hardware, workload, objective) is first translated
-// into the native input, the "underlay". spec.aisimulate.parameters is then applied on
-// top as a JSON Merge Patch (RFC 7386): native objects merge recursively, arrays and
-// scalars replace the underlay value, and null deletes it. The native input therefore
-// wins on every path it names. Finally the derived defaults that no API field carries are
-// added: the request count, a bounded trial budget for a KV-load range search, and
-// goal.strict_sla.
+// Lower works in three steps. The typed spec (model, backends, hardware, workload, objective)
+// is first translated into the native input, the "underlay". The derived defaults that no API
+// field carries are then added to it: the request count, a bounded trial budget for a
+// KV-load range search, and goal.strict_sla when an SLA bound is set. Last,
+// spec.aisimulate.parameters is applied on top as a JSON Merge Patch (RFC 7386): native
+// objects merge recursively, arrays and scalars replace the value, and null deletes it. The
+// parameters are authoritative: they win on every path they name, including the derived
+// defaults, and are applied once, last.
 //
 // The document stays unstructured (map[string]any) because its schema belongs to the
 // AISimulate release the Request selects, not to this package. Reads and writes go

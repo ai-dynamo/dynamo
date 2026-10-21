@@ -23,7 +23,7 @@ func TestDynamoGraphDeploymentRequestCarrierObjectsStayWritable(t *testing.T) {
 		carrierRoundTrip(t, betaDGDRForAdmission(nil), beta2DGDRForAdmission(nil), "v1beta1")
 	})
 	t.Run("native v1beta2 written through v1beta1", func(t *testing.T) {
-		carrierRoundTrip(t, beta2DGDRForAdmission(nil), betaDGDRForAdmission(nil), "v1beta2")
+		carrierRoundTrip(t, beta2DGDRForAdmission(setBeta2AdmissionHardware), betaDGDRForAdmission(nil), "v1beta2")
 	})
 }
 
