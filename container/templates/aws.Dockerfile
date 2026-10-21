@@ -39,10 +39,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 ENV EFA_VERSION="${EFA_VERSION}"
 
 {% if framework == "trtllm" %}
-# EFA uses NIXL's LIBFABRIC backend from the PyPI build, against the EFA
-# installer's libfabric. Preload it in place of TRT-LLM's bundled NIXL; the
-# UCX hang that the runtime's preload works around (ai-dynamo/nixl#1668) does
-# not affect LIBFABRIC. libcuda.so.1 comes from the host driver at runtime.
+# EFA uses NIXL's LIBFABRIC backend, which the base image's NIXL lacks. Preload
+# the PyPI build of the same NIXL version, which has it, against the EFA
+# installer's libfabric. libcuda.so.1 comes from the host driver at runtime.
 ARG NIXL_REF
 RUN echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     /opt/uv/bin/uv pip install --no-deps --target /opt/dynamo/nixl-efa "nixl-cu13==${NIXL_REF#v}" && \

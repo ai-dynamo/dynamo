@@ -351,20 +351,21 @@ RUN python3 -c 'from dynamo.llm import MediaDecoder; assert hasattr(MediaDecoder
 ENV IMAGEIO_FFMPEG_EXE=
 {% endif %}
 
-{% if device != "xpu" and target not in ("dev", "local-dev") %}
+{% if device != "xpu" %}
 # Add generic UCX aliases beside NIXL's private libraries so native consumers
 # use the same implementation without breaking UCX's $ORIGIN-based core and
 # module lookup. The wheel's auditwheel dependency directory is deliberately
 # placed first for every process; it contains only hash-mangled dependencies
 # plus the two generic UCX aliases. No existing wheel file or ELF metadata is
-# modified. The same script publishes NIXL's C API directory at the second path
-# below and registers it with the runtime linker, so the bare dlopen of
-# libnixl_capi.so in nixl-sys resolves. Both paths are passed explicitly because
-# the ENV on the next line has to name the same two directories.
+# modified. Then register NIXL's C API directory with the loader and expose it
+# at /opt/dynamo/nixl. Both paths are passed explicitly because the ENV on the
+# next line has to name the same two directories.
 RUN --mount=type=bind,source=./container/deps/sglang/install_nixl_ucx_compat.sh,target=/tmp/install_nixl_ucx_compat.sh,readonly \
     --mount=type=bind,source=./container/deps/sglang/discover_nixl_ucx_layout.py,target=/tmp/discover_nixl_ucx_layout.py,readonly \
-    bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat /opt/dynamo/nixl-capi
-ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat:/opt/dynamo/nixl-capi${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+    --mount=type=bind,source=./container/deps/register_nixl_libs.sh,target=/tmp/register_nixl_libs.sh,readonly \
+    bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat && \
+    bash /tmp/register_nixl_libs.sh --link /opt/dynamo/nixl
+ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat:/opt/dynamo/nixl${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 {% endif %}
 
 # Copy tests, deploy and components for CI with correct ownership

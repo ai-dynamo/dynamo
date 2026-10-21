@@ -114,14 +114,11 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
     uv pip install --no-deps "nixl==${NIXL_REF#v}" && \
     uv pip show nixl "nixl-cu${CUDA_MAJOR}" | grep -E '^(Name|Version)' | tee /opt/dynamo/nixl-versions.txt
 
-# nixl-sys dlopens libnixl_capi.so by name; register the wheel's library
-# directory with the loader. NIXL finds its plugins beside it.
+# Register the NIXL wheel's libraries with the loader so the Rust bindings'
+# dlopen("libnixl_capi.so") resolves. NIXL finds its plugins beside them.
 USER root
-RUN NIXL_LIB_DIR="$(/opt/dynamo/venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/.nixl_cu${CUDA_MAJOR}.mesonpy.libs" && \
-    [ -f "${NIXL_LIB_DIR}/libnixl_capi.so" ] || { echo "missing ${NIXL_LIB_DIR}/libnixl_capi.so; NIXL wheel layout changed" >&2; exit 1; } && \
-    [ -d "${NIXL_LIB_DIR}/plugins" ] || { echo "missing ${NIXL_LIB_DIR}/plugins; NIXL wheel layout changed" >&2; exit 1; } && \
-    echo "${NIXL_LIB_DIR}" > /etc/ld.so.conf.d/nixl.conf && \
-    ldconfig
+RUN --mount=type=bind,source=./container/deps/register_nixl_libs.sh,target=/tmp/register_nixl_libs.sh,readonly \
+    bash /tmp/register_nixl_libs.sh --python /opt/dynamo/venv/bin/python --cuda-major "${CUDA_MAJOR}"
 USER dynamo
 
 # Install gpu_memory_service wheel if enabled (all targets)

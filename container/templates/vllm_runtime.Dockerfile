@@ -56,20 +56,14 @@ ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/l
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 {% else %}
-# Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel through a
-# stable prefix so non-Python consumers use the same NIXL copy that Python imports.
-# This keeps Rust nixl-sys dlopen("libnixl.so") from falling into stub mode in
-# processes that do not import the nixl Python package first.
-ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+# Register the upstream nixl-cu${CUDA_MAJOR} wheel's libraries with the loader
+# and expose them at a stable prefix, so non-Python consumers (Rust nixl-sys)
+# use the same NIXL copy that Python imports.
 ENV NIXL_PREFIX=/opt/dynamo/nixl \
     NIXL_LIB_DIR=/opt/dynamo/nixl \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
-COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
-RUN install_nixl_from_wheel \
-    --cuda-major "${CUDA_MAJOR}" \
-    --site-packages "${SITE_PACKAGES}" \
-    --prefix "${NIXL_PREFIX}" \
-    --skip-headers
+RUN --mount=type=bind,source=./container/deps/register_nixl_libs.sh,target=/tmp/register_nixl_libs.sh,readonly \
+    bash /tmp/register_nixl_libs.sh --cuda-major "${CUDA_MAJOR}" --link "${NIXL_PREFIX}"
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 {% endif %}
 
