@@ -671,3 +671,29 @@ async fn realtime_websocket_recovers_after_unknown_model() {
     token.cancel();
     let _ = handle.await;
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn realtime_shutdown_closes_upgrades_before_and_after_engine_selection() {
+    temp_env::async_with_vars(
+        [("DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", Some("1"))],
+        async {
+            for select_engine in [false, true] {
+                let (port, token, handle) = spawn_test_service(true, true).await;
+                let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/v1/realtime")).await.unwrap();
+                expect_text_event(&mut ws, "session.created").await;
+                if select_engine {
+                    ws.send(Message::Text(serde_json::json!({
+                        "type": "session.update", "session": {"type": "realtime", "model": ECHO_MODEL}
+                    }).to_string().into())).await.unwrap();
+                    expect_text_event(&mut ws, "session.updated").await;
+                }
+                token.cancel();
+                tokio::time::timeout(Duration::from_secs(3), handle).await.unwrap().unwrap().unwrap();
+                let closed = tokio::time::timeout(Duration::from_secs(2), ws.next()).await.unwrap();
+                assert!(matches!(closed, None | Some(Err(_)) | Some(Ok(Message::Close(_)))), "upgrade survived shutdown: {closed:?}");
+                let _ = ws.close(None).await;
+            }
+        },
+    ).await;
+}

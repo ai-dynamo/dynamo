@@ -1258,7 +1258,7 @@ impl HttpServiceConfigBuilder {
         .collect::<Vec<_>>();
 
         let model_manager = Arc::new(ModelManager::new());
-        let cancel_token = config.cancel_token.unwrap_or_default();
+        let cancel_token = config.cancel_token.unwrap_or_default().child_token();
         // Use the provided discovery client, or fall back to a no-op memory-backed one
         // (for in-process modes that don't need discovery)
         let discovery_client = config.discovery.unwrap_or_else(|| {
@@ -2775,6 +2775,72 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn shutdown_deadline_interrupts_handlers_and_response_bodies() {
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
+            async {
+                for tls in [false, true] {
+                    for before_headers in [false, true] {
+                        let certificates = make_mtls_test_certificates();
+                        let parent = CancellationToken::new();
+                        let mut service = HttpService::builder()
+                            .host("127.0.0.1").port(0).enable_tls(tls)
+                            .cancel_token(Some(parent.clone()))
+                            .tls_cert_path(tls.then(|| certificates.server_cert.path().to_path_buf()))
+                            .tls_key_path(tls.then(|| certificates.server_key.path().to_path_buf()))
+                            .build().unwrap();
+                        let state = service.state_clone();
+                        let entered = CancellationToken::new();
+                        let released = CancellationToken::new();
+                        let handler_entered = entered.clone();
+                        let handler_released = released.clone();
+                        service.router = axum::Router::new().route("/blocked", axum::routing::get(move || {
+                            let entered = handler_entered.clone();
+                            let guard = handler_released.clone().drop_guard();
+                            async move {
+                                entered.cancel();
+                                if before_headers { std::future::pending::<()>().await; }
+                                Body::from_stream(async_stream::stream! {
+                                    let _guard = guard;
+                                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"first"));
+                                    std::future::pending::<()>().await;
+                                })
+                            }
+                        })).layer(axum::middleware::from_fn_with_state(state.clone(), track_inflight_inference));
+                        let cancel = CancellationToken::new();
+                        let server_cancel = cancel.clone();
+                        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let address = listener.local_addr().unwrap();
+                        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                            service.run_with_listener(server_cancel, listener).await
+                        }));
+                        let client = reqwest::Client::builder().no_proxy().danger_accept_invalid_certs(true)
+                            .timeout(Duration::from_secs(4)).build().unwrap();
+                        let request = client.get(format!("{}://{address}/blocked", if tls { "https" } else { "http" })).send();
+                        let mut request = Some(tokio::spawn(request));
+                        tokio::time::timeout(Duration::from_secs(2), entered.cancelled()).await.unwrap();
+                        let response = if before_headers { None } else { Some(request.take().unwrap().await.unwrap().unwrap()) };
+                        cancel.cancel();
+                        if let Some(response) = response {
+                            assert!(response.bytes().await.is_err(), "interruption must not look like EOF");
+                        }
+                        tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap().unwrap();
+                        tokio::time::timeout(Duration::from_secs(1), released.cancelled()).await.unwrap();
+                        if let Some(request) = request {
+                            if let Ok(response) = request.await.unwrap() {
+                                assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+                            }
+                        }
+                        assert_eq!(state.inflight_count(), 0);
+                        assert!(!parent.is_cancelled(), "local deadline must not cancel the runtime");
+                    }
+                }
+            },
+        ).await;
     }
 
     /// Verifies that an unsupported content type returns the standard JSON error

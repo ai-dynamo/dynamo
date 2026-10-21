@@ -46,10 +46,11 @@ use axum::{
     routing::get,
 };
 use dynamo_runtime::engine::AsyncEngineContextProvider;
-use dynamo_runtime::pipeline::{Context, RequestStream};
+use dynamo_runtime::pipeline::{AsyncEngineContext, Context, RequestStream};
 use futures::{SinkExt, StreamExt, stream::SplitSink};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::task::AbortOnDropHandle;
 
 /// Bound on the per-connection request queue. Picks backpressure over
 /// unbounded growth so a fast client cannot drive memory exhaustion against
@@ -96,8 +97,22 @@ async fn realtime_ws_handler(
     }
 
     upgrade
-        .on_upgrade(move |socket| handle_socket(socket, state, permit))
+        .on_upgrade(move |socket| async move {
+            let cancel = state.cancel_token().clone();
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = handle_socket(socket, state, permit) => {},
+            }
+        })
         .into_response()
+}
+
+struct StopOnDrop(Arc<dyn AsyncEngineContext>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.stop_generating();
+    }
 }
 
 async fn handle_socket(
@@ -165,6 +180,7 @@ async fn handle_socket(
 
     let request_stream = Box::pin(ReceiverStream::new(req_rx));
     let input = Context::new(RequestStream::new(request_stream));
+    let _request_stop = StopOnDrop(input.context());
 
     let mut response_stream = match engine.generate(input).await {
         Ok(s) => s,
@@ -178,13 +194,14 @@ async fn handle_socket(
         }
     };
     let resp_ctx = response_stream.context();
+    let _response_stop = StopOnDrop(resp_ctx.clone());
 
     // Outbound task: drain the engine response stream onto the WebSocket.
     // Peels off the Dynamo-side `Annotated` envelope so clients receive bare
     // `RealtimeServerEvent` frames as the OpenAI Realtime spec requires. Engine
     // errors surfaced via `Annotated::error` are mapped to a synthesized
     // `RealtimeServerEvent::Error` so they remain visible on the wire.
-    let outbound = tokio::spawn(async move {
+    let outbound = AbortOnDropHandle::new(tokio::spawn(async move {
         let mut writer = writer;
         while let Some(annotated) = response_stream.next().await {
             let event = if let Some(event) = annotated.data {
@@ -222,7 +239,7 @@ async fn handle_socket(
             }
         }
         // writer dropped at end of scope → spawned cleanup sends Close + drains.
-    });
+    }));
 
     while let Some(msg) = ws_rx.next().await {
         let msg = match msg {
