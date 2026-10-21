@@ -29,7 +29,7 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Once, OnceLock};
+use std::sync::{LazyLock, Once, OnceLock};
 
 use figment::{
     Figment,
@@ -615,6 +615,37 @@ impl TraceParent {
     }
 }
 
+fn genai_operation_from_opt_in(value: &str) -> Option<&'static str> {
+    value
+        .split(',')
+        .any(|value| value.trim() == "gen_ai_latest_experimental")
+        .then_some("invoke_workflow")
+}
+
+fn otel_resource(service_name: &str) -> opentelemetry_sdk::Resource {
+    // Keep SDK detectors, including OTEL_RESOURCE_ATTRIBUTES. Kubernetes
+    // collectors need the emitting pod UID to associate infrastructure tags.
+    opentelemetry_sdk::Resource::builder()
+        .with_service_name(service_name.to_string())
+        .build()
+}
+
+fn genai_operation() -> Option<&'static str> {
+    static OPERATION: LazyLock<Option<&'static str>> = LazyLock::new(|| {
+        genai_operation_from_opt_in(
+            &std::env::var(env_logging::otlp::OTEL_SEMCONV_STABILITY_OPT_IN).unwrap_or_default(),
+        )
+    });
+    *OPERATION
+}
+
+fn genai_worker_operation(endpoint: &str) -> Option<&'static str> {
+    // Discovery, health, and control-plane RPCs are not AI requests.
+    matches!(endpoint, "generate" | "prefill" | "decode")
+        .then(genai_operation)
+        .flatten()
+}
+
 /// Create a span for inference request endpoints (completions, chat, embeddings, etc.).
 ///
 /// Uses `target: "request_span"` which is always allowed through the DYN_LOG filter
@@ -642,6 +673,8 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
         trace_id = trace_parent.trace_id,
         parent_id = trace_parent.parent_id,
         trace_flags = trace_parent.trace_flags,
+        tracestate = trace_parent.tracestate,
+        gen_ai.operation.name = genai_operation(),
         x_request_id = trace_parent.x_request_id,
         request_id = %request_id,
         model = tracing::field::Empty,
@@ -728,6 +761,7 @@ pub fn make_handle_payload_span(
             target: "request_span",
             "handle_payload",
             otel.kind = "server",
+            gen_ai.operation.name = genai_worker_operation(endpoint),
             trace_id = trace_id.as_str(),
             parent_id = parent_id.as_str(),
             trace_flags = trace_parent.trace_flags,
@@ -749,6 +783,7 @@ pub fn make_handle_payload_span(
             target: "request_span",
             "handle_payload",
             otel.kind = "server",
+            gen_ai.operation.name = genai_worker_operation(endpoint),
             trace_flags = trace_parent.trace_flags,
             x_request_id = trace_parent.x_request_id,
             request_id = trace_parent.request_id,
@@ -779,6 +814,7 @@ pub fn make_handle_payload_span_from_tcp_headers(
             target: "request_span",
             "handle_payload",
             otel.kind = "server",
+            gen_ai.operation.name = genai_worker_operation(endpoint),
             trace_id = trace_id.as_str(),
             parent_id = parent_id.as_str(),
             trace_flags = trace_parent.trace_flags,
@@ -800,6 +836,7 @@ pub fn make_handle_payload_span_from_tcp_headers(
             target: "request_span",
             "handle_payload",
             otel.kind = "server",
+            gen_ai.operation.name = genai_worker_operation(endpoint),
             trace_flags = trace_parent.trace_flags,
             x_request_id = trace_parent.x_request_id,
             request_id = trace_parent.request_id,
@@ -1303,9 +1340,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
                 "/v1/logs",
             );
 
-            let resource = opentelemetry_sdk::Resource::builder_empty()
-                .with_service_name(service_name.clone())
-                .build();
+            let resource = otel_resource(&service_name);
 
             let span_exporter = build_span_exporter(traces_protocol, &traces_endpoint)?;
 
@@ -1335,11 +1370,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             // No export - traces generated locally only (for logging/trace IDs)
             let mut provider_builder = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-                .with_resource(
-                    opentelemetry_sdk::Resource::builder_empty()
-                        .with_service_name(service_name.clone())
-                        .build(),
-                );
+                .with_resource(otel_resource(&service_name));
             if let Some(sample_ratio) = sample_ratio {
                 provider_builder = provider_builder.with_sampler(Sampler::ParentBased(Box::new(
                     Sampler::TraceIdRatioBased(sample_ratio),
@@ -2012,6 +2043,149 @@ pub mod tests {
     use std::io::{BufRead, BufReader};
     use stdio_override::*;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn genai_inference_roundtrip() {
+        // Each opt-in state gets a fresh process: the production option is cached
+        // once, and changing process-wide environment in parallel tests is unsafe.
+        const CHILD: &str = "DYNAMO_TEST_GENAI_ROUNDTRIP";
+        if std::env::var_os(CHILD).is_none() {
+            for enabled in [false, true] {
+                let result = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "logging::tests::genai_inference_roundtrip",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, if enabled { "true" } else { "false" })
+                    .env(
+                        env_logging::otlp::OTEL_SEMCONV_STABILITY_OPT_IN,
+                        if enabled {
+                            "gen_ai_latest_experimental"
+                        } else {
+                            ""
+                        },
+                    )
+                    .env(
+                        "OTEL_RESOURCE_ATTRIBUTES",
+                        "k8s.pod.uid=pod-uid,k8s.pod.name=worker-pod",
+                    )
+                    .output()
+                    .unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&result.stdout),
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            }
+            return;
+        }
+
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+        let enabled = std::env::var(CHILD).unwrap() == "true";
+        let exporter = InMemorySpanExporter::default();
+        let resource = otel_resource("dynamo");
+        assert!(
+            resource
+                .iter()
+                .any(|(key, value)| key.as_str() == "k8s.pod.uid" && value.as_str() == "pod-uid")
+        );
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .with_resource(resource)
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("dynamo")))
+            .with(DistributedTraceIdLayer);
+        let state = "dd=s:1;t.llmobs_trace_id:123456;t.llmobs_parent_id:42;t.llmobs_sd:1";
+        tracing::subscriber::with_default(subscriber, || {
+            let request = Request::builder()
+                .uri("/v1/chat/completions")
+                .header(
+                    "traceparent",
+                    "00-11111111111111111111111111111111-2222222222222222-01",
+                )
+                .header("tracestate", state)
+                .body(())
+                .unwrap();
+            let frontend = make_inference_request_span(&request);
+            frontend.in_scope(|| {
+                let mut headers = HeaderMap::new();
+                inject_otel_context_into_nats_headers(&mut headers, None);
+                assert_eq!(headers.get("tracestate").unwrap().as_str(), state);
+                let prefill = make_handle_payload_span(&headers, "prefill", "generate", "test", 1);
+                prefill.in_scope(|| {});
+                let tcp_headers = headers
+                    .iter()
+                    .filter_map(|(key, values)| {
+                        values
+                            .first()
+                            .map(|value| (key.to_string(), value.to_string()))
+                    })
+                    .collect();
+                let decode = make_handle_payload_span_from_tcp_headers(
+                    &tcp_headers,
+                    "decode",
+                    "generate",
+                    "test",
+                    2,
+                );
+                decode.in_scope(|| {});
+            });
+            let health =
+                make_system_request_span(&Request::builder().uri("/health").body(()).unwrap());
+            health.in_scope(|| {});
+        });
+        provider.force_flush().unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 4);
+        let frontend = spans
+            .iter()
+            .find(|span| {
+                span.name == "http-request"
+                    && span.attributes.iter().any(|attr| {
+                        attr.key.as_str() == "uri" && attr.value.as_str() == "/v1/chat/completions"
+                    })
+            })
+            .unwrap();
+        assert_eq!(
+            frontend.span_context.trace_id().to_string(),
+            "11111111111111111111111111111111"
+        );
+        for span in &spans {
+            let ai_attribute = span
+                .attributes
+                .iter()
+                .find(|attr| attr.key.as_str() == "gen_ai.operation.name");
+            let inference = span.name == "handle_payload"
+                || span.span_context.span_id() == frontend.span_context.span_id();
+            if enabled && inference {
+                assert_eq!(ai_attribute.unwrap().value.as_str(), "invoke_workflow");
+            } else {
+                assert!(ai_attribute.is_none());
+            }
+            if span.name == "handle_payload" {
+                assert_eq!(span.parent_span_id, frontend.span_context.span_id());
+                assert_eq!(span.span_context.trace_state().header(), state);
+            }
+        }
+        provider.shutdown().unwrap();
+    }
+
+    #[test]
+    fn genai_opt_in_is_exact() {
+        assert_eq!(genai_operation_from_opt_in(""), None);
+        assert_eq!(
+            genai_operation_from_opt_in("not_gen_ai_latest_experimental"),
+            None
+        );
+        assert_eq!(
+            genai_operation_from_opt_in("http, gen_ai_latest_experimental"),
+            Some("invoke_workflow")
+        );
+        assert_eq!(genai_worker_operation("health"), None);
+    }
 
     #[test]
     fn unset_dyn_log_uses_configured_default() {
