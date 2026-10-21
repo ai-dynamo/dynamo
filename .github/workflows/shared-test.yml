@@ -102,6 +102,11 @@ on:
         required: false
         type: boolean
         default: true
+      prepare_upstream_vllm_chat:
+        description: 'Prepare the pinned vLLM test tree for the dedicated chat behavior suite'
+        required: false
+        type: boolean
+        default: false
       gpu_test_markers:
         description: 'GPU pytest markers. Selects the full GPU pool. When run_gpu_parallel_tests=true, profiled tests run in the parallel stage and are excluded from the sequential stage by appending "and not profiled_vram_gib".'
         required: false
@@ -283,6 +288,27 @@ jobs:
           KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
         run: |
           echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
+      - name: Checkout pinned upstream vLLM tests
+        if: ${{ inputs.prepare_upstream_vllm_chat }}
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: vllm-project/vllm
+          ref: 817fa3518cd4bcc94b31e044c534c002e701c801
+          path: upstream-vllm-source
+          persist-credentials: false
+      - name: Prepare upstream client environment
+        if: ${{ inputs.prepare_upstream_vllm_chat }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream_tests="$(mktemp -d "${RUNNER_TEMP}/vllm-tests.XXXXXX")"
+          # Only tests/config: a source vllm/ directory would shadow the image's wheel.
+          git -C upstream-vllm-source archive HEAD tests pyproject.toml | tar -x -C "$upstream_tests"
+          client_env="$(mktemp -d "${RUNNER_TEMP}/vllm-client.XXXXXX")"
+          uv venv --python "$(command -v python)" --system-site-packages "$client_env"
+          uv pip install --python "$client_env/bin/python" --no-deps tblib==3.1.0
+          echo "VLLM_TESTS_DIR=$upstream_tests" >> "$GITHUB_ENV"
+          echo "VLLM_TEST_PYTHON=$client_env/bin/python" >> "$GITHUB_ENV"
       # Datadog takes ci.job.name from $GITHUB_JOB, which in a reusable workflow
       # is the inner job id — "test" for every caller — so every test session
       # lands under one job name and cannot be attributed to a CI lane.
@@ -521,6 +547,15 @@ jobs:
           path: test-results/dynamo-tests-logs/
           retention-days: 7
           if-no-files-found: ignore
+
+      - name: Upload upstream chat evidence
+        if: ${{ always() && inputs.prepare_upstream_vllm_chat }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: upstream-chat-evidence-${{ github.run_id }}-${{ job.check_run_id }}
+          path: /tmp/dynamo_tests/upstream-vllm-chat/
+          retention-days: 7
+          if-no-files-found: warn
 
       # One JUnit upload per job (one XML per stage inside). The name must keep
       # the test-results-* prefix consumed by the report workflows. Allure and
