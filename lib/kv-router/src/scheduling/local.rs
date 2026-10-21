@@ -321,6 +321,10 @@ where
             .map(AdmittedSchedulingResponse::into_response)
     }
 
+    pub fn policy_control(&self) -> &Arc<super::queue::RuntimePolicyControl> {
+        self.queue.policy_control()
+    }
+
     /// Schedule a request and return the router-internal admitted-attempt identity.
     #[doc(hidden)]
     pub async fn schedule_request_admitted(
