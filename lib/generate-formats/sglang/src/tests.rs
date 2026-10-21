@@ -47,9 +47,8 @@ fn catalog_format_owns_client_shape_and_reuses_native_exchange() {
             default_request_id: "public",
         })
         .unwrap();
-    let mut bound = (opened.bind)(&crate::testkit::worker(&json!({}))).unwrap();
+    let mut bound = (opened.bind)(&crate::testkit::worker()).unwrap();
     assert_eq!(bound.request.token_ids.as_slice(), &[1]);
-    assert!(bound.migration.is_ok());
     for (ids, finish) in [
         (json!([2]), Value::Null),
         (json!([3]), json!({"type":"length"})),

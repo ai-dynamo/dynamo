@@ -490,7 +490,6 @@ impl GenerateFormat for VllmFormat {
                 .map_err(|error| ClientError::new(error.to_string()))?;
                 Ok(Bound {
                     request,
-                    migration: Err("vLLM generate requests do not migrate yet".to_string()),
                     exchange: Box::new(VllmExchange {
                         aggregator: GenerateAggregator::new(request_id),
                         options,
@@ -520,14 +519,6 @@ impl GenerateExchange for VllmExchange {
         self.aggregator
             .apply_output(output, self.options)
             .map_err(|error| DynamoError::from(error.as_ref()))
-    }
-
-    fn migrate(
-        &mut self,
-        _delivered_tokens: usize,
-        _request: &mut PreprocessedRequest,
-    ) -> Result<Option<LLMEngineOutput>, String> {
-        Err("vLLM generate requests do not migrate yet".to_string())
     }
 
     fn finish(&mut self) -> Result<Option<Value>, DynamoError> {

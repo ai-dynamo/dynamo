@@ -4,8 +4,7 @@
 //! Engine-native `POST`/`PUT /generate`, in a pluggable [`GenerateFormat`].
 //!
 //! The format owns every request and response field: it builds the routed
-//! request, joins the worker's outputs into client responses, and continues
-//! migrated requests. This adapter routes, dispatches, streams, and accounts.
+//! request and joins the worker's outputs into client responses. This adapter routes, dispatches, streams, and accounts.
 
 use std::sync::Arc;
 
@@ -236,17 +235,15 @@ impl GenerateMetricCollector {
         let cached_tokens = output
             .completion_usage
             .as_ref()
-            // RetryManager rebases usage onto the client's prompt. Ignore
-            // any usage that still doesn't match this logical
-            // request and let the RequestTracker fallback run on drop.
+            // Ignore usage that does not match the client's prompt and let
+            // the RequestTracker fallback run on drop.
             .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
             .and_then(|usage| usage.prompt_tokens_details.as_ref())
             .and_then(|details| details.cached_tokens)
             .map(|tokens| tokens as usize);
         self.response.observe_cached_tokens(cached_tokens);
 
-        // RetryManager appends delivered tokens to the retried request and only
-        // yields newly generated deltas, so this remains exact across migration.
+        // Worker outputs contain newly generated token deltas.
         let chunk_tokens = output.token_ids.len();
         self.output_tokens += chunk_tokens;
         self.response.observe_current_osl(self.output_tokens);
@@ -336,14 +333,12 @@ async fn handler(
     };
     let worker = Worker {
         model: &model,
-        engine_info: &selection.engine_info,
         kv_cache_block_size: selection.kv_cache_block_size,
         lora_name: selection.lora_name.as_deref(),
         tower_connector_lora_enabled: selection.tower_connector_lora_enabled,
     };
     let Bound {
         mut request,
-        migration,
         exchange,
     } = match bind(&worker) {
         Ok(bound) => bound,
@@ -354,11 +349,6 @@ async fn handler(
     tracker.record_isl(request.token_ids.len(), None);
     request.tracker = Some(tracker.clone());
     let exchange: SharedExchange = Arc::new(Mutex::new(exchange));
-    match migration {
-        Ok(()) => request.continuation = Some(exchange.clone()),
-        Err(reason) => tracing::debug!(%request_id, %reason, "generate request cannot migrate"),
-    }
-
     let context: Context<PreprocessedRequest> =
         match preprocessed_context_from_headers(request, &headers) {
             Ok(context) => context,

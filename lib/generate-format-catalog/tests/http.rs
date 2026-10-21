@@ -150,152 +150,41 @@ impl AsyncEngine<Input, Output, Error> for ReplayEngine {
     }
 }
 
-/// A simulated SGLang worker whose first `failures` attempts drop after
-/// two chunks, as when an engine dies mid-stream.
-struct FlakyWorker {
-    calls: std::sync::atomic::AtomicUsize,
-    failures: usize,
-    truth: dynamo_sglang_generate::testkit::sim::Truth,
-}
-
-#[async_trait::async_trait]
-impl AsyncEngine<Input, Output, Error> for FlakyWorker {
-    async fn generate(&self, request: Input) -> Result<Output, Error> {
-        use dynamo_sglang_generate::testkit::sim;
-        let call = self
-            .calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (request, context) = request.transfer(());
-        let body = request.extra_args.as_ref().unwrap()["sglang_tito"].clone();
-        let chunks = sim::stream(
-            &self.truth,
-            body.as_object().unwrap(),
-            &request.token_ids,
-            sim::Role::Aggregated,
-            &Value::Null,
-        );
-        let mut items: Vec<_> = chunks
-            .into_iter()
-            .map(|mut chunk| {
-                // Each attempt reports cache hits against its physical prompt.
-                chunk["meta_info"]["cached_tokens"] = request.token_ids.len().into();
-                Annotated::from_data(
-                    dynamo_sglang_generate::inspect(chunk, false)
-                        .unwrap()
-                        .output,
-                )
-            })
-            .collect();
-        if call < self.failures {
-            items.truncate(2);
-            items.push(Annotated::from_err(
-                DynamoError::builder()
-                    .error_type(dynamo_runtime::error::ErrorType::Backend(
-                        dynamo_runtime::error::BackendError::StreamIncomplete,
-                    ))
-                    .message("engine died")
-                    .build(),
-            ));
-        }
-        let stream = Box::pin(futures::stream::iter(items));
-        Ok(ResponseStream::new(stream, context.context()))
-    }
-}
-
-/// Generate's migration operator in front of a worker.
-struct Migrating(Arc<dynamo_llm::migration::Migration>, Arc<FlakyWorker>);
-
-#[async_trait::async_trait]
-impl AsyncEngine<Input, Output, Error> for Migrating {
-    async fn generate(&self, request: Input) -> Result<Output, Error> {
-        use dynamo_runtime::pipeline::Operator;
-        self.0.generate(request, self.1.clone()).await
-    }
-}
-
 #[tokio::test]
-async fn a_request_migrated_mid_stream_returns_what_an_unbroken_one_does() {
-    let truth = dynamo_sglang_generate::testkit::sim::Truth {
-        prompt: vec![1, 2, 3],
-        prompt_logprobs: vec![0.0, -0.5, -0.25],
-        output: (10..15).map(|id| (id, -1.0)).collect(),
-        stop: false,
-        row_bytes: 1,
-        experts: vec![0; 16],
-        cuts: (1..=5).collect(),
-        cached_tokens: 2,
-    };
-    let respond = |stream: bool, failures: usize, max_seq_len| {
-        let truth = truth.clone();
-        async move {
-            let body = serde_json::json!({
-                "input_ids": [1, 2, 3], "rid": "request-id", "stream": stream, "return_logprob": true,
-                "logprob_start_len": 0, "sampling_params": {"max_new_tokens": 5},
-            })
-            .to_string();
-            let worker = Arc::new(FlakyWorker {
-                calls: Default::default(),
-                failures,
-                truth,
-            });
-            let card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only("test-model");
-            let metrics = Arc::new(dynamo_llm::http::service::metrics::Metrics::new());
-            let migration =
-                dynamo_llm::migration::Migration::for_generate(&card, 3, max_seq_len, metrics);
-            let state = service_v2::HttpService::builder()
-                .build()
-                .unwrap()
-                .state_clone();
-            let registry = prometheus::Registry::new();
-            state.metrics_clone().register(&registry).unwrap();
-            let response = respond(
-                state,
-                sglang(),
-                Arc::new(Migrating(migration, worker.clone())),
-                serde_json::from_str(&body).unwrap(),
-                HeaderMap::new(),
-            )
-            .await;
-            let status = response.status();
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let calls = worker.calls.load(std::sync::atomic::Ordering::Relaxed);
-            if max_seq_len.is_none() {
-                let families = registry.gather();
-                let cached = families
-                    .iter()
-                    .find(|family| family.name() == "dynamo_frontend_cached_tokens")
-                    .unwrap();
-                let histogram = cached.get_metric()[0].get_histogram();
-                assert_eq!(histogram.get_sample_count(), 1);
-                assert_eq!(histogram.get_sample_sum(), 3.0);
-            }
-            (status, String::from_utf8(body.to_vec()).unwrap(), calls)
-        }
-    };
+async fn native_responses_record_cached_token_metrics() {
     for stream in [false, true] {
-        let (status, unbroken, calls) = respond(stream, 0, None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(calls, 1);
-        let (status, migrated, calls) = respond(stream, 2, None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(calls, 3, "two failed attempts, then one that finishes");
-        assert_eq!(migrated, unbroken, "stream={stream}");
-        let (status, body, calls) = respond(stream, 2, Some(4)).await;
-        assert_eq!(
-            calls, 1,
-            "a retry must not cross the configured sequence limit"
-        );
-        assert_eq!(
-            status,
-            if stream {
-                StatusCode::OK
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
-        );
-        assert!(body.contains("Internal server error"), "{body}");
+        let state = state();
+        let registry = prometheus::Registry::new();
+        state.metrics_clone().register(&registry).unwrap();
+        let output = dynamo_sglang_generate::inspect(
+            serde_json::json!({"output_ids": [7], "meta_info": {
+                "finish_reason": {"type": "length"}, "prompt_tokens": 3,
+                "completion_tokens": 1, "cached_tokens": 2,
+            }}),
+            false,
+        )
+        .unwrap()
+        .output;
+        let response = respond(
+            state,
+            sglang(),
+            Arc::new(ReplayEngine(vec![Annotated::from_data(output)], false)),
+            serde_json::json!({"input_ids": [1, 2, 3], "stream": stream}),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let families = registry.gather();
+        let cached = families
+            .iter()
+            .find(|family| family.name() == "dynamo_frontend_cached_tokens")
+            .unwrap();
+        let histogram = cached.get_metric()[0].get_histogram();
+        assert_eq!(histogram.get_sample_count(), 1);
+        assert_eq!(histogram.get_sample_sum(), 2.0);
     }
 }
 
@@ -335,8 +224,7 @@ async fn vllm_format_preserves_binding_terminal_status_and_wire_shape() {
             })
             .unwrap();
         assert_eq!(opened.request_id, "header-id");
-        let bound = (opened.bind)(&dynamo_sglang_generate::testkit::worker(&Value::Null)).unwrap();
-        assert!(bound.migration.is_err());
+        let bound = (opened.bind)(&dynamo_sglang_generate::testkit::worker()).unwrap();
         let hints = bound.request.routing.as_ref().unwrap();
         assert_eq!(hints.dp_rank, Some(3));
         assert_eq!(hints.priority, Some(7));

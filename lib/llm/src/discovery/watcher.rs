@@ -152,6 +152,9 @@ fn supports_enabled_engine_generate(card: &ModelDeploymentCard, capabilities: &[
         .any(|capability| supports_generate_capability(card, capability))
 }
 
+// Generate's opaque request state is not yet verified for migration replay.
+const GENERATE_MIGRATION_LIMIT: u32 = 0;
+
 /// Resolve the effective [`WorkerType`] for a card during the
 /// cross-version rollout.
 ///
@@ -783,10 +786,10 @@ impl ModelWatcher {
                     anyhow::anyhow!("generate pipeline requires preprocessed routing")
                 })?;
                 let generate_engine = routing
-                    .build_generate_pipeline(
+                    .build_preprocessed_pipeline(
                         card,
-                        self.migration_limit,
-                        self.migration_max_seq_len,
+                        GENERATE_MIGRATION_LIMIT,
+                        None,
                         self.metrics.clone(),
                     )
                     .context("build generate (preprocessed) pipeline")?;
