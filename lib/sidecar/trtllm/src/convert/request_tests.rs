@@ -249,19 +249,22 @@ fn mm_routing_hashes_are_not_used_as_engine_cache_uuids() {
 }
 
 #[test]
-fn image_media_requires_the_loaded_models_advertised_capability() {
-    let mut req = request();
-    add_images(&mut req, ["https://example.com/image.png"]);
-
-    for model_limits in [None, limits(4096)] {
-        let error = build_generate_request(req.clone(), "req", "model", model_limits, AGG)
-            .expect_err("a text-only or unknown model must reject images");
-        assert!(
-            error
-                .to_string()
-                .contains("does not advertise image support"),
-            "unexpected error: {error}"
-        );
+fn media_requires_the_loaded_models_advertised_capability() {
+    for (key, modality) in [("image_url", "image"), ("video_url", "video")] {
+        let mut req = request();
+        req.multi_modal_data = Some(HashMap::from([(
+            key.to_string(),
+            vec![MultimodalData::RawUrl(
+                "https://example.com/media".to_string(),
+            )],
+        )]));
+        for model_limits in [None, limits(4096)] {
+            let error = build_generate_request(req.clone(), "req", "model", model_limits, AGG)
+                .expect_err("a text-only or unknown model must reject media")
+                .to_string();
+            assert!(error.contains(&format!("does not advertise {modality} support")));
+            assert_eq!(error.contains("OpenCV (cv2)"), modality == "video");
+        }
     }
 }
 

@@ -264,9 +264,14 @@ fn media(
                 .and_then(|limits| limits.supported_media)
                 .is_some_and(|media| media.contains(kind.name))
             {
+                let requirement = if kind.name == "video" {
+                    ". Video decoding requires OpenCV (cv2) in the TensorRT-LLM server environment"
+                } else {
+                    ""
+                };
                 return Err(client::invalid_argument(format!(
-                    "the loaded TensorRT-LLM model does not advertise {} support through Control.GetModelInfo",
-                    kind.name
+                    "the loaded TensorRT-LLM model does not advertise {} support through Control.GetModelInfo{requirement}",
+                    kind.name,
                 )));
             }
             active_kinds.push(kind);
