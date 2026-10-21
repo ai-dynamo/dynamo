@@ -105,6 +105,92 @@ fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
     assert_eq!(select(&policy), 0);
 }
 
+/// Issue 16194: a resumed turn whose prefix is cached on one worker. The overlap credit is
+/// capped at the request's own prefill, so slightly higher decode load on the cache holder
+/// sends the turn to a cold worker unless `prefix_affinity_weight` charges the missing blocks.
+#[test]
+fn prefix_affinity_weight_keeps_resumed_prefix_on_cache_holder() {
+    use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
+    use serde_json::json;
+
+    let (workers, mut request) = fixture(2, 47 * 64);
+    for (worker, load) in &mut request.worker_loads {
+        let holder = worker.worker_id == 0;
+        load.active_prefill_tokens = 0;
+        load.active_requests = 0;
+        load.active_decode_blocks = if holder { 143 } else { 95 };
+        load.additional_active_blocks = 0;
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(*worker, if holder { 46 } else { 0 });
+    }
+    let select = |config: KvRouterConfig| {
+        let policy = default_policy(config, "prefill");
+        policy
+            .select_worker(selection_input(&workers, &request, 64))
+            .unwrap()
+            .worker
+            .worker_id
+    };
+    let base = KvRouterConfig {
+        host_cache_hit_weight: 0.0,
+        disk_cache_hit_weight: 0.0,
+        ..Default::default()
+    };
+    assert_eq!(select(base.clone()), 1, "default weights move the session");
+    assert_eq!(
+        select(KvRouterConfig {
+            prefix_affinity_weight: 0.25,
+            ..base.clone()
+        }),
+        0
+    );
+    // The weight is also a runtime policy parameter.
+    let mut policy = default_policy(base, "prefill");
+    let revision = policy.runtime_config().unwrap().revision();
+    let patch = json!({"prefix_affinity_weight": 0.25})
+        .as_object()
+        .unwrap()
+        .clone();
+    policy
+        .update_runtime_config(RuntimePolicyUpdate::patch(revision, patch))
+        .unwrap();
+    assert_eq!(
+        policy
+            .select_worker(selection_input(&workers, &request, 64))
+            .unwrap()
+            .worker
+            .worker_id,
+        0
+    );
+    let negative = json!({"prefix_affinity_weight": -1.0})
+        .as_object()
+        .unwrap()
+        .clone();
+    assert!(
+        policy
+            .update_runtime_config(RuntimePolicyUpdate::patch(revision + 1, negative))
+            .is_err()
+    );
+
+    // A large enough load gap still wins, so the weight is a bias, not a pin.
+    for (worker, load) in &mut request.worker_loads {
+        if worker.worker_id == 0 {
+            load.active_decode_blocks = 400;
+        }
+    }
+    assert_eq!(
+        policy
+            .select_worker(selection_input(&workers, &request, 64))
+            .unwrap()
+            .worker
+            .worker_id,
+        1
+    );
+}
+
 #[test]
 fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
     use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
@@ -251,7 +337,7 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
 fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
     for temperature in [0.0, 0.7] {
         for prompt in [1, 17, 127, 2048] {
-            for mode in 0..32 {
+            for mode in 0..64 {
                 let (workers, mut request) = fixture(16, prompt);
                 let config = KvRouterConfig {
                     router_temperature: temperature,
@@ -260,6 +346,7 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
                     disk_cache_hit_weight: 0.1,
                     decode_active_request_weight: if mode & 8 == 0 { 0.0 } else { 0.7 },
                     shared_cache_multiplier: Some(if mode & 16 == 0 { 0.0 } else { 0.6 }),
+                    prefix_affinity_weight: if mode & 32 == 0 { 0.0 } else { 0.9 },
                     ..Default::default()
                 };
                 if mode % 8 >= 4 {

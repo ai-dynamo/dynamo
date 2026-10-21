@@ -1170,7 +1170,7 @@ impl RouterRequestMetrics {
         let non_max_overlap_selections_total = metrics
             .create_intcountervec(
                 &router_metric(frontend_service::NON_MAX_OVERLAP_SELECTIONS_TOTAL),
-                "Total admitted prefill scheduler selections with less KV cache overlap than another eligible worker",
+                "Total admitted prefill or aggregated scheduler selections with less KV cache overlap than another eligible worker",
                 &[labels::WORKER_TYPE],
                 extra_labels,
             )
@@ -1178,7 +1178,7 @@ impl RouterRequestMetrics {
         let overlap_blocks_lost = metrics
             .create_histogramvec(
                 &router_metric(frontend_service::OVERLAP_BLOCKS_LOST),
-                "Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and selected worker",
+                "Difference in effective KV cache overlap between the highest-overlap eligible worker and selected worker",
                 &[labels::WORKER_TYPE],
                 extra_labels,
                 Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),

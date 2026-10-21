@@ -378,7 +378,18 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let raw_prefill_blocks = raw_prefill_tokens as f64 / context.block_size as f64;
         let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
-        let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
+        let mut logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
+        // Load-only decode routing (the plugin's decode subtraction path) never charges it.
+        if kv_router_config.prefix_affinity_weight != 0.0
+            && (self.worker_type != "decode" || context.track_prefill_tokens)
+        {
+            // Charge each prompt block this worker lacks. The overlap credit is capped at the
+            // request's own prefill, so it alone cannot outweigh transient decode load on the
+            // worker that already holds a resumed prefix.
+            let missing_prefix_blocks =
+                (context.request_blocks.max(1) as f64 - device_overlap_blocks).max(0.0);
+            logit += kv_router_config.prefix_affinity_weight * missing_prefix_blocks;
+        }
 
         // These rows are emitted from the `SchedulerQueueActor` task, which `scheduling::queue`
         // spawns without the caller's request span, so the logging layer cannot attach
