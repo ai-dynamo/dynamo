@@ -93,7 +93,10 @@ export interface PeeringRegionConfig {
 
 /** Karmada control plane, installed in the hub cluster only. */
 export interface KarmadaControlPlaneConfig {
-  /** Karmada release, for example `1.19.0`. Pins the chart and its images. */
+  /**
+   * Karmada release, which pins the chart and its images. It must be
+   * `KARMADA_VERSION`, the release that `crds/` comes from.
+   */
   readonly version: string;
   /** VPC ranges allowed to reach the internal Karmada API load balancer. */
   readonly apiSourceCidrs: readonly [string, ...string[]];

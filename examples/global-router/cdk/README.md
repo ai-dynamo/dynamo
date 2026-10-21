@@ -254,35 +254,47 @@ instead, with curl directed to local `127.0.0.1:8080`.
 > still exposes the SSH daemon to the public internet. Rotate keys promptly and destroy the stack
 > when the environment is not in use.
 
-## Multi-cluster: Karmada and SIG Multicluster (MCS)
+## Multi-cluster: Karmada and Multi-Cluster Services (MCS)
 
-A deployment with `multiCluster` set in `lib/const.ts` is ready for Karmada and the SIG
-Multicluster (MCS) API. Ohio is the Karmada hub (`aws-ohio`) and West is a member (`aws-west`).
-The member names match the Global Router's `site_id` values. For every such cluster, CDK:
+A deployment with `multiCluster` set in `lib/const.ts` is ready for Karmada and the Multi-Cluster
+Services (MCS) API from SIG Multicluster. Ohio is the Karmada hub (`aws-ohio`) and West is a
+member (`aws-west`). The member names match the Global Router's `site_id` values. For every such
+cluster, CDK:
 
 - adds an ingress rule for all TCP from each peer VPC range to the EKS cluster security group.
   MCS EndpointSlices list pod addresses, so a caller in the other cluster, such as a Global Router
   dialing a Relay it found through discovery, connects to the pod directly; without this rule only
   the Relay's NLB is reachable. Pods use their node's security groups, and the nodes get the
-  cluster security group because their launch templates set none;
+  cluster security group because their launch templates set none. A second rule admits the ICMP
+  "fragmentation needed" message from the peer: inter-Region peering carries smaller packets than
+  the pods' MTU, and Path MTU Discovery needs that message to find the limit;
 - excludes the peer VPC ranges from source NAT in the VPC CNI (`aws-node`
   `AWS_VPC_K8S_CNI_EXCLUDE_SNAT_CIDRS`), so traffic between the clusters keeps its pod address;
-- installs the MCS `ServiceExport` and `ServiceImport` CRDs (`crds/`, from Karmada 1.19.0);
-- in the hub only, installs the Karmada 1.19.0 control plane from the release Helm chart into
-  `karmada-system`, with every image pinned. Its API Service is an internal NLB on TCP 5443 that
-  only the configured member VPC ranges can reach, and its certificate covers
-  `*.elb.<region>.amazonaws.com`.
+- installs the MCS `ServiceExport` and `ServiceImport` CRDs (`crds/`, from Karmada 1.19.0). CDK
+  keeps them if they are removed from the stack or a deployment rolls back, because they may
+  predate the stack and deleting a CRD deletes every `ServiceExport` and `ServiceImport`;
+- in the hub only, and only with `-c karmada=true`, installs the Karmada 1.19.0 control plane
+  from the release Helm chart into `karmada-system`, with every image pinned and the
+  `PropagateDeps` feature gate on (the chart turns it off, and the import step below needs it).
+  Its API Service is an internal NLB on TCP 5443 that only the configured member VPC ranges can
+  reach, and its certificate covers `*.elb.<region>.amazonaws.com`.
 
-Karmada's etcd uses `hostPath` storage, as `karmadactl init` does. If the etcd pod moves to
-another node, the members must register again.
+Karmada's etcd keeps its data on the node's own disk (`hostPath`) and is not pinned to a node.
+If the etcd pod moves, for example when the node group replaces a node, the hub loses its state
+and does not recover by itself: install the control plane again and register the members again.
 
-Deploy the hub first, then the members, then `deployment=both`:
+Deploy the hub first, then the members, then `deployment=both`. Leave out `-c karmada=true` until
+the running clusters are moved off their hand-installed Karmada (see the last section):
 
 ```bash
-pnpm exec cdk deploy -c deployment=ohio   # add the routerImage flags if the Router is deployed
+pnpm exec cdk deploy -c deployment=ohio -c karmada=true   # add the routerImage flags if the Router is deployed
 pnpm exec cdk deploy -c deployment=west
 pnpm exec cdk deploy --all -c deployment=both
 ```
+
+Pass `-c karmada=true` on every later Ohio deployment. Without it, CDK stops managing the control
+plane but leaves it installed: CDK never uninstalls the chart, because its uninstall hook also
+deletes the MCS CRDs and the `karmada-system` namespace.
 
 ### Let the bastions reach the other VPC
 
@@ -311,21 +323,30 @@ tar xzf karmadactl-linux-amd64.tgz && sudo install -m 0755 karmadactl /usr/local
 
 On the Ohio bastion, write the Karmada kubeconfig, point it at the load balancer, and create a
 join token. The `KarmadaKubeconfigCommand` and `KarmadaApiEndpointCommand` stack outputs print
-the first two commands:
+the first two commands. The deployment does not wait for the load balancer's address, so if
+`echo $LB` prints nothing, wait a minute and run the `LB=` line again:
 
 ```bash
 kubectl get secret -n karmada-system karmada-kubeconfig -o jsonpath='{.data.kubeconfig}' | base64 -d > karmada-apiserver.config
 LB=$(kubectl get service -n karmada-system karmada-apiserver -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+echo $LB
 kubectl config set-cluster karmada-apiserver --server "https://$LB:5443" --kubeconfig karmada-apiserver.config
 karmadactl token create --print-register-command --kubeconfig karmada-apiserver.config
 ```
 
-On each cluster's bastion, Ohio included, register it under its `KarmadaMemberName` output.
-Use the load balancer name in place of the address that `token create` printed:
+`token create` prints a `karmadactl register` command that already holds the load balancer
+address, the token, and the CA hash. Run that command on each cluster's bastion, adding
+`--cluster-name` with the cluster's `KarmadaMemberName` output. On Ohio, also add
+`--namespace karmada-agent`. The agent's default namespace is `karmada-system`, where the control
+plane already has the `karmada-kubeconfig` Secret, so `register` would stop without registering:
 
 ```bash
-karmadactl register "$LB:5443" --token "<token>" --discovery-token-ca-cert-hash "<hash>" --cluster-name aws-west
+karmadactl register <printed address and flags> --cluster-name aws-west
+karmadactl register <printed address and flags> --cluster-name aws-ohio --namespace karmada-agent
 ```
+
+To remove Ohio later, pass the same `--namespace karmada-agent` to `karmadactl unregister`.
+With the default namespace, it would delete the Secret that the control plane uses.
 
 Then, on the Ohio bastion, both members should be `Pull` and `Ready`:
 
@@ -343,14 +364,16 @@ EndpointSlice, and exporting it again found no slice until the Service changed.
 
 Karmada collects the EndpointSlices of every exported Service on its control plane as
 `imported-<cluster>-<slice>`. To use a Service from a cluster, create a `ServiceImport` on the
-Karmada control plane and propagate it there: that cluster gets a `derived-<service>` Service
-whose EndpointSlices list the pods of every exporting cluster, its own included.
+Karmada control plane and propagate it there with a `PropagationPolicy` that sets
+`propagateDeps: true`: that cluster gets a `derived-<service>` Service whose EndpointSlices list
+the pods of every exporting cluster, its own included.
 
 ### Moving the current clusters to the CDK-managed Karmada
 
 The running clusters have a Karmada control plane that was installed by hand with
-`karmadactl init`. Helm cannot install over it, and the CDK-managed CRDs take over the ones that
-Karmada propagated. Before deploying `deployment=ohio` with `multiCluster`:
+`karmadactl init`, and Helm cannot install over it. Deployments without `-c karmada=true` are
+safe: they add the network settings and take over the MCS CRDs that Karmada propagated. Before
+deploying Ohio with `-c karmada=true`:
 
 1. Deploy `deployment=both` to add the public routes (above), so both bastions reach the Karmada
    API.
@@ -770,7 +793,7 @@ See:
 - [Amazon EC2 key pairs](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-key-pairs.html)
 - [Amazon EKS VPC and subnet requirements](https://docs.aws.amazon.com/eks/latest/userguide/network-reqs.html)
 - [EFA limitations](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html)
-- [Dynamo topology-aware KV transfer](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/kubernetes/multinode/topology-aware-kv-transfer.md)
+- [Dynamo topology-aware KV transfer](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md)
 - [Dynamo Mocker simulation](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx)
 
 ## Main Configuration
@@ -799,7 +822,7 @@ See:
 | `US_EAST2_DEPLOYMENT.dgds` | `MOCKER_OHIO_1_DGD` | DGD workloads created by this deployment |
 | `US_EAST2_DEPLOYMENT.multiCluster.memberName` | `aws-ohio` | Karmada member name and Router site ID |
 | `US_EAST2_DEPLOYMENT.multiCluster.peerCidrs` | `10.43.0.0/16` | Peer VPCs whose pods may reach this cluster's pods |
-| `US_EAST2_DEPLOYMENT.multiCluster.karmadaControlPlane.version` | `1.19.0` | Karmada release installed in the hub |
+| `US_EAST2_DEPLOYMENT.multiCluster.karmadaControlPlane.version` | `1.19.0` | Karmada release installed in the hub with `-c karmada=true`; must equal `KARMADA_VERSION` |
 
 ## Destroy
 

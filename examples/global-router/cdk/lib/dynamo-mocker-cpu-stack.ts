@@ -33,7 +33,7 @@ import * as eks from "aws-cdk-lib/aws-eks-v2";
 import { Construct } from "constructs";
 
 import { EksAdminBastion } from "./bastion";
-import { isValidIpv4Cidr } from "./cidr";
+import { isValidIpv4Cidr, isValidVpcCidr } from "./cidr";
 import type { GlobalRouterDeployment } from "./global-router-deployment";
 import { createGlobalRouterHelmValues } from "./global-router-helm-values";
 import {
@@ -53,6 +53,7 @@ import {
   PURPOSE_LABEL_VALUE,
 } from "./helm-values";
 import {
+  KARMADA_API_PORT,
   KARMADA_API_SERVICE,
   KARMADA_KUBECONFIG_SECRET,
   KARMADA_NAMESPACE,
@@ -432,7 +433,7 @@ export class DynamoMockerCpuStack extends Stack {
       if (config.multiCluster.karmadaControlPlane !== undefined) {
         new CfnOutput(this, "KarmadaApiEndpointCommand", {
           description:
-            "Run on the bastion: prints the internal Karmada API load balancer hostname (port 5443).",
+            `Run on the bastion: prints the internal Karmada API load balancer hostname (port ${KARMADA_API_PORT}).`,
           value:
             `kubectl get service -n ${KARMADA_NAMESPACE} ${KARMADA_API_SERVICE} ` +
             "-o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
@@ -705,32 +706,6 @@ function isStandardAvailabilityZone(
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function isValidVpcCidr(value: string): boolean {
-  const match =
-    /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(
-      value,
-    );
-  if (match === null) {
-    return false;
-  }
-  const octets = match.slice(1, 5).map(Number);
-  const prefix = Number(match[5]);
-  if (octets.some((octet) => octet > 255) || prefix < 16 || prefix > 24) {
-    return false;
-  }
-  const address =
-    octets[0] * 2 ** 24 +
-    octets[1] * 2 ** 16 +
-    octets[2] * 2 ** 8 +
-    octets[3];
-  const blockSize = 2 ** (32 - prefix);
-  const isPrivate =
-    octets[0] === 10 ||
-    (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
-    (octets[0] === 192 && octets[1] === 168);
-  return isPrivate && address % blockSize === 0;
 }
 
 function isKubernetesName(value: string, maximumLength: number): boolean {
