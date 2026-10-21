@@ -332,6 +332,8 @@ spec:
                   description: |-
                     V1Beta2 losslessly preserves a native v1beta2 spec while this object is
                     represented through v1alpha1. It is mutually exclusive with native fields.
+                    This field is a read-only conversion view; modify the request through the
+                    native v1beta2 API.
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
               type: object
@@ -9348,6 +9350,8 @@ spec:
                   description: |-
                     V1Beta2 losslessly preserves a native v1beta2 spec while this object is
                     represented through v1beta1. It is mutually exclusive with native fields.
+                    This field is a read-only conversion view; modify the request through the
+                    native v1beta2 API.
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
                 workload:
@@ -9746,6 +9750,8 @@ spec:
                   description: |-
                     V1Beta1 losslessly preserves a native v1beta1 spec while this object is
                     represented through v1beta2. It is mutually exclusive with native fields.
+                    This field is a read-only conversion view; modify the request through the
+                    native v1beta1 API.
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
                 workload:
