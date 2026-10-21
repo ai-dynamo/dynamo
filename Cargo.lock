@@ -2484,6 +2484,7 @@ dependencies = [
  "parking_lot",
  "rustc-hash 2.1.2",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2526,6 +2527,7 @@ version = "1.6.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
