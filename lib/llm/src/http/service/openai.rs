@@ -3544,20 +3544,13 @@ async fn chat_completions(
         return Err(err_response);
     }
 
-    // Beam route: a `strict` tool whose schema is outside OpenAI's strict subset is
-    // served as non-strict instead of rejected (see
-    // `tool_choice::relax_noncompliant_strict_tools_for_beam`). The model lookup is
-    // repeated below with its own error handling, so a missing model is reported there.
+    // Add legacy Beam builtin declarations before validating their schemas.
+    // The model lookup below reports a missing model through its normal error path.
     if let Ok((_, model_parsing)) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
     {
         crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
-            &mut request,
-            model_parsing.tool_call_parser.as_deref(),
-            model_parsing.reasoning_parser.as_deref(),
-        );
-        crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
             &mut request,
             model_parsing.tool_call_parser.as_deref(),
             model_parsing.reasoning_parser.as_deref(),

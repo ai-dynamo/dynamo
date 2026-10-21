@@ -73,6 +73,42 @@ impl OpenAIPreprocessor {
         common_request: &mut PreprocessedRequest,
         prompt_prefill: impl Into<PromptReasoningPrefill>,
     ) -> Result<GuidedToolConstraint, DynamoError> {
+        let constraint =
+            self.try_apply_tool_choice_guided_decoding(request, common_request, prompt_prefill)?;
+        let choice = request
+            .inner
+            .tool_choice
+            .as_ref()
+            .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
+        let requires_enforcement = self.is_beam()
+            && (matches!(
+                choice,
+                ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
+            ) || effective_tools(&request.inner)?.iter().any(|tool| {
+                tool.function.strict == Some(true)
+                    && match choice {
+                        ChatCompletionToolChoiceOption::None => false,
+                        ChatCompletionToolChoiceOption::Named(named) => {
+                            tool.function.name == named.function.name
+                        }
+                        _ => true,
+                    }
+            }));
+        if requires_enforcement && constraint == GuidedToolConstraint::None {
+            return Err(invalid_argument(
+                "Beam cannot enforce the requested tool constraints with this schema and prompt configuration",
+                None,
+            ));
+        }
+        Ok(constraint)
+    }
+
+    fn try_apply_tool_choice_guided_decoding(
+        &self,
+        request: &NvCreateChatCompletionRequest,
+        common_request: &mut PreprocessedRequest,
+        prompt_prefill: impl Into<PromptReasoningPrefill>,
+    ) -> Result<GuidedToolConstraint, DynamoError> {
         let prompt_prefill = prompt_prefill.into();
         let tool_choice = request
             .inner
@@ -289,52 +325,6 @@ impl OpenAIPreprocessor {
             && !Self::has_guided_tool_choice(request)
             && !self.beam_frames_structured_response(request)
     }
-}
-
-/// Beam route only: a tool declared `strict: true` whose schema lies outside
-/// OpenAI's strict subset (every property required, `additionalProperties: false`, no
-/// composition keywords — enforced upstream since #15153 with an HTTP 400) is served as
-/// non-strict with a warning instead of rejected. The Beam turn grammar holds every
-/// typeable tool regardless of `strict`, so nothing is lost, and clients that stamp
-/// `strict: true` on every tool (inspect_ai's OpenAI-compatible provider does) keep
-/// working. Other routes keep upstream's rejection. Returns the number of tools relaxed.
-pub(crate) fn relax_noncompliant_strict_tools_for_beam(
-    request: &mut NvCreateChatCompletionRequest,
-    tool_call_parser: Option<&str>,
-    reasoning_parser: Option<&str>,
-) -> usize {
-    if !(is_beam_parser(tool_call_parser) || is_beam_parser(reasoning_parser)) {
-        return 0;
-    }
-    let Some(tools) = request.inner.tools.as_mut() else {
-        return 0;
-    };
-    let mut relaxed: Vec<String> = Vec::new();
-    let mut first_violation = None;
-    for tool in tools.iter_mut() {
-        if tool.function.strict != Some(true) {
-            continue;
-        }
-        if let Err(error) =
-            crate::protocols::openai::strict_schema::validate_strict_function(&tool.function)
-        {
-            // The name is unvalidated request data at this point; bound what is logged.
-            relaxed.push(tool.function.name.chars().take(64).collect());
-            first_violation.get_or_insert_with(|| error.to_string());
-            tool.function.strict = None;
-        }
-    }
-    if !relaxed.is_empty() {
-        // One line per request: a client that marks every tool strict would otherwise
-        // log once per tool per request.
-        tracing::warn!(
-            relaxed = relaxed.len(),
-            tools = %relaxed.iter().take(5).cloned().collect::<Vec<_>>().join(", "),
-            first_violation = %first_violation.unwrap_or_default(),
-            "Beam route: tool(s) declared `strict` with a schema outside OpenAI's strict subset; serving them as non-strict (the turn grammar holds every typeable tool regardless)"
-        );
-    }
-    relaxed.len()
 }
 
 /// Beam route only: a `builtin_tools` entry given as a declaration object (the legacy
@@ -737,6 +727,45 @@ mod tests {
             .output_options(OutputOptions::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn beam_rejects_missing_mandatory_tool_grammar() {
+        let preprocessor = preprocessor("beam", StructuralTagMode::Off);
+        for strict in [false, true] {
+            let name = "search";
+            for (choice, _forced) in [
+                (json!("auto"), false),
+                (json!("none"), false),
+                (json!("required"), true),
+                (
+                    json!({"type": "function", "function": {"name": name}}),
+                    true,
+                ),
+            ] {
+                let request = request(json!({
+                    "tools": [{"type": "function", "function": {
+                        "name": name, "strict": strict,
+                        "parameters": {"type": "object", "properties": {
+                            "query": {"type": "string", "pattern": "^a+$"}
+                        }, "required": ["query"], "additionalProperties": false}
+                    }}],
+                    "tool_choice": choice,
+                }));
+                let mut output = preprocessed_request();
+                let result =
+                    preprocessor.apply_tool_choice_guided_decoding(&request, &mut output, false);
+                let required = strict && choice != json!("none");
+                assert_eq!(
+                    result.is_err(),
+                    required,
+                    "strict={strict}, choice={choice}"
+                );
+                if let Err(error) = result {
+                    assert!(error.to_string().contains("cannot enforce"));
+                }
+            }
+        }
     }
 
     #[test]
@@ -1531,51 +1560,6 @@ mod tests {
     }
 
     #[test]
-    fn beam_route_serves_noncompliant_strict_tools_as_non_strict() {
-        use crate::engines::ValidateRequest;
-        // BFCL-style: optional properties, so `required` does not list every property.
-        let loose = json!({"type": "function", "function": {
-            "name": "triangle_properties_get", "strict": true,
-            "parameters": {"type": "object", "properties": {
-                "side1": {"type": "integer"}, "get_area": {"type": "boolean"}},
-                "required": ["side1"], "additionalProperties": false}}});
-        let tight = json!({"type": "function", "function": {
-            "name": "ping", "strict": true,
-            "parameters": {"type": "object", "properties": {"x": {"type": "integer"}},
-                "required": ["x"], "additionalProperties": false}}});
-
-        // Upstream's contract: the strict declaration makes the loose schema a 400.
-        let mut beam = request(json!({"tools": [loose.clone(), tight.clone()]}));
-        assert!(ValidateRequest::validate(&beam).is_err());
-
-        // Beam route: the loose tool is served as non-strict, the compliant one keeps strict.
-        assert_eq!(
-            relax_noncompliant_strict_tools_for_beam(&mut beam, Some("beam"), Some("beam")),
-            1
-        );
-        let tools = beam.inner.tools.as_ref().unwrap();
-        assert_eq!(tools[0].function.strict, None);
-        assert_eq!(tools[1].function.strict, Some(true));
-        assert!(ValidateRequest::validate(&beam).is_ok());
-        assert_eq!(
-            relax_noncompliant_strict_tools_for_beam(&mut beam, Some("beam"), None),
-            0
-        );
-
-        // Every other route keeps the rejection.
-        let mut hermes = request(json!({"tools": [loose]}));
-        assert_eq!(
-            relax_noncompliant_strict_tools_for_beam(&mut hermes, Some("hermes"), None),
-            0
-        );
-        assert_eq!(
-            hermes.inner.tools.as_ref().unwrap()[0].function.strict,
-            Some(true)
-        );
-        assert!(ValidateRequest::validate(&hermes).is_err());
-    }
-
-    #[test]
     fn beam_open_final_channel_holds_only_the_answer_and_forces_no_call() {
         let preprocessor = preprocessor("beam", StructuralTagMode::Off);
         let open_answer = PromptReasoningPrefill {
@@ -1599,14 +1583,14 @@ mod tests {
         assert!(!tag.to_string().contains("to=get_weather"));
 
         let mut common_request = preprocessed_request();
-        let applied = preprocessor
+        let error = preprocessor
             .apply_tool_choice_guided_decoding(
                 &request(json!({"tools": tools(), "tool_choice": "required"})),
                 &mut common_request,
                 open_answer,
             )
-            .unwrap();
-        assert_eq!(applied, GuidedToolConstraint::None);
+            .expect_err("a forced call cannot be enforced inside the final answer");
+        assert!(error.to_string().contains("cannot enforce"));
         assert!(installed_structural_tag(&common_request).is_none());
     }
 
