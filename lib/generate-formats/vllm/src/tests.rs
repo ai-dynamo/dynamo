@@ -430,6 +430,7 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
         .expect("invalid routing metadata must not reject execution");
 
         assert!(preprocessed.mm_routing_info.is_none(), "{name}");
+        assert!(preprocessed.has_opaque_multimodal_input, "{name}");
         assert_eq!(
             preprocessed.token_ids.as_slice(),
             expected_token_ids,
@@ -489,6 +490,7 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
         )
         .expect("build adapter request");
         assert!(adapter.mm_routing_info.is_none());
+        assert!(adapter.has_opaque_multimodal_input);
         assert_eq!(
             adapter.routing.as_ref().unwrap().lora_name.as_deref(),
             Some("adapter-a")

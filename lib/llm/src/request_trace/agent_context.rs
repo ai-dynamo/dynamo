@@ -241,10 +241,10 @@ pub(crate) struct AgentContextTraceState {
     pub finish_reason_metadata: SharedFinishReasonMetadata,
 }
 
-pub(crate) fn build_agent_context_trace_state(
+pub(crate) fn build_agent_context_trace_state<T: Send + Sync + 'static>(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
-    context: &Context<()>,
+    context: &Context<T>,
 ) -> Option<AgentContextTraceState> {
     let agent_context = common_request.agent_context.clone()?;
     let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()

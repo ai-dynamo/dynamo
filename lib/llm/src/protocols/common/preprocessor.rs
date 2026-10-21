@@ -422,6 +422,14 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_data: Option<MultimodalDataMap>,
 
+    /// Frontend formats set this when multimodal inputs live in an opaque
+    /// worker envelope. Request tracing cannot replay them from token IDs alone,
+    /// even if multimodal routing falls back to token-only routing.
+    /// This hint is frontend-local; it does not change the worker protocol.
+    #[builder(default)]
+    #[serde(skip)]
+    pub has_opaque_multimodal_input: bool,
+
     /// User-provided backend cache identities aligned with `multi_modal_data`.
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
