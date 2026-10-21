@@ -11,7 +11,7 @@ use std::{
 
 use crate::{
     ConcurrentRadixTreeCompressed, SessionPrefixIndexer,
-    indexer::{KvIndexer, KvRouterError, ThreadPoolIndexer},
+    indexer::{KvIndexer, KvRouterError, LowerTierIndexers, ThreadPoolIndexer},
     protocols::{
         ExternalSequenceBlockHash, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
         WorkerId, WorkerWithDpRank,
@@ -190,11 +190,20 @@ impl SessionMutation {
         }
     }
 
+    pub(super) fn tier(&self) -> Option<StorageTier> {
+        match self {
+            Self::Stored { tier, .. }
+            | Self::Inherited { tier, .. }
+            | Self::Removed { tier, .. } => Some(*tier),
+            Self::Matched { .. } | Self::Cleared { .. } | Self::WorkerRemoved { .. } => None,
+        }
+    }
+
     async fn apply(
         self,
         index: &SessionPrefixIndexer,
         residency_versions: &ResidencyVersions,
-        barrier: &PrimaryBarrier,
+        barrier: &ResidencyBarrier,
     ) {
         match self {
             Self::Matched {
@@ -206,7 +215,11 @@ impl SessionMutation {
                 let is_resident = if residency_versions.current(worker) == residency_version {
                     true
                 } else {
-                    match barrier.contains_worker_block(worker, matched_hash).await {
+                    match barrier
+                        .primary
+                        .contains_worker_block(worker, matched_hash)
+                        .await
+                    {
                         Ok(is_resident) => is_resident,
                         Err(error) => {
                             tracing::warn!(%error, %session_id, ?worker, "failed to revalidate session prefix match");
@@ -313,19 +326,57 @@ impl PrimaryBarrier {
     }
 }
 
+/// Orders session mutations after the physical indexes they describe: the primary
+/// for every worker in a batch, and the lower-tier lane for each `(worker, tier)` a
+/// lower-tier mutation names.
+struct ResidencyBarrier {
+    primary: PrimaryBarrier,
+    lower_tier: LowerTierIndexers,
+}
+
+impl ResidencyBarrier {
+    async fn wait_for(&self, mutations: &[SessionMutation]) -> Result<(), KvRouterError> {
+        self.primary.wait_for(mutations).await?;
+        let lanes: HashSet<(WorkerWithDpRank, StorageTier)> = mutations
+            .iter()
+            .filter_map(|mutation| Some((mutation.worker()?, mutation.tier()?)))
+            .filter(|(_, tier)| !tier.is_gpu())
+            .collect();
+        for (worker, tier) in lanes {
+            if let Some(indexer) = self.lower_tier.get(tier) {
+                indexer.flush_worker_lane_and_wait(worker).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl SessionUpdateSender {
-    pub fn for_legacy(index: Arc<SessionPrefixIndexer>, primary: KvIndexer) -> Self {
-        Self::spawn(index, PrimaryBarrier::Legacy(primary))
+    pub fn for_legacy(
+        index: Arc<SessionPrefixIndexer>,
+        primary: KvIndexer,
+        lower_tier: LowerTierIndexers,
+    ) -> Self {
+        Self::spawn(index, PrimaryBarrier::Legacy(primary), lower_tier)
     }
 
     pub fn for_concurrent(
         index: Arc<SessionPrefixIndexer>,
         primary: Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>,
+        lower_tier: LowerTierIndexers,
     ) -> Self {
-        Self::spawn(index, PrimaryBarrier::Concurrent(primary))
+        Self::spawn(index, PrimaryBarrier::Concurrent(primary), lower_tier)
     }
 
-    fn spawn(index: Arc<SessionPrefixIndexer>, barrier: PrimaryBarrier) -> Self {
+    fn spawn(
+        index: Arc<SessionPrefixIndexer>,
+        primary: PrimaryBarrier,
+        lower_tier: LowerTierIndexers,
+    ) -> Self {
+        let barrier = ResidencyBarrier {
+            primary,
+            lower_tier,
+        };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let residency_versions = Arc::new(ResidencyVersions::default());
         let task_residency_versions = Arc::clone(&residency_versions);
