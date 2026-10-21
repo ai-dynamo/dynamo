@@ -49,7 +49,7 @@ For more background on the snapshot architecture and startup improvements, see
 - Multi-GPU support has limited validation and currently uses legacy IPC only for peer-to-peer
   communication.
 
-For the cross-feature backend overview, see [Compatibility](../../../../reference/general/compatibility.mdx).
+For the cross-feature backend overview, see [Compatibility](../../../../../pages-dev/reference/general/compatibility.mdx).
 
 ## Quick Start via `DynamoCheckpoint` CR
 

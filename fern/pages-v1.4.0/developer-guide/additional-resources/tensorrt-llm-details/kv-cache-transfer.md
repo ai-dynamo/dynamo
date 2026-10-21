@@ -55,7 +55,7 @@ nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.0-efa
 
 On 1.2.1 the same image is tagged `1.2.1-efa-amd64`. Despite the suffix that tag is a multi-arch manifest covering AMD64 and ARM64; the name was corrected to `-efa` in 1.3.0. Pull the tag exactly as written — `1.2.1-efa` was never published.
 
-See [Release Artifacts](../../../reference/general/release-artifacts.mdx) for all available EFA images.
+See [Release Artifacts](../../../../pages-dev/reference/general/release-artifacts.mdx) for all available EFA images.
 
 - **Host-mount approach (ARM64 / GB200):** Instead of the pre-built image, you can run the standard `tensorrtllm-runtime` image and mount the EFA SDK from the host node, which keeps the SDK in step with the host driver. This is what we tested on GB200 NVL72:
 

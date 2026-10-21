@@ -19,7 +19,7 @@ docker run --gpus all --rm -it \
   /bin/bash
 ```
 
-For installation from source or custom builds, see [Local Installation](../../../../cli/installation/install-dynamo.mdx) and [Release Artifacts](../../../../reference/general/release-artifacts.mdx).
+For installation from source or custom builds, see [Local Installation](../../../../cli/installation/install-dynamo.mdx) and [Release Artifacts](../../../../../pages-dev/reference/general/release-artifacts.mdx).
 
 ## Run KVBM Standalone
 
@@ -29,7 +29,7 @@ KVBM can be used independently without using the rest of the Dynamo stack:
 pip install kvbm
 ```
 
-See the [compatibility page](../../../../reference/general/compatibility.mdx) for version compatibility.
+See the [compatibility page](../../../../../pages-dev/reference/general/compatibility.mdx) for version compatibility.
 
 ### Build from Source
 
@@ -52,7 +52,7 @@ Pick one of the following to get a Dynamo vLLM container with KVBM built in. The
 docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
 ```
 
-See the [Local Installation Guide](../../../../cli/installation/install-dynamo.mdx) for full setup instructions and [Release Artifacts](../../../../reference/general/release-artifacts.mdx) for available versions.
+See the [Local Installation Guide](../../../../cli/installation/install-dynamo.mdx) for full setup instructions and [Release Artifacts](../../../../../pages-dev/reference/general/release-artifacts.mdx) for available versions.
 
 **Option B: Build from source**
 
@@ -122,7 +122,7 @@ Pick one of the following to get a Dynamo TensorRT-LLM container with KVBM built
 docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.0
 ```
 
-See the [Local Installation Guide](../../../../cli/installation/install-dynamo.mdx) for full setup instructions and [Release Artifacts](../../../../reference/general/release-artifacts.mdx) for available versions.
+See the [Local Installation Guide](../../../../cli/installation/install-dynamo.mdx) for full setup instructions and [Release Artifacts](../../../../../pages-dev/reference/general/release-artifacts.mdx) for available versions.
 
 **Option B: Build from source**
 
