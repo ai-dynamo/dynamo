@@ -20,11 +20,11 @@ the recorder retains at most 256 accepted requests.
 
 ```bash
 cargo run -p dynamo-trtllm-mocker --bin dynamo-trtllm-mocker-server -- \
-  --listen 127.0.0.1:50051 --model Qwen/Qwen3-0.6B --context-length 2048 \
+  --listen 127.0.0.1:30001 --model Qwen/Qwen3-0.6B --context-length 2048 \
   --extra-engine-args '{"engine":{"speedup_ratio":1000,"block_size":32}}'
 
 cargo run -p dynamo-trtllm-sidecar --bin dynamo-trtllm-sidecar -- \
-  --grpc-endpoint http://127.0.0.1:50051 --model-path Qwen/Qwen3-0.6B
+  --grpc-endpoint http://127.0.0.1:30001 --model-path Qwen/Qwen3-0.6B
 ```
 
 Set the sidecar's `--model-path` to the server's `--model` so the frontend
@@ -44,19 +44,19 @@ fetch rather than anywhere in this server.
 
 ```bash
 cargo run -p dynamo-trtllm-mocker --bin dynamo-trtllm-mocker-server -- \
-  --listen 127.0.0.1:50051 --model Qwen/Qwen3-0.6B --context-length 2048 \
+  --listen 127.0.0.1:30001 --model Qwen/Qwen3-0.6B --context-length 2048 \
   --disaggregation-mode prefill \
   --extra-engine-args '{"engine":{"speedup_ratio":1000}}'
 cargo run -p dynamo-trtllm-mocker --bin dynamo-trtllm-mocker-server -- \
-  --listen 127.0.0.1:50052 --model Qwen/Qwen3-0.6B --context-length 2048 \
+  --listen 127.0.0.1:30011 --model Qwen/Qwen3-0.6B --context-length 2048 \
   --disaggregation-mode decode \
   --extra-engine-args '{"engine":{"speedup_ratio":1000}}'
 
 cargo run -p dynamo-trtllm-sidecar --bin dynamo-trtllm-sidecar -- \
-  --grpc-endpoint http://127.0.0.1:50051 --model-path Qwen/Qwen3-0.6B \
+  --grpc-endpoint http://127.0.0.1:30001 --model-path Qwen/Qwen3-0.6B \
   --disaggregation-mode prefill
 cargo run -p dynamo-trtllm-sidecar --bin dynamo-trtllm-sidecar -- \
-  --grpc-endpoint http://127.0.0.1:50052 --model-path Qwen/Qwen3-0.6B \
+  --grpc-endpoint http://127.0.0.1:30011 --model-path Qwen/Qwen3-0.6B \
   --disaggregation-mode decode
 ```
 

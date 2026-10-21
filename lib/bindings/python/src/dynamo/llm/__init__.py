@@ -13,6 +13,7 @@ from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import FpmDirectPublisher as FpmDirectPublisher
 from dynamo._core import FpmEventRelay as FpmEventRelay
 from dynamo._core import FpmEventSubscriber as FpmEventSubscriber
+from dynamo._core import FpmHealthSnapshot as FpmHealthSnapshot
 from dynamo._core import FrontendExtensionContext as FrontendExtensionContext
 from dynamo._core import FrontendResponse as FrontendResponse
 from dynamo._core import FrontendRoute as FrontendRoute
@@ -66,6 +67,7 @@ from ._unary import UnaryChatModel as UnaryChatModel
 from ._unary import with_engine_data as with_engine_data
 from .exceptions import HttpError
 from .exceptions import RouterQueueLimitExceeded as RouterQueueLimitExceeded
+from .exceptions import WorkerOverloaded as WorkerOverloaded
 
 
 class RoutedEngine(Protocol):

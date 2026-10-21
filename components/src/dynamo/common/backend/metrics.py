@@ -32,7 +32,7 @@ from dynamo.common.utils.prometheus import gather_with_labels
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
 
-    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
+    from dynamo._core import backend as _backend
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ def ensure_prometheus_multiproc_dir(
 
 
 def register_engine_registry(
-    metrics: "EngineMetrics",
+    metrics: _backend.EngineMetrics,
     registry: "CollectorRegistry",
     *,
     prefix_filters: Optional[list[str]] = None,
@@ -102,7 +102,7 @@ def register_engine_registry(
 
 
 def register_global_registry(
-    metrics: "EngineMetrics",
+    metrics: _backend.EngineMetrics,
     *,
     engine_prefix: str,
     multiproc_only_prefixes: Optional[list[str]] = None,

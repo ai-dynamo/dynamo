@@ -4,6 +4,7 @@
 """Dynamo vLLM wrapper configuration ArgGroup."""
 
 import argparse
+import json
 import logging
 import os
 import warnings
@@ -33,6 +34,21 @@ from .constants import DisaggregationMode, EmbeddingTransferMode
 logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 MAX_PORT = 65535
+
+
+def _configured_artifact_router_profile(
+    configured: str | None,
+) -> tuple[tuple[int, int, int], ...]:
+    if configured is None:
+        return ()
+    from dynamo.artifacts.vllm.capture import _validated_router_profile
+
+    try:
+        return _validated_router_profile(json.loads(configured))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"invalid --artifact-router-profile / DYNAMO_ARTIFACT_ROUTER_PROFILE: {exc}"
+        ) from exc
 
 
 def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int | None:
@@ -114,6 +130,14 @@ class DynamoVllmArgGroup(ArgGroup):
             "or 'encode' (multimodal encode worker).",
             choices=[PREFILL_DECODE_DISAGGREGATION_MODE]
             + [m.value for m in DisaggregationMode],
+        )
+
+        add_argument(
+            g,
+            flag_name="--artifact-router-profile",
+            env_var="DYNAMO_ARTIFACT_ROUTER_PROFILE",
+            default=None,
+            help="JSON array of [router_id, expert_count, top_k] entries for generation-artifact route capture.",
         )
 
         add_negatable_bool_argument(
@@ -491,8 +515,9 @@ class DynamoVllmArgGroup(ArgGroup):
                 "recurrent-state groups forked from the parked chain's live state block "
                 "instead of skipping the warm-up. Attention KV is the chain's real prefix; "
                 "the recurrent state is a valid but deeper-context state (shallow points "
-                "read a few percent fast). Mutually exclusive with "
-                "--benchmark-randomize-kda-state."
+                "read a few percent fast). Applies only to layouts that do not qualify "
+                "for native exact-context warm-up, which takes precedence. Mutually "
+                "exclusive with --benchmark-randomize-kda-state."
             ),
         )
         add_argument(
@@ -563,6 +588,7 @@ class DynamoVllmConfig(ConfigBase):
     disaggregation_mode: Union[
         None, str, DisaggregationMode
     ]  # None when not provided; resolved to enum in validate()
+    artifact_router_profile: Optional[str] = None
     use_vllm_tokenizer: bool
 
     # Multimodal
@@ -634,6 +660,7 @@ class DynamoVllmConfig(ConfigBase):
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
+        _configured_artifact_router_profile(self.artifact_router_profile)
         _reject_removed_multimodal_env_vars()
         self._resolve_disaggregation_mode()
         self._resolve_embedding_transfer_mode()

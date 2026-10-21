@@ -42,7 +42,7 @@ use super::{
     disconnect::{
         ConnectionHandle, StreamErrorSignal, create_connection_monitor,
         monitor_for_disconnects_with_activity_and_error_signal,
-        monitor_for_disconnects_with_error_signal,
+        monitor_for_disconnects_with_error_signal, monitor_for_responses_disconnects,
     },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
@@ -100,7 +100,7 @@ use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
 use dynamo_protocols::types::responses::{
-    CountInputTokensRequest, CountInputTokensResponse, ErrorObject,
+    CountInputTokensRequest, CountInputTokensResponse, ResponseError, ResponseErrorCode,
 };
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
@@ -237,7 +237,7 @@ fn terminal_outcome_for_error_type(error_type: ErrorType) -> TerminalOutcome {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, utoipa::ToSchema)]
 pub(crate) struct ErrorMessage {
     message: String,
     #[serde(rename = "type")]
@@ -415,11 +415,11 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
     }
 }
 
-fn responses_error_code(status_code: StatusCode) -> &'static str {
+fn responses_error_code(status_code: StatusCode) -> ResponseErrorCode {
     match status_code {
-        StatusCode::TOO_MANY_REQUESTS => "rate_limit_exceeded",
-        code if code.is_client_error() => "invalid_prompt",
-        _ => "server_error",
+        StatusCode::TOO_MANY_REQUESTS => ResponseErrorCode::RateLimitExceeded,
+        code if code.is_client_error() => ResponseErrorCode::InvalidPrompt,
+        _ => ResponseErrorCode::ServerError,
     }
 }
 
@@ -1098,11 +1098,32 @@ where
     T: Send + Sync + 'static,
     F: FnOnce(&T) -> Option<InputTrigger>,
 {
+    let agent_context = agent_context_from_headers(headers);
+    context_from_headers_with_agent_context(
+        request,
+        request_id,
+        headers,
+        agent_context,
+        classify_input_trigger,
+    )
+}
+
+fn context_from_headers_with_agent_context<T, F>(
+    request: T,
+    request_id: String,
+    headers: &HeaderMap,
+    agent_context: Option<AgentContext>,
+    classify_input_trigger: F,
+) -> Result<Context<T>, ErrorResponse>
+where
+    T: Send + Sync + 'static,
+    F: FnOnce(&T) -> Option<InputTrigger>,
+{
     let metadata = extract_metadata_from_http(headers)
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
-    if let Some(mut agent_context) = agent_context_from_headers(headers) {
+    if let Some(mut agent_context) = agent_context {
         agent_context.input_trigger = classify_input_trigger(request.content());
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
@@ -1110,6 +1131,22 @@ where
         request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
     }
     Ok(request)
+}
+
+/// [`context_from_headers`] for handlers that build the [`PreprocessedRequest`] themselves.
+///
+/// The OpenAI routes get `agent_context` copied onto the request by the preprocessor
+/// (`attach_agent_context_from_context`). Native generate routes skip the preprocessor, yet the
+/// router's request classifier (e.g. ThunderAgent) reads the session only from the request field,
+/// so without this every native generate request is classified as session-less.
+pub(super) fn preprocessed_context_from_headers(
+    mut request: crate::preprocessor::PreprocessedRequest,
+    request_id: String,
+    headers: &HeaderMap,
+) -> Result<Context<crate::preprocessor::PreprocessedRequest>, ErrorResponse> {
+    let agent_context = agent_context_from_headers(headers);
+    request.agent_context = agent_context.clone();
+    context_from_headers_with_agent_context(request, request_id, headers, agent_context, |_| None)
 }
 
 fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
@@ -3261,14 +3298,14 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
     response
 }
 
-#[derive(Serialize)]
-struct ToolCallDispatchPayload<'a> {
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct ToolCallDispatchPayload<'a> {
     choice_index: u32,
     tool_call: &'a ChatCompletionMessageToolCallChunk,
 }
 
-#[derive(Serialize)]
-struct ReasoningDispatchPayload<'a> {
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct ReasoningDispatchPayload<'a> {
     index: u32,
     reasoning_content: &'a str,
 }
@@ -4196,7 +4233,7 @@ async fn responses(
         instructions: request.inner.instructions.clone(),
         reasoning: request.inner.reasoning.clone(),
         text: request.inner.text.clone(),
-        service_tier: request.inner.service_tier,
+        service_tier: request.inner.service_tier.clone(),
         include: request.inner.include.clone(),
         truncation: request.inner.truncation,
         // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
@@ -4392,8 +4429,9 @@ async fn responses(
                             producer_error_signal
                                 .set(extract_error_type_from_response(&error_response));
                         }
-                        backend_error = Some(ErrorObject {
-                            code: responses_error_code(error_response.0).to_string(),
+                        backend_error = Some(ResponseError {
+                            misalignment: None,
+                            code: responses_error_code(error_response.0),
                             message: error_response.1.message.clone(),
                         });
                     }
@@ -4447,7 +4485,7 @@ async fn responses(
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
-        let stream = monitor_for_disconnects_with_error_signal(
+        let stream = monitor_for_responses_disconnects(
             full_stream,
             ctx,
             inflight_guard,
@@ -4774,7 +4812,8 @@ pub fn completions_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/completions".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let doc = RouteDoc::new(axum::http::Method::POST, &path)
+        .with_openapi_kind(super::OpenApiRouteKind::Completions);
     let router = Router::new()
         .route(&path, post(handler_completions))
         .layer(middleware::from_fn(smart_json_error_middleware))
@@ -4791,7 +4830,8 @@ pub fn chat_completions_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/chat/completions".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let doc = RouteDoc::new(axum::http::Method::POST, &path)
+        .with_openapi_kind(super::OpenApiRouteKind::ChatCompletions);
     let router = Router::new()
         .route(&path, post(handler_chat_completions))
         .layer(middleware::from_fn(smart_json_error_middleware))
@@ -4807,7 +4847,8 @@ pub fn embeddings_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/embeddings".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let doc = RouteDoc::new(axum::http::Method::POST, &path)
+        .with_openapi_kind(super::OpenApiRouteKind::Embeddings);
     let router = Router::new()
         .route(&path, post(embeddings))
         .layer(middleware::from_fn(smart_json_error_middleware))
@@ -4970,8 +5011,6 @@ async fn get_model_openai(
     State(state): State<Arc<service_v2::State>>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> Result<Response, ErrorResponse> {
-    check_ready(&state)?;
-
     let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
 
     // The retrieve route (`/v1/models/{*model_id}`) is a catch-all, so model
@@ -4986,6 +5025,7 @@ async fn get_model_openai(
     // wins over the readiness sub-resource of a sibling `foo`.
     // `get_model_retrieve` applies the readiness gate itself (503 if not ready).
     if state.manager().get_committed_model(model_id).is_some() {
+        check_ready(&state)?;
         return get_model_retrieve(&state, model_id);
     }
 
@@ -4999,6 +5039,7 @@ async fn get_model_openai(
         return get_model_readiness(&state, base);
     }
 
+    check_ready(&state)?;
     Err(ErrorMessage::model_not_found())
 }
 
@@ -5043,11 +5084,13 @@ fn get_model_retrieve(
     .into_response())
 }
 
-/// `GET /v1/models/{model}/ready` — structured per-namespace worker readiness
-/// detail (Mechanism 4). Deliberately *not* readiness-gated: it exists to
-/// diagnose models that are not yet ready, so it returns 200 with the full
-/// breakdown regardless of whether the model would be served.
-fn get_model_readiness(
+/// `GET /v1/models/{model}/ready` — model-specific HTTP serving readiness.
+/// Returns 200 only when topology, a usable engine, and HTTP routes are ready;
+/// otherwise returns 503 with the same diagnostic shape. Namespace details
+/// continue to describe worker topology; the top-level ready/reason also
+/// account for local frontend serving state. Unknown models remain 404.
+/// No inference request is dispatched by this check.
+pub(super) fn get_model_readiness(
     state: &Arc<service_v2::State>,
     model_id: &str,
 ) -> Result<Response, ErrorResponse> {
@@ -5055,7 +5098,28 @@ fn get_model_readiness(
         .manager()
         .get_committed_model(model_id)
         .ok_or_else(ErrorMessage::model_not_found)?;
-    Ok(Json(model.namespace_readiness()).into_response())
+    let mut readiness = model.namespace_readiness();
+    if readiness.ready {
+        let serving_reason = if !state.is_ready() {
+            Some(format!("frontend is {}", state.service_stage()))
+        } else if !model.is_ready_to_serve() {
+            Some("model has no usable serving engine".to_string())
+        } else if !state.model_http_routes_ready(&model) {
+            Some("model HTTP inference routes are not ready".to_string())
+        } else {
+            None
+        };
+        if let Some(reason) = serving_reason {
+            readiness.ready = false;
+            readiness.reason = Some(reason);
+        }
+    }
+    let status = if readiness.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    Ok((status, Json(readiness)).into_response())
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoints
@@ -5076,6 +5140,7 @@ pub fn responses_router(
     // derived path and leaves existing configurations behaving as they do now.
     let input_tokens_path = format!("{}/input_tokens", path.trim_end_matches('/'));
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let doc = doc.with_openapi_kind(super::OpenApiRouteKind::Responses);
     let input_tokens_doc = RouteDoc::new(axum::http::Method::POST, &input_tokens_path);
     let router = Router::new()
         .route(&path, post(handler_responses))
@@ -5119,15 +5184,7 @@ async fn images_with_request(
         .inner
         .model
         .as_ref()
-        .map(|m| match m {
-            dynamo_protocols::types::ImageModel::DallE2 => "dall-e-2".to_string(),
-            dynamo_protocols::types::ImageModel::DallE3 => "dall-e-3".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage1 => "gpt-image-1".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage1dot5 => "gpt-image-1.5".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage1Mini => "gpt-image-1-mini".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage2 => "gpt-image-2".to_string(),
-            dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
-        })
+        .map(ToString::to_string)
         .unwrap_or_else(|| "diffusion".to_string());
 
     // Per-model serving readiness gate (now that we have a resolved model
@@ -6565,6 +6622,60 @@ mod tests {
             agent_context.agent_headers["x-codex-turn-metadata"],
             [headers["x-codex-turn-metadata"].to_str().unwrap()]
         );
+    }
+
+    #[test]
+    fn test_preprocessed_context_from_headers_attaches_agent_context_to_request() {
+        let request = || {
+            crate::preprocessor::PreprocessedRequest::builder()
+                .model("test-model".to_string())
+                .token_ids(vec![1])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .build()
+                .unwrap()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
+        headers.insert("x-dynamo-parent-session-id", "parent-456".parse().unwrap());
+        headers.insert("x-dynamo-session-final", "true".parse().unwrap());
+        let context =
+            preprocessed_context_from_headers(request(), "request-1".to_string(), &headers)
+                .unwrap();
+
+        // The router reads the request field; the context key must carry the same identity.
+        let on_request = context
+            .content()
+            .agent_context
+            .clone()
+            .expect("request agent_context");
+        assert_eq!(on_request.session_id, "session-123");
+        assert_eq!(on_request.parent_session_id.as_deref(), Some("parent-456"));
+        assert_eq!(on_request.session_final, Some(true));
+        let in_context = context
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .expect("context agent_context");
+        assert_eq!(in_context.session_id, on_request.session_id);
+        assert!(
+            Arc::ptr_eq(&in_context.agent_headers, &on_request.agent_headers),
+            "headers are parsed once and the captured map is shared"
+        );
+        assert!(
+            context
+                .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+                .is_ok(),
+            "session affinity still keyed from the same headers"
+        );
+
+        let context = preprocessed_context_from_headers(
+            request(),
+            "request-2".to_string(),
+            &HeaderMap::new(),
+        )
+        .unwrap();
+        assert!(context.content().agent_context.is_none());
     }
 
     #[test]
@@ -8334,12 +8445,11 @@ mod tests {
     // 9. Invalid or Out of range temperature: Done
     // 10.Invalid or out of range top_p: Done
     // 11. Repetition Penalty: Should be a float between 0.0 and 2.0 : Done
-    // 12. Logprobs: Should be a positive integer between 0 and 5 : Done
+    // 12. Logprobs: Should be a positive integer between 0 and 20 : Done
     // invalid or non existing user : Only empty string is not allowed validation is there. How can we check non-extisting user ?
     // Unknown fields : Done (rejected via extra_fields catch-all)
     // guided_whitespace_pattern null or invalid : Not Done
     // "response_format": { "type": "invalid_format" } : Not Done
-    // "logit_bias": { "invalid_token": "not_a_number" }, : Partial Validation is already there
     fn test_bad_base_request_for_completion() {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateCompletionRequest {
@@ -8469,13 +8579,12 @@ mod tests {
             );
         }
 
-        // Logprobs: Should be a positive integer between 0 and 5
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
-                logprobs: Some(6),
+                logprobs: Some(21),
                 ..Default::default()
             },
             common: Default::default(),
@@ -8490,7 +8599,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Logprobs must be between 0 and 5, got 6")
+                format!("{VALIDATION_PREFIX}Logprobs must be between 0 and 20, got 21")
             );
         }
     }
@@ -10996,12 +11105,14 @@ mod tests {
             prompt_tokens_details: Some(PromptTokensDetails {
                 audio_tokens: Some(1),
                 cached_tokens: Some(2),
+                ..Default::default()
             }),
             completion_tokens_details: Some(CompletionTokensDetails {
                 accepted_prediction_tokens: Some(1),
                 audio_tokens: None,
                 reasoning_tokens: Some(2),
                 rejected_prediction_tokens: Some(0),
+                ..Default::default()
             }),
         };
         let second_usage = CompletionUsage {
@@ -11011,12 +11122,14 @@ mod tests {
             prompt_tokens_details: Some(PromptTokensDetails {
                 audio_tokens: Some(2),
                 cached_tokens: Some(3),
+                ..Default::default()
             }),
             completion_tokens_details: Some(CompletionTokensDetails {
                 accepted_prediction_tokens: Some(2),
                 audio_tokens: Some(1),
                 reasoning_tokens: None,
                 rejected_prediction_tokens: Some(1),
+                ..Default::default()
             }),
         };
 

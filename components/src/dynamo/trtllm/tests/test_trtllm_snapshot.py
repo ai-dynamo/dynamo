@@ -125,9 +125,20 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
             self.snapshot_config = snapshot_config
 
         async def wait_for_restore(self):
-            lifecycle_calls.append("pause")
-            assert await self.pause_controller.pause(self.engine) is True
+            assert await self.pause_controller.pause(["kv_cache"]) is True
             return True
+
+    class FakePauseController:
+        async def pause(self, tags):
+            lifecycle_calls.append(("pause", tags))
+            return True
+
+        async def resume(self):
+            lifecycle_calls.append("resume")
+            return True
+
+        def mark_resumed(self):
+            pass
 
     def fake_create_runtime(
         discovery_backend, request_plane, event_plane, response_plane="tcp"
@@ -138,12 +149,6 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
         assert response_plane == "tcp"
         assert "resume" not in lifecycle_calls
         return created_runtime, object()
-
-    original_resume = snapshot_mod._NoOpSnapshotPauseController.resume
-
-    async def tracking_resume(self):
-        lifecycle_calls.append("resume")
-        return await original_resume(self)
 
     async def fake_refresh_restore_runtime_config(config, argv):
         assert config.namespace == "checkpoint-ns"
@@ -164,7 +169,7 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
     )
     monkeypatch.setattr(snapshot_mod, "_create_runtime", fake_create_runtime)
     monkeypatch.setattr(
-        snapshot_mod._NoOpSnapshotPauseController, "resume", tracking_resume
+        snapshot_mod, "_create_pause_controller", lambda engine: FakePauseController()
     )
 
     proxy = _SnapshotRuntimeProxy(
@@ -178,7 +183,7 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
 
     await proxy.snapshot_before_endpoint(engine=object(), config=config)
 
-    assert lifecycle_calls == ["pause", "resume"]
+    assert lifecycle_calls == [("pause", ["kv_cache"]), "resume"]
     assert config.namespace == "restored-ns"
     assert config.discovery_backend == "kubernetes"
     assert proxy.endpoint("ns.component.generate") == "endpoint:ns.component.generate"
@@ -212,6 +217,9 @@ async def test_snapshot_runtime_proxy_exits_without_runtime_after_capture(monkey
         snapshot_mod,
         "_create_engine_snapshot_controller",
         FakeSnapshotController,
+    )
+    monkeypatch.setattr(
+        snapshot_mod, "_create_pause_controller", lambda engine: object()
     )
     monkeypatch.setattr(snapshot_mod, "_create_runtime", unexpected_create_runtime)
     monkeypatch.setattr(snapshot_mod.os, "_exit", fake_exit)

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import copy
 import logging
 from collections.abc import Mapping
 from typing import Optional
@@ -53,6 +54,7 @@ JSON_PATCH_CONTENT_TYPE = "application/json-patch+json"
 DYNAMO_DGD_NAME_LABEL = "nvidia.com/dynamo-graph-deployment-name"
 DYNAMO_COMPONENT_LABEL = "nvidia.com/dynamo-component"
 GROVE_PCSG_REPLICA_INDEX_LABEL = "grove.io/podcliquescalinggroup-replica-index"
+PLANNER_WRITER_FENCE_ANNOTATION = "dynamo.nvidia.com/planner-writer-fence"
 
 
 def get_current_k8s_namespace() -> str:
@@ -129,26 +131,20 @@ class KubernetesAPI:
             service_name: Name of the component in DGD.spec.components
             replicas: Desired number of replicas
         """
-        # DGDSA naming convention: <dgd-name>-<lowercase-service-name>
-        adapter_name = f"{graph_deployment_name}-{service_name.lower()}"
-
         try:
             # Try to scale via DGDSA Scale subresource
-            self.custom_api.patch_namespaced_custom_object_scale(
-                group=NVIDIA_API_GROUP,
-                version=DYNAMO_API_VERSION,
-                namespace=self.current_namespace,
-                plural=DGDSA_PLURAL,
-                name=adapter_name,
-                body={"spec": {"replicas": replicas}},
+            self.update_scaling_adapter_replicas(
+                graph_deployment_name, service_name, replicas
             )
-            logger.info(f"Scaled DGDSA {adapter_name} to {replicas} replicas")
 
         except client.ApiException as e:
             if e.status == 404:
                 # DGDSA doesn't exist - fall back to a direct DGD patch.
+                adapter_name = self.scaling_adapter_name(
+                    graph_deployment_name, service_name
+                )
                 logger.info(
-                    f"DGDSA {adapter_name} not found, falling back to DGD update"
+                    "DGDSA %s not found, falling back to DGD update", adapter_name
                 )
                 self._update_dgd_replicas(graph_deployment_name, service_name, replicas)
             else:
@@ -164,7 +160,7 @@ class KubernetesAPI:
                 version=DYNAMO_API_VERSION,
                 namespace=self.current_namespace,
                 plural=DGDSA_PLURAL,
-                name=f"{graph_deployment_name}-{service_name.lower()}",
+                name=self.scaling_adapter_name(graph_deployment_name, service_name),
             )
             return int(scale["spec"]["replicas"])
         except client.ApiException as e:
@@ -173,6 +169,126 @@ class KubernetesAPI:
         deployment = self.get_graph_deployment(graph_deployment_name)
         component = get_components_by_name(deployment)[service_name]
         return Service(name=service_name, service=component).number_replicas()
+
+    @staticmethod
+    def scaling_adapter_name(graph_deployment_name: str, service_name: str) -> str:
+        """Return the operator-defined DGDSA name for one DGD component."""
+        return f"{graph_deployment_name}-{service_name.lower()}"
+
+    def get_service_scaling_adapter(
+        self, graph_deployment_name: str, service_name: str
+    ) -> dict:
+        """Read the DGDSA that owns a component's desired replica count.
+
+        Callers use this only when the DGD component explicitly declares the
+        ``scalingAdapter`` key. A missing adapter is therefore an operator
+        reconciliation error and is intentionally returned as a 404 rather
+        than being hidden behind the legacy DGD fallback.
+        """
+        return self.custom_api.get_namespaced_custom_object(
+            group=NVIDIA_API_GROUP,
+            version=DYNAMO_API_VERSION,
+            namespace=self.current_namespace,
+            plural=DGDSA_PLURAL,
+            name=self.scaling_adapter_name(graph_deployment_name, service_name),
+        )
+
+    @staticmethod
+    def get_scaling_adapter_desired_replicas(adapter: dict) -> int:
+        """Return a validated authoritative replica target from a DGDSA."""
+        replicas = adapter.get("spec", {}).get("replicas")
+        if isinstance(replicas, bool) or not isinstance(replicas, int) or replicas < 0:
+            adapter_name = adapter.get("metadata", {}).get("name", "<unknown>")
+            raise ValueError(
+                f"DGDSA {adapter_name!r} spec.replicas must be a non-negative integer"
+            )
+        return replicas
+
+    def update_scaling_adapter_replicas(
+        self,
+        graph_deployment_name: str,
+        service_name: str,
+        replicas: int,
+        *,
+        resource_version: str | None = None,
+    ) -> None:
+        """Strictly patch a declared DGDSA through its Scale subresource.
+
+        Unlike :meth:`update_service_replicas`, this method never falls back to
+        mutating the DGD. Components that declare ``scalingAdapter`` have made
+        the DGDSA desired state authoritative, so a missing adapter must fail
+        loudly instead of creating a second replica owner.
+        """
+        adapter_name = self.scaling_adapter_name(graph_deployment_name, service_name)
+        body: dict[str, object] = {"spec": {"replicas": replicas}}
+        if resource_version is not None:
+            body["metadata"] = {"resourceVersion": resource_version}
+
+        self.custom_api.patch_namespaced_custom_object_scale(
+            group=NVIDIA_API_GROUP,
+            version=DYNAMO_API_VERSION,
+            namespace=self.current_namespace,
+            plural=DGDSA_PLURAL,
+            name=adapter_name,
+            body=body,
+        )
+        logger.info("Scaled DGDSA %s to %s replicas", adapter_name, replicas)
+
+    def patch_scaling_adapter_writer_fence(
+        self,
+        graph_deployment_name: str,
+        service_name: str,
+        writer_id: str,
+        *,
+        adapter: Mapping,
+    ) -> None:
+        """CAS-patch a Planner writer nonce onto an owned DGDSA."""
+        adapter_name = self.scaling_adapter_name(graph_deployment_name, service_name)
+        metadata = adapter.get("metadata", {}) or {}
+        if not isinstance(metadata, Mapping):
+            raise ValueError("DGDSA metadata is malformed")
+        resource_version = metadata.get("resourceVersion")
+        if not isinstance(resource_version, str) or not resource_version:
+            raise ValueError("DGDSA resourceVersion is unavailable")
+        annotations = metadata.get("annotations") or {}
+        if not isinstance(annotations, Mapping):
+            raise ValueError("DGDSA annotations are malformed")
+        updated_annotations = dict(annotations)
+        updated_annotations[PLANNER_WRITER_FENCE_ANNOTATION] = writer_id
+        patch: list[dict[str, object]] = [
+            {
+                "op": "test",
+                "path": "/metadata/resourceVersion",
+                "value": resource_version,
+            },
+            {
+                "op": "add",
+                "path": "/metadata/annotations",
+                "value": updated_annotations,
+            },
+        ]
+        self.custom_api.api_client.call_api(
+            "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}",
+            "PATCH",
+            {
+                "group": NVIDIA_API_GROUP,
+                "version": DYNAMO_API_VERSION,
+                "namespace": self.current_namespace,
+                "plural": DGDSA_PLURAL,
+                "name": adapter_name,
+            },
+            [],
+            {
+                "Accept": "application/json",
+                "Content-Type": JSON_PATCH_CONTENT_TYPE,
+            },
+            body=patch,
+            response_type="object",
+            auth_settings=["BearerToken"],
+            _return_http_data_only=True,
+            collection_formats={},
+        )
+        logger.info("Claimed DGDSA %s for Planner writer %s", adapter_name, writer_id)
 
     def _update_dgd_replicas(
         self, graph_deployment_name: str, service_name: str, replicas: int
@@ -185,6 +301,67 @@ class KubernetesAPI:
         )
         logger.info(
             f"Updated DGD {graph_deployment_name} component {service_name} to {replicas} replicas"
+        )
+
+    def update_dgd_replicas_directly(
+        self, graph_deployment_name: str, service_name: str, replicas: int
+    ) -> None:
+        """Patch only the DGD replica field when the DGD still owns scaling.
+
+        Callers use this after proving the component does not declare a
+        ``scalingAdapter``. It deliberately ignores any convention-named stray
+        DGDSA so preflight and execution use the same replica authority. A
+        second DGD read closes the connector-to-client preflight window, while
+        the JSON Patch tests fence changes between that read and the write.
+        """
+        deployment = self.get_graph_deployment(graph_deployment_name)
+        metadata = deployment.get("metadata", {}) or {}
+        resource_version = metadata.get("resourceVersion")
+        if not isinstance(resource_version, str) or not resource_version:
+            raise ValueError(
+                f"DGD {graph_deployment_name!r} metadata.resourceVersion is unavailable"
+            )
+
+        components = self._dgd_components(deployment, graph_deployment_name)
+        index = self._find_component_index(
+            graph_deployment_name, components, service_name
+        )
+        component = components[index]
+        if "scalingAdapter" in component:
+            # The component changed authority after the connector preflight.
+            # Surface a retryable conflict rather than writing around DGDSA.
+            raise client.ApiException(
+                status=409,
+                reason=(f"component {service_name!r} now declares a scalingAdapter"),
+            )
+
+        patch: list[dict[str, object]] = [
+            {
+                "op": "test",
+                "path": "/metadata/resourceVersion",
+                "value": resource_version,
+            },
+            {
+                # Testing the complete component is how JSON Patch represents
+                # the important negative precondition: scalingAdapter is still
+                # absent. A concurrent opt-in changes both this value and the
+                # DGD resourceVersion, so the API server rejects the write.
+                "op": "test",
+                "path": f"/spec/components/{index}",
+                "value": copy.deepcopy(component),
+            },
+            {
+                "op": "add",
+                "path": f"/spec/components/{index}/replicas",
+                "value": replicas,
+            },
+        ]
+        self._patch_dgd_with_json_patch(graph_deployment_name, patch)
+        logger.info(
+            "Updated DGD %s component %s to %s replicas",
+            graph_deployment_name,
+            service_name,
+            replicas,
         )
 
     @staticmethod
@@ -227,7 +404,7 @@ class KubernetesAPI:
     @staticmethod
     def _component_replicas_json_patch(
         index: int, component_name: str, replicas: int
-    ) -> list[dict]:
+    ) -> list[dict[str, object]]:
         return [
             {
                 "op": "test",
@@ -242,7 +419,7 @@ class KubernetesAPI:
         ]
 
     def _patch_dgd_with_json_patch(
-        self, graph_deployment_name: str, patch: list[dict]
+        self, graph_deployment_name: str, patch: list[dict[str, object]]
     ) -> None:
         """Patch a v1beta1 DGD with RFC 6902 JSON Patch operations."""
         self.custom_api.api_client.call_api(
@@ -451,6 +628,122 @@ class KubernetesAPI:
                 not_ready.append(component_name)
         return not not_ready, not_ready
 
+    def fetch_authoritative_replica_targets(self, deployment: dict) -> dict:
+        """Overlay declared DGDSA targets onto a DGD settlement snapshot.
+
+        ``spec.components[].replicas`` is only an initial seed for a component
+        that declares ``scalingAdapter``. Startup must compare status with the
+        live, owned DGDSA target or a restart can wait forever after that target
+        has legitimately reached zero.
+        """
+        components = get_components_by_name(deployment)
+        adapter_components = [
+            name
+            for name, component in components.items()
+            if "scalingAdapter" in component
+        ]
+        if not adapter_components:
+            return deployment
+
+        metadata = deployment.get("metadata", {}) or {}
+        if not isinstance(metadata, Mapping):
+            raise ValueError("DGD metadata is malformed")
+        dgd_name = metadata.get("name")
+        dgd_uid = metadata.get("uid")
+        if not isinstance(dgd_name, str) or not dgd_name:
+            raise ValueError("DGD metadata.name is unavailable")
+        if not isinstance(dgd_uid, str) or not dgd_uid:
+            raise ValueError("DGD metadata.uid is unavailable")
+
+        authoritative = copy.deepcopy(deployment)
+        authoritative_components = get_components_by_name(authoritative)
+        for component_name in adapter_components:
+            adapter = self.get_service_scaling_adapter(dgd_name, component_name)
+            rejection = self.scaling_adapter_identity_rejection(
+                deployment, component_name, adapter
+            )
+            if rejection is not None:
+                raise ValueError(rejection)
+            authoritative_components[component_name][
+                "replicas"
+            ] = self.get_scaling_adapter_desired_replicas(adapter)
+        return authoritative
+
+    def scaling_adapter_identity_rejection(
+        self,
+        deployment: dict,
+        component_name: str,
+        adapter: dict,
+        *,
+        require_resource_version: bool = False,
+    ) -> str | None:
+        """Validate the identity fields needed to trust a DGDSA target."""
+        if not isinstance(adapter, Mapping):
+            return f"DGDSA for component {component_name!r} is malformed"
+        dgd_metadata = deployment.get("metadata", {}) or {}
+        if not isinstance(dgd_metadata, Mapping):
+            return "DGD metadata is malformed"
+        dgd_name = dgd_metadata.get("name")
+        dgd_uid = dgd_metadata.get("uid")
+        if not isinstance(dgd_name, str) or not dgd_name:
+            return "DGD metadata.name is unavailable"
+        if not isinstance(dgd_uid, str) or not dgd_uid:
+            return "DGD metadata.uid is unavailable"
+        adapter_metadata = adapter.get("metadata", {}) or {}
+        if not isinstance(adapter_metadata, Mapping):
+            return f"DGDSA metadata for component {component_name!r} is malformed"
+        expected_name = self.scaling_adapter_name(str(dgd_name), component_name)
+        if adapter_metadata.get("name") != expected_name:
+            return f"DGDSA metadata.name does not match component {component_name!r}"
+        if adapter_metadata.get("deletionTimestamp") is not None:
+            return f"DGDSA {expected_name!r} is being deleted"
+        resource_version = adapter_metadata.get("resourceVersion")
+        if require_resource_version and (
+            not isinstance(resource_version, str) or not resource_version.strip()
+        ):
+            return f"DGDSA {expected_name!r} has no resourceVersion"
+
+        expected_api_version = f"{NVIDIA_API_GROUP}/{DYNAMO_API_VERSION}"
+        owners = adapter_metadata.get("ownerReferences", []) or []
+        if not isinstance(owners, list):
+            return f"DGDSA {expected_name!r} ownerReferences are malformed"
+        if not any(
+            isinstance(owner, Mapping)
+            and owner.get("apiVersion") == expected_api_version
+            and owner.get("controller") is True
+            and owner.get("kind") == "DynamoGraphDeployment"
+            and owner.get("name") == dgd_name
+            and owner.get("uid") == dgd_uid
+            for owner in owners
+        ):
+            return f"DGDSA {expected_name!r} is not controller-owned by the DGD"
+
+        adapter_spec = adapter.get("spec", {}) or {}
+        if not isinstance(adapter_spec, Mapping):
+            return f"DGDSA {expected_name!r} spec is malformed"
+        dgd_ref = adapter_spec.get("dgdRef") or {}
+        if not isinstance(dgd_ref, Mapping):
+            return f"DGDSA {expected_name!r} dgdRef is malformed"
+        if dgd_ref.get("name") != dgd_name:
+            return f"DGDSA {expected_name!r} references a different DGD"
+        if dgd_ref.get("componentName") != component_name:
+            return f"DGDSA {expected_name!r} references a different component"
+
+        labels = adapter_metadata.get("labels") or {}
+        if not isinstance(labels, Mapping):
+            return f"DGDSA {expected_name!r} labels are malformed"
+        if (
+            DYNAMO_DGD_NAME_LABEL in labels
+            and labels[DYNAMO_DGD_NAME_LABEL] != dgd_name
+        ):
+            return f"DGDSA {expected_name!r} has a mismatched DGD label"
+        if (
+            DYNAMO_COMPONENT_LABEL in labels
+            and labels[DYNAMO_COMPONENT_LABEL] != component_name
+        ):
+            return f"DGDSA {expected_name!r} has a mismatched component label"
+        return None
+
     @staticmethod
     def is_rolling_update_blocking_settlement(deployment: dict) -> tuple[bool, str]:
         """True while an operator-managed worker rollout is not yet cut over."""
@@ -644,7 +937,12 @@ class KubernetesAPI:
                 continue
 
             # Legacy exclude-planner path: replica-count stability only.
-            all_stable, not_ready = self.non_planner_components_stable(graph_deployment)
+            settlement_deployment = self.fetch_authoritative_replica_targets(
+                graph_deployment
+            )
+            all_stable, not_ready = self.non_planner_components_stable(
+                settlement_deployment
+            )
             if not all_stable:
                 logger.info(
                     f"[Attempt {attempt + 1}/{max_attempts}] "

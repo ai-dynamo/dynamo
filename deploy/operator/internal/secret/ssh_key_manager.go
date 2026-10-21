@@ -58,6 +58,11 @@ func (rsaKeyPairGenerator) Generate() ([]byte, []byte, error) {
 	return privPEM, ssh.MarshalAuthorizedKey(sshPub), nil
 }
 
+// GenerateSSHKeyPair returns a new MPI SSH key pair in the same format as the shared Secret.
+func GenerateSSHKeyPair() (privateKeyPEM, publicKeyAuthorized []byte, err error) {
+	return rsaKeyPairGenerator{}.Generate()
+}
+
 // SSHKeyManager ensures the MPI SSH key pair secret exists and can replicate
 // it to target namespaces for cross-namespace deployments. Keys are generated
 // lazily on first use.

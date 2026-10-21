@@ -36,6 +36,7 @@ def _touch(root: Path, rel: str) -> None:
 
 
 def test_in_tree_ffmpeg_is_allowed(tmp_path: Path):
+    """Allow the in-tree FFmpeg libraries and both standalone tools."""
     # Our own /usr/local ffmpeg libs — must classify as allowed, never violate.
     # The names carry the --build-suffix=_dynamo the wheel_builder configure sets,
     # so this also pins the matching deny_globs: drop them and these libraries
@@ -44,6 +45,7 @@ def test_in_tree_ffmpeg_is_allowed(tmp_path: Path):
         "usr/local/lib/libavcodec_dynamo.so.63",
         "usr/local/lib/libswscale_dynamo.so.10",
         "usr/local/bin/ffmpeg",
+        "usr/local/bin/ffprobe",
     ):
         _touch(tmp_path, rel)
     violations, _exceptions, allowed = scan_filesystem(tmp_path, _POLICY)
@@ -52,6 +54,7 @@ def test_in_tree_ffmpeg_is_allowed(tmp_path: Path):
         "/usr/local/lib/libavcodec_dynamo.so.63",
         "/usr/local/lib/libswscale_dynamo.so.10",
         "/usr/local/bin/ffmpeg",
+        "/usr/local/bin/ffprobe",
     }
 
 
@@ -118,17 +121,31 @@ def test_pynvvideocodec_demux_libs_waived_but_codec_denied(tmp_path: Path):
 @pytest.mark.parametrize(
     "rel",
     [
+        "usr/bin/ffprobe",
+        "opt/venv/bin/ffprobe",
         "usr/lib/x86_64-linux-gnu/libx264.so.164",
         "usr/lib/x86_64-linux-gnu/libx265.so.199",
         # A third-party bundled libavcodec NOT under /usr/local and NOT DALI.
         "usr/local/lib/python3.12/dist-packages/opencv_python_headless.libs/libavcodec-156beeea.so.62.11.100",
         "opt/venv/lib/python3.12/site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.1",
+        "usr/local/bin/ffprobe.d/libx264.so.164",
+        "usr/local/bin/ffmpeg.d/libx264.so.164",
     ],
 )
 def test_nonallowlisted_media_artifacts_are_violations(tmp_path: Path, rel: str):
+    """Reject codec artifacts outside the exact tools and allowed library prefixes."""
     _touch(tmp_path, rel)
     violations, _, _ = scan_filesystem(tmp_path, _POLICY)
     assert [v["path"] for v in violations] == ["/" + rel]
+
+
+@pytest.mark.parametrize("tool", ["ffmpeg", "ffprobe"])
+def test_tool_allowance_requires_exact_path(tool: str):
+    """A tool's name cannot allow a longer path or a copy in another directory."""
+    path = f"/usr/local/bin/{tool}"
+    assert _POLICY.classify(path) == ("allowed", None)
+    for other in (f"{path}-anything", f"{path}.d/libx264.so.164", f"/usr/bin/{tool}"):
+        assert _POLICY.classify(other) == ("violation", None)
 
 
 def test_unrelated_files_are_ignored(tmp_path: Path):
@@ -244,6 +261,17 @@ def test_load_rejects_scalar_allow_paths(tmp_path: Path):
         "deny_globs: ['**/libx264.so*']\nallow_paths: /usr/local/lib\n",
     )
     with pytest.raises(ValueError, match="allow_paths"):
+        CodecPolicy.load(pol)
+
+
+@pytest.mark.parametrize("value", ["/usr/local/bin/ffprobe", "['']", "[1]", "{}"])
+def test_load_rejects_malformed_exact_paths(tmp_path: Path, value: str):
+    """Reject malformed exact allowances instead of silently broadening a match."""
+    pol = _write_policy(
+        tmp_path,
+        f"deny_globs: ['**/bin/ffprobe']\nallow_exact_paths: {value}\n",
+    )
+    with pytest.raises(ValueError, match="allow_exact_paths"):
         CodecPolicy.load(pol)
 
 

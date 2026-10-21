@@ -386,6 +386,97 @@ pub fn compute_block_bytes_with_mm(
     out
 }
 
+/// Hashes of one complete block. The tokens that produced them are not stored.
+///
+/// Built by [`hash_complete_blocks`]. The fields match the corresponding
+/// [`TokenBlock`] from [`TokenBlockSequence::split_tokens_with_mm`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockLineage {
+    /// XXH3 over this block's byte encoding, seeded by the request salt.
+    pub block_hash: BlockHash,
+    /// Parent-chained sequence hash. Equals [`Self::block_hash`] at position 0.
+    pub sequence_hash: SequenceHash,
+    /// Sequence hash of the previous complete block, if this is not position 0.
+    pub parent_sequence_hash: Option<SequenceHash>,
+    /// Packed positional lineage hash for this block.
+    pub positional_lineage_hash: PositionalLineageHash,
+}
+
+/// Hashes every complete `block_size` window of `tokens` without copying them.
+///
+/// `mm_runs` must already be validated and sorted (non-overlapping, in bounds),
+/// the same contract as [`TokenBlockSequence::split_tokens_with_mm`]. A trailing
+/// partial window is ignored.
+///
+/// A window that does not overlap a run is hashed in place with
+/// [`compute_block_hash_for_tokens`] (legacy 4-byte native-endian token ids).
+/// A window that overlaps a run allocates 13 bytes per slot (13 × `block_size`)
+/// for the tagged frame from [`compute_block_bytes_with_mm`] and hashes that buffer. The chain step uses
+/// [`compute_next_sequence_hash`] and [`PositionalLineageHash::new`], the same
+/// recurrence `TokenBlock` uses.
+///
+/// # Panics
+///
+/// Panics if `block_size` is 0.
+pub fn hash_complete_blocks(
+    tokens: &[Token],
+    mm_runs: &[TokenBlockMmInfo],
+    block_size: u32,
+    salt_hash: SaltHash,
+) -> Vec<BlockLineage> {
+    assert!(block_size > 0, "block_size must be greater than 0");
+    debug_assert!(
+        mm_runs.windows(2).all(|w| w[0].end() <= w[1].offset),
+        "hash_complete_blocks: mm_runs must be sorted by offset and non-overlapping",
+    );
+    debug_assert!(
+        mm_runs.iter().all(|r| r.length > 0),
+        "hash_complete_blocks: mm_runs must have non-zero length",
+    );
+
+    let bs = block_size as usize;
+    let n_complete = tokens.len() / bs;
+    let mut lineages = Vec::with_capacity(n_complete);
+    let mut run_cursor = 0usize;
+    let mut parent_sequence_hash: Option<SequenceHash> = None;
+
+    for position in 0..n_complete {
+        let block_offset = position * bs;
+        let block_end = block_offset + bs;
+        let block_tokens = &tokens[block_offset..block_end];
+
+        // Runs are sorted and non-overlapping, so a cursor can drop runs that
+        // ended at or before this window. The next run is the only one that can
+        // overlap it.
+        while run_cursor < mm_runs.len() && mm_runs[run_cursor].end() <= block_offset {
+            run_cursor += 1;
+        }
+        let overlaps = run_cursor < mm_runs.len() && mm_runs[run_cursor].offset < block_end;
+        let block_hash = if overlaps {
+            let block_bytes = compute_block_bytes_with_mm(block_tokens, block_offset, mm_runs);
+            compute_block_hash(&block_bytes, salt_hash)
+        } else {
+            compute_block_hash_for_tokens(block_tokens, salt_hash)
+        };
+
+        let sequence_hash = match parent_sequence_hash {
+            Some(parent) => compute_next_sequence_hash(parent, block_hash),
+            None => block_hash,
+        };
+        let positional_lineage_hash =
+            PositionalLineageHash::new(sequence_hash, parent_sequence_hash, position as u64);
+        lineages.push(BlockLineage {
+            block_hash,
+            sequence_hash,
+            parent_sequence_hash,
+            positional_lineage_hash,
+        });
+        parent_sequence_hash = Some(sequence_hash);
+    }
+
+    lineages
+}
+
 /// A 128-bit positional sequence hash combining traditional sequence hash with positional information.
 ///
 /// Layout:
@@ -1336,8 +1427,14 @@ impl TokenBlockSequence {
         }
         let block_offset = self.blocks.len() * (self.current_block.block_size as usize);
         let tokens = std::mem::take(&mut self.current_block.tokens);
-        let block_bytes = compute_block_bytes_with_mm(&tokens, block_offset, &self.mm_runs);
-        let block_hash = compute_block_hash(&block_bytes, self.current_block.salt_hash);
+        // Text windows keep the legacy in-place hash. Only a window that overlaps
+        // a run pays for 13 bytes per slot (13 × block_size) for the tagged frame.
+        let block_hash = if block_has_mm(block_offset, tokens.len(), &self.mm_runs) {
+            let block_bytes = compute_block_bytes_with_mm(&tokens, block_offset, &self.mm_runs);
+            compute_block_hash(&block_bytes, self.current_block.salt_hash)
+        } else {
+            compute_block_hash_for_tokens(&tokens, self.current_block.salt_hash)
+        };
         let chunk = TokenBlockChunk {
             tokens,
             salt_hash: self.current_block.salt_hash,
@@ -1785,29 +1882,30 @@ impl TokenBlockSequence {
     ) -> (Vec<TokenBlock>, PartialTokenBlock) {
         assert!(block_size > 0, "block_size must be greater than 0");
         let bs = block_size as usize;
-        let n_complete = tokens.len() / bs;
-        let mut result_blocks = Vec::with_capacity(n_complete);
-        let mut last_seq_hash: Option<SequenceHash> = None;
-        for i in 0..n_complete {
-            let block_offset = i * bs;
-            let block_tokens = &tokens[block_offset..block_offset + bs];
-            let block_bytes = compute_block_bytes_with_mm(block_tokens, block_offset, mm_runs);
-            let block_hash = compute_block_hash(&block_bytes, salt_hash);
+        let lineages = hash_complete_blocks(tokens, mm_runs, block_size, salt_hash);
+        let mut result_blocks = Vec::with_capacity(lineages.len());
+        for (position, lineage) in lineages.into_iter().enumerate() {
+            let block_offset = position * bs;
             let chunk = TokenBlockChunk {
-                tokens: block_tokens.into(),
+                tokens: tokens[block_offset..block_offset + bs].into(),
                 salt_hash,
-                block_hash,
+                block_hash: lineage.block_hash,
             };
-            let new_block = TokenBlock::from_chunk(chunk, last_seq_hash, i);
-            last_seq_hash = Some(new_block.sequence_hash());
+            let new_block = TokenBlock::from_chunk(chunk, lineage.parent_sequence_hash, position);
+            debug_assert_eq!(new_block.sequence_hash(), lineage.sequence_hash);
+            debug_assert_eq!(
+                new_block.positional_lineage_hash(),
+                lineage.positional_lineage_hash
+            );
             result_blocks.push(new_block);
         }
+        let n_complete = result_blocks.len();
         let remainder = &tokens[n_complete * bs..];
         let current_block = PartialTokenBlock {
             tokens: remainder.into(),
             block_size,
             salt_hash,
-            parent_sequence_hash: last_seq_hash,
+            parent_sequence_hash: result_blocks.last().map(|block| block.sequence_hash()),
             position: n_complete,
         };
         (result_blocks, current_block)
@@ -3486,6 +3584,134 @@ mod tests {
             seq_mm.blocks()[1].block_hash(),
             seq_plain.blocks()[1].block_hash()
         );
+    }
+
+    /// Borrowed hashing matches `TokenBlockSequence` and keeps the legacy block hash
+    /// for text windows on either side of an MM run.
+    #[test]
+    fn hash_complete_blocks_matches_sequence_around_mm_run() {
+        let block_size: u32 = 4;
+        let salt = TEST_SALT_HASH;
+        // Three complete blocks. The MM run covers only the middle one.
+        let raw = vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+        let mm = vec![TokenBlockMmInfo {
+            mm_hash: 0xAB,
+            offset: 4,
+            length: 4,
+        }];
+
+        let empty = hash_complete_blocks(&raw, &[], block_size, salt);
+        let plain = TokenBlockSequence::new(Tokens::from(raw.clone()), block_size, Some(salt));
+        assert_eq!(empty.len(), plain.blocks().len());
+        assert_eq!(empty.len(), 3);
+        for (lineage, block) in empty.iter().zip(plain.blocks().iter()) {
+            assert_eq!(lineage.block_hash, block.block_hash());
+            assert_eq!(lineage.sequence_hash, block.sequence_hash());
+            assert_eq!(lineage.parent_sequence_hash, block.parent_sequence_hash());
+            assert_eq!(
+                lineage.positional_lineage_hash,
+                block.positional_lineage_hash()
+            );
+        }
+
+        let lineages = hash_complete_blocks(&raw, &mm, block_size, salt);
+        let seq_mm =
+            TokenBlockSequence::new_with_mm(Tokens::from(raw.clone()), &mm, block_size, Some(salt))
+                .unwrap();
+        for (lineage, block) in lineages.iter().zip(seq_mm.blocks().iter()) {
+            assert_eq!(lineage.block_hash, block.block_hash());
+            assert_eq!(lineage.sequence_hash, block.sequence_hash());
+            assert_eq!(lineage.parent_sequence_hash, block.parent_sequence_hash());
+            assert_eq!(
+                lineage.positional_lineage_hash,
+                block.positional_lineage_hash()
+            );
+        }
+
+        // Text windows use the in-place token hash, including the window after the run.
+        assert_eq!(
+            lineages[0].block_hash,
+            compute_block_hash_for_tokens(&raw[0..4], salt)
+        );
+        assert_eq!(
+            lineages[2].block_hash,
+            compute_block_hash_for_tokens(&raw[8..12], salt)
+        );
+        let mm_bytes = compute_block_bytes_with_mm(&raw[4..8], 4, &mm);
+        assert_eq!(lineages[1].block_hash, compute_block_hash(&mm_bytes, salt));
+        // The chain still carries the middle block, so the following sequence hash differs.
+        assert_ne!(lineages[2].sequence_hash, plain.blocks()[2].sequence_hash());
+    }
+
+    /// Tests cursor gate boundaries in `hash_complete_blocks` against ground-truth
+    /// `compute_block_bytes_with_mm` buffer hashing:
+    /// (a) run ending one slot into a block
+    /// (b) run starting at a block's last slot
+    /// (c) run ending exactly on a block boundary
+    /// (d) adjacent runs.
+    #[test]
+    fn hash_complete_blocks_cursor_gate_boundaries() {
+        let block_size: u32 = 4;
+        let salt = TEST_SALT_HASH;
+        let bs = block_size as usize;
+        // 6 complete blocks (24 tokens)
+        let tokens: Vec<Token> = (0..24).collect();
+
+        let verify_cases = |mm_runs: &[TokenBlockMmInfo]| {
+            let lineages = hash_complete_blocks(&tokens, mm_runs, block_size, salt);
+            let n_complete = tokens.len() / bs;
+            assert_eq!(lineages.len(), n_complete);
+
+            for (position, lineage) in lineages.iter().enumerate() {
+                let block_offset = position * bs;
+                let block_tokens = &tokens[block_offset..block_offset + bs];
+                let expected_bytes =
+                    compute_block_bytes_with_mm(block_tokens, block_offset, mm_runs);
+                let expected_hash = compute_block_hash(&expected_bytes, salt);
+                assert_eq!(
+                    lineage.block_hash,
+                    expected_hash,
+                    "Cursor gate block hash mismatch at block position {position} [offset {block_offset}..{}) run layout: {:?}",
+                    block_offset + bs,
+                    mm_runs
+                );
+            }
+        };
+
+        // Case (a): run ending one slot into a block ([4..8) block, run [1..5))
+        verify_cases(&[TokenBlockMmInfo {
+            mm_hash: 0x0A,
+            offset: 1,
+            length: 4,
+        }]);
+
+        // Case (b): run starting at a block's last slot ([4..8) block, run [7..10))
+        verify_cases(&[TokenBlockMmInfo {
+            mm_hash: 0x0B,
+            offset: 7,
+            length: 3,
+        }]);
+
+        // Case (c): run ending exactly on a block boundary ([4..8) block, run [4..8))
+        verify_cases(&[TokenBlockMmInfo {
+            mm_hash: 0x0C,
+            offset: 4,
+            length: 4,
+        }]);
+
+        // Case (d): adjacent runs ([4..8) and [8..12))
+        verify_cases(&[
+            TokenBlockMmInfo {
+                mm_hash: 0x0D1,
+                offset: 4,
+                length: 4,
+            },
+            TokenBlockMmInfo {
+                mm_hash: 0x0D2,
+                offset: 8,
+                length: 4,
+            },
+        ]);
     }
 
     /// #11d — `offset + length` overflow is rejected as a dedicated error variant rather

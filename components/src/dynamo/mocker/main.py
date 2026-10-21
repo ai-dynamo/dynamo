@@ -5,6 +5,7 @@
 
 import argparse
 import asyncio
+import functools
 import logging
 import os
 import signal
@@ -153,6 +154,19 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
     """
     futures = []
     runtimes = []
+    shutdown_requested = False
+
+    def on_worker_done(worker_num: int, future: asyncio.Future) -> None:
+        # Workers serve until shutdown, so one that stops earlier has failed. Report it
+        # here: the gather below waits for every worker and keeps no errors.
+        if shutdown_requested or future.cancelled():
+            return
+        error = future.exception()
+        logger.error(
+            "Mocker worker %d stopped before shutdown: %s",
+            worker_num,
+            error if error is not None else "run_input returned",
+        )
 
     stagger_delay = compute_stagger_delay(args.num_workers, args.stagger_delay)
     batch_size = 32
@@ -250,6 +264,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
 
         # run_input returns a Rust Future (not a Python coroutine)
         future = run_input(runtime, args.endpoint, engine_config)
+        future.add_done_callback(functools.partial(on_worker_done, worker_id + 1))
         futures.append(future)
 
         # Stagger worker launches for large deployments
@@ -267,6 +282,12 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
+        nonlocal shutdown_requested
+        # Every worker already stopped on its own: the cleanup below shuts the
+        # runtimes down and exits 1, so this signal is not a shutdown request.
+        if all(future.done() for future in futures):
+            return
+        shutdown_requested = True
         asyncio.create_task(graceful_shutdown(runtimes))
 
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -282,6 +303,10 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         logger.info("Shutting down DistributedRuntime instances")
         for runtime in runtimes:
             runtime.shutdown()
+
+    if not shutdown_requested:
+        logger.error("Every mocker worker stopped without a shutdown signal")
+        raise SystemExit(1)
 
 
 def main():
