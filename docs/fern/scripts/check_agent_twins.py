@@ -137,30 +137,24 @@ def _interaction_backends(source: str) -> list[str]:
     return sorted(set(re.findall(r'backend:\s*"([^"]+)"', blk)))
 
 
-INTERACTIONS_HEADING = r"[Ff]eature interactions by backend"
+INTERACTIONS_HEADING = r"[Kk]nown feature interaction constraints by backend"
 RELEASES_HEADING = r"\*\*CUDA toolkit and minimum driver per Dynamo release\*\*"
 RELEASES_END = r"\n\*\*"
 
 
 def _interaction_features(source: str) -> set[str]:
-    """Row labels in the pairwise matrices.
-
-    Bounded on the array literal, not on the next ``export const``. Two other
-    exports sit between INTERACTION_FEATURES and the next const -- a type and
-    an interface -- so splitting on ``export const`` swallowed both and
-    admitted the backend names from ``backend: "SGLang" | "TensorRT-LLM" |
-    "vLLM"``. That inflated the denominator in the "missing N of M row labels"
-    message, and inconsistently: the uppercase filter kept SGLang and
-    TensorRT-LLM but dropped vLLM.
-    """
+    """Feature-combination labels in FEATURE_INTERACTIONS."""
     try:
-        blk = source[source.index("export const INTERACTION_FEATURES") :]
+        blk = source[source.index("export const FEATURE_INTERACTIONS") :]
     except ValueError:
         return set()
-    end = blk.find("]")
-    if end == -1:
-        return set()
-    return set(re.findall(r'"([^"]+)"', blk[:end]))
+    blk = blk.split("\nexport const ", 1)[0]
+    return {
+        f"{left} + {right}"
+        for left, right in re.findall(
+            r'features:\s*\[\s*"([^"]+)",\s*"([^"]+)"\s*\]', blk
+        )
+    }
 
 
 def _interactions_segment(blob: str) -> str:
@@ -209,10 +203,8 @@ def expectations(source: str) -> dict[str, object]:
     release row or it does not.
 
     A tuple of regexes means the twin must have a particular shape. The
-    pairwise interaction matrices need this because their feature names also
-    appear in the feature-support table directly above them, so a name list is
-    satisfied by that table alone and the matrices could be deleted without
-    the check noticing.
+    feature-interaction constraints need this because their individual feature
+    names also appear in the support table directly above them.
     """
     feats = _features(source)
     backends = _interaction_backends(source) or ["vLLM", "SGLang", "TensorRT-LLM"]
@@ -220,8 +212,7 @@ def expectations(source: str) -> dict[str, object]:
         "ReleaseSupportMatrix": _releases(source),
         "FeatureHeatmap": feats,
         "FeatureInteractions": tuple(
-            [r"[Ff]eature interactions by backend"]
-            + [rf"\*{re.escape(b)}\*" for b in backends]
+            [INTERACTIONS_HEADING] + [rf"\*{re.escape(b)}\*" for b in backends]
         ),
         "ArtifactBrowser": _named(source, "ARTIFACTS"),
         "ModelEABuildCards": _named(source, "MODEL_EA_BUILDS", "model"),
@@ -275,9 +266,8 @@ def check(path: Path, expected: dict[str, object], source: str = "") -> list[str
                 )
                 continue
             # Shape alone is not enough: keeping the heading and the backend
-            # markers while deleting every table row under them passed. Row
-            # labels are therefore required inside the section itself, where
-            # the feature-support table above cannot satisfy them.
+            # markers while deleting every table row under them passed.
+            # Combination labels are therefore required inside this section.
             segment = _interactions_segment(blob)
             rows = _interaction_features(source)
             absent = sorted(r for r in rows if r not in segment)
@@ -286,7 +276,7 @@ def check(path: Path, expected: dict[str, object], source: str = "") -> list[str
                 more = f" (+{len(absent) - 6} more)" if len(absent) > 6 else ""
                 problems.append(
                     f"{rel}: the interactions section of the twin is missing "
-                    f"{len(absent)} of {len(rows)} row labels: {shown}{more}"
+                    f"{len(absent)} of {len(rows)} combinations: {shown}{more}"
                 )
             continue
 
@@ -329,7 +319,11 @@ def _selftest() -> int:
     """
     exp = {
         "ReleaseSupportMatrix": {"1.3.0", "1.3.1", "1.2.0", "1.2.1", "1.1.0"},
-        "FeatureInteractions": (r"[Ff]eature interactions", r"\*vLLM\*", r"\*SGLang\*"),
+        "FeatureInteractions": (
+            r"[Kk]nown feature interaction constraints",
+            r"\*vLLM\*",
+            r"\*SGLang\*",
+        ),
         "FeatureHeatmap": {"alpha", "bravo", "charlie", "delta", "echo"},
     }
     twin = "<llms-only>{}</llms-only>"
@@ -412,12 +406,13 @@ def _selftest() -> int:
         (
             "structure present",
             "<FeatureInteractions />\n"
-            + twin.format("Feature interactions *vLLM* *SGLang*"),
+            + twin.format("Known feature interaction constraints *vLLM* *SGLang*"),
             True,
         ),
         (
             "structure missing a backend",
-            "<FeatureInteractions />\n" + twin.format("Feature interactions *vLLM*"),
+            "<FeatureInteractions />\n"
+            + twin.format("Known feature interaction constraints *vLLM*"),
             False,
         ),
         (
