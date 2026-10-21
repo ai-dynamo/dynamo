@@ -75,14 +75,11 @@ def resolve_model_path(model: str) -> str:
     return path
 
 
-def read_special_token_ids(model_path: str) -> tuple[list[int], int]:
-    """Return ``(eos_token_ids, bos_token_id)`` from the checkpoint config."""
+def read_bos_token_id(model_path: str, default: int = 1) -> int:
+    """Return the checkpoint's ``bos_token_id`` (for the health-check prompt)."""
     with open(os.path.join(model_path, "config.json")) as f:
-        config = json.load(f)
-    eos = config.get("eos_token_id")
-    eos_ids = [] if eos is None else [eos] if isinstance(eos, int) else list(eos)
-    bos = config.get("bos_token_id")
-    return eos_ids, int(bos) if bos is not None else 1
+        bos = json.load(f).get("bos_token_id")
+    return int(bos) if bos is not None else default
 
 
 class DeepInferLLMEngine(LLMEngine):
@@ -90,7 +87,6 @@ class DeepInferLLMEngine(LLMEngine):
         self.config = config
         self._runner: Optional[EngineRunner] = None
         self._sampling_params_cls: Any = None
-        self._eos_token_ids: list[int] = []
         self._bos_token_id = 1
         # request id -> that request's queue; only touched on the event loop.
         self._streams: dict[str, asyncio.Queue] = {}
@@ -114,7 +110,7 @@ class DeepInferLLMEngine(LLMEngine):
     async def start(self, worker_id: int) -> EngineConfig:
         del worker_id
         model_path = await asyncio.to_thread(resolve_model_path, self.config.model)
-        self._eos_token_ids, self._bos_token_id = read_special_token_ids(model_path)
+        self._bos_token_id = read_bos_token_id(model_path)
         runner = EngineRunner()
         # The native engine is built on the runner's own thread so that
         # construction and every later step share one thread.
@@ -187,7 +183,6 @@ class DeepInferLLMEngine(LLMEngine):
             params = self._sampling_params_cls(
                 **build_sampling_kwargs(
                     request,
-                    eos_token_ids=self._eos_token_ids,
                     model_max_len=self.config.max_model_len,
                 )
             )
@@ -244,13 +239,6 @@ class DeepInferLLMEngine(LLMEngine):
     ) -> tuple[GenerateChunk, bool]:
         last = batch[-1]
         token_ids = [out.token_id for out in batch]
-        if (
-            last.finished
-            and last.finish_reason == "stop"
-            and (token_ids[-1] in self._eos_token_ids)
-        ):
-            # The EOS token ends the sequence; it is not part of the text.
-            batch, token_ids = batch[:-1], token_ids[:-1]
         chunk: GenerateChunk = {"token_ids": token_ids, "index": _CHUNK_INDEX}
         if logprobs is not None:
             self._add_logprobs(chunk, batch, logprobs)

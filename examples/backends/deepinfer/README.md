@@ -20,8 +20,8 @@ the OpenAI-compatible API, discovery and request lifecycle.
   guided decoding yet.
 - Requests using features DeepInfer cannot honour are rejected with an
   `InvalidArgument` error rather than served differently: penalties, `min_p`,
-  `n > 1`, `logit_bias`, `min_tokens`, guided decoding, `prompt_logprobs`, and
-  stop tokens other than the model's EOS tokens.
+  `n > 1`, `logit_bias`, `min_tokens`, guided decoding, and `prompt_logprobs`.
+  Stop strings and stop token ids are enforced by Dynamo's decoder, not the engine.
 
 ## Prerequisites
 

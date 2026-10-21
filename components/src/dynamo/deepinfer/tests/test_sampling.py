@@ -8,11 +8,8 @@ from dynamo.llm.exceptions import InvalidArgument
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
-EOS = [1, 2]
-
 
 def build(request, **kwargs):
-    kwargs.setdefault("eos_token_ids", EOS)
     return build_sampling_kwargs(request, **kwargs)
 
 
@@ -42,7 +39,6 @@ def test_maps_dynamo_request():
         "seq_seed": 123,
         "max_tokens": 17,
         "ignore_eos": True,
-        "eos_id": 1,
         "top_logprobs": 3,
     }
 
@@ -55,7 +51,7 @@ def test_disabled_top_k_becomes_minus_one(top_k):
 
 
 def test_unset_fields_are_left_to_deepinfer_defaults():
-    kwargs = build({"token_ids": [1]}, eos_token_ids=[])
+    kwargs = build({"token_ids": [1]})
 
     assert kwargs == {"top_k": -1}
 
@@ -111,14 +107,24 @@ def test_min_tokens_is_rejected():
         build({"token_ids": [1], "stop_conditions": {"min_tokens": 4}})
 
 
-def test_non_eos_stop_token_ids_are_rejected():
-    with pytest.raises(InvalidArgument, match=r"\[9\]"):
-        build(
-            {
-                "token_ids": [1],
-                "stop_conditions": {"stop_token_ids": [2, 9]},
-            }
-        )
+def test_stop_token_ids_are_left_to_the_dynamo_decoder():
+    # The frontend adds the model's EOS ids (from generation_config.json, which
+    # may differ from config.json) to every request, and its decoder enforces
+    # them, so the backend must accept whatever it is sent.
+    kwargs = build(
+        {
+            "token_ids": [1],
+            "stop_conditions": {
+                "max_tokens": 4,
+                "stop_token_ids_hidden": [2, 9, 128009],
+                "stop_token_ids_visible": [77],
+                "stop_token_ids": [5],
+            },
+        }
+    )
+
+    assert kwargs["max_tokens"] == 4
+    assert not any("stop" in key for key in kwargs)
 
 
 def test_prompt_logprobs_are_rejected():

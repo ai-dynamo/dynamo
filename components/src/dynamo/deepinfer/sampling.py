@@ -45,22 +45,9 @@ def _reject_unsupported(options: dict[str, Any], stop: dict[str, Any]) -> None:
         raise InvalidArgument(f"DeepInfer does not support min_tokens={min_tokens!r}")
 
 
-def _check_stop_token_ids(stop: dict[str, Any], eos_token_ids: Collection[int]) -> None:
-    requested = set(stop.get("stop_token_ids_hidden") or ()) | set(
-        stop.get("stop_token_ids") or ()
-    )
-    extra = requested - set(eos_token_ids)
-    if extra:
-        raise InvalidArgument(
-            "DeepInfer only stops on the model's EOS tokens; unsupported "
-            f"stop_token_ids: {sorted(extra)}"
-        )
-
-
 def build_sampling_kwargs(
     request: GenerateRequest,
     *,
-    eos_token_ids: Sequence[int],
     model_max_len: Optional[int] = None,
 ) -> dict[str, Any]:
     options = request.get("sampling_options") or {}
@@ -68,7 +55,6 @@ def build_sampling_kwargs(
     output = request.get("output_options") or {}
 
     _reject_unsupported(options, stop)
-    _check_stop_token_ids(stop, eos_token_ids)
 
     kwargs: dict[str, Any] = {}
     for key in ("temperature", "top_p"):
@@ -87,8 +73,6 @@ def build_sampling_kwargs(
         kwargs["max_tokens"] = max(1, max_tokens)
     if stop.get("ignore_eos") is not None:
         kwargs["ignore_eos"] = stop["ignore_eos"]
-    if eos_token_ids:
-        kwargs["eos_id"] = next(iter(eos_token_ids))
 
     logprobs, prompt_logprobs = parse_logprob_options(output)
     if prompt_logprobs:

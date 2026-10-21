@@ -12,7 +12,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from dynamo.deepinfer import llm_engine
-from dynamo.deepinfer.llm_engine import DeepInferLLMEngine, read_special_token_ids
+from dynamo.deepinfer.llm_engine import DeepInferLLMEngine, read_bos_token_id
 from dynamo.deepinfer.tests.fake_native import FakeEngine
 from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, Unknown
 
@@ -174,18 +174,27 @@ async def test_prompt_is_sent_as_int32_token_ids(engine, native):
     assert request_id == "dyn-r1"
     assert prompt == [1, 2, 3, 4]
     assert params.max_tokens == 1
-    assert params.eos_id == EOS[0]
+    assert not hasattr(params, "eos_id")  # DeepInfer fills its own
 
 
-async def test_trailing_eos_is_hidden_but_counted(engine, native):
+async def test_eos_token_is_passed_through_for_the_decoder_to_hide(engine, native):
     native.finish_reason = "stop"
     native.final_token = EOS[0]
 
     chunks = await run(engine, request(max_tokens=3))
 
-    assert [t for c in chunks for t in c["token_ids"]] == [100, 101]
+    assert [t for c in chunks for t in c["token_ids"]] == [100, 101, EOS[0]]
     assert chunks[-1]["finish_reason"] == "stop"
     assert chunks[-1]["completion_usage"]["completion_tokens"] == 3
+
+
+async def test_stop_token_ids_from_the_frontend_are_accepted(engine, native):
+    req = request(max_tokens=2)
+    req["stop_conditions"]["stop_token_ids_hidden"] = [EOS[0], 9, 128009]
+
+    chunks = await run(engine, req)
+
+    assert chunks[-1]["finish_reason"] == "length"
 
 
 async def test_logprobs_are_returned_when_requested(engine, native):
@@ -259,7 +268,6 @@ async def test_abort_of_unknown_request_is_a_noop(engine, native):
     [
         {"sampling_options": {"frequency_penalty": 0.5}},
         {"sampling_options": {"n": 2}},
-        {"stop_conditions": {"max_tokens": 4, "stop_token_ids": [9]}},
     ],
 )
 async def test_unsupported_sampling_is_invalid_argument(engine, native, bad):
@@ -272,6 +280,13 @@ async def test_unsupported_sampling_is_invalid_argument(engine, native, bad):
 async def test_empty_prompt_is_invalid_argument(engine):
     with pytest.raises(InvalidArgument, match="token_ids"):
         await run(engine, {"token_ids": []})
+
+
+async def test_request_deepinfer_drops_fails_instead_of_hanging(engine, native):
+    native.drop.add("dyn-bad")
+
+    with pytest.raises(InvalidArgument, match="rejected"):
+        await asyncio.wait_for(run(engine, request(), "bad"), 5)
 
 
 async def test_prompt_too_long_is_invalid_argument(engine, native):
@@ -347,16 +362,12 @@ async def test_health_check_payload_uses_the_model_bos(engine):
 
 @pytest.mark.parametrize(
     "config, expected",
-    [
-        ({"eos_token_id": 1}, ([1], 1)),
-        ({"eos_token_id": [1, 2], "bos_token_id": 0}, ([1, 2], 0)),
-        ({}, ([], 1)),
-    ],
+    [({"bos_token_id": 0}, 0), ({"bos_token_id": 7, "eos_token_id": 1}, 7), ({}, 1)],
 )
-def test_read_special_token_ids(tmp_path, config, expected):
+def test_read_bos_token_id(tmp_path, config, expected):
     (tmp_path / "config.json").write_text(json.dumps(config))
 
-    assert read_special_token_ids(str(tmp_path)) == expected
+    assert read_bos_token_id(str(tmp_path)) == expected
 
 
 def test_resolve_model_path_requires_config_json(tmp_path):
