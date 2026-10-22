@@ -2830,10 +2830,10 @@ mod tests {
                         }
                         tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap().unwrap();
                         tokio::time::timeout(Duration::from_secs(1), released.cancelled()).await.unwrap();
-                        if let Some(request) = request {
-                            if let Ok(response) = request.await.unwrap() {
-                                assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-                            }
+                        if let Some(request) = request
+                            && let Ok(response) = request.await.unwrap()
+                        {
+                            assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
                         }
                         assert_eq!(state.inflight_count(), 0);
                         assert!(!parent.is_cancelled(), "local deadline must not cancel the runtime");
