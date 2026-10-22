@@ -2476,6 +2476,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-global-discovery-client"
+version = "1.6.0"
+dependencies = [
+ "axum 0.8.4",
+ "reqwest 0.12.28",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "dynamo-kv-hashing"
 version = "1.6.0"
 dependencies = [
