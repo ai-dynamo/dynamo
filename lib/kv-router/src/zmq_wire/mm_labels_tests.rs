@@ -16,8 +16,8 @@ use crate::indexer::{
     BranchShardedIndexer, KvIndexerInterface, LowerTierIndexer, RadixTree, ThreadPoolIndexer,
 };
 use crate::protocols::{
-    BlockHashOptions, ExternalSequenceBlockHash, KvCacheStoreData, LocalBlockHash, RouterEvent,
-    compute_block_hash_for_seq, compute_next_seq_hash, pad_value_for_mm_hash,
+    BlockHashOptions, KvCacheStoreData, LocalBlockHash, RouterEvent, compute_block_hash_for_seq,
+    compute_next_seq_hash, pad_value_for_mm_hash,
 };
 
 const BLOCK: usize = 16;
@@ -519,57 +519,6 @@ async fn alias_across_workers_leaves_no_stale_entries() {
     assert_eq!(indexes.scores(&query, &[A, B]).await, vec![1, 1]);
 }
 
-/// The same scenario with spans rewritten but SGLang's ids kept: the second
-/// worker is attached to the first worker's node, its removal misses, and it
-/// keeps predicting a hit. This is why the image chain needs Dynamo-owned ids.
-#[tokio::test]
-async fn keeping_engine_ids_for_aliases_goes_stale() {
-    let mut indexes = Indexes::new();
-    let query = request(LABEL_U);
-    let store = |ids: [u64; 3]| {
-        PlacementEvent::new(
-            crate::protocols::Placement::local_worker(0, 0, StorageTier::Device),
-            KvCacheEvent {
-                event_id: 1,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    start_position: None,
-                    blocks: ids
-                        .iter()
-                        .zip(&query)
-                        .map(|(&id, &local)| crate::protocols::KvCacheStoredBlockData {
-                            block_hash: ExternalSequenceBlockHash(id),
-                            tokens_hash: local,
-                            mm_extra_info: None,
-                        })
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        )
-    };
-    indexes.apply(A, &store([E_T, E_IX, E_KX])).await;
-    indexes.apply(B, &store([E_T, E_IY, E_KY])).await;
-    let remove = PlacementEvent::new(
-        crate::protocols::Placement::local_worker(0, 0, StorageTier::Device),
-        KvCacheEvent {
-            event_id: 2,
-            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: vec![
-                    ExternalSequenceBlockHash(E_IY),
-                    ExternalSequenceBlockHash(E_KY),
-                ],
-            }),
-            dp_rank: 0,
-        },
-    );
-    let event = router_event(B, &remove);
-    let _ = indexes.radix.apply_event(event.clone());
-    let _ = indexes.crtc.apply_event_and_wait(event).await;
-    // B still scores 3 although the engine evicted those blocks.
-    assert_eq!(indexes.scores(&query, &[A, B]).await, vec![3, 3]);
-}
-
 #[tokio::test]
 async fn alias_on_one_worker_is_reference_counted() {
     let mut normalizer = labeled_normalizer();
@@ -971,6 +920,11 @@ async fn relabeled_engine_block_keeps_the_first_mapping() {
     assert_eq!(normalizer.engine_mm_stats().relabel_conflicts, 1);
     assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![3]);
     assert_eq!(indexes.scores(&request(LABEL_V), &[A]).await, vec![1]);
+
+    // The first mapping still owns the block, so its eviction reaches the index.
+    let evict = run(&mut normalizer, A, 3, removed(&[E_KX, E_IX]));
+    indexes.apply(A, &evict).await;
+    assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
 }
 
 #[test]
@@ -1193,4 +1147,89 @@ fn exclusions_are_scoped_to_worker_rank_and_tier() {
     assert_eq!(removed_ids(&rank0_evict), vec![E_IX, E_KX]);
     let rank1_evict = run_on(&mut normalizer, rank1, 2, removed(&[E_IX, E_KX]));
     assert!(removed_ids(&rank1_evict).is_empty());
+}
+
+/// SGLang's label registry is bounded, so a later store of a cached block can
+/// arrive without its span. The block keeps its mapping: its eviction still
+/// reaches the index.
+#[tokio::test]
+async fn restore_without_label_keeps_the_mapping_for_eviction() {
+    let mut normalizer = labeled_normalizer();
+    let mut indexes = Indexes::new();
+    let first = run(
+        &mut normalizer,
+        A,
+        1,
+        image_request_store(IMAGE_X, LABEL_U, [E_T, E_IX, E_KX]),
+    );
+    indexes.apply(A, &first).await;
+    let unlabeled = run(
+        &mut normalizer,
+        A,
+        2,
+        stored(
+            Some(E_T),
+            &[
+                block(E_IX, image(IMAGE_X, BLOCK), vec![]),
+                block(E_KX, text(300), vec![]),
+            ],
+        ),
+    );
+    indexes.apply(A, &unlabeled).await;
+
+    let evict = run(&mut normalizer, A, 3, removed(&[E_KX, E_IX]));
+    indexes.apply(A, &evict).await;
+    assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
+}
+
+/// A block excluded while unlabeled and later stored with its label is mapped
+/// from then on: descendants attach to it and its eviction reaches the index.
+#[tokio::test]
+async fn readmitted_block_is_mapped() {
+    for evict_after in [false, true] {
+        let mut normalizer = labeled_normalizer();
+        let mut indexes = Indexes::new();
+        let unlabeled = run(
+            &mut normalizer,
+            A,
+            1,
+            stored(
+                None,
+                &[
+                    block(E_T, text(100), vec![]),
+                    block(E_IX, image(IMAGE_X, BLOCK), vec![]),
+                ],
+            ),
+        );
+        indexes.apply(A, &unlabeled).await;
+        let labeled = run(
+            &mut normalizer,
+            A,
+            2,
+            stored(
+                Some(E_T),
+                &[block(
+                    E_IX,
+                    image(IMAGE_X, BLOCK),
+                    vec![(0, BLOCK as u32, LABEL_U)],
+                )],
+            ),
+        );
+        indexes.apply(A, &labeled).await;
+
+        if evict_after {
+            let evict = run(&mut normalizer, A, 3, removed(&[E_IX]));
+            indexes.apply(A, &evict).await;
+            assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
+        } else {
+            let child = run(
+                &mut normalizer,
+                A,
+                3,
+                stored(Some(E_IX), &[block(E_KX, text(300), vec![])]),
+            );
+            indexes.apply(A, &child).await;
+            assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![3]);
+        }
+    }
 }

@@ -18,7 +18,8 @@
 //! A store is cut at the first block whose hashed tokens hold a multimodal
 //! value no span maps. That block and every block chained after it are
 //! excluded, including later stores under an excluded parent, and their
-//! removals never reach the index.
+//! removals never reach the index. An engine id is never both mapped and
+//! excluded.
 //!
 //! Every source excludes values that did not fit in `u32`: they all narrow to
 //! one sentinel, so indexing them would give different images one local hash.
@@ -278,7 +279,6 @@ impl EngineMmState {
                 );
                 let key = (worker, tier, engine_id);
                 match self.ids.get(&key).copied() {
-                    // Duplicate store of an engine block already translated.
                     Some(existing) if existing == dynamo_id => already_indexed = true,
                     Some(_) => {
                         // The engine re-stored a block with a different label.
@@ -299,6 +299,9 @@ impl EngineMmState {
                         break;
                     }
                     None => {
+                        // A block excluded earlier, for example while its
+                        // label was missing, is mapped from now on.
+                        self.excluded.remove(&key);
                         self.ids.insert(key, dynamo_id);
                         let refs = self.refs.entry((worker, tier, dynamo_id)).or_insert(0);
                         *refs += 1;
@@ -382,7 +385,12 @@ impl EngineMmState {
         self.excluded.retain(|(known, _, _)| *known != worker);
     }
 
+    /// Exclude an engine id from the index. A mapped id stays mapped: its
+    /// removal must still reach the index through its Dynamo-owned id.
     fn exclude(&mut self, key: Key) {
+        if self.ids.contains_key(&key) {
+            return;
+        }
         if self.excluded.len() < self.excluded_capacity {
             self.excluded.insert(key);
         } else if !self.excluded.contains(&key) {
