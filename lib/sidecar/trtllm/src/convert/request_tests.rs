@@ -116,6 +116,35 @@ fn image_urls_data_uris_and_uuids_are_mapped_in_order() {
 }
 
 #[test]
+fn inline_media_conversion_preserves_the_payload_allocation() {
+    for (key, mime) in [("image_url", "image/png"), ("video_url", "video/mp4")] {
+        for parsed in [false, true] {
+            let uri = format!("data:{mime};base64,{}", "AAAA".repeat(16384));
+            let item = if parsed {
+                MultimodalData::Url(uri.parse().unwrap())
+            } else {
+                MultimodalData::RawUrl(uri)
+            };
+            let original = match &item {
+                MultimodalData::Url(url) => url.as_str().as_ptr(),
+                MultimodalData::RawUrl(url) => url.as_ptr(),
+                _ => unreachable!(),
+            };
+            let mut req = request();
+            req.multi_modal_data = Some(HashMap::from([(key.to_string(), vec![item])]));
+
+            let proto = build_generate_request(req, "req", "model", image_video_limits(4096), AGG)
+                .expect("inline media request");
+
+            let Some(pb::media_item::Source::DataUri(value)) = &proto.media[0].source else {
+                panic!("expected inline media");
+            };
+            assert_eq!(value.as_ptr(), original, "{key}, parsed={parsed}");
+        }
+    }
+}
+
+#[test]
 fn mixed_image_and_video_media_follow_prompt_order() {
     let mut req = request();
     req.multi_modal_data = Some(HashMap::from([

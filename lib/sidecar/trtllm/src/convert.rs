@@ -394,7 +394,7 @@ fn media(
                     ))
                 })?;
             let source = match item {
-                MultimodalData::Url(url) => media_source(url.to_string(), kind.key, index)?,
+                MultimodalData::Url(url) => media_source(String::from(url), kind.key, index)?,
                 MultimodalData::RawUrl(url) => media_source(url, kind.key, index)?,
                 MultimodalData::Decoded(_) => {
                     return Err(client::invalid_argument(format!(

@@ -425,6 +425,7 @@ async fn e2e_real_openengine_video() {
         ConfiguredModel {
             source: model.clone(),
             context_length: None,
+            ..Default::default()
         },
         AGG,
     );
