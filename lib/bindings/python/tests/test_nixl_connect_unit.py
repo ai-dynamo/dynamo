@@ -10,12 +10,39 @@ disappears mid-transfer (issue #7319).
 NIXL and CUDA are mocked so these tests run on CPU-only machines.
 """
 
+import base64
 import sys
+import zlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
-pytestmark = [pytest.mark.unit, pytest.mark.pre_merge]
+pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+
+
+def test_failed_remote_import_can_be_destroyed_without_partial_state_errors():
+    from dynamo import nixl_connect as api
+
+    connection = object.__new__(api.Connection)
+    connection._nixl = SimpleNamespace(
+        add_remote_agent=MagicMock(side_effect=RuntimeError("producer disconnected"))
+    )
+    remote = object.__new__(api.Remote)
+    with pytest.raises(RuntimeError, match="producer disconnected"):
+        remote.__init__(connection, b"agent metadata")
+    remote.__del__()
+
+    operation = object.__new__(api.ReadOperation)
+    metadata = api.RdmaMetadata(
+        operation_kind=int(api.OperationKind.READ),
+        nixl_metadata="b64:"
+        + base64.b64encode(zlib.compress(b"agent metadata")).decode(),
+    )
+    with pytest.raises(RuntimeError, match="producer disconnected"):
+        operation.__init__(connection, metadata, api.Descriptor(torch.ones(4)))
+    operation.__del__()
 
 
 def _make_nixl_mocks():
