@@ -31,7 +31,7 @@ SHELL ["/bin/bash", "-c"]
 USER root
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        libsqlite3-dev && \
+        ca-certificates libsqlite3-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Pin the Level-Zero UMD + IGC, matching upstream sgl-kernel-xpu's
@@ -74,8 +74,12 @@ RUN curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused -o /tmp/miniforge.s
         https://github.com/conda-forge/miniforge/releases/download/25.1.1-0/Miniforge3-Linux-x86_64.sh && \
     bash /tmp/miniforge.sh -b -p ${CONDA_DIR} && \
     rm /tmp/miniforge.sh && \
-    ${CONDA_DIR}/bin/conda create -y -n sglang python=${PYTHON_VERSION} && \
-    ${CONDA_DIR}/bin/conda run -n sglang conda install -y pip
+    CONDA_SSL_VERIFY=/etc/ssl/certs/ca-certificates.crt \
+        ${CONDA_DIR}/bin/conda install -y -n base ca-certificates=2026.10.19 certifi=2026.10.19 && \
+    ${CONDA_DIR}/bin/python -m pip install --no-deps --upgrade pip==26.2.2 && \
+    ${CONDA_DIR}/bin/conda create -y -n sglang python=${PYTHON_VERSION} ca-certificates=2026.10.19 certifi=2026.10.19 && \
+    ${CONDA_DIR}/bin/conda run -n sglang conda install -y pip && \
+    ${CONDA_DIR}/envs/sglang/bin/python -m pip install --no-deps --upgrade pip==26.2.2
 
 ENV VIRTUAL_ENV="${CONDA_DIR}/envs/sglang" \
     PATH="${CONDA_DIR}/envs/sglang/bin:${CONDA_DIR}/bin:${PATH}" \
