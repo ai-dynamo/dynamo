@@ -3,8 +3,10 @@
 
 mod model;
 pub(crate) mod readiness;
-pub(crate) use model::GenerateEngineSelection;
 pub use model::Model;
+pub(crate) use model::{
+    GenerateEngineSelection, SystemOneExecutionSelection, SystemOneSelectionError,
+};
 
 pub mod kv_source_membership;
 pub use kv_source_membership::{
