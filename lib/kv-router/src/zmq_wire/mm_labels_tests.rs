@@ -11,6 +11,7 @@
 use serde::Serialize;
 
 use super::*;
+use crate::PositionalIndexer;
 use crate::indexer::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use crate::indexer::{KvIndexerInterface, LowerTierIndexer, RadixTree, ThreadPoolIndexer};
 use crate::protocols::{
@@ -62,18 +63,40 @@ struct WireStored {
     medium: Option<&'static str>,
 }
 
+/// Eagle/NextN stores carry overlapping token pairs.
+#[derive(Serialize)]
+struct WireStoredBigram {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    block_hashes: Vec<i64>,
+    parent_block_hash: Option<i64>,
+    token_ids: Vec<(u64, u64)>,
+    block_size: usize,
+    lora_id: Option<i64>,
+}
+
 #[derive(Serialize)]
 struct WireRemoved {
     #[serde(rename = "type")]
     kind: &'static str,
     block_hashes: Vec<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    medium: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct WireCleared {
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Wire {
     Stored(WireStored),
+    StoredBigram(WireStoredBigram),
     Removed(WireRemoved),
+    Cleared(WireCleared),
 }
 
 struct Block {
@@ -105,10 +128,35 @@ fn stored_on(parent: Option<u64>, blocks: &[Block], medium: Option<&'static str>
     })
 }
 
+/// An Eagle store over `tokens` (`ids.len() * BLOCK + 1` tokens), sent as the
+/// overlapping pairs SGLang publishes.
+fn stored_eagle(ids: &[u64], tokens: &[u64]) -> Wire {
+    assert_eq!(tokens.len(), ids.len() * BLOCK + 1);
+    Wire::StoredBigram(WireStoredBigram {
+        kind: "BlockStored",
+        block_hashes: ids.iter().map(|id| *id as i64).collect(),
+        parent_block_hash: None,
+        token_ids: tokens.windows(2).map(|pair| (pair[0], pair[1])).collect(),
+        block_size: BLOCK,
+        lora_id: None,
+    })
+}
+
 fn removed(ids: &[u64]) -> Wire {
+    removed_on(ids, None)
+}
+
+fn removed_on(ids: &[u64], medium: Option<&'static str>) -> Wire {
     Wire::Removed(WireRemoved {
         kind: "BlockRemoved",
         block_hashes: ids.iter().map(|id| *id as i64).collect(),
+        medium,
+    })
+}
+
+fn cleared() -> Wire {
+    Wire::Cleared(WireCleared {
+        kind: "AllBlocksCleared",
     })
 }
 
@@ -137,8 +185,17 @@ fn run(
     event_id: u64,
     wire: Wire,
 ) -> PlacementEvent {
+    run_on(normalizer, worker(worker_id), event_id, wire)
+}
+
+fn run_on(
+    normalizer: &mut ZmqEventNormalizer,
+    worker: WorkerWithDpRank,
+    event_id: u64,
+    wire: Wire,
+) -> PlacementEvent {
     normalizer
-        .normalize(decode_one(wire), event_id, worker(worker_id))
+        .normalize(decode_one(wire), event_id, worker)
         .expect("accepted events always yield a placement event")
 }
 
@@ -162,11 +219,10 @@ fn is_noop(event: &PlacementEvent) -> bool {
     matches!(&event.event.data, KvCacheEventData::Removed(remove) if remove.block_hashes.is_empty())
 }
 
-fn request_hashes(blocks: &[Vec<u64>]) -> Vec<LocalBlockHash> {
-    let tokens: Vec<u32> = blocks
-        .concat()
-        .into_iter()
-        .map(|token| u32::try_from(token).expect("routing tokens fit in u32"))
+fn hashes(tokens: &[u64], is_eagle: bool) -> Vec<LocalBlockHash> {
+    let tokens: Vec<u32> = tokens
+        .iter()
+        .map(|&token| u32::try_from(token).expect("routing tokens fit in u32"))
         .collect();
     compute_block_hash_for_seq(
         &tokens,
@@ -174,10 +230,14 @@ fn request_hashes(blocks: &[Vec<u64>]) -> Vec<LocalBlockHash> {
         BlockHashOptions {
             block_mm_infos: None,
             lora_name: None,
-            is_eagle: None,
+            is_eagle: Some(is_eagle),
             cache_namespace: None,
         },
     )
+}
+
+fn request_hashes(blocks: &[Vec<u64>]) -> Vec<LocalBlockHash> {
+    hashes(&blocks.concat(), false)
 }
 
 /// Request: text, one image, text. Routing tokens use Dynamo's pad.
@@ -239,23 +299,6 @@ impl Indexes {
     }
 }
 
-#[test]
-fn sglang_map_with_wide_tokens_decodes() {
-    let raw = decode_one(stored(
-        None,
-        &[block(E_T, text(100)), block(E_IX, image(IMAGE_X, BLOCK))],
-    ));
-    let RawKvEvent::BlockStored { token_ids, .. } = raw else {
-        panic!("expected BlockStored");
-    };
-    // Wide values no longer fail the batch; they narrow to the sentinel.
-    assert!(
-        token_ids[BLOCK..2 * BLOCK]
-            .iter()
-            .all(|&token| token == WIDE_TOKEN_SENTINEL)
-    );
-}
-
 #[tokio::test]
 async fn image_is_excluded_with_its_descendants() {
     let mut normalizer = engine_owned_normalizer();
@@ -292,7 +335,7 @@ async fn image_is_excluded_with_its_descendants() {
     let evict = run(&mut normalizer, A, 3, removed(&[E_IX, E_KX, 0xc0de, E_T]));
     assert_eq!(removed_ids(&evict), vec![E_T]);
 
-    let stats = normalizer.engine_mm_stats().unwrap();
+    let stats = normalizer.engine_mm_stats();
     assert_eq!(stats.excluded_unmapped, 2);
     assert_eq!(stats.excluded_parent, 1);
     assert_eq!(indexes.scores(&request(LABEL_U), &[A]).await, vec![1]);
@@ -313,6 +356,12 @@ async fn fully_excluded_store_is_a_noop_for_an_unseen_worker() {
     );
     assert!(is_noop(&event));
     indexes.apply(A, &event).await;
+
+    let positional = ThreadPoolIndexer::new(PositionalIndexer::new(8), 2, BLOCK as u32);
+    positional
+        .apply_event_and_wait(router_event(A, &event))
+        .await
+        .expect("positional index accepts an empty removal");
 
     let lower = ThreadPoolIndexer::new(LowerTierIndexer::new(), 2, BLOCK as u32);
     let host = run(
@@ -341,7 +390,7 @@ async fn fully_excluded_store_is_a_noop_for_an_unseen_worker() {
 /// excluded block reaches the index, which rejects it for its unknown parent.
 #[tokio::test]
 async fn losing_exclusion_state_never_indexes_unmapped_descendants() {
-    let mut normalizer = ZmqEventNormalizer::new(BLOCK as u32).with_engine_mm_excluded_capacity(0);
+    let mut normalizer = engine_owned_normalizer().with_engine_mm_excluded_capacity(0);
     let mut indexes = Indexes::new();
     let first = run(
         &mut normalizer,
@@ -353,7 +402,7 @@ async fn losing_exclusion_state_never_indexes_unmapped_descendants() {
         ),
     );
     indexes.apply(A, &first).await;
-    assert_eq!(normalizer.engine_mm_stats().unwrap().excluded_overflow, 1);
+    assert_eq!(normalizer.engine_mm_stats().excluded_overflow, 1);
 
     let child = run(
         &mut normalizer,
@@ -383,8 +432,8 @@ fn losing_exclusion_state_is_a_source_fault_for_the_dc_relay() {
     use crate::protocols::KvCacheEventError;
 
     let events = |excluded_capacity: usize| {
-        let mut normalizer = ZmqEventNormalizer::new(BLOCK as u32)
-            .with_engine_mm_excluded_capacity(excluded_capacity);
+        let mut normalizer =
+            engine_owned_normalizer().with_engine_mm_excluded_capacity(excluded_capacity);
         let first = run(
             &mut normalizer,
             A,
@@ -442,13 +491,16 @@ fn multimodal_values_that_fit_in_u32_are_still_classified() {
         1,
         "the block with multimodal values is cut"
     );
-    assert_eq!(normalizer.engine_mm_stats().unwrap().excluded_unmapped, 1);
+    assert_eq!(normalizer.engine_mm_stats().excluded_unmapped, 1);
 }
 
+/// Without the engine-owned flag, every value that did not fit in `u32`
+/// narrows to one sentinel; indexing those blocks would make different images
+/// share a local hash. They are excluded like engine-owned values, descendants
+/// and removals included, so a later chained store never reaches the index
+/// under an unknown parent.
 #[test]
-fn unflagged_source_does_not_index_wide_tokens() {
-    // Without the engine-owned flag every wide value narrows to one sentinel;
-    // indexing those blocks would make different images share a local hash.
+fn unflagged_source_excludes_wide_blocks_and_their_descendants() {
     let mut normalizer = ZmqEventNormalizer::new(BLOCK as u32);
     let event = run(
         &mut normalizer,
@@ -466,6 +518,115 @@ fn unflagged_source_does_not_index_wide_tokens() {
     let store = store_data(&event).unwrap();
     assert_eq!(store.blocks.len(), 1);
     assert_eq!(store.blocks[0].block_hash.0, E_T);
+
+    let child = run(
+        &mut normalizer,
+        A,
+        2,
+        stored(Some(E_KX), &[block(0xc0de, text(500))]),
+    );
+    assert!(is_noop(&child));
+    let evict = run(&mut normalizer, A, 3, removed(&[E_IX, E_KX, 0xc0de, E_T]));
+    assert_eq!(removed_ids(&evict), vec![E_T]);
+}
+
+/// Legacy sources use Dynamo's own pads, which sit above `MM_PAD_SHIFT_VALUE`
+/// but fit in `u32`; only the engine-owned flag excludes those.
+#[test]
+fn unflagged_source_keeps_legacy_pads() {
+    let mut legacy_pad = text(100);
+    legacy_pad[BLOCK - 1] = u64::from(pad_value_for_mm_hash(LABEL_U));
+    let wire = || {
+        stored(
+            None,
+            &[block(E_T, text(50)), block(E_IX, legacy_pad.clone())],
+        )
+    };
+
+    let mut unflagged = ZmqEventNormalizer::new(BLOCK as u32);
+    let kept = run(&mut unflagged, A, 1, wire());
+    assert_eq!(store_data(&kept).unwrap().blocks.len(), 2);
+
+    let mut flagged = engine_owned_normalizer();
+    let cut = run(&mut flagged, A, 1, wire());
+    assert_eq!(store_data(&cut).unwrap().blocks.len(), 1);
+}
+
+/// Eagle hashes each block together with the next block's first token, so a
+/// multimodal value there belongs to the preceding block. Both flag states
+/// classify exactly the hashed windows and keep the overlap token the last
+/// surviving block needs.
+#[test]
+fn eagle_overlap_token_is_classified_with_the_preceding_block() {
+    for engine_owned in [false, true] {
+        let normalizer =
+            || ZmqEventNormalizer::new(BLOCK as u32).with_engine_owned_mm_identity(engine_owned);
+
+        // The image starts at the overlap token of block 0.
+        let mut at_overlap: Vec<u64> = (100..100 + BLOCK as u64).collect();
+        at_overlap.extend(image(IMAGE_X, BLOCK + 1));
+        let event = run(
+            &mut normalizer(),
+            A,
+            1,
+            stored_eagle(&[E_T, E_IX], &at_overlap),
+        );
+        assert!(is_noop(&event), "engine_owned={engine_owned}");
+
+        // The image starts one token later: block 0 is text, overlap included.
+        let mut after_overlap: Vec<u64> = (100..101 + BLOCK as u64).collect();
+        after_overlap.extend(image(IMAGE_X, BLOCK));
+        let event = run(
+            &mut normalizer(),
+            A,
+            1,
+            stored_eagle(&[E_T, E_IX], &after_overlap),
+        );
+        let store = store_data(&event).expect("text block published");
+        assert_eq!(store.blocks.len(), 1, "engine_owned={engine_owned}");
+        assert_eq!(store.blocks[0].block_hash.0, E_T);
+        assert_eq!(
+            store.blocks[0].tokens_hash,
+            hashes(&after_overlap[..=BLOCK], true)[0],
+            "block 0 hashes its tokens plus the overlap token"
+        );
+    }
+}
+
+/// Exclusions belong to one worker, DP rank and storage tier. A clear forgets
+/// only that rank's exclusions; another tier never held the excluded blocks.
+#[test]
+fn exclusions_are_scoped_to_worker_rank_and_tier() {
+    let mut normalizer = engine_owned_normalizer();
+    let rank0 = WorkerWithDpRank::new(A, 0);
+    let rank1 = WorkerWithDpRank::new(A, 1);
+    let image_store = || {
+        stored(
+            None,
+            &[
+                block(E_T, text(100)),
+                block(E_IX, image(IMAGE_X, BLOCK)),
+                block(E_KX, text(300)),
+            ],
+        )
+    };
+    run_on(&mut normalizer, rank0, 1, image_store());
+    run_on(&mut normalizer, rank1, 1, image_store());
+
+    let host = run_on(
+        &mut normalizer,
+        rank0,
+        2,
+        removed_on(&[E_IX], Some("CPU_PINNED")),
+    );
+    assert_eq!(removed_ids(&host), vec![E_IX]);
+
+    let clear = run_on(&mut normalizer, rank0, 3, cleared());
+    assert!(matches!(clear.event.data, KvCacheEventData::Cleared));
+    let rank0_evict = run_on(&mut normalizer, rank0, 4, removed(&[E_IX, E_KX]));
+    assert_eq!(removed_ids(&rank0_evict), vec![E_IX, E_KX]);
+    let rank1_evict = run_on(&mut normalizer, rank1, 2, removed(&[E_IX, E_KX]));
+    assert!(removed_ids(&rank1_evict).is_empty());
 }
 
 #[test]

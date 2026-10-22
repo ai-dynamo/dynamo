@@ -78,6 +78,11 @@ pub enum KvEventSourceConfig {
         /// Model video-placeholder token id. `None` leaves video runs on the
         /// engine's native hashing path.
         video_token_id: Option<u32>,
+        /// The source derives multimodal pad values from engine identities
+        /// (SGLang after sgl-project/sglang#43043), so every event token at or
+        /// above `MM_PAD_SHIFT_VALUE` is excluded from the index. Otherwise only
+        /// values that do not fit in `u32` are excluded.
+        engine_owned_mm_identity: bool,
     },
 }
 
@@ -136,6 +141,7 @@ impl KvEventSource {
                 topic,
                 image_token_id,
                 video_token_id,
+                engine_owned_mm_identity,
             } => {
                 let listener_handle =
                     component
@@ -152,6 +158,7 @@ impl KvEventSource {
                             next_event_id,
                             image_token_id,
                             video_token_id,
+                            engine_owned_mm_identity,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
                 let supervisor_handle =

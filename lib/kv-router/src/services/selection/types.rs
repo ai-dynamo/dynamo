@@ -155,6 +155,10 @@ pub struct WorkerCatalogRecord {
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_event_source_mode: Option<String>,
+    /// The KV event source derives multimodal pad values from engine identities
+    /// (SGLang after sgl-project/sglang#43043). Unset means a legacy source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_owned_mm_identity: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_schedulable_reasons: Vec<String>,
 }
@@ -185,6 +189,7 @@ impl WorkerCatalogRecord {
             router_hint_worker_type: req.router_hint_worker_type,
             router_hint_source_control_endpoints: req.router_hint_source_control_endpoints,
             kv_event_source_mode: req.kv_event_source_mode,
+            engine_owned_mm_identity: req.engine_owned_mm_identity,
             not_schedulable_reasons: Vec::new(),
         }
     }
@@ -285,6 +290,7 @@ impl Default for WorkerRequest {
             router_hint_worker_type: None,
             router_hint_source_control_endpoints: HashMap::new(),
             kv_event_source_mode: None,
+            engine_owned_mm_identity: None,
         }
     }
 }
@@ -324,6 +330,10 @@ pub struct WorkerRequest {
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
     #[serde(default)]
     pub kv_event_source_mode: Option<String>,
+    /// The KV event source derives multimodal pad values from engine identities
+    /// (SGLang after sgl-project/sglang#43043). Unset means a legacy source.
+    #[serde(default)]
+    pub engine_owned_mm_identity: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -350,6 +360,8 @@ pub struct WorkerPatchRequest {
     pub router_hint_source_control_endpoints: Option<HashMap<u32, String>>,
     #[serde(default)]
     pub kv_event_source_mode: Option<String>,
+    #[serde(default)]
+    pub engine_owned_mm_identity: Option<bool>,
 }
 
 impl WorkerCatalogRecord {
@@ -413,6 +425,9 @@ impl WorkerCatalogRecord {
         }
         if patch.kv_event_source_mode.is_some() {
             self.kv_event_source_mode = patch.kv_event_source_mode;
+        }
+        if patch.engine_owned_mm_identity.is_some() {
+            self.engine_owned_mm_identity = patch.engine_owned_mm_identity;
         }
     }
 }

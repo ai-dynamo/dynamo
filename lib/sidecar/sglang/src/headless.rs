@@ -278,6 +278,9 @@ fn start_publishers(
                     // Same SGLang normalization contract as the full worker relay.
                     image_token_id: None,
                     video_token_id: None,
+                    // The sidecar cannot inspect the SGLang build. Unflagged
+                    // sources still exclude values that do not fit in u32.
+                    engine_owned_mm_identity: false,
                 }),
                 config.enable_local_indexer,
                 source.dp_rank,
