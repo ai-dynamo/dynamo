@@ -18,6 +18,7 @@ from tests.utils.payloads import (
     CompletionPayload,
     CompletionPayloadWithLogprobs,
     DisaggregatedChatPayload,
+    DisaggregatedKvRoutingPayload,
     ElasticEPScalePayload,
     EmbeddingPayload,
     GuidedDecodingChatPayload,
@@ -25,6 +26,7 @@ from tests.utils.payloads import (
     ImagesPayload,
     ImageTokenMetricsPayload,
     KvEventMetricsPayload,
+    KvRoutingPayload,
     LMCacheMetricsPayload,
     LoraTestChatPayload,
     MetricsPayload,
@@ -32,6 +34,8 @@ from tests.utils.payloads import (
     ResponsesPayload,
     ResponsesStreamPayload,
     RouterNvextChatPayload,
+    SGLangGenerateCancellationPayload,
+    SGLangGenerateRecoveryPayload,
     SGLangMetricsPayload,
     StreamingChatPayload,
     TRTLLMMetricsPayload,
@@ -820,6 +824,7 @@ def streaming_chat_payload_with_logprobs(
     if prompt_logprobs is not None:
         body["prompt_logprobs"] = prompt_logprobs
         fields.extend(["prompt_token_ids", "prompt_logprobs"])
+    nvext["extra_fields"] = list(dict.fromkeys(fields))
     return StreamingChatPayload(
         body=body,
         repeat_count=repeat_count,
@@ -846,7 +851,9 @@ def disaggregated_chat_payload() -> DisaggregatedChatPayload:
     )
 
 
-def disaggregated_token_count_payload() -> DisaggregatedChatPayload:
+def disaggregated_token_count_payload(
+    *, logprobs: bool = False
+) -> DisaggregatedChatPayload:
     return DisaggregatedChatPayload(
         body={
             "messages": [{"role": "user", "content": LONG_PROMPT_FOR_CACHING}],
@@ -855,6 +862,7 @@ def disaggregated_token_count_payload() -> DisaggregatedChatPayload:
             "temperature": 0,
             "stream": False,
             "ignore_eos": True,
+            **({"logprobs": True, "top_logprobs": 0} if logprobs else {}),
             "chat_template_kwargs": {"enable_thinking": False},
             "nvext": {
                 "extra_fields": [
@@ -872,14 +880,17 @@ def disaggregated_token_count_payload() -> DisaggregatedChatPayload:
     )
 
 
-def chat_logprobs_and_structured_output_payloads() -> list[BasePayload]:
+def chat_logprobs_and_structured_output_payloads(
+    *, prompt_logprobs: int | None = 2
+) -> list[BasePayload]:
     logprobs = streaming_chat_payload_with_logprobs(
         content="Count from one to ten.",
         expected_response=[],
         max_tokens=8,
         top_logprobs=2,
-        prompt_logprobs=2,
+        prompt_logprobs=prompt_logprobs,
         extra_body={
+            "nvext": {"extra_fields": ["prompt_token_ids"]},
             "ignore_eos": True,
             "chat_template_kwargs": {"enable_thinking": False},
         },
@@ -930,7 +941,7 @@ def chat_logprobs_and_structured_output_payloads() -> list[BasePayload]:
 
 
 def http_cancellation_payloads(
-    metrics: EngineMetrics, *, max_tokens: int
+    metrics: EngineMetrics | None, *, max_tokens: int
 ) -> list[BasePayload]:
     body = {
         "messages": [{"role": "user", "content": "Count from one to a thousand."}],
@@ -955,6 +966,71 @@ def http_cancellation_payloads(
             expected_completion_tokens=4,
         ),
     ]
+
+
+def sglang_generate_cancellation_payloads(
+    metrics: EngineMetrics, *, max_tokens: int
+) -> list[BasePayload]:
+    body = {
+        "input_ids": [11] * 128,
+        "sampling_params": {
+            "max_new_tokens": max_tokens,
+            "ignore_eos": True,
+            "temperature": 0,
+        },
+        "stream": True,
+        "return_logprob": True,
+    }
+    return [
+        SGLangGenerateCancellationPayload(
+            body=body, expected_response=[], expected_log=[], metrics=metrics
+        ),
+        SGLangGenerateRecoveryPayload(
+            body={
+                **body,
+                "sampling_params": {**body["sampling_params"], "max_new_tokens": 4},
+            },
+            expected_response=[],
+            expected_log=[],
+            metrics=metrics,
+        ),
+    ]
+
+
+_KV_ROUTING_SMOKE_BODY = {
+    "messages": [{"role": "user", "content": "Say hello."}],
+    "max_tokens": 1,
+    "temperature": 0,
+}
+
+
+def kv_routing_payload(
+    routed_workers: tuple[int, ...],
+    *,
+    block_size: int,
+    dp_ranks: tuple[int, ...] = (0,),
+) -> KvRoutingPayload:
+    return KvRoutingPayload(
+        body=dict(_KV_ROUTING_SMOKE_BODY),
+        expected_response=[],
+        expected_log=[],
+        routed_workers=routed_workers,
+        block_size=block_size,
+        dp_ranks=dp_ranks,
+    )
+
+
+def disaggregated_kv_routing_payload(
+    prefill_workers: tuple[int, ...],
+    transfer_metrics: tuple[EngineMetrics, ...],
+) -> DisaggregatedKvRoutingPayload:
+    return DisaggregatedKvRoutingPayload(
+        body=dict(_KV_ROUTING_SMOKE_BODY),
+        expected_response=[],
+        expected_log=[],
+        routed_workers=prefill_workers,
+        transfer_metrics=transfer_metrics,
+    )
 
 
 def completion_payload_with_logprobs(

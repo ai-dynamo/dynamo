@@ -680,6 +680,39 @@ def test_dp_rank_prefers_data_parallel_index():
     assert InstrumentedScheduler._resolve_dp_rank(pc) == 1
 
 
+def test_external_dp_schedulers_publish_on_distinct_global_rank_ports(monkeypatch):
+    base_port = 20000  # The mocked publisher never binds a socket.
+    monkeypatch.setenv(instrumented_scheduler_module.ENV_FPM_PORT, str(base_port))
+    monkeypatch.setenv(instrumented_scheduler_module.ENV_FPM_WORKER_ID, "dp-worker")
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler, "__init__", lambda *a, **kw: None
+    )
+    publisher = MagicMock()
+    monkeypatch.setattr(instrumented_scheduler_module, "_FpmPublisherThread", publisher)
+
+    for rank in (0, 1):
+        config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                data_parallel_index=rank,
+                data_parallel_rank=0,
+                data_parallel_size=2,
+            ),
+            additional_config={},
+        )
+        scheduler = InstrumentedScheduler(config, None, None, block_size=16)
+        assert scheduler._fpm_dp_rank == rank
+
+    assert publisher.call_args_list == [
+        call(
+            f"tcp://*:{base_port + rank}",
+            worker_id="dp-worker",
+            dp_rank=rank,
+            start_paused=False,
+        )
+        for rank in (0, 1)
+    ]
+
+
 def test_benchmark_synchronizer_aligns_point_and_shares_run_id():
     endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
     rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
@@ -9226,15 +9259,18 @@ def realseed_prefix_cache(monkeypatch):
 
     monkeypatch.setattr(kv_cache_utils, "NONE_HASH", sha256("test-root"), raising=False)
 
-    def build(point, *, drop=0, seq=0):
+    def build(point, *, drop=0, seq=0, block_size=32):
         stub, _ = _realseed_prefill_stub(point, monkeypatch, seq=seq, drop=drop)
         del stub._bench_inject_prefill
         del stub._bench_synthetic_token_ids
-        stub._bench_hash_block_size = 32
+        stub.block_size = block_size
+        stub._bench_hash_block_size = block_size
         stub._bench_vocab_size = 4096
         stub._bench_content_seed = "0"
         stub._fpm_dp_rank = 0
-        stub._bench_block_hasher = kv_cache_utils.get_request_block_hasher(32, sha256)
+        stub._bench_block_hasher = kv_cache_utils.get_request_block_hasher(
+            block_size, sha256
+        )
         stub.kv_cache_manager = KVCacheManager(
             KVCacheConfig(
                 num_blocks=2048,
@@ -9243,7 +9279,7 @@ def realseed_prefix_cache(monkeypatch):
                     KVCacheGroupSpec(
                         ["layer"],
                         FullAttentionSpec(
-                            block_size=32,
+                            block_size=block_size,
                             num_kv_heads=1,
                             head_size=1,
                             dtype=torch.bfloat16,
@@ -9252,8 +9288,8 @@ def realseed_prefix_cache(monkeypatch):
                 ],
             ),
             max_model_len=4096,
-            scheduler_block_size=32,
-            hash_block_size=32,
+            scheduler_block_size=block_size,
+            hash_block_size=block_size,
             enable_caching=True,
             use_eagle=bool(drop),
         )
@@ -9308,6 +9344,52 @@ def _complete_realseed_cache_shot(stub):
         ]
         stub._bench_save_current_point()
     return requests, hits
+
+
+@pytest.mark.parametrize(("new_tokens", "kv_read_tokens"), [(1, 16), (16, 64)])
+def test_prefill_grid_rejects_eagle_points_without_a_measurable_tail(
+    new_tokens, kv_read_tokens
+):
+    grid = _prefill_grid_stub(block_size=16, num_gpu_blocks=2048)
+    grid.max_model_len = 4096
+    grid.kv_cache_manager.use_eagle = True
+    _install_test_capacity_preflight(grid, _benchmark_capacity(max_model_len=4096))
+    assert not grid._bench_prefill_point_feasible(new_tokens, 1, kv_read_tokens)
+
+
+@pytest.mark.parametrize(
+    ("drop", "new_tokens", "kv_read_tokens"),
+    [(0, 1, 16), (0, 16, 64), (16, 17, 16), (16, 32, 1024)],
+)
+def test_prefill_seed_preserves_exact_kv_reads_at_eagle_block_boundary(
+    realseed_prefix_cache, kv_read_tokens, drop, new_tokens
+):
+    grid = _prefill_grid_stub(block_size=16, num_gpu_blocks=2048)
+    grid.max_model_len = 4096
+    grid.kv_cache_manager.use_eagle = bool(drop)
+    _install_test_capacity_preflight(grid, _benchmark_capacity(max_model_len=4096))
+    assert grid._bench_prefill_point_feasible(new_tokens, 1, kv_read_tokens)
+
+    point = BenchmarkPoint(
+        "prefill",
+        total_prefill_tokens=new_tokens,
+        total_kv_read_tokens=kv_read_tokens,
+        batch_size=1,
+    )
+    scheduler = realseed_prefix_cache(point, drop=drop, block_size=16)
+    del scheduler._bench_eagle_cache_drop_tokens
+    scheduler._bench_realseed_stage_point(point, [kv_read_tokens], [new_tokens])
+    seeded, _ = _complete_realseed_cache_shot(scheduler)
+    assert [request.num_tokens for request in seeded] == [kv_read_tokens + drop]
+
+    for _ in ("warm", "measure"):
+        assert scheduler._bench_realseed_pending_step()
+        requests, hits = _complete_realseed_cache_shot(scheduler)
+        assert hits == [kv_read_tokens]
+        assert requests[0].num_tokens - hits[0] == new_tokens
+
+    assert scheduler._bench_skipped_points == []
+    assert len(scheduler._bench_results) == 1
 
 
 @pytest.mark.parametrize("content", ["random", "zeros", "sharegpt"])
@@ -9867,13 +9949,12 @@ def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
     ctx = zmq.Context.instance()
     sub = ctx.socket(zmq.SUB)
     sub.setsockopt(zmq.SUBSCRIBE, b"")
-    port = sub.bind_to_random_port("tcp://127.0.0.1")
-    sub.unbind(sub.getsockopt(zmq.LAST_ENDPOINT))
     publisher = instrumented_scheduler_module._FpmPublisherThread(
-        f"tcp://127.0.0.1:{port}", worker_id="", dp_rank=0
+        "tcp://127.0.0.1:*", worker_id="", dp_rank=0, start_paused=True
     )
-    sub.connect(f"tcp://127.0.0.1:{port}")
     try:
+        sub.connect(publisher._pub.getsockopt_string(zmq.LAST_ENDPOINT))
+        publisher.resume()
         scheduler = object.__new__(InstrumentedScheduler)
         scheduler._fpm_worker_id = ""
         scheduler._fpm_dp_rank = 0

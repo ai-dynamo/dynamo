@@ -308,15 +308,17 @@ type ServiceReplicaStatus struct {
 	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
 
 	// ServedModelName is the effective primary model identity exposed by this
-	// component's serving role. During rolling updates, worker status keeps the
-	// old active revision value until cutover completes.
+	// component's serving role in combined mode. Native sidecars omit this field;
+	// Kubernetes Planner reads their registered model identity. During rolling
+	// updates, worker status keeps the old active revision until cutover completes.
 	// +optional
 	ServedModelName string `json:"servedModelName,omitempty"`
 
 	// RuntimeComponentName is an explicit Dynamo runtime component identity
-	// resolved from the serving role's endpoint override. Omission means the
-	// backend default applies. During rolling updates, worker status keeps the
-	// old active revision value until cutover completes.
+	// resolved from the serving role's endpoint override in combined mode.
+	// Native sidecars omit this field; Kubernetes Planner reads their registered
+	// component identity. During rolling updates, worker status keeps the old
+	// active revision value until cutover completes.
 	// +optional
 	RuntimeComponentName string `json:"runtimeComponentName,omitempty"`
 

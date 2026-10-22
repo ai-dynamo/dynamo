@@ -238,6 +238,7 @@ class OmniHandler(BaseOmniHandler):
             media_fs=media_output_fs,
             media_http_url=media_output_http_url,
             default_fps=getattr(config, "default_video_fps", 16),
+            image_png_compression_level=config.image_png_compression_level,
         )
 
         # Audio/TTS handler — composition, not inheritance.
@@ -348,16 +349,9 @@ class OmniHandler(BaseOmniHandler):
                 image = await self._image_loader.load_image(
                     parsed_request.input_reference
                 )
-            except Exception as e:
-                logger.warning("Failed to load I2V input_reference: %s", e)
-                yield {
-                    "id": request_id,
-                    "object": "video",
-                    "model": self.config.model,
-                    "status": "failed",
-                    "error": f"Failed to load input_reference: {e}",
-                }
-                return
+            except (ValueError, PIL.Image.DecompressionBombError) as e:
+                # Keep URLs and inline image data out of the client error.
+                raise InvalidArgument("Failed to load input_reference") from e
 
         try:
             inputs = await self.build_engine_inputs(

@@ -31,13 +31,12 @@ lpx:
   modelRegistryURL: ""
 
 dgdrV1Beta2:
-  # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2
-  # API schemas. DynamoGraphDeploymentRun and DynamoGraphDeploymentCandidate objects
-  # created through these schemas are persisted in etcd. Incompatible schema changes
-  # may make stored objects unreadable or block future CRD upgrades. When false, the
-  # CRD init container omits those resources and removes v1beta2 from
-  # DynamoGraphDeploymentRequest before installation. The operator does not reconcile
-  # v1beta2 resources.
+  # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2
+  # Request API with conversion and install the Run and Candidate APIs. Run and
+  # Candidate objects are persisted in etcd; incompatible schema changes may make
+  # them unreadable or block future CRD upgrades. When false, the CRD init container
+  # installs the legacy Request schemas without v1beta2 conversion envelopes and
+  # omits Run and Candidate. The operator does not reconcile v1beta2 requests.
   enabled: false
 
 # Environment variables to pass to operator Deployment.

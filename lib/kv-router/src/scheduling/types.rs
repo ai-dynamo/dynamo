@@ -15,8 +15,8 @@ use super::prefill_load::effective_prefill_tokens;
 use crate::kv_hints::KvTransferCandidates;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
-    WorkerId, WorkerWithDpRank,
+    LocalBlockHash, RoutingConstraints, SelectionTrace, SharedCacheHits, WorkerAffinityTarget,
+    WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
@@ -161,6 +161,9 @@ pub struct SchedulingResponse {
     pub target_cached_prefix_blocks: u32,
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub potential_decode_blocks: usize,
+    /// Per-candidate costs, present only when the scheduler has a selection
+    /// trace spec installed and this selection was admitted.
+    pub selection_trace: Option<SelectionTrace>,
 }
 
 /// Internal result that pairs a public scheduling response with its attempt identity.
