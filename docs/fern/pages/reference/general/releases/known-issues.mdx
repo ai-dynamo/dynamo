@@ -12,9 +12,19 @@ import { RELEASE_STATS } from "@/components/releases.data";
 
 Known issues are mirrored verbatim from each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
 
+<a id="v151"></a>
+
+## v1.5.1 — current release
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **SGLang Sidecar Inference 500 Errors:** Every inference request sent to the SGLang sidecar still fails with HTTP 500 and the error `'GenerateReqInput' object has no attribute 'batch_size'`. The cause is a protocol mismatch with the bundled SGLang version that is corrected in upstream SGLang v0.5.19. No workaround is available yet; the fix is targeted for v1.6.0.
+
+<span className="dynref-badge dynref-badge--blue">Multimodal</span> **Video Decode Worker Crash:** Some H.264 videos sent as multimodal input crash the worker serving the request when PyNvVideoCodec 2.2.3 decodes the final frame, and later requests to that worker fail until it restarts. The issue also affects v1.5.0 on SGLang, TensorRT-LLM, and vLLM. Image and audio inputs are not affected. No workaround is available yet; the fix is targeted for v1.6.0.
+
+The other [v1.5.0 known issues](#v150) still apply.
+
 <a id="v150"></a>
 
-## v1.5.0 — current release
+## v1.5.0
 
 <span className="dynref-badge dynref-badge--blue">SGLang</span> **SGLang Sidecar Inference 500 Errors:** Every inference request sent to the SGLang sidecar fails with HTTP 500 and the error `'GenerateReqInput' object has no attribute 'batch_size'`. Startup, registration and discovery succeed on the same binaries, so only the generate path is affected; the cause is a protocol mismatch between the sidecar's request handling and the bundled SGLang version, which is corrected in upstream SGLang v0.5.19. No workaround is available yet.
 

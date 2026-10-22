@@ -97,9 +97,13 @@ recomputable state and introduce a second state machine without improving recove
 
 ## Hash Function Contract
 
-The v2 hash summarizes rendered worker DCD inputs that require a new worker generation. Scaling-only
-inputs such as replica count do not participate because the controller applies them to the active
-generation without a worker rollout.
+The v2 hash identifies a serving cohort. It includes rendered ordinary worker DCD inputs and, when
+present, LPX component inputs. LPX reuses this hash in `LPXInputRevision` and its runtime namespace so
+cooperating workers share the same serving revision. DGDs without LPX retain their existing v2 hash.
+
+Scaling-only inputs do not participate because the controller applies them to the active generation
+without a worker rollout. For LPX, `lpx.scheduling` and conductor/engine replica counts are excluded.
+Agent-only replica count remains included because it changes the speculative-model layout.
 
 Hash-function changes must be conservative. Changing the value for an existing DGD causes a rollout,
 even when the rendered worker workload is unchanged. Any new hash input must therefore preserve
@@ -115,6 +119,7 @@ stored v1 values are opaque generation suffixes.
 | 1.3 | The 1.2 dual-hash algorithm remained unchanged: both hashes were computed, ordinary rollouts remained v1-named, and v2 detected changes outside the v1 input. |
 | 1.4 | [#11529](https://github.com/ai-dynamo/dynamo/pull/11529) made v2 authoritative in the steady state. New DGDs start v2-only. Existing dual-annotation DGDs keep their constant v1 suffix until the next real rollout, then become v2-only. v1 computation remains only in the incomplete v1-only compatibility path. |
 | 1.5 | [#12633](https://github.com/ai-dynamo/dynamo/pull/12633) added the canonical resolved runtime version to v2 for runtimes at or above 1.5.0. Older and unresolved runtime versions keep their previous v2 value. [#13450](https://github.com/ai-dynamo/dynamo/pull/13450) removed the remaining v1 calculation; stored v1 values are now always opaque. |
+| 1.6 | [#15607](https://github.com/ai-dynamo/dynamo/pull/15607) extended v2 to include LPX component inputs and reused it in LPX input revisions and runtime namespaces. DGDs without LPX retain their existing v2 hash. |
 
 The v2 annotation therefore first shipped in 1.2, participated in change detection in 1.2 and 1.3,
 and became the sole steady-state rollout comparison in 1.4. The controller stopped computing v1 for

@@ -62,10 +62,12 @@ import (
 	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -116,6 +118,8 @@ func initCRDSchemes() {
 
 	utilruntime.Must(nvidiacomv1beta1.AddToScheme(crdScheme))
 
+	utilruntime.Must(nvidiacomv1beta2.AddToScheme(crdScheme))
+
 	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
 
 	utilruntime.Must(volcanoscheme.AddToScheme(crdScheme))
@@ -125,6 +129,8 @@ func initCRDSchemes() {
 	// PodSnapshot/PodSnapshotContent are owned by github.com/ai-dynamo/snapshot; the
 	// operator only consumes them (creates/reads), it does not reconcile them.
 	utilruntime.Must(snapshotv1alpha1.AddToScheme(crdScheme))
+
+	utilruntime.Must(lpxv1alpha1.AddToScheme(crdScheme))
 
 	utilruntime.Must(apiextensionsv1.AddToScheme(crdScheme))
 

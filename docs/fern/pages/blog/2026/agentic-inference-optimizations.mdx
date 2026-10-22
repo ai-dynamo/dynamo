@@ -6,7 +6,7 @@ sidebar-title: Agentic Inference Optimizations
 subtitle: "Ishan Dhanani and Matej Kosec — March 2026"
 description: "How Dynamo optimizes for agentic workloads at three layers: frontend API, router, and KV cache management."
 keywords: agentic inference, KV cache, prefix caching, agent hints, disaggregated serving, Dynamo
-last-updated: June 12, 2026
+last-updated: October 2, 2026
 hide-page-actions: true
 ---
 
@@ -123,20 +123,17 @@ Once dispatched, SGLang, vLLM, and TRT-LLM may interpret engine priority differe
 
 ### Agentic Workload Routing Strategies
 
-A research agent with a 200K context window needs workers with enough free KV capacity to hold its full state. The router's default cost function (overlap score + decode load) handles the common case, but teams with domain-specific workloads can use the router's Python bindings to implement custom routing strategies. The core `KvRouter` class provides `best_worker()` for querying routing decisions, `get_potential_loads()` for per-worker load inspection, and `generate()` for routing + dispatch in one call. Custom routers register on the same service mesh as the default components and can override routing config per-request:
+A research agent with a 200K context window needs workers with enough free KV capacity to hold its full state. The router's default cost function (overlap score + decode load) handles the common case, but teams with domain-specific workloads can use the router's Python bindings to implement custom routing strategies. The core `KvRouter` class provides `best_worker()` for querying routing decisions, `get_potential_loads()` for per-worker load inspection, and `generate()` for routing + dispatch in one call. Custom routers register on the same service mesh as the default components:
 
 ```python
 # Query per-worker load and overlap for custom routing logic
 loads = await router.get_potential_loads(token_ids)
 
-# Override routing config based on request properties
-# Long contexts benefit from stronger overlap credit
-config = {"overlap_score_credit": 1.0} if len(token_ids) > 8192 else {}
+# Ask the default selector for a worker and track the request
 worker_id, dp_rank, overlap = await router.best_worker(
     token_ids,
     request_id="req-123",
     update_indexer=True,
-    router_config_override=config
 )
 
 # Or bypass the default selector entirely when the harness
@@ -145,6 +142,8 @@ stream = await router.generate(
     token_ids, model=model, worker_id=chosen_worker
 )
 ```
+
+As of current Dynamo, the default worker-selection policy ignores per-request score and temperature overrides in `router_config_override`. Set its scoring weights and temperature in the default-policy parameters passed through `--router-policy-config`; see [Configure the Default Policy](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#configure-the-default-policy).
 
 The [NeMo Agent Toolkit (NAT)](https://github.com/NVIDIA/NeMo-Agent-Toolkit/tree/develop/examples/dynamo_integration) team used these APIs to build a custom online-learning agentic router. Their router extracts session metadata from `nvext` annotations and feeds it to a [Thompson Sampling](https://en.wikipedia.org/wiki/Thompson_sampling) bandit style cost function that learns which workers perform best for which prefix patterns under load. Compared to Dynamo's default routing, they measured 4x reduction in p50 TTFT and 1.5x increase in p50 tokens-per-second. Priority tagging of latency-sensitive requests achieved up to 63% p50 TTFT reduction under moderate memory pressure. See the [NAT Dynamo integration example](https://github.com/NVIDIA/NeMo-Agent-Toolkit/tree/develop/examples/dynamo_integration) for implementation details. We will be making this available as a routing strategy in Dynamo soon.
 

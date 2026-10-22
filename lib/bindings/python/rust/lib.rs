@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::admission_gate::WorkerAdmissionGate;
 use dynamo_llm::local_model::{
     LocalModel, register_model_card, update_model_taints as update_model_taints_rs,
 };
@@ -94,7 +95,7 @@ mod python_payload;
 
 type PythonServerStreamingIngress = Ingress<
     SingleIn<python_payload::PythonPayload>,
-    ManyOut<python_payload::PythonResponseItem>,
+    ManyOut<python_payload::EncodedPythonResponse>,
     python_payload::PythonIngressPayloadAdapter,
 >;
 
@@ -109,10 +110,13 @@ type PythonPushEgressIngress = Ingress<
     python_payload::PythonIngressPayloadAdapter,
 >;
 
+/// Ingress for bidirectional endpoints, which backend admission never sees:
+/// its own adapter decodes request frames without the rank probe and encodes
+/// responses without classifying them.
 type PythonBidirectionalIngress = Ingress<
     rs::pipeline::ManyIn<python_payload::PythonPayload>,
     ManyOut<python_payload::PythonResponseItem>,
-    python_payload::PythonIngressPayloadAdapter,
+    python_payload::PythonBidirectionalPayloadAdapter,
 >;
 
 static INIT: OnceCell<()> = OnceCell::new();
@@ -145,10 +149,10 @@ fn get_span_for_direct_context(
 }
 
 // Helper to create request context with proper linking and cancellation handling
-fn create_request_context(
-    request: rmpv::Value,
+fn create_request_context<T: rs::pipeline::Data>(
+    request: T,
     parent_ctx: &Option<context::Context>,
-) -> RsContext<rmpv::Value> {
+) -> RsContext<T> {
     match parent_ctx {
         // If there is a parent context, link the request as a child context of it
         Some(parent_ctx) => {
@@ -158,7 +162,9 @@ fn create_request_context(
                 parent_ctx.metadata_snapshot(),
             );
             parent_ctx.inner().link_child(child_ctx.context());
-            if parent_ctx.inner().is_stopped() || parent_ctx.inner().is_killed() {
+            if parent_ctx.inner().is_killed() {
+                child_ctx.context().kill();
+            } else if parent_ctx.inner().is_stopped() {
                 // Let the server handle the cancellation for now since not all backends are
                 // properly handling request exceptions
                 // TODO: (DIS-830) Return an error if context is cancelled
@@ -168,6 +174,36 @@ fn create_request_context(
         }
         // Otherwise if there is no parent context, use the request as-is
         _ => request.into(),
+    }
+}
+
+#[cfg(test)]
+mod request_context_tests {
+    use super::*;
+    use rs::pipeline::AsyncEngineContext;
+    use rs::pipeline::context::Controller;
+
+    #[test]
+    fn create_request_context_preserves_killed_state() {
+        let parent_controller = Arc::new(Controller::new("parent".to_string()));
+        parent_controller.kill();
+        let parent = context::Context::new(parent_controller, None, None, Default::default());
+
+        let child = create_request_context(rmpv::Value::Nil, &Some(parent));
+
+        assert!(child.context().is_killed());
+    }
+
+    #[test]
+    fn create_request_context_preserves_stopped_state() {
+        let parent_controller = Arc::new(Controller::new("parent".to_string()));
+        parent_controller.stop_generating();
+        let parent = context::Context::new(parent_controller, None, None, Default::default());
+
+        let child = create_request_context(rmpv::Value::Nil, &Some(parent));
+
+        assert!(child.context().is_stopped());
+        assert!(!child.context().is_killed());
     }
 }
 
@@ -351,14 +387,12 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::frontend_routes::PyFrontendExtensionContext>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
-    m.add_class::<llm::entrypoint::AicPerfConfig>()?;
+    m.add_class::<llm::entrypoint::AisPerfConfig>()?;
     m.add_class::<llm::entrypoint::RouterConfig>()?;
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::kv::LoadThresholdConfig>()?;
     m.add_class::<llm::replay::ReasoningConfig>()?;
-    m.add_class::<llm::replay::SglangArgs>()?;
-    m.add_class::<llm::replay::TrtllmArgs>()?;
-    m.add_class::<llm::replay::MockEngineArgs>()?;
+    m.add_function(wrap_pyfunction!(llm::replay::_normalize_mocker_config, m)?)?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
@@ -376,6 +410,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::fpm::FpmEventRelay>()?;
     m.add_class::<llm::fpm::FpmDirectPublisher>()?;
     m.add_class::<llm::fpm::FpmEventSubscriber>()?;
+    m.add_class::<llm::fpm::FpmHealthSnapshot>()?;
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
@@ -506,7 +541,9 @@ fn resolve_event_transport_kind(
     match event_plane {
         Some("nats") => Ok(EventTransportKind::Nats),
         Some("zmq") => Ok(EventTransportKind::Zmq),
-        Some("") | None => Ok(discovery_backend.resolve_event_transport_kind()),
+        Some("") | None => discovery_backend
+            .resolve_event_transport_kind()
+            .map_err(to_pyerr),
         Some(other) => Err(PyValueError::new_err(format!(
             "Invalid event_plane value '{other}'. Valid values: 'nats', 'zmq'"
         ))),
@@ -605,7 +642,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None, skip_model_assets=false))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -630,6 +667,7 @@ fn register_model<'p>(
     ignore_weights: bool,
     max_gpu_lora_count: Option<u32>,
     model_aliases: Option<Vec<String>>,
+    skip_model_assets: bool,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -687,6 +725,7 @@ fn register_model<'p>(
 
     let is_tensor_based = model_type.inner.supports_tensor();
     let is_images = model_type.inner.supports_images();
+    let is_audios = model_type.inner.supports_audios();
     let is_videos = model_type.inner.supports_videos();
     let is_realtime = model_type.inner.supports_realtime();
 
@@ -785,6 +824,15 @@ fn register_model<'p>(
         WorkerType::Encode => rs::telemetry::LifecycleOperationRole::Encode,
         WorkerType::Aggregated => rs::telemetry::LifecycleOperationRole::Worker,
     };
+    // The gate of the worker this endpoint serves for, created by its first
+    // registration with its metrics exposed on the endpoint's component. It
+    // exists before the role is recorded: recording the role, before the card
+    // is built and published, is what makes this endpoint a model backend,
+    // whose requests that gate admits from now on, even if it is already
+    // serving.
+    let admission_gate = endpoint
+        .admission_gate
+        .get_or_create(endpoint.inner.component());
     endpoint
         .inner
         .set_lifecycle_operation_role(lifecycle_role)
@@ -793,11 +841,10 @@ fn register_model<'p>(
     crate::future_into_py(py, async move {
         let runtime_config = runtime_config.unwrap_or_default();
 
-        // For TensorBased, Images, Videos, and Realtime models, skip
-        // HuggingFace downloads and register directly. These model types
-        // handle model loading internally; no tokenizer extraction is
-        // needed and the source path is not required to be a HF repo.
-        if is_tensor_based || is_images || is_videos || is_realtime {
+        // These model types handle model loading internally. External adapters can
+        // opt into the same minimal card without resolving local or HF assets.
+        // Ordinary audio registrations retain the builder's metadata and checksum.
+        if is_tensor_based || is_images || is_videos || is_realtime || skip_model_assets {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             // Preserve source_path for compatibility checks (LoRA vs base model).
@@ -818,13 +865,15 @@ fn register_model<'p>(
             card.worker_type = worker_type_value;
             card.needs = needs_value.clone();
             card.user_data = user_data_json;
-            // Aliases are only honored on the LLM surfaces (their handlers
-            // canonicalize alias→primary); ignore them for these types.
-            if !model_aliases.is_empty() {
+            // The audio handler resolves aliases to the primary model name.
+            // Preserve the existing alias behavior for other minimal-card types.
+            if is_audios {
+                card.set_aliases(model_aliases);
+            } else if !model_aliases.is_empty() {
                 tracing::warn!(
                     model_name = %model_name,
                     "Ignoring served-model-name aliases: not supported for \
-                     tensor/images/videos/realtime models"
+                     non-audio minimal model cards"
                 );
             }
 
@@ -842,6 +891,7 @@ fn register_model<'p>(
             register_model_card(&endpoint.inner, &card)
                 .await
                 .map_err(|e| PyException::new_err(format!("{}", e)))?;
+            admission_gate.record_model_card(&card);
 
             return Ok(());
         }
@@ -910,6 +960,7 @@ fn register_model<'p>(
             )
             .await
             .map_err(to_pyerr)?;
+        admission_gate.record_model_card(local_model.card());
 
         if let Some(lora_name) = lora_identifier {
             tracing::info!("Registered LoRA '{}' MDC", lora_name);
@@ -1019,6 +1070,10 @@ fn fetch_model<'p>(
 pub struct DistributedRuntime {
     inner: rs::DistributedRuntime,
     event_loop: PyObject,
+    /// The admission gate of the Python worker this runtime serves, shared
+    /// with every endpoint it creates: a Python backend's runtime is its
+    /// worker, so backends sharing one runtime share one gate.
+    admission_gate: WorkerAdmissionGate,
 }
 
 impl DistributedRuntime {
@@ -1039,6 +1094,9 @@ struct CancellationToken {
 struct Endpoint {
     inner: rs::component::Endpoint,
     event_loop: PyObject,
+    /// The admission gate of the worker this endpoint serves for: its
+    /// runtime's, or the backend `Worker`'s that handed it to its engine.
+    admission_gate: WorkerAdmissionGate,
 }
 
 #[pyclass(name = "FirstTokenSource")]
@@ -1410,7 +1468,11 @@ impl DistributedRuntime {
             .block_on(rs::DistributedRuntime::new(runtime, runtime_config))
             .map_err(to_pyerr)?;
 
-        Ok(DistributedRuntime { inner, event_loop })
+        Ok(DistributedRuntime {
+            inner,
+            event_loop,
+            admission_gate: WorkerAdmissionGate::default(),
+        })
     }
 
     #[staticmethod]
@@ -1427,6 +1489,7 @@ impl DistributedRuntime {
         Ok(DistributedRuntime {
             inner,
             event_loop: py.None(),
+            admission_gate: WorkerAdmissionGate::default(),
         })
     }
 
@@ -1459,6 +1522,7 @@ impl DistributedRuntime {
         Ok(Endpoint {
             inner: endpoint,
             event_loop: self.event_loop.clone(),
+            admission_gate: self.admission_gate.clone(),
         })
     }
 
@@ -1478,6 +1542,45 @@ impl DistributedRuntime {
         self.inner
             .system_status_server_info()
             .map(|info| format!("http://{}", info.advertised_socket_addr()))
+    }
+
+    /// Register a component handler under `/engine/{name}/...` on the system listener.
+    /// The callback receives `{method, path, body}` and returns `{status, body}`.
+    fn register_engine_http_handler(
+        &self,
+        py: Python<'_>,
+        name: String,
+        callback: PyObject,
+    ) -> PyResult<()> {
+        if self.inner.system_status_server_info().is_none() {
+            return Err(to_pyerr("control handlers require DYN_SYSTEM_PORT"));
+        }
+        let locals = Arc::new(pyo3_async_runtimes::tokio::get_current_locals(py)?);
+        let callback = Arc::new(callback);
+        let handler: rs::engine_routes::EngineHttpCallback = Arc::new(move |request| {
+            let callback = Arc::clone(&callback);
+            let locals = Arc::clone(&locals);
+            Box::pin(async move {
+                let future = Python::with_gil(|py| {
+                    let request = pythonize::pythonize(py, &request)?;
+                    let coroutine = callback.call1(py, (request,))?;
+                    pyo3_async_runtimes::into_future_with_locals(&locals, coroutine.into_bound(py))
+                })?;
+                let result = future.await?;
+                Python::with_gil(|py| {
+                    pythonize::depythonize::<rs::engine_routes::EngineHttpResponse>(result.bind(py))
+                        .map_err(anyhow::Error::from)
+                })
+            })
+        });
+        self.inner
+            .engine_routes()
+            .register_http(name, handler)
+            .map_err(to_pyerr)
+    }
+
+    fn unregister_engine_http_handler(&self, name: &str) {
+        self.inner.engine_routes().unregister_http(name);
     }
 
     /// Register an async Python callback for /engine/{route_name}
@@ -1612,6 +1715,15 @@ impl Endpoint {
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
+        // The network engines read the role per request, so one recorded later
+        // by `register_model` takes effect from then on, through the gate of
+        // the worker this endpoint serves for.
+        let backend_role = engine::BackendRole::of(&self.inner);
+        let admission = engine::EndpointAdmission::new(
+            self.admission_gate.clone(),
+            self.inner.component().clone(),
+        );
+
         // Push egress: the handler pushes each response into a Rust channel via
         // its `response_sender` argument, instead of Rust pulling `__anext__`
         // off its generator on a tokio thread once per response. Selected per
@@ -1657,6 +1769,8 @@ impl Endpoint {
                 Arc::new(push_egress::PythonPushEngine::new(
                     generator,
                     self.event_loop.clone(),
+                    backend_role,
+                    admission,
                 )),
                 python_payload::PythonIngressPayloadAdapter,
             )
@@ -1668,7 +1782,7 @@ impl Endpoint {
                 generator,
                 self.event_loop.clone(),
             )?);
-            let network_engine = Arc::new(engine.network_engine());
+            let network_engine = Arc::new(engine.network_engine(backend_role, admission));
             let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
                 network_engine,
                 python_payload::PythonIngressPayloadAdapter,
@@ -1752,9 +1866,11 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress: Arc<PythonBidirectionalIngress> =
-            Ingress::for_engine_with_adapter(engine, python_payload::PythonIngressPayloadAdapter)
-                .map_err(to_pyerr)?;
+        let ingress: Arc<PythonBidirectionalIngress> = Ingress::for_engine_with_adapter(
+            engine,
+            python_payload::PythonBidirectionalPayloadAdapter,
+        )
+        .map_err(to_pyerr)?;
 
         let builder = self
             .inner
@@ -1902,7 +2018,7 @@ impl Client {
         let inner = self.router.client.clone();
         crate::future_into_py(py, async move {
             inner
-                .wait_for_instances()
+                .wait_for_routable_instances()
                 .await
                 .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<u64>>())
                 .map_err(to_pyerr)

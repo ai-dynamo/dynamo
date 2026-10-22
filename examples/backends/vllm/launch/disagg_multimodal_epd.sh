@@ -24,6 +24,8 @@ if ! [[ "$DYN_VLLM_KV_LEASE_DURATION" =~ ^([6-9]|[1-9][0-9]+)$ ]]; then
     exit 2
 fi
 KV_TRANSFER_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"kv_lease_duration\":${DYN_VLLM_KV_LEASE_DURATION}}}"
+KV_TRANSFER_CONFIG_PREFILL="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\",\"kv_connector_extra_config\":{\"kv_lease_duration\":${DYN_VLLM_KV_LEASE_DURATION}}}"
+KV_TRANSFER_CONFIG_DECODE="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\",\"kv_connector_extra_config\":{\"kv_lease_duration\":${DYN_VLLM_KV_LEASE_DURATION}}}"
 
 # --single-gpu: Packs all 3 workers (encode, prefill, decode) onto a single GPU.
 # This is intended for functional testing with small models (e.g. 2B) where CI
@@ -69,6 +71,10 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Disaggregated multimodal serving with separate Encode/Prefill/Decode workers"
             echo ""
+            echo "Single-GPU mode uses the first CUDA_VISIBLE_DEVICES entry; missing or empty is an error."
+            echo "Explicit DYN_ENCODE_WORKER_GPU, DYN_PREFILL_WORKER_GPU, and DYN_DECODE_WORKER_GPU values override it."
+            echo "Set CUDA_VISIBLE_DEVICES unless every worker has an explicit GPU override."
+            echo ""
             echo "Options:"
             echo "  --model <model_name>          Specify the VLM model to use (default: $MODEL_NAME)"
             echo "                                LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates"
@@ -81,7 +87,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --model llava-hf/llava-1.5-7b-hf"
             echo "  $0 --model microsoft/Phi-3.5-vision-instruct"
             echo "  $0 --model Qwen/Qwen2.5-VL-7B-Instruct"
-            echo "  $0 --model Qwen/Qwen3-VL-2B-Instruct --single-gpu"
+            echo "  CUDA_VISIBLE_DEVICES=0 $0 --model Qwen/Qwen3-VL-2B-Instruct --single-gpu"
             echo "  $0 --model llava-hf/llava-1.5-7b-hf --two-gpu"
             echo ""
             exit 0
@@ -124,13 +130,13 @@ DECODE_GPU_MEM_ARGS=""
 
 # GPU assignments (override via environment variables).
 # Modes:
-#   --single-gpu : all 3 workers on GPU 0
+#   --single-gpu : all 3 workers on the inherited GPU (see inherited_gpu_id)
 #   --two-gpu    : encode + prefill on GPU 0, decode on GPU 1
 #   default      : encode 0, prefill 1, decode 2 (3 GPUs)
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
-    DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
-    DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-0}
+    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-$(inherited_gpu_id)}
+    DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-$(inherited_gpu_id)}
+    DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-$(inherited_gpu_id)}
 elif [[ "$TWO_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
@@ -230,8 +236,15 @@ SYSTEM_PORT_DECODE=$(dyn_port DYN_SYSTEM_PORT 3 8083)
 # --enforce-eager. The V1 runner keeps vLLM's encoder-only vision tower (no full
 # model load). Short-term workaround; drop it (set VLLM_USE_V2_MODEL_RUNNER=1)
 # once the V2 encoder-only path is fixed upstream. MoE VLMs are unaffected.
+#
+# The encode worker serves `generate` without a health-check payload. With
+# canaries off (the default), its /health then falls back to a process status
+# that starts NotReady and is never set, so it answers 503 forever. The operator
+# sets DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS on every worker; mirror it here so
+# readiness follows the endpoint's registration.
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
 DYN_SYSTEM_PORT=$SYSTEM_PORT_ENCODE \
+DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS='["generate"]' \
 VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-0} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
@@ -241,13 +254,13 @@ python -m dynamo.vllm --enable-multimodal --disaggregation-mode encode --model $
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (${PREFILL_GPU_MEM_ARGS})..."
 DYN_SYSTEM_PORT=$SYSTEM_PORT_PREFILL \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL \
-CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $PREFILL_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config "$KV_TRANSFER_CONFIG" --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_PREFILL}\"}" &
+CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $PREFILL_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config "$KV_TRANSFER_CONFIG_PREFILL" --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_PREFILL}\"}" &
 
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (${DECODE_GPU_MEM_ARGS})..."
 DYN_SYSTEM_PORT=$SYSTEM_PORT_DECODE \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE \
-CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU python -m dynamo.vllm  --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $DECODE_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config "$KV_TRANSFER_CONFIG" --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_DECODE}\"}" &
+CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU python -m dynamo.vllm  --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $DECODE_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config "$KV_TRANSFER_CONFIG_DECODE" --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_DECODE}\"}" &
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."

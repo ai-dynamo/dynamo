@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod agentic;
 mod artifacts;
 mod entrypoints;
 pub(crate) mod offline;
@@ -11,9 +12,10 @@ mod validate;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use crate::common::protocols::{DirectRequest, MockerConfig};
 use dynamo_kv_router::PrefillLoadEstimator;
 
+pub use agentic::AgenticReplayOptions;
 /// Backward-compatible Dynamo Mocker name for [`aisimulate_core::ReplayReport`].
 pub use aisimulate_core::ReplayReport as TraceSimulationReport;
 pub(crate) use aisimulate_core::replay::TraceCollector;
@@ -45,8 +47,8 @@ pub type ReplayPrefillLoadEstimator = Arc<dyn PrefillLoadEstimator>;
 
 #[derive(Clone, Debug)]
 pub struct OfflineDisaggReplayConfig {
-    pub prefill_args: MockEngineArgs,
-    pub decode_args: MockEngineArgs,
+    pub prefill_args: MockerConfig,
+    pub decode_args: MockerConfig,
     pub num_prefill_workers: usize,
     pub num_decode_workers: usize,
 }
@@ -92,9 +94,12 @@ pub use entrypoints::{
     ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
     generate_trace_worker_artifacts_offline_with_kv_event_visibility,
     simulate_agentic_trace_live_workload_with_router_mode_and_options,
+    simulate_agentic_trace_workload_disagg_with_options,
     simulate_agentic_trace_workload_disagg_with_router_mode,
+    simulate_agentic_trace_workload_disagg_with_router_mode_and_runtime_observers,
     simulate_agentic_trace_workload_disagg_with_router_mode_and_telemetry,
-    simulate_agentic_trace_workload_with_router_mode,
+    simulate_agentic_trace_workload_with_options, simulate_agentic_trace_workload_with_router_mode,
+    simulate_agentic_trace_workload_with_router_mode_and_runtime_observers,
     simulate_agentic_trace_workload_with_router_mode_and_telemetry, simulate_concurrency_file,
     simulate_concurrency_file_disagg_with_router_mode,
     simulate_concurrency_file_disagg_with_router_mode_and_format,
@@ -151,6 +156,35 @@ pub use entrypoints::{
 #[doc(hidden)]
 pub use offline::run_offline_handoff_conformance;
 pub use validate::validate_replay_args_mode;
+
+thread_local! {
+    static KV_EVENT_LAG_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// Run `replay` with a simulated KV event lag for offline KV-router replay.
+///
+/// Delays the KV cache events (blocks stored and removed) the router's indexer observes by
+/// `lag_ms` of simulated time. Prefill and request completions stay immediate, as a live router
+/// observes them in-band on the response path. Applies to offline KV-router replays constructed
+/// on this thread inside `replay`; `0.0` keeps synchronous updates.
+pub fn with_kv_event_lag_ms<T>(lag_ms: f64, replay: impl FnOnce() -> T) -> anyhow::Result<T> {
+    anyhow::ensure!(
+        lag_ms.is_finite() && lag_ms >= 0.0,
+        "kv_event_lag_ms must be finite and non-negative, got {lag_ms}"
+    );
+    struct Restore(f64);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            KV_EVENT_LAG_MS.with(|lag| lag.set(self.0));
+        }
+    }
+    let _restore = Restore(KV_EVENT_LAG_MS.with(|lag| lag.replace(lag_ms)));
+    Ok(replay())
+}
+
+pub(crate) fn kv_event_lag_ms() -> f64 {
+    KV_EVENT_LAG_MS.with(std::cell::Cell::get)
+}
 
 pub(crate) fn normalize_trace_requests(
     mut requests: Vec<DirectRequest>,

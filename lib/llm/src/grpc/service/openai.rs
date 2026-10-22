@@ -77,7 +77,7 @@ pub async fn completion_response_stream(
     )
     .await;
     // update the request to always stream
-    let request = request.map(|mut req| {
+    let mut request = request.map(|mut req| {
         req.inner.stream = Some(true);
         req
     });
@@ -106,7 +106,8 @@ pub async fn completion_response_stream(
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = inflight_guard.response_collector();
+    inflight_guard.request_metrics().attach_to(&mut request);
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -344,6 +345,7 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateCompletionRequest {
         };
 
         Ok(NvCreateCompletionRequest {
+            no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: request.model_name,
                 prompt: Prompt::String(text_input),

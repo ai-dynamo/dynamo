@@ -65,6 +65,18 @@ const (
 	// Default: true when both API groups are detected; false otherwise
 	LWS Name = "lws"
 
+	// DisaggregatedSet enables the opt-in DisaggregatedSet workload pathway.
+	//
+	// Owner: @yankay
+	// Experimental since: v1.4.0
+	// Beta since: N/A
+	// GA since: N/A
+	// Configuration: nvidia.com/enable-disaggregatedset annotation
+	// Auto-detection: disaggregatedset.x-k8s.io/v1 API
+	// Requires: LWS serving disaggregatedset.x-k8s.io/v1
+	// Default: true when the API is detected; false otherwise
+	DisaggregatedSet Name = "disaggregatedSet"
+
 	// KaiScheduler enables Kai Scheduler integration.
 	//
 	// Owner: @julienmancuso
@@ -130,7 +142,9 @@ const (
 var allNames = [...]Name{
 	Checkpoint,
 	Grove,
+	LPX,
 	LWS,
+	DisaggregatedSet,
 	KaiScheduler,
 	VolcanoScheduler,
 	DRA,
@@ -147,7 +161,9 @@ type Gate interface {
 type Gates struct {
 	Checkpoint       bool `json:"checkpoint"`
 	Grove            bool `json:"grove"`
+	LPX              bool `json:"lpx"`
 	LWS              bool `json:"lws"`
+	DisaggregatedSet bool `json:"disaggregatedSet"`
 	KaiScheduler     bool `json:"kaiScheduler"`
 	VolcanoScheduler bool `json:"volcanoScheduler"`
 	DRA              bool `json:"dra"`
@@ -163,7 +179,11 @@ func Defaults() Gates {
 }
 
 // New detects cluster capabilities and resolves them with operator configuration.
-func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration) (Gates, error) {
+func New(
+	ctx context.Context,
+	mgr ctrl.Manager,
+	config *configv1alpha1.OperatorConfiguration,
+) (Gates, error) {
 	gates := Defaults()
 	gates.GPUDiscovery = config.Namespace.Restricted == "" || ptr.Deref(config.GPU.DiscoveryEnabled, true)
 
@@ -196,6 +216,13 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 		return Gates{}, err
 	}
 
+	// Enable LPX only when explicitly configured and its external API dependency is available.
+	if config.LPX.Enabled {
+		if gates.LPX, err = resolveLPX(ctx, mgr.GetConfig()); err != nil {
+			return Gates{}, err
+		}
+	}
+
 	lwsAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "leaderworkerset.x-k8s.io", "", "")
 	if err != nil {
 		return Gates{}, err
@@ -204,6 +231,14 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 	if err != nil {
 		return Gates{}, err
 	}
+	disaggregatedSetAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "disaggregatedset.x-k8s.io", "v1", "")
+	if err != nil {
+		return Gates{}, err
+	}
+	// The DS pathway lists and watches the LWS children created by the DS
+	// controller. Do not register those watches when the LWS API is absent.
+	lwsOptedOut := config.Orchestrators.LWS.Enabled != nil && !*config.Orchestrators.LWS.Enabled
+	gates.DisaggregatedSet = !lwsOptedOut && lwsAvailable && disaggregatedSetAvailable
 	if ptr.Deref(config.Orchestrators.LWS.Enabled, lwsAvailable && volcanoAvailable) {
 		if !lwsAvailable {
 			return Gates{}, fmt.Errorf("LWS is explicitly enabled in config but the LWS API group was not detected in the cluster")

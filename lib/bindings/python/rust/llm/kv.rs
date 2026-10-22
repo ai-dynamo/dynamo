@@ -43,7 +43,7 @@ use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
-use tracing;
+use tracing::Instrument;
 
 use llm_rs::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use llm_rs::kv_router::RoutingHost;
@@ -56,8 +56,8 @@ use llm_rs::session_affinity::{
     MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode as RsSessionAffinityMode,
 };
 
-use super::aic_callback::create_aic_prefill_load_estimator;
-use super::entrypoint::AicPerfConfig;
+use super::ais_callback::create_ais_prefill_load_estimator;
+use super::entrypoint::AisPerfConfig;
 
 mod demand_driven;
 
@@ -1294,6 +1294,8 @@ impl KvEventPublisher {
         video_token_id: Option<u32>,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
+            liveness: None,
+            expected_rank: None,
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
             image_token_id,
@@ -2113,13 +2115,17 @@ impl KvRouter {
     fn process_request_to_stream<'p>(
         py: Python<'p>,
         inner: Arc<RsRoutingHost>,
-        request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+        request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_size: usize,
+        dispatch_span: tracing::Span,
     ) -> PyResult<Bound<'p, PyAny>> {
         crate::future_into_py(py, async move {
-            let single_in = SingleIn::new(request);
-            let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
+            let stream = inner
+                .generate(request)
+                .instrument(dispatch_span)
+                .await
+                .map_err(to_pyerr)?;
             let (tx, rx) =
                 tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(response_buffer_size);
 
@@ -2187,17 +2193,23 @@ impl KvRouter {
     fn dispatch_request_to_stream<'p>(
         py: Python<'p>,
         inner: Arc<RsRoutingHost>,
-        request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+        request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_mode: ResponseBufferMode,
+        dispatch_span: tracing::Span,
     ) -> PyResult<Bound<'p, PyAny>> {
         match response_buffer_mode {
             ResponseBufferMode::Rendezvous => {
-                demand_driven::process_request_to_stream(py, inner, request, tracker)
+                demand_driven::process_request_to_stream(py, inner, request, tracker, dispatch_span)
             }
-            ResponseBufferMode::Buffered(capacity) => {
-                Self::process_request_to_stream(py, inner, request, tracker, capacity)
-            }
+            ResponseBufferMode::Buffered(capacity) => Self::process_request_to_stream(
+                py,
+                inner,
+                request,
+                tracker,
+                capacity,
+                dispatch_span,
+            ),
         }
     }
 }
@@ -2214,13 +2226,13 @@ impl KvRouter {
     /// Worker role and Prometheus metric labels come from the endpoint's model card.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard"))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, ais_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard"))]
     fn new(
         py: Python<'_>,
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
-        aic_perf_config: Option<&AicPerfConfig>,
+        ais_perf_config: Option<&AisPerfConfig>,
         session_affinity_ttl_secs: Option<u64>,
         load_threshold_config: Option<&LoadThresholdConfig>,
         session_affinity_mode: &str,
@@ -2234,28 +2246,9 @@ impl KvRouter {
             .map(LoadThresholdConfig::as_rust)
             .unwrap_or_default();
         let plugins = crate::router_plugins(&kv_router_config).map_err(to_pyerr)?;
-        let prefill_load_estimator = aic_perf_config
+        let prefill_load_estimator = ais_perf_config
             .map(|config| {
-                Python::with_gil(|py| {
-                    create_aic_prefill_load_estimator(
-                        py,
-                        config.backend_name(),
-                        config.system(),
-                        config.model_path(),
-                        config.tp_size(),
-                        config.backend_version(),
-                        config.moe_tp_size(),
-                        config.moe_ep_size(),
-                        config.attention_dp_size(),
-                        config.gemm_dtype(),
-                        config.moe_dtype(),
-                        config.fmha_dtype(),
-                        config.kv_cache_dtype(),
-                        config.comm_dtype(),
-                        config.nextn(),
-                        config.nextn_accept_rates(),
-                    )
-                })
+                Python::with_gil(|py| create_ais_prefill_load_estimator(py, config.config()))
             })
             .transpose()
             .map_err(to_pyerr)?;
@@ -2420,18 +2413,22 @@ impl KvRouter {
         Self::dispatch_request_to_stream(
             py,
             self.inner.clone(),
-            request,
+            SingleIn::new(request),
             Some(tracker),
             response_buffer_size,
+            tracing::Span::none(),
         )
     }
 
-    #[pyo3(signature = (request, response_buffer_size=100))]
+    /// Generate from a preprocessed request while optionally preserving its
+    /// parent Python context across the PyO3 task boundary.
+    #[pyo3(signature = (request, response_buffer_size=100, context=None))]
     fn generate_from_request<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
         response_buffer_size: isize,
+        context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let response_buffer_size = validate_response_buffer_size(response_buffer_size)?;
         // Depythonize the request directly into PreprocessedRequest
@@ -2447,6 +2444,11 @@ impl KvRouter {
                 t
             }
         };
+        let request = crate::create_request_context(request, &context);
+        let dispatch_span = context
+            .as_ref()
+            .map(|context| crate::get_span_for_context(context, "kv_router.generate_from_request"))
+            .unwrap_or_else(tracing::Span::none);
 
         // Use the helper method to process the request
         Self::dispatch_request_to_stream(
@@ -2455,6 +2457,7 @@ impl KvRouter {
             request,
             Some(tracker),
             response_buffer_size,
+            dispatch_span,
         )
     }
 
@@ -2638,13 +2641,8 @@ impl KvRouter {
         include_shared: bool,
         cache_namespace: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let router_config_override = if let Some(obj) = router_config_override {
-            let override_config: RouterConfigOverride =
-                depythonize(obj.bind(py)).map_err(to_pyerr)?;
-            Some(override_config)
-        } else {
-            None
-        };
+        // Retain the Python argument for existing callers; raw overlaps have no score weights.
+        let _ = router_config_override;
         let block_mm_infos = block_mm_infos
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
             .transpose()?;
@@ -2654,7 +2652,6 @@ impl KvRouter {
             let scores = chooser
                 .get_overlap_scores(
                     &token_ids,
-                    router_config_override.as_ref(),
                     block_mm_infos.as_deref(),
                     lora_name.as_deref(),
                     cache_namespace.as_deref(),

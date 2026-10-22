@@ -219,6 +219,25 @@ fn local_candidates<R: IpResolver>(resolver: &R) -> Result<AddressCandidates, Ip
         .list_up_afinet_netifas()
         .map_err(IpResolutionError::InterfaceEnumeration)?;
     let mut candidates = AddressCandidates::default();
+
+    // Prefer the source address the operating system routes outbound traffic from
+    // (on Linux, the preferred source of the route to an external address). Hosts
+    // often have node-local interfaces, such as a BMC Redfish host interface, that
+    // enumerate before the cluster interface. A routed address is used only if an
+    // up interface in this snapshot carries it; failed probes are ignored.
+    for routed in [resolver.local_ip(), resolver.local_ipv6()]
+        .into_iter()
+        .flatten()
+    {
+        let routed = routed.to_canonical();
+        if interfaces
+            .iter()
+            .any(|(_, address)| address.to_canonical() == routed)
+        {
+            candidates.consider(routed);
+        }
+    }
+
     for (_, address) in interfaces {
         candidates.consider(address);
     }
@@ -319,7 +338,9 @@ fn resolve_wildcard(
 }
 
 /// Resolve an advertisement address that is served by an existing listener.
-/// Wildcard listeners stay in their bound family.
+/// Wildcard listeners prefer their bound family. An IPv6 wildcard listener also
+/// accepts IPv4 by default, so it falls back to a non-loopback IPv4 address on
+/// hosts without one for IPv6. An IPv4 wildcard never advertises IPv6.
 pub(crate) fn resolve_advertise_ip_for_bind<R: IpResolver>(
     bind_ip: IpAddr,
     resolver: &R,
@@ -331,8 +352,13 @@ pub(crate) fn resolve_advertise_ip_for_bind<R: IpResolver>(
     }
 
     let candidates = local_candidates(resolver)?;
+    let dual_stack_fallback = bind_ip
+        .is_ipv6()
+        .then(|| candidates.other_non_loopback(bind_ip))
+        .flatten();
     Ok(candidates
         .non_loopback_for(bind_ip)
+        .or(dual_stack_fallback)
         .or_else(|| candidates.loopback_for(bind_ip))
         .unwrap_or_else(|| loopback_for(bind_ip)))
 }
@@ -466,6 +492,7 @@ pub(crate) mod test_support {
 
     #[derive(Clone, Copy)]
     pub(crate) enum ProbeOutcome {
+        Found(&'static str),
         NotFound,
         Strategy(&'static str),
         Platform(&'static str),
@@ -474,6 +501,7 @@ pub(crate) mod test_support {
     impl ProbeOutcome {
         fn result(self) -> Result<IpAddr, Error> {
             match self {
+                Self::Found(address) => Ok(address.parse().expect("valid test address")),
                 Self::NotFound => Err(Error::LocalIpAddressNotFound),
                 Self::Strategy(message) => Err(Error::StrategyError(message.to_string())),
                 Self::Platform(platform) => Err(Error::PlatformNotSupported(platform.to_string())),
@@ -491,8 +519,6 @@ pub(crate) mod test_support {
         pub(crate) interfaces: Vec<(&'static str, IpAddr)>,
         pub(crate) down_interfaces: Vec<&'static str>,
         pub(crate) interface_error: Option<ProbeOutcome>,
-        pub(crate) ipv4_calls: Cell<usize>,
-        pub(crate) ipv6_calls: Cell<usize>,
         pub(crate) interface_calls: Cell<usize>,
     }
 
@@ -507,8 +533,6 @@ pub(crate) mod test_support {
                 ],
                 down_interfaces: Vec::new(),
                 interface_error: None,
-                ipv4_calls: Cell::new(0),
-                ipv6_calls: Cell::new(0),
                 interface_calls: Cell::new(0),
             }
         }
@@ -520,12 +544,10 @@ pub(crate) mod test_support {
 
     impl IpResolver for StubResolver {
         fn local_ip(&self) -> Result<IpAddr, Error> {
-            self.ipv4_calls.set(self.ipv4_calls.get() + 1);
             self.ipv4.result()
         }
 
         fn local_ipv6(&self) -> Result<IpAddr, Error> {
-            self.ipv6_calls.set(self.ipv6_calls.get() + 1);
             self.ipv6.result()
         }
 
@@ -556,7 +578,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{ProbeOutcome, StubResolver};
     use super::*;
-    use ProbeOutcome::{NotFound, Platform, Strategy};
+    use ProbeOutcome::{Found, NotFound, Platform, Strategy};
 
     fn ip(address: &str) -> IpAddr {
         address.parse().unwrap()
@@ -570,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_only_inventory_uses_global_ipv6_without_family_probes() {
+    fn ipv6_only_inventory_uses_global_ipv6_when_family_probes_fail() {
         let mut resolver = StubResolver::new(Strategy("IPv4 failed"), NotFound);
         resolver.interfaces = vec![
             ("lo", ip("127.0.0.1")),
@@ -581,9 +603,59 @@ mod tests {
         let resolved = resolve_local_host(&resolver).unwrap();
         assert_eq!(resolved.bind_ip(), ip("2001:db8::5"));
         assert!(!resolved.used_loopback_fallback());
-        assert_eq!(resolver.ipv4_calls.get(), 0);
-        assert_eq!(resolver.ipv6_calls.get(), 0);
         assert_eq!(resolver.interface_calls.get(), 1);
+    }
+
+    #[test]
+    fn routed_address_is_preferred_over_earlier_interfaces() {
+        let mut resolver = StubResolver::new(Found("10.3.10.72"), Found("2001:db8::72"));
+        resolver.interfaces = vec![
+            ("lo", ip("127.0.0.1")),
+            ("bmc_redfish0", ip("10.0.1.2")),
+            ("bmc_redfish0", ip("fd00::2")),
+            ("eth0", ip("10.3.10.72")),
+            ("eth0", ip("2001:db8::72")),
+        ];
+
+        assert_eq!(
+            resolve_local_host(&resolver).unwrap().advertise_ip(),
+            ip("10.3.10.72")
+        );
+        let wildcard = resolve_host_or_interface("0.0.0.0", &resolver).unwrap();
+        assert_eq!(wildcard.bind_ip(), ip("0.0.0.0"));
+        assert_eq!(wildcard.advertise_ip(), ip("10.3.10.72"));
+        assert_eq!(
+            resolve_advertise_ip_for_bind(ip("0.0.0.0"), &resolver).unwrap(),
+            ip("10.3.10.72")
+        );
+        assert_eq!(
+            resolve_advertise_ip_for_bind(ip("::"), &resolver).unwrap(),
+            ip("2001:db8::72")
+        );
+        assert_eq!(
+            resolve_host_or_interface("bmc_redfish0", &resolver)
+                .unwrap()
+                .advertise_ip(),
+            ip("10.0.1.2")
+        );
+    }
+
+    #[test]
+    fn routed_address_outside_up_snapshot_is_ignored() {
+        for routed in ["198.51.100.1", "192.0.2.99"] {
+            let mut resolver = StubResolver::new(Found(routed), NotFound);
+            resolver.interfaces = vec![
+                ("lo", ip("127.0.0.1")),
+                ("stale0", ip("198.51.100.1")),
+                ("eth0", ip("192.0.2.10")),
+            ];
+            resolver.down_interfaces.push("stale0");
+
+            assert_eq!(
+                resolve_local_host(&resolver).unwrap().advertise_ip(),
+                ip("192.0.2.10")
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -836,6 +908,32 @@ mod tests {
         assert_eq!(
             resolve_advertise_ip_for_bind(ip("::ffff:127.0.0.1"), &resolver).unwrap(),
             ip("127.0.0.1")
+        );
+    }
+
+    #[test]
+    fn ipv6_wildcard_advertisement_falls_back_to_ipv4() {
+        let mut resolver = StubResolver::not_found();
+        resolver.interfaces = vec![
+            ("lo", ip("127.0.0.1")),
+            ("lo", ip("::1")),
+            ("eth0", ip("192.0.2.20")),
+        ];
+        assert_eq!(
+            resolve_advertise_ip_for_bind(ip("::"), &resolver).unwrap(),
+            ip("192.0.2.20")
+        );
+
+        resolver.interfaces.push(("eth0", ip("2001:db8::20")));
+        assert_eq!(
+            resolve_advertise_ip_for_bind(ip("::"), &resolver).unwrap(),
+            ip("2001:db8::20")
+        );
+
+        resolver.interfaces.retain(|(name, _)| *name == "lo");
+        assert_eq!(
+            resolve_advertise_ip_for_bind(ip("::"), &resolver).unwrap(),
+            ip("::1")
         );
     }
 

@@ -131,8 +131,9 @@ The common local environment variables are:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DYN_NAMESPACE_PREFIX` | unset | Preferred Dynamo discovery namespace prefix. |
-| `DYN_NAMESPACE` | unset | Exact Dynamo discovery namespace fallback. If unset, the binary uses `vllm-agg`. |
+| `DYN_NAMESPACE_PREFIX` | unset | Preferred Dynamo discovery namespace prefix. `dynamo` selects global discovery. Other prefixes use literal matching unless strict mode is enabled. |
+| `DYN_NAMESPACE_PREFIX_STRICT` | `false` | With a namespace prefix, admit only its base namespace, eight-character lowercase hexadecimal worker generations, and the `legacy` migration generation. |
+| `DYN_NAMESPACE` | unset | Exact Dynamo discovery namespace fallback; `dynamo` selects global discovery. If unset or empty, the binary uses `vllm-agg`. |
 | `DYN_COMPONENT_NAME` | `backend` | Dynamo component that exposes the `generate` endpoint. |
 | `DYN_ENFORCE_DISAGG` | `false` | Deprecated and ignored. Registered worker types determine routing topology and readiness. |
 | `DYN_KUBE_DISCOVERY_MODE` | `pod` | Kubernetes discovery identity mode. `container` (intra-pod GMS failover) is supported under the default `DYN_EPP_MODE=dynamo`, which resolves per-container worker identities from reflected Pods. `DYN_EPP_MODE=standalone` rejects it at startup: standalone selects workers from the Pod's aggregate `Ready` condition, which a pod holding an intentionally-standby engine container never satisfies. Standalone support is planned rather than ruled out, tracked by [DEP #11661](https://github.com/ai-dynamo/dynamo/issues/11661) (EPP Embedded SelectionService Interface). |

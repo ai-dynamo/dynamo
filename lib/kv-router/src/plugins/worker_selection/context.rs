@@ -26,12 +26,14 @@ impl WorkerSelectionContext<'_> {
     }
 
     /// Exact incoming prompt length in tokens. Borrowed from this request; no rounding,
-    /// cache weighting, or additional storage is involved.
+    /// cache weighting, or additional storage is involved. Zero when the request carries
+    /// no prompt token IDs, such as embeddings-only input.
     pub fn prompt_tokens(&self) -> usize {
         self.request.isl_tokens
     }
 
-    /// Return the incoming prompt size in KV blocks.
+    /// Return the incoming prompt size in KV blocks. Zero when
+    /// [`prompt_tokens`](Self::prompt_tokens) is zero.
     pub fn request_blocks(&self) -> u64 {
         self.request_blocks
     }

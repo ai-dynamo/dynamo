@@ -117,43 +117,46 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
   Directory holding profiler-generated performance data (npz or JSON), used to bootstrap or tune the performance model when the `get_perf_metrics` endpoint is unavailable.
 </ParamField>
 
-<ParamField path="aic_perf_model" type="AICPerfModelSpec" default="null">
-  Native AIConfigurator forward-pass model identity passed to the compatibility `aiconfigurator_core` namespace in the `aisimulate` wheel, enabling real-time AIC estimates with online correction. Unsupported native configs fall back to FPM regression. Does not trigger an AIC interpolation sweep.
+<ParamField path="ais_perf_model" type="AISPerfModelSpec" default="null">
+  Role-indexed AISimulate forward-pass configurations. Constructs each model through
+  `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
+  interpolation sweep. Configure model identity and estimator controls through
+  `ais_perf_model.roles`; the retired `aic_perf_model` and `hf_id` / pick shape
+  are rejected.
 </ParamField>
 
 <Indent>
-  <ParamField path="hf_id" type="string" required={true}>
-    HuggingFace model id, for example `Qwen/Qwen3-32B`.
+  <ParamField path="roles" type="object" required={true}>
+    Maps deployment roles to complete upstream `ForwardPassPerfModelConfig` objects.
+    Supply `prefill` and `decode` for `disagg`, the matching single role for `prefill`
+    or `decode`, and `aggregated` for `agg`. Each key must match `worker_type`.
   </ParamField>
-  <ParamField path="system" type="string" required={true}>
-    AIC system identifier, for example `h200_sxm`.
+  <ParamField path="roles.&lt;role&gt;.model / system / backend" type="string" required={true}>
+    Model identifier, AISimulate system identifier, and inference backend
+    (`vllm`, `sglang`, or `trtllm`). Optional `backend_version`, `tp`, `pp`,
+    `attention_dp`, MoE axes, quantization, KV block size, and speculation fields
+    use the upstream schema. Published worker capabilities must agree with the
+    configured identity.
   </ParamField>
-  <ParamField path="backend" type="string" required={true}>
-    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>trtllm</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge></span>
+  <ParamField path="roles.&lt;role&gt;.estimation_mode" type="string" default="auto">
+    `auto` searches `op_level`, `fpm_interpolation`, then `fpm_regression`.
+    Explicit modes select the named estimator.
   </ParamField>
-  <ParamField path="backend_version" type="string" default="null">
-    Optional backend version string.
+  <ParamField path="roles.&lt;role&gt;.fallback_policy" type="string" default="deny">
+    `deny` rejects failure of an explicitly selected mode. `allow` tries the other modes in
+    `op_level`, `fpm_interpolation`, `fpm_regression` priority order; `regression` permits a regression fallback.
+    Auto selection searches the full priority order even with `deny`.
   </ParamField>
-  <ParamField path="prefill_pick" type="PickedParallelConfig" default="null">
-    Parallelism pick for the prefill engine. Required for `mode` `disagg` or `prefill`. See [PickedParallelConfig](#pickedparallelconfig).
+  <ParamField path="roles.&lt;role&gt;.systems_paths" type="list[string]" default="[]">
+    Ordered performance-data roots. The SDK resolves its packaged root when unset.
+    `database_mode` and `transfer_policy` are also passed through unchanged.
   </ParamField>
-  <ParamField path="decode_pick" type="PickedParallelConfig" default="null">
-    Parallelism pick for the decode engine. Required for `mode` `disagg`, `decode`, or `agg`. See [PickedParallelConfig](#pickedparallelconfig).
-  </ParamField>
-  <ParamField path="model_arch" type="string" default="null">
-    Optional model architecture override.
-  </ParamField>
-  <ParamField path="weight_dtype" type="string" default="null">
-    Optional weight dtype.
-  </ParamField>
-  <ParamField path="moe_dtype" type="string" default="null">
-    Optional Mixture-of-Experts dtype.
-  </ParamField>
-  <ParamField path="activation_dtype" type="string" default="null">
-    Optional activation dtype.
-  </ParamField>
-  <ParamField path="kv_cache_dtype" type="string" default="null">
-    Optional KV cache dtype.
+  <ParamField path="roles.&lt;role&gt;.estimator_config" type="object" default="{}">
+    Complete upstream estimator controls, including independent regression and
+    correction sampling, fit settings, feature weights, and correction bounds.
+    Explicit settings override Planner sampling defaults. A legacy total bucket
+    count of 16 maps to `bins_per_axis: [4, 4]`. Unknown fields are rejected by
+    AISimulate. See the [AISimulate core API](https://github.com/ai-dynamo/aisimulate/blob/main/docs/core-api.md).
   </ParamField>
 </Indent>
 
@@ -380,6 +383,102 @@ curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
 
 PATCH is atomic. Malformed JSON, unknown fields, and empty patches return HTTP `400`. `null`, a negative `min_endpoint`, component-specific minimums below `1`, fields that are inactive for the current mode, and minimums that exceed the configured GPU or power budget return HTTP `422` without changing the active configuration.
 
+### System-port reconfiguration API
+
+<ParamField path="enable_runtime_reconfiguration" type="boolean" default="false">
+  Enable the Planner control API on the existing `DYN_SYSTEM_PORT` listener.
+  The runtime must have a system listener enabled. Kubernetes Planner deployments
+  configure this port as `9090`.
+</ParamField>
+
+<ParamField path="runtime_warmup_trace_dir" type="string" default="null">
+  Directory containing permitted runtime warmup traces. Required when submitting
+  `warmup_trace`; paths must remain inside this directory, and symlinks are rejected.
+  This setting cannot be changed through the runtime API.
+</ParamField>
+
+<Warning>
+  This API changes scaling behavior and has no application authentication. Restrict
+  access to the system listener to trusted controllers and operators before enabling it.
+  The existing localhost `9086` API remains available with its original configuration.
+</Warning>
+
+| Method and path | Response |
+| --- | --- |
+| `GET /engine/planner/config` | Applied settings, `instance_id`, `revision`, and `supported_fields`. |
+| `PATCH /engine/planner/config` | `202` with an operation ID after validation and admission. |
+| `GET /engine/planner/operations/{request_id}` | Operation state: `preparing`, `warming`, `applied`, or `failed`. |
+
+The supported configuration groups are:
+
+| Group | Fields |
+| --- | --- |
+| Endpoint floors and GPU budgets | Mode-specific minimum endpoint fields from the table above, `min_gpu_budget`, `max_gpu_budget`. |
+| SLA targets | `ttft_ms`, `itl_ms`. |
+| Scaling policy | `max_throughput_scaling_replicas`, `load_scaling_down_sensitivity`, `prefill_scale_up_queue_tokens`, `prefill_scale_down_queue_tokens`, `decode_scale_up_kv_rate`, `decode_scale_down_kv_rate`. |
+| Load prediction | `load_predictor`, `load_predictor_log1p`, `prophet_window_size`, `kalman_q_level`, `kalman_q_trend`, `kalman_r`, `kalman_min_points`. |
+
+Fields retain their normal mode-specific meaning. For example, the explicit queue/KV
+thresholds are used by `optimization_target: load`. Predictor replacement requires
+`optimization_target: sla` with throughput scaling enabled. Scheduling intervals,
+AIS performance models, deployment topology, and other fields are rejected by this API.
+
+Use the instance ID and revision returned by GET when submitting an update:
+
+```json
+{
+  "instance_id": "<instance_id from GET>",
+  "expected_revision": 0,
+  "request_id": "sweep-42",
+  "config": {
+    "ttft_ms": 800,
+    "load_predictor": "kalman",
+    "kalman_min_points": 5
+  },
+  "warmup_trace": "recent-traffic.jsonl"
+}
+```
+
+`config` is a nonempty partial update. A predictor change requires either `warmup_trace`
+or explicit `cold_start: true`. The trace must be a single regular Dynamo/Mooncake JSONL
+or JSONL.GZ file inside `runtime_warmup_trace_dir`. Relative paths are resolved from
+that directory; absolute paths must also be inside it. Runtime warmup accepts at most
+16 MiB of stored data and 16 MiB after decompression, and at most 4,096 aggregation
+intervals (including idle gaps). Directories and globs remain supported by the startup
+`load_predictor_warmup_trace` option but are rejected by runtime reconfiguration.
+Observations use the unchanged throughput adjustment interval. Warmup must provide enough
+effective samples for request count, ISL, and OSL and complete a successful forecast.
+SLA/budget-only updates do not require warmup. Supplying a trace explicitly also allows rewarming an unchanged predictor.
+
+The active configuration continues serving while a candidate is prepared. Preparation
+has a 120-second deadline and only one preparation can run at a time. If a background
+fit outlives its deadline, its result cannot activate and further preparations are
+rejected until that work exits; updates that do not replace the predictor remain available.
+Invalid data, failed fitting, or a changed revision leave the active settings unchanged.
+Successful activation occurs between decisions and increments the revision. Updates preserve
+the existing prediction and scaling cadence, including changes to SLA targets,
+`max_throughput_scaling_replicas`, and predictor settings. The next scheduled throughput
+decision uses the active settings and the full trailing traffic window; predictor replacement
+does not delay that decision. Performance models, worker state, and already-admitted
+scaling operations are retained. `applied` means the
+configuration is active; it does not mean the deployment has finished scaling.
+
+A successful write through the legacy minimum-endpoint API also changes the revision
+reported here. If it happens during preparation, the pending update fails with
+`error_type: conflict`.
+Updates are process-local and are not written to the Planner ConfigMap. A restart creates
+a new `instance_id` and restores startup settings. Address the intended Planner instance
+directly rather than distributing a conditional write across replicas.
+
+Retry the identical request with the same `request_id` to retrieve its retained operation
+without applying it twice. The last 32 operations are retained in memory. Reusing an ID
+for different content returns `409`; an evicted operation returns `404`, so inspect the applied revision before submitting another update.
+
+Malformed JSON returns `400`; invalid or unsupported updates return `422`; instance,
+revision, idempotency, and concurrent-update conflicts return `409`; unavailable control
+returns `503`. Requests exceeding 64 KiB return `413`. Preparation failures after `202`
+are reported by the operation's `state`, `error`, and `error_type` fields.
+
 ## Scheduling and plugin pipeline
 
 The Planner runs the builtin plugin pipeline by default. `scheduling` controls pipeline cadence; `plugin_registration` controls how plugins register, authenticate, and communicate. For the pipeline model, see the [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md#scheduling--plugin-pipeline).
@@ -480,7 +579,7 @@ Nested object types referenced above, broken out to keep the field lists shallow
 
 ### PickedParallelConfig
 
-A parallelism pick emitted by AIConfigurator. Referenced by `aic_perf_model.prefill_pick` / `decode_pick` and by `AICInterpolationSpec`.
+A parallelism pick emitted by AIConfigurator. Referenced by `AICInterpolationSpec`.
 
 <ParamField path="tp" type="integer" default="1">
   Tensor-parallel size.
@@ -649,7 +748,7 @@ The Planner enforces these cross-field rules at startup and rejects a config tha
 - `global_planner_namespace` is required when `environment` is `global-planner`.
 - Under `optimization_target: load`, prefill modes require `prefill_scale_up_queue_tokens` > `prefill_scale_down_queue_tokens`, and decode modes require `decode_scale_up_kv_rate` > `decode_scale_down_kv_rate`.
 - At least one scaling mode must be enabled. Under any `optimization_target` other than `sla`, the Planner forces load scaling on and throughput scaling off and ignores `ttft_ms` / `itl_ms`.
-- When `aic_perf_model` is set, `prefill_pick` is required for `mode` `disagg`/`prefill` and `decode_pick` for `mode` `disagg`/`decode`/`agg`.
+- When `ais_perf_model` is set, its `roles` must cover the deployment: `prefill` and `decode` for `disagg`, the matching role for `prefill`/`decode`, or `aggregated` for `agg`. Role keys must agree with `worker_type`. Unknown canonical fields and the retired `aic_perf_model` input are rejected.
 - `scheduling.scale_interval_seconds` must evenly divide `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`.
 - When both scaling modes are enabled, `load_adjustment_interval_seconds` must be shorter than `throughput_adjustment_interval_seconds`.
 

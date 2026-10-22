@@ -236,8 +236,9 @@ Relay discovers direct ZMQ publishers through Kubernetes metadata and connects t
 advertised TCP addresses. Allow those pod-to-pod connections, worker recovery requests, and
 the return path to Relay's response port. Publisher ports may be dynamically allocated;
 opening only `5561` is insufficient. On multi-interface workers, set `DYN_EVENT_PLANE_HOST`
-to a reachable pod IP if automatic selection advertises the wrong address. It changes the
-advertised address, not the listener's bind address; use routable IPv4 addresses for direct ZMQ.
+to a reachable IPv4 or IPv6 pod address if automatic selection advertises the wrong address.
+Direct ZMQ publishers bind `0.0.0.0` for an advertised IPv4 address or `[::]` for an advertised
+IPv6 address. Relay connects to the advertised address and the port assigned to that listener.
 
 Discovery RBAC, the WAN Service, optional mTLS sidecar, and the gRPC checks below are unchanged.
 

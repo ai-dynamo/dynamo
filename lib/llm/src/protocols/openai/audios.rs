@@ -5,10 +5,12 @@ use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
+use crate::engines::ValidateRequest;
+
 mod aggregator;
 mod nvext;
 
-pub use nvext::{NvExt, NvExtProvider};
+pub use nvext::NvExt;
 
 /// Request for audio speech generation (/v1/audio/speech endpoint).
 ///
@@ -27,19 +29,21 @@ pub struct NvCreateAudioSpeechRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice: Option<String>,
 
-    /// How the generated data should be returned: "url" or "b64_json" (default: "b64_json")
-    /// Note that in image and video generation, the 'response_format' is the equivalent of
-    /// this field. However, in audio generation, OpenAI specifies the 'response_format'
-    /// to be used for output format.
+    /// Delivery mode of the generated audio. Absent means [`AudioDataSource::B64Json`].
+    /// Image and video generation use `response_format` for this choice. The
+    /// OpenAI audio API uses `response_format` for the codec. Audio uses a
+    /// separate field for the delivery mode.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub data_source: Option<String>,
+    pub data_source: Option<AudioDataSource>,
 
     /// Output codec: "wav", "mp3", "pcm", "flac", "aac", "opus" (default: "wav")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<String>,
 
-    /// Speed factor (0.25-4.0, default: 1.0)
+    /// Speed factor. The frontend rejects a value outside 0.25 to 4.0.
+    /// Absent means 1.0.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[validate(range(min = 0.25, max = 4.0, message = "speed must be between 0.25 and 4.0"))]
     pub speed: Option<f64>,
 
     // Qwen3-TTS specific parameters (top-level, matching vLLM-Omni)
@@ -91,6 +95,19 @@ pub struct NvCreateAudioSpeechRequest {
     pub passthrough: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Delivery mode of the generated audio.
+///
+/// The frontend reads this field to select the delivery mode. The set has two
+/// values. A request with an unknown value fails to parse.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioDataSource {
+    /// The response carries a URL to the audio file.
+    Url,
+    /// The response carries the audio bytes as base64 text.
+    B64Json,
+}
+
 impl NvCreateAudioSpeechRequest {
     /// Nest captured top-level unknowns under `extra_args["media_passthrough"]`
     /// for dispatch to a worker.
@@ -115,7 +132,7 @@ pub struct AudioData {
 }
 
 /// Response structure for audio speech generation
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NvAudioSpeechResponse {
     /// Unique identifier for the response
     pub id: String,
@@ -179,10 +196,11 @@ impl NvAudioSpeechResponse {
     }
 }
 
-/// Implements `NvExtProvider` for `NvCreateAudioSpeechRequest`.
-impl NvExtProvider for NvCreateAudioSpeechRequest {
-    fn nvext(&self) -> Option<&NvExt> {
-        self.nvext.as_ref()
+impl ValidateRequest for NvCreateAudioSpeechRequest {
+    fn validate(&self) -> Result<(), anyhow::Error> {
+        // `Validate` and `ValidateRequest` share the method name, so the
+        // call names the trait.
+        Validate::validate(self).map_err(anyhow::Error::from)
     }
 }
 
@@ -220,7 +238,7 @@ mod tests {
     fn audio_request_data_source_url_round_trips() {
         let json = r#"{"input":"hello","data_source":"url"}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.data_source.as_deref(), Some("url"));
+        assert_eq!(req.data_source, Some(AudioDataSource::Url));
 
         let out = serde_json::to_string(&req).unwrap();
         assert!(out.contains("\"data_source\":\"url\""));
@@ -230,15 +248,59 @@ mod tests {
     fn audio_request_data_source_b64_json_round_trips() {
         let json = r#"{"input":"hi","data_source":"b64_json"}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.data_source.as_deref(), Some("b64_json"));
+        assert_eq!(req.data_source, Some(AudioDataSource::B64Json));
     }
 
     #[test]
     fn audio_request_data_source_and_response_format_coexist() {
         let json = r#"{"input":"hi","data_source":"url","response_format":"mp3"}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.data_source.as_deref(), Some("url"));
+        assert_eq!(req.data_source, Some(AudioDataSource::Url));
         assert_eq!(req.response_format.as_deref(), Some("mp3"));
+    }
+
+    #[test]
+    fn audio_request_unknown_data_source_is_rejected() {
+        let json = r#"{"input":"hi","data_source":"ftp"}"#;
+        let err = serde_json::from_str::<NvCreateAudioSpeechRequest>(json).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("url") && message.contains("b64_json"),
+            "expected the parse error to list the valid values; got: {message}"
+        );
+    }
+
+    #[test]
+    fn audio_request_speed_in_range_passes_validation() {
+        // The bounds are inclusive, and an absent speed means 1.0.
+        for json in [
+            r#"{"input":"hi"}"#,
+            r#"{"input":"hi","speed":0.25}"#,
+            r#"{"input":"hi","speed":1.0}"#,
+            r#"{"input":"hi","speed":4.0}"#,
+        ] {
+            let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+            assert!(
+                ValidateRequest::validate(&req).is_ok(),
+                "expected {json} to pass validation"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_request_speed_out_of_range_fails_validation() {
+        for json in [
+            r#"{"input":"hi","speed":0.1}"#,
+            r#"{"input":"hi","speed":5.0}"#,
+        ] {
+            let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+            let err = ValidateRequest::validate(&req).unwrap_err();
+            let message = err.to_string();
+            assert!(
+                message.contains("speed"),
+                "expected the error for {json} to name the field; got: {message}"
+            );
+        }
     }
 
     #[test]

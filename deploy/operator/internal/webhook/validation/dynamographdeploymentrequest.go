@@ -59,6 +59,11 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate(
 	ctx context.Context,
 	request *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
+	// Legacy v1beta1 rules do not apply to a converted v1beta2 carrier.
+	if request.Spec.V1Beta2 != nil {
+		return nil, nil
+	}
+
 	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
 	allErrs := validation.validateDynamoGraphDeploymentRequest(request)
 	return validation.warnings, invalidDynamoGraphDeploymentRequestError(request, allErrs)
@@ -70,9 +75,15 @@ func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(
 	oldRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 	newRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
+	// Legacy v1beta1 rules do not apply to a converted v1beta2 carrier.
+	if newRequest.Spec.V1Beta2 != nil {
+		return nil, nil
+	}
+
 	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
 	allErrs := validation.validateDynamoGraphDeploymentRequestUpdate(newRequest, oldRequest)
 	validation.warnDeprecatedDGDOverrideTargets(&newRequest.Spec)
+	validation.warnDeprecatedGPUSKU(&newRequest.Spec)
 	return validation.warnings, invalidDynamoGraphDeploymentRequestError(newRequest, allErrs)
 }
 
@@ -114,8 +125,20 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	}
 
 	v.warnDeprecatedDGDOverrideTargets(spec)
+	v.warnDeprecatedGPUSKU(spec)
 
 	return allErrs
+}
+
+func (v *dynamoGraphDeploymentRequestValidation) warnDeprecatedGPUSKU(
+	spec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+) {
+	//nolint:staticcheck // SA1019: Admission must warn when the deprecated value is used.
+	if spec.Hardware == nil || spec.Hardware.GPUSKU != nvidiacomv1beta1.GPUSKUTypeGB200SXM {
+		return
+	}
+
+	v.warn(`spec.hardware.gpuSku: "gb200_sxm" is deprecated; use "gb200". The legacy value will be removed in a future release`)
 }
 
 func (v *dynamoGraphDeploymentRequestValidation) warnDeprecatedDGDOverrideTargets(

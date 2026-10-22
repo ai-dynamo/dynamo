@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: kimi-k25-agg-kv-eagle
+spec:
+  backendFramework: trtllm
+  priorityClassName: ci-nightly-high-priority
+  pvcs:
+  - name: shared-model-cache
+    create: false
+  services:
+    Frontend:
+      extraPodMetadata:
+        annotations:
+          nvidia.com/disable-image-pull-secret-discovery: "true"
+      volumeMounts:
+      - name: shared-model-cache
+        mountPoint: /opt/models
+      extraPodSpec:
+        priorityClassName: ci-nightly-high-priority
+        imagePullSecrets:
+        - name: acr-token-secret
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+        - key: dedicated
+          operator: Equal
+          value: user-workload
+          effect: NoExecute
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: cloud.google.com/gke-nodepool
+                  operator: In
+                  values: [customer-gpu-o7v, customer-gpu-w0e]
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchExpressions:
+                  - key: nvidia.com/dynamo-graph-deployment-name
+                    operator: Exists
+    agg:
+      replicas: 1
+      resources:
+        requests:
+          gpu: "4"
+      sharedMemory:
+        size: 179Gi
+      extraPodMetadata:
+        annotations:
+          nvidia.com/disable-image-pull-secret-discovery: "true"
+      extraPodSpec:
+        priorityClassName: ci-nightly-high-priority
+        imagePullSecrets:
+        - name: acr-token-secret
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+        - key: dedicated
+          operator: Equal
+          value: user-workload
+          effect: NoExecute
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: cloud.google.com/gke-nodepool
+                  operator: In
+                  values: [customer-gpu-o7v, customer-gpu-w0e]
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: nvidia.com/gpu.clique
+              matchLabelKeys: [nvidia.com/dynamo-graph-deployment-name]
+              labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values: [worker, prefill, decode]
+        initContainers:
+        - name: sshd-privsep-dir
+          image: busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+          command: [sh, -c, "chmod 0755 /run/sshd && chown root:root /run/sshd"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+          - name: sshd-run
+            mountPath: /run/sshd

@@ -2055,6 +2055,306 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Requests booked on each worker and DP rank that have not yet returned their first output token (request_phase=\"prefill\"), from the frontend KV router's bookkeeping. Populated in KV routing mode only. Series from several frontends are collapsed with max: exact when router replica sync is on, and the busiest frontend's share when it is off, because each frontend then books only its own requests.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 47,
+        "w": 8,
+        "h": 8
+      },
+      "id": 26,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (worker_id, dp_rank, worker_type) (dynamo_frontend_worker_active_requests{request_phase=\"prefill\"})",
+          "legendFormat": "worker={{worker_id}} | dp={{dp_rank}} | type={{worker_type}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Per-Worker Requests in Prefill",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Requests booked on each worker and DP rank that have returned their first output token and are still generating (request_phase=\"decode\"), from the frontend KV router's bookkeeping. Populated in KV routing mode only. Series from several frontends are collapsed with max: exact when router replica sync is on, and the busiest frontend's share when it is off, because each frontend then books only its own requests.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 47,
+        "w": 8,
+        "h": 8
+      },
+      "id": 27,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (worker_id, dp_rank, worker_type) (dynamo_frontend_worker_active_requests{request_phase=\"decode\"})",
+          "legendFormat": "worker={{worker_id}} | dp={{dp_rank}} | type={{worker_type}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Per-Worker Requests in Decode",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Total in-flight requests on each worker and DP rank, prefill plus decode, from the frontend KV router's bookkeeping. Compare the ranks of one worker to spot uneven DP load. Populated in KV routing mode only. Each frontend's prefill and decode are summed first, then series from several frontends are collapsed with max: exact when router replica sync is on, and the busiest frontend's total when it is off. With replica sync off this can be less than the Prefill panel plus the Decode panel, because those two can come from different frontends.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 47,
+        "w": 8,
+        "h": 8
+      },
+      "id": 28,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (worker_id, dp_rank, worker_type) (sum without (request_phase) (dynamo_frontend_worker_active_requests))",
+          "legendFormat": "worker={{worker_id}} | dp={{dp_rank}} | type={{worker_type}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Per-Worker Active Requests (Total)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "description": "Predicted KV cache hit rate at routing time. Calculated by the KV router as overlap_blocks / input_sequence_blocks for the selected worker, then recorded as a histogram.",
       "fieldConfig": {
         "defaults": {
@@ -2119,7 +2419,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 47,
+        "y": 55,
         "w": 8,
         "h": 8
       },
@@ -2252,7 +2552,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 47,
+        "y": 55,
         "w": 8,
         "h": 8
       },
@@ -2506,7 +2806,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 47,
+        "y": 55,
         "w": 8,
         "h": 8
       },
@@ -2613,7 +2913,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 55,
+        "y": 63,
         "w": 24,
         "h": 1
       },
@@ -2687,7 +2987,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 56,
+        "y": 64,
         "w": 8,
         "h": 8
       },
@@ -2809,7 +3109,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 56,
+        "y": 64,
         "w": 8,
         "h": 8
       },
@@ -2950,7 +3250,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 56,
+        "y": 64,
         "w": 8,
         "h": 8
       },

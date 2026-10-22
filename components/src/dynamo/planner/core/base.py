@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Optional
 
@@ -30,7 +30,10 @@ from dynamo.planner.control_api import (
 )
 from dynamo.planner.core import util
 from dynamo.planner.core.budget import minimum_power_footprint_fits
-from dynamo.planner.core.engine_protocol import EngineProtocol
+from dynamo.planner.core.engine_protocol import (
+    EngineProtocol,
+    ReconfigurableEngineProtocol,
+)
 from dynamo.planner.core.types import (
     EngineCapabilities,
     FpmObservations,
@@ -49,10 +52,12 @@ from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
+from dynamo.planner.reconfiguration import PlannerReconfiguration
 from dynamo.runtime import DistributedRuntime
 
 if TYPE_CHECKING:
     from dynamo.planner.monitoring.worker_info import WorkerInfo
+    from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +161,7 @@ class NativePlannerBase:
         self._config_lock = asyncio.Lock()
         self._effect_admission_lock = asyncio.Lock()
         self._config_generation = 0
+        self.reconfiguration = PlannerReconfiguration(self)
         self._effect_submission_task: Optional[asyncio.Task[None]] = None
         self._effect_submission_outcome_unknown: Optional[str] = None
         self._effect_submission_hold_logged = False
@@ -174,6 +180,12 @@ class NativePlannerBase:
 
             await self._bootstrap_regression()
             await self._bootstrap_engine_plugins_if_needed()
+
+            if self.config.enable_runtime_reconfiguration:
+                if self.runtime is None:
+                    raise ValueError("system-port reconfiguration requires a runtime")
+                self._reconfigurable_engine()
+                self.reconfiguration.register(self.runtime)
 
             if self.config.advisory:
                 logger.info(
@@ -205,6 +217,8 @@ class NativePlannerBase:
 
     async def _shutdown_runtime(self) -> None:
         """Release initialized planner resources after normal or failed startup."""
+
+        await self.reconfiguration.close()
 
         if not self._diagnostics_finalized:
             self._diagnostics_finalized = True
@@ -374,6 +388,36 @@ class NativePlannerBase:
 
         async with self._bounded_config_lock():
             return self._min_endpoint_response()
+
+    def validate_runtime_candidate(self, candidate: PlannerConfig) -> None:
+        p_min, d_min = candidate.active_min_endpoints()
+        errors = self._runtime_configuration_errors(
+            p_min, d_min, candidate.min_gpu_budget, candidate.max_gpu_budget
+        )
+        if errors:
+            raise ValueError("; ".join(errors))
+        self._reconfigurable_engine()
+
+    def _reconfigurable_engine(self) -> ReconfigurableEngineProtocol:
+        engine = self._ensure_engine()
+        if not isinstance(engine, ReconfigurableEngineProtocol):
+            raise ValueError("this engine does not support runtime reconfiguration")
+        return engine
+
+    def apply_runtime_candidate(
+        self,
+        candidate: PlannerConfig,
+        fields: Iterable[str],
+        predictor: BuiltinLoadPredict | None,
+    ) -> None:
+        engine = self._reconfigurable_engine()
+        engine.apply_runtime_configuration(candidate, fields, predictor)
+        self._config_generation += 1
+        self.prometheus_metrics.sla_target_ttft_ms.set(self.config.ttft_ms)
+        self.prometheus_metrics.sla_target_itl_ms.set(self.config.itl_ms)
+        logger.info(
+            "Activated planner configuration revision %d", self._config_generation
+        )
 
     @asynccontextmanager
     async def _bounded_config_lock(self) -> AsyncIterator[None]:
@@ -801,8 +845,8 @@ class NativePlannerBase:
         """Emit power-budget gauges from DGD-resolved caps (read-only observe path).
 
         Per-replica watts come from the cached deployment state
-        (``power_watts_per_replica``, resolved once from the DGD worker
-        podTemplate annotation during Planner startup), so this performs no
+        (``power_watts_per_replica``, resolved once from operator-projected DGD
+        component status during Planner startup), so this performs no
         apiserver I/O and never blocks the tick loop. DGD admission rejects
         changes to the cached power tuple; changing it requires replacing the
         DGD and starting a new Planner. These gauges are advisory
@@ -834,8 +878,8 @@ class NativePlannerBase:
             if not self._power_projected_zero_warned:
                 logger.warning(
                     "power_projected_watts not published: per-replica watts "
-                    "unresolved (prefill=%s, decode=%s). Caps are authored on "
-                    "the DGD worker podTemplate annotation.",
+                    "unresolved (prefill=%s, decode=%s). Caps were not "
+                    "available in current DGD component status.",
                     p_watts,
                     d_watts,
                 )

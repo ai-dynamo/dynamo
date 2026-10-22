@@ -41,7 +41,7 @@ Coverage matrix:
   decode sweep within agg mode; ``gpu_1``).
 * ``test_self_benchmark_disagg_serves_after_bench`` -- prefill worker
   (``--benchmark-mode prefill``) + decode worker
-  (``--benchmark-mode decode``, NixlConnector ``kv_both``); the
+  (``--benchmark-mode decode``, NixlConnector ``kv_consumer``); the
   user-reported configuration. Exercises BOTH fixes simultaneously
   (``gpu_2``).
 
@@ -196,10 +196,11 @@ class _DynamoBenchmarkWorker(ManagedProcess):
     """Process manager for a vLLM worker started with ``--benchmark-mode``.
 
     Modeled on ``tests/fault_tolerance/cancellation/test_vllm.py``'s
-    ``DynamoWorkerProcess`` so the disagg worker pair (prefill + decode)
-    wires NixlConnector / kv-events / NIXL side channel exactly the
-    same way -- this keeps CI ports and process layout consistent with
-    other vLLM e2e tests.
+    ``DynamoWorkerProcess`` for the disagg worker pair's NixlConnector /
+    kv-events / NIXL side-channel wiring. Every listener port this class
+    controls is allocated from the shared ranges in
+    ``tests/utils/constants.py`` rather than hardcoded, reducing the risk
+    of bind collisions between concurrent runs on one host.
     """
 
     def __init__(
@@ -275,7 +276,7 @@ class _DynamoBenchmarkWorker(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                    '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
                 ]
             )
             health_check_urls = [
@@ -286,7 +287,7 @@ class _DynamoBenchmarkWorker(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                    '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}',
                 ]
             )
             health_check_urls = [
@@ -312,10 +313,16 @@ class _DynamoBenchmarkWorker(ManagedProcess):
         # the other worker's publisher for tcp://*:20380.
         env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
-        # Prefill worker publishes KV events on its own ZMQ port and uses
-        # a distinct NIXL side-channel port. Same constants as
-        # ``tests/fault_tolerance/cancellation/test_vllm.py``.
+        # Both disagg workers open a NIXL handshake listener; vLLM's default
+        # side-channel port (5600) is host-wide, so a fixed value can collide.
+        if is_prefill is not None:
+            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
+            allocated_ports.append(self.nixl_side_channel_port)
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
+
         if is_prefill is True:
+            self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
+            allocated_ports.append(self.kv_event_port)
             command.extend(
                 [
                     "--kv-events-config",
@@ -323,13 +330,12 @@ class _DynamoBenchmarkWorker(ManagedProcess):
                         {
                             "publisher": "zmq",
                             "topic": "kv-events",
-                            "endpoint": "tcp://*:20082",
+                            "endpoint": f"tcp://*:{self.kv_event_port}",
                             "enable_kv_cache_events": True,
                         }
                     ),
                 ]
             )
-            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "5601"
 
         if is_prefill is True:
             worker_type = "prefill_worker"
@@ -504,7 +510,7 @@ def test_self_benchmark_disagg_serves_after_bench(
     This is the user-reported configuration. Exercises:
 
     * connector-metadata fix on the decode worker (NixlConnector
-      kv_both -- worker would die on the first synthetic decode batch
+      ``kv_consumer`` -- worker would die on the first synthetic decode batch
       if the metadata isn't attached);
     * prompt-padding fix on both workers' decode sweeps (the prefill
       worker also runs decode warmup steps via ``_bench_step_warmup``).
