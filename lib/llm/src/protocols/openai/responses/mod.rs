@@ -875,9 +875,6 @@ fn convert_tools_and_choice(
         None => None,
     };
 
-    super::tools::validate_openai_tool_choice(converted_choice.as_ref(), Some(&converted_tools))
-        .map_err(|error| ResponsesConversionError::InvalidArgument(error.to_string()))?;
-
     Ok((
         (!converted_tools.is_empty()).then_some(converted_tools),
         converted_choice,
@@ -3014,11 +3011,10 @@ mod tests {
                     payload["tools"] = tools.clone();
                 }
                 let req: NvCreateResponse = serde_json::from_value(payload).unwrap();
-                let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
-                assert!(matches!(
-                    error.downcast_ref::<ResponsesConversionError>(),
-                    Some(ResponsesConversionError::InvalidArgument(_))
-                ));
+                let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
+                let error = crate::engines::ValidateRequest::validate(&chat).unwrap_err();
+                assert!(error.to_string().contains("tool_choice"));
+                assert!(error.to_string().contains("tools"));
             }
         }
     }
