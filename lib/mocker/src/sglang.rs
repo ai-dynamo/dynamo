@@ -118,6 +118,12 @@ impl ResponseMetadata {
         finish_reason: Option<Value>,
     ) -> Map<String, Value> {
         let terminal = finish_reason.is_some();
+        let is_zero_output_scoring = completion_tokens == 0
+            && finish_reason
+                .as_ref()
+                .and_then(|reason| reason.get("type"))
+                .and_then(Value::as_str)
+                == Some("length");
         let mut meta_info = Map::from_iter([
             ("id".to_string(), Value::String(self.request_id.clone())),
             (
@@ -151,7 +157,7 @@ impl ResponseMetadata {
                 );
             }
             if let Some(candidate_token_ids) = self.candidate_token_ids.as_deref() {
-                let scored_positions = output_ids.len().max(1);
+                let scored_positions = output_ids.len().max(usize::from(is_zero_output_scoring));
                 meta_info.insert(
                     "output_token_ids_logprobs".to_string(),
                     Value::Array(
@@ -343,6 +349,43 @@ mod tests {
         assert_eq!(
             response["meta_info"]["output_token_ids_logprobs"],
             json!([[[-10.8, 17, null], [-10.5, 4, null]]])
+        );
+    }
+
+    #[test]
+    fn empty_frames_do_not_fabricate_candidate_scores() {
+        let options = LogprobOptions::new(true, 0, -1).unwrap();
+        let metadata = ResponseMetadata::new("score", &[10, 11], options)
+            .with_candidate_token_ids(vec![17, 4]);
+        for (completion_tokens, finish_reason) in [
+            (0, None),
+            (0, Some(json!({"type": "abort"}))),
+            (2, Some(json!({"type": "cancel"}))),
+            (2, Some(json!({"type": "error"}))),
+            (2, Some(json!({"type": "length"}))),
+            (0, Some(json!({"type": "stop"}))),
+        ] {
+            let response = metadata.response(&[], completion_tokens, finish_reason);
+            assert_eq!(
+                response["meta_info"]["output_token_ids_logprobs"],
+                json!([]),
+                "{response}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_error_preserves_scores_for_actual_output_tokens() {
+        let options = LogprobOptions::new(true, 0, -1).unwrap();
+        let metadata = ResponseMetadata::new("score", &[10, 11], options)
+            .with_candidate_token_ids(vec![17, 4]);
+        let response = metadata.response(&[42, 43], 2, Some(json!({"type": "abort"})));
+        assert_eq!(
+            response["meta_info"]["output_token_ids_logprobs"],
+            json!([
+                [[-10.8, 17, null], [-10.5, 4, null]],
+                [[-10.8, 17, null], [-10.5, 4, null]]
+            ])
         );
     }
 

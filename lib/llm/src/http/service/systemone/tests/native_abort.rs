@@ -16,7 +16,12 @@ async fn native_abort_preserves_retry_status_and_cancels_pending_peer() {
         )
         .await
         .expect("native abort must not wait for stream closure or its pending peer");
-        assert_eq!(response.status().as_u16(), status);
+        let expected = if status == 429 {
+            super::super::super::error::overload_status_code()
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+        assert_eq!(response.status(), expected);
         assert_eq!(response.headers()["retry-after"], "1");
         let body = response_body(response).await;
         assert!(body.get("answers").is_none());
