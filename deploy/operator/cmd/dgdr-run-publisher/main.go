@@ -48,13 +48,17 @@ func run() int {
 	flag.StringVar(&cfg.RunUID, "run-uid", "", "UID of the DynamoGraphDeploymentRun this pod serves")
 	flag.StringVar(&cfg.SweeperContainer, "sweeper-container", "sweeper", "name of the Sweeper container in this pod")
 	flag.DurationVar(&cfg.MinPollInterval, "poll-interval", time.Second, "snapshot check interval after a change")
-	flag.DurationVar(&cfg.MaxPollInterval, "max-poll-interval", 5*time.Second, "longest snapshot check interval while the snapshot is unchanged")
+	flag.DurationVar(
+		&cfg.MaxPollInterval, "max-poll-interval", 5*time.Second,
+		"longest snapshot check interval while the snapshot is unchanged",
+	)
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&logOptions)))
 
 	cfg.Namespace, cfg.PodName = os.Getenv("POD_NAMESPACE"), os.Getenv("POD_NAME")
 	if cfg.SnapshotDir == "" || cfg.RunName == "" || cfg.RunUID == "" || cfg.Namespace == "" || cfg.PodName == "" {
-		fmt.Fprintln(os.Stderr, "--snapshot-dir, --run-name, --run-uid and the POD_NAMESPACE/POD_NAME environment variables are required")
+		fmt.Fprintln(os.Stderr, "--snapshot-dir, --run-name, --run-uid and the POD_NAMESPACE/POD_NAME "+
+			"environment variables are required")
 		return dgdrrunpublisher.ExitReconcileFailed
 	}
 
