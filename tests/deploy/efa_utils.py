@@ -18,7 +18,9 @@ adapter counters that moved -- are identical and live here.
 
 import json
 import logging
+import re
 import shlex
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -44,6 +46,21 @@ logger = logging.getLogger(__name__)
 EFA_MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 MANIFEST_DIR = Path(__file__).parent / "efa"
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def runtime_version_override(image: str) -> str | None:
+    """Return the workspace version when the image tag carries none.
+
+    DGD admission requires runtimeVersionOverride for an image whose tag has no
+    leading semantic version, such as the per-commit ECR EFA images.
+    """
+    if re.search(r":\d+\.\d+\.\d+(?:[-.@]|$)", image):
+        return None
+    cargo = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text())
+    return re.split(r"[-+]", cargo["workspace"]["package"]["version"])[0]
+
 
 # Comfortably under the tests' own pytest timeout, so a deployment that never
 # becomes ready loses the race to _wait_for_condition, which raises with pod
@@ -504,6 +521,10 @@ async def run_efa_deployment_check(
     # Single EFA-tagged image for every service (the framework runtime image also
     # provides the frontend entrypoint).
     deployment_spec.set_image(image)
+    version = runtime_version_override(image)
+    if version:
+        for component in deployment_spec.spec()["spec"]["components"]:
+            component["runtimeVersionOverride"] = version
 
     logger.info(
         "Starting %s EFA deploy test (image: %s, model: %s, namespace: %s)",
