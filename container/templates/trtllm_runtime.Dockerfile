@@ -269,6 +269,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libssl3t64 \
         openssl
 
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
 ENV PATH=/opt/uv/bin:${PATH}

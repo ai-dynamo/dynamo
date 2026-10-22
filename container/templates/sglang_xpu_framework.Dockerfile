@@ -34,6 +34,8 @@ RUN apt-get update && \
         ca-certificates libsqlite3-dev && \
     rm -rf /var/lib/apt/lists/*
 
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+
 # Pin the Level-Zero UMD + IGC, matching upstream sgl-kernel-xpu's
 # Dockerfile.xpu_kernel for the v0.2.0 tag. These must stay in lockstep with
 # the host xe KMD: sgl-kernel-xpu#296 saw a mismatched UMD fault libze on

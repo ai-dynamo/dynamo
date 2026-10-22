@@ -101,6 +101,7 @@ ENV PYTHONUNBUFFERED=1 \
     LD_LIBRARY_PATH=/opt/dcgm/lib
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20250419~deb12u2 && \
     update-ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Runtime deps. pynvml (NVML bindings), kubernetes (pod listing),
