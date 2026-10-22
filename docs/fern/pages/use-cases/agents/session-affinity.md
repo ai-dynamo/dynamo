@@ -63,12 +63,18 @@ Enable [tracing](agent-tracing.md) and list the worker for each request in a ses
 
 ```bash
 gzip -cd "${DYN_REQUEST_TRACE_FILE_PATH:-/tmp/dynamo-request-trace}".*.jsonl.gz \
-  | jq -c 'select(.event_type=="request_end")
+  | jq -c '.event | select(.event_type=="request_end")
            | {session: .agent_context.session_id, worker: .request.worker,
               cached_tokens: .request.cached_tokens}'
 ```
 
-This check needs at least two eligible workers. With one worker, every row shows that worker whether or not affinity is on, and KV routing alone can raise `cached_tokens`. To confirm affinity, run the same multi-turn session once without the TTL and once with it. With `hard` affinity, every row for the session shows the same worker. Without it, rows can spread across workers.
+This check needs at least two eligible workers. With one worker, every row shows that worker whether or not affinity is on, and KV routing alone can raise `cached_tokens`. To confirm affinity, run the same multi-turn session once without the TTL and once with it. The trace writer appends new segments after the existing ones, so clear the old segments before each run to keep the two runs apart:
+
+```bash
+rm -f "${DYN_REQUEST_TRACE_FILE_PATH:-/tmp/dynamo-request-trace}".*.jsonl.gz
+```
+
+Then run the filter above. With `hard` affinity, every row for the session shows the same worker. Without it, rows can spread across workers.
 
 ## Subagents
 

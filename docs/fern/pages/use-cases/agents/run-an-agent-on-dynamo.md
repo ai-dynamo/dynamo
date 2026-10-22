@@ -69,7 +69,7 @@ List the requests by session:
 
 ```bash
 gzip -cd "${DYN_REQUEST_TRACE_FILE_PATH:-/tmp/dynamo-request-trace}".*.jsonl.gz \
-  | jq -c 'select(.event_type=="request_end")
+  | jq -c '.event | select(.event_type=="request_end")
        | {session: .agent_context.session_id,
           input_tokens: .request.input_tokens,
           output_tokens: .request.output_tokens,

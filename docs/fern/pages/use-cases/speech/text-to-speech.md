@@ -108,11 +108,11 @@ optionally its exact transcript. This example encodes a local recording,
 
 ```bash
 REF_TEXT="The exact words spoken in reference-voice.wav."
-jq -n \
+base64 < reference-voice.wav | tr -d '\n' |
+jq -Rs \
   --arg input "This sentence is spoken in the reference voice." \
-  --arg ref_audio "data:audio/wav;base64,$(base64 < reference-voice.wav | tr -d '\n')" \
   --arg ref_text "$REF_TEXT" \
-  '{input: $input, task_type: "Base", ref_audio: $ref_audio, ref_text: $ref_text}' |
+  '{input: $input, task_type: "Base", ref_audio: ("data:audio/wav;base64," + .), ref_text: $ref_text}' |
 curl -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d @- --output cloned.wav

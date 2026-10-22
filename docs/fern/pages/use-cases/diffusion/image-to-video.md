@@ -102,7 +102,9 @@ The `text-to-video-diffusion.sh` launcher loads text-to-video checkpoints only
 start the worker directly with an image-to-video checkpoint:
 
 ```bash
+mkdir -p /tmp/dynamo_inputs
 python3 -m dynamo.frontend --http-port 8000 &
+DYN_MM_LOCAL_PATH=/tmp/dynamo_inputs \
 python3 -m dynamo.sglang \
   --model-path Wan-AI/Wan2.1-I2V-14B-480P-Diffusers \
   --served-model-name Wan-AI/Wan2.1-I2V-14B-480P-Diffusers \
@@ -121,25 +123,24 @@ and use the same ID in the launch command and the request.
 
 ### Generate a Video from an Image
 
-Pass the source image in `input_reference`, as an `https://` URL or a `data:` URI. The
-worker loads it under the same
+Pass the source image in `input_reference`, as an `https://` URL or as a path inside the
+`DYN_MM_LOCAL_PATH` directory of the SGLang worker. The SGLang worker rejects a `data:` URI.
+It fetches a URL under the same
 [media URL policy](../image-understanding/overview.md#media-url-policy) as image inputs.
-This example encodes a local `cat.png` as a data URI:
+This example copies a local `cat.png` into the directory that the launch command allows:
 
 ```bash
-jq -n \
-  --arg image "data:image/png;base64,$(base64 < cat.png | tr -d '\n')" \
-  '{
-    model: "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
-    prompt: "The cat slowly turns its head and blinks",
-    input_reference: $image,
-    seconds: 2,
-    size: "832x480",
-    response_format: "url"
-  }' |
+cp cat.png /tmp/dynamo_inputs/cat.png
 curl http://localhost:8000/v1/videos \
   -H "Content-Type: application/json" \
-  -d @-
+  -d '{
+    "model": "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
+    "prompt": "The cat slowly turns its head and blinks",
+    "input_reference": "/tmp/dynamo_inputs/cat.png",
+    "seconds": 2,
+    "size": "832x480",
+    "response_format": "url"
+  }'
 ```
 
 ### See Also
