@@ -5,12 +5,59 @@
 
 import ast
 import re
+import sys
 from pathlib import Path
 
 import pytest
 
 pytest_plugins = ["pytester"]
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
+
+
+@pytest.mark.parametrize(
+    "release", ["0.5.19", "0.5.19+cu128", "0.5.22", "0.5.22+cu130"]
+)
+def test_native_parity_fixture_uses_version_specific_prefill_graph_flag(release):
+    source = Path(__file__).parent / "serve" / "test_systemone_sglang.py"
+    tree = ast.parse(source.read_text())
+    fixture = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "native_sglang_server"
+    )
+    command = next(
+        keyword.value
+        for node in ast.walk(fixture)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "ManagedProcess"
+        for keyword in node.keywords
+        if keyword.arg == "command"
+    )
+    helpers = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_native_prefill_graph_args"
+    ]
+    namespace = {
+        "sys": sys,
+        "QWEN": "model",
+        "ports": [12345],
+        "version": lambda _: release,
+    }
+    exec(
+        compile(ast.Module(body=helpers, type_ignores=[]), str(source), "exec"),
+        namespace,
+    )
+    arguments = eval(compile(ast.Expression(command), str(source), "eval"), namespace)
+    if release.startswith("0.5.22"):
+        index = arguments.index("--cuda-graph-backend-prefill")
+        assert arguments[index + 1] == "disabled"
+        assert "--disable-piecewise-cuda-graph" not in arguments
+    else:
+        assert "--disable-piecewise-cuda-graph" in arguments
+        assert "--cuda-graph-backend-prefill" not in arguments
 
 
 @pytest.mark.parametrize(
