@@ -38,6 +38,7 @@ pub mod realtime;
 pub mod router_policy;
 pub mod service_v2;
 pub mod sglang_generate;
+pub mod systemone;
 mod worker_metrics;
 
 pub use axum;

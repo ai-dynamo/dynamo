@@ -42,7 +42,7 @@ use dynamo_runtime::metrics::{
     transport_metrics::ensure_transport_metrics_registered_prometheus,
 };
 use std::net::{IpAddr, SocketAddr};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
@@ -143,6 +143,57 @@ pub struct State {
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
+    systemone_admission: Arc<Semaphore>,
+    systemone_preflight_admission: Arc<Semaphore>,
+    systemone_max_inflight_branches: usize,
+    systemone_max_input_tokens: usize,
+    systemone_request_timeout: Duration,
+}
+
+const DEFAULT_SYSTEMONE_MAX_INFLIGHT_BRANCHES: usize = 256;
+const DEFAULT_SYSTEMONE_MAX_INPUT_TOKENS: usize = 65_536;
+const MAX_SYSTEMONE_INFLIGHT_BRANCHES: usize = 4096;
+const MAX_SYSTEMONE_INPUT_TOKENS: usize = 1_048_576;
+const MAX_SYSTEMONE_REQUEST_TIMEOUT_SECS: usize = 3600;
+const SYSTEMONE_MAX_CONCURRENT_PREFLIGHT: usize = 4;
+
+fn bounded_systemone_limit(env_name: &'static str, default: usize, maximum: usize) -> usize {
+    match std::env::var(env_name) {
+        Ok(value) => match value.parse::<usize>() {
+            Ok(parsed) if parsed > 0 => {
+                if parsed > maximum {
+                    tracing::warn!(
+                        env = env_name,
+                        requested = parsed,
+                        effective = maximum,
+                        "lowering configured System One limit"
+                    );
+                } else if parsed > default {
+                    tracing::warn!(
+                        env = env_name,
+                        effective = parsed,
+                        default,
+                        "raising System One resource limit above the default"
+                    );
+                }
+                parsed.min(maximum)
+            }
+            _ => {
+                tracing::warn!(
+                    env = env_name,
+                    value,
+                    default,
+                    "ignoring invalid System One limit"
+                );
+                default
+            }
+        },
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => {
+            tracing::warn!(env = env_name, %error, default, "ignoring invalid System One limit");
+            default
+        }
+    }
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -530,6 +581,11 @@ impl State {
         cancel_token: CancellationToken,
         config: StateConfig,
     ) -> Self {
+        let systemone_max_inflight_branches = bounded_systemone_limit(
+            env_llm::DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES,
+            DEFAULT_SYSTEMONE_MAX_INFLIGHT_BRANCHES,
+            MAX_SYSTEMONE_INFLIGHT_BRANCHES,
+        );
         Self {
             manager,
             metrics: Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix())),
@@ -557,6 +613,21 @@ impl State {
             responses_api_enabled: config.responses_api_enabled,
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
+            systemone_admission: Arc::new(Semaphore::new(systemone_max_inflight_branches)),
+            systemone_preflight_admission: Arc::new(Semaphore::new(
+                SYSTEMONE_MAX_CONCURRENT_PREFLIGHT,
+            )),
+            systemone_max_inflight_branches,
+            systemone_max_input_tokens: bounded_systemone_limit(
+                env_llm::DYN_SYSTEMONE_MAX_INPUT_TOKENS,
+                DEFAULT_SYSTEMONE_MAX_INPUT_TOKENS,
+                MAX_SYSTEMONE_INPUT_TOKENS,
+            ),
+            systemone_request_timeout: Duration::from_secs(bounded_systemone_limit(
+                env_llm::DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS,
+                300,
+                MAX_SYSTEMONE_REQUEST_TIMEOUT_SECS,
+            ) as u64),
         }
     }
 
@@ -571,6 +642,26 @@ impl State {
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
+    }
+
+    pub(crate) fn systemone_admission(&self) -> Arc<Semaphore> {
+        self.systemone_admission.clone()
+    }
+
+    pub(crate) fn systemone_max_inflight_branches(&self) -> usize {
+        self.systemone_max_inflight_branches
+    }
+
+    pub(crate) fn systemone_preflight_admission(&self) -> Arc<Semaphore> {
+        self.systemone_preflight_admission.clone()
+    }
+
+    pub(crate) fn systemone_max_input_tokens(&self) -> usize {
+        self.systemone_max_input_tokens
+    }
+
+    pub(crate) fn systemone_request_timeout(&self) -> Duration {
+        self.systemone_request_timeout
     }
 
     pub fn discovery(&self) -> Arc<dyn Discovery> {
@@ -1698,10 +1789,92 @@ impl HttpServiceConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Read, Seek, SeekFrom, Write};
     use std::sync::Arc;
     use tempfile::NamedTempFile;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn bounded_systemone_limit_accepts_operator_increases_and_warns_when_clamped() {
+        for (configured, effective, warned) in [
+            ("128", 128, false),
+            ("1024", 1024, false),
+            ("8192", 4096, true),
+        ] {
+            let mut capture = tempfile::tempfile().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(capture.try_clone().unwrap())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                temp_env::with_var("DYN_TEST_DECISION_LIMIT", Some(configured), || {
+                    assert_eq!(
+                        bounded_systemone_limit("DYN_TEST_DECISION_LIMIT", 256, 4096),
+                        effective
+                    );
+                });
+            });
+            capture.seek(SeekFrom::Start(0)).unwrap();
+            let mut logs = String::new();
+            capture.read_to_string(&mut logs).unwrap();
+            assert_eq!(
+                logs.contains("lowering configured System One limit"),
+                warned
+            );
+            assert_eq!(
+                logs.contains("raising System One resource limit above the default"),
+                configured == "1024"
+            );
+            if warned {
+                assert!(logs.contains("requested=8192"), "{logs}");
+                assert!(logs.contains("effective=4096"), "{logs}");
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_systemone_limits_reject_invalid_values_and_preserve_defaults() {
+        for configured in [
+            None,
+            Some("0"),
+            Some("-1"),
+            Some("abc"),
+            Some("184467440737095516160"),
+        ] {
+            temp_env::with_var("DYN_TEST_DECISION_LIMIT", configured, || {
+                assert_eq!(
+                    bounded_systemone_limit("DYN_TEST_DECISION_LIMIT", 256, 4096),
+                    256
+                );
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn raised_systemone_limits_reach_state_and_admission() {
+        temp_env::with_vars(
+            [
+                (env_llm::DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES, Some("512")),
+                (env_llm::DYN_SYSTEMONE_MAX_INPUT_TOKENS, Some("131072")),
+                (env_llm::DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS, Some("600")),
+            ],
+            || {
+                let service = HttpService::builder().build().unwrap();
+                let state = service.state_clone();
+                assert_eq!(state.systemone_max_inflight_branches(), 512);
+                assert_eq!(state.systemone_max_input_tokens(), 131_072);
+                assert_eq!(state.systemone_request_timeout(), Duration::from_secs(600));
+                assert!(
+                    state
+                        .systemone_admission()
+                        .try_acquire_many_owned(512)
+                        .is_ok()
+                );
+            },
+        );
+    }
 
     struct MtlsTestCertificates {
         ca: NamedTempFile,
