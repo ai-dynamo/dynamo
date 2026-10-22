@@ -152,6 +152,8 @@ navigation:
             contents:
               - page: Fast Model Loading
                 path: ../pages-v1.5.1/kubernetes/model-deployment/model-loading/fast-model-loading.mdx
+              - page: Dynamo Snapshot (Experimental)
+                path: ../pages-v1.5.1/kubernetes/model-deployment/model-loading/snapshot.mdx
               - page: MatrixHub
                 path: ../pages-v1.5.1/kubernetes/model-deployment/model-loading/matrixhub.md
       - section: KV-Aware Routing
@@ -196,6 +198,8 @@ navigation:
             path: ../pages-v1.5.1/kubernetes/fault-tolerance/request-rejection.md
           - page: Graceful Shutdown
             path: ../pages-v1.5.1/kubernetes/fault-tolerance/graceful-shutdown.md
+          - page: Shadow Engine Failover
+            path: ../pages-v1.5.1/developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md
       - section: Auto Deployment
         icon: wand-magic-sparkles
         collapsed: true
