@@ -289,7 +289,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--connector",
             env_var="DYN_CONNECTOR",
             default=[],
-            help="[Deprecated for vLLM] Use --kv-transfer-config instead. For TRT-LLM, options: nixl, lmcache, kvbm, null, none.",
+            help="[Deprecated for vLLM] Use --kv-transfer-config instead. TensorRT-LLM supports only none; KVBM integration has been removed.",
             nargs="*",
         )
 

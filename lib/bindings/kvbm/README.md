@@ -118,29 +118,6 @@ DYN_KVBM_CPU_CACHE_GB=100 vllm serve \
 
 See the [KVBM configuration reference](../../../docs/fern/pages/reference/components/kvbm-configuration.mdx) for all KVBM settings.
 
-### TensorRT-LLM
-
-```bash
-cat >/tmp/kvbm_llm_api_config.yaml <<EOF
-cuda_graph_config: null
-kv_cache_config:
-  enable_partial_reuse: false
-  free_gpu_memory_fraction: 0.80
-kv_connector_config:
-  connector_module: kvbm.trtllm_integration.connector
-  connector_scheduler_class: DynamoKVBMConnectorLeader
-  connector_worker_class: DynamoKVBMConnectorWorker
-EOF
-
-DYN_KVBM_CPU_CACHE_GB=100 trtllm-serve Qwen/Qwen3-8B \
-  --host localhost --port 8000 \
-  --backend pytorch \
-  --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
-```
-
-See the [KVBM configuration reference](../../../docs/fern/pages/reference/components/kvbm-configuration.mdx) for all KVBM settings.
-
-
 ## 📚 Docs
 
 - [KVBM Configuration](../../../docs/fern/pages/reference/components/kvbm-configuration.mdx)

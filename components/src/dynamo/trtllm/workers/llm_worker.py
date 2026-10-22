@@ -26,7 +26,6 @@ from tensorrt_llm.llmapi import (
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.llmapi.llm_args import (
     TOKENIZER_ALIASES,
-    KvCacheConnectorConfig,
     LoadFormat,
 )
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
@@ -51,7 +50,6 @@ from dynamo.common.utils.prometheus import (
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
-    KvEventPublisher,
     MediaDecoder,
     MediaFetcher,
     ModelInput,
@@ -176,22 +174,6 @@ def _resolve_image_token_id(model_type: str, config: Config) -> Optional[int]:
     ):
         return None
     return resolve_routing_image_token_id(config.model, _resolve_model_dir(config))
-
-
-def build_kv_connector_config(config: Config):
-    if config.connector:
-        if config.connector[0] == "kvbm":
-            return KvCacheConnectorConfig(
-                connector_module="kvbm.trtllm_integration.connector",
-                connector_scheduler_class="DynamoKVBMConnectorLeader",
-                connector_worker_class="DynamoKVBMConnectorWorker",
-            )
-        elif config.connector[0] == "none":
-            return None
-        else:
-            logging.error(f"Invalid connector: {config.connector[0]}")
-            sys.exit(1)
-    return None
 
 
 def _warn_override_collisions(target: dict, source: dict, path: str = "") -> None:
@@ -370,9 +352,6 @@ async def init_llm_worker(
         free_gpu_memory_fraction=config.free_gpu_memory_fraction
     )
 
-    if config.has_connector("kvbm"):
-        kv_cache_config.enable_partial_reuse = False
-
     dynamic_batch_config = DynamicBatchConfig(
         enable_batch_size_tuning=True,
         enable_max_num_tokens_tuning=False,
@@ -382,7 +361,6 @@ async def init_llm_worker(
         capacity_scheduler_policy=CapacitySchedulerPolicy.GUARANTEED_NO_EVICT,
         dynamic_batch_config=dynamic_batch_config,
     )
-    kv_connector_config = build_kv_connector_config(config)
 
     try:
         model_loader_extra_config = _parse_model_loader_extra_config(
@@ -449,7 +427,6 @@ async def init_llm_worker(
         "enable_iter_perf_stats": (
             config.publish_metrics or config.publish_forward_pass_metrics
         ),
-        "kv_connector_config": kv_connector_config,
     }
 
     arg_map["load_format"] = engine_load_format
@@ -560,42 +537,6 @@ async def init_llm_worker(
                 arg_map["backend"],
             )
             sys.exit(1)
-
-    trtllm_zmq_bind_endpoint = None  # Endpoint for TensorRT-LLM to bind and publish
-    consolidator_output_endpoint = (
-        None  # Endpoint where consolidator publishes (workers subscribe to this)
-    )
-
-    try:
-        from kvbm.trtllm_integration.consolidator_config import (
-            get_consolidator_endpoints,
-            should_enable_consolidator,
-        )
-
-        if (
-            kv_event_publication_mode is KvEventPublicationMode.POLLING
-            and should_enable_consolidator(arg_map)
-        ):
-            # get_consolidator_endpoints returns (trtllm_bind_endpoint, output_bind_endpoint, output_connect_endpoint)
-            consolidator_endpoints = get_consolidator_endpoints()
-            trtllm_zmq_bind_endpoint = consolidator_endpoints[0]  # TRTLLM bind endpoint
-            consolidator_output_endpoint = consolidator_endpoints[
-                1
-            ]  # Consolidator output bind endpoint (for KVBM connector)
-            consolidator_output_connect_endpoint = consolidator_endpoints[
-                2
-            ]  # Consolidator output connect endpoint (for worker publisher)
-    except ImportError:
-        # kvbm package is not installed
-        logging.info(
-            "kvbm package not installed - skipping KV event consolidator setup."
-        )
-    except Exception as e:
-        logging.error(
-            f"Failed to set up consolidator endpoints: {e}. "
-            "Continuing without KV event consolidation.",
-            exc_info=True,
-        )
 
     logging.info(f"TensorRT-LLM engine args: {arg_map}")
     engine_args = arg_map
@@ -1025,28 +966,6 @@ async def init_llm_worker(
                 ),  # Native engine compatibility
             ]
 
-            # Create worker-side publisher for consolidated events if consolidator is enabled
-            # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
-            consolidator_publisher = None
-            if (
-                kv_event_publication_mode is KvEventPublicationMode.POLLING
-                and consolidator_output_endpoint
-            ):
-                # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
-                consolidator_publisher = KvEventPublisher(
-                    endpoint=endpoint,
-                    kv_block_size=kv_cache_block_size,
-                    zmq_endpoint=consolidator_output_connect_endpoint,
-                    zmq_topic="",
-                    enable_local_indexer=config.enable_local_indexer,
-                    kv_state_endpoint=config.kv_state_endpoint,
-                    image_token_id=image_token_id,
-                )
-                logging.info(
-                    f"Created worker-side publisher for consolidated events: "
-                    f"subscribing to {consolidator_output_connect_endpoint}, worker_id={endpoint.connection_id()}"
-                )
-
             async with get_publisher(
                 endpoint,
                 engine,
@@ -1056,7 +975,6 @@ async def init_llm_worker(
                 component_gauges=component_gauges,
                 additional_metrics=additional_metrics,
                 event_buffer_max_size=event_buffer_max_size,
-                zmq_endpoint=trtllm_zmq_bind_endpoint,
                 enable_local_indexer=config.enable_local_indexer,
                 metrics_collector=metrics_collector,
                 kv_state_endpoint=config.kv_state_endpoint,
@@ -1086,9 +1004,6 @@ async def init_llm_worker(
                     health_check_payload=health_check_payload,
                 )
 
-            # Shutdown consolidator publisher if it was created
-            if consolidator_publisher:
-                consolidator_publisher.shutdown()
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             if config.load_format == "gms":

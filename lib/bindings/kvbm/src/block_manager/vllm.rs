@@ -51,8 +51,6 @@ fn _vllm_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<connector::leader::PyKvConnectorLeader>()?;
     m.add_class::<connector::SchedulerOutput>()?;
     // TODO: use TRTLLM own integration module
-    m.add_class::<connector::trtllm_worker::PyTrtllmKvConnectorWorker>()?;
-    m.add_class::<connector::trtllm_leader::PyTrtllmKvConnectorLeader>()?;
     Ok(())
 }
 
