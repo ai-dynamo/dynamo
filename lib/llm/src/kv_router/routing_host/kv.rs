@@ -616,7 +616,7 @@ impl RoutingHost {
         request_dispatch.record(
             "dynamo.dispatch.result",
             match &dispatch_result {
-                Ok(_) => "accepted",
+                Ok(_) => completed_dispatch_result(request_context.as_ref()),
                 Err(error) if is_cancelled(error) => "cancelled",
                 Err(_) => "failed",
             },
