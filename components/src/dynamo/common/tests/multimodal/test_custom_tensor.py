@@ -5,10 +5,13 @@ import asyncio
 import json
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
 import torch
+
+from dynamo.common.multimodal import custom_tensor as transport
 
 from dynamo.common.multimodal.custom_tensor import (
     TENSOR_KEY,
@@ -19,6 +22,90 @@ from dynamo.common.multimodal.custom_tensor import (
 from dynamo.common.multimodal.shm_bytes import read_shm_bytes
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+
+
+@pytest.mark.parametrize("limit", ["bytes", "count"])
+def test_request_admission_precedes_all_materialization(monkeypatch, limit):
+    # Repeated references across modalities must share one budget. Use a tiny
+    # budget so the regression cannot OOM the test runner.
+    monkeypatch.setattr(transport, "MAX_REQUEST_TENSOR_BYTES", 8)
+    monkeypatch.setattr(transport, "MAX_REQUEST_TENSORS", 2)
+    source = torch.ones(1) if limit == "bytes" else torch.empty(0)
+    with ShmTensorPublisher(source, worker_id=7) as publisher:
+        ref = publisher.envelope()
+        request = {"first": [ref], "second": {"nested": [ref, ref]}}
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("admission must finish before any materialization")
+
+        monkeypatch.setattr(transport, "_resolve_tensor", forbidden)
+        # Raise the count budget to isolate the byte-limit case.
+        if limit == "bytes":
+            monkeypatch.setattr(transport, "MAX_REQUEST_TENSORS", 32)
+        with pytest.raises(
+            ValueError, match="total byte" if limit == "bytes" else "count"
+        ):
+            resolve_custom_tensors(request, worker_id=7)
+
+
+def test_request_admission_boundary_includes_inline_and_reference(monkeypatch):
+    monkeypatch.setattr(transport, "MAX_REQUEST_TENSOR_BYTES", 8)
+    monkeypatch.setattr(transport, "MAX_REQUEST_TENSORS", 2)
+    source = torch.ones(1)
+    with ShmTensorPublisher(source, worker_id=7) as publisher:
+        result = resolve_custom_tensors(
+            [inline_tensor(source), publisher.envelope()], worker_id=7
+        )
+    assert all(torch.equal(item, source) for item in result)
+
+
+@pytest.mark.asyncio
+async def test_async_resolution_keeps_loop_live_and_holds_cancelled_slots(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    slots = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(transport, "_RESOLVER_SLOTS", slots)
+
+    def blocked(value, *, worker_id):
+        entered.set()
+        try:
+            assert release.wait(5), "test failed to release resolver"
+            return value
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(transport, "resolve_custom_tensors", blocked)
+    task = asyncio.create_task(transport.resolve_custom_tensors_async({"x": 1}))
+    try:
+        # A running transfer can block while the loop still handles this timer
+        # and cancels its waiter. Calling the resolver inline deadlocks this.
+        async with asyncio.timeout(3):
+            while not entered.is_set():
+                await asyncio.sleep(0.001)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with pytest.raises(transport.CustomTensorCapacityError):
+            await transport.resolve_custom_tensors_async({})
+    finally:
+        release.set()
+        async with asyncio.timeout(3):
+            while not finished.is_set() or not slots.acquire(blocking=False):
+                await asyncio.sleep(0.001)
+        slots.release()
+    # Completion of the actual work, not cancellation of its waiter, frees it.
+    assert await transport.resolve_custom_tensors_async({"next": True}) == {
+        "next": True
+    }
+
+
+@pytest.mark.asyncio
+async def test_async_resolution_failure_releases_capacity(monkeypatch):
+    monkeypatch.setattr(transport, "_RESOLVER_SLOTS", threading.BoundedSemaphore(1))
+    for _ in range(2):
+        with pytest.raises(ValueError, match="invalid custom tensor"):
+            await transport.resolve_custom_tensors_async({TENSOR_KEY: {}})
 
 
 @pytest.mark.parametrize(

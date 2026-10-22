@@ -10,6 +10,7 @@ codec, a media descriptor, or an encoder/disaggregation handoff.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -18,6 +19,7 @@ import os
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -35,6 +37,22 @@ from dynamo.common.multimodal.shm_bytes import read_shm_bytes, write_shm_bytes
 
 TENSOR_KEY = "$dynamo_tensor"
 MAX_TENSOR_BYTES = 64 * 1024 * 1024
+MAX_REQUEST_TENSOR_BYTES = 128 * 1024 * 1024
+MAX_REQUEST_TENSORS = 32
+MAX_CONCURRENT_RESOLUTIONS = 2
+
+# Process-wide across processors/LoRA models and event loops. Reject excess work
+# before submission: ThreadPoolExecutor's own work queue is otherwise unbounded.
+_RESOLVER_POOL = ThreadPoolExecutor(
+    max_workers=MAX_CONCURRENT_RESOLUTIONS, thread_name_prefix="custom-tensors"
+)
+_RESOLVER_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_RESOLUTIONS)
+
+
+class CustomTensorCapacityError(RuntimeError):
+    """All process-wide custom-input preparation slots are occupied."""
+
+
 DType = Literal[
     "float16",
     "bfloat16",
@@ -53,9 +71,7 @@ class TensorSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     version: Literal[1]
     dtype: DType
-    shape: list[Annotated[StrictInt, Field(ge=0, le=2**63 - 1)]] = Field(
-        max_length=32
-    )
+    shape: list[Annotated[StrictInt, Field(ge=0, le=2**63 - 1)]] = Field(max_length=32)
     order: Literal["C"]
 
     def byte_size(self) -> int:
@@ -183,44 +199,77 @@ class ShmTensorPublisher:
         self.close()
 
 
-def resolve_custom_tensors(value: Any, *, worker_id: int | None = None) -> Any:
-    """Resolve reserved envelopes recursively; retain JSON/item structure.
+def _plan_custom_tensors(
+    value: Any, worker_id: int | None
+) -> list[tuple[TensorSpec, int]]:
+    """Validate the entire request before any bulk decode, SHM read or allocation.
 
-    worker_id is the strict routing target carried by the routed request; the
-    frontend must require equality with every SHM descriptor before dispatch.
+    Count occurrences, including aliases/repeated references and empty tensors.
+    Keep descriptors in traversal order so materialization cannot reset the
+    budget for nested containers or separate modalities.
     """
-    if isinstance(value, list):
-        return [resolve_custom_tensors(item, worker_id=worker_id) for item in value]
-    if not isinstance(value, dict):
-        return value
-    if TENSOR_KEY not in value:
-        return {
-            key: resolve_custom_tensors(item, worker_id=worker_id)
-            for key, item in value.items()
-        }
-    if len(value) != 1:
-        raise ValueError("tensor envelope cannot have sibling fields")
-    try:
-        spec = _SPEC.validate_python(value[TENSOR_KEY])
-    except ValidationError as exc:
-        raise ValueError("invalid custom tensor descriptor") from exc
-    size = spec.byte_size()
+    specs: list[tuple[TensorSpec, int]] = []
+    total_bytes = 0
+
+    def visit(item: Any) -> None:
+        nonlocal total_bytes
+        if isinstance(item, list):
+            for child in item:
+                visit(child)
+        elif isinstance(item, dict):
+            if TENSOR_KEY not in item:
+                for child in item.values():
+                    visit(child)
+                return
+            if len(item) != 1:
+                raise ValueError("tensor envelope cannot have sibling fields")
+            if len(specs) >= MAX_REQUEST_TENSORS:
+                raise ValueError("custom tensor request exceeds the tensor count limit")
+            try:
+                spec = _SPEC.validate_python(item[TENSOR_KEY])
+            except ValidationError as exc:
+                raise ValueError("invalid custom tensor descriptor") from exc
+            size = spec.byte_size()
+            total_bytes += size
+            if total_bytes > MAX_REQUEST_TENSOR_BYTES:
+                raise ValueError("custom tensor request exceeds the total byte limit")
+            if isinstance(spec, InlineTensor):
+                if len(spec.data_base64) != 4 * ((size + 2) // 3):
+                    raise ValueError(
+                        "inline tensor byte count does not match shape and dtype"
+                    )
+            else:
+                _validate_reference(spec, worker_id)
+                if spec.size != size:
+                    raise ValueError(
+                        "tensor reference size does not match shape and dtype"
+                    )
+            specs.append((spec, size))
+
+    visit(value)
+    return specs
+
+
+def _validate_reference(spec: ShmTensor, worker_id: int | None) -> None:
+    if spec.worker_id != worker_id:
+        raise ValueError("shared-memory tensor requires its pinned worker")
+    if spec.placement != shm_placement():
+        raise ValueError("shared-memory tensor placement mismatch")
+    if time.time() >= spec.expires_at:
+        raise ValueError("custom tensor reference expired")
+
+
+def _resolve_tensor(spec: TensorSpec, size: int, worker_id: int | None) -> torch.Tensor:
     if isinstance(spec, InlineTensor):
-        if len(spec.data_base64) != 4 * ((size + 2) // 3):
-            raise ValueError("inline tensor byte count does not match shape and dtype")
         try:
             data = bytearray(base64.b64decode(spec.data_base64, validate=True))
         except binascii.Error as exc:
             raise ValueError("invalid tensor base64") from exc
     else:
-        if spec.worker_id != worker_id:
-            raise ValueError("shared-memory tensor requires its pinned worker")
-        if spec.placement != shm_placement():
-            raise ValueError("shared-memory tensor placement mismatch")
-        if time.time() >= spec.expires_at:
-            raise ValueError("custom tensor reference expired")
-        if spec.size != size:
-            raise ValueError("tensor reference size does not match shape and dtype")
+        # Earlier tensors may take time to decode; recheck the lease immediately
+        # before opening each segment. Producer release during a read is safe:
+        # unlink does not invalidate the reader's already-open mapping.
+        _validate_reference(spec, worker_id)
         try:
             data = read_shm_bytes(spec.name, spec.size)
         except FileNotFoundError as exc:
@@ -232,11 +281,55 @@ def resolve_custom_tensors(value: Any, *, worker_id: int | None = None) -> Any:
     if len(data) != size:
         raise ValueError("tensor byte count does not match shape and dtype")
     dtype = getattr(torch, spec.dtype)
-    # Tensor owns a reference to this private writable bytearray. No SHM view
-    # survives resolution, so producer release cannot invalidate model inputs.
+    # The tensor retains this private writable bytearray, never a SHM view.
     try:
         if size == 0:
             return torch.empty(spec.shape, dtype=dtype)
         return torch.frombuffer(data, dtype=dtype).reshape(spec.shape)
     except RuntimeError as exc:
         raise ValueError("custom tensor shape cannot be represented") from exc
+
+
+def resolve_custom_tensors(value: Any, *, worker_id: int | None = None) -> Any:
+    """Resolve one complete request's custom fields with a shared count/byte budget.
+
+    Callers must not split the request by modality or mutate it during resolution.
+    Serving code must use the bounded async entry point below.
+    """
+    specs = iter(_plan_custom_tensors(value, worker_id))
+
+    def materialize(item: Any) -> Any:
+        if isinstance(item, list):
+            return [materialize(child) for child in item]
+        if isinstance(item, dict):
+            if TENSOR_KEY in item:
+                spec, size = next(specs)
+                return _resolve_tensor(spec, size, worker_id)
+            return {key: materialize(child) for key, child in item.items()}
+        return item
+
+    # Serial materialization limits transient storage to one tensor in addition
+    # to the admitted output budget. No per-tensor fanout or parallel reads.
+    return materialize(value)
+
+
+async def resolve_custom_tensors_async(
+    value: Any, *, worker_id: int | None = None
+) -> Any:
+    """Offload complete request preparation without an unbounded executor queue.
+
+    A cancelled waiter cannot stop a running thread. Its slot stays occupied
+    until the concurrent future completes and drops any unconsumed result. No
+    asyncio task/callback retains a resolved tensor after caller cancellation.
+    """
+    if not _RESOLVER_SLOTS.acquire(blocking=False):
+        raise CustomTensorCapacityError("custom tensor resolution capacity exhausted")
+    try:
+        future = _RESOLVER_POOL.submit(
+            resolve_custom_tensors, value, worker_id=worker_id
+        )
+    except BaseException:
+        _RESOLVER_SLOTS.release()
+        raise
+    future.add_done_callback(lambda _: _RESOLVER_SLOTS.release())
+    return await asyncio.wrap_future(future)

@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import base64
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,6 +15,7 @@ from PIL import Image
 import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.custom_tensor import ShmTensorPublisher, inline_tensor
+from dynamo.common.multimodal import custom_tensor as transport
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.video_utils import encode_to_video_bytes
 from dynamo.vllm.multimodal_utils import request_processor as mod
@@ -25,6 +28,72 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.parametrize(
+    "kind", ["text", "image_url", "video_url", "audio_url", "input_audio"]
+)
+@pytest.mark.parametrize("mixed", [False, True])
+def test_custom_wire_key_collisions_are_rejected(kind, mixed):
+    items = [{"Json": {"metadata": 1}}]
+    if mixed:
+        items.append({"Url": "https://example.com/media"})
+    with pytest.raises(mod.InvalidArgument, match="reserved for built-in"):
+        mod._split_multimodal_data({"multi_modal_data": {kind: items}})
+
+
+@pytest.mark.asyncio
+async def test_worker_awaits_async_resolver_and_maps_capacity_errors(monkeypatch):
+    processor = _processor()
+    request = {
+        "token_ids": [1],
+        "multi_modal_data": {"chemistry": [{"Json": {"x": 1}}]},
+    }
+    resolver = AsyncMock(
+        side_effect=mod.CustomTensorCapacityError("capacity exhausted")
+    )
+    monkeypatch.setattr(mod, "resolve_custom_tensors_async", resolver)
+    with pytest.raises(mod.WorkerOverloaded, match="capacity exhausted"):
+        await _prepare_prompt(
+            processor, request, "overloaded", None, DisaggregationMode.AGGREGATED
+        )
+    resolver.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_worker_tensor_preparation_does_not_block_other_async_work(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    original = transport._resolve_tensor
+
+    def blocked(*args):
+        entered.set()
+        assert release.wait(5), "event loop did not release the resolver"
+        return original(*args)
+
+    monkeypatch.setattr(transport, "_resolve_tensor", blocked)
+    source = torch.arange(8)
+    request = {
+        "token_ids": [1],
+        "multi_modal_data": {"chemistry": [{"Json": {"x": inline_tensor(source)}}]},
+    }
+    task = asyncio.create_task(
+        _prepare_prompt(
+            _processor(), request, "large", None, DisaggregationMode.AGGREGATED
+        )
+    )
+    try:
+        async with asyncio.timeout(3):
+            while not entered.is_set():
+                await asyncio.sleep(0.001)
+        # Represents another streaming task scheduled while tensor work runs.
+        heartbeat = asyncio.create_task(asyncio.sleep(0, result="stream advanced"))
+        assert await heartbeat == "stream advanced"
+        assert not task.done()
+    finally:
+        release.set()
+        result = await asyncio.wait_for(task, 3)
+    assert torch.equal(result.multi_modal_data["chemistry"]["x"], source)
 
 
 def _processor(

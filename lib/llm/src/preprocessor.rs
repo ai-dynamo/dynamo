@@ -1611,6 +1611,18 @@ fn attach_request_context_metadata(
     attach_image_cache_scope_from_context(request, context);
 }
 
+fn validate_custom_kind(kind: &str) -> Result<()> {
+    if matches!(
+        kind,
+        "text" | "image_url" | "video_url" | "audio_url" | "input_audio"
+    ) {
+        return Err(custom_transport_error(
+            "Custom kind is reserved for built-in content",
+        ));
+    }
+    Ok(())
+}
+
 fn custom_transport_error(message: &'static str) -> anyhow::Error {
     DynamoError::builder()
         .error_type(ErrorType::InvalidArgument)
@@ -3845,6 +3857,7 @@ impl OpenAIPreprocessor {
             for content_part in content_parts {
                 let Some((type_str, url, uuid)) = content_part.media_info() else {
                     if let Some(part) = content_part.custom_part() {
+                        validate_custom_kind(&part.kind)?;
                         let payload = serde_json::Value::Object(part.fields.clone());
                         let nvext = request.nvext();
                         if nvext.is_some_and(|ext| {
@@ -17456,6 +17469,17 @@ mod custom_content_template_tests {
             "must-not-be-tokenized"
         );
     }
+    #[test]
+    fn custom_kinds_reserve_builtin_wire_names() {
+        for kind in ["text", "image_url", "video_url", "audio_url", "input_audio"] {
+            assert!(validate_custom_kind(kind).is_err());
+        }
+        // Engine names are distinct from the wire tags and retain the existing
+        // downstream collision checks when mixed with built-in media.
+        assert!(validate_custom_kind("image").is_ok());
+        assert!(validate_custom_kind("chemistry").is_ok());
+    }
+
     #[test]
     fn custom_tensor_routing_is_explicit_and_capability_gated() {
         let reference = serde_json::json!({"nested":[{"$dynamo_tensor":{

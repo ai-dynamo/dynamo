@@ -102,7 +102,9 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 }
 ```
 
-`kind` is a non-empty string. `fields` is a JSON object whose values may be any
+`kind` is a non-empty string. The built-in wire names `text`, `image_url`,
+`video_url`, `audio_url`, and `input_audio` are reserved and rejected as custom
+kinds, including when mixed with typed media. `fields` is a JSON object whose values may be any
 JSON, including arrays and null. Dynamo passes the **complete fields object** as
 `multi_modal_data[kind]`: the example plugin receives
 `{"chemistry": {"data_base64": "..."}, "units": "angstrom"}` under the chemistry
@@ -130,8 +132,19 @@ The adapter replaces only these objects with CPU PyTorch tensors before the
 model's vLLM processor runs. Other JSON and item boundaries remain intact.
 The reserved object cannot have sibling keys. Tensor descriptors use version 1,
 little-endian bytes, C order, at most 32 non-negative dimensions, and at most
-64 MiB per tensor. Supported dtypes are `float16`, `bfloat16`, `float32`,
+64 MiB per tensor, 128 MiB of resolved tensor bytes per request, and 32 tensor
+occurrences per request. Repeated references count each time; empty tensors
+also count toward the item limit. Admission validates the complete custom input
+across modalities before decoding, reading, or allocating any tensor storage.
+Supported dtypes are `float16`, `bfloat16`, `float32`,
 `float64`, `int8`, `uint8`, `int16`, `int32`, `int64` and `bool`.
+
+Worker preparation runs off the async event loop in a process-wide pool with
+at most two concurrent requests and no pending work queue. Excess requests
+receive `WorkerOverloaded`. Each admitted request resolves tensors serially.
+Cancelling a waiter retains its capacity slot until the running resolution
+finishes and releases its unconsumed private storage. Cancellation cannot stop
+a Python thread in the middle of a decode or SHM read.
 
 Inline representation (two float32 values):
 

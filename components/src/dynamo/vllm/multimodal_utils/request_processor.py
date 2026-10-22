@@ -22,7 +22,10 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.audio_loader import AudioLoader
-from dynamo.common.multimodal.custom_tensor import resolve_custom_tensors
+from dynamo.common.multimodal.custom_tensor import (
+    CustomTensorCapacityError,
+    resolve_custom_tensors_async,
+)
 from dynamo.common.multimodal.image_loader import (
     URL_VARIANT_KEY,
     UUID_ONLY_VARIANT_KEY,
@@ -39,7 +42,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.llm.exceptions import InvalidArgument, WorkerOverloaded
 
 from .hash_utils import compute_mm_uuids_from_images
 from .model import ModelFamily, construct_qwen_decode_mm_data, resolve_model_family
@@ -283,6 +286,12 @@ def _split_multimodal_data(
     json_data: dict[str, Any] = {}
     media_data: dict[str, Any] = {}
     for modality, items in (request.get("multi_modal_data") or {}).items():
+        if (
+            modality in {"text", "image_url", "video_url", "audio_url", "input_audio"}
+            and isinstance(items, list)
+            and any(isinstance(item, dict) and "Json" in item for item in items)
+        ):
+            raise InvalidArgument("Custom kind is reserved for built-in content")
         if (
             isinstance(items, list)
             and items
@@ -951,7 +960,7 @@ class VllmMultimodalRequestProcessor:
             prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
         return TokensPrompt(**prompt_kwargs)
 
-    def _prepare_backend_multimodal_input(
+    async def _prepare_backend_multimodal_input(
         self,
         request: dict[str, Any],
         mode: DisaggregationMode,
@@ -964,12 +973,14 @@ class VllmMultimodalRequestProcessor:
             )
         backend_data, _ = _split_multimodal_data(request)
         try:
-            backend_data = resolve_custom_tensors(
+            backend_data = await resolve_custom_tensors_async(
                 backend_data,
                 worker_id=(request.get("routing") or {}).get("decode_worker_id"),
             )
         except ValueError as exc:
             raise InvalidArgument(str(exc)) from exc
+        except CustomTensorCapacityError as exc:
+            raise WorkerOverloaded(str(exc)) from exc
         mm_processor_kwargs = get_mm_processor_kwargs(request)
         request_for_prompt = dict(request)
         request_for_prompt.pop("multi_modal_data")
@@ -997,7 +1008,7 @@ class VllmMultimodalRequestProcessor:
         """
         json_data, media_data = _split_multimodal_data(request)
         if json_data:
-            opaque = self._prepare_backend_multimodal_input(request, mode)
+            opaque = await self._prepare_backend_multimodal_input(request, mode)
             json_data = opaque.multi_modal_data
             if not media_data:
                 return opaque
