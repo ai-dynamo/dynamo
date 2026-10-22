@@ -31,9 +31,8 @@ use crate::{
     kv_router::plugins::RouterPluginBuilder,
     kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext},
     local_model::runtime_config::{
-        SGLANG_GENERATE_CAPABILITY, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-        TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-        VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY, TokenizerBackend,
+        VLLM_INFERENCE_V1_GENERATE_CAPABILITY, VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
@@ -550,19 +549,8 @@ impl ModelWatcher {
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
-            let needs_systemone_preprocessor = self.systemone_enabled
-                && card
-                    .runtime_config
-                    .supports_runtime_capability(SGLANG_GENERATE_CAPABILITY)
-                && card.runtime_config.supports_runtime_capability(
-                    crate::local_model::runtime_config::SGLANG_SYSTEMONE_SERIAL_V1,
-                )
-                && card.runtime_config.max_num_seqs == Some(1)
-                && card.worker_type == Some(WorkerType::Aggregated)
-                && card.needs.is_empty()
-                && card.lora.is_none()
-                && card.migration_limit == 0
-                && !card.runtime_config.runtime_data.contains_key("spec_decode");
+            let needs_systemone_preprocessor =
+                self.systemone_enabled && card.is_systemone_serial_eligible();
             let needs_local_tokenizer =
                 needs_local_chat_pipeline || needs_local_completions_pipeline;
             let tokenizer = if needs_local_tokenizer && card.has_tokenizer() {
