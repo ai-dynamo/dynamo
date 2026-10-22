@@ -401,7 +401,7 @@ impl EndpointPicker for EppRouter {
             token_ids: None,
             cache_namespace,
             // Raw engines have no Dynamo handler to tag the salt; the EPP does.
-            cache_salt_forwarding: CacheSaltForwarding::NativeVllm,
+            cache_salt_forwarding: CacheSaltForwarding::RawEngine,
             strip_nvext,
             // Booking id for the server's lifecycle callbacks (no shared map).
             reservation_id: Some(reservation_id),

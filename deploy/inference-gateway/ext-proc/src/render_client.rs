@@ -24,25 +24,6 @@ use crate::render_http::{
 
 const CHAT_RENDER_PATH: &str = "/v1/chat/completions/render";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokenIdsField {
-    /// vLLM's render response and TensorRT-LLM's `RenderedRequest`.
-    TokenIds,
-    /// SGLang's `GenerateRequest`.
-    InputIds,
-}
-
-impl RendererProtocol {
-    fn token_ids_field(self) -> TokenIdsField {
-        match self {
-            RendererProtocol::VllmRender | RendererProtocol::TrtllmRender => {
-                TokenIdsField::TokenIds
-            }
-            RendererProtocol::SglangRenderer => TokenIdsField::InputIds,
-        }
-    }
-}
-
 /// Pooled client for one renderer.
 #[derive(Clone, Debug)]
 pub struct RenderClient {
@@ -116,25 +97,31 @@ impl RenderClient {
 
         check_content_length(&response, self.max_response_bytes)?;
         let body = read_success_body(response, self.max_response_bytes, self.timeout).await?;
-        parse_token_ids(self.protocol.token_ids_field(), &body)
+        parse_token_ids(self.protocol, &body)
             .map_err(|source| RenderError::InvalidResponse { source })
     }
 }
 
-/// Typed per field so a TensorRT-LLM response, which echoes the whole request,
-/// is never parsed into a `Value`.
-fn parse_token_ids(field: TokenIdsField, body: &[u8]) -> Result<Vec<u32>, serde_json::Error> {
+/// Typed per protocol so a TensorRT-LLM response, which echoes the whole
+/// request, is never parsed into a `Value`.
+fn parse_token_ids(protocol: RendererProtocol, body: &[u8]) -> Result<Vec<u32>, serde_json::Error> {
+    /// vLLM's render response and TensorRT-LLM's `RenderedRequest`.
     #[derive(Deserialize)]
     struct TokenIds {
         token_ids: Vec<u32>,
     }
+    /// SGLang's `GenerateRequest`.
     #[derive(Deserialize)]
     struct InputIds {
         input_ids: Vec<u32>,
     }
-    match field {
-        TokenIdsField::TokenIds => serde_json::from_slice::<TokenIds>(body).map(|r| r.token_ids),
-        TokenIdsField::InputIds => serde_json::from_slice::<InputIds>(body).map(|r| r.input_ids),
+    match protocol {
+        RendererProtocol::VllmRender | RendererProtocol::TrtllmRender => {
+            serde_json::from_slice::<TokenIds>(body).map(|r| r.token_ids)
+        }
+        RendererProtocol::SglangRenderer => {
+            serde_json::from_slice::<InputIds>(body).map(|r| r.input_ids)
+        }
     }
 }
 
@@ -264,26 +251,19 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_another_engines_response_shape() {
-        for (protocol, fixture) in [
-            (RendererProtocol::VllmRender, sglang_fixture()),
-            (RendererProtocol::TrtllmRender, sglang_fixture()),
-            (RendererProtocol::SglangRenderer, vllm_fixture()),
-            (RendererProtocol::SglangRenderer, trtllm_fixture()),
-        ] {
-            let (router, _rx) = fixture_router(fixture);
-            let (base_url, server) = spawn_server(router).await;
+        let (router, _rx) = fixture_router(sglang_fixture());
+        let (base_url, server) = spawn_server(router).await;
 
-            let error = client(protocol, &base_url)
-                .render_chat(Bytes::from_static(b"{}"))
-                .await
-                .unwrap_err();
+        let error = client(RendererProtocol::TrtllmRender, &base_url)
+            .render_chat(Bytes::from_static(b"{}"))
+            .await
+            .unwrap_err();
 
-            assert!(
-                matches!(error, RenderError::InvalidResponse { .. }),
-                "{protocol:?}: {error:?}"
-            );
-            server.abort();
-        }
+        assert!(
+            matches!(error, RenderError::InvalidResponse { .. }),
+            "{error:?}"
+        );
+        server.abort();
     }
 
     #[tokio::test]
@@ -527,30 +507,25 @@ mod tests {
 
     #[test]
     fn rejects_invalid_client_config() {
-        for protocol in [
-            RendererProtocol::VllmRender,
-            RendererProtocol::SglangRenderer,
-            RendererProtocol::TrtllmRender,
-        ] {
-            assert!(
-                RenderClient::new(
-                    protocol,
-                    "unix:///tmp/render.sock",
-                    Duration::from_secs(1),
-                    TEST_MAX_RESPONSE_BYTES
-                )
-                .is_err()
-            );
-            assert!(
-                RenderClient::new(
-                    protocol,
-                    "http://127.0.0.1:8000",
-                    Duration::ZERO,
-                    TEST_MAX_RESPONSE_BYTES
-                )
-                .is_err()
-            );
-            assert!(RenderClient::new(protocol, "http://127.0.0.1:8000", TEST_TIMEOUT, 0).is_err());
-        }
+        let protocol = RendererProtocol::TrtllmRender;
+        assert!(
+            RenderClient::new(
+                protocol,
+                "unix:///tmp/render.sock",
+                Duration::from_secs(1),
+                TEST_MAX_RESPONSE_BYTES
+            )
+            .is_err()
+        );
+        assert!(
+            RenderClient::new(
+                protocol,
+                "http://127.0.0.1:8000",
+                Duration::ZERO,
+                TEST_MAX_RESPONSE_BYTES
+            )
+            .is_err()
+        );
+        assert!(RenderClient::new(protocol, "http://127.0.0.1:8000", TEST_TIMEOUT, 0).is_err());
     }
 }

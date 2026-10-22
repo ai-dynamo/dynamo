@@ -63,9 +63,9 @@ pub enum CacheSaltForwarding {
     #[default]
     Preserve,
     /// Write `cache_salt = "dynamo-cache-salt:" + namespace` at the top level.
-    /// Raw engines read that field but have no Dynamo code in the request path
-    /// to add the marker, so the EPP must add it.
-    NativeVllm,
+    /// Raw engines (vLLM, SGLang, TensorRT-LLM) read that field but have no
+    /// Dynamo code in the request path to add the marker, so the EPP must add it.
+    RawEngine,
 }
 
 /// The endpoint selection result, with the Dynamo-specific routing headers
