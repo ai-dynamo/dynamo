@@ -100,9 +100,8 @@ impl KvTransferExtensions {
 }
 type OwnerBlockIndex = FxHashMap<ExternalSequenceBlockHash, TransitionKey>;
 
-/// Compact identity of an exact owner. Edges refer to it by [`OwnerId`]; full
-/// owners are retained once in the reverse index for reset filtering and exact
-/// recovery dumps.
+/// Exact owner identity. Edges store its [`OwnerId`]; full owners are kept once
+/// in the reverse index for reset filtering and recovery dumps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum IndexedResidencyOwner {
     Worker(WorkerWithDpRank),
@@ -142,9 +141,11 @@ impl IndexedResidencyOwner {
 struct OwnerId(u32);
 
 /// Append-only owner interning table. Lookups in both directions read one
-/// `ArcSwap` snapshot and take no lock; only appends serialize. Ids are never
-/// reused, so a reader holding an older snapshot can miss a new owner but
-/// never misname one.
+/// `ArcSwap` snapshot and take no lock. Only a never-seen owner takes `append`
+/// and copies the snapshot, so the table costs about 70 bytes per owner
+/// identity ever seen. Ids are never reused: a reader holding an older snapshot
+/// can miss a new owner but never misname one.
+#[derive(Default)]
 struct OwnerTable {
     snapshot: ArcSwap<OwnerSnapshot>,
     append: Mutex<()>,
@@ -154,15 +155,6 @@ struct OwnerTable {
 struct OwnerSnapshot {
     owners: Vec<IndexedResidencyOwner>,
     ids: FxHashMap<IndexedResidencyOwner, OwnerId>,
-}
-
-impl Default for OwnerTable {
-    fn default() -> Self {
-        Self {
-            snapshot: ArcSwap::from_pointee(OwnerSnapshot::default()),
-            append: Mutex::new(()),
-        }
-    }
 }
 
 impl OwnerTable {
@@ -193,14 +185,20 @@ impl OwnerTable {
     }
 }
 
-/// Query-side view: one owner snapshot plus the routing projection.
 #[derive(Clone, Copy)]
 struct OwnerView<'a> {
     owners: &'a [IndexedResidencyOwner],
     projection: &'a ResidencyProjection,
 }
 
-impl OwnerView<'_> {
+impl<'a> OwnerView<'a> {
+    fn new(snapshot: &'a OwnerSnapshot, projection: &'a ResidencyProjection) -> Self {
+        Self {
+            owners: &snapshot.owners,
+            projection,
+        }
+    }
+
     /// `None` for an id newer than the snapshot: that owner was interned after
     /// the query began.
     #[inline]
@@ -255,8 +253,7 @@ impl TransitionKey {
     }
 }
 
-/// Owners of one edge. Only the common single-owner case is inline; the rest
-/// are boxed so the table slot stays as small as `Single`.
+/// Owners of one edge. Only `Single` is inline, so the value stays 16 bytes.
 #[derive(Debug, Clone)]
 enum EdgeOwnersEntry {
     Single {
@@ -326,10 +323,6 @@ impl MultiOwners {
 type OwnerSetFingerprint = (usize, usize, u64);
 
 impl EdgeOwnersEntry {
-    fn new(child_hash: ExternalSequenceBlockHash, owner: OwnerId) -> Self {
-        Self::Single { child_hash, owner }
-    }
-
     #[inline]
     fn child_hash(&self) -> ExternalSequenceBlockHash {
         match self {
@@ -754,7 +747,10 @@ impl LowerTierIndexer {
                         .insert(block.block_hash, owner_id, indexed_owner, &self.owners)
                 }
                 dashmap::mapref::entry::Entry::Vacant(edge) => {
-                    edge.insert(EdgeOwnersEntry::new(block.block_hash, owner_id));
+                    edge.insert(EdgeOwnersEntry::Single {
+                        child_hash: block.block_hash,
+                        owner: owner_id,
+                    });
                     true
                 }
             };
@@ -886,10 +882,7 @@ impl LowerTierIndexer {
         projection: &ResidencyProjection,
     ) -> Vec<WorkerWithDpRank> {
         let owners = self.owners.snapshot.load();
-        let view = OwnerView {
-            owners: &owners.owners,
-            projection,
-        };
+        let view = OwnerView::new(&owners, projection);
         self.edges
             .get(&TransitionKey::new(None, local_hash))
             .map(|edge| edge.collect_workers(view))
@@ -903,10 +896,7 @@ impl LowerTierIndexer {
     ) -> HintSourceSet {
         let mut sources = HintSourceSet::default();
         let owners = self.owners.snapshot.load();
-        let view = OwnerView {
-            owners: &owners.owners,
-            projection: snapshot.projection(),
-        };
+        let view = OwnerView::new(&owners, snapshot.projection());
         if let Some(edge) = self.edges.get(&TransitionKey::new(None, local_hash)) {
             edge.collect_router_hint_sources(snapshot, view, &mut sources);
         }
@@ -1054,10 +1044,7 @@ impl LowerTierIndexer {
         S: BuildHasher,
     {
         let owners = self.owners.snapshot.load();
-        let view = OwnerView {
-            owners: &owners.owners,
-            projection: snapshot.projection(),
-        };
+        let view = OwnerView::new(&owners, snapshot.projection());
         let mut kv_transfer_extensions =
             retain_kv_transfer_extensions.then(KvTransferExtensions::default);
 
