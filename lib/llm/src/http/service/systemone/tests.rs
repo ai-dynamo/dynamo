@@ -67,6 +67,7 @@ async fn dialect_errors_preserve_request_ids_and_validation_envelopes() {
             super::decision_error(DecisionError::validation(dialect, "invalid questions"));
         super::attach_request_ids(&mut response, "fixture-request");
         assert_eq!(response.headers()["x-request-id"], "fixture-request");
+        assert_eq!(response.headers()["x-dynamo-systemone-version"], "1");
         assert_eq!(
             response.headers()["x-typesafe-request-id"],
             "fixture-request"
