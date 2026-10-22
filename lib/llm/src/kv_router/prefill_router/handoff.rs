@@ -124,6 +124,7 @@ impl PrefillTask {
         output: PrefillNeed,
     ) -> anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let emit = output != PrefillNeed::None;
+        let prefill_first = output == PrefillNeed::BeforeFirst;
         let mut completion = Box::pin(self.wait());
         tokio::pin!(decode);
         let mut response = tokio::select! {
@@ -145,25 +146,7 @@ impl PrefillTask {
         let context = response.context();
         let stream_context = context.clone();
         let stream = async_stream::stream! {
-            if output == PrefillNeed::BeforeFirst {
-                match completion.as_mut().await {
-                    Ok(output) => {
-                        if let Some(item) = output_item(output) {
-                            yield item;
-                        }
-                    }
-                    Err(error) => {
-                        request_context.stop_generating();
-                        stream_context.stop_generating();
-                        yield Annotated::from_err(error);
-                        return;
-                    }
-                }
-                while let Some(output) = response.next().await {
-                    yield output;
-                }
-                return;
-            }
+            let mut buffered = Vec::new();
             loop {
                 tokio::select! {
                     biased;
@@ -178,6 +161,9 @@ impl PrefillTask {
                                 yield Annotated::from_err(error);
                                 return;
                             }
+                        }
+                        for output in buffered.drain(..) {
+                            yield output;
                         }
                         while let Some(output) = response.next().await {
                             yield output;
@@ -210,8 +196,14 @@ impl PrefillTask {
                                 }
                             }
                         }
+                        if terminal {
+                            for output in buffered.drain(..) {
+                                yield output;
+                            }
+                        }
                         match output {
-                            Some(output) => yield output,
+                            Some(item) if prefill_first && !terminal => buffered.push(item),
+                            Some(item) => yield item,
                             None => return,
                         }
                         if terminal {
@@ -313,6 +305,32 @@ mod tests {
                 tx.send(Ok(None)).unwrap();
             }
         }
+    }
+
+    #[tokio::test]
+    async fn before_first_decode_failure_does_not_wait_for_prefill() {
+        let request = Arc::new(Controller::default());
+        let prefill = Arc::new(Controller::default());
+        let (tx, task) = pending_prefill();
+        let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
+            Box::pin(stream::iter([
+                Annotated::from_data(LLMEngineOutput::default()),
+                Annotated::from_error("decode failed"),
+            ])),
+            request.clone(),
+        );
+        let result = task
+            .forward_decode(async { Ok(decode) }, request, PrefillNeed::BeforeFirst)
+            .await;
+        let mut response = cancel_prefill_on_decode_error(prefill.clone(), result).unwrap();
+        let item = response
+            .next()
+            .now_or_never()
+            .expect("do not wait for prefill")
+            .unwrap();
+        assert!(item.err().unwrap().to_string().contains("decode failed"));
+        assert!(prefill.is_stopped());
+        tx.send(Ok(None)).unwrap();
     }
 
     #[tokio::test]
@@ -538,9 +556,13 @@ mod tests {
                 tokio::task::yield_now().await;
             }
             let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
-                Box::pin(stream::iter([Annotated::from_data(
-                    LLMEngineOutput::length(),
-                )])),
+                Box::pin(stream::iter([
+                    Annotated::from_data(LLMEngineOutput {
+                        token_ids: vec![42],
+                        ..Default::default()
+                    }),
+                    Annotated::from_data(LLMEngineOutput::length()),
+                ])),
                 Arc::new(Controller::default()),
             );
             let context = Arc::new(Controller::default());
@@ -559,6 +581,7 @@ mod tests {
             let item = response.next().await.unwrap();
             assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
             assert_eq!(item.data.unwrap().engine_data, Some(output));
+            assert_eq!(response.next().await.unwrap().data.unwrap().token_ids, [42]);
             assert!(
                 response
                     .next()
