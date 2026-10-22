@@ -213,10 +213,18 @@ Existing typed media paths and their transports remain unchanged.
 #### NIXL Lifecycle Dependency
 
 Public custom NIXL tensors remain explicitly rejected. Workers do not advertise
-`custom_tensor_nixl_v1`. The raw CPU byte-path prototype reuses maintained
-`nixl_connect.Descriptor`, `Connector.create_readable`, `begin_read`, registration,
-and completion notifications. It keeps tensor specs separate from byte movement
-and does not use the processed vLLM `mm_kwargs` codec or media descriptors.
+`custom_tensor_nixl_v1`. The raw CPU prototype calls the maintained
+`NixlReadEmbeddingSender` and `NixlReadEmbeddingReceiver` directly. These own
+NIXL registration, descriptors, READ operations, completion notifications, and
+buffer release. The adapter supplies tensor shape and dtype through the existing
+`TransferRequest`, copies the completed receive buffer into model-owned storage,
+and calls `release_tensor`. It does not use the processed vLLM `mm_kwargs` codec
+or media descriptors.
+
+Source ownership follows the existing encoder's send-completion queue: retain
+the source until the READ completion awaitable finishes. Cancelling the caller
+does not cancel that waiter. Reference expiry is checked before admission; it
+does not authorize releasing a buffer while a transfer might still access it.
 
 The blocking case is **timeout or peer failure after a READ might have started**.
 In NIXL 1.5.0, releasing the native handle requests cancellation and releases the
@@ -229,29 +237,25 @@ See the [NIXL release implementation](https://github.com/ai-dynamo/nixl/blob/v1.
 [UCX cancellation implementation](https://github.com/openucx/ucx/blob/v1.23.x/src/ucp/core/ucp_request.c),
 and [software GET implementation](https://github.com/openucx/ucx/blob/v1.23.x/src/ucp/rma/rma_sw.c).
 
-The smallest proposed native extension is an **awaitable request-agent
-close-and-drain operation**, rather than a reusable-reference service. The raw
-adapter can use a dedicated agent for each request. Close-and-drain must:
+This concern also applies to existing transports. The maintained processed
+`MmKwargsNixlSender` bounds its completion wait and releases buffers on timeout;
+that policy does not establish that an already-started READ has stopped. The
+custom adapter adds no separate timeout-release policy. Completion-based
+ownership can retain storage indefinitely if a reader disappears, so it does
+not yet satisfy finite cleanup after failure.
 
-1. Stop new outbound posts and inbound accesses for that request.
-2. Retain transfer handles, remote keys, registrations, and buffers while
-   progressing native close/flush requests to completion.
-3. Acknowledge quiescence for both producer and consumer before either releases
-   or reuses storage. A timeout/error must not be reported as proof of drain.
+Any correction belongs in the shared NIXL transport machinery. Safe finite
+cleanup needs proof that both outbound and inbound accesses have stopped before
+storage is released or reused. An awaited native close-and-drain operation is
+one possible extension; no custom handshake or reusable-reference service is
+implemented by this adapter.
 
 Existing `remove_remote_agent()` does not provide this contract: metadata
 invalidation precedes disconnect, and the asynchronous UCX endpoint close is
 not awaited. See [metadata invalidation](https://github.com/ai-dynamo/nixl/blob/v1.5.0/src/core/nixl_agent.cpp)
 and [endpoint close](https://github.com/ai-dynamo/nixl/blob/v1.5.0/src/plugins/ucx/ucx_utils.cpp).
 
-A one-shot claim/grant/abort/completion handshake can use existing native
-notifications and clean up requests rejected before any READ is permitted.
-After a READ may have started, an uncertain failure still requires retaining
-storage and its capacity charge until completion or proven native teardown.
-Bounded quarantine prevents unbounded memory growth but cannot provide finite
-reclamation after a worker disappears. It is not a substitute for close-and-drain.
-
-Qualifying this extension requires real producer and worker hosts, including
+Qualifying failure cleanup requires real producer and worker hosts, including
 active-transfer cancellation, timeout, lost workers, late descriptors, and
 proof that buffers are not reused before drain. Successful cross-host byte
 parity alone does not establish lifecycle safety. GPU transport, zero-copy GPU
