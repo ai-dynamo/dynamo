@@ -174,7 +174,8 @@ func main() {
 	flag.StringVar(&dgdrDefaultImage, "dgdr-default-image", "",
 		"Default DGDR profiler image, put into DGDR spec.image when unset; empty derives dynamo-planner:<operator-version>")
 	flag.StringVar(&dgdrAISimulateDefaultImage, "dgdr-aisimulate-default-image", "",
-		"AISimulate runner image, put into v1beta2 DGDR spec.aisimulate.image when unset; empty leaves the image unset and the Request is rejected")
+		"AISimulate runner image, put into v1beta2 DGDR spec.aisimulate.image when unset; "+
+			"empty leaves the image unset and the Request is rejected")
 	opts := zap.Options{
 		Development: true,
 	}
