@@ -3544,7 +3544,6 @@ async fn chat_completions(
         return Err(err_response);
     }
 
-    // Add legacy Beam builtin declarations before validating their schemas.
     // The model lookup below reports a missing model through its normal error path.
     if let Ok((_, model_parsing)) = state
         .manager()

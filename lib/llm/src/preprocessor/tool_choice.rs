@@ -73,8 +73,13 @@ impl OpenAIPreprocessor {
         common_request: &mut PreprocessedRequest,
         prompt_prefill: impl Into<PromptReasoningPrefill>,
     ) -> Result<GuidedToolConstraint, DynamoError> {
-        let constraint =
-            self.try_apply_tool_choice_guided_decoding(request, common_request, prompt_prefill)?;
+        let tools = effective_tools(&request.inner)?;
+        let constraint = self.try_apply_tool_choice_guided_decoding(
+            request,
+            common_request,
+            prompt_prefill,
+            &tools,
+        )?;
         let choice = request
             .inner
             .tool_choice
@@ -84,7 +89,7 @@ impl OpenAIPreprocessor {
             && (matches!(
                 choice,
                 ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
-            ) || effective_tools(&request.inner)?.iter().any(|tool| {
+            ) || tools.iter().any(|tool| {
                 tool.function.strict == Some(true)
                     && match choice {
                         ChatCompletionToolChoiceOption::None => false,
@@ -108,6 +113,7 @@ impl OpenAIPreprocessor {
         request: &NvCreateChatCompletionRequest,
         common_request: &mut PreprocessedRequest,
         prompt_prefill: impl Into<PromptReasoningPrefill>,
+        tools: &[ChatCompletionTool],
     ) -> Result<GuidedToolConstraint, DynamoError> {
         let prompt_prefill = prompt_prefill.into();
         let tool_choice = request
@@ -115,7 +121,6 @@ impl OpenAIPreprocessor {
             .tool_choice
             .as_ref()
             .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
-        let tools = effective_tools(&request.inner)?;
         let is_forced_tool_choice = matches!(
             tool_choice,
             ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
@@ -124,7 +129,7 @@ impl OpenAIPreprocessor {
         let has_response_format_constraint = has_response_format_constraint(request);
         let parser_tool_choice = convert_tool_choice(tool_choice);
 
-        self.validate_structured_output_composition(request, tool_choice, tools.as_ref())?;
+        self.validate_structured_output_composition(request, tool_choice, tools)?;
 
         if is_forced_tool_choice && has_explicit_guided_decoding {
             return Err(invalid_argument(
@@ -161,7 +166,7 @@ impl OpenAIPreprocessor {
         if !is_forced_tool_choice && beam_constraint.frames_structured_answer() {
             if let Some(schema) = request.get_guided_json()
                 && let Some(structural_tag) = beam_turn_structural_tag(
-                    tools.as_ref(),
+                    tools,
                     &parser_tool_choice,
                     request.inner.parallel_tool_calls,
                     prompt_prefill.beam_channel,
@@ -184,7 +189,7 @@ impl OpenAIPreprocessor {
 
         if self.apply_tool_choice_structural_tag(
             &parser_tool_choice,
-            &convert_tools(tools.as_ref()),
+            &convert_tools(tools),
             request.inner.parallel_tool_calls,
             prompt_prefill.unified,
             request.inner.response_format.as_ref(),
@@ -198,7 +203,7 @@ impl OpenAIPreprocessor {
             GuidedToolConstraint::BeamTurnGrammar { .. }
         ) {
             if let Some(structural_tag) = beam_turn_structural_tag(
-                tools.as_ref(),
+                tools,
                 &parser_tool_choice,
                 request.inner.parallel_tool_calls,
                 prompt_prefill.beam_channel,
@@ -238,7 +243,7 @@ impl OpenAIPreprocessor {
 
         match get_tool_choice_guidance_from_tools(
             Some(tool_choice),
-            Some(tools.as_ref()),
+            Some(tools),
             request.inner.parallel_tool_calls,
         ) {
             Ok(Some(guidance)) => {
