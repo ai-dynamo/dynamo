@@ -42,6 +42,9 @@ use crate::{
     },
 };
 
+#[path = "systemone/abort.rs"]
+mod abort;
+
 #[path = "systemone/execution.rs"]
 mod execution;
 use execution::{
@@ -509,6 +512,8 @@ async fn dispatch(
 ) -> Response {
     let dialect = request.dialect;
     let mut salt_bytes = [0_u8; 16];
+    // Share sibling prefixes, but isolate requests until a trusted tenant scope exists.
+    // Client metadata and request IDs are not authenticated cache identities.
     rand::rng().fill(&mut salt_bytes);
     let cache_salt = URL_SAFE_NO_PAD.encode(salt_bytes);
     let first = branches.remove(0);
@@ -754,12 +759,13 @@ async fn read_branch(
                 DispatchError::malformed("invalid native scoring stream")
             }
         })?;
-        if frame
+        let finish = frame
             .get("meta_info")
-            .and_then(|meta| meta.get("finish_reason"))
-            .is_some_and(|finish| !finish.is_null())
-            && terminal.replace(frame).is_some()
-        {
+            .and_then(|meta| meta.get("finish_reason"));
+        if let Some(cause) = finish.and_then(abort::classify) {
+            return Err(cause);
+        }
+        if finish.is_some_and(|finish| !finish.is_null()) && terminal.replace(frame).is_some() {
             return Err(DispatchError::malformed(
                 "multiple terminal SGLang scoring frames",
             ));

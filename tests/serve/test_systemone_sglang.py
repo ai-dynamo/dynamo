@@ -5,7 +5,7 @@
 
 Set DYNAMO_DECISION_RUN_PINNED_SGLANG=1 in an explicitly provisioned 0.5.19
 environment. The default backend on main is not qualified by these fixtures;
-ordinary CI skips them before worker startup. This small-model campaign does
+ordinary CI deselects them before worker startup. This small-model campaign does
 not establish Qwen3.8-27B qualification or physical GPU cancellation settlement.
 """
 
@@ -31,7 +31,7 @@ from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import reserved_ports
 
 pytestmark = [
-    pytest.mark.manual,
+    pytest.mark.post_merge,
     pytest.mark.skipif(
         os.environ.get("DYNAMO_DECISION_RUN_PINNED_SGLANG") != "1",
         reason="Set DYNAMO_DECISION_RUN_PINNED_SGLANG=1 for pinned SGLang qualification",

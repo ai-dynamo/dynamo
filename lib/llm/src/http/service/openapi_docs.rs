@@ -466,11 +466,8 @@ fn create_operation_for_route(route: &RouteDoc) -> utoipa::openapi::path::Operat
         );
         for (status, description) in [
             ("413", "Request body exceeds 4 MiB"),
+            ("415", "Content-Type must be application/json"),
             ("429", "Decision scoring admission capacity is exhausted"),
-            (
-                "422",
-                "Invalid question, unsupported control, or prompt/token budget",
-            ),
             ("499", "Request cancelled"),
             ("500", "Malformed or incomplete native scoring response"),
             ("504", "Decision preflight or execution deadline exceeded"),
@@ -478,6 +475,14 @@ fn create_operation_for_route(route: &RouteDoc) -> utoipa::openapi::path::Operat
             operation = operation.response(
                 status,
                 ResponseBuilder::new().description(description).build(),
+            );
+        }
+        if route.openapi_kind() == Some(OpenApiRouteKind::SystemOne) {
+            operation = operation.response(
+                "422",
+                ResponseBuilder::new()
+                    .description("Invalid question, unsupported control, or prompt/token budget")
+                    .build(),
             );
         }
     }
@@ -1264,7 +1269,7 @@ mod tests {
         assert!(operation["requestBody"]["content"]["application/json"]["schema"].is_object());
         assert!(operation["responses"]["200"]["content"]["application/json"]["schema"].is_object());
         for status in [
-            "400", "404", "413", "422", "429", "499", "500", "503", "504", "529",
+            "400", "404", "413", "415", "422", "429", "499", "500", "503", "504", "529",
         ] {
             assert!(
                 operation["responses"].get(status).is_some(),
@@ -1301,6 +1306,9 @@ mod tests {
                 .all(|name| !name.starts_with("DecisionSglang"))
         );
         assert!(operation["responses"].get("429").is_some());
+        assert!(operation["responses"].get("400").is_some());
+        assert!(operation["responses"].get("415").is_some());
+        assert!(operation["responses"].get("422").is_none());
     }
 
     #[test]

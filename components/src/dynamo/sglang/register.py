@@ -54,6 +54,7 @@ from dynamo.sglang.capacity import (
     model_card_dp_rank_bounds,
     per_rank_max_running_requests,
     runtime_capacity,
+    sglang_dp_layout,
 )
 from dynamo.sglang.engine_generate import (
     DISAGG_PREFILL_CANCEL_ANYTIME_V1,
@@ -130,7 +131,15 @@ def _supports_systemone_serial(
     output_type: ModelType,
     worker_type: WorkerType,
 ) -> bool:
-    """Require scheduler isolation until SGLang's mixed logprob rows are safe."""
+    """Gate the serialized SGLang 0.5.19 execution profile.
+
+    CUDA is the qualified deployment; device support is not validated here,
+    and XPU remains unqualified.
+
+    Serialization and disabled overlap apply to the entire worker, including
+    chat and completions. Use dedicated decision workers for this low-throughput
+    profile; the stock image's newer SGLang release is not yet qualified.
+    """
     # Relax the validated pin only after mixed scoring/decode GPU validation.
     priority_preemption = getattr(
         server_args, "enable_priority_scheduling", False
@@ -139,6 +148,7 @@ def _supports_systemone_serial(
         worker_type == WorkerType.Aggregated
         and version("sglang").split("+")[0] == "0.5.19"
         and _supports_engine_generate(input_type, output_type, worker_type)
+        and sglang_dp_layout(server_args) == (1, False)
         and per_rank_max_running_requests(server_args) == 1
         and getattr(server_args, "disable_overlap_schedule", False) is True
         and getattr(server_args, "pp_size", 1) == 1
@@ -256,7 +266,11 @@ async def _register_model_with_runtime_config(
             runtime_config.set_engine_specific(
                 SGLANG_SYSTEMONE_SERIAL_V1, json.dumps(True)
             )
-            logging.info("Published serialized SGLang System One capability")
+            logging.info(
+                "Published SGLang 0.5.19 System One capability: the entire worker, "
+                "including chat and completions, is serialized with overlap disabled; "
+                "use dedicated decision workers for this low-throughput profile"
+            )
     # Configure the Rust frontend's media decoder so it ships pre-decoded
     # media via NIXL RDMA instead of forwarding raw URLs / base64 to us.
     media_decoder = None

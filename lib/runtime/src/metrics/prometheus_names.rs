@@ -187,6 +187,24 @@ pub mod frontend_service {
     /// Total number of LLM requests accepted by the frontend handler
     pub const REQUESTS_STARTED_TOTAL: &str = "requests_started_total";
 
+    /// Questions per admitted System One request.
+    pub const SYSTEMONE_QUESTIONS: &str = "systemone_questions";
+
+    /// Expanded prompt tokens per admitted System One request.
+    pub const SYSTEMONE_INPUT_TOKENS: &str = "systemone_input_tokens";
+
+    /// Requested candidate token IDs per admitted System One request.
+    pub const SYSTEMONE_CANDIDATE_IDS: &str = "systemone_candidate_ids";
+
+    /// Cached prompt tokens reported by a completed System One branch.
+    pub const SYSTEMONE_CACHED_TOKENS: &str = "systemone_cached_tokens";
+
+    /// Total question branches admitted for System One dispatch.
+    pub const SYSTEMONE_ADMITTED_BRANCHES_TOTAL: &str = "systemone_admitted_branches_total";
+
+    /// Duration of a System One execution phase in seconds.
+    pub const SYSTEMONE_PHASE_SECONDS: &str = "systemone_phase_seconds";
+
     /// Total number of terminal semantic request failures.
     pub const FAILURES_TOTAL: &str = "failures_total";
 
@@ -1002,9 +1020,15 @@ pub fn sanitize_frontend_prometheus_prefix(raw: &str) -> String {
 /// Builds a full component metric name by prepending the component prefix
 /// Sanitizes the metric name to ensure it's valid for Prometheus
 pub fn build_component_metric_name(metric_name: &str) -> String {
+    build_metric_name(name_prefix::COMPONENT, metric_name)
+}
+
+/// Builds a full metric name by prepending `prefix`
+/// Sanitizes the metric name to ensure it's valid for Prometheus
+pub(crate) fn build_metric_name(prefix: &str, metric_name: &str) -> String {
     let sanitized_name =
         sanitize_prometheus_name(metric_name).expect("metric name should be valid or sanitizable");
-    format!("{}_{}", name_prefix::COMPONENT, sanitized_name)
+    format!("{}_{}", prefix, sanitized_name)
 }
 
 /// Safely converts a u64 value to i64 for Prometheus metrics

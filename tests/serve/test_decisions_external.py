@@ -4,7 +4,8 @@
 """Opt-in qualification against an already running decision deployment.
 
 Set DYNAMO_DECISION_TEST_URL and DYNAMO_DECISION_TEST_MODEL explicitly. This
-client does not launch or download a model; large-model qualification remains
+client does not launch or download a model; default collection deselects this
+module until the URL is set. Large-model qualification remains
 outside the shared CI GPU budget. Set DYNAMO_DECISION_REQUIRE_SDKS=1 to make
 missing official clients a failure instead of an optional-dependency skip.
 
@@ -35,7 +36,7 @@ from tests.utils.decision_api import (
 )
 
 pytestmark = [
-    pytest.mark.manual,
+    pytest.mark.post_merge,
     pytest.mark.gpu_0,
     pytest.mark.integration,
     pytest.mark.sglang,

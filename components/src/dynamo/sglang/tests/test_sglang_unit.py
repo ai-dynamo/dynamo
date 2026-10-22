@@ -37,6 +37,8 @@ from dynamo.sglang._compat import (
     supports_external_mm_hashes,
 )
 from dynamo.sglang.args import (
+    CUDA_COREDUMP_WAIT_ENV,
+    _default_cuda_coredump_wait,
     _diffusion_generator_kwargs,
     _forward_pass_metrics_source,
     _normalize_multimodal_disaggregation_args,
@@ -149,6 +151,46 @@ def test_freeze_gc_after_init_requires_decode_or_aggregated_mode(
     else:
         with pytest.raises(ValueError, match="--freeze-gc-after-init"):
             sglang_args.Config(server_args, dynamo_args)
+
+
+@pytest.fixture
+def clean_coredump_env(monkeypatch):
+    # Register the key so teardown removes the value the helper writes.
+    monkeypatch.setenv(CUDA_COREDUMP_WAIT_ENV, "")
+    monkeypatch.delenv(CUDA_COREDUMP_WAIT_ENV)
+    monkeypatch.delenv("CUDA_ENABLE_USER_TRIGGERED_COREDUMP", raising=False)
+    return monkeypatch
+
+
+def test_cuda_coredump_wait_skipped_when_coredumps_disabled(clean_coredump_env):
+    from sglang.srt.environ import envs
+
+    _default_cuda_coredump_wait(SimpleNamespace(crash_dump_folder=None))
+
+    assert os.environ[CUDA_COREDUMP_WAIT_ENV] == "0"
+    assert envs.SGLANG_CUDA_COREDUMP_BEFORE_CRASH_WAIT_SECS.get() == 0.0
+
+
+def test_cuda_coredump_wait_keeps_explicit_value(clean_coredump_env):
+    clean_coredump_env.setenv(CUDA_COREDUMP_WAIT_ENV, "30")
+
+    _default_cuda_coredump_wait(SimpleNamespace(crash_dump_folder=None))
+
+    assert os.environ[CUDA_COREDUMP_WAIT_ENV] == "30"
+
+
+def test_cuda_coredump_wait_kept_when_user_coredumps_enabled(clean_coredump_env):
+    clean_coredump_env.setenv("CUDA_ENABLE_USER_TRIGGERED_COREDUMP", "1")
+
+    _default_cuda_coredump_wait(SimpleNamespace(crash_dump_folder=None))
+
+    assert CUDA_COREDUMP_WAIT_ENV not in os.environ
+
+
+def test_cuda_coredump_wait_kept_with_crash_dump_folder(clean_coredump_env, tmp_path):
+    _default_cuda_coredump_wait(SimpleNamespace(crash_dump_folder=str(tmp_path)))
+
+    assert CUDA_COREDUMP_WAIT_ENV not in os.environ
 
 
 def test_diffusion_generator_kwargs_maps_nccl_port_to_master_port():
@@ -1912,8 +1954,17 @@ def test_use_modelexpress_remote_instance_rejects_other_load_paths(
             {"max_running_requests": 2, "dp_size": 2, "enable_dp_attention": True},
             "Tokens",
             "Aggregated",
-            True,
+            False,
         ),
+        ({"dp_size": 2}, "Tokens", "Aggregated", False),
+        ({"enable_dp_attention": True}, "Tokens", "Aggregated", False),
+        (
+            {"max_running_requests": 2, "attn_dp_size": 2},
+            "Tokens",
+            "Aggregated",
+            False,
+        ),
+        ({"ep_join_mode": "scale"}, "Tokens", "Aggregated", False),
     ],
 )
 def test_systemone_serial_capability_registration_gate(
@@ -1946,7 +1997,13 @@ def test_systemone_serial_capability_registration_gate(
 
 @pytest.mark.parametrize(
     ("installed", "expected"),
-    [("0.5.18", False), ("0.5.19", True), ("0.5.19+cu129", True), ("0.5.20", False)],
+    [
+        ("0.5.18", False),
+        ("0.5.19", True),
+        ("0.5.19+cu129", True),
+        ("0.5.20", False),
+        ("0.5.22", False),
+    ],
 )
 def test_systemone_serial_capability_version_gate(monkeypatch, installed, expected):
     if sglang_register is None:
@@ -1969,7 +2026,7 @@ def test_systemone_serial_capability_version_gate(monkeypatch, installed, expect
 @pytest.mark.asyncio
 @pytest.mark.parametrize("serial", [False, True])
 async def test_systemone_serial_capability_published_only_when_isolated(
-    monkeypatch, serial
+    monkeypatch, caplog, serial
 ):
     if sglang_register is None:
         pytest.skip("dynamo.sglang.register is unavailable")
@@ -1999,15 +2056,17 @@ async def test_systemone_serial_capability_published_only_when_isolated(
     dynamo_args = SimpleNamespace(
         use_sglang_tokenizer=False, custom_jinja_template=None, model_source_uri=None
     )
-    assert await sglang_register._register_model_with_runtime_config(
-        engine=SimpleNamespace(),
-        endpoint=SimpleNamespace(),
-        server_args=server_args,
-        dynamo_args=dynamo_args,
-        worker_type=sglang_register.WorkerType.Aggregated,
-    )
+    with caplog.at_level(logging.INFO):
+        assert await sglang_register._register_model_with_runtime_config(
+            engine=SimpleNamespace(),
+            endpoint=SimpleNamespace(),
+            server_args=server_args,
+            dynamo_args=dynamo_args,
+            worker_type=sglang_register.WorkerType.Aggregated,
+        )
     assert published["sglang_generate"] == "true"
     assert published.get("sglang_systemone_serial_v1") == ("true" if serial else None)
+    assert ("including chat and completions" in caplog.text) is serial
 
 
 def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():

@@ -29,7 +29,6 @@ use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_me
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::{Context, Result};
-use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
@@ -99,16 +98,51 @@ fn path_within_namespace(path: &str, namespace: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
+struct InferenceReadinessState {
+    state: Arc<State>,
+    decision_dialects: HashMap<String, dynamo_decisions::Dialect>,
+}
+
+impl InferenceReadinessState {
+    fn rejection(&self, request: &axum::extract::Request) -> axum::response::Response {
+        let unavailable = super::openai::ErrorMessage::_service_unavailable();
+        let dialect = request
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
+            .filter(|_| request.method() == axum::http::Method::POST)
+            .and_then(|path| self.decision_dialects.get(path.as_str()));
+        let Some(&dialect) = dialect else {
+            return unavailable.into_response();
+        };
+        let error = dynamo_decisions::DecisionError::new(
+            dialect,
+            unavailable.0.as_u16(),
+            "server_error",
+            unavailable.1.0.message(),
+        );
+        let mut response = (unavailable.0, axum::Json(error.response_body())).into_response();
+        let request_id = super::openai::get_or_create_request_id(request.headers());
+        let value = axum::http::HeaderValue::from_str(&request_id)
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("invalid"));
+        response.headers_mut().insert("x-request-id", value.clone());
+        response
+            .headers_mut()
+            .insert("x-typesafe-request-id", value);
+        response
+    }
+}
+
 async fn track_inflight_inference(
-    axum::extract::State(state): axum::extract::State<Arc<State>>,
+    axum::extract::State(readiness): axum::extract::State<Arc<InferenceReadinessState>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use futures::StreamExt;
+    let state = &readiness.state;
 
     // Requests rejected during draining should not extend the drain window.
     if !state.is_ready() {
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return readiness.rejection(&request);
     }
 
     let permit = state.acquire_inflight();
@@ -116,7 +150,7 @@ async fn track_inflight_inference(
     // before this request is counted as inflight.
     if !state.is_ready() {
         drop(permit);
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return readiness.rejection(&request);
     }
 
     let response = next.run(request).await;
@@ -154,21 +188,31 @@ pub struct State {
 
 const DEFAULT_SYSTEMONE_MAX_INFLIGHT_BRANCHES: usize = 256;
 const DEFAULT_SYSTEMONE_MAX_INPUT_TOKENS: usize = 65_536;
+const MAX_SYSTEMONE_INFLIGHT_BRANCHES: usize = 4096;
+const MAX_SYSTEMONE_INPUT_TOKENS: usize = 1_048_576;
+const MAX_SYSTEMONE_REQUEST_TIMEOUT_SECS: usize = 3600;
 const SYSTEMONE_MAX_CONCURRENT_PREFLIGHT: usize = 4;
 
-fn bounded_systemone_limit(env_name: &'static str, default: usize) -> usize {
+fn bounded_systemone_limit(env_name: &'static str, default: usize, maximum: usize) -> usize {
     match std::env::var(env_name) {
         Ok(value) => match value.parse::<usize>() {
             Ok(parsed) if parsed > 0 => {
-                if parsed > default {
+                if parsed > maximum {
                     tracing::warn!(
                         env = env_name,
                         requested = parsed,
-                        effective = default,
+                        effective = maximum,
                         "lowering configured System One limit"
                     );
+                } else if parsed > default {
+                    tracing::warn!(
+                        env = env_name,
+                        effective = parsed,
+                        default,
+                        "raising System One resource limit above the default"
+                    );
                 }
-                parsed.min(default)
+                parsed.min(maximum)
             }
             _ => {
                 tracing::warn!(
@@ -582,6 +626,7 @@ impl State {
         let systemone_max_inflight_branches = bounded_systemone_limit(
             env_llm::DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES,
             DEFAULT_SYSTEMONE_MAX_INFLIGHT_BRANCHES,
+            MAX_SYSTEMONE_INFLIGHT_BRANCHES,
         );
         Self {
             manager,
@@ -620,10 +665,12 @@ impl State {
             systemone_max_input_tokens: bounded_systemone_limit(
                 env_llm::DYN_SYSTEMONE_MAX_INPUT_TOKENS,
                 DEFAULT_SYSTEMONE_MAX_INPUT_TOKENS,
+                MAX_SYSTEMONE_INPUT_TOKENS,
             ),
             systemone_request_timeout: Duration::from_secs(bounded_systemone_limit(
                 env_llm::DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS,
                 300,
+                MAX_SYSTEMONE_REQUEST_TIMEOUT_SECS,
             ) as u64),
         }
     }
@@ -932,8 +979,8 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_nvext: bool,
 
-    /// Master switch for the frontend admin API surface (`GET` /
-    /// `POST /busy_threshold`). Default `true`; env-truthy
+    /// Master switch for `/router_policy` (including its busy-threshold subresource)
+    /// and the legacy `/busy_threshold` API. Default `true`; env-truthy
     /// `DYN_DISABLE_FRONTEND_ADMIN_API` overrides to `false`.
     #[builder(default = "true")]
     enable_admin_api: bool,
@@ -997,13 +1044,11 @@ impl HttpService {
     }
 
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
-        self.run_inner(cancel_token, None, None).await
+        self.run_inner(cancel_token, None).await
     }
 
     /// Like [`spawn`], but uses a caller-provided pre-bound listener. Closes the TOCTOU
-    /// port-allocation gap for tests that need to know the bound port up front. Not
-    /// supported in TLS mode, which binds internally. Returns an error if invoked on a
-    /// service built with `enable_tls(true)`.
+    /// port-allocation gap for tests that need to know the bound port up front.
     ///
     /// [`spawn`]: HttpService::spawn
     pub async fn spawn_with_listener(
@@ -1016,24 +1061,21 @@ impl HttpService {
     }
 
     /// Like [`run`], but serves on a caller-provided pre-bound listener instead of
-    /// binding `{host}:{port}` internally. See [`spawn_with_listener`] for the TLS
-    /// restriction.
+    /// binding `{host}:{port}` internally.
     ///
     /// [`run`]: HttpService::run
-    /// [`spawn_with_listener`]: HttpService::spawn_with_listener
     pub async fn run_with_listener(
         &self,
         cancel_token: CancellationToken,
         listener: tokio::net::TcpListener,
     ) -> Result<()> {
-        self.run_inner(cancel_token, Some(listener), None).await
+        self.run_inner(cancel_token, Some(listener)).await
     }
 
     async fn run_inner(
         &self,
         cancel_token: CancellationToken,
         listener: Option<tokio::net::TcpListener>,
-        server_handle: Option<axum_server::Handle>,
     ) -> Result<()> {
         if self.tls_client_ca_cert_path.is_some() && !self.enable_tls {
             anyhow::bail!("TLS must be enabled when a client CA certificate is configured");
@@ -1049,14 +1091,7 @@ impl HttpService {
         let state = self.state.clone();
         let state_cancel = state.cancel_token().clone();
 
-        if self.enable_tls {
-            if listener.is_some() {
-                return Err(anyhow::anyhow!(
-                    "Pre-bound listener is not supported in TLS mode. \
-                     Use run()/spawn() (which bind internally) when enable_tls is set."
-                ));
-            }
-            let addr = listen_socket_addr(&self.host, self.port)?;
+        let tls = if self.enable_tls {
             let cert_path = self
                 .tls_cert_path
                 .as_ref()
@@ -1072,150 +1107,64 @@ impl HttpService {
             )
             .context("Failed to create TLS config")?;
             server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-            let config = RustlsConfig::from_config(Arc::new(server_config));
+            Some(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)))
+        } else {
+            None
+        };
 
-            let handle = server_handle.unwrap_or_default();
-            let std_listener = bind_listener(addr)
-                .and_then(|l| l.into_std())
-                .map_err(|e| {
+        let listener = match listener {
+            Some(l) => l,
+            None => {
+                let addr = listen_socket_addr(&self.host, self.port)?;
+                bind_listener(addr).map_err(|e| {
                     tracing::error!(
                         protocol = %protocol,
                         address = %address,
                         error = %e,
                         "Failed to bind server to address"
                     );
-                    anyhow::anyhow!("Failed to start {} server on {}: {}", protocol, address, e)
-                })?;
-            let server = axum_server::from_tcp_rustls(std_listener, config)
-                .map(|acceptor| {
-                    super::write_timeout::WriteTimeoutAcceptor::new(acceptor, write_idle_timeout())
-                })
-                .handle(handle.clone())
-                .serve(router.into_make_service());
-
-            let server = async {
-                tokio::pin!(server);
-                tokio::select! {
-                    result = &mut server => result,
-                    address = handle.listening() => {
-                        if let Some(address) = address {
-                            tracing::info!(%address, "HTTPS server listening");
-                        }
-                        server.await
+                    match e.kind() {
+                        std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+                            "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
+                            protocol,
+                            self.port
+                        ),
+                        _ => anyhow::anyhow!(
+                            "Failed to start {} server on {}: {}",
+                            protocol,
+                            address,
+                            e
+                        ),
                     }
-                }
-            };
-
-            self.spawn_rl_listener_if_configured(&cancel_token).await?;
-
-            // Spawn canary after all fallible startup so it won't leak on early errors
-            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
-
-            tokio::pin!(server);
-            tokio::select! {
-                result = &mut server => {
-                    let result = result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e));
-                    state.start_stopping();
-                    cancel_token.cancel();
-                    result?;
-                }
-                _ = observer.cancelled() => {
-                    state.start_draining();
-                    tracing::info!("HTTPS server shutdown requested");
-                    let shutdown_timeout =
-                        Duration::from_secs(get_graceful_shutdown_timeout() as u64);
-                    let drain_started = tokio::time::Instant::now();
-                    let (result, ()) = tokio::join!(&mut server, async {
-                        if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
-                            tracing::warn!(
-                                inflight_requests = state.inflight_count(),
-                                "Timed out waiting for inflight inference requests to drain"
-                            );
-                        }
-                        handle.graceful_shutdown(Some(
-                            shutdown_timeout.saturating_sub(drain_started.elapsed()),
-                        ));
-                    });
-                    state.start_stopping();
-                    state_cancel.cancel();
-                    result.context("HTTPS server shutdown")?;
-                }
+                })?
             }
-        } else {
-            let listener = match listener {
-                Some(l) => l,
-                None => {
-                    let addr = listen_socket_addr(&self.host, self.port)?;
-                    bind_listener(addr).map_err(|e| {
-                        tracing::error!(
-                            protocol = %protocol,
-                            address = %address,
-                            error = %e,
-                            "Failed to bind server to address"
-                        );
-                        match e.kind() {
-                            std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
-                                "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
-                                protocol,
-                                self.port
-                            ),
-                            _ => anyhow::anyhow!(
-                                "Failed to start {} server on {}: {}",
-                                protocol,
-                                address,
-                                e
-                            ),
-                        }
-                    })?
-                }
-            };
+        };
+        tracing::info!(address = %listener.local_addr()?, "{protocol} server listening");
 
-            let std_listener = listener.into_std()?;
-            self.spawn_rl_listener_if_configured(&cancel_token).await?;
+        self.spawn_rl_listener_if_configured(&cancel_token).await?;
 
-            // Spawn canary after all fallible startup so it won't leak on early errors
-            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+        // Spawn canary after all fallible startup so it won't leak on early errors
+        tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
-            let handle = server_handle.unwrap_or_default();
-            let server = axum_server::from_tcp(std_listener)
-                .map(|acceptor| {
-                    super::write_timeout::WriteTimeoutAcceptor::new(acceptor, write_idle_timeout())
-                })
-                .handle(handle.clone())
-                .serve(router.into_make_service());
-            tokio::pin!(server);
-            tokio::select! {
-                result = &mut server => {
-                    state.start_stopping();
-                    cancel_token.cancel();
-                    result?;
-                },
-                _ = observer.cancelled() => {
-                    state.start_draining();
-                    tracing::info!("HTTP server shutdown requested");
-                    let shutdown_timeout =
-                        Duration::from_secs(get_graceful_shutdown_timeout() as u64);
-                    let drain_started = tokio::time::Instant::now();
-                    let (result, ()) = tokio::join!(&mut server, async {
-                        if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
-                            tracing::warn!(
-                                inflight_requests = state.inflight_count(),
-                                "Timed out waiting for inflight inference requests to drain"
-                            );
-                        }
-                        handle.graceful_shutdown(Some(
-                            shutdown_timeout.saturating_sub(drain_started.elapsed()),
-                        ));
-                    });
-                    state.start_stopping();
-                    state_cancel.cancel();
-                    result.context("HTTP server shutdown")?;
-                }
+        // The server keeps accepting while inflight requests drain, then gives open
+        // connections what is left of the shutdown budget.
+        let shutdown = async {
+            observer.cancelled().await;
+            state.start_draining();
+            tracing::info!("{protocol} server shutdown requested");
+            let shutdown_timeout = Duration::from_secs(get_graceful_shutdown_timeout() as u64);
+            let drain_started = tokio::time::Instant::now();
+            if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
+                tracing::warn!(
+                    inflight_requests = state.inflight_count(),
+                    "Timed out waiting for inflight inference requests to drain"
+                );
             }
-            self.state.start_stopping();
-            cancel_token.cancel();
-        }
-
+            shutdown_timeout.saturating_sub(drain_started.elapsed())
+        };
+        super::server::serve(listener, tls, router, write_idle_timeout(), shutdown).await;
+        state.start_stopping();
+        state_cancel.cancel();
         Ok(())
     }
 
@@ -1584,7 +1533,11 @@ impl HttpServiceConfigBuilder {
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
+        // TODO: Revisit admin write exposure: listener separation, authentication, and default enablement.
         if admin_api_enabled {
+            system_routes.push(super::router_policy::router_policy_router(
+                state.manager_clone(),
+            ));
             system_routes.push(super::busy_threshold::busy_threshold_router(
                 state.clone(),
                 None,
@@ -1592,7 +1545,7 @@ impl HttpServiceConfigBuilder {
         } else {
             tracing::info!(
                 env = env_llm::DYN_DISABLE_FRONTEND_ADMIN_API,
-                "frontend admin API disabled — busy_threshold routes not registered"
+                "frontend admin API disabled — admin routes not registered"
             );
         }
         for extension in &config.frontend_route_extensions {
@@ -1624,8 +1577,21 @@ impl HttpServiceConfigBuilder {
             systemone_enabled,
             config.enable_batch_endpoints && config.batch_gateway_url.is_none(),
         )?;
+        let decision_dialects = endpoint_routes
+            .iter()
+            .filter(|(endpoint, _, _)| *endpoint == EndpointType::SystemOne)
+            .flat_map(|(_, docs, _)| docs)
+            .map(|doc| {
+                let dialect = if doc.path() == super::systemone::DECISIONS_PATH {
+                    dynamo_decisions::Dialect::OpenAi
+                } else {
+                    dynamo_decisions::Dialect::Jev
+                };
+                (doc.path().to_owned(), dialect)
+            })
+            .collect();
         let mut inference_router = axum::Router::new();
-        for (route_docs, route) in endpoint_routes {
+        for (_, route_docs, route) in endpoint_routes {
             append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             inference_router = inference_router.merge(route);
         }
@@ -1635,7 +1601,10 @@ impl HttpServiceConfigBuilder {
                 .on_response(on_response),
         );
         inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
-            state.clone(),
+            Arc::new(InferenceReadinessState {
+                state: state.clone(),
+                decision_dialects,
+            }),
             track_inflight_inference,
         ));
 
@@ -1780,7 +1749,7 @@ impl HttpServiceConfigBuilder {
         sglang_generate_enabled: bool,
         systemone_enabled: bool,
         enable_batch_endpoints: bool,
-    ) -> Result<Vec<(Vec<RouteDoc>, axum::Router)>> {
+    ) -> Result<Vec<(EndpointType, Vec<RouteDoc>, axum::Router)>> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
         let (chat_docs, chat_route) = super::openai::chat_completions_router(
@@ -1903,7 +1872,7 @@ impl HttpServiceConfigBuilder {
                     }
                 },
             ));
-            routes.push((docs, route));
+            routes.push((endpoint_type, docs, route));
         }
         Ok(routes)
     }
@@ -1918,8 +1887,12 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     #[test]
-    fn bounded_systemone_limit_warns_only_when_lowered() {
-        for (configured, effective, warned) in [("128", 128, false), ("1024", 256, true)] {
+    fn bounded_systemone_limit_accepts_operator_increases_and_warns_when_clamped() {
+        for (configured, effective, warned) in [
+            ("128", 128, false),
+            ("1024", 1024, false),
+            ("8192", 4096, true),
+        ] {
             let mut capture = tempfile::tempfile().unwrap();
             let subscriber = tracing_subscriber::fmt()
                 .without_time()
@@ -1930,7 +1903,7 @@ mod tests {
             tracing::subscriber::with_default(subscriber, || {
                 temp_env::with_var("DYN_TEST_DECISION_LIMIT", Some(configured), || {
                     assert_eq!(
-                        bounded_systemone_limit("DYN_TEST_DECISION_LIMIT", 256),
+                        bounded_systemone_limit("DYN_TEST_DECISION_LIMIT", 256, 4096),
                         effective
                     );
                 });
@@ -1942,11 +1915,57 @@ mod tests {
                 logs.contains("lowering configured System One limit"),
                 warned
             );
+            assert_eq!(
+                logs.contains("raising System One resource limit above the default"),
+                configured == "1024"
+            );
             if warned {
-                assert!(logs.contains("requested=1024"), "{logs}");
-                assert!(logs.contains("effective=256"), "{logs}");
+                assert!(logs.contains("requested=8192"), "{logs}");
+                assert!(logs.contains("effective=4096"), "{logs}");
             }
         }
+    }
+
+    #[test]
+    fn bounded_systemone_limits_reject_invalid_values_and_preserve_defaults() {
+        for configured in [
+            None,
+            Some("0"),
+            Some("-1"),
+            Some("abc"),
+            Some("184467440737095516160"),
+        ] {
+            temp_env::with_var("DYN_TEST_DECISION_LIMIT", configured, || {
+                assert_eq!(
+                    bounded_systemone_limit("DYN_TEST_DECISION_LIMIT", 256, 4096),
+                    256
+                );
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn raised_systemone_limits_reach_state_and_admission() {
+        temp_env::with_vars(
+            [
+                (env_llm::DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES, Some("512")),
+                (env_llm::DYN_SYSTEMONE_MAX_INPUT_TOKENS, Some("131072")),
+                (env_llm::DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS, Some("600")),
+            ],
+            || {
+                let service = HttpService::builder().build().unwrap();
+                let state = service.state_clone();
+                assert_eq!(state.systemone_max_inflight_branches(), 512);
+                assert_eq!(state.systemone_max_input_tokens(), 131_072);
+                assert_eq!(state.systemone_request_timeout(), Duration::from_secs(600));
+                assert!(
+                    state
+                        .systemone_admission()
+                        .try_acquire_many_owned(512)
+                        .is_ok()
+                );
+            },
+        );
     }
 
     struct MtlsTestCertificates {
@@ -2031,18 +2050,9 @@ mod tests {
             .build()
             .unwrap();
         let cancel = CancellationToken::new();
-        let tls_handle = axum_server::Handle::new();
-        let server_handle = tls_handle.clone();
-        let server_cancel = cancel.clone();
-        let handle = tokio::spawn(async move {
-            service
-                .run_inner(server_cancel, None, Some(server_handle))
-                .await
-        });
-        let addr = tokio::time::timeout(Duration::from_secs(2), tls_handle.listening())
-            .await
-            .expect("TLS service did not start")
-            .expect("TLS service failed to bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = service.spawn_with_listener(cancel.clone(), listener).await;
 
         let root = reqwest::Certificate::from_pem(&std::fs::read(certificates.ca.path()).unwrap())
             .unwrap();
@@ -2737,11 +2747,8 @@ mod tests {
         assert_eq!(observer.inflight_count(), 0);
     }
 
-    /// `enable_admin_api=false` ⇒ `GET /busy_threshold` is not registered and
-    /// returns 404, not 503 or 405. Inference is unaffected (covered by other
-    /// tests).
     #[tokio::test]
-    async fn test_admin_api_disabled_404s_busy_threshold() {
+    async fn test_admin_api_disabled_404s_router_management() {
         let cancel_token = Arc::new(CancellationToken::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -2760,14 +2767,24 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        let resp = reqwest::Client::new()
-            .get(format!("http://localhost:{}/busy_threshold", port))
-            .send()
-            .await
-            .expect("request failed");
-        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+        let client = reqwest::Client::new();
+        for (method, path) in [
+            (reqwest::Method::GET, "/busy_threshold"),
+            (reqwest::Method::POST, "/busy_threshold"),
+            (reqwest::Method::GET, "/router_policy/busy_threshold"),
+            (reqwest::Method::POST, "/router_policy/busy_threshold"),
+            (reqwest::Method::GET, "/router_policy"),
+            (reqwest::Method::PATCH, "/router_policy"),
+        ] {
+            let response = client
+                .request(method, format!("http://localhost:{port}{path}"))
+                .json(&serde_json::json!({"model": "missing"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
+        }
 
-        // And /live still works (sanity: only the admin surface is gated).
         let live = reqwest::Client::new()
             .get(format!("http://localhost:{}/live", port))
             .send()
@@ -2961,23 +2978,12 @@ mod tests {
                     let cancel = CancellationToken::new();
                     let _guard = cancel.clone().drop_guard();
                     let server_cancel = cancel.clone();
-                    let handle = axum_server::Handle::new();
-                    let server_handle = handle.clone();
-                    let listener = if is_tls {
-                        None
-                    } else {
-                        Some(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap())
-                    };
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let addr = listener.local_addr().unwrap();
                     let mut task =
                         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-                            service
-                                .run_inner(server_cancel, listener, Some(server_handle))
-                                .await
+                            service.run_with_listener(server_cancel, listener).await
                         }));
-                    let addr = tokio::time::timeout(Duration::from_secs(2), handle.listening())
-                        .await
-                        .unwrap()
-                        .unwrap();
                     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
                     let mut client: Box<dyn Connection> = if is_tls {
                         let config = dynamo_runtime::tls_utils::client_tls_config(
@@ -3026,7 +3032,6 @@ mod tests {
                     tokio::time::timeout(Duration::from_secs(1), released.cancelled())
                         .await
                         .expect("frontend retained upstream response");
-                    handle.shutdown();
                     drop(client);
                     upstream_task.abort();
                     let _ = upstream_task.await;
@@ -3860,6 +3865,87 @@ mod tests {
             let result = HttpService::builder().frontend_api_config(api).build();
             assert!(result.is_err());
         });
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn decision_readiness_rejections_preserve_mounted_protocol_and_request_ids() {
+        use tower::ServiceExt;
+
+        for configured_path in [None, Some("/custom/decide")] {
+            temp_env::async_with_vars(
+                [(HTTP_SVC_SYSTEMONE_PATH_ENV, configured_path)],
+                async move {
+                    let mut api = FrontendApiConfig::default();
+                    api.set_systemone_enabled(true);
+                    let service = HttpService::builder()
+                        .frontend_api_config(api)
+                        .build()
+                        .unwrap();
+                    service.state().start_draining();
+                    let systemone_path = configured_path.unwrap_or("/v1/systemone");
+                    for (path, client_id) in [
+                        (systemone_path, Some("readiness-request")),
+                        ("/v1/decisions", Some("readiness-request")),
+                        ("/v1/responses", Some("readiness-request")),
+                        (systemone_path, None),
+                        ("/v1/decisions", None),
+                    ] {
+                        let mut request = axum::http::Request::post(path)
+                            .header("content-type", "application/json");
+                        if let Some(client_id) = client_id {
+                            request = request.header("x-request-id", client_id);
+                        }
+                        let response = service
+                            .router
+                            .clone()
+                            .oneshot(request.body(Body::from("{}")).unwrap())
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            response.status(),
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE
+                        );
+                        if path != "/v1/responses" {
+                            let canonical_id = &response.headers()["x-typesafe-request-id"];
+                            assert!(uuid::Uuid::parse_str(canonical_id.to_str().unwrap()).is_ok());
+                            if let Some(client_id) = client_id {
+                                assert_eq!(response.headers()["x-request-id"], client_id);
+                            } else {
+                                assert_eq!(&response.headers()["x-request-id"], canonical_id);
+                            }
+                        }
+                        let body = axum::body::to_bytes(response.into_body(), 4096)
+                            .await
+                            .unwrap();
+                        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        if path == systemone_path {
+                            assert_eq!(body["detail"], "Service is not ready");
+                            assert_eq!(body["code"], "server_error");
+                            assert!(body.get("error").is_none());
+                        } else if path == "/v1/decisions" {
+                            assert_eq!(body["error"]["message"], "Service is not ready");
+                            assert_eq!(body["error"]["code"], "server_error");
+                        } else {
+                            assert_eq!(body["code"], 503);
+                        }
+                    }
+                    let unmatched = service
+                        .router
+                        .clone()
+                        .oneshot(
+                            axum::http::Request::post(format!("{systemone_path}/not-registered"))
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(unmatched.status(), axum::http::StatusCode::NOT_FOUND);
+                    assert_eq!(service.state().inflight_count(), 0);
+                },
+            )
+            .await;
+        }
     }
 
     #[test]
