@@ -56,6 +56,7 @@ pytestmark = [
 def mock_kube_api():
     mock_api = Mock()
     mock_api.get_graph_deployment = Mock()
+    mock_api.custom_api.list_namespaced_custom_object.return_value = {"items": []}
     mock_api.fetch_authoritative_replica_targets = Mock(
         side_effect=lambda deployment: deployment
     )
@@ -255,20 +256,62 @@ def _scaling_adapter(component_name, replicas=0):
     }
 
 
-def _model_card_cr(name, worker_type="decode"):
-    return {
-        "metadata": {"name": name},
+def _registered_worker(
+    name="worker-pod",
+    uid="pod-uid",
+    *,
+    graph="test-graph",
+    service="decode",
+    component="backend",
+    role="decode",
+    revision="active",
+    namespace="test-active",
+    model="registered-model",
+):
+    """A real Pod/registration relationship, independent of launch arguments."""
+    pod = client.V1Pod(
+        metadata=client.V1ObjectMeta(
+            name=name,
+            uid=uid,
+            labels={
+                "nvidia.com/dynamo-graph-deployment-name": graph,
+                "nvidia.com/dynamo-component": service,
+                "nvidia.com/dynamo-worker-hash": revision,
+            },
+        ),
+        status=client.V1PodStatus(
+            phase="Running",
+            conditions=[client.V1PodCondition(type="Ready", status="True")],
+        ),
+    )
+    cr = {
+        "metadata": {
+            "name": name,
+            "ownerReferences": [
+                {
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "name": name,
+                    "uid": uid,
+                }
+            ],
+        },
         "spec": {
             "data": {
                 "model_cards": {
                     "model": {
                         "type": "Model",
-                        "card_json": {"worker_type": worker_type},
+                        "namespace": namespace,
+                        "component": component,
+                        "endpoint": "custom-generate",
+                        "instance_id": "12345",
+                        "card_json": {"worker_type": role, "display_name": model},
                     }
                 }
             }
         },
     }
+    return pod, cr
 
 
 def _deployment_with_worker_status(
@@ -2742,18 +2785,19 @@ def test_extract_mdc_entries_uses_truncated_grove_component_name(
     }
     kubernetes_connector.graph_deployment_name = dgd_name
     mock_kube_api.get_graph_deployment.return_value = deployment
-    kubernetes_connector._list_worker_metadata_crs = Mock(
-        return_value=[_model_card_cr(cr_name)]
-    )
+    pod, cr = _registered_worker(component_name, graph=dgd_name)
+    cr["metadata"]["name"] = cr_name
+    mock_kube_api.list_pods_for_graph.return_value = [pod]
+    kubernetes_connector._list_worker_metadata_crs = Mock(return_value=[cr])
 
     assert not cr_name.startswith(f"{dgd_name}-")
-    entries = kubernetes_connector._extract_mdc_entries()
+    entries = kubernetes_connector._extract_mdc_entries(deployment)["decode"]
 
     assert len(entries) == 1
     assert entries[0].card_json["worker_type"] == "decode"
 
 
-def test_extract_mdc_entries_uses_dgd_prefix_with_partial_component_names(
+def test_extract_mdc_entries_does_not_require_generated_component_names(
     kubernetes_connector, mock_kube_api
 ):
     deployment = _deployment(_component("decode", "decode", replicas=1))
@@ -2763,11 +2807,11 @@ def test_extract_mdc_entries_uses_dgd_prefix_with_partial_component_names(
         }
     }
     mock_kube_api.get_graph_deployment.return_value = deployment
-    kubernetes_connector._list_worker_metadata_crs = Mock(
-        return_value=[_model_card_cr("test-graph-0-decode-f4k85")]
-    )
+    pod, cr = _registered_worker("unrelated-to-dgd-name")
+    mock_kube_api.list_pods_for_graph.return_value = [pod]
+    kubernetes_connector._list_worker_metadata_crs = Mock(return_value=[cr])
 
-    entries = kubernetes_connector._extract_mdc_entries()
+    entries = kubernetes_connector._extract_mdc_entries(deployment)["decode"]
 
     assert len(entries) == 1
     assert entries[0].card_json["worker_type"] == "decode"
@@ -2985,3 +3029,298 @@ async def test_wait_for_settled_graph_deployment_requires_backing(kubernetes_con
         prefill_component_name=None,
         decode_component_name="CustomDecode",
     )
+
+
+@pytest.mark.parametrize(
+    "service_type,runtime_component,role",
+    [
+        ("worker", "custom-aggregated", "aggregated"),
+        ("worker", "worker", "aggregated"),
+        ("decode", "backend", "decode"),
+        ("prefill", "custom-prefill", "prefill"),
+    ],
+)
+def test_worker_info_uses_registration_not_projected_identity(
+    kubernetes_connector,
+    mock_kube_api,
+    service_type,
+    runtime_component,
+    role,
+):
+    deployment = _deployment(_component("Pool", service_type, replicas=2))
+    deployment["metadata"]["annotations"] = {"nvidia.com/current-worker-hash": "active"}
+    deployment["status"] = {
+        "observedGeneration": deployment["metadata"]["generation"],
+        "components": {
+            "Pool": {
+                "runtimeComponentName": "$WORKER_NAME",
+                "servedModelName": "predicted-model",
+                "runtimeNamespace": "test-active",
+            }
+        },
+    }
+    first, first_cr = _registered_worker(
+        "worker-a", "uid-a", service="Pool", component=runtime_component, role=role
+    )
+    second, second_cr = _registered_worker(
+        "worker-b", "uid-b", service="Pool", component=runtime_component, role=role
+    )
+    # Adapter and encoder records must not override the primary serving model.
+    cards = first_cr["spec"]["data"]["model_cards"]
+    cards["adapter"] = {"type": "LoRA", "card_json": {"display_name": "adapter"}}
+    # Runtime adapters are also Model variants, identified by model_suffix/lora.
+    adapter = deepcopy(cards["model"])
+    adapter["model_suffix"] = "adapter"
+    adapter["card_json"]["display_name"] = "adapter"
+    cards["runtime-adapter"] = adapter
+    legacy_adapter = deepcopy(adapter)
+    legacy_adapter.pop("model_suffix")
+    legacy_adapter["card_json"]["lora"] = {"name": "adapter"}
+    cards["legacy-adapter"] = legacy_adapter
+    cards["encoder"] = {
+        "type": "Model",
+        "namespace": "test-active",
+        "card_json": {"worker_type": "encode", "display_name": "encoder"},
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.list_pods_for_graph.return_value = [second, first]
+    kubernetes_connector._list_worker_metadata_crs = Mock(
+        return_value=[second_cr, first_cr]
+    )
+
+    sub_type = (
+        SubComponentType.PREFILL if role == "prefill" else SubComponentType.DECODE
+    )
+    info = kubernetes_connector.get_worker_info(sub_type)
+
+    assert (info.k8s_name, info.component_name, info.endpoint, info.model_name) == (
+        "Pool",
+        runtime_component,
+        "custom-generate",
+        "registered-model",
+    )
+    mock_kube_api.get_graph_deployment.assert_called_once()
+    # Model refresh is a separate Planner path; it must use the same identity.
+    assert (
+        kubernetes_connector.get_model_name(
+            require_prefill=role == "prefill", require_decode=role != "prefill"
+        )
+        == "registered-model"
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "recreated-pod",
+        "owner-name",
+        "owner-kind",
+        "no-owner",
+        "sibling-component",
+        "sibling-graph",
+        "unready",
+        "terminal",
+        "terminating",
+        "deleted-registration",
+        "wrong-namespace",
+        "candidate-revision",
+        "missing-revision",
+    ],
+)
+def test_registration_requires_current_serving_pod(
+    kubernetes_connector,
+    mock_kube_api,
+    invalid,
+):
+    deployment = _deployment(_component("decode", "decode", replicas=1))
+    deployment["metadata"]["annotations"] = {"nvidia.com/current-worker-hash": "active"}
+    deployment["status"] = {
+        "components": {"decode": {"runtimeNamespace": "test-active"}}
+    }
+    pod, cr = _registered_worker()
+    if invalid == "recreated-pod":
+        pod.metadata.uid = "replacement-uid"  # Same name must not match an old UID.
+    elif invalid == "owner-name":
+        cr["metadata"]["ownerReferences"][0]["name"] = "other-pod"
+    elif invalid == "owner-kind":
+        cr["metadata"]["ownerReferences"][0]["kind"] = "Deployment"
+    elif invalid == "no-owner":
+        cr["metadata"]["ownerReferences"] = []
+    elif invalid == "sibling-component":
+        pod.metadata.labels["nvidia.com/dynamo-component"] = "other"
+    elif invalid == "sibling-graph":
+        pod.metadata.labels["nvidia.com/dynamo-graph-deployment-name"] = "other"
+    elif invalid == "unready":
+        pod.status.conditions[0].status = "False"
+    elif invalid == "terminal":
+        pod.status.phase = "Succeeded"
+    elif invalid == "terminating":
+        pod.metadata.deletion_timestamp = datetime.now(timezone.utc)
+    elif invalid == "deleted-registration":
+        cr["metadata"]["deletionTimestamp"] = "2026-01-01T00:00:00Z"
+    elif invalid == "wrong-namespace":
+        cr["spec"]["data"]["model_cards"]["model"]["namespace"] = "candidate"
+    elif invalid == "candidate-revision":
+        pod.metadata.labels["nvidia.com/dynamo-worker-hash"] = "candidate"
+    elif invalid == "missing-revision":
+        del pod.metadata.labels["nvidia.com/dynamo-worker-hash"]
+    mock_kube_api.list_pods_for_graph.return_value = [pod]
+    kubernetes_connector._list_worker_metadata_crs = Mock(return_value=[cr])
+
+    assert kubernetes_connector._extract_mdc_entries(deployment) == {}
+    if invalid == "recreated-pod":
+        cr["metadata"]["ownerReferences"][0]["uid"] = pod.metadata.uid
+        assert len(kubernetes_connector._extract_mdc_entries(deployment)["decode"]) == 1
+
+
+@pytest.mark.parametrize("namespace_changes", [False, True])
+def test_registration_follows_rollout_cutover(
+    kubernetes_connector, mock_kube_api, namespace_changes
+):
+    new_namespace = "test-new" if namespace_changes else "test-old"
+    deployment = _deployment(_component("decode", "decode", replicas=2))
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/current-worker-hash": "old-v1",
+        "nvidia.com/current-worker-hash-v2": "old-v2",
+    }
+    deployment["status"] = {
+        "rollingUpdate": {"phase": "InProgress"},
+        "components": {"decode": {"runtimeNamespace": "test-old"}},
+    }
+    old, old_cr = _registered_worker(
+        "old-pod",
+        "old-uid",
+        revision="old-v2",
+        namespace="test-old",
+        component="old-worker",
+        model="old-model",
+    )
+    new, new_cr = _registered_worker(
+        "new-pod",
+        "new-uid",
+        revision="new",
+        namespace=new_namespace,
+        component="new-worker",
+        model="new-model",
+    )
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.list_pods_for_graph.return_value = [new, old]
+    kubernetes_connector._list_worker_metadata_crs = Mock(return_value=[new_cr, old_cr])
+
+    info = kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+    assert (info.component_name, info.model_name) == ("old-worker", "old-model")
+
+    # Old Pods/registrations still exist after cutover; only the active revision wins.
+    deployment["metadata"]["annotations"] = {"nvidia.com/current-worker-hash": "new"}
+    deployment["status"]["components"]["decode"]["runtimeNamespace"] = new_namespace
+    info = kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+    assert (info.component_name, info.model_name) == ("new-worker", "new-model")
+
+
+@pytest.mark.parametrize("active_hash", [None, "active"])
+@pytest.mark.parametrize("conflicting_field", ["component", "endpoint", "model"])
+def test_registration_rejects_conflicting_replica_identity(
+    kubernetes_connector, mock_kube_api, active_hash, conflicting_field
+):
+    deployment = _deployment(_component("decode", "decode", replicas=2))
+    if active_hash:
+        deployment["metadata"]["annotations"] = {
+            "nvidia.com/current-worker-hash": active_hash
+        }
+    first, first_cr = _registered_worker("first", "first-uid", component="one")
+    second, second_cr = _registered_worker("second", "second-uid", component="one")
+    second_card = second_cr["spec"]["data"]["model_cards"]["model"]
+    if conflicting_field == "model":
+        second_card["card_json"]["display_name"] = "other-model"
+    else:
+        second_card[conflicting_field] = "other"
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.list_pods_for_graph.return_value = [first, second]
+    kubernetes_connector._list_worker_metadata_crs = Mock(
+        return_value=[first_cr, second_cr]
+    )
+
+    with pytest.raises(PlannerError, match="Conflicting runtime registrations"):
+        kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+
+
+@pytest.mark.parametrize("status", [401, 500])
+def test_registration_does_not_hide_other_pod_list_failures(
+    kubernetes_connector, mock_kube_api, status
+):
+    deployment = _deployment(_component("decode", "decode", replicas=1))
+    _, cr = _registered_worker()
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.list_pods_for_graph.side_effect = client.ApiException(status=status)
+    kubernetes_connector._list_worker_metadata_crs = Mock(return_value=[cr])
+
+    with pytest.raises(client.ApiException):
+        kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+
+    # No registrations (including an absent CRD) retains the existing fallback.
+    kubernetes_connector._list_worker_metadata_crs.return_value = []
+    info = kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+    assert info.component_name == "backend"
+    mock_kube_api.list_pods_for_graph.assert_called_once()
+
+
+def test_registration_preserves_old_rbac_fallback_and_recovers(
+    kubernetes_connector, mock_kube_api, caplog
+):
+    deployment = _deployment(_component("decode", "decode", replicas=1))
+    deployment["status"] = {
+        "observedGeneration": deployment["metadata"]["generation"],
+        "components": {
+            "decode": {
+                "servedModelName": "projected-model",
+                "runtimeComponentName": "projected-worker",
+            }
+        },
+    }
+    pod, cr = _registered_worker()
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.list_pods_for_graph.side_effect = client.ApiException(status=403)
+    kubernetes_connector._list_worker_metadata_crs = Mock(return_value=[cr])
+
+    info = kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+    assert (info.component_name, info.model_name) == (
+        "projected-worker",
+        "projected-model",
+    )
+    assert (
+        kubernetes_connector.get_model_name(require_prefill=False) == "projected-model"
+    )
+    assert "registered identity is unavailable" in caplog.text
+    assert caplog.text.count("registered identity is unavailable") == 1
+
+    # Permissions can be granted without restarting Planner.
+    mock_kube_api.list_pods_for_graph.side_effect = None
+    mock_kube_api.list_pods_for_graph.return_value = [pod]
+    info = kubernetes_connector.get_worker_info(SubComponentType.DECODE)
+    assert (info.component_name, info.model_name) == ("backend", "registered-model")
+
+
+def test_model_refresh_reads_registrations_and_pods_once(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(
+        _component("prefill", "prefill", replicas=1),
+        _component("decode", "decode", replicas=1),
+    )
+    prefill, prefill_cr = _registered_worker(
+        "prefill-pod",
+        "prefill-uid",
+        service="prefill",
+        component="prefill",
+        role="prefill",
+    )
+    decode, decode_cr = _registered_worker()
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.list_pods_for_graph.return_value = [prefill, decode]
+    kubernetes_connector._list_worker_metadata_crs = Mock(
+        return_value=[prefill_cr, decode_cr]
+    )
+
+    assert kubernetes_connector.get_model_name() == "registered-model"
+    kubernetes_connector._list_worker_metadata_crs.assert_called_once()
+    mock_kube_api.list_pods_for_graph.assert_called_once()

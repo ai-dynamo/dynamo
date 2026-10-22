@@ -27,13 +27,15 @@ dynamo-vllm-mocker = { path = "../../mocker/servers/vllm" }
 dynamo-sglang-mocker = { path = "../../mocker/servers/sglang" }
 dynamo-vllm-sidecar = { path = "../vllm" }
 dynamo-sglang-sidecar = { path = "../sglang" }
+dynamo-trtllm-sidecar = { path = "../trtllm" }
+dynamo-trtllm-mocker = { path = "../../mocker/servers/trtllm" }
 tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true }
 tonic-v14 = { workspace = true }
 tonic-health-v14 = { workspace = true }
 serde_json = { workspace = true }
 dynamo-runtime = { workspace = true }
-dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-llm = { workspace = true }
 tempfile = { workspace = true }
 tokio-util = { workspace = true }
 libc = { workspace = true }
