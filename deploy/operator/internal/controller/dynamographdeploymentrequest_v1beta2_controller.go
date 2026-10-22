@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
@@ -44,8 +45,9 @@ import (
 )
 
 const (
-	// dgdrV1beta2RequestLabel names the Request that owns a Run.
-	dgdrV1beta2RequestLabel = "nvidia.com/dgdr-request"
+	// dgdrV1beta2RequestLabel holds the UID of the Request that owns a Run. A label value is limited to
+	// 63 characters, which a Request name is not, so the UID is used.
+	dgdrV1beta2RequestLabel = "nvidia.com/dgdr-request-uid"
 	// dgdrV1beta2GenerationAnnotation records the Request generation a Run was created for.
 	dgdrV1beta2GenerationAnnotation = "nvidia.com/dgdr-request-generation"
 
@@ -58,6 +60,13 @@ const (
 	dgdrReasonRunCreated          = "RunCreated"
 	dgdrReasonInvalidSpec         = "InvalidSpec"
 	dgdrReasonWaitingForActiveRun = "WaitingForActiveRun"
+	dgdrReasonRunNameConflict     = "RunNameConflict"
+
+	// dgdrV1beta2MaxRunNameLength is the longest object name Kubernetes accepts.
+	dgdrV1beta2MaxRunNameLength = 253
+
+	// dgdrV1beta2ConflictRetry is how long to wait before looking again at a Run name held by another owner.
+	dgdrV1beta2ConflictRetry = 5 * time.Second
 
 	dgdrRunPhaseSucceeded = "Succeeded"
 	dgdrRunPhaseFailed    = "Failed"
@@ -93,6 +102,7 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 		return ctrl.Result{}, nil
 	}
 	original := request.DeepCopy()
+	result := ctrl.Result{}
 
 	runs, err := r.ownedRuns(ctx, request)
 	if err != nil {
@@ -119,11 +129,29 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 			logger.Info("Request cannot be turned into a Run", "reason", buildErr.Error())
 			condition = dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonInvalidSpec, buildErr.Error())
 		} else {
-			if err := r.Create(ctx, run); err != nil && !apierrors.IsAlreadyExists(err) {
+			err := r.Create(ctx, run)
+			switch {
+			case err == nil:
+				runs = append(runs, *run)
+				accepted = true
+			case apierrors.IsAlreadyExists(err):
+				// A stale cache, or a Run left by an earlier Request of the same name that is still being
+				// garbage collected. Only a Run this Request controls counts as ours.
+				existing := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}
+				if getErr := r.Get(ctx, client.ObjectKeyFromObject(run), existing); getErr != nil {
+					return ctrl.Result{}, fmt.Errorf("get existing Run %q: %w", wantName, getErr)
+				}
+				if metav1.IsControlledBy(existing, request) {
+					runs = append(runs, *existing)
+					accepted = true
+				} else {
+					condition = dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonRunNameConflict,
+						fmt.Sprintf("Run %q exists and is owned by another object; trying again once it is gone", wantName))
+					result.RequeueAfter = dgdrV1beta2ConflictRetry
+				}
+			default:
 				return ctrl.Result{}, fmt.Errorf("create Run %q: %w", wantName, err)
 			}
-			runs = append(runs, *run)
-			accepted = true
 		}
 	}
 
@@ -153,7 +181,7 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 			return ctrl.Result{}, fmt.Errorf("update Request status: %w", err)
 		}
 	}
-	return ctrl.Result{}, nil
+	return result, nil
 }
 
 // buildRun resolves the optional inputs of the Request into an immutable Run spec. The effective
@@ -162,6 +190,10 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) buildRun(
 	request *nvidiacomv1beta2.DynamoGraphDeploymentRequest,
 ) (*nvidiacomv1beta2.DynamoGraphDeploymentRun, error) {
+	if name := dgdrV1beta2RunName(request); len(name) > dgdrV1beta2MaxRunNameLength {
+		return nil, fmt.Errorf("the Request name is too long: the Run name %q would exceed %d characters",
+			name, dgdrV1beta2MaxRunNameLength)
+	}
 	spec := &request.Spec
 	if spec.AISimulate == nil || spec.AISimulate.Image == "" {
 		return nil, errors.New("spec.aisimulate.image is required")
@@ -193,7 +225,7 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) buildRun(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        dgdrV1beta2RunName(request),
 			Namespace:   request.Namespace,
-			Labels:      map[string]string{dgdrV1beta2RequestLabel: request.Name},
+			Labels:      map[string]string{dgdrV1beta2RequestLabel: string(request.UID)},
 			Annotations: map[string]string{dgdrV1beta2GenerationAnnotation: strconv.FormatInt(request.Generation, 10)},
 		},
 		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRunSpec{NativeSearchInput: *frozen},
@@ -211,7 +243,7 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) ownedRuns(
 ) ([]nvidiacomv1beta2.DynamoGraphDeploymentRun, error) {
 	list := &nvidiacomv1beta2.DynamoGraphDeploymentRunList{}
 	if err := r.List(ctx, list, client.InNamespace(request.Namespace),
-		client.MatchingLabels{dgdrV1beta2RequestLabel: request.Name}); err != nil {
+		client.MatchingLabels{dgdrV1beta2RequestLabel: string(request.UID)}); err != nil {
 		return nil, fmt.Errorf("list Runs: %w", err)
 	}
 	owned := make([]nvidiacomv1beta2.DynamoGraphDeploymentRun, 0, len(list.Items))
