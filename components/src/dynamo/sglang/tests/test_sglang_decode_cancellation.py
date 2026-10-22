@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import gc
 import logging
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -642,6 +644,39 @@ async def test_cancelled_stream_drain_does_not_wait_for_resistant_iterator(
     assert "Timed out draining SGLang stream after cancellation" in caplog.messages
     await asyncio.wait_for(iterator_finished.wait(), timeout=1)
     assert cancellation_seen.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_stream_end_frees_request_without_cyclic_gc(decode_cancellation_case):
+    class Request:
+        pass
+
+    async def chunks():
+        for index in range(3):
+            await asyncio.sleep(0)
+            yield {"chunk": index}
+
+    cancellation_task = asyncio.create_task(asyncio.Event().wait())
+
+    async def generate(request):
+        return await _collect(
+            decode_cancellation_case.handler._stream_until_cancelled(
+                chunks(), cancellation_task
+            )
+        )
+
+    request = Request()
+    request_ref = weakref.ref(request)
+    gc.disable()
+    try:
+        outputs = await generate(request)
+        del request
+        assert outputs == [{"chunk": index} for index in range(3)]
+        assert request_ref() is None
+    finally:
+        gc.enable()
+        cancellation_task.cancel()
 
 
 @pytest.mark.asyncio
