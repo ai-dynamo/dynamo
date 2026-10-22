@@ -12,7 +12,7 @@ func TestDCGMPhaseContextReservesTimeForTheFallback(t *testing.T) {
 	outerDeadline, _ := outer.Deadline()
 
 	t.Log("With the fallback enabled the DCGM phase ends well before the outer deadline")
-	phase, cancel := dcgmPhaseContext(outer, true)
+	phase, cancel := dcgmPhaseContext(outer, func() bool { return true })
 	defer cancel()
 	phaseDeadline, ok := phase.Deadline()
 	if !ok {
@@ -23,14 +23,17 @@ func TestDCGMPhaseContextReservesTimeForTheFallback(t *testing.T) {
 	}
 
 	t.Log("Without the fallback the whole context is used")
-	same, cancelSame := dcgmPhaseContext(outer, false)
+	same, cancelSame := dcgmPhaseContext(outer, func() bool { return false })
 	defer cancelSame()
 	if same != outer {
 		t.Fatal("context was narrowed although there is no fallback to reserve time for")
 	}
 
 	t.Log("A context without a deadline is left alone")
-	bare, cancelBare := dcgmPhaseContext(t.Context(), true)
+	bare, cancelBare := dcgmPhaseContext(t.Context(), func() bool {
+		t.Fatal("the fallback callback was asked although the context has no deadline")
+		return true
+	})
 	defer cancelBare()
 	if _, hasDeadline := bare.Deadline(); hasDeadline {
 		t.Fatal("a deadline was invented for a context that had none")

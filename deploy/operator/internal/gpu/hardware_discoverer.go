@@ -55,7 +55,7 @@ func (d *Discoverer) Discover(ctx context.Context, filterSKU nvidiacomv1beta1.GP
 	var dcgmErr error
 	if d.DCGM != nil {
 		// A slow exporter must not leave the node-label fallback with an expired context.
-		dcgmCtx, cancel := dcgmPhaseContext(ctx, d.NodeLabels != nil && d.NodeLabels())
+		dcgmCtx, cancel := dcgmPhaseContext(ctx, d.NodeLabels)
 		info, err := d.DCGM.DiscoverGPUsFromDCGMFiltered(dcgmCtx, d.Reader, d.Cache, filterSKU)
 		cancel()
 		if err == nil {
@@ -143,13 +143,15 @@ func DiscoveryFailureReason(err error) string {
 	return unknownReason
 }
 
-// dcgmPhaseContext bounds the DCGM phase of discovery. When the node-label fallback is enabled
-// and ctx has a deadline, the DCGM phase gets half of what remains, so a slow exporter cannot
+// dcgmPhaseContext bounds the DCGM phase of discovery. When ctx has a deadline and fallbackEnabled
+// reports that the node-label fallback is enabled, the DCGM phase gets half of what remains, so a slow exporter cannot
 // consume the whole admission budget and leave the fallback with an expired context. Otherwise
 // ctx is returned unchanged. The returned cancel function must be called.
-func dcgmPhaseContext(ctx context.Context, reserveForFallback bool) (context.Context, context.CancelFunc) {
+func dcgmPhaseContext(ctx context.Context, fallbackEnabled func() bool) (context.Context, context.CancelFunc) {
 	deadline, ok := ctx.Deadline()
-	if !ok || !reserveForFallback {
+	// fallbackEnabled is only asked when there is a deadline to share: without one nothing is reserved,
+	// and the callback may depend on state that a caller without a deadline never configured.
+	if !ok || fallbackEnabled == nil || !fallbackEnabled() {
 		return ctx, func() {}
 	}
 	remaining := time.Until(deadline)
