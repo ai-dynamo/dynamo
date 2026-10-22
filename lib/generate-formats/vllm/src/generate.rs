@@ -597,8 +597,11 @@ fn prompt_logprobs_from_output(output: &LLMEngineOutput) -> Result<Option<Prompt
     let mut prompt_logprobs: PromptLogprobs = serde_json::from_value(prompt_logprobs.clone())
         .map_err(|error| anyhow::anyhow!("invalid generate prompt_logprobs payload: {error}"))?;
     for entries in prompt_logprobs.iter_mut().flatten() {
-        for entry in entries.values_mut() {
+        for (token_id, entry) in entries {
             entry.logprob = clamp_vllm_logprob(entry.logprob);
+            entry
+                .decoded_token
+                .get_or_insert_with(|| format!("token_id:{token_id}"));
         }
     }
     Ok(Some(prompt_logprobs))

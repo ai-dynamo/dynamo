@@ -414,8 +414,12 @@ fn generate_response_accumulates_engine_deltas() {
                     {
                         "22": {
                             "logprob": -0.125,
-                            "rank": 1,
-                            "decoded_token": "token_id:22"
+                            "rank": 1
+                        },
+                        "23": {
+                            "logprob": -0.5,
+                            "rank": 2,
+                            "decoded_token": "worker label"
                         }
                     }
                 ]
@@ -493,6 +497,10 @@ fn generate_response_accumulates_engine_deltas() {
     assert_eq!(
         response.prompt_logprobs.as_ref().expect("prompt logprobs")[1]["22"]["decoded_token"],
         "token_id:22"
+    );
+    assert_eq!(
+        response.prompt_logprobs.as_ref().unwrap()[1]["23"]["decoded_token"],
+        "worker label"
     );
     assert_eq!(
         response
