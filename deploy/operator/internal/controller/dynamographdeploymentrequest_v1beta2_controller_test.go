@@ -20,6 +20,7 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
@@ -277,7 +278,7 @@ func dgdrV1beta2TerminalRun(request *nvidiacomv1beta2.DynamoGraphDeploymentReque
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        fmt.Sprintf("search-%d", generation),
 			Namespace:   "default",
-			Labels:      map[string]string{dgdrV1beta2RequestLabel: request.Name},
+			Labels:      map[string]string{dgdrV1beta2RequestLabel: string(request.UID)},
 			Annotations: map[string]string{dgdrV1beta2GenerationAnnotation: fmt.Sprint(generation)},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: nvidiacomv1beta2.GroupVersion.String(),
@@ -296,3 +297,67 @@ func boolPointerForTest(value bool) *bool { return &value }
 
 // apiextensionsJSONForTest is a non-empty v1beta1 carrier payload.
 var apiextensionsJSONForTest = apiextensionsv1.JSON{Raw: []byte(`{"model":"carrier"}`)}
+
+func TestV1beta2RequestControllerLabelsRunsWithTheRequestUID(t *testing.T) {
+	request := dgdrV1beta2Request(true)
+	request.Name = strings.Repeat("a", 100)
+	f := newDGDRV1beta2Fixture(t, request)
+	run, err := f.reconciler.buildRun(request)
+	if err != nil {
+		t.Fatalf("build run: %v", err)
+	}
+	value := run.Labels[dgdrV1beta2RequestLabel]
+	if value != string(request.UID) {
+		t.Fatalf("label = %q, want the request UID", value)
+	}
+	if len(value) > 63 {
+		t.Fatalf("label value has %d characters; a label value is limited to 63", len(value))
+	}
+}
+
+func TestV1beta2RequestControllerRejectsANameThatCannotBeDerived(t *testing.T) {
+	request := dgdrV1beta2Request(true)
+	request.Name = strings.Repeat("a", 252)
+	f := newDGDRV1beta2Fixture(t, request)
+	if _, err := f.reconciler.buildRun(request); err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Fatalf("err = %v, want a name-too-long error", err)
+	}
+}
+
+func TestV1beta2RequestControllerDoesNotAdoptARunOfAnotherOwner(t *testing.T) {
+	stale := &nvidiacomv1beta2.DynamoGraphDeploymentRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "search-1",
+			Namespace: "default",
+			Labels:    map[string]string{dgdrV1beta2RequestLabel: "old-uid"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: nvidiacomv1beta2.GroupVersion.String(),
+				Kind:       "DynamoGraphDeploymentRequest",
+				Name:       "search",
+				UID:        "old-uid",
+				Controller: boolPointerForTest(true),
+			}},
+		},
+	}
+	f := newDGDRV1beta2Fixture(t, dgdrV1beta2Request(true), stale)
+
+	result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "default", Name: "search"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatal("no retry was scheduled for the Run name held by another owner")
+	}
+	request := f.request()
+	if condition := dgdrV1beta2ReconciledCondition(t, request); condition.Reason != dgdrReasonRunNameConflict {
+		t.Fatalf("condition = %v, want reason %s", condition, dgdrReasonRunNameConflict)
+	}
+	if request.Status.ActiveRunRef != nil {
+		t.Fatalf("activeRunRef = %v, want none: the old Run is not ours", request.Status.ActiveRunRef)
+	}
+	if request.Status.ObservedGeneration != 0 {
+		t.Fatalf("observedGeneration = %d, want 0", request.Status.ObservedGeneration)
+	}
+}
