@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Native SGLang transport used by the reusable decision API core.
+//! Backend scoring transports used by the reusable decision API core.
 
 mod native;
+pub mod vllm;
 
 pub use native::{build_native_score_request, parse_candidate_scores};
 
