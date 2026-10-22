@@ -183,15 +183,34 @@ impl RuleSet {
         }
     }
 
-    /// P/D: prompt values are swapped in; prefill's base64 prefix overwrites
+    /// P/D: prompt values are swapped in; prefill's sequence prefix overwrites
     /// decode's in place, and decode's value is dropped without one.
     fn join_prefill(&self, prefill: &mut Value, decode: &mut Value, codec: &impl ClientCodec) {
+        // Prefill generates the first token. If it is also the last, decode
+        // never runs a model step and has no sequence value of its own.
+        // Read the attempt-local count before migration offsets are added.
+        let prefill_only = decode
+            .pointer("/meta_info/completion_tokens")
+            .and_then(Value::as_u64)
+            == Some(1)
+            && matches!(
+                decode
+                    .pointer("/meta_info/finish_reason/type")
+                    .and_then(Value::as_str),
+                Some("stop" | "length")
+            );
         self.swap(FieldClass::Prompt, prefill, decode);
         for field in self.of(FieldClass::SequenceFinal) {
             let Some(target) = object(decode, &field.parent) else {
                 continue;
             };
             let source = object(prefill, &field.parent).and_then(|o| o.get(&field.key));
+            if prefill_only
+                && !target.contains_key(&field.key)
+                && let Some(source) = source
+            {
+                target.insert(field.key.clone(), source.clone());
+            }
             let joined = match (source, target.get_mut(&field.key)) {
                 (_, None) => true,
                 (Some(source), Some(target)) => codec.overlay_sequence(&field.path, source, target),
@@ -351,6 +370,29 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn missing_decode_sequence_requires_complete_valid_prefill() {
+        for count in [Value::Null, json!(0), json!(1), json!(2)] {
+            for finish in [Value::Null, json!("stop"), json!("length"), json!("abort")] {
+                for prefix in [Value::Null, json!("AB=="), json!("AQID")] {
+                    let complete = count == 1
+                        && matches!(finish.as_str(), Some("stop" | "length"))
+                        && prefix == "AQID";
+                    let mut prefill = json!({"meta_info": {"routed_experts": prefix}});
+                    let mut response = json!({"meta_info": {
+                        "completion_tokens": count, "finish_reason": {"type": finish}
+                    }});
+                    crate::rules().join_prefill(&mut prefill, &mut response, &Native);
+                    assert_eq!(
+                        response.pointer("/meta_info/routed_experts"),
+                        complete.then_some(&prefix),
+                        "count={count}, finish={finish}, prefix={prefix}"
+                    );
+                }
+            }
+        }
+    }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]

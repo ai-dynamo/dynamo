@@ -247,7 +247,9 @@ pub fn stream(
                 );
             }
         }
-        if last && experts {
+        // With one output token, prefill finishes generation and decode never
+        // runs a model step, so it has no expert buffer to return.
+        if last && experts && !(role == Role::Decode && generated == 1) {
             // One row per position that produced a token: the prompt and every
             // output token but the last.
             let rows = prompt_len + generated - 1;
