@@ -12513,6 +12513,7 @@ mod beam_routing_tests {
         let body = "<|start|>assistant to=weather<|channel|>analysis <|constrain|>xml<|message|><rfl:parameter name=\"city\">Paris</rfl:parameter>";
         for (suffix, finish, eos, held, succeeds) in [
             ("", Some(FinishReason::Stop), true, true, true),
+            ("<|return|>", Some(FinishReason::Stop), true, true, true),
             ("", Some(FinishReason::Stop), false, true, false),
             ("", Some(FinishReason::Stop), true, false, false),
             ("", Some(FinishReason::Length), true, true, false),

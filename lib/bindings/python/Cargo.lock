@@ -2373,7 +2373,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers-v2"
 version = "0.7.29"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=fdb91f487ce0bceb0374b4633e0b59b60827ec59#fdb91f487ce0bceb0374b4633e0b59b60827ec59"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=3c34d112e75f4d536dee1a3c6c53e3665f9140fe#3c34d112e75f4d536dee1a3c6c53e3665f9140fe"
 dependencies = [
  "anyhow",
  "openai-harmony",
