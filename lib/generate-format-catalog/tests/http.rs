@@ -411,5 +411,41 @@ async fn format_request_id_reaches_the_runtime_context() {
 #[path = "http/compatibility.rs"]
 mod compatibility;
 
+#[tokio::test]
+async fn streaming_preserves_json_bytes_and_event_order() {
+    let values = [
+        serde_json::json!({"output_ids": [1], "text": "\"雪\"\n\r\\"}),
+        serde_json::json!({"output_ids": [2], "custom": [null, true, {"a": 1.25}]}),
+    ];
+    let outputs = values
+        .iter()
+        .map(|value| {
+            Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![1],
+                engine_data: Some(serde_json::json!({"sglang_response": value})),
+                ..Default::default()
+            })
+        })
+        .collect();
+    let response = respond(
+        state(),
+        sglang(),
+        Arc::new(ReplayEngine(outputs, false)),
+        serde_json::json!({"input_ids": [1], "stream": true}),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let actual = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let mut expected = values
+        .iter()
+        .map(|value| format!("data: {value}\n\n"))
+        .collect::<String>();
+    expected.push_str("data: [DONE]\n\n");
+    assert_eq!(actual.as_ref(), expected.as_bytes());
+}
+
 #[path = "http/error_policy.rs"]
 mod error_policy;

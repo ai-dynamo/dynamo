@@ -425,22 +425,29 @@ fn feed(
 fn events(
     stream: impl Stream<Item = Annotated<LLMEngineOutput>>,
     exchange: SharedExchange,
-) -> impl Stream<Item = Result<Event, DynamoError>> {
+) -> impl Stream<Item = Result<Event, axum::Error>> {
     async_stream::try_stream! {
         pin_mut!(stream);
+        let mut out = Vec::new();
+        let mut buffer = Vec::new();
+        let mut render = |value: &Value| {
+            buffer.clear();
+            serde_json::to_writer(&mut buffer, value).map_err(axum::Error::new)?;
+            let json = std::str::from_utf8(&buffer).map_err(axum::Error::new)?;
+            Ok::<_, axum::Error>(Event::default().data(json))
+        };
         while let Some(delta) = stream.next().await {
-            let mut out = Vec::new();
             feed(&exchange, delta, &mut |value| {
-                out.push(Event::default().data(value.to_string()));
-            })?;
-            for event in out {
-                yield event;
+                out.push(render(value));
+            }).map_err(axum::Error::new)?;
+            for event in out.drain(..) {
+                yield event?;
             }
         }
         // Release the lock before `?` or `yield` can suspend the stream.
         let last = exchange.lock().finish();
-        if let Some(last) = last? {
-            yield Event::default().data(last.to_string());
+        if let Some(last) = last.map_err(axum::Error::new)? {
+            yield render(&last)?;
         }
     }
 }
@@ -557,7 +564,7 @@ impl Dispatch {
                 _ => cancelled(&mut inflight_guard),
             };
         }
-        let stream = events(stream, exchange).map(|result| result.map_err(axum::Error::new));
+        let stream = events(stream, exchange);
         let stream = monitor_for_disconnects_with_error(
             stream,
             engine_context,
