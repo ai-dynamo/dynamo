@@ -6,6 +6,7 @@
 from collections.abc import Iterator
 
 import pytest
+import requests
 
 from tests.fault_tolerance.cancellation.utils import (
     CancellableRequest,
@@ -37,6 +38,20 @@ def _request_with_stream(*lines: bytes) -> CancellableRequest:
     request.response = _StreamingResponse(*lines)
     request._response_ready.set()
     return request
+
+
+def test_completion_wait_preserves_response_readiness(monkeypatch):
+    request = CancellableRequest()
+    response = object()
+    monkeypatch.setattr(request.session, "post", lambda *args, **kwargs: response)
+
+    with pytest.raises(requests.exceptions.Timeout):
+        request.get_response(timeout=0)
+
+    request.post("http://unused")
+    request.wait(timeout_s=1)
+
+    assert request.get_response(timeout=0) is response
 
 
 def test_drained_stream_can_require_generated_content():
