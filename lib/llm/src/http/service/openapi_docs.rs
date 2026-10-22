@@ -470,6 +470,7 @@ fn create_operation_for_route(route: &RouteDoc) -> utoipa::openapi::path::Operat
             ("429", "Decision scoring admission capacity is exhausted"),
             ("499", "Request cancelled"),
             ("500", "Malformed or incomplete native scoring response"),
+            ("502", "Executor result failed decision contract validation"),
             ("504", "Decision preflight or execution deadline exceeded"),
         ] {
             operation = operation.response(
@@ -586,7 +587,7 @@ fn add_request_body_for_route(
 
     let (description, schema, example) = match kind {
         Some(OpenApiRouteKind::SystemOne) => (
-            "Jev text evaluation; unsupported fields and controls are rejected",
+            "Jev text evaluation; unsupported controls are rejected; unknown top-level fields are ignored",
             <decisions_jev::Request as utoipa::PartialSchema>::schema(),
             serde_json::json!({
                 "model": "Qwen/Qwen3.8-27B", "state": "The payment failed.",
@@ -1267,10 +1268,16 @@ mod tests {
             .unwrap();
         let operation = &value["paths"]["/v1/systemone"]["post"];
         assert_eq!(operation["summary"], "Score System One questions");
+        assert!(
+            operation["requestBody"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("unknown top-level fields are ignored")
+        );
         assert!(operation["requestBody"]["content"]["application/json"]["schema"].is_object());
         assert!(operation["responses"]["200"]["content"]["application/json"]["schema"].is_object());
         for status in [
-            "400", "404", "413", "415", "422", "429", "499", "500", "503", "504", "529",
+            "400", "404", "413", "415", "422", "429", "499", "500", "502", "503", "504", "529",
         ] {
             assert!(
                 operation["responses"].get(status).is_some(),
@@ -1309,6 +1316,7 @@ mod tests {
         assert!(operation["responses"].get("429").is_some());
         assert!(operation["responses"].get("400").is_some());
         assert!(operation["responses"].get("415").is_some());
+        assert!(operation["responses"].get("502").is_some());
         assert!(operation["responses"].get("422").is_none());
     }
 
