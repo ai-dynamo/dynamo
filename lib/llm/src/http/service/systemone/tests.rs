@@ -14,10 +14,12 @@ use dynamo_runtime::{
     engine::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider},
     pipeline::{Context, Error, ManyOut, ResponseStream, SingleIn},
 };
-use futures::stream;
+use futures::{StreamExt, stream};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, Semaphore};
 
+#[path = "tests/native_abort.rs"]
+mod native_abort;
 #[path = "tests/preflight.rs"]
 mod preflight;
 
@@ -346,6 +348,7 @@ enum EngineBehavior {
     PendingSiblings,
     RejectGenerate,
     RejectStream,
+    NativeAbort { status: Option<u16>, branch: usize },
 }
 
 struct ObservedBranch {
@@ -430,6 +433,41 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
         if matches!(self.behavior, EngineBehavior::PendingGenerate) {
             return pending().await;
+        }
+        if let EngineBehavior::NativeAbort { status, branch } = self.behavior {
+            if index == branch + 1 {
+                self.sibling_started.notify_one();
+                return Ok(ResponseStream::new(
+                    Box::pin(stream::pending()),
+                    stream_context,
+                ));
+            }
+            if index == branch {
+                if branch > 0 {
+                    self.sibling_started.notified().await;
+                }
+                let abort = Annotated::from_data(LLMEngineOutput {
+                    engine_data: Some(json!({"sglang_response": {
+                        "output_ids": [],
+                        "meta_info": {"finish_reason": {
+                            "type": "abort",
+                            "status_code": status,
+                            "message": "private worker detail"
+                        }}
+                    }})),
+                    ..Default::default()
+                });
+                if branch == 0 {
+                    return Ok(ResponseStream::new(
+                        Box::pin(stream::iter([abort])),
+                        stream_context,
+                    ));
+                }
+                return Ok(ResponseStream::new(
+                    Box::pin(stream::iter([abort]).chain(stream::pending())),
+                    stream_context,
+                ));
+            }
         }
         if matches!(self.behavior, EngineBehavior::PendingStream)
             || (matches!(self.behavior, EngineBehavior::PendingSiblings) && index > 0)
