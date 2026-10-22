@@ -235,9 +235,13 @@ ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
-{% elif framework == "trtllm" or (framework == "vllm" and device == "cuda") %}
-# trtllm and vLLM CUDA dev images inherit upstream containers that ship NIXL
-# inside Python wheels. These env vars provide a stable prefix for source builds.
+{% elif framework == "trtllm" %}
+# Reuse TRT-LLM's native SDK for source builds as well as runtime transfers.
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+# Runtime registers both architecture-specific native paths with ldconfig.
+# Keep those inherited paths rather than selecting another Python wheel copy.
+{% elif framework == "vllm" and device == "cuda" %}
+# vLLM's NIXL wheel provides the stable prefix used for source builds.
 # For vLLM CUDA, /opt/dynamo/nixl is a symlink to the wheel's
 # .nixl_cu${CUDA_MAJOR}.mesonpy.libs directory, with headers added by the dev stage.
 ENV NIXL_PREFIX=/opt/dynamo/nixl \
@@ -270,8 +274,10 @@ ENV CUDA_HOME=/usr/local/cuda \
 # Framework-specific paths are conditionally added in /etc/profile.d/50-framework-paths.sh
 ARG PYTHON_VERSION
 ENV LD_LIBRARY_PATH=\
+{% if framework != "trtllm" %}
 ${NIXL_LIB_DIR}:\
 ${NIXL_PLUGIN_DIR}:\
+{% endif %}
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 ${LD_LIBRARY_PATH}

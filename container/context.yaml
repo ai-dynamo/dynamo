@@ -180,7 +180,8 @@ trtllm:
     runtime_image_tag: 1.4.0rc0
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
     baseline_sbom: release@cab83184
-  nixl_ref: v1.3.1
+  # EFA adds only the LIBFABRIC plugin; match upstream TRT-LLM's native NIXL.
+  nixl_ref: v1.4.0
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
 

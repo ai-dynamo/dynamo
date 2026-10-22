@@ -791,13 +791,14 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 ##################################
 ##### wheel_builder ##############
 ##################################
-{% if ("nixl_ref" in context[framework] or device == "xpu") and target != "frontend" %}
+{% if ("nixl_ref" in context[framework] or device == "xpu") and target != "frontend" and (framework != "trtllm" or make_efa) %}
 # Builds NIXL (native + Python wheel), then consolidates all wheels.
 # Runtime templates COPY from this stage.
 # Note: XPU triggers this path even when the framework section lacks nixl_ref,
 # because no upstream XPU runtime image ships pre-built NIXL.
 # Note: frontend is excluded — it installs NIXL from PyPI at NIXL_REF, so
 # nothing in that image consumes a from-source NIXL build.
+# TRT-LLM reuses upstream NIXL; only EFA needs its missing LIBFABRIC plugin.
 
 FROM wheel_builder_base AS wheel_builder
 
@@ -835,7 +836,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
             -Dcudapath_lib="/usr/local/cuda/lib64" \
             -Dcudapath_inc="/usr/local/cuda/include" \
             -Ducx_path="/usr/local/ucx" \
-            -Dlibfabric_path="/usr/local/libfabric"; \
+            -Dlibfabric_path="/usr/local/libfabric"{% if framework == "trtllm" %} \
+            -Denable_plugins=LIBFABRIC -Dbuild_tests=false -Dbuild_examples=false{% endif %}; \
     elif [ "$DEVICE" = "xpu" ]; then \
         meson setup build/ --prefix=/opt/intel/intel_nixl --buildtype=release \
             -Ducx_path="/usr/local/ucx"; \
@@ -869,7 +871,7 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
-{% if not (framework == "sglang" and device == "cuda" and target in ("runtime", "dev", "local-dev")) %}
+{% if framework != "trtllm" and not (framework == "sglang" and device == "cuda" and target in ("runtime", "dev", "local-dev")) %}
 # Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
 ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
@@ -891,7 +893,8 @@ COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
 COPY --from=runtime_wheel_builder /opt/dynamo/rust-licenses/ /opt/dynamo/rust-licenses/
 
 {% else %}
-# The frontend installs NIXL from PyPI and Triton ships no NIXL. Keep this alias
+# TRT-LLM reuses upstream NIXL, the frontend installs it from PyPI, and Triton
+# ships no NIXL. Keep this alias
 # so downstream stages can still COPY Dynamo wheels and build tools from a
 # common wheel_builder stage name.
 FROM runtime_wheel_builder AS wheel_builder

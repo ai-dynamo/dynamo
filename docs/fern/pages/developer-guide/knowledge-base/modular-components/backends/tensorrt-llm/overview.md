@@ -52,13 +52,13 @@ The matrix below shows which TensorRT-LLM feature pairs are validated to work to
 | **Disaggregated Serving** | — | | | | | | | | | |
 | **KV-Aware Routing** | ✅ | — | | | | | | | | |
 | **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
-| **KV Block Manager** | ✅ | ✅ | ✅ | — | | | | | | |
-| **Multimodal** | ✅<sup>1</sup> | ✅<sup>2</sup> | — | ✅ | — | | | | | |
-| **Request Migration** | ✅ | ✅ | ✅ | ✅ | 🚧 | — | | | | |
-| **Request Cancellation** | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | — | | | |
-| **LoRA** | | | | | | | | — | | |
-| **Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | — | |
-| **Speculative Decoding** | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | | ✅ | — |
+| **KV Block Manager** | Unsupported | Unsupported | Unsupported | — | | | | | | |
+| **Multimodal** | ✅<sup>1</sup> | ✅<sup>2</sup> | — | Unsupported | — | | | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | Unsupported | 🚧 | — | | | | |
+| **Request Cancellation** | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | Unsupported | ✅<sup>3</sup> | ✅<sup>3</sup> | — | | | |
+| **LoRA** | | | | Unsupported | | | | — | | |
+| **Tool Calling** | ✅ | ✅ | ✅ | Unsupported | ✅ | ✅ | ✅ | | — | |
+| **Speculative Decoding** | ✅ | ✅ | — | Unsupported | — | ✅ | ✅ | | ✅ | — |
 
 > **Notes:**
 > 1. **Multimodal Disaggregation**: Supports **EP/D** (Traditional) and **E/P/D** (Full Disaggregation) image flows, including image URLs and pre-computed embeddings. ([Source](multimodal.md))
@@ -66,6 +66,12 @@ The matrix below shows which TensorRT-LLM feature pairs are validated to work to
 > 3. **Request Cancellation**: Due to known issues, the TensorRT-LLM engine is temporarily not notified of request cancellations, meaning allocated resources for cancelled requests are not freed.
 
 ## Prerequisites
+
+The Dynamo TensorRT-LLM container uses the NIXL library and Python bindings provided by its upstream TensorRT-LLM release image. Multimodal embedding transfers still use those bindings. Do not install a second NIXL distribution or preload `libnixl` globally.
+
+The AWS EFA variant adds the missing LIBFABRIC plugin without replacing upstream's NIXL libraries or Python bindings. Its `trtllm.nixl_ref` build setting must match the upstream native NIXL release when updating the base image.
+
+The deprecated KVBM connector and event consolidator have been removed. Remove `--connector kvbm` and KVBM-specific settings from existing deployments. Native KV-event publishing through `--publish-kv-events` and KV-aware routing remain supported.
 
 - **`yq`** for in-place YAML edits. Install with `wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && chmod +x /usr/local/bin/yq` or `pip install yq` (the latter is a different tool with the same name but similar syntax). If neither is available, a `sed` fallback is shown inline where `yq` is used.
 
