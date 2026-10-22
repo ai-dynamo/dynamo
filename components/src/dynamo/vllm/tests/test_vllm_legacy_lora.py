@@ -77,6 +77,8 @@ def _make_prefill_handler():
 async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     monkeypatch,
 ):
+    from vllm.version import __version_tuple__
+
     handler = _make_prefill_handler()
     manager = SimpleNamespace(
         download_lora=AsyncMock(
@@ -112,7 +114,7 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     assert json.loads(runtime_config.runtime_data["token_budget"]) == {
         "combined_limit": 8192,
         "reject_prompt_overflow": True,
-        "reject_total_overflow": True,
+        "reject_total_overflow": __version_tuple__[:2] < (0, 32),
     }
     assert runtime_config.kv_event_publishing_enabled is True
     # The adapter card must carry the engine-actual main-attention block size,

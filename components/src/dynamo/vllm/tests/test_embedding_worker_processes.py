@@ -56,7 +56,7 @@ def _core_engine_launch_object(engine_manager, addresses):
 
 
 def _core_engine_launch_tuple(engine_manager, addresses):
-    """The shape vLLM yields before 0.28, including the 0.27.1 XPU images."""
+    """The shape vLLM yields before 0.28."""
     return (engine_manager, None, addresses, None)
 
 
@@ -278,7 +278,9 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch, make_l
     parent_config = _vllm_config()
     monkeypatch.delenv(processes._ROLE_ENV, raising=False)
     monkeypatch.setattr(processes, "_short_rpc_directory", lambda: rpc_directory)
-    monkeypatch.setattr(processes, "create_engine_zmq_transport", lambda *_: addresses)
+    monkeypatch.setattr(
+        engine_utils, "get_engine_zmq_addresses", lambda *_: addresses, raising=False
+    )
     monkeypatch.setattr(processes, "launch_core_engines", launch_context)
     monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
     monkeypatch.setattr(processes.subprocess, "Popen", create_child)
@@ -406,7 +408,6 @@ def test_embedding_child_adopts_supervisor_bound_listeners(monkeypatch):
         return real_popen([sys.executable, "-c", child_script], **kwargs)
 
     monkeypatch.delenv(processes._ROLE_ENV, raising=False)
-    monkeypatch.setattr(processes, "create_engine_zmq_transport", None)
     monkeypatch.setattr(processes, "launch_core_engines", launch_context)
     monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
     monkeypatch.setattr(processes.subprocess, "Popen", launch_child)

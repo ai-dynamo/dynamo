@@ -1657,9 +1657,15 @@ def test_build_sampling_params_accepts_productive_recursive_guided_json():
     assert sampling_params.structured_outputs.json == schema
 
 
-def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
+@pytest.mark.parametrize("vllm_version", [(0, 31, 0), (0, 32, 0)])
+def test_build_sampling_params_caps_max_tokens_to_generation_budget(
+    monkeypatch, vllm_version
+):
+    import vllm.version
+
     from dynamo.vllm.handlers import build_sampling_params
 
+    monkeypatch.setattr(vllm.version, "__version_tuple__", vllm_version)
     model_max_len = 100
     defaults = {"max_tokens": 32}
 
@@ -1686,6 +1692,11 @@ def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
 
     sp = build_sampling_params(make({"max_tokens": 64}), defaults, model_max_len)
     assert sp.max_tokens == 64
+
+    sp = build_sampling_params(
+        make({"max_tokens": model_max_len}), defaults, model_max_len
+    )
+    assert sp.max_tokens == (remaining if vllm_version >= (0, 32) else model_max_len)
 
     sp = build_sampling_params(make({}), {}, model_max_len)
     assert sp.max_tokens == remaining

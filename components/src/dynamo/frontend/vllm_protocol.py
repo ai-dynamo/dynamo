@@ -5,6 +5,7 @@
 
 from importlib.util import find_spec
 
+# vLLM 0.32 moved the chat helpers to vllm.renderers.
 if find_spec("vllm.renderers.chat_utils") is not None:
     from vllm.renderers.chat_utils import load_chat_template, make_tool_call_id
 else:
