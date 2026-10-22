@@ -16,7 +16,8 @@ import msgspec
 import pytest
 import zmq
 
-from dynamo.common.backend.publisher import ComponentSnapshot
+from dynamo.common.backend.publisher import ComponentSnapshot, ZmqSource
+from dynamo.common.constants import DisaggregationMode
 from dynamo.deepinfer.args import (
     DeepInferArgs,
     apply_env_defaults,
@@ -70,7 +71,7 @@ def make_engine(*extra: str, dp: int = 1, max_model_len: int = 2048) -> DeepInfe
         LocalRankHandle(RankRunner(s), threaded=True) for s in specs[1:]
     ]
     meta = handles[0].wait_ready()
-    controller = Controller(handles, meta)
+    controller = Controller(handles, meta, engine_type=args.engine_type)
     return DeepInferEngine(args, controller, meta)
 
 
@@ -127,6 +128,7 @@ async def test_generate_streams_tokens_with_one_terminal_chunk(fake_env):
         "prompt_tokens": 150,
         "completion_tokens": 6,
         "total_tokens": 156,
+        "prompt_tokens_details": {"cached_tokens": 0},
     }
 
 
@@ -277,6 +279,23 @@ async def test_registration_and_metrics_declarations(fake_env):
         await engine.cleanup()
 
 
+async def test_kv_event_sources_one_per_rank_with_a_cache_manager(fake_env):
+    args = make_args(
+        "--kv-cache-manager", "prefix", "--kv-events-port-base", "6000", dp=2
+    )
+    engine = DeepInferEngine(
+        args, Controller([_Idle(0), _Idle(1)], IDLE_META), IDLE_META
+    )
+    assert await engine.kv_event_sources() == [
+        ZmqSource(endpoint="tcp://127.0.0.1:6000", topic="", dp_rank=0),
+        ZmqSource(endpoint="tcp://127.0.0.1:6001", topic="", dp_rank=1),
+    ]
+    assert [s.kv_events_endpoint for s in args.rank_specs("e")] == [
+        "tcp://*:6000",
+        "tcp://*:6001",
+    ]
+
+
 async def test_snapshots_are_published_per_rank(fake_env):
     published: list[tuple[int, ComponentSnapshot]] = []
 
@@ -317,7 +336,7 @@ async def test_cleanup_ends_inflight_streams(fake_env):
 
 def test_parse_args_defaults(fake_env):
     args = make_args(dp=4)
-    assert args.engine_type == "NORMAL"
+    assert args.engine_type == "NORMAL" and args.kv_transfer == "none"
     assert (args.namespace, args.component, args.endpoint) == (
         "dynamo",
         "backend",
@@ -326,22 +345,61 @@ def test_parse_args_defaults(fake_env):
     rank3 = args.engine_args(3)
     assert rank3["engine_rank"] == 3 and rank3["data_parallel_size"] == 4
     assert rank3["expert_parallel_size"] == 4 and rank3["chunked_prefill"] is True
-    assert (
-        make_args("--engine-arg", "max_num_seqs=8").engine_args(0)["max_num_seqs"] == 8
+
+    prefill = make_args(
+        "--disaggregation-mode", "prefill", "--engine-arg", "max_num_seqs=8"
     )
+    assert prefill.disaggregation_mode == DisaggregationMode.PREFILL
+    assert (prefill.engine_type, prefill.kv_transfer, prefill.component) == (
+        "PROMPT",
+        "nixl",
+        "prefill",
+    )
+    assert prefill.engine_args(0)["max_num_seqs"] == 8
+    decode = make_args("--disaggregation-mode", "decode")
+    assert decode.engine_args(0)["stop_preempted_request"] is True
+    with pytest.raises(ValueError):
+        make_args("--kv-transfer", "nixl")
 
 
 def test_launch_env_defaults(fake_env):
-    env = deepinfer_env(make_args())
+    env = deepinfer_env(make_args("--kv-cache-manager", "prefix"))
+    assert env["DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE"] == "compact"
+    assert env["DEEPINFER_YOCO_PREFILL_KEEP_TOKENS"] == "140"
     assert env["DEEPINFER_GLOO_TIMEOUT"] == "600"
     assert env["DEEPINFER_USE_MULTIMODAL_POOL"] == "0"
-    assert env["DEEPINFER_PREFILL_ATTEMPT_INTERVAL"] == "8"
-    assert env["MASTER_ADDR"] == "127.0.0.1"
-    # The pod's own environment wins over the defaults.
-    environ = {"DEEPINFER_GLOO_TIMEOUT": "60"}
-    apply_env_defaults(make_args(), environ)
-    assert environ["DEEPINFER_GLOO_TIMEOUT"] == "60"
-    assert environ["DEEPINFER_USE_MULTIMODAL_POOL"] == "0"
+    assert "UCX_TLS" not in env and "EP_DISABLE_GIN" not in env
+    assert "UCX_TLS" in deepinfer_env(make_args("--disaggregation-mode", "decode"))
+
+
+@pytest.mark.parametrize("value", ["1", "true", "off", "no", "2"])
+def test_prefix_cache_refuses_extra_state_as_deepinfer_reads_it(fake_env, value):
+    args = make_args("--kv-cache-manager", "prefix")
+    with pytest.raises(ValueError, match="EXTRA_STATE"):
+        apply_env_defaults(args, {"DEEPINFER_PREFILL_STORE_EXTRA_STATE": value})
+
+
+@pytest.mark.parametrize("value", ["0", "", "false", "False"])
+def test_prefix_cache_accepts_extra_state_off(fake_env, value):
+    args = make_args("--kv-cache-manager", "prefix")
+    apply_env_defaults(args, {"DEEPINFER_PREFILL_STORE_EXTRA_STATE": value})
+
+
+def test_nixl_uses_the_rail_nccl_is_pinned_to(fake_env):
+    decode = make_args("--disaggregation-mode", "decode")
+    env = {"NCCL_IB_HCA": "=mlx5_0"}
+    apply_env_defaults(decode, env)
+    assert env["UCX_NET_DEVICES"] == "mlx5_0:1"
+    env = {"NCCL_IB_HCA": "=mlx5_0", "UCX_NET_DEVICES": "mlx5_2:1"}
+    apply_env_defaults(decode, env)
+    assert env["UCX_NET_DEVICES"] == "mlx5_2:1"  # the pod's choice wins
+    for hca in ("^mlx5_1", "mlx5_0,mlx5_1"):
+        env = {"NCCL_IB_HCA": hca}
+        apply_env_defaults(decode, env)
+        assert "UCX_NET_DEVICES" not in env
+    env = {"NCCL_IB_HCA": "=mlx5_0"}
+    apply_env_defaults(make_args(), env)  # aggregated: no NIXL
+    assert "UCX_NET_DEVICES" not in env
 
 
 @pytest.mark.timeout(120)
@@ -453,6 +511,24 @@ def _ppid(pid: str) -> Optional[int]:
     except OSError:
         return None
     return None if fields[0] == "Z" else int(fields[1])
+
+
+IDLE_META = EngineMeta(
+    block_size=128,
+    num_gpu_blocks=8,
+    max_num_seqs=4,
+    max_model_len=256,
+    max_num_batched_tokens=256,
+    prefill_any_attempt_interval=100,
+)
+
+
+class _Idle(LocalRankHandle):
+    """A rank handle that is never driven (for declaration-only tests)."""
+
+    def __init__(self, rank: int) -> None:
+        self.rank = rank
+        self.inline = rank == 0
 
 
 def test_evict_page_cache_advises_checkpoint_shards_only(tmp_path):

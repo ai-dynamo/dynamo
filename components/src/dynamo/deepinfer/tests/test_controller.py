@@ -15,6 +15,13 @@ import pytest
 import zmq
 
 from dynamo.deepinfer.controller import Controller
+from dynamo.deepinfer.disagg import (
+    HANDOFF_KEY,
+    DeepInferHandoff,
+    handoff_from_prefill_result,
+)
+from dynamo.deepinfer.kv_transfer import base as kv_transfer_base
+from dynamo.deepinfer.kv_transfer.base import KVLayout, KVTransfer
 from dynamo.deepinfer.protocol import (
     AddReq,
     Cmd,
@@ -50,7 +57,9 @@ def fake_env(monkeypatch):
     shutil.rmtree(workdir, ignore_errors=True)
 
 
-def spec(rank: int = 0, dp: int = 1, **kw: Any) -> RankSpec:
+def spec(
+    rank: int = 0, dp: int = 1, engine_type: str = "NORMAL", **kw: Any
+) -> RankSpec:
     engine_args = {
         "model": "fake",
         "chunked_prefill": True,
@@ -59,20 +68,24 @@ def spec(rank: int = 0, dp: int = 1, **kw: Any) -> RankSpec:
         "engine_rank": rank,
         **kw.pop("engine_args", {}),
     }
+    if engine_type == "COMPLETION":
+        engine_args["stop_preempted_request"] = True
     return RankSpec(
         rank=rank,
         dp_size=dp,
         engine_args=engine_args,
+        engine_type=engine_type,
         backend="fake",
         **kw,
     )
 
 
-def add(rid: str, n: int = 40, max_tokens: int = 4) -> AddReq:
+def add(rid: str, n: int = 40, max_tokens: int = 4, **kw: Any) -> AddReq:
     return AddReq(
         request_id=rid,
         token_ids=prompt_bytes([2 + (i * 7) % 900 for i in range(n)]),
         sampling={"max_tokens": max_tokens},
+        **kw,
     )
 
 
@@ -466,6 +479,47 @@ def test_abort_of_partially_prefilled_request_frees_its_kv(fake_env):
     runner.apply(Cmd(seq=3, op=Op.CLOSE))
 
 
+class _CopyTransfer(KVTransfer):
+    """Same-process pull: copies block rows and the state row between ranks."""
+
+    agents: dict[str, "_CopyTransfer"] = {}
+
+    def __init__(self, *, rank: int, engine_id: str, **options: Any) -> None:
+        super().__init__(rank=rank, engine_id=engine_id)
+        self.name = f"{engine_id}/{rank}"
+        self.done: list[str] = []
+        self.released: list[str] = []
+
+    def register(self, layout: KVLayout) -> None:
+        self.layout = layout
+        self.agents[self.name] = self
+
+    def agent_info(self) -> dict[str, str]:
+        return {"agent_name": self.name, "agent_metadata": ""}
+
+    def start_read(self, req_id, handoff, local_block_ids, local_state_id):
+        peer = self.agents[handoff.agent_name]
+        for region, src, dst in (
+            ("gpu_blocks", handoff.block_ids, local_block_ids),
+            ("gpu_states", [handoff.state_id], [local_state_id]),
+        ):
+            self.layout.region(region).buffer[dst] = peer.layout.region(region).buffer[
+                src
+            ]
+        self.done.append(req_id)
+
+    def poll(self):
+        done, self.done = self.done, []
+        released, self.released = self.released, []
+        return done, [], released
+
+    def release_remote(self, handoff) -> None:
+        self.agents[handoff.agent_name].released.append(handoff.request_id)
+
+    def shutdown(self) -> None:
+        self.agents.pop(self.name, None)
+
+
 def _run(
     runner: RankRunner, cmds: list[Cmd], until, limit: int = 200
 ) -> dict[str, list[Output]]:
@@ -482,3 +536,115 @@ def _run(
 
 def _done(rid):
     return lambda seen: any(o.finish_reason for o in seen.get(rid, []))
+
+
+def test_prefill_decode_handoff_reproduces_aggregated_tokens(fake_env, monkeypatch):
+    def make_transfer(name, *, rank, engine_id, **options):
+        return None if name == "none" else _CopyTransfer(rank=rank, engine_id=engine_id)
+
+    monkeypatch.setattr(kv_transfer_base, "make_kv_transfer", make_transfer)
+    agg = RankRunner(spec())
+    prefill = RankRunner(spec(engine_type="PROMPT", kv_transfer="copy", engine_id="P"))
+    decode = RankRunner(
+        spec(engine_type="COMPLETION", kv_transfer="copy", engine_id="D")
+    )
+
+    expected = _run(
+        agg,
+        [Cmd(seq=0, adds=[add("r", n=300, max_tokens=6)])],
+        _done("r"),
+    )
+    expected_tokens = [t for o in expected["r"] for t in o.token_ids]
+
+    first = _run(
+        prefill,
+        [Cmd(seq=0, adds=[add("r", n=300, max_tokens=1, hold_kv=True)])],
+        _done("r"),
+    )
+    terminal = first["r"][-1]
+    assert (
+        terminal.finish_reason == "length" and terminal.token_ids == expected_tokens[:1]
+    )
+    handoff = handoff_from_prefill_result(
+        {"disaggregated_params": terminal.disaggregated_params}
+    )
+    assert prefill.prefill.num_held == 1 and len(handoff["block_ids"]) == 3
+
+    second = _run(
+        decode,
+        [Cmd(seq=0, adds=[add("r", n=300, max_tokens=6, handoff=handoff)])],
+        _done("r"),
+    )
+    assert [t for o in second["r"] for t in o.token_ids] == expected_tokens
+    assert second["r"][-1].finish_reason == "length"
+
+    _run(prefill, [], lambda seen: prefill.prefill.num_held == 0, limit=3)
+    assert prefill.prefill.num_held == 0
+    assert prefill.cache.stats().used_blocks == 0
+    _run(decode, [], lambda seen: False, limit=2)
+    assert decode.cache.stats().used_blocks == 0
+    for runner in (agg, prefill, decode):
+        runner.apply(Cmd(seq=10_000, op=Op.CLOSE))
+
+
+def test_decode_add_aborted_in_its_own_batch_releases_the_prefill_copy(
+    fake_env, monkeypatch
+):
+    def make_transfer(name, *, rank, engine_id, **options):
+        return None if name == "none" else _CopyTransfer(rank=rank, engine_id=engine_id)
+
+    monkeypatch.setattr(kv_transfer_base, "make_kv_transfer", make_transfer)
+    prefill = RankRunner(spec(engine_type="PROMPT", kv_transfer="copy", engine_id="P"))
+    decode = RankRunner(
+        spec(engine_type="COMPLETION", kv_transfer="copy", engine_id="D")
+    )
+    first = _run(
+        prefill,
+        [Cmd(seq=0, adds=[add("r", n=300, max_tokens=1, hold_kv=True)])],
+        _done("r"),
+    )
+    handoff = first["r"][-1].disaggregated_params[HANDOFF_KEY]
+    assert prefill.prefill.num_held == 1
+
+    controller, fatal = controller_for(
+        [LocalRankHandle(decode)], engine_type="COMPLETION"
+    )
+    controller.submit(add("r", n=300, handoff=handoff))
+    controller.abort("r")  # the client left before the add reached the rank
+    controller._iterate(0.0)
+    prefill.apply(Cmd(seq=50))
+    assert prefill.prefill.num_held == 0
+    controller.close()
+    prefill.apply(Cmd(seq=51, op=Op.CLOSE))
+    assert not fatal
+
+
+def test_handoff_validation():
+    good = DeepInferHandoff(
+        version=1,
+        engine_id="e",
+        dp_rank=0,
+        request_id="r",
+        agent_name="a",
+        agent_metadata="",
+        layout_hash="h",
+        block_ids=[1, 2],
+        state_id=3,
+        num_tokens=200,
+        first_token=7,
+        expiry_ts=1.0,
+    ).to_dict()
+    assert (
+        handoff_from_prefill_result({"disaggregated_params": {HANDOFF_KEY: good}})
+        == good
+    )
+    for bad in (
+        {**good, "version": 2},
+        {**good, "block_ids": []},
+        {**good, "num_tokens": True},
+        {k: v for k, v in good.items() if k != "state_id"},
+    ):
+        with pytest.raises(ValueError):
+            handoff_from_prefill_result({"disaggregated_params": {HANDOFF_KEY: bad}})
+    with pytest.raises(ValueError, match="no 'deepinfer' handoff"):
+        handoff_from_prefill_result({"disaggregated_params": {}})
