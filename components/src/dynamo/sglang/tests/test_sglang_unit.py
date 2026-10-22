@@ -1087,7 +1087,12 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
 
 
 @pytest.mark.asyncio
-async def test_external_mm_hashes_rebuild_padding_after_hash_override():
+async def test_external_mm_hashes_rebuild_padding_after_hash_override(monkeypatch):
+    # The repair applies to SGLang builds that still derive pad values from
+    # caller hashes.
+    monkeypatch.setattr(
+        sglang_compat, "sglang_uses_engine_owned_mm_identity", lambda: False
+    )
     item = SimpleNamespace(pad_value=91, offsets=[(1, 2)])
     mm_inputs = SimpleNamespace(mm_items=[item], padded_input_ids=[1, 7, 7, 4])
     tokenized = SimpleNamespace(input_ids=[1, 2, 3, 4], mm_inputs=mm_inputs)
@@ -1118,6 +1123,20 @@ def test_external_mm_hashes_are_disabled_when_engine_lacks_kwarg():
             return None
 
     assert not supports_external_mm_hashes(LegacyEngine())
+
+
+def test_external_mm_hashes_are_disabled_for_engine_owned_mm_identity(monkeypatch):
+    # sgl-project/sglang#43043 builds derive wide pad values from their own
+    # identity; caller hashes no longer match Dynamo's pads and Kimi rejects them.
+    monkeypatch.setattr(
+        sglang_compat, "sglang_uses_engine_owned_mm_identity", lambda: True
+    )
+
+    class MmHashEngine:
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    assert not supports_external_mm_hashes(MmHashEngine())
 
 
 @pytest.mark.parametrize(

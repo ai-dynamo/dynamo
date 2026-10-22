@@ -64,7 +64,8 @@ pub(super) async fn start_zmq_listener(
 
     let mut normalizer = ZmqEventNormalizer::new(kv_block_size)
         .with_image_token_id(image_token_id)
-        .with_video_token_id(video_token_id);
+        .with_video_token_id(video_token_id)
+        .with_engine_owned_mm_identity(engine_owned_mm_identity_from_env());
     let socket = match connect_sub_socket(&zmq_endpoint, Some(&zmq_topic)).await {
         Ok(socket) => socket,
         Err(error) => {
