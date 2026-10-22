@@ -3,6 +3,7 @@ package dynamo
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -22,26 +23,54 @@ type SGLangBackend struct {
 	roleLaunchOwnership roleLaunchOwnership
 }
 
-// sglangSidecarNeedsWorker resolves placement only for an explicit native launch.
-// Scripts and config files can hide topology flags and require complete role templates.
-// container must not be nil.
-func sglangSidecarNeedsWorker(container *corev1.Container) (bool, error) {
-	command := append(append([]string(nil), container.Command...), container.Args...)
-	if len(command) < 3 || !isPythonCommand(command[0]) || command[1] != "-m" || command[2] != "sglang.launch_server" {
-		return false, fmt.Errorf("multinode SGLang sidecar requires an explicit python -m sglang.launch_server command; use complete leader and worker podTemplates for other launchers")
+type sglangLaunchArgs struct {
+	EnableDPAttention bool
+}
+
+// readSGLangLaunchArgs reads the topology needed for automatic runtime placement.
+// container must not be nil. Config files and runtime expansions are never evaluated.
+func readSGLangLaunchArgs(container *corev1.Container) (sglangLaunchArgs, error) {
+	args, err := pythonModuleArgs(container, "sglang.launch_server")
+	if err != nil {
+		return sglangLaunchArgs{}, fmt.Errorf("cannot determine SGLang topology: %w; use complete leader and worker podTemplates", err)
 	}
 
-	// Hidden or expanded arguments cannot reliably determine follower placement.
-	worker := false
-	for _, arg := range command[3:] {
-		if arg == "--config" || strings.HasPrefix(arg, "--config=") || strings.Contains(arg, "$(") || strings.HasPrefix(arg, "--enable-dp-attention=") {
-			return false, fmt.Errorf("cannot determine SGLang sidecar placement from config files or expanded arguments; use complete leader and worker podTemplates")
+	// An explicit boolean flag takes precedence over config-file defaults.
+	launch := sglangLaunchArgs{}
+	for _, arg := range args {
+		if strings.HasPrefix(arg.Value, "--enable-dp-attention=") {
+			return launch, fmt.Errorf("--enable-dp-attention takes no value; use the standalone flag")
 		}
-		if arg == "--enable-dp-attention" {
-			worker = true
+		if arg.Value == "--enable-dp-attention" {
+			launch.EnableDPAttention = true
 		}
 	}
-	return worker, nil
+	if launch.EnableDPAttention {
+		return launch, nil
+	}
+
+	// Without an explicit mode, hidden flags could turn a presumed TP worker into a KV publisher.
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		flag, _, _ := strings.Cut(arg.Value, "=")
+		if flag == "--config" || strings.ContainsAny(flag, "$`") || arg.MayExpand {
+			return launch, fmt.Errorf("cannot determine whether SGLang DP-attention is enabled by config files or expanded flags; declare --enable-dp-attention explicitly or use complete leader and worker podTemplates")
+		}
+
+		// These model-related values cannot change topology. Keep their expansions opaque.
+		switch arg.Value {
+		case "--model-path", "--model", "--tokenizer-path", "--served-model-name", "--download-dir":
+			if i+1 < len(args) && !args[i+1].MayExpand {
+				i++
+			}
+		}
+	}
+	return launch, nil
+}
+
+// sglangWorkerRoleRequiresRuntimeContainer keeps a relay beside each attention-DP KV publisher.
+func sglangWorkerRoleRequiresRuntimeContainer(launch sglangLaunchArgs) bool {
+	return launch.EnableDPAttention
 }
 
 // isPythonCommand checks if the command is a Python interpreter
@@ -284,8 +313,23 @@ func nixlPrometheusPort(env *corev1.EnvVar) (int32, bool, error) {
 	return int32(port), true, nil
 }
 
-func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	// do nothing
+func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) error {
+	// Only operator-authored multinode followers need an automatic placement decision.
+	if numberOfNodes <= 1 || role != RoleWorker || b.roleLaunchOwnership == roleLaunchOwnedByPodTemplate || GetDynamoSidecar(component) == nil {
+		return nil
+	}
+
+	// TP followers need no runtime; attention-DP followers relay their local KV events.
+	launch, err := readSGLangLaunchArgs(GetMainContainer(component))
+	if err != nil {
+		return err
+	}
+	if !sglangWorkerRoleRequiresRuntimeContainer(launch) {
+		podSpec.InitContainers = slices.DeleteFunc(podSpec.InitContainers, func(c corev1.Container) bool {
+			return c.Name == commonconsts.RuntimeContainerName
+		})
+	}
+	return nil
 }
 
 // getMultinodeFlags returns the multinode flags and whether shell interpretation
