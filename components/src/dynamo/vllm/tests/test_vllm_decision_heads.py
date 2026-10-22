@@ -3,12 +3,20 @@
 
 """CPU contracts for the optional, unregistered native head executor."""
 
+import ast
 import asyncio
 import copy
+import hashlib
+import importlib.util
+import json
 import math
+import os
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -535,3 +543,249 @@ async def test_cancelled_request_never_starts_engine_work(native):
             wire(), [], request_id="cancelled", cancelled=lambda: True
         )
     assert not engine.calls
+
+
+@pytest.mark.asyncio
+async def test_installed_pinned_native_preparation():
+    if importlib.util.find_spec("vllm") is None:
+        pytest.skip("Pinned optional vLLM runtime is not installed")
+    try:
+        heads._load_native(heads.PINNED_VLLM_COMMIT)
+    except heads.HeadRuntimeError:
+        pytest.skip("Installed vLLM sources do not match the pinned head runtime")
+    engine = Engine("ClefFlashForJointSchema")
+    engine.model_config = SimpleNamespace(
+        **vars(engine.model_config),
+        model="test-clef-flash",
+        hf_config=SimpleNamespace(model_type="qwen3_5"),
+    )
+    engine.vllm_config = SimpleNamespace(
+        **{**vars(engine.vllm_config), "model_config": engine.model_config}
+    )
+    tokenizer = Tokenizer()
+    engine.renderer = SimpleNamespace(
+        tokenizer=tokenizer, get_tokenizer=lambda: tokenizer
+    )
+    instance = await adapter(engine, heads.CLEF_FLASH_PROFILE)
+    prepared = instance.prepare(wire(heads.CLEF_FLASH_PROFILE))
+    assert len(prepared.reads) == 1
+    params = prepared.reads[0].pooling_params
+    assert params.task == "token_classify"
+    assert params.extra_kwargs["joint_schema"]["option_counts"] == [2]
+
+
+@pytest.mark.parametrize(
+    "evidence,expected",
+    [
+        ({"description": "Low"}, "Low"),
+        ({"label": "Low"}, "Low"),
+        ({"label": "Low", "description": "Small impact"}, "Low - Small impact"),
+        ({"description": {"impact": ["Low", "minor"]}}, '{"impact": ["Low", "minor"]}'),
+    ],
+)
+def test_installed_native_score_evidence_is_rendered_once(evidence, expected):
+    if importlib.util.find_spec("vllm") is None:
+        pytest.skip("Pinned optional vLLM runtime is not installed")
+    try:
+        native = heads._load_native(heads.PINNED_VLLM_COMMIT)
+    except heads.HeadRuntimeError:
+        pytest.skip("Installed vLLM sources do not match the pinned head runtime")
+    raw = question(kind="Score", values=("0", "1"))
+    raw["instructions"] = "Rate the impact."
+    raw["candidates"][0].update(evidence)
+    raw["candidates"][1].update(label="High")
+    result = heads._question(raw, 0, native, 10)
+    labeled = native.questions.Question(
+        result.id,
+        result.type,
+        result.instructions,
+        result.options,
+        result.type.label_set[: len(result.options)],
+    )
+    prompt = (
+        f"Question: Rate the impact.\n0: {expected}\n1: High\n"
+        "Answer with the number of one level only."
+    )
+    assert result.type.prompt(labeled) == prompt
+    assert (
+        native.strategies.DiffusionGemmaCanvasStrategy._content(
+            None, "Customer requests a refund.", labeled
+        )
+        == f"Customer requests a refund.\n\n{prompt}"
+    )
+    assert [(o.name, o.description) for o in result.options] == [
+        (expected, None),
+        ("High", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    "kind,values", [("Choice", ("billing", "technical")), ("Predicate", (True, False))]
+)
+def test_non_score_option_descriptions_are_preserved(kind, values):
+    raw = question(kind=kind, values=values)
+    raw["candidates"][0]["description"] = {"evidence": ["Payments"]}
+    result = heads._question(raw, 0, NativeApi(), 10)
+    assert result.options[0].description == '{"evidence": ["Payments"]}'
+
+
+@pytest.fixture
+def pinned_preparation(monkeypatch):
+    source_repo = os.environ.get("DYNAMO_VLLM_SOURCE_REPO")
+    if source_repo is None:
+        pytest.skip(
+            "Set DYNAMO_VLLM_SOURCE_REPO for exact-source CPU preparation fixtures"
+        )
+
+    def source(module_name):
+        result = subprocess.run(
+            [
+                "git",
+                "-c",
+                "gc.auto=0",
+                "-C",
+                source_repo,
+                "show",
+                f"{heads.PINNED_VLLM_COMMIT}:{module_name.replace('.', '/')}.py",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=10,
+            env={**os.environ, "GIT_NO_LAZY_FETCH": "1"},
+        )
+        expected = dict(heads._PINNED_SOURCES)[module_name]
+        assert hashlib.sha256(result.stdout).hexdigest() == expected
+        return result.stdout.decode()
+
+    question_name = f"_pinned_head_questions_{uuid4().hex}"
+    question_module = ModuleType(question_name)
+    monkeypatch.setitem(sys.modules, question_name, question_module)
+    exec(  # noqa: S102 -- Executes hash-verified upstream fixtures, never request data.
+        compile(
+            source("vllm.entrypoints.openai.decisions.question_types"),
+            question_name,
+            "exec",
+        ),
+        question_module.__dict__,
+    )
+    tree = ast.parse(source("vllm.entrypoints.openai.decisions.strategies"))
+    selected = {
+        "state_text",
+        "DecisionLimits",
+        "D3Strategy",
+        "JointSchemaStrategy",
+        "ClefFlashStrategy",
+    }
+    definitions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in selected
+    ]
+
+    class ReadStrategy:
+        def __init__(self, context):
+            self.context = context
+
+    strategy_module = ModuleType(f"_pinned_head_strategies_{uuid4().hex}")
+    monkeypatch.setitem(sys.modules, strategy_module.__name__, strategy_module)
+    namespace = strategy_module.__dict__
+    namespace.update(
+        {
+            "ReadStrategy": ReadStrategy,
+            "json": json,
+            "dataclass": dataclass,
+            "LABELS": question_module.LABELS,
+            "StructuredDecisionError": question_module.StructuredDecisionError,
+        }
+    )
+    module = ast.Module(
+        body=[
+            ast.ImportFrom(
+                module="__future__", names=[ast.alias(name="annotations")], level=0
+            ),
+            *definitions,
+        ],
+        type_ignores=[],
+    )
+    exec(  # noqa: S102 -- Executes hash-verified upstream fixtures, never request data.
+        compile(ast.fix_missing_locations(module), "pinned-head-strategies", "exec"),
+        namespace,
+    )
+    api = NativeApi()
+    api.questions = question_module
+    api.strategies = SimpleNamespace(
+        **{name: namespace[name] for name in selected if name != "state_text"},
+        ReadContext=lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr(heads, "_load_native", lambda commit: api)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+async def test_exact_pinned_d3_prompt_and_order(pinned_preparation):
+    engine = Engine()
+    engine.model_config.hf_config = SimpleNamespace(
+        decision_config={"codes": ["A", "B", "C"], "temperature": 2.0}
+    )
+    instance = await adapter(engine)
+    prepared = instance.prepare(
+        wire(questions=[question(kind="Predicate", values=(True, False))])
+    )
+    prompt = bytes(prepared.reads[0].prompt_ids).decode()
+    assert (
+        "State:\nstate\n\nQuestion:\nChoose.\n\nOptions:\nA: No / false\nB: Yes / true"
+        in prompt
+    )
+    assert prompt.endswith("Reply with only the code of the best option.")
+    assert prepared.reads[0].orders == ((1, 0),)
+    assert "client-name" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize(
+    "profile,architecture",
+    [
+        (heads.CLEF_FLASH_PROFILE, "ClefFlashForJointSchema"),
+        (heads.CLEF_OMNI_PROFILE, "ClefOmniForJointSchema"),
+    ],
+)
+async def test_exact_pinned_clef_joint_schema_and_state_truncation(
+    pinned_preparation, profile, architecture
+):
+    engine = Engine(architecture)
+    engine.model_config.max_model_len = 1200
+    instance = await adapter(engine, profile)
+    questions = [question(), question(1, "Predicate", (True, False))]
+    request = wire(profile, questions)
+    request["decision_head"]["input"] = "x" * 3000
+    prepared = instance.prepare(request)
+    read = prepared.reads[0]
+    schema = read.pooling_params.extra_kwargs["joint_schema"]
+    assert len(read.prompt_ids) == 1200
+    assert schema["question_types"] == [1, 0]
+    assert schema["option_counts"] == [2, 2]
+    assert read.orders == ((1, 0), (0, 1))
+    prompt = bytes(read.prompt_ids).decode()
+    assert "JOINT SCHEMA DECISIONS:" in prompt
+    assert "ID: question-0" in prompt and "ID: question-1" in prompt
+    for start, end in [*schema["question_spans"], *schema["option_spans"]]:
+        assert -len(read.prompt_ids) <= start < end <= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("model_impl", "transformers"),
+        ("model_class_overrides", {"D3ForSequenceClassification": "custom.Model"}),
+        ("convert_type", "classify"),
+        ("is_diffusion", True),
+        ("is_encoder_decoder", True),
+    ],
+)
+async def test_unqualified_native_head_implementation_is_rejected(native, field, value):
+    engine = Engine()
+    setattr(engine.model_config, field, value)
+    with pytest.raises(heads.HeadRuntimeError):
+        await adapter(engine)

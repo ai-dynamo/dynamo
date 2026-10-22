@@ -14,6 +14,7 @@ import pytest
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
 from dynamo.llm import ModelInput, ModelType, WorkerType
+from dynamo.vllm import decision_heads as heads
 from dynamo.vllm.args import Config
 from dynamo.vllm.benchmark_worker_extension import FpmBenchmarkWorkerExtension
 from dynamo.vllm.constants import DisaggregationMode
@@ -23,6 +24,8 @@ from dynamo.vllm.instrumented_scheduler import (
     InstrumentedScheduler,
     benchmark_content_point_key,
 )
+from dynamo.vllm.pooling_handlers import ClassifyWorkerHandler
+from dynamo.vllm.tests.test_vllm_decision_heads import Engine, NativeApi, monitor
 from dynamo.vllm.worker_factory import (
     CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS,
     ENGINE_PROBE_TIMEOUT_SECONDS,
@@ -977,9 +980,32 @@ class TestCreate:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ready_profile", "health_check_case"),
+    [
+        (None, "default"),
+        (heads.D3_PROFILE, "default"),
+        (heads.CLEF_FLASH_PROFILE, "default"),
+        (heads.CLEF_OMNI_PROFILE, "default"),
+        (None, "override"),
+        (heads.D3_PROFILE, "override"),
+        (heads.D3_PROFILE, "invalid-native"),
+        (heads.D3_PROFILE, "invalid-native-override"),
+    ],
+)
 async def test_classify_worker_registers_classify_and_pooling(
     monkeypatch: pytest.MonkeyPatch,
+    ready_profile: str | None,
+    health_check_case: str,
 ) -> None:
+    monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
+    has_override = "override" in health_check_case
+    invalid_native = health_check_case.startswith("invalid-native")
+    expected_profile = None if invalid_native else ready_profile
+    if has_override:
+        monkeypatch.setenv(
+            "DYN_HEALTH_CHECK_PAYLOAD", json.dumps({"input": "operator-health"})
+        )
     endpoint = Mock()
     endpoint.connection_id.return_value = "worker-1"
     endpoint.serve_endpoint = AsyncMock()
@@ -987,6 +1013,30 @@ async def test_classify_worker_registers_classify_and_pooling(
     runtime.endpoint.return_value = endpoint
 
     engine_client = Mock()
+    adapter = None
+    if ready_profile is not None:
+        architecture = {
+            heads.D3_PROFILE: "D3ForSequenceClassification",
+            heads.CLEF_FLASH_PROFILE: "ClefFlashForJointSchema",
+            heads.CLEF_OMNI_PROFILE: "ClefOmniForJointSchema",
+        }[ready_profile]
+        engine_client = Engine(architecture)
+        if ready_profile != heads.D3_PROFILE:
+            engine_client.values = [0.7, 0.3]
+            engine_client.get_supported_tasks = AsyncMock(
+                return_value=("token_classify",)
+            )
+        monkeypatch.setattr(heads, "_load_native", lambda _: NativeApi())
+        adapter = await heads.HeadExecutionAdapter.create(
+            engine_client,
+            ready_profile,
+            source_commit=heads.PINNED_VLLM_COMMIT,
+            abort_monitor=monitor,
+        )
+        if invalid_native:
+            adapter.prepare = Mock(
+                side_effect=heads.HeadValidationError("canary exceeds context")
+            )
     vllm_config = Mock(model_config=Mock())
     engine_tuple: EngineSetupResult = (
         engine_client,
@@ -996,7 +1046,34 @@ async def test_classify_worker_registers_classify_and_pooling(
         None,
     )
     register_model = AsyncMock()
-    handler = Mock()
+    handler = object.__new__(ClassifyWorkerHandler)
+    handler.decision_head_adapter = None
+    handler.cleanup = Mock()
+    handler.decision_head_health_check_payload = Mock(
+        wraps=ClassifyWorkerHandler.decision_head_health_check_payload.__get__(handler)
+    )
+    handler.generate = ClassifyWorkerHandler.generate.__get__(handler)
+
+    async def serve_endpoint(generate, *, health_check_payload, **kwargs):
+        if expected_profile is None or has_override:
+            return
+        context = SimpleNamespace(
+            id=lambda: "factory-health-probe",
+            is_stopped=lambda: False,
+            is_killed=lambda: False,
+            trace_headers=lambda: None,
+            append=Mock(),
+        )
+        response = [item async for item in generate(health_check_payload, context)]
+        assert response[0]["profile"] == ready_profile
+        assert response[0]["outcomes"][0]["ordinal"] == 0
+
+    endpoint.serve_endpoint = AsyncMock(side_effect=serve_endpoint)
+
+    async def initialize_decision_head():
+        handler.decision_head_adapter = adapter
+
+    handler.initialize_decision_head = AsyncMock(side_effect=initialize_decision_head)
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.ClassifyWorkerHandler",
         Mock(return_value=handler),
@@ -1031,6 +1108,29 @@ async def test_classify_worker_registers_classify_and_pooling(
     )
 
     register_model.assert_awaited_once()
+    handler.initialize_decision_head.assert_awaited_once()
+    handler.decision_head_health_check_payload.assert_called_once_with("model")
+    served_probe = endpoint.serve_endpoint.call_args.kwargs["health_check_payload"]
+    if has_override:
+        assert served_probe["input"] == "operator-health"
+        assert "decision_head" not in served_probe
+        if ready_profile is not None:
+            assert not engine_client.calls
+    elif expected_profile is not None:
+        assert served_probe["decision_head"]["profile"] == ready_profile
+        assert len(engine_client.calls) == 1
+        params = engine_client.calls[0]["pooling_params"]
+        if ready_profile == heads.D3_PROFILE:
+            assert params.task == "classify"
+        else:
+            assert params.task == "token_classify"
+            assert params.extra_kwargs["joint_schema"]["option_counts"] == [2]
+    else:
+        assert served_probe == {
+            "input": "probe",
+            "model": "model",
+            "_HEALTH_CHECK": True,
+        }
     register_args = register_model.await_args.args
     registered_model_type = register_args[1]
     assert register_args[0] == ModelInput.Text
@@ -1046,6 +1146,7 @@ async def test_classify_worker_registers_classify_and_pooling(
     assert register_model.await_args.kwargs == {
         "worker_type": WorkerType.Aggregated,
         "needs": [],
+        "decision_head_profile": expected_profile,
     }
     assert shutdown_endpoints == [endpoint]
     handler.cleanup.assert_called_once()
