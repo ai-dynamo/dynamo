@@ -5,7 +5,7 @@
 
 - patch_torch_memory_saver: Routes weights and kv_cache to GMS
 - patch_model_runner: Fixes memory accounting with pre-loaded weights
-- patch_kv_cache_sizing_for_gms: Makes the XPU KV sizing probe see GMS weights
+- patch_xpu_kv_cache_sizing_for_gms: Makes the XPU KV sizing probe see GMS weights
 - patch_static_state_for_gms: No-ops named-buffer export/import (GMS preserves them)
 """
 
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 _torch_memory_saver_patched = False
 _model_runner_patched = False
-_kv_cache_sizing_patched = False
+_xpu_kv_cache_sizing_patched = False
 _static_state_patched = False
 
 
@@ -224,7 +224,7 @@ def patch_model_runner() -> None:
     logger.info("[GMS] Patched ModelRunner.alloc_memory_pool")
 
 
-def patch_kv_cache_sizing_for_gms() -> None:
+def patch_xpu_kv_cache_sizing_for_gms() -> None:
     """Make the XPU KV sizing probe account for GMS-resident weights.
 
     On CUDA sglang's ``get_available_gpu_memory()`` calls ``torch.cuda.mem_get_info()``,
@@ -251,16 +251,16 @@ def patch_kv_cache_sizing_for_gms() -> None:
     until a reader sets impl.preloaded_weights_bytes during load_model(), so
     the pre-load baseline sampled by distributed.bootstrap is unaffected.
     """
-    global _kv_cache_sizing_patched
+    global _xpu_kv_cache_sizing_patched
 
-    if _kv_cache_sizing_patched:
+    if _xpu_kv_cache_sizing_patched:
         return
 
     from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
 
     if get_vmm_device_type() != VMMDeviceType.XPU:
         # CUDA's probe is device-wide; nothing to correct.
-        _kv_cache_sizing_patched = True
+        _xpu_kv_cache_sizing_patched = True
         return
 
     def make_gms_aware_probe(original):
@@ -326,7 +326,7 @@ def patch_kv_cache_sizing_for_gms() -> None:
         ", ".join(sorted(rebound)),
     )
 
-    _kv_cache_sizing_patched = True
+    _xpu_kv_cache_sizing_patched = True
 
 
 def patch_static_state_for_gms() -> None:

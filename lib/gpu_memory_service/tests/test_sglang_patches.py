@@ -140,11 +140,11 @@ def _install_probe_modules(monkeypatch, free_gb):
     monkeypatch.setitem(sys.modules, unrelated.__name__, unrelated)
     modules[unrelated.__name__] = unrelated
 
-    monkeypatch.setattr(patches, "_kv_cache_sizing_patched", False)
+    monkeypatch.setattr(patches, "_xpu_kv_cache_sizing_patched", False)
     return get_available_gpu_memory, modules
 
 
-def test_kv_cache_sizing_rebinds_every_reference_on_xpu(monkeypatch):
+def test_xpu_kv_cache_sizing_rebinds_every_reference(monkeypatch):
     """Every binding of the probe gets the GMS adjustment, not a fixed list.
 
     Covers the definition site, a package re-export, an existing from-import
@@ -156,7 +156,7 @@ def test_kv_cache_sizing_rebinds_every_reference_on_xpu(monkeypatch):
     impl = SimpleNamespace(preloaded_weights_bytes=0)
     monkeypatch.setattr(patches, "get_gms_memory_saver_impl", lambda: impl)
 
-    patches.patch_kv_cache_sizing_for_gms()
+    patches.patch_xpu_kv_cache_sizing_for_gms()
 
     late = {}
     exec("from sglang.srt.utils import get_available_gpu_memory", late)
@@ -178,11 +178,11 @@ def test_kv_cache_sizing_rebinds_every_reference_on_xpu(monkeypatch):
     assert modules["sglang.srt.fake_unrelated"].get_available_gpu_memory() == -1.0
 
 
-def test_kv_cache_sizing_is_noop_on_cuda(monkeypatch):
+def test_xpu_kv_cache_sizing_is_noop_on_cuda(monkeypatch):
     original, modules = _install_probe_modules(monkeypatch, free_gb=10.0)
     monkeypatch.setattr(gms_vmm, "get_vmm_device_type", lambda: VMMDeviceType.CUDA)
 
-    patches.patch_kv_cache_sizing_for_gms()
+    patches.patch_xpu_kv_cache_sizing_for_gms()
 
     for name, module in modules.items():
         if name != "sglang.srt.fake_unrelated":
