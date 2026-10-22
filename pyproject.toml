@@ -341,7 +341,6 @@ asyncio_mode = "auto"
 markers = [
     "pre_merge: marks tests to run before merging",
     "post_merge: marks tests to run after merge",
-    "manual: opt-in qualification requiring explicitly provisioned services or a pinned runtime; not selected by automated CI lifecycle lanes",
     "parallel: marks tests that can run in parallel with pytest-xdist",
     "defaulted: applied automatically by the repository-root conftest.py to a test that declared no lifecycle or hardware marker. Do not hand-apply it. The CPU parallel job selects it so defaulted tests do not pile into the sequential job, which runs the fault-tolerance suite in one process",
     "nightly: marks tests to run nightly",
