@@ -1,6 +1,6 @@
 ---
 name: dynamo-issue-first
-description: Ensures every piece of work in ai-dynamo/dynamo starts from a tracked issue and every pull request references one. Use when starting new work, creating or sorting its Linear issue (release, feature project, milestone), opening or editing a pull request, or when the "PR Issue Link" check fails and needs remediation.
+description: Ensures every piece of work in ai-dynamo/dynamo starts from a tracked issue and every pull request references one. Use when starting new work, creating or sorting its Linear issue into a feature or workstream project, opening or editing a pull request, or when the "PR Issue Link" check fails and needs remediation.
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -48,36 +48,42 @@ the change exists; an agent pointed at the issue first inherits all of it.
   back into DGH, so either side works.
 - Bug found mid-task that needs its own fix: create an issue for it rather
   than folding untracked work into the current PR.
-- **Release features**: each feature in a release has a tracking ticket in
-  Linear with its work issues linked as Related, so that ticket is where to
-  look up which feature a work issue belongs to.
+- **Release features**: each roadmap feature has a Linear feature project,
+  and its team plans the feature's issues there before development starts.
+  Work on a planned feature starts from one of those issues.
 
 ### Sort the Issue (NVIDIA Engineers)
 
-When you create or update the Linear issue for your work, set its release and
-feature project yourself. You have the context; nobody sorts it after you.
+When you create or update the Linear issue for your work, set its project
+yourself. You have the context; nobody sorts it after you. The repo sets the
+release on merge.
 
 - **Content.** The Linear issue holds what the public PR must not: customer
   names, NVBug ids and repro steps, internal threads, and roadmap context. Keep
   that detail in an issue in your own team or DYN, never in DGH, which mirrors
   to public GitHub. The PR references the issue and describes only the
   technical change.
-- **Release.** Look up the Linear "Dynamo" release pipeline every time (Linear
-  MCP `list_releases`, archived off) and take the release in "In Development".
-  Never hardcode it or derive it from the version on `main`, which lags after a
-  branch cut. Two exceptions: a QA bug against the release in QA takes that
+- **Project.** Put the issue in the first of these that fits:
+  1. The feature project whose scope matches the change, planned or not.
+     Feature projects carry the newest label in the DYNO "Dynamo Roadmap"
+     project label group and are named by Roadmap ID (`R150-ROUT-03 Title`).
+  2. The workstream project, for bugs, tests and non-feature work in that
+     workstream.
+  3. No project, when neither fits. Never guess a feature project or create one.
+
+  Feature projects have no release milestones; never add one.
+- **Release.** Leave it to the repo: the Linear Release Sync workflow adds the
+  issue to the release in development when its PR merges to `main`. Set it
+  yourself only in two cases: a QA bug against the release in QA takes that
   release, and a cherry-pick takes each release it ships in, patch releases
-  included (see `dynamo-release-cherry-pick`). Never add a patch release
-  otherwise.
-- **Project.** Feature projects carry the newest label in the DYNO "Dynamo
-  Roadmap" project label group and are named `<window>-AREA-NN Title`. Pick the
-  one in the current window whose scope matches the work. If none clearly fits,
-  or the window has no projects yet, leave it empty; never guess or create one.
-  Add a milestone only when the project has one named exactly like the release.
-- **Write.** Use the Linear MCP `save_issue` with `project` and `addReleases`
-  (pass `id` for an existing issue), or `issueUpdate` with `addedReleaseIds`.
-  Never `setReleases` or a replacing `labels` / `labelIds`, which drop what
-  others added. Read the issue back to confirm the project and release stuck.
+  included (see `dynamo-release-cherry-pick`). Look the release up in the
+  Linear "Dynamo" release pipeline (Linear MCP `list_releases`, archived off);
+  never hardcode it or derive it from the version on `main`.
+- **Write.** Use the Linear MCP `save_issue` with `project` (pass `id` for an
+  existing issue). For the two release cases add `addReleases`, or
+  `issueUpdate` with `addedReleaseIds`. Never `setReleases` or a replacing
+  `labels` / `labelIds`, which drop what others added. Read the issue back to
+  confirm the project stuck.
 - The project is the feature: do not mark it with labels or sub-issues, and ask
   before moving an issue out of a project someone else set.
 
@@ -119,6 +125,10 @@ Add one using the table above and edit the PR description; editing re-triggers
 the check. If no issue exists yet, create one first (see Start From an Issue).
 Until the next minor release branch is cut the check passes with a warning;
 its message names the branch that switches it on.
+
+The check also warns, without blocking, when the linked Linear issue is in no
+project. Put the issue in its feature project or workstream project (see Sort
+the Issue); the warning clears on the next run.
 
 ## Related
 
