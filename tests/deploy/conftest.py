@@ -28,12 +28,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     defined in tests/conftest.py.
     """
     parser.addoption(
-        "--sidecar-multinode-manifest",
-        type=str,
-        default=None,
-        help="Fully configured SGLang multinode sidecar DGD for live acceptance tests.",
-    )
-    parser.addoption(
         "--framework",
         type=str,
         default=None,
