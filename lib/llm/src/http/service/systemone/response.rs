@@ -28,6 +28,10 @@ pub(super) fn error(dialect: Dialect, status: StatusCode, message: impl Into<Str
 }
 
 pub(super) fn attach_request_ids(response: &mut Response, request_id: &str) {
+    response.headers_mut().insert(
+        HeaderName::from_static("x-dynamo-systemone-version"),
+        HeaderValue::from_static("1"),
+    );
     let value =
         HeaderValue::from_str(request_id).unwrap_or_else(|_| HeaderValue::from_static("invalid"));
     response
