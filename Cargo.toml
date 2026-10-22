@@ -56,6 +56,10 @@ homepage = "https://github.com/ai-dynamo/dynamo"
 repository = "https://github.com/ai-dynamo/dynamo.git"
 keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
+# Draft validation-helper candidate; replace with its containing release before merge.
+[patch.crates-io]
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "ce9116bee5eed600d6a0073b7442d07de04eb232" }
+
 [workspace.dependencies]
 dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.6.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
