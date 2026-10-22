@@ -480,7 +480,7 @@ def create_shared_embedding_engine_client(
     if is_embedding_process_child():
         process_index, inputs, outputs = _decode_child_addresses(process_count)
         listener_fds = json.loads(os.environ.get(_LISTENER_FDS_ENV, "null"))
-        listeners = ()
+        listeners: tuple[socket.socket, ...] = ()
         if listener_fds is not None:
             input_fd, output_fd = listener_fds
             listeners = (

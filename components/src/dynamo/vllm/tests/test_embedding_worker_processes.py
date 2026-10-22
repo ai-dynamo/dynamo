@@ -42,11 +42,6 @@ def _vllm_config():
 
 
 def _core_engine_launch_object(engine_manager, addresses):
-    """The shape vLLM 0.28 yields: a ``CoreEngineLaunch`` dataclass.
-
-    Reproduced locally rather than imported, because the name does not exist
-    in the vLLM releases that yield the tuple below.
-    """
     return SimpleNamespace(
         engine_manager=engine_manager,
         coordinator=None,
@@ -56,7 +51,6 @@ def _core_engine_launch_object(engine_manager, addresses):
 
 
 def _core_engine_launch_tuple(engine_manager, addresses):
-    """The shape vLLM yields before 0.28."""
     return (engine_manager, None, addresses, None)
 
 

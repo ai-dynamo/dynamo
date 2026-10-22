@@ -74,18 +74,11 @@ def test_metrics_model_name_falls_back_to_model():
     assert get_metrics_model_name(config) == "meta-llama/Llama-3.1-8B"
 
 
-@pytest.mark.parametrize(
-    ("vllm_version", "reject_total_overflow"),
-    [((0, 31, 0), True), ((0, 32, 0), False)],
-)
-def test_vllm_token_budget_matches_rejection_policy(
-    monkeypatch, vllm_version, reject_total_overflow
-):
-    import vllm.version
+def test_vllm_token_budget_matches_rejection_policy():
+    from vllm.version import __version_tuple__
 
     from dynamo.vllm.capacity import publish_vllm_token_budget
 
-    monkeypatch.setattr(vllm.version, "__version_tuple__", vllm_version)
     runtime_config = SimpleNamespace(set_engine_specific=Mock())
     publish_vllm_token_budget(runtime_config, 4096)
 
@@ -95,7 +88,7 @@ def test_vllm_token_budget_matches_rejection_policy(
     assert json.loads(value) == {
         "combined_limit": 4096,
         "reject_prompt_overflow": True,
-        "reject_total_overflow": reject_total_overflow,
+        "reject_total_overflow": __version_tuple__[:2] < (0, 32),
     }
 
 

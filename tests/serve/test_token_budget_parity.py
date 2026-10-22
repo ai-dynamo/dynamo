@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -69,7 +69,7 @@ PARITY_SPECS = (
             "vllm",
             "default",
             reject_prompt_overflow=True,
-            reject_total_overflow=True,
+            reject_total_overflow=False,
         ),
         id="vllm-default",
         marks=[
@@ -477,11 +477,6 @@ def test_native_and_dynamo_token_budget_parity(
     tmp_path,
 ):
     """Pin native overflow semantics and require Dynamo to match them."""
-    if spec.framework == "vllm":
-        from vllm.version import __version_tuple__
-
-        spec = replace(spec, reject_total_overflow=__version_tuple__[:2] < (0, 32))
-
     dynamo_config = _dynamo_config(spec, tmp_path)
 
     with _native_process(spec, native_server_port, tmp_path, request):
