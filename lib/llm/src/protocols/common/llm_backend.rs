@@ -83,6 +83,12 @@ pub enum OutputType {
     Audio,
 }
 
+impl OutputType {
+    fn is_text(&self) -> bool {
+        matches!(self, Self::Text)
+    }
+}
+
 /// Image URL data for responses
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ImageUrlData {
@@ -224,7 +230,7 @@ pub struct LLMEngineOutput {
     pub text: Option<String>,
 
     /// Output type discriminator (text, image, video, audio)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "OutputType::is_text")]
     pub output_type: OutputType,
 
     /// Multimodal content parts (for non-text outputs)
@@ -573,44 +579,18 @@ mod tests {
         assert!(chunk.completion_usage.is_none());
     }
 
-    /// A per-token chunk goes on the request plane without nil keys for its unset
-    /// Options, and frames from producers that still send those nil keys decode to
-    /// the same value.
+    /// A token-only chunk goes on the wire as just its token IDs.
     #[test]
-    fn token_chunk_omits_unset_options_on_the_wire() {
+    fn token_chunk_omits_defaults_on_the_wire() {
         let chunk = LLMEngineOutput {
             token_ids: vec![42],
             ..Default::default()
         };
         let bytes = rmp_serde::to_vec_named(&chunk).unwrap();
         let wire: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
-        let mut keys: Vec<&str> = wire
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
-        assert_eq!(keys, ["output_type", "token_ids"]);
+        assert_eq!(wire, serde_json::json!({"token_ids": [42]}));
         assert_eq!(
             rmp_serde::from_slice::<LLMEngineOutput>(&bytes).unwrap(),
-            chunk
-        );
-
-        let with_nil_keys = rmp_serde::to_vec_named(&serde_json::json!({
-            "token_ids": [42],
-            "tokens": null,
-            "text": null,
-            "output_type": "text",
-            "cum_log_probs": null,
-            "log_probs": null,
-            "top_logprobs": null,
-            "finish_reason": null,
-            "index": null,
-        }))
-        .unwrap();
-        assert_eq!(
-            rmp_serde::from_slice::<LLMEngineOutput>(&with_nil_keys).unwrap(),
             chunk
         );
     }
