@@ -170,15 +170,14 @@ async fn shutdown_reaches_only_the_verified_instance() {
 }
 
 #[tokio::test]
-async fn uncertainty_does_not_shutdown_and_unmanaged_engine_failure_is_explicit() {
+async fn failed_recovery_does_not_shutdown_and_unmanaged_engine_failure_is_explicit() {
     let server = FakeServer::start(FakeVllm::default()).await;
     let (engine, controls) = started(&server).await;
-    controls[0].status.send_replace(KvStreamStatus::Uncertain {
-        reason: "empty replay timed out".into(),
-        is_terminal: false,
+    controls[0].status.send_replace(KvStreamStatus::Failed {
+        reason: "replay timed out".into(),
     });
     assert!(engine.wait_for_startup().await.is_err());
-    assert!(engine.recover_startup().await.unwrap().is_some());
+    assert!(engine.recover_startup().await.is_err());
     assert!(server.service.control_calls.lock().await.is_empty());
     let sources = engine.kv_event_sources().await.unwrap();
     for source in sources {
