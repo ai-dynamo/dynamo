@@ -166,7 +166,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Complete Pod template for this role. It must include a container named `main` with a non-empty `image`. Role templates do not inherit from each other or from the component-level template.
 
-    For SGLang multinode sidecar mode, declare `runtime` in the leader template. This selects native-engine defaults for the whole component, including workers without a sidecar. Declare `runtime` in the worker template for DP-attention; omit it for TP. Other multinode backends do not yet support sidecar mode.
+    For SGLang multinode sidecar mode, declare `runtime` in the leader template. This selects native-engine defaults for the whole component, including workers without a sidecar. Declare `runtime` in the worker template only when each follower has a local KV publisher. Other multinode backends do not yet support sidecar mode.
 
     LPX components may declare it only in the role template whose Pods host the engine: `conductor` for a hybrid build, or `agent` for an LPU-only single-model build with no conductor role; a speculative target's conductor takes none. Admission rejects it on other roles. Reconciliation rejects a build that does not match, and the DGD reports `status.state: failed`.
 
@@ -306,14 +306,14 @@ podTemplate:
 
 For SGLang multinode deployments, set `backendFramework: sglang` and choose one template form:
 
-- **Component `podTemplate`:** use `python3 -m sglang.launch_server` directly or as a single `sh -c` or `bash -c` command, optionally prefixed by `exec`. The operator adds `--nnodes`, `--node-rank`, and `--dist-init-addr`. It keeps `runtime` on the leader for TP and on every Pod when `--enable-dp-attention` is present. Model-path values can use Kubernetes variable references such as `$(MODEL_PATH)`; quote shell variable values such as `"$MODEL_PATH"`. Config files are supported when `--enable-dp-attention` is explicit. If the topology depends on a config file, expanded flags, or a custom launcher, use role templates.
+- **Component `podTemplate`:** use `python3 -m sglang.launch_server` directly or as a single `sh -c` or `bash -c` command, optionally prefixed by `exec`. The operator adds `--nnodes`, `--node-rank`, and `--dist-init-addr`. It keeps `runtime` on the leader and derives follower placement from TP, PP, attention-DP, attention-CP, and the local KV publisher configuration. Both `--attn-dp-size` (alias `--attention-data-parallel-size`) and legacy `--dp-size N --enable-dp-attention` are supported, including `--option=value` forms for sizes. It retains `runtime` on every follower when all followers publish, and removes it when none do. Mixed follower layouts are rejected because Grove and LeaderWorkerSet share one worker Pod template. Model-path values can use Kubernetes variable references such as `$(MODEL_PATH)`; quote shell variable values such as `"$MODEL_PATH"`. Config files, expanded topology values, and custom launchers require role templates because the operator cannot resolve publisher placement from them.
 - **Complete role templates:** define both launches and sidecar placement yourself. For DGDs with an operator origin version of 1.6.0 or later, the operator injects `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` for use in commands and arguments. Dynamo defaults apply only to declared `runtime` containers; engine images are not interpreted as Dynamo runtime versions.
 
 Topology aliases use the same origin-version gate in sidecar and integrated runtime modes. Component templates with an older or missing origin version retain provider-specific multinode arguments.
 
 Shared memory, compilation cache, provider startup ordering, and group management follow the existing multinode behavior. Worker `main` probes are removed; a worker's `runtime` keeps its independent sidecar probes. Prefill and decode components each render their own engine group.
 
-See the [TP component-template example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and [DP-attention role-template example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). DP-attention requires an engine with follower gRPC metadata and a sidecar that understands that engine's attention-DP rank metadata.
+See the [TP component-template example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and [DP-attention component-template example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). DP-attention requires an engine with follower gRPC metadata and a sidecar that understands that engine's attention-DP rank metadata.
 
 Set the engine launch configuration and sidecar command for your backend. See the [vLLM sidecar manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) for complete examples.
 
