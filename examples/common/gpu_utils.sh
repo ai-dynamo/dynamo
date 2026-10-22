@@ -118,20 +118,17 @@ build_trtllm_override_args_with_mem() {
     fi
 
     if [[ -n "$gpu_mem_json" ]]; then
-        if [[ -n "$merge_json" ]]; then
-            # Merge: GPU mem config first, then existing config
-            # Strip outer braces from existing JSON
-            local existing="${merge_json#\{}"
-            existing="${existing%\}}"
-            if [[ -n "${existing//[[:space:]]/}" ]]; then
-                echo "{${gpu_mem_json}, ${existing}}"
-            else
-                echo "{${gpu_mem_json}}"
-            fi
-        else
-            # Just GPU mem config
-            echo "{${gpu_mem_json}}"
-        fi
+        # Merge the nested KV settings instead of emitting duplicate JSON keys.
+        # An explicit profiling budget overrides the same key in the input.
+        python3 - "$gpu_mem_json" "$merge_json" <<'PYTHON'
+import json
+import sys
+
+config = {"kv_cache_config": {}}
+config.update(json.loads(sys.argv[2] or "{}"))
+config["kv_cache_config"].update(json.loads("{" + sys.argv[1] + "}")["kv_cache_config"])
+print(json.dumps(config))
+PYTHON
     elif [[ -n "$merge_json" ]]; then
         # No GPU override, return existing JSON as-is
         echo "$merge_json"
@@ -238,6 +235,53 @@ _gpu_utils_self_test() {
     echo "=== trtllm: no GPU override, but pass through existing JSON ==="
     result=$(build_trtllm_override_args_with_mem --merge-with-json '{"return_perf_metrics": true}')
     _assert "trtllm passthrough" '{"return_perf_metrics": true}' "$result"
+
+    # Regression: nested event settings must not discard profiling memory limits.
+    local budget_key budget_env
+    for budget_key in max_tokens max_gpu_total_bytes; do
+        if [[ "$budget_key" == max_tokens ]]; then
+            budget_env=_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS
+        else
+            budget_env=_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES
+        fi
+        echo ""
+        echo "=== trtllm: merge $budget_key with KV events ==="
+        result=$(
+            export "$budget_env=2048"
+            build_trtllm_override_args_with_mem --merge-with-json \
+                "{\"kv_cache_config\": {\"$budget_key\": 4096, \"enable_block_reuse\": true, \"kv_events_config\": {\"enable_kv_cache_events\": true, \"endpoint\": \"tcp://*:5557\"}}, \"guided_decoding_backend\": \"xgrammar\"}"
+        )
+        result=$(python3 - "$result" "$budget_key" <<'PYTHON'
+import json
+import sys
+
+
+def unique_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+config = json.loads(sys.argv[1], object_pairs_hook=unique_keys)
+expected = {
+    "kv_cache_config": {
+        sys.argv[2]: 2048,
+        "enable_block_reuse": True,
+        "kv_events_config": {
+            "enable_kv_cache_events": True,
+            "endpoint": "tcp://*:5557",
+        },
+    },
+    "guided_decoding_backend": "xgrammar",
+}
+print(config == expected)
+PYTHON
+        )
+        _assert "trtllm nested $budget_key merge" "True" "$result"
+    done
 
     echo ""
     echo "=========================================="
