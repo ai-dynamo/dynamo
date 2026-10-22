@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::Semaphore;
 
 use dynamo_kv_router::services::selection::{SelectionError, WorkerSelectionPolicyRegistry};
@@ -43,7 +43,7 @@ use crate::pod_discovery::PodDiscovery;
 use crate::render_http::RenderError;
 use crate::selector::{SelectRequest, Selector};
 use crate::sglang_renderer_client::SglangRendererClient;
-use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
+use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter, worker_request};
 use crate::vllm_render_client::VllmRenderClient;
 
 /// Resolve the request's scheduling policy class from the Dynamo metadata
@@ -82,6 +82,9 @@ pub struct EppRouter {
     // Kept alive for the lifetime of the router; the reconcile loop runs on it.
     _adapter: TopologyAdapter,
     reflector_ready: Arc<AtomicBool>,
+    /// Replication bootstrap readiness (replicated mode only): initial peer
+    /// discovery plus KV-index recovery, or authoritative no-peer bootstrap.
+    peer_ready: Option<Arc<AtomicBool>>,
     model_name: String,
     /// Bounds total concurrent in-flight `pick()`s. HTTP/2 stream multiplexing
     /// means the TCP-connection cap (`MAX_CONCURRENT_CONNECTIONS`) does NOT bound
@@ -124,28 +127,54 @@ impl EppRouter {
         };
         let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
         let reflector = Arc::new(reflector);
+        let peer_ready = selector.peer_ready();
         let defaults = RegistrationDefaults::from_config(&cfg);
-        let adapter =
+
+        if peer_ready.is_some() {
+            reflector.wait_until_ready().await?;
+            // Every initial worker must register (its ZMQ listener buffering)
+            // before the peer dump is fetched; a failure would open an event
+            // gap, so abort startup instead of recovering over it.
+            for worker in reflector.ready_workers() {
+                let worker_id = worker.worker_id;
+                selector
+                    .service
+                    .upsert_worker(worker_request(worker, &defaults))
+                    .await
+                    .with_context(|| {
+                        format!("pre-registering initial worker {worker_id} for bootstrap")
+                    })?;
+            }
+        }
+
+        let _adapter =
             TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
 
-        // Readiness is driven solely by the live pod+pool signal (see `is_ready`);
-        // we do not block startup on a schedulable worker. A valid, empty pool is
-        // ready immediately and returns 503 per-request until capacity appears.
+        if peer_ready.is_some() {
+            selector.run_bootstrap_recovery().await?;
+        }
+
         Ok(Self {
             renderer,
             reflector,
             selector,
-            _adapter: adapter,
+            _adapter,
             reflector_ready,
+            peer_ready,
             model_name: cfg.model_name,
             inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
         })
     }
 
-    /// Overall EPP readiness for the gRPC health signal: the pod reflector has
-    /// synced workers and resolved its InferencePool. Polled by the health mirror in `main`.
+    /// Overall EPP readiness: worker discovery is ready and replicated mode has
+    /// completed peer discovery plus KV-index recovery/bootstrap.
     pub fn is_ready(&self) -> bool {
-        self.reflector_ready.load(Ordering::Acquire)
+        compute_ready(
+            self.reflector_ready.load(Ordering::Acquire),
+            self.peer_ready
+                .as_ref()
+                .map(|ready| ready.load(Ordering::Acquire)),
+        )
     }
 
     /// Tokenize a chat body and resolve its routing inputs.
@@ -210,6 +239,11 @@ impl EppRouter {
             endpoint_in_subset(endpoint, &candidates, &candidate_ips)
         })
     }
+}
+
+/// Overall EPP health: pod readiness AND replication bootstrap readiness.
+fn compute_ready(pod_ready: bool, peer_ready: Option<bool>) -> bool {
+    pod_ready && peer_ready.unwrap_or(true)
 }
 
 /// True if a scheme-less `ip:port` endpoint is covered by an Envoy subset,
