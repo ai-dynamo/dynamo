@@ -3,10 +3,43 @@
 """No-GPU VMM ownership, admission and rollback tests with a fake CUDA driver."""
 
 import ctypes
+import importlib.util
+import sys
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
-from kvbm.vllm_integration import gpu_mnnvl as m
+
+# This helper is stdlib-only. Marker collection must not import the optional
+# KVBM/vLLM packages. Flat component staging resolves the installed package path
+# without executing its __init__; missing or broken source still fails loudly.
+_helper_relative = Path("lib/bindings/kvbm/python/kvbm/vllm_integration/gpu_mnnvl.py")
+_helper_file = next(
+    (
+        parent / _helper_relative
+        for parent in Path(__file__).resolve().parents
+        if (parent / _helper_relative).is_file()
+    ),
+    None,
+)
+if _helper_file is None:
+    _package = importlib.util.find_spec("kvbm")
+    if _package is None or _package.submodule_search_locations is None:
+        raise ModuleNotFoundError(
+            "KVBM fabric helper source is unavailable", name="kvbm"
+        )
+    _locations = list(_package.submodule_search_locations)
+    if len(_locations) != 1:
+        raise RuntimeError("One unambiguous KVBM helper source is required")
+    _helper_file = Path(_locations[0]) / "vllm_integration/gpu_mnnvl.py"
+_helper_spec = importlib.util.spec_from_file_location(
+    __name__ + "._gpu_mnnvl", _helper_file
+)
+if _helper_spec is None or _helper_spec.loader is None:
+    raise RuntimeError("KVBM fabric helper source cannot be loaded")
+m = importlib.util.module_from_spec(_helper_spec)
+sys.modules[_helper_spec.name] = m
+_helper_spec.loader.exec_module(m)
 
 pytestmark = [
     pytest.mark.post_merge,

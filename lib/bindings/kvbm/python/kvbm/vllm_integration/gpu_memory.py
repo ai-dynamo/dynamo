@@ -65,7 +65,10 @@ def import_ipc(data: dict, shape: tuple[int, int]) -> torch.Tensor:
     device = torch.cuda.current_device()
     if data.get("gpu_uuid") != str(torch.cuda.get_device_properties(device).uuid):
         raise ValueError("GPU cache owner and worker must use the same physical GPU")
-    decode = lambda name: base64.b64decode(data[name], validate=True)
+
+    def decode(name):
+        return base64.b64decode(data[name], validate=True)
+
     result = rebuild_cuda_tensor(
         torch.Tensor,
         tuple(data["shape"]),

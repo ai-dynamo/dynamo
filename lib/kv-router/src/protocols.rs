@@ -3037,7 +3037,6 @@ mod tests {
             };
             assert_eq!(legacy.reset_scope(), Ok(Some(ResetScope::All)));
             assert_eq!(legacy.targets_primary(), Ok(tier != StorageTier::GpuDirect));
-
         }
     }
 
