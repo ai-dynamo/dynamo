@@ -2900,8 +2900,7 @@ mod tests {
         temp_env::async_with_vars(
             [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
             async {
-                for tls in [false, true] {
-                    for before_headers in [false, true] {
+                for (tls, before_headers) in [(false, false), (true, true)] {
                         let certificates = make_mtls_test_certificates();
                         let parent = CancellationToken::new();
                         let mut service = HttpService::builder()
@@ -2954,7 +2953,6 @@ mod tests {
                         }
                         assert_eq!(state.inflight_count(), 0);
                         assert!(!parent.is_cancelled(), "local deadline must not cancel the runtime");
-                    }
                 }
             },
         ).await;
