@@ -19,8 +19,9 @@ use std::sync::{Arc, OnceLock};
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::{
-    ModelRuntimeConfig, SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1, TokenizerBackend,
-    VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    DecisionExecutionProfile, ModelRuntimeConfig, SGLANG_GENERATE_CAPABILITY,
+    SGLANG_SYSTEMONE_SERIAL_V1, TokenizerBackend, VLLM_CAUSAL_DECISION_V1,
+    VLLM_INFERENCE_V1_GENERATE_CAPABILITY, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
@@ -1271,6 +1272,58 @@ impl ModelDeploymentCard {
             && !self.runtime_config.runtime_data.contains_key("spec_decode")
     }
 
+    pub(crate) fn decision_execution_profile(&self) -> Option<DecisionExecutionProfile> {
+        let mut profiles = [
+            DecisionExecutionProfile::VllmD3V1,
+            DecisionExecutionProfile::VllmClefFlashV1,
+            DecisionExecutionProfile::VllmClefOmniV1,
+            DecisionExecutionProfile::VllmLiquidV1,
+            DecisionExecutionProfile::VllmDiffusionV1,
+        ]
+        .into_iter()
+        .filter(|profile| {
+            self.runtime_config
+                .supports_runtime_capability(profile.generate_capability())
+        });
+        if let Some(profile) = profiles.next() {
+            if profiles.next().is_some() {
+                return None;
+            }
+            let supported_surface = if profile.is_head() {
+                self.model_input == ModelInput::Text
+                    && self.model_type.supports_classify()
+                    && self.model_type.supports_pooling()
+            } else {
+                matches!(self.model_input, ModelInput::Text | ModelInput::Tokens)
+                    && (self.model_type.supports_chat() || self.model_type.supports_completions())
+            };
+            return (supported_surface
+                && self.worker_type == Some(crate::worker_type::WorkerType::Aggregated)
+                && self.runtime_config.data_parallel_size == 1
+                && self.needs.is_empty()
+                && self.lora.is_none()
+                && self.migration_limit == 0
+                && !self.runtime_config.runtime_data.contains_key("spec_decode"))
+            .then_some(profile);
+        }
+        if self.is_systemone_serial_eligible() {
+            return Some(DecisionExecutionProfile::SglangSerialV1);
+        }
+        (self
+            .runtime_config
+            .supports_runtime_capability(VLLM_CAUSAL_DECISION_V1)
+            && self
+                .runtime_config
+                .supports_runtime_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            && self.model_input == ModelInput::Tokens
+            && self.worker_type == Some(crate::worker_type::WorkerType::Aggregated)
+            && self.needs.is_empty()
+            && self.lora.is_none()
+            && self.migration_limit == 0
+            && !self.runtime_config.runtime_data.contains_key("spec_decode"))
+        .then_some(DecisionExecutionProfile::VllmCausalV1)
+    }
+
     pub fn mdcsum(&self) -> &str {
         self.checksum
             .get_or_init(|| {
@@ -1407,6 +1460,17 @@ impl ModelDeploymentCard {
                 // Preserve legacy checksums when serial scoring is unavailable.
                 if self.is_systemone_serial_eligible() {
                     bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true");
+                }
+                if self.decision_execution_profile() == Some(DecisionExecutionProfile::VllmCausalV1) {
+                    bytes_to_hash.extend_from_slice(b"\0vllm_causal_decision_v1\0true");
+                }
+                if let Some(profile) = self.decision_execution_profile().filter(|profile| profile.is_head()) {
+                    bytes_to_hash.extend_from_slice(b"\0decision_head\0");
+                    bytes_to_hash.extend_from_slice(profile.generate_capability().as_bytes());
+                }
+                if let Some(profile) = self.decision_execution_profile().filter(|profile| profile.is_native_read()) {
+                    bytes_to_hash.extend_from_slice(b"\0decision_read\0");
+                    bytes_to_hash.extend_from_slice(profile.generate_capability().as_bytes());
                 }
 
                 // The Qwen video contract is resolved per cohort, not per card.
@@ -3684,6 +3748,133 @@ mod ownership_tests {
 
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn native_decision_profiles_require_unique_eligible_revision_bound_cards() {
+        use crate::worker_type::WorkerType;
+        fn card(profile: DecisionExecutionProfile) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("native-model");
+            card.model_input = if profile.is_head() {
+                ModelInput::Text
+            } else {
+                ModelInput::Tokens
+            };
+            card.model_type = if profile.is_head() {
+                ModelType::Classify | ModelType::Pooling
+            } else {
+                ModelType::Chat
+            };
+            card.worker_type = Some(WorkerType::Aggregated);
+            card.runtime_config.data_parallel_size = 1;
+            card.runtime_config
+                .runtime_data
+                .insert(profile.generate_capability().into(), true.into());
+            card
+        }
+        for profile in [
+            DecisionExecutionProfile::VllmD3V1,
+            DecisionExecutionProfile::VllmClefFlashV1,
+            DecisionExecutionProfile::VllmClefOmniV1,
+            DecisionExecutionProfile::VllmLiquidV1,
+            DecisionExecutionProfile::VllmDiffusionV1,
+        ] {
+            let enabled = card(profile);
+            assert_eq!(enabled.decision_execution_profile(), Some(profile));
+            let mut missing = card(profile);
+            missing
+                .runtime_config
+                .runtime_data
+                .remove(profile.generate_capability());
+            let mut disabled = card(profile);
+            disabled
+                .runtime_config
+                .runtime_data
+                .insert(profile.generate_capability().into(), false.into());
+            assert_eq!(missing.mdcsum(), disabled.mdcsum());
+            assert_ne!(enabled.mdcsum(), missing.mdcsum());
+            let mut ambiguous = card(profile);
+            let other = if profile == DecisionExecutionProfile::VllmLiquidV1 {
+                DecisionExecutionProfile::VllmDiffusionV1
+            } else {
+                DecisionExecutionProfile::VllmLiquidV1
+            };
+            ambiguous
+                .runtime_config
+                .runtime_data
+                .insert(other.generate_capability().into(), true.into());
+            assert_eq!(ambiguous.decision_execution_profile(), None);
+            for mutate in [
+                (|c: &mut ModelDeploymentCard| c.worker_type = Some(WorkerType::Decode))
+                    as fn(&mut ModelDeploymentCard),
+                |c| c.runtime_config.data_parallel_size = 2,
+                |c| c.needs = vec![vec![WorkerType::Prefill]],
+                |c| c.migration_limit = 1,
+                |c| {
+                    c.runtime_config
+                        .runtime_data
+                        .insert("spec_decode".into(), true.into());
+                },
+            ] {
+                let mut invalid = card(profile);
+                mutate(&mut invalid);
+                assert_eq!(invalid.decision_execution_profile(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn vllm_decision_contract_requires_eligible_aggregated_workers() {
+        fn card(configure: impl FnOnce(&mut ModelDeploymentCard)) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.model_input = ModelInput::Tokens;
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.runtime_config
+                .runtime_data
+                .insert("vllm_inference_v1_generate".into(), true.into());
+            card.runtime_config
+                .runtime_data
+                .insert("vllm_causal_decision_v1".into(), true.into());
+            configure(&mut card);
+            card
+        }
+
+        let enabled = card(|_| {});
+        assert_eq!(
+            enabled.decision_execution_profile(),
+            Some(crate::local_model::runtime_config::DecisionExecutionProfile::VllmCausalV1),
+        );
+        let disabled = card(|card| {
+            card.runtime_config
+                .runtime_data
+                .remove("vllm_causal_decision_v1");
+        });
+        let explicit_false = card(|card| {
+            card.runtime_config
+                .runtime_data
+                .insert("vllm_causal_decision_v1".into(), false.into());
+        });
+        assert_eq!(disabled.mdcsum(), explicit_false.mdcsum());
+        assert_ne!(enabled.mdcsum(), disabled.mdcsum());
+
+        let unsupported: [fn(&mut ModelDeploymentCard); 5] = [
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .remove("vllm_inference_v1_generate");
+            },
+            |card| card.worker_type = Some(crate::worker_type::WorkerType::Decode),
+            |card| card.needs = vec![vec![crate::worker_type::WorkerType::Prefill]],
+            |card| card.migration_limit = 1,
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .insert("spec_decode".into(), serde_json::json!({}));
+            },
+        ];
+        for configure in unsupported {
+            assert_eq!(card(configure).decision_execution_profile(), None);
+        }
     }
 
     #[test]

@@ -75,6 +75,9 @@ from .capacity import (
     publish_vllm_token_budget,
 )
 from .constants import MX_LOAD_FORMATS
+from .decision_execution import publish_vllm_decision_capability
+from .decision_heads import publish_decision_head_capability
+from .decision_reads import DIFFUSION_PROFILE, LIQUID_PROFILE
 from .dp_topology import get_dp_range_for_worker
 from .embedding_worker_processes import (
     EmbeddingEngineCleanupResource,
@@ -880,6 +883,8 @@ async def register_vllm_model(
     vllm_config: VllmConfig,
     worker_type: WorkerType,
     needs: list[list[WorkerType]] | None = None,
+    decision_head_profile: str | None = None,
+    decision_read_profile: str | None = None,
 ) -> None:
     """
     Helper function to register a vLLM model with runtime configuration.
@@ -900,6 +905,8 @@ async def register_vllm_model(
             frontend's model-serving-readiness check.
         needs: Peer worker types required to serve traffic, in DNF form
             (list of alternative AND-sets).
+        decision_head_profile: Native head profile initialized by the pooling handler.
+        decision_read_profile: Native generative profile initialized by the decode handler.
     """
     runtime_config = ModelRuntimeConfig()
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
@@ -920,14 +927,43 @@ async def register_vllm_model(
         vllm_config.lora_config
         and getattr(vllm_config.lora_config, "enable_tower_connector_lora", False)
     )
-    if publish_engine_generate_capability(
+    native_generate_supported = publish_engine_generate_capability(
         runtime_config,
         model_input,
         model_type,
         worker_type,
         tower_connector_lora_enabled,
-    ):
+    )
+    if native_generate_supported:
         logging.info("Published vLLM engine-native generate capability")
+    if publish_vllm_decision_capability(
+        runtime_config,
+        model_input,
+        model_type,
+        worker_type,
+        vllm_config,
+        config,
+        native_generate_supported=native_generate_supported,
+        needs=needs,
+    ):
+        logger.info("Published vLLM causal decision capability")
+    if (
+        model_input == ModelInput.Text
+        and model_type.supports_classify()
+        and model_type.supports_pooling()
+        and worker_type == WorkerType.Aggregated
+        and not any(needs or ())
+        and publish_decision_head_capability(runtime_config, decision_head_profile)
+    ):
+        logger.info("Published vLLM native head decision capability")
+    if (
+        worker_type == WorkerType.Aggregated
+        and (model_type.supports_chat() or model_type == ModelType.Completions)
+        and not any(needs or ())
+        and decision_read_profile in (LIQUID_PROFILE, DIFFUSION_PROFILE)
+    ):
+        runtime_config.set_engine_specific(decision_read_profile, "true")
+        logger.info("Published vLLM native generative decision capability")
     if model_type != ModelType.Embedding:
         publish_vllm_token_budget(
             runtime_config, vllm_config.model_config.max_model_len

@@ -21,6 +21,15 @@ use tokio::sync::{Notify, Semaphore};
 #[path = "tests/preflight.rs"]
 mod preflight;
 
+#[path = "tests/vllm.rs"]
+mod vllm;
+
+#[path = "tests/head.rs"]
+mod head;
+
+#[path = "tests/native_read.rs"]
+mod native_read;
+
 #[tokio::test]
 async fn empty_canonical_questions_are_rejected_before_admission() {
     let service = super::service_v2::HttpService::builder().build().unwrap();
@@ -222,11 +231,12 @@ fn prepared_noul_branch(index: usize) -> PreparedBranch {
     )
     .unwrap();
     PreparedBranch {
+        profile: super::DecisionExecutionProfile::SglangSerialV1,
         index,
         temperature: 1.0,
         prompt_ids,
         label_ids,
-        native: Some(native),
+        native: Some(super::PreparedScoringRequest::Sglang(native)),
     }
 }
 
@@ -382,9 +392,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let index: usize = request.id().rsplit('-').next().unwrap().parse().unwrap();
-        let native = request.extra_args.as_ref().unwrap()["sglang_tito"].clone();
-        let label_ids: Vec<u32> =
-            serde_json::from_value(native["token_ids_logprob"].clone()).unwrap();
+        let is_vllm = request
+            .extra_args
+            .as_ref()
+            .unwrap()
+            .get("vllm_tito")
+            .is_some();
+        let native = request.extra_args.as_ref().unwrap()
+            [if is_vllm { "vllm_tito" } else { "sglang_tito" }]
+        .clone();
+        let labels = if is_vllm {
+            &native["sampling_params"]["logprob_token_ids"]
+        } else {
+            &native["token_ids_logprob"]
+        };
+        let label_ids: Vec<u32> = serde_json::from_value(labels.clone()).unwrap();
         let stream_context = Context::new(()).context();
         self.observations.lock().unwrap().push(ObservedBranch {
             index,
@@ -457,7 +479,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
         }
         Ok(ResponseStream::new(
-            Box::pin(stream::iter([terminal_output(&label_ids)])),
+            Box::pin(stream::iter([if is_vllm {
+                vllm::terminal_output(&label_ids, request.token_ids.len())
+            } else {
+                terminal_output(&label_ids)
+            }])),
             stream_context,
         ))
     }
@@ -473,10 +499,13 @@ fn selection(engine: Arc<TestEngine>) -> SystemOneExecutionSelection {
     card.runtime_config.data_parallel_size = 4;
     let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
     SystemOneExecutionSelection {
+        profile: super::DecisionExecutionProfile::SglangSerialV1,
         canonical_model: "test-model".to_string(),
-        engine,
+        executor: crate::discovery::DecisionExecutor::Token {
+            engine,
+            preprocessor,
+        },
         card,
-        preprocessor,
         admitted_ids: None,
     }
 }
@@ -666,7 +695,7 @@ async fn placement_mismatch_fails_with_unavailable_without_answers() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = response_body(response).await;
     assert!(body.get("answers").is_none());
-    assert_eq!(body["detail"], "SGLang scoring worker is unavailable");
+    assert_eq!(body["detail"], "decision scoring worker is unavailable");
     assert!(parent.is_killed());
     assert_eq!(semaphore.available_permits(), 2);
 }

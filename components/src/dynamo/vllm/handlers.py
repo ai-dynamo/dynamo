@@ -102,6 +102,14 @@ from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
 from .constants import MX_LOAD_FORMATS, DisaggregationMode, EmbeddingTransferMode
+from .decision_reads import (
+    DIFFUSION_PROFILE,
+    LIQUID_PROFILE,
+    PINNED_VLLM_COMMIT,
+    ReadExecutionAdapter,
+    ReadRuntimeError,
+    ReadValidationError,
+)
 from .dp_topology import get_dp_range_for_worker
 from .engine_generate import (
     adapt_engine_generate_request,
@@ -3779,11 +3787,67 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             encode_worker_client=encode_worker_client,
         )
         self._first_token_source = first_token_source
+        self.decision_read_adapter: ReadExecutionAdapter | None = None
+        self._decision_read_initialization_attempted = False
+        self._decision_read_initialization_lock = asyncio.Lock()
         self._external_encoder_handoff_consumer: Optional[
             ExternalEncoderHandoffConsumer
         ] = None
 
+    @property
+    def decision_read_profile(self) -> str | None:
+        adapter = self.decision_read_adapter
+        return adapter.profile if adapter is not None else None
+
+    async def initialize_decision_read(self) -> None:
+        async with self._decision_read_initialization_lock:
+            if self._decision_read_initialization_attempted:
+                return
+            self._decision_read_initialization_attempted = True
+            architecture = getattr(self.model_config, "architecture", None)
+            profile = {
+                "Lfm2VlForConditionalGeneration": LIQUID_PROFILE,
+                "DiffusionGemmaForBlockDiffusion": DIFFUSION_PROFILE,
+            }.get(architecture)
+            if profile is None:
+                return
+            try:
+                config = self.config
+                if (
+                    config.disaggregation_mode != DisaggregationMode.AGGREGATED
+                    or config.enable_rl
+                    or config.route_to_encoder
+                    or config.custom_encoder_class is not None
+                    or config.enable_multimodal
+                    or config.realtime
+                ):
+                    raise ReadRuntimeError(
+                        "worker configuration does not support native decisions"
+                    )
+                self.decision_read_adapter = await ReadExecutionAdapter.create(
+                    self.engine_client,
+                    profile,
+                    source_commit=PINNED_VLLM_COMMIT,
+                    abort_monitor=self._abort_monitor,
+                )
+            except ReadRuntimeError as cause:
+                logger.warning("vLLM native generative decisions disabled: %s", cause)
+
     async def generate(self, request, context):
+        if "decision_read" in request:
+            adapter = self.decision_read_adapter
+            if adapter is None:
+                raise ReadValidationError(
+                    "native decision read is not available on this worker"
+                )
+            yield await adapter.execute(
+                request,
+                context,
+                request_id=context.id(),
+                cancelled=lambda: context.is_stopped() or context.is_killed(),
+                trace_headers=context.trace_headers(),
+            )
+            return
         normalize_request_token_ids(request)
         settings = _backend_metadata_upload_settings(request)
         if settings is not None and "kind" in settings and self.use_vllm_tokenizer:

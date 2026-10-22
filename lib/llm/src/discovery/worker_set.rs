@@ -22,6 +22,7 @@ use crate::{
     kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
+    protocols::decision_head::DecisionHeadStreamingEngine,
     types::{
         RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
@@ -226,6 +227,9 @@ pub struct WorkerSet {
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
+    pub(crate) decision_head_engine: Option<DecisionHeadStreamingEngine>,
+    pub(crate) decision_read_engine:
+        Option<crate::protocols::decision_read::DecisionReadStreamingEngine>,
 
     /// Cached tokenizer and prompt formatter for the System One API.
     pub(crate) systemone_preprocessor: Option<Arc<OpenAIPreprocessor>>,
@@ -276,6 +280,8 @@ impl WorkerSet {
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
+            decision_head_engine: None,
+            decision_read_engine: None,
             systemone_preprocessor: None,
             load_context: None,
             load_thresholds: None,
@@ -399,6 +405,8 @@ impl WorkerSet {
             || self.has_audios_engine()
             || self.has_realtime_engine()
             || self.has_generate_engine()
+            || self.decision_head_engine.is_some()
+            || self.decision_read_engine.is_some()
     }
 
     /// Whether this set tracks an Encode worker. Encode WorkerSets carry
@@ -521,6 +529,8 @@ impl WorkerSet {
         retain_for_requests!(tensor_engine);
         retain_for_requests!(realtime_engine);
         retain_for_requests!(generate_engine);
+        retain_for_requests!(decision_head_engine);
+        retain_for_requests!(decision_read_engine);
         self.allocator_trim_wrapped = true;
     }
 
@@ -557,6 +567,8 @@ impl WorkerSet {
             // inject the adapter identity. Fail closed instead of serving the base weights.
             realtime_engine: None,
             generate_engine,
+            decision_head_engine: None,
+            decision_read_engine: None,
             systemone_preprocessor: None,
             load_context: self.load_context.clone(),
             load_thresholds: self.load_thresholds.clone(),

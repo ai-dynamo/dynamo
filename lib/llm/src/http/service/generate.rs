@@ -616,6 +616,27 @@ fn preprocessed_from_generate(
     )
 }
 
+pub(super) fn preprocessed_decision_request(
+    request: GenerateRequest,
+    model: &str,
+    request_id: &str,
+    kv_cache_block_size: u32,
+    tracker: Arc<RequestTracker>,
+) -> anyhow::Result<PreprocessedRequest> {
+    preprocessed_from_generate_with_tracker(
+        request,
+        model,
+        None,
+        request_id,
+        GenerateRoutingMetadata {
+            kv_cache_block_size,
+            tower_connector_lora_enabled: false,
+            lora_name: None,
+        },
+        tracker,
+    )
+}
+
 fn preprocessed_from_generate_with_tracker(
     request: GenerateRequest,
     model: &str,

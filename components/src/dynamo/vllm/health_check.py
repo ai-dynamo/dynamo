@@ -61,8 +61,11 @@ def _get_bos_token_id_from_engine(engine_client) -> int:
 def _make_default_payload(
     engine_client: Optional["AsyncLLM"], use_text_input: bool
 ) -> dict:
+    # Older optional runtimes may not expose diffusion model metadata.
+    model_config = getattr(engine_client, "model_config", None)
+    is_diffusion = getattr(model_config, "is_diffusion", False) is True
     sampling_options = {
-        "temperature": 0.0,
+        "temperature": 1.0 if is_diffusion else 0.0,
     }
 
     stop_conditions = {

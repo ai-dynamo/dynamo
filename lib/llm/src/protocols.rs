@@ -14,6 +14,8 @@ pub mod agents;
 pub mod anthropic;
 pub mod codec;
 pub mod common;
+pub(crate) mod decision_head;
+pub(crate) mod decision_read;
 pub mod openai;
 pub mod response_merge;
 pub mod sglang;

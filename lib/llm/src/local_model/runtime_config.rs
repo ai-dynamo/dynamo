@@ -182,6 +182,54 @@ pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 /// Worker-confirmed isolated scheduling for zero-decode candidate scoring.
 pub const SGLANG_SYSTEMONE_SERIAL_V1: &str = "sglang_systemone_serial_v1";
 
+/// Worker-confirmed raw requested-ID scoring through the Python vLLM worker.
+pub const VLLM_CAUSAL_DECISION_V1: &str = "vllm_causal_decision_v1";
+pub const VLLM_D3_DECISION_V1: &str = "vllm_d3_decision_v1";
+pub const VLLM_CLEF_FLASH_DECISION_V1: &str = "vllm_clef_flash_joint_decision_v1";
+pub const VLLM_CLEF_OMNI_DECISION_V1: &str = "vllm_clef_omni_joint_decision_v1";
+pub const VLLM_LIQUID_DECISION_V1: &str = "vllm_liquid_decision_v1";
+pub const VLLM_DIFFUSION_DECISION_V1: &str = "vllm_diffusion_canvas_decision_v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DecisionExecutionProfile {
+    SglangSerialV1,
+    VllmCausalV1,
+    VllmD3V1,
+    VllmClefFlashV1,
+    VllmClefOmniV1,
+    VllmLiquidV1,
+    VllmDiffusionV1,
+}
+
+impl DecisionExecutionProfile {
+    pub(crate) fn generate_capability(self) -> &'static str {
+        match self {
+            Self::SglangSerialV1 => SGLANG_GENERATE_CAPABILITY,
+            Self::VllmCausalV1 => VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+            Self::VllmD3V1 => VLLM_D3_DECISION_V1,
+            Self::VllmClefFlashV1 => VLLM_CLEF_FLASH_DECISION_V1,
+            Self::VllmClefOmniV1 => VLLM_CLEF_OMNI_DECISION_V1,
+            Self::VllmLiquidV1 => VLLM_LIQUID_DECISION_V1,
+            Self::VllmDiffusionV1 => VLLM_DIFFUSION_DECISION_V1,
+        }
+    }
+
+    pub(crate) fn is_head(self) -> bool {
+        matches!(
+            self,
+            Self::VllmD3V1 | Self::VllmClefFlashV1 | Self::VllmClefOmniV1
+        )
+    }
+
+    pub(crate) fn is_native_read(self) -> bool {
+        matches!(self, Self::VllmLiquidV1 | Self::VllmDiffusionV1)
+    }
+
+    pub(crate) fn is_token_scoring(self) -> bool {
+        matches!(self, Self::SglangSerialV1 | Self::VllmCausalV1)
+    }
+}
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
