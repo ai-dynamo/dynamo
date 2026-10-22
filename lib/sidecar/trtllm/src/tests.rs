@@ -197,6 +197,7 @@ impl pb::control_server::Control for FakeTrtllm {
             } else {
                 Some(4096)
             },
+            supports_multimodal: Some(false),
             ..Default::default()
         }))
     }
@@ -875,6 +876,25 @@ async fn a_configured_context_length_survives_a_server_without_control() {
         config.llm.expect("llm registration").context_length,
         Some(8192)
     );
+
+    let mut image_request = request();
+    add_images(&mut image_request, ["https://example.com/image.png"]);
+    let error = match engine
+        .generate(
+            image_request,
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+        )
+        .await
+    {
+        Ok(_) => panic!("a server without capability discovery must reject images"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise image support")
+    );
+    assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
 }
 
 /// Shutdown has to terminate in-flight requests: the worker cannot drain if a

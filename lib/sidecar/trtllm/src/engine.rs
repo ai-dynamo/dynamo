@@ -4,6 +4,7 @@
 //! Dynamo backend for TensorRT-LLM's OpenEngine (`openengine.v1`) gRPC server.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -14,15 +15,22 @@ use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
 };
 use futures::stream::BoxStream;
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, OnceCell};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, ModelLimits, TrtllmClient};
+use crate::client::{self, ModelInfoResponse, ModelLimits, TrtllmClient};
 use crate::convert::{ResponseState, build_generate_request};
 use crate::model::ConfiguredModel;
 
 const ALREADY_STARTED: &str = "TensorRT-LLM sidecar has already started";
+const DISCOVERY_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+struct FailedDiscovery {
+    error: DynamoError,
+    retry_at: Instant,
+}
 
 /// Terminal output emitted when a request is cancelled, carrying the usage
 /// accumulated so far.
@@ -40,6 +48,8 @@ pub struct TrtllmSidecarEngine {
     /// Connection and limits may be discovered in the cancellable sidecar bootstrap.
     connection: OnceCell<(TrtllmClient, ModelLimits)>,
     started: OnceCell<()>,
+    rediscovered_limits: OnceCell<ModelLimits>,
+    discovery_failure: Mutex<Option<FailedDiscovery>>,
     cancel: CancellationToken,
 }
 
@@ -57,6 +67,8 @@ impl TrtllmSidecarEngine {
             mode,
             connection: OnceCell::new(),
             started: OnceCell::new(),
+            rediscovered_limits: OnceCell::new(),
+            discovery_failure: Mutex::new(None),
             cancel: CancellationToken::new(),
         }
     }
@@ -165,6 +177,65 @@ impl TrtllmSidecarEngine {
         };
         Ok((engine, config))
     }
+    async fn limits_for_request(
+        &self,
+        client: &TrtllmClient,
+        initial: ModelLimits,
+        request: &PreprocessedRequest,
+    ) -> Result<ModelLimits, DynamoError> {
+        if let Some(limits) = self.rediscovered_limits.get() {
+            return Ok(*limits);
+        }
+        let has_images = request.multi_modal_data.as_ref().is_some_and(|media| {
+            media
+                .get("image_url")
+                .is_some_and(|images| !images.is_empty())
+        });
+        if !has_images || initial.supports_image.is_some() {
+            return Ok(initial);
+        }
+
+        // Serialize attempts and retain failures through the retry delay, so waiters
+        // share a failed RPC instead of each spending another RPC timeout.
+        let arrived_at = Instant::now();
+        let mut failure = self.discovery_failure.lock().await;
+        if let Some(failure) = &*failure
+            && arrived_at < failure.retry_at
+        {
+            return Err(failure.error.clone());
+        }
+        let result: Result<ModelLimits, DynamoError> = self
+            .rediscovered_limits
+            .get_or_try_init(|| async {
+                match client.model_limits(&self.model.source).await? {
+                    ModelInfoResponse::Available(mut reported) => {
+                        if let Some(engine_context_length) = reported.context_length
+                            && Some(engine_context_length) != initial.context_length
+                        {
+                            tracing::warn!(
+                                configured_context_length = ?initial.context_length,
+                                engine_context_length,
+                                "--context-length disagrees with the context length TensorRT-LLM \
+                                 reported; using the configured --context-length"
+                            );
+                        }
+                        reported.context_length = initial.context_length;
+                        Ok(reported)
+                    }
+                    ModelInfoResponse::Unsupported(_) => Ok(ModelLimits {
+                        supports_image: Some(false),
+                        ..initial
+                    }),
+                }
+            })
+            .await
+            .copied();
+        *failure = result.as_ref().err().map(|error| FailedDiscovery {
+            error: error.clone(),
+            retry_at: Instant::now() + DISCOVERY_RETRY_DELAY,
+        });
+        result
+    }
 
     async fn bootstrap(
         (engine, config): (Self, WorkerConfig),
@@ -210,20 +281,26 @@ impl TrtllmSidecarEngine {
             // `Watch`). Do not grow a second readiness protocol here.
             Some(configured) => {
                 let reported = match client.model_limits(&model.source).await {
-                    Ok(reported) => reported,
+                    Ok(ModelInfoResponse::Available(reported)) => reported,
+                    Ok(ModelInfoResponse::Unsupported(status)) => {
+                        tracing::warn!(
+                            code = ?status.code(),
+                            message = status.message(),
+                            configured_context_length = configured,
+                            "Control.GetModelInfo is unavailable; using the configured \
+                             --context-length"
+                        );
+                        ModelLimits {
+                            supports_image: Some(false),
+                            ..Default::default()
+                        }
+                    }
                     Err(error) => {
-                        // Tolerated because some OpenEngine servicer builds ship
-                        // without Control, which is what --context-length exists
-                        // for. UNIMPLEMENTED also fits an engine left on the
-                        // default --grpc-protocol smg, where Generate will fail
-                        // too -- name both so the log points at the real fix.
                         tracing::warn!(
                             %error,
                             configured_context_length = configured,
-                            "Control.GetModelInfo failed; using the configured \
-                             --context-length. If this is UNIMPLEMENTED, the engine either \
-                             ships no Control service or was started without \
-                             --grpc-protocol openengine"
+                            "Control.GetModelInfo failed transiently; using the configured \
+                             --context-length and deferring media capability discovery"
                         );
                         ModelLimits::default()
                     }
@@ -304,13 +381,6 @@ impl LLMEngine for TrtllmSidecarEngine {
             .filter(|_| self.started.initialized())
             .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let proto_request = build_generate_request(
-            &request,
-            &request_id,
-            &self.model.source,
-            Some(*limits),
-            self.mode,
-        )?;
         let mut state = ResponseState::new(&request, self.mode);
         // A decode request that took a handoff has KV transferred into it, and
         // the transceiver releases those blocks when the engine finishes the
@@ -328,6 +398,24 @@ impl LLMEngine for TrtllmSidecarEngine {
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
         let shutdown = self.cancel.child_token();
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
+
+        let limits = tokio::select! {
+            biased;
+            _ = &mut request_cancellation, if !needs_cancellation_deferral => None,
+            _ = &mut shutdown_cancellation => None,
+            result = self.limits_for_request(client, *limits, &request) => Some(result?),
+        };
+        let Some(limits) = limits else {
+            let output = cancelled(&state);
+            return Ok(Box::pin(futures::stream::once(async move { Ok(output) })));
+        };
+        let proto_request = build_generate_request(
+            request,
+            &request_id,
+            &self.model.source,
+            Some(limits),
+            self.mode,
+        )?;
 
         // The same deferral applies here, not just to the streaming loop below.
         // `generate` sends the request and then awaits response headers, so
