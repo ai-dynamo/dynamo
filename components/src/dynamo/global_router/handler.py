@@ -24,6 +24,23 @@ from .pool_selection import get_priority_retry_order, load_config
 logger = logging.getLogger(__name__)
 
 
+def _extract_uncached_tokens(router_params: Dict[str, Any]) -> Optional[int]:
+    """Read the client-declared uncached-token estimate from nvext.router.
+
+    Returns None when absent or malformed so routers can distinguish "no
+    estimate" from an explicit 0. The Rust layer rejects non-integer or
+    negative values at deserialization; this guard only covers direct
+    in-process calls that bypass the typed frontend.
+    """
+    value = router_params.get("uncached_tokens")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        logger.warning("Ignoring invalid nvext.router.uncached_tokens: %r", value)
+        return None
+    return value
+
+
 class GlobalRouterHandler:
     """
     Handler for the Global Router that routes requests to worker pools.
@@ -231,6 +248,9 @@ class GlobalRouterHandler:
         ttft_target_ms = router_params.get("ttft_target")
         if ttft_target_ms is None:
             ttft_target_ms = self.default_ttft_target_ms
+        # Client-declared estimate of tokens needing fresh prefill compute.
+        # Use `is None` to distinguish "no estimate" from an explicit 0.
+        uncached_tokens = _extract_uncached_tokens(router_params)
 
         # Extract priority from routing hints (set by nvext.agent_hints.priority)
         routing = request.get("routing") or {}
@@ -238,7 +258,10 @@ class GlobalRouterHandler:
 
         # Select prefill pool
         pool_idx = self.config.prefill_pool_selection_strategy.select_pool(
-            isl=isl, ttft_target_ms=ttft_target_ms, priority=priority
+            isl=isl,
+            ttft_target_ms=ttft_target_ms,
+            priority=priority,
+            uncached_tokens=uncached_tokens,
         )
         namespace = self.config.prefill_pool_dynamo_namespaces[pool_idx]
         assert self.config.prefill_pool_priorities is not None
@@ -250,8 +273,8 @@ class GlobalRouterHandler:
 
         logger.info(
             f"Routing prefill request: ISL={isl}, TTFT_target={ttft_target_ms}ms, "
-            f"priority={priority} -> pool {pool_idx} ({namespace}); "
-            f"retry_order={pool_order}"
+            f"uncached_tokens={uncached_tokens}, priority={priority} -> "
+            f"pool {pool_idx} ({namespace}); retry_order={pool_order}"
         )
 
         # Forward request to local router and stream back responses
@@ -348,6 +371,9 @@ class GlobalRouterHandler:
         itl_target_ms = router_params.get("itl_target")
         if itl_target_ms is None:
             itl_target_ms = self.default_itl_target_ms
+        # Client-declared estimate of tokens needing fresh prefill compute.
+        # Use `is None` to distinguish "no estimate" from an explicit 0.
+        uncached_tokens = _extract_uncached_tokens(router_params)
 
         # Extract priority from routing hints (set by nvext.agent_hints.priority)
         routing = request.get("routing") or {}
@@ -359,6 +385,7 @@ class GlobalRouterHandler:
             itl_target_ms=itl_target_ms,
             priority=priority,
             isl=isl,
+            uncached_tokens=uncached_tokens,
         )
         namespace = self.config.agg_pool_dynamo_namespaces[pool_idx]
         assert self.config.agg_pool_priorities is not None
@@ -370,10 +397,11 @@ class GlobalRouterHandler:
 
         logger.info(
             "Routing agg request: ISL=%s, TTFT_target=%sms, ITL_target=%sms, "
-            "priority=%s -> pool %s (%s); retry_order=%s",
+            "uncached_tokens=%s, priority=%s -> pool %s (%s); retry_order=%s",
             isl,
             ttft_target_ms,
             itl_target_ms,
+            uncached_tokens,
             priority,
             pool_idx,
             namespace,
