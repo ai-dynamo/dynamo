@@ -580,7 +580,8 @@ func gpuCountFromQuantity(name corev1.ResourceName, q resource.Quantity) (int, e
 }
 
 func isGPUResourceName(name corev1.ResourceName) bool {
-	normalized := strings.ToLower(string(name))
+	// The NVIDIA device plugin appends ".shared" to time-sliced and MPS resources when renameByDefault is set.
+	normalized := strings.TrimSuffix(strings.ToLower(string(name)), ".shared")
 	return normalized == commonconsts.KubeResourceGPUNvidia ||
 		normalized == "gpu" ||
 		strings.HasSuffix(normalized, "/gpu") ||

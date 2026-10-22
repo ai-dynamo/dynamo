@@ -90,6 +90,49 @@ func TestResolveGPUShapeSeparatesEngineWidthFromReplicaCost(t *testing.T) {
 	}
 }
 
+func TestResolveGPUShapeCountsSharedDeviceResources(t *testing.T) {
+	tests := []struct {
+		name         string
+		resourceName corev1.ResourceName
+	}{
+		{name: "whole GPU", resourceName: corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)},
+		{name: "shared GPU renamed by default", resourceName: "nvidia.com/gpu.shared"},
+		{name: "shared MIG slice", resourceName: "nvidia.com/mig-1g.10gb.shared"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a single-node worker whose main container requests one unit of the resource")
+			main := corev1.Container{
+				Name: commonconsts.MainContainerName,
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					tt.resourceName: resource.MustParse("1"),
+				}},
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{main},
+				}},
+			}
+			pod := &corev1.PodSpec{Containers: []corev1.Container{main}}
+
+			t.Log("Resolve the shape projected into DGD status")
+			shape, err := ResolveGPUShape(
+				t.Context(),
+				nil,
+				"default",
+				component,
+				[]PodSpecMultiplicity{{PodSpec: pod, Count: 1}},
+			)
+			require.NoError(t, err)
+			assert.Equal(t, int64(1), shape.GPUsPerEngine)
+			assert.Equal(t, int64(1), shape.GPUsPerReplica)
+		})
+	}
+}
+
 func TestResolveGPUShapeUsesRoleTemplatesForEngineWidth(t *testing.T) {
 	leaderMain := gpuContainer(commonconsts.MainContainerName, "1")
 	workerMain := corev1.Container{
