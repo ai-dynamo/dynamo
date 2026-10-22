@@ -3,15 +3,23 @@
 
 """Retune sweep: replay one trace window once per candidate and score it.
 
-``run_sweep`` runs on the retune controller's single sweep thread. It reads
-the window (and, with an inner planner, the history before it), optionally
-picks a load predictor by forecast loss, and evaluates every candidate with
-``dynamo.replay.run_trace_replay`` in ``max_parallel`` spawned worker
-processes. Each worker gets one task at a time over its own pipe, so a worker
-that dies (Rust abort, OOM kill) fails only the candidate it held and is
-replaced. At the deadline, or when the controller closes, every worker is
-killed. ``multiprocessing.Pool`` is not used: a Pool worker that dies hard
-never completes its result and would hang the sweep until the deadline.
+``run_sweep`` runs on the retune controller's single sweep thread and does
+no trace I/O itself. Every phase is a task in one of ``max_parallel`` spawned
+worker processes: reading the window (and, with an inner planner, the history
+before it) into the sweep directory, the optional load-predictor pre-sweep,
+and one ``dynamo.replay.run_trace_replay`` per candidate. Each worker gets one
+task at a time over its own pipe, so a worker that dies (Rust abort, OOM
+kill) fails only the task it held and is replaced. At the deadline, or when
+the controller closes, every worker is killed, so a hung trace read (a stuck
+network filesystem) or a worker stuck in its imports ends the sweep at the
+deadline instead of holding the sweep thread. ``multiprocessing.Pool`` is
+not used: a Pool worker that dies hard never completes its result and would
+hang the sweep until the deadline.
+
+Task messages stay small: bulk data (the window, the history and the
+pre-sweep observations) is written to the sweep directory and passed by path.
+A message larger than the pipe's socket buffer blocks ``send`` until the
+worker reads it, which a worker still importing does not do.
 
 Everything here is module level and picklable: workers are started with the
 ``spawn`` method and receive their task functions by reference.
@@ -19,6 +27,8 @@ Everything here is module level and picklable: workers are started with the
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
 import math
 import multiprocessing
@@ -33,7 +43,7 @@ from multiprocessing.connection import Connection, wait
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from statistics import mean
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from aisimulate.sweeper import OptimizationTarget, objective_value
 
@@ -66,7 +76,11 @@ GOODPUT_KEY = "goodput_output_throughput_tok_s"
 WORKER_NICENESS = 10
 _POLL_INTERVAL_S = 0.25
 _JOIN_TIMEOUT_S = 5.0
+_READ_TASK = "read-trace"
 _PRESWEEP_TASK = "predictor-presweep"
+_WINDOW_FILE = "window.jsonl"
+_HISTORY_FILE = "history.jsonl"
+_OBSERVATIONS_FILE = "observations.json"
 # A task whose fresh worker dies before accepting it this many times fails.
 _MAX_TASK_SEND_ATTEMPTS = 3
 
@@ -389,6 +403,163 @@ def _presweep_summary(
     }
 
 
+def _write_observations(
+    path: str | os.PathLike[str], observations: Sequence[TrafficObservation]
+) -> str:
+    """Write ``observations`` as a JSON list of ``TrafficObservation`` rows.
+
+    Each row holds the dataclass fields in order. JSON writes a float's
+    shortest round-trip repr, so ``_read_observations`` returns the same
+    values.
+    """
+
+    rows = [dataclasses.astuple(observation) for observation in observations]
+    with open(path, "w", encoding="utf-8") as sink:
+        json.dump(rows, sink, separators=(",", ":"))
+    return os.fspath(path)
+
+
+def _read_observations(path: str | os.PathLike[str]) -> list[TrafficObservation]:
+    """Read observations written by ``_write_observations``."""
+
+    with open(path, encoding="utf-8") as source:
+        return [TrafficObservation(*row) for row in json.load(source)]
+
+
+def _presweep_task(
+    observations_path: str,
+    presets: Sequence[str],
+    interval_s: int,
+    eval_steps: int,
+) -> dict[str, Any]:
+    """Worker side of a pre-sweep task: ``predictor_presweep`` on a file.
+
+    The observations travel by path: days of history at the planner interval
+    are thousands of buckets, more than a pipe's socket buffer holds.
+    """
+
+    return predictor_presweep(
+        _read_observations(observations_path), presets, interval_s, eval_steps
+    )
+
+
+class _SweepInputs(NamedTuple):
+    """What the read task hands back; the files live in the sweep directory.
+
+    ``observations`` are the history and window buckets (``None`` without
+    throughput scaling); ``observations_path`` is their file, written only
+    for the pre-sweep. ``history_path`` is ``None`` when no history row was
+    selected.
+    """
+
+    window_path: str
+    num_requests: int
+    row_counts: dict[str, int]
+    history_path: str | None = None
+    observations: tuple[TrafficObservation, ...] | None = None
+    observations_path: str | None = None
+
+
+@dataclass(frozen=True)
+class _ReadSpec:
+    """The read task's slice of a ``SweepRequest``.
+
+    Only what the readers need: the request also carries every candidate and
+    the engine, which would make the task message large. ``read_history`` is
+    set with an inner planner; ``buckets`` (empty) with throughput scaling.
+    """
+
+    trace_paths: tuple[str, ...]
+    history_paths: tuple[str, ...]
+    window_start_ms: float
+    window_end_ms: float
+    history_start_ms: float
+    as_of_ms: float
+    prune_by_mtime: bool
+    read_history: bool
+    buckets: ObservationBuckets | None
+    write_observations: bool
+
+    @classmethod
+    def from_request(
+        cls,
+        request: SweepRequest,
+        buckets: ObservationBuckets | None,
+        *,
+        write_observations: bool,
+    ) -> _ReadSpec:
+        return cls(
+            trace_paths=tuple(request.trace_paths),
+            history_paths=tuple(request.history_paths),
+            window_start_ms=request.window_start_ms,
+            window_end_ms=request.window_end_ms,
+            history_start_ms=request.history_start_ms,
+            as_of_ms=request.as_of_ms,
+            prune_by_mtime=request.prune_by_mtime,
+            read_history=request.base_planner is not None,
+            buckets=buckets,
+            write_observations=write_observations,
+        )
+
+
+def _read_sweep_inputs(spec: _ReadSpec, work_dir: str) -> _SweepInputs:
+    """Read the window, and the history before it, into ``work_dir``.
+
+    Runs as a sweep worker task, so the deadline and cancel kill a hung read.
+    An empty window stops here: the history is not read. ``row_counts`` holds
+    the window reader's counts plus the history reader's under
+    ``history_<key>`` and ``history_requests``. Raises what the readers
+    raise.
+    """
+
+    directory = Path(work_dir)
+    buckets = spec.buckets
+    window = read_trace_window(
+        spec.trace_paths,
+        spec.window_start_ms,
+        spec.window_end_ms,
+        spec.as_of_ms,
+        directory / _WINDOW_FILE,
+        prune_by_mtime=spec.prune_by_mtime,
+        buckets=buckets,
+    )
+    row_counts = dict(window.row_counts)
+    if window.num_requests == 0:
+        return _SweepInputs(window.path, 0, row_counts)
+
+    history_path = None
+    if spec.read_history and spec.history_start_ms < spec.window_start_ms:
+        history = read_trace_history(
+            (*spec.trace_paths, *spec.history_paths),
+            spec.history_start_ms,
+            spec.window_start_ms,
+            spec.as_of_ms,
+            directory / _HISTORY_FILE,
+            prune_by_mtime=spec.prune_by_mtime,
+            buckets=buckets,
+        )
+        row_counts.update(
+            {f"history_{key}": value for key, value in history.row_counts.items()}
+        )
+        row_counts["history_requests"] = history.num_requests
+        if history.num_requests:
+            history_path = history.path
+    observations = None if buckets is None else tuple(buckets.observations())
+    observations_path = None
+    if observations is not None and spec.write_observations:
+        observations_path = _write_observations(
+            directory / _OBSERVATIONS_FILE, observations
+        )
+    return _SweepInputs(
+        window_path=window.path,
+        num_requests=window.num_requests,
+        row_counts=row_counts,
+        history_path=history_path,
+        observations=observations,
+        observations_path=observations_path,
+    )
+
+
 def run_sweep(
     request: SweepRequest,
     *,
@@ -399,11 +570,12 @@ def run_sweep(
 
     Never raises: a read error or any unexpected failure is status
     ``failed``. An empty window is status ``empty`` and evaluates nothing.
-    ``timeout_s`` bounds the whole call in wall-clock time; at the deadline
-    every worker is killed and the status is ``timeout``. Setting ``cancel``
-    kills the workers the same way (status ``failed``). ``evaluator`` runs
-    in the workers and must be picklable by reference; it is
-    ``evaluate_candidate`` except in tests.
+    ``timeout_s`` bounds the whole call in wall-clock time, trace reads
+    included; at the deadline every worker is killed and the status is
+    ``timeout``. Setting ``cancel`` kills the workers the same way (status
+    ``failed``). A sweep stopped while reading has no ``num_requests`` or
+    ``row_counts``. ``evaluator`` runs in the workers and must be picklable
+    by reference; it is ``evaluate_candidate`` except in tests.
     """
 
     started = time.monotonic()
@@ -448,61 +620,62 @@ def _run_sweep(
             duration_s=float(interval_s),
         )
     )
-    window = read_trace_window(
-        request.trace_paths,
-        request.window_start_ms,
-        request.window_end_ms,
-        request.as_of_ms,
-        work_dir / "window.jsonl",
-        prune_by_mtime=request.prune_by_mtime,
-        buckets=buckets,
+    presets = tuple(request.predictor_presets or ())
+    # (bucket length in trace ms, planner interval in s) when the pre-sweep runs
+    presweep_interval = (
+        (buckets.interval_ms, interval_s)
+        if presets and buckets is not None and interval_s
+        else None
     )
-    row_counts = dict(window.row_counts)
-    if window.num_requests == 0:
-        return SweepResult(
-            status="empty",
-            row_counts=row_counts,
-            wall_s=time.monotonic() - started,
-        )
-
-    inner_base = None
-    if request.base_planner is not None:
-        history_path = None
-        if request.history_start_ms < request.window_start_ms:
-            history = read_trace_history(
-                (*request.trace_paths, *request.history_paths),
-                request.history_start_ms,
-                request.window_start_ms,
-                request.as_of_ms,
-                work_dir / "history.jsonl",
-                prune_by_mtime=request.prune_by_mtime,
-                buckets=buckets,
-            )
-            row_counts.update(
-                {f"history_{key}": value for key, value in history.row_counts.items()}
-            )
-            row_counts["history_requests"] = history.num_requests
-            if history.num_requests:
-                history_path = history.path
-        # The inner planner is the current one, warmed from the recorded
-        # history instead of the outer run's own warmup trace, never retuned,
-        # and without diagnostics reports (one HTML file per candidate).
-        inner_base = {
-            **request.base_planner,
-            "retune": None,
-            "load_predictor_warmup_trace": history_path,
-            "report_interval_hours": None,
-            "live_dashboard_port": 0,
-        }
-    warmup = None if buckets is None else tuple(buckets.observations())
+    spec = _ReadSpec.from_request(
+        request, buckets, write_observations=presweep_interval is not None
+    )
 
     pool = _WorkerPool(request.max_parallel, deadline, cancel)
+    inputs: _SweepInputs | None = None
     presweep: dict[str, Any] | None = None
     scores: dict[str, float | None] = {}
     metrics: dict[str, dict[str, Any]] = {}
     try:
-        if request.predictor_presets and buckets is not None and interval_s:
-            presweep = _run_presweep(request, pool, buckets, warmup or (), interval_s)
+        # Start every worker the later rounds can use now, so they import
+        # while the first one reads instead of after it.
+        pool.start(
+            max(len(request.candidates), len(presets) if presweep_interval else 0)
+        )
+        read = pool.run([(_READ_TASK, _read_sweep_inputs, (spec, str(work_dir)))])
+        ok, value = read[_READ_TASK]
+        if not ok:
+            logger.error(
+                "retune sweep for window %d failed to read its trace: %s",
+                request.window_index,
+                value,
+            )
+            return SweepResult(
+                status="failed", wall_s=time.monotonic() - started, error=value
+            )
+        inputs = value
+        if inputs.num_requests == 0:
+            return SweepResult(
+                status="empty",
+                row_counts=dict(inputs.row_counts),
+                wall_s=time.monotonic() - started,
+            )
+
+        inner_base = None
+        if request.base_planner is not None:
+            # The inner planner is the current one, warmed from the recorded
+            # history instead of the outer run's own warmup trace, never
+            # retuned, and without diagnostics reports (one HTML file per
+            # candidate).
+            inner_base = {
+                **request.base_planner,
+                "retune": None,
+                "load_predictor_warmup_trace": inputs.history_path,
+                "report_interval_hours": None,
+                "live_dashboard_port": 0,
+            }
+        if presweep_interval is not None:
+            presweep = _run_presweep(request, pool, inputs, *presweep_interval)
         fields = None if presweep is None else presweep["fields"]
         by_effective: dict[str, tuple[RetuneParams, list[str]]] = {}
         for candidate in request.candidates:
@@ -514,7 +687,7 @@ def _run_sweep(
                 effective_key,
                 evaluator,
                 (
-                    window.path,
+                    inputs.window_path,
                     request.engine,
                     request.arrival_speedup_ratio,
                     effective,
@@ -537,8 +710,8 @@ def _run_sweep(
         )
         return SweepResult(
             status=interrupted.status,
-            num_requests=window.num_requests,
-            row_counts=row_counts,
+            num_requests=0 if inputs is None else inputs.num_requests,
+            row_counts={} if inputs is None else dict(inputs.row_counts),
             predictor_presweep=presweep,
             wall_s=time.monotonic() - started,
             error=str(interrupted),
@@ -563,19 +736,19 @@ def _run_sweep(
     logger.info(
         "retune sweep for window %d: %d requests, %d/%d candidates scored in %.1fs",
         request.window_index,
-        window.num_requests,
+        inputs.num_requests,
         scored,
         len(scores),
         wall_s,
     )
     return SweepResult(
         status="ok",
-        num_requests=window.num_requests,
-        row_counts=row_counts,
+        num_requests=inputs.num_requests,
+        row_counts=dict(inputs.row_counts),
         scores=scores,
         metrics=metrics,
         predictor_presweep=presweep,
-        warmup_observations=warmup,
+        warmup_observations=inputs.observations,
         wall_s=wall_s,
     )
 
@@ -588,36 +761,50 @@ def _inner_throughput_interval(base_planner: Mapping[str, Any] | None) -> int | 
     return int(base_planner["throughput_adjustment_interval_seconds"])
 
 
+def _presweep_tasks(
+    presets: Sequence[str],
+    observations_path: str,
+    interval_s: int,
+    eval_steps: int,
+) -> list[tuple[str, Callable[..., Any], tuple[Any, ...]]]:
+    """One task per preset; each carries the observations file's path."""
+
+    return [
+        (
+            f"{_PRESWEEP_TASK}:{name}",
+            _presweep_task,
+            (observations_path, (name,), interval_s, eval_steps),
+        )
+        for name in presets
+    ]
+
+
 def _run_presweep(
     request: SweepRequest,
     pool: _WorkerPool,
-    buckets: ObservationBuckets,
-    observations: Sequence[TrafficObservation],
+    inputs: _SweepInputs,
+    interval_ms: float,
     interval_s: int,
 ) -> dict[str, Any]:
     """Score every preset in its own worker task, then pick the winner.
 
-    ``observations`` are history and window buckets ending at the window end;
-    only the buckets wholly inside ``W_k`` are forecast and scored, and the
-    ones before them only warm the predictors.
+    ``inputs.observations`` are history and window buckets ending at the
+    window end; only the buckets wholly inside ``W_k`` are forecast and
+    scored, and the ones before them only warm the predictors. The workers
+    load them from ``inputs.observations_path``.
     """
 
+    if inputs.observations is None or inputs.observations_path is None:
+        raise RuntimeError("the pre-sweep needs the read task's observations file")
     started = time.monotonic()
     window_steps = int(
-        (request.window_end_ms - request.window_start_ms) / buckets.interval_ms + 1e-9
+        (request.window_end_ms - request.window_start_ms) / interval_ms + 1e-9
     )
-    eval_steps = min(len(observations), window_steps)
-    warmup_steps = len(observations) - eval_steps
+    eval_steps = min(len(inputs.observations), window_steps)
+    warmup_steps = len(inputs.observations) - eval_steps
     presets = tuple(request.predictor_presets or ())
     outcomes = pool.run(
-        [
-            (
-                f"{_PRESWEEP_TASK}:{name}",
-                predictor_presweep,
-                (tuple(observations), (name,), interval_s, eval_steps),
-            )
-            for name in presets
-        ]
+        _presweep_tasks(presets, inputs.observations_path, interval_s, eval_steps)
     )
     losses: dict[str, float | None] = {}
     errors: dict[str, str] = {}
@@ -642,6 +829,9 @@ class _Worker:
     process: BaseProcess
     conn: Connection
     task_id: str | None = None
+    # Set once the worker has returned a result, so it has imported and
+    # reads its pipe.
+    answered: bool = False
 
 
 class _WorkerPool:
@@ -683,22 +873,40 @@ class _WorkerPool:
                     self._collect(worker, results)
         return results
 
-    def close(self, *, kill: bool) -> None:
-        """Stop every worker; ``kill`` skips the graceful shutdown."""
+    def start(self, count: int) -> None:
+        """Start idle workers up to ``count``, at most the pool size."""
 
+        while len(self._workers) < min(count, self._size):
+            self._spawn()
+
+    def close(self, *, kill: bool) -> None:
+        """Stop every worker; ``kill`` skips the graceful shutdown.
+
+        Only idle workers that have answered a task are asked to exit: a
+        worker that never answered may still be importing, so it is killed
+        instead of waited for.
+        """
+
+        graceful = (
+            []
+            if kill
+            else [
+                worker
+                for worker in self._workers
+                if worker.answered
+                and worker.task_id is None
+                and worker.process.is_alive()
+            ]
+        )
+        for worker in graceful:
+            try:
+                worker.conn.send(None)
+            except OSError:
+                pass
+        for worker in graceful:
+            worker.process.join(timeout=_JOIN_TIMEOUT_S)
         for worker in self._workers:
-            if not kill and worker.task_id is None and worker.process.is_alive():
-                try:
-                    worker.conn.send(None)
-                except OSError:
-                    pass
-        for worker in self._workers:
-            if not kill:
-                worker.process.join(timeout=_JOIN_TIMEOUT_S)
-            if worker.process.is_alive():
-                worker.process.kill()
-            worker.process.join()
-            worker.conn.close()
+            _reap(worker)
         self._workers = []
 
     def _check_interrupted(self) -> None:
@@ -709,9 +917,9 @@ class _WorkerPool:
 
     def _dispatch(self, pending: deque, results: dict[str, tuple[bool, Any]]) -> None:
         idle = [worker for worker in self._workers if worker.task_id is None]
-        # Start every worker this round needs before sending: a task larger
-        # than the pipe buffer blocks its send until the worker has imported,
-        # and the workers should import in parallel.
+        # Start every worker this round needs before sending, so they import
+        # in parallel. A send does not wait for the import: task messages
+        # are small (bulk data goes by file) and fit in the pipe's buffer.
         while len(idle) < len(pending) and len(self._workers) < self._size:
             idle.append(self._spawn())
         while pending and idle:
@@ -753,6 +961,7 @@ class _WorkerPool:
                     )
                 results[task_id] = (ok, value)
                 worker.task_id = None
+                worker.answered = True
                 return
         except (EOFError, OSError):
             pass
@@ -788,11 +997,30 @@ class _WorkerPool:
         return worker
 
     def _discard(self, worker: _Worker) -> None:
-        if worker.process.is_alive():
-            worker.process.kill()
-        worker.process.join()
-        worker.conn.close()
+        _reap(worker)
         self._workers.remove(worker)
+
+
+def _reap(worker: _Worker) -> None:
+    """Kill ``worker`` if it runs and close its pipe, waiting a bounded time.
+
+    A process blocked in uninterruptible I/O (a hard-mounted filesystem)
+    does not die on SIGKILL until the I/O returns; it is left behind rather
+    than holding the sweep thread.
+    """
+
+    if worker.process.is_alive():
+        worker.process.kill()
+    worker.process.join(timeout=_JOIN_TIMEOUT_S)
+    if worker.process.is_alive():
+        logger.error(
+            "retune sweep worker %s (pid %s) did not exit %.0fs after SIGKILL; "
+            "leaving it behind",
+            worker.process.name,
+            worker.process.pid,
+            _JOIN_TIMEOUT_S,
+        )
+    worker.conn.close()
 
 
 def _worker_main(conn: Connection) -> None:
