@@ -23,13 +23,16 @@
 # the selector for a worker, then tells Envoy where to send the request.
 #
 # Tokenization uses TensorRT-LLM's render endpoint (`/v1/chat/completions/render`,
-# NVIDIA/TensorRT-LLM#19964). The example runs it as a separate CPU-only
-# `trtllm-render` Deployment that loads only the tokenizer and model
-# configuration: no weights, no GPU. Start it with the same model, tokenizer,
-# and chat-template options as the workers so both render the same ids
-# (compare `GET /server_info` `render_fingerprint.digest` once if in doubt).
+# NVIDIA/TensorRT-LLM#19964). The example runs the CPU-only `trtllm-render`
+# process as a native sidecar of the EPP pod (an init container with
+# restartPolicy: Always): it loads only the tokenizer and model configuration,
+# starts before the EPP, gates pod readiness, listens on loopback only, and
+# every EPP replica gets its own. Start it with the same model, tokenizer, and
+# chat-template options as the workers so both render the same ids (compare
+# `GET /server_info` `render_fingerprint.digest` once if in doubt).
 # Alternatively, run the workers with TRTLLM_ENABLE_RENDER_ENDPOINTS=1 and point
-# the renderer Service at the worker pods, as the vLLM on-ramp does.
+# DYN_EPP_TOKENIZER_SERVICE_URL at a Service selecting the worker pods, as the
+# vLLM on-ramp does.
 #
 # KV-aware routing uses TensorRT-LLM's native streaming KV event publisher
 # (`kv_cache_config.kv_events_config`, ZeroMQ, three-frame msgpack framing,
@@ -152,81 +155,6 @@ spec:
           key: nvidia.com/gpu
           operator: Exists
 ---
-# CPU-only renderer: the same TensorRT-LLM image, no GPU, tokenizer and config
-# only. Serves /v1/chat/completions/render, /health, and /server_info.
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: trtllm-qwen-render
-  labels:
-    app: trtllm-qwen-render
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: trtllm-qwen-render
-  template:
-    metadata:
-      labels:
-        app: trtllm-qwen-render
-    spec:
-      containers:
-        - name: render
-          image: <TRTLLM_IMAGE>
-          # `import tensorrt_llm` dlopens libcuda.so.1 even though rendering
-          # never touches a GPU. On a node without the NVIDIA driver, expose the
-          # CUDA toolkit's driver stub under that soname; on a GPU node the
-          # driver library is already present and the branch is skipped.
-          command: ["bash", "-ec"]
-          args:
-            - |
-              if ! ldconfig -p | grep -q 'libcuda.so.1'; then
-                STUB=$(find /usr/local/cuda* -path '*stubs/libcuda.so' | head -1)
-                mkdir -p /tmp/cuda-stub && ln -sf "$STUB" /tmp/cuda-stub/libcuda.so.1
-                export LD_LIBRARY_PATH="/tmp/cuda-stub${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-              fi
-              exec trtllm-render \
-                --model Qwen/Qwen3-0.6B \
-                --served_model_name Qwen/Qwen3-0.6B \
-                --host 0.0.0.0 \
-                --port 8100
-          env:
-            # Keep the NVIDIA container runtime from exposing GPUs to a
-            # process that does not need them.
-            - name: NVIDIA_VISIBLE_DEVICES
-              value: void
-          ports:
-            - name: http
-              containerPort: 8100
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: http
-            initialDelaySeconds: 20
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 6
-          resources:
-            requests:
-              cpu: "4"
-              memory: 12Gi
-            limits:
-              memory: 24Gi
----
-# Stable renderer address used by the EPP for TensorRT-LLM's
-# /v1/chat/completions/render tokenization endpoint.
-apiVersion: v1
-kind: Service
-metadata:
-  name: trtllm-qwen-render
-spec:
-  selector:
-    app: trtllm-qwen-render
-  ports:
-    - name: http
-      port: 8100
-      targetPort: http
----
 # RBAC: the EPP reads the InferencePool (read-only), lists/watches its pods, and
 # watches EndpointSlices for worker discovery (and for sibling EPP replicas when
 # DYN_EPP_PEER_SERVICE is set).
@@ -297,9 +225,10 @@ spec:
       port: 9002
       targetPort: grpc
 ---
-# The Dynamo EPP in standalone mode with the selector EMBEDDED in-process.
-# For replicated EPPs, raise `replicas`, add DYN_EPP_PEER_SERVICE=dynamo-epp
-# and a downward-API POD_IP as in agg.yaml.
+# The Dynamo EPP in standalone mode with the selector EMBEDDED in-process and
+# the TensorRT-LLM renderer as a native sidecar. For replicated EPPs, raise
+# `replicas` (each replica carries its own renderer), add
+# DYN_EPP_PEER_SERVICE=dynamo-epp and a downward-API POD_IP as in agg.yaml.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -317,6 +246,55 @@ spec:
         app: dynamo-epp
     spec:
       serviceAccountName: dynamo-epp
+      initContainers:
+        # CPU-only renderer sidecar: the same TensorRT-LLM image, no GPU,
+        # tokenizer and config only. `restartPolicy: Always` makes it a native
+        # sidecar (Kubernetes 1.29+): it starts before the EPP container, is
+        # restarted on failure, and its readiness probe gates pod readiness, so
+        # the gateway never sees an EPP whose renderer is not up.
+        - name: render
+          image: <TRTLLM_IMAGE>
+          restartPolicy: Always
+          # `import tensorrt_llm` dlopens libcuda.so.1 even though rendering
+          # never touches a GPU. On a node without the NVIDIA driver, expose the
+          # CUDA toolkit's driver stub under that soname; on a GPU node the
+          # driver library is already present and the branch is skipped.
+          command: ["bash", "-ec"]
+          args:
+            - |
+              if ! ldconfig -p | grep -q 'libcuda.so.1'; then
+                STUB=$(find /usr/local/cuda* -path '*stubs/libcuda.so' | head -1)
+                mkdir -p /tmp/cuda-stub && ln -sf "$STUB" /tmp/cuda-stub/libcuda.so.1
+                export LD_LIBRARY_PATH="/tmp/cuda-stub${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              fi
+              exec trtllm-render \
+                --model Qwen/Qwen3-0.6B \
+                --served_model_name Qwen/Qwen3-0.6B \
+                --host 127.0.0.1 \
+                --port 8100
+          env:
+            # Keep the NVIDIA container runtime from exposing GPUs to a
+            # process that does not need them.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+          # The renderer listens on loopback only (reachable just by the EPP in
+          # this pod), so probe it from inside the container.
+          readinessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=3)"
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "4"
+              memory: 12Gi
+            limits:
+              memory: 24Gi
       containers:
         - name: epp
           image: dynamo/dynamo-epp:dev
@@ -329,9 +307,10 @@ spec:
             - name: DYN_MODEL_NAME
               value: Qwen/Qwen3-0.6B
             # Tokenizer service base URL + wire protocol. Points at the
-            # TensorRT-LLM renderer's /v1/chat/completions/render endpoint.
+            # renderer sidecar's /v1/chat/completions/render endpoint on
+            # loopback.
             - name: DYN_EPP_TOKENIZER_SERVICE_URL
-              value: http://trtllm-qwen-render:8100
+              value: http://127.0.0.1:8100
             - name: DYN_EPP_TOKENIZER_PROTOCOL
               value: trtllm-render
             # Must match kv_cache_config.tokens_per_block above.
