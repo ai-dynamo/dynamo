@@ -14,7 +14,7 @@ import requests
 def post_with_capacity_retry(url, payload):
     for attempt in range(3):
         response = requests.post(url, json=payload, timeout=60)
-        if response.status_code != 429 or attempt == 2:
+        if response.status_code not in (429, 529) or attempt == 2:
             return response
         assert response.headers.get("retry-after") == "1", response.text
         time.sleep(1)

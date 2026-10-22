@@ -132,33 +132,39 @@ def test_native_probability_reference_preserves_zero_decode_controls(monkeypatch
     assert input_tokens == 2
 
 
-def test_systemone_client_retries_only_bounded_capacity_errors(monkeypatch):
+@pytest.mark.parametrize("capacity_status", [429, 529])
+def test_systemone_client_retries_only_bounded_capacity_errors(
+    monkeypatch, capacity_status
+):
     sleeps = []
     monkeypatch.setattr(client.time, "sleep", sleeps.append)
     responses = iter(
         SimpleNamespace(status_code=status, headers={"retry-after": "1"}, text="")
-        for status in [429, 429, 200]
+        for status in [capacity_status, capacity_status, 200]
     )
     monkeypatch.setattr(
         client.requests, "post", lambda *args, **kwargs: next(responses)
     )
     assert client.post_with_capacity_retry("unused", {}).status_code == 200
     assert sleeps == [1, 1]
-    overloaded = SimpleNamespace(status_code=429, headers={"retry-after": "1"}, text="")
+    overloaded = SimpleNamespace(
+        status_code=capacity_status, headers={"retry-after": "1"}, text=""
+    )
     responses = iter([overloaded, overloaded, overloaded])
     monkeypatch.setattr(
         client.requests, "post", lambda *args, **kwargs: next(responses)
     )
-    assert client.post_with_capacity_retry("unused", {}).status_code == 429
+    assert client.post_with_capacity_retry("unused", {}).status_code == capacity_status
     assert sleeps == [1, 1, 1, 1]
     unavailable = SimpleNamespace(
-        status_code=429, headers={}, text="missing retry contract"
+        status_code=capacity_status, headers={}, text="missing retry contract"
     )
     monkeypatch.setattr(client.requests, "post", lambda *args, **kwargs: unavailable)
     with pytest.raises(AssertionError, match="missing retry contract"):
         client.post_with_capacity_retry("unused", {})
     unavailable = SimpleNamespace(
-        status_code=503, headers={}, text="worker unavailable"
+        status_code=503, headers={"retry-after": "1"}, text="worker unavailable"
     )
     monkeypatch.setattr(client.requests, "post", lambda *args, **kwargs: unavailable)
     assert client.post_with_capacity_retry("unused", {}) is unavailable
+    assert sleeps == [1, 1, 1, 1]
