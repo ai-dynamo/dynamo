@@ -16,6 +16,7 @@ pub(super) fn classify(finish: &Value) -> Option<DispatchError> {
                 public_message: "SGLang scoring worker capacity is exhausted",
                 detail: "native scoring worker capacity exhausted".to_string(),
                 retry_after: true,
+                is_capacity_exhausted: true,
             }
         } else {
             // Dynamo constructs the scoring request; a backend 4xx does not establish client fault.
