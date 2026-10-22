@@ -216,10 +216,11 @@ Public custom NIXL tensors remain explicitly rejected. Workers do not advertise
 `custom_tensor_nixl_v1`. The raw CPU prototype calls the maintained
 `NixlReadEmbeddingSender` and `NixlReadEmbeddingReceiver` directly. These own
 NIXL registration, descriptors, READ operations, completion notifications, and
-buffer release. The adapter supplies tensor shape and dtype through the existing
+buffer release. The adapter transfers a flat `uint8` buffer through the existing
 `TransferRequest`, copies the completed receive buffer into model-owned storage,
-and calls `release_tensor`. It does not use the processed vLLM `mm_kwargs` codec
-or media descriptors.
+and calls `release_tensor`. The outer Custom descriptor preserves the original
+tensor shape and dtype for reconstruction, including scalar tensors. It does not
+use the processed vLLM `mm_kwargs` codec or media descriptors.
 
 Source ownership follows the existing encoder's send-completion queue: retain
 the source until the READ completion awaitable finishes. Cancelling the caller
