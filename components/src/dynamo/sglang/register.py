@@ -54,6 +54,7 @@ from dynamo.sglang.capacity import (
     model_card_dp_rank_bounds,
     per_rank_max_running_requests,
     runtime_capacity,
+    sglang_dp_layout,
 )
 from dynamo.sglang.engine_generate import (
     DISAGG_PREFILL_CANCEL_ANYTIME_V1,
@@ -147,6 +148,7 @@ def _supports_systemone_serial(
         worker_type == WorkerType.Aggregated
         and version("sglang").split("+")[0] == "0.5.19"
         and _supports_engine_generate(input_type, output_type, worker_type)
+        and sglang_dp_layout(server_args) == (1, False)
         and per_rank_max_running_requests(server_args) == 1
         and getattr(server_args, "disable_overlap_schedule", False) is True
         and getattr(server_args, "pp_size", 1) == 1
