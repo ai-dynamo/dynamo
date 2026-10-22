@@ -130,24 +130,26 @@ fn create_tls_acceptor() -> Result<TlsAcceptor> {
 /// Run EPP until it exits.
 pub async fn run(policy_registry: Option<WorkerSelectionPolicyRegistry>) -> Result<()> {
     init_tracing();
-    let mode = EppMode::from_env()?;
-    if !matches!(mode, EppMode::Standalone)
-        && policy_registry
-            .as_ref()
-            .is_some_and(|registry| !registry.is_empty())
-    {
-        anyhow::bail!("linked worker-selection policies require DYN_EPP_MODE=standalone")
+    let result = async {
+        let mode = EppMode::from_env()?;
+        if !matches!(mode, EppMode::Standalone)
+            && policy_registry
+                .as_ref()
+                .is_some_and(|registry| !registry.is_empty())
+        {
+            anyhow::bail!("linked worker-selection policies require DYN_EPP_MODE=standalone")
+        }
+        run_inner(mode, policy_registry.unwrap_or_default()).await
     }
-    run_inner(mode, policy_registry.unwrap_or_default()).await
+    .await;
+    // Drain the last OTLP batch on both normal shutdown and startup failure.
+    tokio::task::spawn_blocking(dynamo_runtime::logging::flush).await?;
+    result
 }
 
+/// Use the same logging filters and OTLP configuration as the Frontend.
 fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
+    dynamo_runtime::logging::init();
 }
 
 /// Wait for SIGTERM (kubelet pod termination) or SIGINT (Ctrl-C).
