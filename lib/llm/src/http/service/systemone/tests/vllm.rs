@@ -35,14 +35,14 @@ async fn causal_dispatch_preserves_both_contracts_usage_and_placement() {
             .map(|index| {
                 let mut branch = prepared_noul_branch(index);
                 branch.profile = selected.profile;
-                branch.native = Some(super::super::PreparedScoringRequest::Vllm(
+                branch.native = Some(super::super::PreparedScoringRequest::Vllm(Box::new(
                     crate::protocols::systemone::vllm::causal_scoring_request(
                         branch.prompt_ids.clone(),
                         &branch.label_ids,
                         "validation",
                     )
                     .unwrap(),
-                ));
+                )));
                 branch
             })
             .collect();

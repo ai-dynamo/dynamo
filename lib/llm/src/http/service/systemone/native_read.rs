@@ -47,12 +47,11 @@ pub(super) async fn run(
         if let Some(response) = frame
             .into_data()
             .map_err(|cause| super::head::backend_error(&cause))?
+            && terminal.replace(response).is_some()
         {
-            if terminal.replace(response).is_some() {
-                return Err(DispatchError::malformed(
-                    "multiple terminal native read responses",
-                ));
-            }
+            return Err(DispatchError::malformed(
+                "multiple terminal native read responses",
+            ));
         }
     }
     if parent.is_killed() {

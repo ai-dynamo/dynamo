@@ -185,10 +185,10 @@ async fn run(
             .await
             .ok_or_else(DispatchError::cancelled)?;
         let Some(frame) = frame else { break };
-        if let Some(response) = frame.into_data().map_err(|cause| backend_error(&cause))? {
-            if terminal.replace(response).is_some() {
-                return Err(DispatchError::malformed("multiple terminal head responses"));
-            }
+        if let Some(response) = frame.into_data().map_err(|cause| backend_error(&cause))?
+            && terminal.replace(response).is_some()
+        {
+            return Err(DispatchError::malformed("multiple terminal head responses"));
         }
     }
     if parent.is_killed() {

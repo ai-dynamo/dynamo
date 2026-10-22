@@ -22,8 +22,8 @@ use crate::{
 };
 
 pub(super) enum PreparedScoringRequest {
-    Sglang(SglangGenerateRequest),
-    Vllm(GenerateRequest),
+    Sglang(Box<SglangGenerateRequest>),
+    Vllm(Box<GenerateRequest>),
 }
 
 pub(super) fn measured_cached_tokens(
@@ -56,7 +56,7 @@ impl PreparedScoringRequest {
             Self::Sglang(mut native) => {
                 native.cache_salt = Some(cache_salt);
                 let mut request = sglang_generate::preprocessed_request(
-                    native,
+                    *native,
                     &selection.canonical_model,
                     None,
                     branch_id,
@@ -72,7 +72,7 @@ impl PreparedScoringRequest {
             Self::Vllm(mut native) => {
                 native.cache_salt = Some(cache_salt);
                 generate::preprocessed_decision_request(
-                    native,
+                    *native,
                     &selection.canonical_model,
                     branch_id,
                     selection.card.kv_cache_block_size,

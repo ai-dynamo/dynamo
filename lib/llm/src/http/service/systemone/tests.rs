@@ -239,7 +239,7 @@ fn prepared_noul_branch(index: usize) -> PreparedBranch {
         temperature: 1.0,
         prompt_ids,
         label_ids,
-        native: Some(super::PreparedScoringRequest::Sglang(native)),
+        native: Some(super::PreparedScoringRequest::Sglang(Box::new(native))),
     }
 }
 

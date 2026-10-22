@@ -469,10 +469,12 @@ fn prepare_branches(
                             )
                         })
                     })
+                    .map(Box::new)
                     .map(PreparedScoringRequest::Sglang)
             }
             DecisionExecutionProfile::VllmCausalV1 => {
                 causal_scoring_request(prompt_ids.clone(), &label_ids, "validation")
+                    .map(Box::new)
                     .map(PreparedScoringRequest::Vllm)
             }
             _ => {
