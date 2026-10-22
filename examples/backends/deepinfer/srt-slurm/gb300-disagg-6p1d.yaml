@@ -20,10 +20,12 @@
 #   - 1 node for the frontend and etcd
 # 12 nodes and 44 GPUs in total.
 #
-# Needs an srt-slurm build that supports `engine: deepinfer`, and an image built from
-# ../Dockerfile. Set model.path, model.container, the NIC names and the cache mount for your
-# cluster. Benchmark runs of this shape forced MTP acceptance with a DeepInfer patch that
-# ../Dockerfile does not carry; without it, acceptance is the model's own.
+# Needs srt-slurm with the deepinfer engine, which is not in NVIDIA/srt-slurm yet: use the
+# deepinfer-engine branch of https://github.com/jthomson04/srt-slurm. Build the image from
+# ../Dockerfile, and set model.path, model.container, the NIC names and the cache mount for your
+# cluster (../README.md, "Run on SLURM with srt-slurm"). Benchmark runs of this shape forced MTP
+# acceptance with a DeepInfer patch that ../Dockerfile does not carry; without it, acceptance is
+# the model's own.
 schema: 2
 name: dsv41flash-fp4-gb300-deepinfer-disagg-6p1d-dep2-dep32
 model:

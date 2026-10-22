@@ -137,8 +137,27 @@ CUDA_VISIBLE_DEVICES=2,3 DYN_SYSTEM_PORT=8082 python -m dynamo.deepinfer --model
 [`srt-slurm/gb300-disagg-6p1d.yaml`](srt-slurm/gb300-disagg-6p1d.yaml) is an srt-slurm (`srtctl`)
 config for disaggregated serving on 12 GB300 nodes. It runs six DEP2 prefill workers with the
 prefix cache's host tier, and one DEP32 decode worker with expert-parallel load balancing. It is
-tuned for agentic coding traffic at about 3,000 concurrent sessions, and needs an srt-slurm build
-that supports `engine: deepinfer`.
+tuned for agentic coding traffic at about 3,000 concurrent sessions.
+
+srt-slurm's `deepinfer` engine is not in [NVIDIA/srt-slurm](https://github.com/NVIDIA/srt-slurm)
+yet. Until it is, use the `deepinfer-engine` branch of
+[jthomson04/srt-slurm](https://github.com/jthomson04/srt-slurm/tree/deepinfer-engine):
+
+```bash
+git clone -b deepinfer-engine https://github.com/jthomson04/srt-slurm.git
+cd srt-slurm
+uv sync --no-dev
+make setup ARCH=aarch64  # writes srtslurm.yaml
+```
+
+In `srtslurm.yaml`, map `dsv41flash` under `model_paths` to a DeepSeek-V4.1-Flash checkpoint and
+`deepinfer` under `containers` to an image built from the [Dockerfile](Dockerfile). In the
+config, set the NIC names and the cache mount for your cluster. Then, from the srt-slurm checkout:
+
+```bash
+uv run srtctl dry-run -f /path/to/dynamo/examples/backends/deepinfer/srt-slurm/gb300-disagg-6p1d.yaml
+uv run srtctl apply -f /path/to/dynamo/examples/backends/deepinfer/srt-slurm/gb300-disagg-6p1d.yaml
+```
 
 ## Worker Options
 
