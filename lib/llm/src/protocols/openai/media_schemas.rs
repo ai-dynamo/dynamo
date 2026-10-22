@@ -20,6 +20,12 @@
 //! check. The bounds tests tie the two together: every bound the schema
 //! states is checked against the Rust type, so the generated model never
 //! rejects a value the frontend forwards.
+//!
+//! What the generated model mirrors is what the schema states: the type of
+//! each field, its bounds, its enum values, and its default. The shared cases
+//! in `media_fixtures/` ([`super::media_fixtures`]) hold both sides to that
+//! for accepted and rejected input. A Rust rule the schema does not state,
+//! such as an integer width, is checked by the frontend alone.
 
 use std::path::Path;
 

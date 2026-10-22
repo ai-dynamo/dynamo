@@ -15,9 +15,14 @@ With --check, the script writes nothing and fails when a committed model is
 stale.
 
 The models carry the constraints of the Rust types: an enum becomes a
-``Literal`` of its values, and a numeric bound becomes a field constraint. A
-worker then rejects a value the frontend would reject, where the value is
-produced.
+``Literal`` of its values, a numeric bound becomes a field constraint, and a
+scalar is strict, so a string is not read as a number or a bool. For a type,
+a bound, an enum value, or a default, a generated model accepts and rejects
+the same JSON as the Rust type; the shared cases in
+lib/llm/src/protocols/openai/media_fixtures/ hold both sides to that. A Rust
+rule the schema cannot state, such as a validator with no ``#[schema]``
+bound or an integer width, is not mirrored: the frontend checks it before a
+request reaches a worker.
 """
 
 import argparse
@@ -49,6 +54,14 @@ OPTIONS = (
     "--collapse-root-models",
     # A field with a serde default is not Optional.
     "--strict-nullable",
+    # Pydantic reads "4" and 4.0 as the int 4, and "true" as the bool True,
+    # where serde rejects them. Strict scalars reject what serde rejects;
+    # strict float still reads a JSON integer, as serde's f64 does.
+    "--strict-types",
+    "int",
+    "float",
+    "bool",
+    "str",
     "--use-field-description",
     "--use-schema-description",
     "--disable-timestamp",

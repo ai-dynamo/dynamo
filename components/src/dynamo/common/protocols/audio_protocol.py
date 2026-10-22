@@ -8,7 +8,15 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, confloat
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    confloat,
+)
 
 
 class AudioData(BaseModel):
@@ -16,15 +24,15 @@ class AudioData(BaseModel):
     Audio data in response
     """
 
-    output_format: str
+    output_format: StrictStr
     """
     Actual codec used for this audio: "wav", "mp3", "pcm", "flac", "aac", "opus"
     """
-    url: str | None = None
+    url: StrictStr | None = None
     """
     URL of the generated audio (if data_source is "url")
     """
-    b64_json: str | None = None
+    b64_json: StrictStr | None = None
     """
     Base64-encoded audio data (if data_source is "b64_json")
     """
@@ -35,11 +43,11 @@ class AudioNvExt(BaseModel):
     NVIDIA extensions to the Audio Speech API
     """
 
-    annotations: list[str] | None = None
+    annotations: list[StrictStr] | None = None
     """
     Annotations for SSE stream events
     """
-    frontend_accepts_audio_chunks: bool | None = None
+    frontend_accepts_audio_chunks: StrictBool | None = None
     """
     Internal frontend-to-worker compatibility signal.
 
@@ -49,7 +57,7 @@ class AudioNvExt(BaseModel):
 
     TODO(v1.7): Remove after v1.4 leaves the N-2 compatibility window.
     """
-    cfg_scale: float | None = None
+    cfg_scale: StrictFloat | None = None
     """
     Classifier-free guidance scale (Audex only, hence an extension rather
     than a top-level OpenAI field). Unset or 1.0 decodes unguided; higher
@@ -64,27 +72,27 @@ class NvAudioSpeechResponse(BaseModel):
     Response structure for audio speech generation
     """
 
-    id: str
+    id: StrictStr
     """
     Unique identifier for the response
     """
-    object: str = 'audio.speech'
+    object: StrictStr = 'audio.speech'
     """
     Object type (always "audio.speech")
     """
-    model: str
+    model: StrictStr
     """
     Model used for generation
     """
-    status: str = 'completed'
+    status: StrictStr = 'completed'
     """
     Status of the generation ("completed", "failed", etc.)
     """
-    progress: int = 100
+    progress: StrictInt = 100
     """
     Progress percentage (0-100)
     """
-    created: int
+    created: StrictInt
     """
     Unix timestamp of creation
     """
@@ -92,11 +100,11 @@ class NvAudioSpeechResponse(BaseModel):
     """
     Generated audio data
     """
-    error: str | None = None
+    error: StrictStr | None = None
     """
     Error message if generation failed
     """
-    inference_time_s: float | None = None
+    inference_time_s: StrictFloat | None = None
     """
     Inference time in seconds
     """
@@ -110,55 +118,55 @@ class NvCreateAudioSpeechRequest(BaseModel):
     parameters as top-level fields.
     """
 
-    input: str
+    input: StrictStr
     """
     The text to synthesize into speech (required)
     """
-    model: str | None = None
+    model: StrictStr | None = None
     """
     The TTS model to use
     """
-    voice: str | None = None
+    voice: StrictStr | None = None
     """
     Voice/speaker name (e.g., "vivian", "ryan", "aiden")
     """
     data_source: Literal['url', 'b64_json'] | None = None
-    response_format: str | None = None
+    response_format: StrictStr | None = None
     """
     Output codec: "wav", "mp3", "pcm", "flac", "aac", "opus" (default: "wav")
     """
-    speed: confloat(ge=0.25, le=4.0) = 1.0
+    speed: confloat(ge=0.25, le=4.0, strict=True) = 1.0
     """
     Speed factor, 0.25 to 4.0. An omitted `speed` and an explicit `null`
     both mean 1.0, as they did when this field was an `Option`. The
     frontend rejects a value outside the range and always forwards a
     number, so the worker-side contract is a non-null `speed`.
     """
-    task_type: str | None = None
+    task_type: StrictStr | None = None
     """
     TTS task type: "CustomVoice", "VoiceDesign", or "Base"
     """
-    language: str | None = None
+    language: StrictStr | None = None
     """
     Language: "Auto", "Chinese", "English", "Japanese", etc.
     """
-    instructions: str | None = None
+    instructions: StrictStr | None = None
     """
     Voice style/emotion instructions (for VoiceDesign)
     """
-    ref_audio: str | None = None
+    ref_audio: StrictStr | None = None
     """
     Reference audio URL or base64 (for voice cloning with Base task)
     """
-    ref_text: str | None = None
+    ref_text: StrictStr | None = None
     """
     Reference transcript (for voice cloning with Base task)
     """
-    max_new_tokens: int | None = None
+    max_new_tokens: StrictInt | None = None
     """
     Maximum tokens to generate (default: 2048)
     """
-    user: str | None = None
+    user: StrictStr | None = None
     """
     Optional user identifier
     """
