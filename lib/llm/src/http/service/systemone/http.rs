@@ -105,8 +105,9 @@ async fn handle_http(
     attach_request_ids(&mut response, &request_id);
     match response.status().as_u16() {
         _ if response
-            .headers()
-            .contains_key(axum::http::header::RETRY_AFTER) =>
+            .extensions()
+            .get::<super::DecisionCapacityRejection>()
+            .is_some() =>
         {
             state.metrics_clone().inc_rejection(&metric_model, endpoint);
             guard.mark_error(ErrorType::Overload);
