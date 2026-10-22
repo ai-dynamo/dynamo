@@ -37,8 +37,11 @@ IGW_LATEST_RELEASE=v1.2.1
 kubectl apply \
   -f "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml"
 
-# Install and upgrade agentgateway (includes CRDs).
-AGW_VERSION=v1.0.0
+# Install and upgrade agentgateway (includes CRDs). Use v1.2.0 or later:
+# earlier releases open a new TLS connection to the EPP for every request and
+# keep it idle for up to 3 minutes, which exhausts the EPP's connection limit
+# under sustained load.
+AGW_VERSION=v1.6.0
 helm upgrade -i --create-namespace --namespace "$AGW_NAMESPACE" --version "$AGW_VERSION" \
   agentgateway-crds oci://cr.agentgateway.dev/charts/agentgateway-crds
 
