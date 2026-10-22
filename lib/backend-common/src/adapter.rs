@@ -20,7 +20,8 @@ use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_runtime::pipeline::{
-    AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
+    AsyncEngine, AsyncEngineContextProvider, Error, ManyIn, ManyOut, RequestStream, ResponseStream,
+    SingleIn,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
@@ -31,7 +32,10 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::disagg::DisaggregationMode;
-use crate::engine::{FirstTokenNotifier, GenerateContext, LLMEngine, RawEngine};
+use crate::engine::{
+    BidirectionalEngine, FirstTokenNotifier, GenerateContext, LLMEngine, RawEngine,
+};
+use crate::error::DynamoError;
 
 const ABORT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -594,79 +598,161 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
                 Error::from(e)
             })?;
 
-        // Cancellation monitor: call engine.abort() on stop/kill. No
-        // first-token deferral (no disagg decode peer to protect).
-        let (drop_tx, mut drop_rx) = oneshot::channel();
         let abort_engine = self.engine.clone();
         let abort_ctx = ctx.clone();
-        tokio::spawn(async move {
-            let mut dropped_stream = None;
-            let cancelled = tokio::select! {
-                _ = abort_ctx.stopped() => {
-                    tracing::debug!(request_id = abort_ctx.id(), "cancellation observed (stopped)");
-                    true
-                }
-                _ = abort_ctx.killed() => {
-                    tracing::debug!(request_id = abort_ctx.id(), "cancellation observed (killed)");
-                    true
-                }
-                stream = &mut drop_rx => {
-                    dropped_stream = Some(stream);
-                    abort_ctx.is_stopped() || abort_ctx.is_killed()
-                },
-            };
-            if cancelled
-                && tokio::time::timeout(ABORT_TIMEOUT, abort_engine.abort(abort_ctx.clone()))
-                    .await
-                    .is_err()
-            {
-                tracing::warn!(
-                    request_id = abort_ctx.id(),
-                    timeout_secs = ABORT_TIMEOUT.as_secs(),
-                    "engine abort timed out; releasing cancelled stream"
-                );
-            }
-            drop((dropped_stream, drop_rx));
-        });
-        let guard = CancelMonitorGuard {
-            stream: Some(chunks),
-            drop_tx: Some(drop_tx),
-        };
-
-        let stream_ctx = ctx.clone();
-        let finalizer_span = span.clone();
-        let mapped = async_stream::stream! {
-            let finalizer = StreamSpanFinalizer::new(finalizer_span);
-            let mut inner = guard;
-            let mut chunk_count: usize = 0;
-            while let Some(item) = inner.next().await {
-                chunk_count += 1;
-                match item {
-                    Ok(value) => yield Annotated::from_data(value),
-                    Err(dynamo_err) => {
-                        tracing::debug!(
-                            request_id = stream_ctx.id(),
-                            error = %dynamo_err,
-                            "raw engine stream yielded typed error",
-                        );
-                        finalizer.mark_completed();
-                        yield Annotated::from_err(dynamo_err);
-                        return;
-                    }
-                }
-            }
-            // A raw stream has no terminal-chunk marker (the JSON carries no
-            // finish_reason); natural end of the generator IS the terminal.
-            finalizer.mark_completed();
-            tracing::debug!(
-                request_id = stream_ctx.id(),
-                chunks = chunk_count,
-                cancelled = stream_ctx.is_stopped(),
-                "raw stream complete"
-            );
-        };
-        Ok(ResponseStream::new(Box::pin(mapped), ctx))
+        Ok(json_response(chunks, ctx, span, async move {
+            abort_engine.abort(abort_ctx).await;
+        }))
     }
+}
+
+/// Reuses raw JSON response handling with a streaming request input.
+pub(crate) struct BidirectionalEngineAdapter {
+    engine: Arc<dyn BidirectionalEngine>,
+}
+
+impl BidirectionalEngineAdapter {
+    pub(crate) fn new(engine: Arc<dyn BidirectionalEngine>) -> Self {
+        Self { engine }
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>>, Error>
+    for BidirectionalEngineAdapter
+{
+    async fn generate(
+        &self,
+        input: ManyIn<serde_json::Value>,
+    ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
+        let (requests, handle) = input.into_parts();
+        let ctx = handle.context();
+        let span = tracing::info_span!(
+            target: "request_span",
+            "engine.generate",
+            request_id = %ctx.id(),
+            error_kind = tracing::field::Empty,
+        );
+        let requests = requests
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("request stream already consumed"))?;
+        let gen_ctx = GenerateContext::with_metadata(ctx.clone(), None, handle.metadata().clone());
+        let chunks = self
+            .engine
+            .generate(requests, gen_ctx)
+            .instrument(span.clone())
+            .await
+            .map_err(|e| {
+                span.record("error_kind", "setup_failed");
+                span.set_status(Status::error("setup_failed"));
+                Error::from(e)
+            })?;
+        let abort_engine = self.engine.clone();
+        let abort_ctx = ctx.clone();
+        Ok(json_response(chunks, ctx, span, async move {
+            abort_engine.abort(abort_ctx).await;
+        }))
+    }
+}
+
+/// The local health registry uses single inputs. Probe the same bidirectional
+/// adapter with a finite, one-event stream instead of a separate health engine.
+pub(crate) struct BidirectionalProbeAdapter {
+    pub(crate) inner: Arc<BidirectionalEngineAdapter>,
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>>, Error>
+    for BidirectionalProbeAdapter
+{
+    async fn generate(
+        &self,
+        input: SingleIn<serde_json::Value>,
+    ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
+        let (request, handle) = input.into_parts();
+        self.inner
+            .generate(
+                handle.map(|_| {
+                    RequestStream::new(Box::pin(futures::stream::once(async { request })))
+                }),
+            )
+            .await
+    }
+}
+
+fn json_response(
+    chunks: BoxStream<'static, Result<serde_json::Value, DynamoError>>,
+    ctx: Arc<dyn AsyncEngineContext>,
+    span: tracing::Span,
+    abort: impl std::future::Future<Output = ()> + Send + 'static,
+) -> ManyOut<Annotated<serde_json::Value>> {
+    // Cancellation monitor: call engine.abort() on stop/kill. No
+    // first-token deferral (no disagg decode peer to protect).
+    let (drop_tx, mut drop_rx) = oneshot::channel();
+    let abort_ctx = ctx.clone();
+    tokio::spawn(async move {
+        let mut dropped_stream = None;
+        let cancelled = tokio::select! {
+            _ = abort_ctx.stopped() => {
+                tracing::debug!(request_id = abort_ctx.id(), "cancellation observed (stopped)");
+                true
+            }
+            _ = abort_ctx.killed() => {
+                tracing::debug!(request_id = abort_ctx.id(), "cancellation observed (killed)");
+                true
+            }
+            stream = &mut drop_rx => {
+                dropped_stream = Some(stream);
+                abort_ctx.is_stopped() || abort_ctx.is_killed()
+            },
+        };
+        if cancelled && tokio::time::timeout(ABORT_TIMEOUT, abort).await.is_err() {
+            tracing::warn!(
+                request_id = abort_ctx.id(),
+                timeout_secs = ABORT_TIMEOUT.as_secs(),
+                "engine abort timed out; releasing cancelled stream"
+            );
+        }
+        drop((dropped_stream, drop_rx));
+    });
+    let guard = CancelMonitorGuard {
+        stream: Some(chunks),
+        drop_tx: Some(drop_tx),
+    };
+
+    let stream_ctx = ctx.clone();
+    let finalizer_span = span.clone();
+    let mapped = async_stream::stream! {
+        let finalizer = StreamSpanFinalizer::new(finalizer_span);
+        let mut inner = guard;
+        let mut chunk_count: usize = 0;
+        while let Some(item) = inner.next().await {
+            chunk_count += 1;
+            match item {
+                Ok(value) => yield Annotated::from_data(value),
+                Err(dynamo_err) => {
+                    tracing::debug!(
+                        request_id = stream_ctx.id(),
+                        error = %dynamo_err,
+                        "raw engine stream yielded typed error",
+                    );
+                    finalizer.mark_completed();
+                    yield Annotated::from_err(dynamo_err);
+                    return;
+                }
+            }
+        }
+        // A raw stream has no terminal-chunk marker (the JSON carries no
+        // finish_reason); natural end of the generator IS the terminal.
+        finalizer.mark_completed();
+        tracing::debug!(
+            request_id = stream_ctx.id(),
+            chunks = chunk_count,
+            cancelled = stream_ctx.is_stopped(),
+            "raw stream complete"
+        );
+    };
+    ResponseStream::new(Box::pin(mapped), ctx)
 }
 
 #[cfg(test)]
@@ -2125,6 +2211,109 @@ mod tests {
                 );
                 assert_eq!(abort_ct.load(Ordering::SeqCst), 1);
             }
+        }
+    }
+
+    struct BidirectionalMock {
+        abort_calls: Arc<AtomicUsize>,
+        abort_calls_at_drop: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl BidirectionalEngine for BidirectionalMock {
+        async fn start(&self, _: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig::default())
+        }
+
+        async fn generate(
+            &self,
+            mut requests: BoxStream<'static, serde_json::Value>,
+            _ctx: GenerateContext,
+        ) -> Result<BoxStream<'static, Result<serde_json::Value, DynamoError>>, DynamoError>
+        {
+            let guard = StreamDropTracker {
+                abort_calls: self.abort_calls.clone(),
+                abort_calls_at_drop: self.abort_calls_at_drop.clone(),
+            };
+            Ok(Box::pin(async_stream::stream! {
+                let _guard = guard;
+                while let Some(event) = requests.next().await {
+                    yield Ok(event);
+                }
+                yield Ok(serde_json::json!({"drained": true}));
+            }))
+        }
+
+        async fn abort(&self, _: Arc<dyn AsyncEngineContext>) {
+            self.abort_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+    }
+
+    fn bidirectional_mock() -> Arc<BidirectionalMock> {
+        Arc::new(BidirectionalMock {
+            abort_calls: Arc::new(AtomicUsize::new(0)),
+            abort_calls_at_drop: Arc::new(AtomicUsize::new(usize::MAX)),
+        })
+    }
+
+    #[tokio::test]
+    async fn bidirectional_input_eof_drains_and_probes_use_the_same_engine() {
+        let engine = bidirectional_mock();
+        let adapter = Arc::new(BidirectionalEngineAdapter::new(engine.clone()));
+        let input = Context::new(RequestStream::new(Box::pin(futures::stream::iter([
+            serde_json::json!({"audio": "first"}),
+            serde_json::json!({"audio": "second"}),
+        ]))));
+        let output = adapter
+            .generate(input)
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(output.len(), 3);
+        assert_eq!(output[2].data.as_ref().unwrap()["drained"], true);
+        assert_eq!(engine.abort_calls.load(Ordering::SeqCst), 0);
+        let probe = BidirectionalProbeAdapter { inner: adapter };
+        let output = probe
+            .generate(Context::new(serde_json::json!({"probe": true})))
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(output[0].data.as_ref().unwrap()["probe"], true);
+        assert_eq!(output[1].data.as_ref().unwrap()["drained"], true);
+    }
+
+    #[tokio::test]
+    async fn bidirectional_abort_is_explicit_but_every_drop_releases_resources() {
+        for cancellation in ["none", "stop", "kill"] {
+            let engine = bidirectional_mock();
+            let adapter = BidirectionalEngineAdapter::new(engine.clone());
+            let input = Context::new(RequestStream::new(Box::pin(futures::stream::pending())));
+            let ctx = input.context();
+            let output = adapter.generate(input).await.unwrap();
+            match cancellation {
+                "stop" => ctx.stop_generating(),
+                "kill" => ctx.kill(),
+                _ => {}
+            }
+            // Also covers a response dropped before its first poll.
+            drop(output);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while engine.abort_calls_at_drop.load(Ordering::SeqCst) == usize::MAX {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                engine.abort_calls_at_drop.load(Ordering::SeqCst),
+                usize::from(cancellation != "none")
+            );
         }
     }
 }

@@ -486,6 +486,47 @@ pub trait RawEngine: Send + Sync + 'static {
     }
 }
 
+/// Bidirectional JSON engine for realtime sessions.
+///
+/// This is the streaming-input sibling of [`RawEngine`]. The [`crate::Worker`]
+/// owns the same discovery, metrics, readiness, and shutdown lifecycle. Engines
+/// own session state and return responses while requests are still arriving.
+#[async_trait]
+pub trait BidirectionalEngine: Send + Sync + 'static {
+    /// Start the engine and return registration metadata. See [`LLMEngine::start`].
+    async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError>;
+
+    /// Handle a session's ordered request stream.
+    ///
+    /// Input EOF means no more events will arrive; finish accepted work before
+    /// ending the response stream. Explicit context cancellation must interrupt
+    /// that work. As with [`RawEngine::generate`], an output `Err` is terminal.
+    /// Resource cleanup on response-stream drop must use RAII; [`Self::abort`]
+    /// is only called on explicit stop/kill.
+    async fn generate(
+        &self,
+        requests: BoxStream<'static, serde_json::Value>,
+        ctx: GenerateContext,
+    ) -> Result<BoxStream<'static, Result<serde_json::Value, DynamoError>>, DynamoError>;
+
+    /// Notify the engine of explicit session cancellation. See [`LLMEngine::abort`].
+    async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
+
+    /// Release resources, including partially initialized state. Must be idempotent.
+    async fn cleanup(&self) -> Result<(), DynamoError>;
+
+    /// Wire up engine metrics using the same handoff as [`RawEngine::setup_metrics`].
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        Ok(MetricsBindings::default())
+    }
+
+    /// Optional finite canary. The worker sends this as a one-event input stream
+    /// and then closes input. The response must reflect upstream engine health.
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        Ok(None)
+    }
+}
+
 /// Marker key stamped on canary payloads. Handlers may inspect it to branch
 /// probe-specific behavior (e.g. skip a synthetic first-yield that would
 /// mask a hung engine rank). Re-exported to Python via

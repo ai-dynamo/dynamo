@@ -3,7 +3,9 @@
 
 use std::{future::Future, sync::Arc};
 
-use dynamo_backend_common::{DynamoError, LLMEngine, RuntimeConfig, Worker, WorkerConfig};
+use dynamo_backend_common::{
+    BidirectionalEngine, DynamoError, LLMEngine, RawEngine, RuntimeConfig, Worker, WorkerConfig,
+};
 use dynamo_runtime::system_status_server::SystemProbePolicy;
 use dynamo_runtime::{DistributedRuntime, Runtime, logging};
 use tokio_util::sync::CancellationToken;
@@ -24,8 +26,42 @@ pub fn run<E: LLMEngine + 'static>(
         impl Future<Output = EngineBootstrapResult<E>>,
     ),
 ) -> anyhow::Result<()> {
+    run_worker(runtime_config, bootstrap, |engine, config| {
+        Worker::new(Arc::new(engine), config)
+    })
+}
+
+/// Start a single-input media sidecar with the shared startup/shutdown lifecycle.
+pub fn run_raw<E: RawEngine>(
+    (runtime_config, bootstrap): (
+        RuntimeConfig,
+        impl Future<Output = EngineBootstrapResult<E>>,
+    ),
+) -> anyhow::Result<()> {
+    run_worker(runtime_config, bootstrap, |engine, config| {
+        Worker::new_raw(Arc::new(engine), config)
+    })
+}
+
+/// Start a realtime sidecar with the shared startup/shutdown lifecycle.
+pub fn run_bidirectional<E: BidirectionalEngine>(
+    (runtime_config, bootstrap): (
+        RuntimeConfig,
+        impl Future<Output = EngineBootstrapResult<E>>,
+    ),
+) -> anyhow::Result<()> {
+    run_worker(runtime_config, bootstrap, |engine, config| {
+        Worker::new_bidirectional(Arc::new(engine), config)
+    })
+}
+
+fn run_worker<E>(
+    runtime_config: RuntimeConfig,
+    bootstrap: impl Future<Output = EngineBootstrapResult<E>>,
+    build: impl FnOnce(E, WorkerConfig) -> Worker,
+) -> anyhow::Result<()> {
     run_task(|runtime, shutdown| async move {
-        run_until_shutdown(runtime_config, bootstrap, &runtime, shutdown).await
+        run_until_shutdown(runtime_config, bootstrap, &runtime, shutdown, build).await
     })
 }
 
@@ -64,11 +100,12 @@ where
     })
 }
 
-async fn run_until_shutdown<E: LLMEngine + 'static>(
+async fn run_until_shutdown<E>(
     runtime_config: RuntimeConfig,
     bootstrap: impl Future<Output = EngineBootstrapResult<E>>,
     runtime: &Runtime,
     shutdown: CancellationToken,
+    build: impl FnOnce(E, WorkerConfig) -> Worker,
 ) -> anyhow::Result<()> {
     let startup = async {
         let distributed = runtime_config.to_distributed_config()?;
@@ -108,7 +145,7 @@ async fn run_until_shutdown<E: LLMEngine + 'static>(
         anyhow::bail!("runtime shut down during sidecar initialization");
     }
     let (drt, engine, config) = result?;
-    Worker::new(Arc::new(engine), config)
+    build(engine, config)
         .run_with_drt(drt, shutdown)
         .await
         .map_err(Into::into)
@@ -179,6 +216,7 @@ mod tests {
                                 bootstrap,
                                 &runtime,
                                 shutdown.clone(),
+                                |engine, config| Worker::new(Arc::new(engine), config),
                             ),
                         )
                         .await

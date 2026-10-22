@@ -32,10 +32,13 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
 
-use crate::adapter::{EngineAdapter, RawEngineAdapter};
+use crate::adapter::{
+    BidirectionalEngineAdapter, BidirectionalProbeAdapter, EngineAdapter, RawEngineAdapter,
+};
 use crate::disagg::DisaggregationMode;
 use crate::engine::{
-    EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
+    BidirectionalEngine, EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx,
+    RawEngine,
 };
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::publisher::{PublisherHandles, setup_publishers};
@@ -295,15 +298,14 @@ enum EngineRouteLifecycle {
     ShuttingDown,
 }
 
-/// The engine a [`Worker`] drives, tagged by request modality. Both variants
-/// share the lifecycle (driven via the forwarders below); they differ only in
-/// the serve-loop adapter: `Llm` → token pipeline ([`EngineAdapter`]), `Raw` →
-/// JSON passthrough ([`RawEngineAdapter`]) for media. A new media modality is
-/// a new `Raw` engine, not a new variant.
+/// The engine a [`Worker`] drives, tagged by request shape. All variants share
+/// one lifecycle; bidirectional sessions differ in their streaming input.
+/// A new media modality with a single request remains a new `Raw` engine.
 #[derive(Clone)]
 pub(crate) enum EngineKind {
     Llm(Arc<dyn LLMEngine>),
     Raw(Arc<dyn RawEngine>),
+    Bidirectional(Arc<dyn BidirectionalEngine>),
 }
 
 impl EngineKind {
@@ -311,6 +313,7 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.start(worker_id).await,
             EngineKind::Raw(e) => e.start(worker_id).await,
+            EngineKind::Bidirectional(e) => e.start(worker_id).await,
         }
     }
 
@@ -318,6 +321,7 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.cleanup().await,
             EngineKind::Raw(e) => e.cleanup().await,
+            EngineKind::Bidirectional(e) => e.cleanup().await,
         }
     }
 
@@ -326,6 +330,7 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.is_quiescent().await,
             EngineKind::Raw(e) => e.is_quiescent().await,
+            EngineKind::Bidirectional(_) => Ok(None),
         }
     }
 
@@ -333,6 +338,7 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.setup_metrics(ctx).await,
             EngineKind::Raw(e) => e.setup_metrics(ctx).await,
+            EngineKind::Bidirectional(e) => e.setup_metrics(ctx).await,
         }
     }
 
@@ -340,7 +346,7 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.kv_event_sources().await,
             // Raw media engines have no block-structured KV cache to route on.
-            EngineKind::Raw(_) => Ok(Vec::new()),
+            EngineKind::Raw(_) | EngineKind::Bidirectional(_) => Ok(Vec::new()),
         }
     }
 
@@ -348,6 +354,7 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.health_check_payload().await,
             EngineKind::Raw(e) => e.health_check_payload().await,
+            EngineKind::Bidirectional(e) => e.health_check_payload().await,
         }
     }
 
@@ -355,7 +362,7 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.supported_controls().await,
             // Raw media engines advertise no semantic engine controls.
-            EngineKind::Raw(_) => Ok(Vec::new()),
+            EngineKind::Raw(_) | EngineKind::Bidirectional(_) => Ok(Vec::new()),
         }
     }
 
@@ -366,7 +373,7 @@ impl EngineKind {
     ) -> Result<serde_json::Value, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.engine_control(control, body).await,
-            EngineKind::Raw(_) => Ok(serde_json::json!({
+            EngineKind::Raw(_) | EngineKind::Bidirectional(_) => Ok(serde_json::json!({
                 "status": "error",
                 "message": format!("unsupported engine control: {control}"),
             })),
@@ -380,7 +387,7 @@ impl EngineKind {
     ) -> Result<(), DynamoError> {
         match self {
             EngineKind::Llm(e) => e.validate_engine_control(control, body),
-            EngineKind::Raw(_) => Ok(()),
+            EngineKind::Raw(_) | EngineKind::Bidirectional(_) => Ok(()),
         }
     }
 
@@ -388,7 +395,7 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.supported_updates().await,
             // Raw media engines advertise no semantic engine updates.
-            EngineKind::Raw(_) => Ok(Vec::new()),
+            EngineKind::Raw(_) | EngineKind::Bidirectional(_) => Ok(Vec::new()),
         }
     }
 
@@ -399,7 +406,7 @@ impl EngineKind {
     ) -> Result<serde_json::Value, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.engine_update(update, body).await,
-            EngineKind::Raw(_) => Ok(serde_json::json!({
+            EngineKind::Raw(_) | EngineKind::Bidirectional(_) => Ok(serde_json::json!({
                 "status": "error",
                 "message": format!("unsupported engine update: {update}"),
             })),
@@ -413,15 +420,15 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.on_endpoint_ready(endpoint).await,
             // Raw media engines publish no discovery records of their own.
-            EngineKind::Raw(_) => Ok(()),
+            EngineKind::Raw(_) | EngineKind::Bidirectional(_) => Ok(()),
         }
     }
 
     /// Raw media engines (image/video/audio) register name-only — the engine
     /// loads the model itself and the model has no LLM artifacts (tokenizer /
     /// chat template / config.json) for Dynamo to fetch.
-    fn is_raw(&self) -> bool {
-        matches!(self, EngineKind::Raw(_))
+    fn uses_name_only_registration(&self) -> bool {
+        matches!(self, EngineKind::Raw(_) | EngineKind::Bidirectional(_))
     }
 }
 
@@ -469,6 +476,11 @@ impl Worker {
     /// (image/video/audio generation).
     pub fn new_raw(engine: Arc<dyn RawEngine>, config: WorkerConfig) -> Self {
         Self::with_engine(EngineKind::Raw(engine), config)
+    }
+
+    /// Build a worker for bidirectional realtime sessions.
+    pub fn new_bidirectional(engine: Arc<dyn BidirectionalEngine>, config: WorkerConfig) -> Self {
+        Self::with_engine(EngineKind::Bidirectional(engine), config)
     }
 
     fn with_engine(engine: EngineKind, config: WorkerConfig) -> Self {
@@ -532,6 +544,7 @@ impl Worker {
         // doesn't pay the cost of installing signal handlers and spawning
         // a listener task just to get an InvalidArgument error.
         validate_model_input(self.config.model_input, &self.engine)?;
+        validate_streaming_input(&self.config, &self.engine)?;
         validate_route_to_encoder(&self.config)?;
 
         // Install the OS signal handlers synchronously, before spawning
@@ -581,6 +594,7 @@ impl Worker {
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
         validate_model_input(self.config.model_input, &self.engine)?;
+        validate_streaming_input(&self.config, &self.engine)?;
         validate_route_to_encoder(&self.config)?;
         self.run_with_shutdown(drt.runtime().clone(), Some(drt), shutdown)
             .await
@@ -1031,8 +1045,12 @@ impl Worker {
         } else {
             None
         };
-        let mut local_model =
-            build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
+        let mut local_model = build_local_model(
+            &self.config,
+            engine_config,
+            self.engine.uses_name_only_registration(),
+        )
+        .await?;
         tracing::debug!("local model built");
 
         // Hand the engine its serving endpoint before registering the model
@@ -1131,6 +1149,17 @@ impl Worker {
                     )
                 })?;
                 (ingress, raw_adapter)
+            }
+            EngineKind::Bidirectional(engine) => {
+                let adapter = Arc::new(BidirectionalEngineAdapter::new(engine.clone()));
+                let ingress = Ingress::for_engine(adapter.clone()).map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("bidirectional ingress: {e}"),
+                    )
+                })?;
+                let probe = Arc::new(BidirectionalProbeAdapter { inner: adapter });
+                (ingress, probe)
             }
         };
 
@@ -2109,6 +2138,7 @@ fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
             "images" | "image" => ModelType::Images,
             "videos" | "video" => ModelType::Videos,
             "audios" | "audio" => ModelType::Audios,
+            "realtime" => ModelType::Realtime,
             other => {
                 return Err(err(
                     ErrorType::Backend(BackendError::InvalidArgument),
@@ -2158,7 +2188,42 @@ fn validate_model_input(model_input: ModelInput, engine: &EngineKind) -> Result<
                 Ok(())
             }
         }
+        EngineKind::Bidirectional(_) => {
+            if model_input == ModelInput::Text {
+                Ok(())
+            } else {
+                Err(err(
+                    ErrorType::Backend(BackendError::InvalidArgument),
+                    "BidirectionalEngine requires ModelInput::Text",
+                ))
+            }
+        }
     }
+}
+
+/// Discovery must advertise the request shape actually accepted by ingress.
+fn validate_streaming_input(config: &WorkerConfig, engine: &EngineKind) -> Result<(), DynamoError> {
+    if matches!(engine, EngineKind::Bidirectional(_)) {
+        if parse_endpoint_types(&config.endpoint_types)? != ModelType::Realtime
+            || config.disaggregation_mode != DisaggregationMode::Aggregated
+            || config.route_to_encoder
+        {
+            return Err(err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                "BidirectionalEngine requires only the realtime endpoint in aggregated mode",
+            ));
+        }
+    } else if config
+        .endpoint_types
+        .split(',')
+        .any(|kind| kind.trim().eq_ignore_ascii_case("realtime"))
+    {
+        return Err(err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            "the realtime endpoint requires a BidirectionalEngine",
+        ));
+    }
+    Ok(())
 }
 
 async fn build_local_model(
@@ -2516,6 +2581,56 @@ mod tests {
 
     fn raw_kind() -> EngineKind {
         EngineKind::Raw(Arc::new(ValidationRawMock))
+    }
+
+    #[async_trait::async_trait]
+    impl BidirectionalEngine for ValidationRawMock {
+        async fn start(&self, _: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig::default())
+        }
+
+        async fn generate(
+            &self,
+            input: futures::stream::BoxStream<'static, serde_json::Value>,
+            _: crate::GenerateContext,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<serde_json::Value, DynamoError>>,
+            DynamoError,
+        > {
+            use futures::StreamExt;
+            Ok(input.map(Ok).boxed())
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn realtime_registration_requires_bidirectional_aggregated_text_input() {
+        let engine = EngineKind::Bidirectional(Arc::new(ValidationRawMock));
+        let config = WorkerConfig {
+            model_input: ModelInput::Text,
+            endpoint_types: "realtime".into(),
+            ..WorkerConfig::default()
+        };
+        validate_model_input(config.model_input, &engine).unwrap();
+        validate_streaming_input(&config, &engine).unwrap();
+        assert!(validate_streaming_input(&config, &llm_kind()).is_err());
+        assert!(validate_streaming_input(&config, &raw_kind()).is_err());
+        assert!(validate_model_input(ModelInput::Tokens, &engine).is_err());
+        for config in [
+            WorkerConfig {
+                endpoint_types: "realtime,audios".into(),
+                ..config.clone()
+            },
+            WorkerConfig {
+                disaggregation_mode: DisaggregationMode::Prefill,
+                ..config.clone()
+            },
+        ] {
+            assert!(validate_streaming_input(&config, &engine).is_err());
+        }
     }
 
     #[test]

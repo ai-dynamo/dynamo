@@ -2436,6 +2436,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-realtime"
+version = "1.6.0"
+dependencies = [
+ "async-stream",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "parking_lot",
+ "reqwest 0.12.28",
+ "rubato",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-renderer"
 version = "8.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2673,17 +2694,22 @@ dependencies = [
  "clap",
  "dynamo-backend-common",
  "dynamo-llm",
+ "dynamo-realtime",
  "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
  "prost-types 0.14.4",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tonic 0.14.6",
  "tonic-health 0.14.6",
  "tracing",
+ "url",
+ "uuid",
  "vllm-proto",
 ]
 
@@ -7129,6 +7155,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "realfft"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f821338fddb99d089116342c46e9f1fbf3828dba077674613e734e01d6ea8677"
+dependencies = [
+ "rustfft",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7354,6 +7389,18 @@ dependencies = [
  "serde_derive",
  "typeid",
  "unicode-ident",
+]
+
+[[package]]
+name = "rubato"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5258099699851cfd0082aeb645feb9c084d9a5e1f1b8d5372086b989fc5e56a1"
+dependencies = [
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "realfft",
 ]
 
 [[package]]
@@ -8869,7 +8916,11 @@ checksum = "7a9daff607c6d2bf6c16fd681ccb7eecc83e4e2cdc1ca067ffaadfca5de7f084"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite",
 ]
 
@@ -9328,6 +9379,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.4",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.18",
  "utf-8",

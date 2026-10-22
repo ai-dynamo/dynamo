@@ -1,7 +1,7 @@
 # Backend Common (Rust)
 
 Shared runtime glue for Rust backends. `Worker` (runtime lifecycle)
-drives one of two engine traits, selected by request modality:
+drives an engine trait selected by request shape:
 
 - `LLMEngine` — token pipeline. `generate` takes `PreprocessedRequest`
   (`token_ids` in) and yields `LLMEngineOutput` (`token_ids` out), the
@@ -14,9 +14,16 @@ drives one of two engine traits, selected by request modality:
   detokenizer, or KV cache. Served through `RawEngineAdapter`. The
   contract is modality-neutral: a new media modality is a new
   `RawEngine`, not a new framework path.
+- `BidirectionalEngine` — realtime sessions. `generate` consumes a stream of
+  JSON events and produces a stream of JSON events through
+  `BidirectionalEngineAdapter`. Input EOF drains accepted work; context
+  cancellation interrupts it. ASR and Omni share this shape. TTS remains a
+  `RawEngine` because its input is a single request.
 
 `Worker` registration honours `WorkerConfig.model_input`: `LLMEngine`
-requires `ModelInput::Tokens`; `RawEngine` requires `Text`/`Tensor`.
+requires `ModelInput::Tokens`; `RawEngine` requires `Text`/`Tensor`;
+`BidirectionalEngine` requires `Text`, only the `realtime` endpoint type,
+and aggregated mode.
 `endpoint_types` parses `images`/`videos`/`audios` (→ `ModelType`) for
 the raw path alongside the LLM `chat`/`completions`/`embedding`/etc.
 
