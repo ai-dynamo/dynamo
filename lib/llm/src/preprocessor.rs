@@ -70,7 +70,8 @@ use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact}
 use crate::preprocessor::media::MediaFetcher;
 use crate::preprocessor::media::{MediaDecoder, MediaLoader, max_data_url_bytes};
 use crate::protocols::common::preprocessor::{
-    MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
+    MultimodalData, MultimodalDataMap, MultimodalItemRef, MultimodalUuidMap,
+    PreprocessedRequestBuilder, RoutingHints,
 };
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
@@ -3657,6 +3658,7 @@ impl OpenAIPreprocessor {
 
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut uuid_map: MultimodalUuidMap = HashMap::new();
+        let mut media_order: Vec<MultimodalItemRef> = Vec::new();
         let mut has_user_uuid = false;
         // Decoded results are written back into these reserved modality slots so
         // URL-backed and UUID-only inputs retain request order.
@@ -3736,6 +3738,10 @@ impl OpenAIPreprocessor {
 
                 let slots = media_map.entry(type_str.to_string()).or_default();
                 let slot_idx = slots.len();
+                media_order.push(MultimodalItemRef {
+                    modality: type_str.to_string(),
+                    index: slot_idx,
+                });
                 has_user_uuid |= uuid.is_some();
                 uuid_map
                     .entry(type_str.to_string())
@@ -4039,6 +4045,7 @@ impl OpenAIPreprocessor {
 
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
+            builder.multi_modal_order(Some(media_order));
             if has_user_uuid {
                 builder.multi_modal_uuids(Some(uuid_map));
             }
@@ -8657,6 +8664,60 @@ mod extra_args_media_copy_tests {
     fn inline_data_url() -> String {
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn multimodal_order_tracks_the_rendered_media_sequence() {
+        let preprocessor = test_preprocessor();
+        let image = inline_data_url();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "alias",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA"}},
+                    {"type": "image_url", "image_url": {"url": image}},
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}},
+                    {"type": "video_url", "video_url": {"url": "https://example.com/second.mp4"}}
+                ]
+            }]
+        }))
+        .unwrap();
+        let mut builder = PreprocessedRequestBuilder::default();
+        builder
+            .model("alias".into())
+            .token_ids(Vec::new())
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default());
+
+        preprocessor
+            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[])
+            .await
+            .unwrap();
+        let result = builder.build().unwrap();
+
+        assert_eq!(
+            result.multi_modal_order.unwrap(),
+            [
+                MultimodalItemRef {
+                    modality: "video_url".to_string(),
+                    index: 0,
+                },
+                MultimodalItemRef {
+                    modality: "image_url".to_string(),
+                    index: 0,
+                },
+                MultimodalItemRef {
+                    modality: "audio_url".to_string(),
+                    index: 0,
+                },
+                MultimodalItemRef {
+                    modality: "video_url".to_string(),
+                    index: 1,
+                },
+            ]
+        );
     }
 
     #[tokio::test]

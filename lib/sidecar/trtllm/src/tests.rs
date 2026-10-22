@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{
-    DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
-    PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
+    DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, MultimodalData,
+    MultimodalItemRef, OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions,
+    StopReason,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
@@ -49,6 +50,11 @@ struct FakeTrtllm {
     empty_model_info: Arc<AtomicBool>,
     /// Answers `UNAVAILABLE`, the shape of an engine that is not serving yet.
     unavailable_model_info: Arc<AtomicBool>,
+    /// Portable coarse-grained model capability.
+    supports_multimodal: Arc<AtomicBool>,
+    /// TensorRT-LLM's finer-grained modality advertisement.
+    advertises_image: Arc<AtomicBool>,
+    advertises_video: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
 }
 
@@ -82,7 +88,7 @@ impl pb::inference_server::Inference for FakeTrtllm {
         self.requests.lock().await.push(request.clone());
 
         let request_id = request.request_id.clone();
-        let prompt_tokens = prompt_len(&request);
+        let prompt_tokens = prompt_len(&request) + 64 * request.media.len() as u32;
         let wants_logprobs = wants_logprobs(&request);
         let context_only = is_context_only(&request);
         let hang = self.hang.load(Ordering::SeqCst);
@@ -190,6 +196,17 @@ impl pb::control_server::Control for FakeTrtllm {
         if self.unavailable_model_info.load(Ordering::SeqCst) {
             return Err(Status::unavailable("not serving yet"));
         }
+        let supports_multimodal = self.supports_multimodal.load(Ordering::SeqCst);
+        let modalities = [
+            (self.advertises_image.load(Ordering::SeqCst), "image"),
+            (self.advertises_video.load(Ordering::SeqCst), "video"),
+        ]
+        .into_iter()
+        .filter(|(advertised, _)| *advertised)
+        .map(|(_, modality)| prost_types::Value {
+            kind: Some(prost_types::value::Kind::StringValue(modality.to_string())),
+        })
+        .collect();
         Ok(Response::new(pb::ModelInfo {
             model_id: "fake-model".to_string(),
             max_context_length: if self.empty_model_info.load(Ordering::SeqCst) {
@@ -197,7 +214,17 @@ impl pb::control_server::Control for FakeTrtllm {
             } else {
                 Some(4096)
             },
-            supports_multimodal: Some(false),
+            supports_multimodal: Some(supports_multimodal),
+            extra: Some(prost_types::Struct {
+                fields: std::collections::BTreeMap::from([(
+                    "trtllm_supported_modalities".to_string(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::ListValue(
+                            prost_types::ListValue { values: modalities },
+                        )),
+                    },
+                )]),
+            }),
             ..Default::default()
         }))
     }
@@ -519,6 +546,90 @@ async fn aggregated_generation_streams_delta_then_terminal() {
     match sent.input.as_ref().expect("input") {
         pb::generate_request::Input::TokenIds(tokens) => assert_eq!(tokens.ids, [11, 22, 33]),
         other => panic!("expected token IDs input, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn advertised_image_media_reaches_openengine_and_uses_expanded_usage() {
+    let service = FakeTrtllm::default();
+    service.supports_multimodal.store(true, Ordering::SeqCst);
+    service.advertises_image.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+
+    let mut req = request();
+    req.stop_conditions.max_tokens = None;
+    add_images(&mut req, ["data:image/png;base64,aW1hZ2U="]);
+    let outputs = collect(&engine, req).await;
+    let usage = outputs
+        .last()
+        .and_then(|output| output.completion_usage.as_ref())
+        .expect("terminal engine usage");
+    assert_eq!(usage.prompt_tokens, 67, "3 text tokens + 64 image tokens");
+
+    let requests = server.service.requests.lock().await;
+    let sent = requests.first().expect("recorded request");
+    assert_eq!(sent.stopping.as_ref().expect("stopping").max_tokens, None);
+    assert_eq!(sent.media.len(), 1);
+    assert_eq!(sent.media[0].modality, pb::Modality::Image as i32);
+    assert!(matches!(
+        sent.media[0].source.as_ref(),
+        Some(pb::media_item::Source::DataUri(value)) if value.starts_with("data:image/png")
+    ));
+}
+
+#[tokio::test]
+async fn advertised_video_media_reaches_openengine() {
+    let service = FakeTrtllm::default();
+    service.supports_multimodal.store(true, Ordering::SeqCst);
+    service.advertises_video.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+
+    let mut req = request();
+    req.multi_modal_data = Some(HashMap::from([(
+        "video_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "https://example.com/video.mp4".to_string(),
+        )],
+    )]));
+    collect(&engine, req).await;
+
+    let requests = server.service.requests.lock().await;
+    let sent = requests.first().expect("recorded request");
+    assert_eq!(sent.media.len(), 1);
+    assert_eq!(sent.media[0].modality, pb::Modality::Video as i32);
+    assert_eq!(
+        sent.media[0].source,
+        Some(pb::media_item::Source::Url(
+            "https://example.com/video.mp4".to_string()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn both_multimodal_capability_signals_are_required() {
+    for (coarse, image) in [(true, false), (false, true)] {
+        let service = FakeTrtllm::default();
+        service.supports_multimodal.store(coarse, Ordering::SeqCst);
+        service.advertises_image.store(image, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let engine = engine(&server.endpoint, 1);
+        engine.start(0).await.expect("start");
+
+        let mut req = request();
+        add_images(&mut req, ["https://example.com/image.png"]);
+        let context = dynamo_backend_common::testing::mock_context();
+        let result = engine
+            .generate(req, GenerateContext::new(context, None))
+            .await;
+        assert!(
+            result.is_err(),
+            "capabilities ({coarse}, {image}) must fail closed"
+        );
+        assert!(server.service.requests.lock().await.is_empty());
     }
 }
 
@@ -897,6 +1008,52 @@ async fn a_configured_context_length_survives_a_server_without_control() {
     assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn media_requests_retry_transient_capability_discovery() {
+    for (key, url, image, video) in [
+        ("image_url", "https://example.com/image.png", true, false),
+        ("video_url", "https://example.com/video.mp4", false, true),
+    ] {
+        let service = FakeTrtllm::default();
+        service.unavailable_model_info.store(true, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let engine = engine_with(&server.endpoint, transport(1), Some(4096), AGG);
+        engine.start(0).await.expect("start with configured window");
+
+        server
+            .service
+            .unavailable_model_info
+            .store(false, Ordering::SeqCst);
+        server
+            .service
+            .supports_multimodal
+            .store(true, Ordering::SeqCst);
+        server
+            .service
+            .advertises_image
+            .store(image, Ordering::SeqCst);
+        server
+            .service
+            .advertises_video
+            .store(video, Ordering::SeqCst);
+        let mut media_request = request();
+        media_request.multi_modal_data = Some(HashMap::from([(
+            key.to_string(),
+            vec![MultimodalData::RawUrl(url.to_string())],
+        )]));
+
+        let output = collect(&engine, media_request).await;
+        assert_eq!(
+            output.last().unwrap().finish_reason,
+            Some(FinishReason::Stop)
+        );
+        assert_eq!(
+            server.service.model_info_calls.load(Ordering::SeqCst),
+            2,
+            "the {key} request must retry the transient startup failure once"
+        );
+    }
+}
 /// Shutdown has to terminate in-flight requests: the worker cannot drain if a
 /// stream waits forever on an engine that will never answer.
 #[tokio::test]

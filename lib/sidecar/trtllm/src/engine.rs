@@ -20,7 +20,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, ModelInfoResponse, ModelLimits, TrtllmClient};
+use crate::client::{self, ModelInfoResponse, ModelLimits, SupportedMedia, TrtllmClient};
 use crate::convert::{ResponseState, build_generate_request};
 use crate::model::ConfiguredModel;
 
@@ -186,12 +186,12 @@ impl TrtllmSidecarEngine {
         if let Some(limits) = self.rediscovered_limits.get() {
             return Ok(*limits);
         }
-        let has_images = request.multi_modal_data.as_ref().is_some_and(|media| {
-            media
-                .get("image_url")
-                .is_some_and(|images| !images.is_empty())
+        let has_supported_media = request.multi_modal_data.as_ref().is_some_and(|media| {
+            ["image_url", "video_url"]
+                .iter()
+                .any(|key| media.get(*key).is_some_and(|items| !items.is_empty()))
         });
-        if !has_images || initial.supports_image.is_some() {
+        if !has_supported_media || initial.supported_media.is_some() {
             return Ok(initial);
         }
 
@@ -223,7 +223,7 @@ impl TrtllmSidecarEngine {
                         Ok(reported)
                     }
                     ModelInfoResponse::Unsupported(_) => Ok(ModelLimits {
-                        supports_image: Some(false),
+                        supported_media: Some(SupportedMedia::default()),
                         ..initial
                     }),
                 }
@@ -291,7 +291,7 @@ impl TrtllmSidecarEngine {
                              --context-length"
                         );
                         ModelLimits {
-                            supports_image: Some(false),
+                            supported_media: Some(SupportedMedia::default()),
                             ..Default::default()
                         }
                     }

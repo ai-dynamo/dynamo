@@ -362,6 +362,13 @@ pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalDat
 /// Backend cache UUIDs aligned positionally with multimodal data slots.
 pub type MultimodalUuidMap = std::collections::HashMap<String, Vec<Option<String>>>;
 
+/// A reference into [`MultimodalDataMap`] preserving the media traversal order.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct MultimodalItemRef {
+    pub modality: String,
+    pub index: usize,
+}
+
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The `dynamo.llm-preprocessor`
 /// crate is responsible for converting request from the public APIs to this internal representation.
 #[derive(Serialize, Deserialize, Clone, Builder)]
@@ -420,6 +427,13 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_uuids: Option<MultimodalUuidMap>,
+
+    /// Media references in gather order: content parts, after the formatter's
+    /// message ordering. A chat template that regroups media by modality
+    /// renders a different placeholder order.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_modal_order: Option<Vec<MultimodalItemRef>>,
 
     /// Optional multimodal routing-only fields (separate from execution payload).
     #[builder(default)]
