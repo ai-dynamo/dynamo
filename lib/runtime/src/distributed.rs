@@ -902,25 +902,37 @@ impl DiscoveryBackend {
     /// This is the single authoritative mapping of `DYN_EVENT_PLANE` →
     /// `EventTransportKind`. ZMQ is the default event plane for all backends
     /// (`file`/`mem`/`etcd`/`kubernetes`); NATS is an explicit opt-in via
-    /// `DYN_EVENT_PLANE=nats`.
+    /// `DYN_EVENT_PLANE=nats`. The value is trimmed and matched case-insensitively.
     ///
     /// Call this once at startup and store the result; do not call it repeatedly.
-    pub fn resolve_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
+    ///
+    /// # Errors
+    /// Returns an error if `DYN_EVENT_PLANE` is set to anything other than
+    /// `nats`, `zmq`, or an empty value, so a typo cannot silently select ZMQ.
+    pub fn resolve_event_transport_kind(&self) -> Result<crate::discovery::EventTransportKind> {
         use crate::config::environment_names::event_plane::DYN_EVENT_PLANE;
+        Self::event_transport_kind_from_env_result(std::env::var(DYN_EVENT_PLANE))
+    }
+
+    fn event_transport_kind_from_env_result(
+        value: std::result::Result<String, std::env::VarError>,
+    ) -> Result<crate::discovery::EventTransportKind> {
         use crate::discovery::EventTransportKind;
-        match std::env::var(DYN_EVENT_PLANE).as_deref() {
-            Ok("nats") => EventTransportKind::Nats,
-            Ok("zmq") => EventTransportKind::Zmq,
+        match value {
             // Unset or empty: ZMQ is the default for every backend.
-            Ok("") | Err(_) => EventTransportKind::Zmq,
-            Ok(other) => {
-                tracing::warn!(
-                    "Invalid DYN_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'. \
-                     Defaulting to ZMQ.",
-                    other
-                );
-                EventTransportKind::Zmq
-            }
+            Err(std::env::VarError::NotPresent) => Ok(EventTransportKind::Zmq),
+            Ok(raw) => match raw.trim().to_lowercase().as_str() {
+                "nats" => Ok(EventTransportKind::Nats),
+                "zmq" | "" => Ok(EventTransportKind::Zmq),
+                _ => Err(anyhow::anyhow!(
+                    "Invalid DYN_EVENT_PLANE value '{raw}'. Valid values: 'nats', 'zmq'"
+                )),
+            },
+            Err(std::env::VarError::NotUnicode(raw)) => Err(anyhow::anyhow!(
+                "Invalid DYN_EVENT_PLANE value '{}': not valid Unicode. \
+                 Valid values: 'nats', 'zmq'",
+                raw.to_string_lossy()
+            )),
         }
     }
 }
@@ -997,7 +1009,7 @@ impl DistributedConfig {
             Some(other) => {
                 anyhow::bail!("Invalid event plane '{other}'. Valid options are: 'nats', 'zmq'")
             }
-            None => discovery_backend.resolve_event_transport_kind(),
+            None => discovery_backend.resolve_event_transport_kind()?,
         };
 
         // NATS is used for more than just NATS request-plane RPC:
@@ -1040,7 +1052,7 @@ impl DistributedConfig {
         let request_plane = RequestPlaneMode::from_env()?;
         let discovery_backend =
             DiscoveryBackend::KvStore(kv::Selector::Etcd(Box::new(etcd_config)));
-        let event_transport_kind = discovery_backend.resolve_event_transport_kind();
+        let event_transport_kind = discovery_backend.resolve_event_transport_kind()?;
         let nats_enabled = request_plane.is_nats()
             || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
             || matches!(
@@ -1193,6 +1205,65 @@ mod request_plane_env_tests {
         assert!(
             message.contains("'nats'") && message.contains("'tcp'"),
             "error should list the valid options, got: {message}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod event_plane_env_tests {
+    use super::DiscoveryBackend;
+    use crate::discovery::EventTransportKind;
+
+    fn resolve(
+        value: std::result::Result<String, std::env::VarError>,
+    ) -> anyhow::Result<EventTransportKind> {
+        DiscoveryBackend::event_transport_kind_from_env_result(value)
+    }
+
+    #[test]
+    fn valid_event_plane_values_resolve_case_insensitively() {
+        for (value, expected) in [
+            ("nats", EventTransportKind::Nats),
+            ("NATS", EventTransportKind::Nats),
+            (" nats ", EventTransportKind::Nats),
+            ("zmq", EventTransportKind::Zmq),
+            ("Zmq", EventTransportKind::Zmq),
+        ] {
+            let kind = resolve(Ok(value.to_string()))
+                .unwrap_or_else(|err| panic!("DYN_EVENT_PLANE={value:?} should resolve: {err}"));
+            assert_eq!(kind, expected, "value {value:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_event_plane_is_an_error_naming_value_and_options() {
+        for value in ["nat", "x"] {
+            let err = resolve(Ok(value.to_string()))
+                .expect_err("a misspelled DYN_EVENT_PLANE must not silently fall back to ZMQ");
+            let message = err.to_string();
+            assert!(
+                message.contains(&format!("'{value}'")),
+                "error should name the offending value, got: {message}"
+            );
+            assert!(
+                message.contains("Valid values: 'nats', 'zmq'"),
+                "error should list the valid values, got: {message}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_event_plane_is_an_error_not_a_default() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let raw = OsString::from_vec(b"nats\xff".to_vec());
+        let err = resolve(Err(std::env::VarError::NotUnicode(raw)))
+            .expect_err("a non-Unicode DYN_EVENT_PLANE must not silently fall back to ZMQ");
+        assert!(
+            err.to_string().contains("not valid Unicode"),
+            "error should say the value was not valid Unicode, got: {err}"
         );
     }
 }

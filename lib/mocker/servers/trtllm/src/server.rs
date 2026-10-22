@@ -676,9 +676,19 @@ impl pb::control_server::Control for TrtllmMockerService {
         _request: Request<pb::GetLoadRequest>,
     ) -> Result<Response<pb::LoadInfo>, Status> {
         let metrics = self.engine.metrics_receiver().borrow().clone();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| Status::internal(error.to_string()))?
+            .as_nanos() as u64;
+        let dp_size = self
+            .server_info
+            .parallelism
+            .as_ref()
+            .and_then(|parallelism| parallelism.data_parallel_size)
+            .unwrap_or(1);
         Ok(Response::new(pb::LoadInfo {
             instance_id: self.server_info.instance_id.clone(),
-            timestamp_unix_nanos: None,
+            timestamp_unix_nanos: Some(timestamp),
             running_requests: Some(metrics.running_requests as u32),
             queued_requests: Some(metrics.waiting_requests as u32),
             active_kv_sessions: (self.config.mode != ServerMode::Aggregated).then(|| {
@@ -693,7 +703,14 @@ impl pb::control_server::Control for TrtllmMockerService {
             waiting_tokens: None,
             prefill_batch_size: None,
             decode_batch_size: None,
-            ranks: Vec::new(),
+            ranks: (0..dp_size)
+                .map(|rank| pb::RankLoadInfo {
+                    data_parallel_rank: Some(rank),
+                    used_kv_blocks: Some(metrics.active_decode_blocks),
+                    total_kv_blocks: Some(metrics.total_blocks),
+                    ..Default::default()
+                })
+                .collect(),
             attributes: None,
         }))
     }

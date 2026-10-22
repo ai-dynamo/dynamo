@@ -13,6 +13,7 @@ from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import FpmDirectPublisher as FpmDirectPublisher
 from dynamo._core import FpmEventRelay as FpmEventRelay
 from dynamo._core import FpmEventSubscriber as FpmEventSubscriber
+from dynamo._core import FpmHealthSnapshot as FpmHealthSnapshot
 from dynamo._core import FrontendExtensionContext as FrontendExtensionContext
 from dynamo._core import FrontendResponse as FrontendResponse
 from dynamo._core import FrontendRoute as FrontendRoute

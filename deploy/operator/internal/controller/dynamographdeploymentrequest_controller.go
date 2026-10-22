@@ -451,6 +451,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 		return ctrl.Result{}, err
 	}
 
+	// A v1beta2 request is stored as a v1beta1 envelope carrier. Until its
+	// reconciler exists, leave that carrier and its children untouched.
+	if dgdr.Spec.V1Beta2 != nil {
+		return ctrl.Result{}, nil
+	}
+
 	// Handle finalizer using common function
 	finalized, err := commonController.HandleFinalizer(ctx, dgdr, r.Client, r)
 	if err != nil {
@@ -1224,7 +1230,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) confirmDGDIdentity(
 	}
 	apply := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": nvidiacomv1beta1.GroupVersion.String(),
-		"kind":       "DynamoGraphDeploymentRequest",
+		"kind":       nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind,
 		"metadata": map[string]any{
 			"name":            dgdr.Name,
 			"namespace":       dgdr.Namespace,
@@ -1295,7 +1301,7 @@ func removeDGDROwnerReferences(ownerReferences []metav1.OwnerReference, dgdr *nv
 	filtered := ownerReferences[:0]
 	removed := false
 	for _, ownerReference := range ownerReferences {
-		if ownerReference.Kind == "DynamoGraphDeploymentRequest" &&
+		if ownerReference.Kind == nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind &&
 			ownerReference.Name == dgdr.Name {
 			removed = true
 			continue
@@ -2055,7 +2061,10 @@ func restoredAlphaProfilingConfig(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRe
 	if err := alpha.ConvertFrom(dgdr); err != nil {
 		return dgdv1alpha1.ProfilingConfigSpec{}, err
 	}
-	return alpha.Spec.ProfilingConfig, nil
+	if alpha.Spec.ProfilingConfig == nil {
+		return dgdv1alpha1.ProfilingConfigSpec{}, nil
+	}
+	return *alpha.Spec.ProfilingConfig, nil
 }
 
 // checkProfilingJobStatus checks if the profiling job has completed
@@ -2273,7 +2282,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	}
 	apply := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": nvidiacomv1beta1.GroupVersion.String(),
-		"kind":       "DynamoGraphDeploymentRequest",
+		"kind":       nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind,
 		"metadata": map[string]any{
 			"name":            dgdr.Name,
 			"namespace":       dgdr.Namespace,

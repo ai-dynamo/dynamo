@@ -43,6 +43,56 @@ import (
 const disaggregatedSetUnitTestNamespace = "default"
 const maxInt32GroupIndex = 1<<31 - 1
 
+func TestDisaggregatedSetRestartAppliedRequiresEveryTemplate(t *testing.T) {
+	for _, tc := range []struct {
+		name, leaderID, workerID              string
+		missingRole, missingLeader, malformed bool
+		wantApplied, wantError                bool
+	}{
+		{name: "requested restart on both templates", leaderID: "requested", workerID: "requested", wantApplied: true},
+		{name: "ready old revision", leaderID: "previous", workerID: "previous"},
+		{name: "only leader updated", leaderID: "requested", workerID: "previous"},
+		{name: "only worker updated", leaderID: "previous", workerID: "requested"},
+		{name: "leader template missing", workerID: "requested", missingLeader: true},
+		{name: "selected role missing", leaderID: "requested", workerID: "requested", missingRole: true},
+		{name: "malformed role spec", malformed: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Build the observed DS templates for two selected roles")
+			ds := newDisaggregatedSetObject()
+			roles := make([]any, 0, 2)
+			for _, roleName := range []string{"prefill", "decode"} {
+				if tc.missingRole && roleName == "decode" {
+					continue
+				}
+				template := map[string]any{
+					"workerTemplate": map[string]any{"metadata": map[string]any{"annotations": map[string]any{consts.RestartAnnotation: tc.workerID}}},
+				}
+				if !tc.missingLeader {
+					template["leaderTemplate"] = map[string]any{"metadata": map[string]any{"annotations": map[string]any{consts.RestartAnnotation: tc.leaderID}}}
+				}
+				roles = append(roles, map[string]any{"name": roleName, "spec": map[string]any{"leaderWorkerTemplate": template}})
+			}
+			ds.Object["spec"] = map[string]any{"roles": roles}
+			if tc.malformed {
+				ds.Object["spec"] = map[string]any{"roles": "invalid"}
+			}
+			original := ds.DeepCopy()
+			selection := disaggregatedSetSelection{componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"}}
+
+			t.Log("Require both templates to observe the requested restart without mutating the snapshot")
+			applied, err := disaggregatedSetRestartApplied(ds, selection, "requested")
+			require.Equal(t, tc.wantApplied, applied)
+			if tc.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, original, ds)
+		})
+	}
+}
+
 func TestDisaggregatedSetEligibilityDoesNotSelectAProvider(t *testing.T) {
 	dgd := newEnvtestDSHappyPathDGD("selection-eligibility")
 	tests := []struct {

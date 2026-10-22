@@ -1,0 +1,385 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# =============================================================================
+# route_buildkit.sh - Discover and route BuildKit pods for CI builds
+# =============================================================================
+#
+# ROUTING LOGIC (Coverage-Aware Ranked Rendezvous Hashing with SHA-256):
+# ---------------------------------------------------------
+# Routing is optimized for Docker layer caching, linear scaling, and
+# 100% pod utilization across any number of BuildKit pods.
+#
+# CACHE GROUPS (3 groups, one cache domain per dynamo_base image tag):
+#   - Group 0 (vllm-sglang): vLLM & SGLang                    (cuda13.0 base)
+#   - Group 1 (general):     dynamo runtime, planner, frontend,
+#                            operator, snapshot, power-agent  (cuda13.0 base)
+#   - Group 2 (trtllm):      TRT-LLM runtime / dev / efa, Triton (cuda13.1 base)
+#
+# Groups follow the dynamo_base image tag, not the framework: that is where the
+# rendered Dockerfiles diverge, since manylinux_${ARCH}, wheel_builder_base and
+# runtime_wheel_builder are shared by every build kind. TRT-LLM and Triton share
+# the cuda13.1 base, so they use one group. vLLM and SGLang share
+# one because their build filters differ, and a dedicated pool for either would
+# idle whenever only the other changed.
+#
+# ALGORITHM:
+# 1. SCORING: Each group key is hashed with every active pod index (SHA-256)
+#    to produce a uniformly distributed score per (group, arch, pod) triple.
+# 2. RANKING: Pods are sorted by score (descending) per group. StatefulSet
+#    pod names are constant, so rankings are stable across invocations.
+# 3. POOL SIZING: Each group gets its GROUP_WEIGHTS share of the active pods,
+#    rounded, and at least one pod. General gets any pod that rounding
+#    leaves out.
+# 4. COVERAGE-AWARE SELECTION: Pools are built round-by-round across all 3
+#    groups simultaneously. In each round, each group picks its highest-ranked
+#    pod that is NOT YET in any group's pool (preferring uncovered pods).
+#    This guarantees every active pod appears in at least one group's pool.
+# 5. RANDOM PICK: ONE pod is randomly selected from the candidate pool.
+#
+# LOAD DISTRIBUTION (example: amd64; arm64 ranks differently, all pods utilized):
+# +------+--------+---------------------------+--------------------------------------------+---------------------+
+# | Pods | Sizes  | G0: vLLM/SGLang           | G1: General                                | G2: TRT-LLM, Triton |
+# +------+--------+---------------------------+--------------------------------------------+---------------------+
+# | 1    | 1/1/1  | {0}                       | {0}                                        | {0}                 |
+# | 2    | 1/1/1  | {0}                       | {1}                                        | {1}                 |
+# | 3    | 1/2/1  | {2}                       | {0, 2}                                     | {1}                 |
+# | 4    | 1/2/1  | {2}                       | {3, 0}                                     | {1}                 |
+# | 5    | 2/3/1  | {4, 0}                    | {2, 3, 4}                                  | {1}                 |
+# | 6    | 2/3/1  | {4, 0}                    | {2, 3, 5}                                  | {1}                 |
+# | 7    | 2/4/1  | {4, 2}                    | {6, 3, 5, 0}                               | {1}                 |
+# | 8    | 2/4/2  | {7, 4}                    | {6, 2, 3, 0}                               | {1, 5}              |
+# | 9    | 3/5/2  | {7, 4, 8}                 | {6, 2, 3, 0, 8}                            | {1, 5}              |
+# | 14   | 4/7/3  | {12, 7, 2, 8}             | {6, 9, 13, 3, 5, 10, 0}                    | {1, 4, 11}          |
+# | 24   | 7/12/5 | {12, 7, 4, 15, 17, 21, 0} | {6, 9, 13, 2, 8, 3, 5, 16, 14, 23, 20, 10} | {1, 19, 18, 22, 11} |
+# +------+--------+---------------------------+--------------------------------------------+---------------------+
+#
+# =============================================================================
+
+set -e
+
+# --- ARGUMENT PARSING ---
+ARCH_INPUT=""
+FLAVOR_INPUT=""
+CUDA_VERSION=""
+ALL_FLAVORS=("vllm" "trtllm" "sglang" "triton" "general")
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --arch)
+      ARCH_INPUT="$2"
+      shift 2
+      ;;
+    --flavor)
+      FLAVOR_INPUT="$2"
+      shift 2
+      ;;
+    --cuda)
+      CUDA_VERSION="$2"
+      shift 2
+      ;;
+    *)
+      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|triton|general|all> [--cuda <13.0|13.1>]."
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z "$ARCH_INPUT" ]; then
+  echo "❌ Error: Must specify --arch <amd64|arm64|all>."
+  exit 1
+fi
+
+if [ -z "$FLAVOR_INPUT" ]; then
+  echo "❌ Error: Must specify --flavor <vllm|trtllm|sglang|triton|general|all>."
+  exit 1
+fi
+
+# CUDA version no longer affects pod routing: cache groups are keyed by
+# framework (see GROUP_KEYS / flavor_to_group), so --cuda is still accepted for
+# backward compatibility but is neither required nor validated here.
+# To re-enable per-CUDA-version routing in the future: (1) uncomment the
+# requirement block below and the validation block further down, (2) add the
+# CUDA major back into GROUP_KEYS, and (3) take the cuda_version into account in
+# flavor_to_group.
+#
+# # CUDA version is required for all flavors except "general"
+# if [ -z "$CUDA_VERSION" ] && [ "$FLAVOR_INPUT" != "general" ]; then
+#   echo "❌ Error: Must specify --cuda <13.0|13.1> for flavor '$FLAVOR_INPUT'."
+#   exit 1
+# fi
+
+# Validate arch input
+case $ARCH_INPUT in
+  amd64|arm64|all) ;;
+  *)
+    echo "❌ Error: Invalid arch '$ARCH_INPUT'. Must be amd64, arm64, or all."
+    exit 1
+    ;;
+esac
+
+# Validate flavor input
+case $FLAVOR_INPUT in
+  vllm|trtllm|sglang|triton|general|all) ;;
+  *)
+    echo "❌ Error: Invalid flavor '$FLAVOR_INPUT'. Must be vllm, trtllm, sglang, triton, general, or all."
+    exit 1
+    ;;
+esac
+
+# Validate CUDA version input (allow empty for general flavor) — disabled; see
+# the note above the requirement block. Re-enable alongside it if per-CUDA-version
+# routing is reintroduced.
+# if [ -n "$CUDA_VERSION" ]; then
+#   case $CUDA_VERSION in
+#     13.0|13.1) ;;
+#     *)
+#       echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 13.0 or 13.1."
+#       exit 1
+#       ;;
+#   esac
+# fi
+
+# Determine architectures to process
+if [ "$ARCH_INPUT" = "all" ]; then
+  ARCHS=("amd64" "arm64")
+else
+  ARCHS=("$ARCH_INPUT")
+fi
+
+# Determine flavors to process
+if [ "$FLAVOR_INPUT" = "all" ]; then
+  FLAVORS=("${ALL_FLAVORS[@]}")
+else
+  FLAVORS=("$FLAVOR_INPUT")
+fi
+
+# --- CONFIGURATION ---
+NAMESPACE="${BUILDKIT_NAMESPACE:?BUILDKIT_NAMESPACE must be set}"
+PORT="1234"
+# Highest buildkit pod ordinal to probe, exclusive. Must be >= the KEDA
+# maxReplicaCount for the buildkit StatefulSet, or pods above this ordinal are
+# never discovered and sit idle while builds queue on the pods below it.
+MAX_POD_CHECK=${MAX_POD_CHECK:-25}
+# ---------------------
+
+if ! command -v nslookup &> /dev/null; then
+    echo "❌ Error: nslookup not found. Please install dnsutils or bind-tools."
+    exit 1
+fi
+
+if ! command -v sha256sum &> /dev/null; then
+    echo "❌ Error: sha256sum not found. Please install coreutils."
+    exit 1
+fi
+
+# --- RETRY CONFIGURATION ---
+MAX_RETRIES=${MAX_RETRIES:-2}
+RETRY_DELAY=${RETRY_DELAY:-30}
+# ---------------------------
+
+# Function to discover SPECIFIC active pod indices
+# This handles gaps (e.g., if pod-0 and pod-2 are up, but pod-1 is down)
+get_active_indices() {
+  local arch=$1
+  local service_name=$2
+  local active_indices=()
+
+  # Loop through theoretical indices to see which ones actually resolve via DNS.
+  for (( i=0; i<MAX_POD_CHECK; i++ )); do
+    local pod_dns="buildkit-${arch}-${i}.${service_name}.${NAMESPACE}.svc.cluster.local"
+
+    # Check if this specific pod resolves
+    if nslookup "$pod_dns" >/dev/null 2>&1; then
+      active_indices+=("$i")
+    fi
+  done
+
+  echo "${active_indices[@]}"
+}
+
+# Group keys are SHA-256 salt: renaming one reshuffles that group's pod pool and
+# cold-starts its cache.
+GROUP_KEYS=("vllm-sglang" "general" "trtllm")
+
+# Share of the active pods per group, in GROUP_KEYS order, sized to the
+# relative build load of each group.
+GROUP_WEIGHTS=(30 50 20)
+
+# Map a flavor to a group index (0, 1, or 2).
+flavor_to_group() {
+  local flavor=$1
+  case "$flavor" in
+    vllm|sglang) echo 0 ;;
+    trtllm|triton) echo 2 ;;
+    general|*) echo 1 ;;
+  esac
+}
+
+# Compute coverage-aware pool assignments for all 3 groups.
+# Outputs pipe-separated pools: "pool0|pool1|pool2"
+compute_group_pools() {
+  local arch=$1
+  local -a available_indices=("${@:2}")
+  local count=${#available_indices[@]}
+
+  if [ "$count" -eq 0 ]; then
+    echo "||"
+    return
+  fi
+
+  local total_weight=$(( GROUP_WEIGHTS[0] + GROUP_WEIGHTS[1] + GROUP_WEIGHTS[2] ))
+  local -a pool_sizes=()
+  local max_size=0 assigned=0
+  for g in 0 1 2; do
+    pool_sizes[g]=$(( (count * GROUP_WEIGHTS[g] + total_weight / 2) / total_weight ))
+    if [ "${pool_sizes[g]}" -lt 1 ]; then pool_sizes[g]=1; fi
+    assigned=$(( assigned + pool_sizes[g] ))
+  done
+  if [ "$assigned" -lt "$count" ]; then
+    pool_sizes[1]=$(( pool_sizes[1] + count - assigned ))
+  fi
+  for g in 0 1 2; do
+    if [ "${pool_sizes[g]}" -gt "$max_size" ]; then max_size=${pool_sizes[g]}; fi
+  done
+
+  local rank0="" rank1="" rank2=""
+  for g in 0 1 2; do
+    local scored_list=()
+    for idx in "${available_indices[@]}"; do
+      local combo="${GROUP_KEYS[$g]}-buildkit-${arch}-${idx}"
+      local score=$(echo -n "$combo" | sha256sum | awk '{print $1}')
+      scored_list+=("${score}:${idx}")
+    done
+    local sorted_str=$(printf "%s\n" "${scored_list[@]}" | sort -r | cut -d':' -f2 | tr '\n' ' ')
+    if [ "$g" -eq 0 ]; then rank0="$sorted_str"; fi
+    if [ "$g" -eq 1 ]; then rank1="$sorted_str"; fi
+    if [ "$g" -eq 2 ]; then rank2="$sorted_str"; fi
+  done
+
+  local pool0=" " pool1=" " pool2=" "
+  local covered=" "
+
+  for (( round=0; round<max_size; round++ )); do
+    for g in 0 1 2; do
+      if [ "$round" -ge "${pool_sizes[g]}" ]; then continue; fi
+      local current_rank="" current_pool=""
+      if [ "$g" -eq 0 ]; then current_rank="$rank0"; current_pool="$pool0"; fi
+      if [ "$g" -eq 1 ]; then current_rank="$rank1"; current_pool="$pool1"; fi
+      if [ "$g" -eq 2 ]; then current_rank="$rank2"; current_pool="$pool2"; fi
+
+      local picked=""
+      for candidate in $current_rank; do
+        [[ "$current_pool" == *" $candidate "* ]] && continue
+        if [[ "$covered" != *" $candidate "* ]]; then
+          picked=$candidate; break
+        fi
+      done
+      if [ -z "$picked" ]; then
+        for candidate in $current_rank; do
+          [[ "$current_pool" == *" $candidate "* ]] && continue
+          picked=$candidate; break
+        done
+      fi
+
+      if [ -n "$picked" ]; then
+        current_pool="${current_pool}${picked} "
+        covered="${covered}${picked} "
+        if [ "$g" -eq 0 ]; then pool0="$current_pool"; fi
+        if [ "$g" -eq 1 ]; then pool1="$current_pool"; fi
+        if [ "$g" -eq 2 ]; then pool2="$current_pool"; fi
+      fi
+    done
+  done
+
+  pool0=$(echo "$pool0" | xargs)
+  pool1=$(echo "$pool1" | xargs)
+  pool2=$(echo "$pool2" | xargs)
+  echo "${pool0}|${pool1}|${pool2}"
+}
+
+# Route a flavor to its group's pre-computed pool.
+get_target_indices() {
+  local flavor=$1
+  local cuda_version=$2
+  local arch=$3
+  local -a available_indices=("${@:4}")
+
+  if [ ${#available_indices[@]} -eq 0 ]; then
+    echo ""
+    return
+  fi
+
+  local group=$(flavor_to_group "$flavor" "$cuda_version")
+  local cuda_major=${cuda_version%%.*}
+  echo "    [DEBUG] Routing Key: '$flavor-cuda$cuda_major' -> Group: $group (${GROUP_KEYS[$group]})" >&2
+
+  local all_pools=$(compute_group_pools "$arch" "${available_indices[@]}")
+  echo "$all_pools" | cut -d'|' -f$((group + 1))
+}
+
+# Process each architecture
+for ARCH in "${ARCHS[@]}"; do
+  SERVICE_NAME="buildkit-${ARCH}-headless"
+  POD_PREFIX="buildkit-${ARCH}"
+
+  echo "🔍 Discovering active Buildkit pods for ${ARCH} via DNS (checking indices 0-$((MAX_POD_CHECK-1)))..."
+
+  # Get the actual list of alive indices (e.g., "0 2 5")
+  ACTIVE_INDICES=($(get_active_indices "$ARCH" "$SERVICE_NAME"))
+  COUNT=${#ACTIVE_INDICES[@]}
+
+  # Retry loop if no pods found
+  if [ "$COUNT" -eq "0" ]; then
+    echo "⚠️  DNS returned 0 records for ${ARCH}. KEDA should be triggering a new buildkit pod."
+
+    for (( retry=1; retry<=MAX_RETRIES; retry++ )); do
+      echo "⏳ Waiting ${RETRY_DELAY}s for BuildKit pods to become available (attempt ${retry}/${MAX_RETRIES})..."
+      sleep "$RETRY_DELAY"
+
+      # Re-probe for active indices
+      ACTIVE_INDICES=($(get_active_indices "$ARCH" "$SERVICE_NAME"))
+      COUNT=${#ACTIVE_INDICES[@]}
+
+      if [ "$COUNT" -gt "0" ]; then
+        echo "✅ BuildKit pods for ${ARCH} are now available!"
+        break
+      fi
+
+      if [ "$retry" -eq "$MAX_RETRIES" ]; then
+        echo "::warning::No remote BuildKit pods available for ${ARCH} after ${MAX_RETRIES} attempts. Falling back to Kubernetes driver."
+        echo "⚠️  Warning: No remote BuildKit pods available for ${ARCH}."
+
+        for flavor in "${FLAVORS[@]}"; do
+          echo "${flavor}_${ARCH}=" >> "$GITHUB_OUTPUT"
+        done
+        exit 1
+      fi
+    done
+  fi
+
+  echo "✅ Found $COUNT active pod(s) (Indices: ${ACTIVE_INDICES[*]})."
+
+  # Iterate over flavors and set outputs
+  for flavor in "${FLAVORS[@]}"; do
+    # Pass the discovered ACTIVE_INDICES to the routing function to get the candidate pool
+    TARGET_INDICES=($(get_target_indices "$flavor" "$CUDA_VERSION" "$ARCH" "${ACTIVE_INDICES[@]}"))
+
+    ADDRS=""
+    # 2. Get the number of elements in the candidate pool array
+    TARGET_INDICES_LENGTH=${#TARGET_INDICES[@]}
+
+    # 3. Generate a random index between 0 and length-1
+    # The $RANDOM variable provides a number between 0 and 32767.
+    RANDOM_INDEX=$(($RANDOM % $TARGET_INDICES_LENGTH))
+    RANDOM_VALUE="${TARGET_INDICES[$RANDOM_INDEX]}"
+    POD_NAME="${POD_PREFIX}-${RANDOM_VALUE}"
+    ADDRS="tcp://${POD_NAME}.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:${PORT}"
+
+    echo "    -> Routing ${flavor}_${ARCH} to Candidate Pool: {${TARGET_INDICES[*]}} | Selected: ${RANDOM_VALUE}"
+
+    # Write to GitHub Output
+    echo "${flavor}_${ARCH}=$ADDRS" >> "$GITHUB_OUTPUT"
+  done
+done
