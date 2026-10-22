@@ -12,6 +12,7 @@ import mmap
 import multiprocessing.shared_memory as shm
 import os
 import re
+import time
 import uuid
 
 
@@ -37,6 +38,12 @@ def read_shm_bytes(name: str, size: int) -> bytearray:
         if os.fstat(fd).st_size != max(1, size):
             raise ValueError("shared-memory segment size does not match descriptor")
         with mmap.mmap(fd, max(1, size), access=mmap.ACCESS_READ) as view:
-            return bytearray(view[:size])
+            data = bytearray()
+            # Bound transient copies and GIL hold times for async callers using
+            # a worker thread. A single large bytes/bytearray copy holds the GIL.
+            for offset in range(0, size, 1024 * 1024):
+                data.extend(view[offset : min(size, offset + 1024 * 1024)])
+                time.sleep(0)
+            return data
     finally:
         os.close(fd)

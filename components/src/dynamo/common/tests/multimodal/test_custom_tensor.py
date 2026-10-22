@@ -12,7 +12,6 @@ import pytest
 import torch
 
 from dynamo.common.multimodal import custom_tensor as transport
-
 from dynamo.common.multimodal.custom_tensor import (
     TENSOR_KEY,
     ShmTensorPublisher,
@@ -141,6 +140,18 @@ def test_noncontiguous_and_arbitrary_json_preserve_metadata_and_item_boundaries(
     assert torch.equal(result["items"][1], source + 1)
     assert result["metadata"] == fields["metadata"]
     assert result["items"][0].is_contiguous()
+
+
+def test_chunked_inline_decoder_preserves_bytes_and_rejects_midstream_padding():
+    source = torch.arange(2 * 1024 * 1024, dtype=torch.uint8)
+    envelope = inline_tensor(source)
+    assert torch.equal(resolve_custom_tensors(envelope), source)
+    encoded = envelope[TENSOR_KEY]["data_base64"]
+    envelope[TENSOR_KEY]["data_base64"] = (
+        encoded[: 1024 * 1024 - 1] + "=" + encoded[1024 * 1024 :]
+    )
+    with pytest.raises(ValueError, match="base64"):
+        resolve_custom_tensors(envelope)
 
 
 @pytest.mark.parametrize(

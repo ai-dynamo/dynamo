@@ -11,7 +11,7 @@ import json
 import torch
 import uvloop
 
-from dynamo.common.multimodal.custom_tensor import resolve_custom_tensors
+from dynamo.common.multimodal.custom_tensor import resolve_custom_tensors_async
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -54,7 +54,7 @@ async def generate(request, context):
     if request.get("token_ids") == [1, 2, 5]:
         if "data_base64" in json.dumps(request):
             raise _mismatch("inline bytes present in reference request", None)
-        resolved = resolve_custom_tensors(
+        resolved = await resolve_custom_tensors_async(
             received["chemistry"][0]["Json"],
             worker_id=(request.get("routing") or {}).get("decode_worker_id"),
         )

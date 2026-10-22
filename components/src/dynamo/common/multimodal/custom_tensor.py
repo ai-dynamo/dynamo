@@ -71,7 +71,9 @@ class TensorSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     version: Literal[1]
     dtype: DType
-    shape: list[Annotated[StrictInt, Field(ge=0, le=2**63 - 1)]] = Field(max_length=32)
+    shape: list[Annotated[StrictInt, Field(ge=0, le=2**63 - 1)]] = Field(
+        max_length=32
+    )
     order: Literal["C"]
 
     def byte_size(self) -> int:
@@ -262,7 +264,15 @@ def _validate_reference(spec: ShmTensor, worker_id: int | None) -> None:
 def _resolve_tensor(spec: TensorSpec, size: int, worker_id: int | None) -> torch.Tensor:
     if isinstance(spec, InlineTensor):
         try:
-            data = bytearray(base64.b64decode(spec.data_base64, validate=True))
+            # binascii's decoder holds the GIL. Bound each call and explicitly
+            # yield it so off-thread work cannot starve the serving event loop.
+            data = bytearray()
+            for offset in range(0, len(spec.data_base64), 1024 * 1024):
+                chunk = spec.data_base64[offset : offset + 1024 * 1024]
+                if offset + len(chunk) < len(spec.data_base64) and "=" in chunk:
+                    raise binascii.Error("base64 padding before final block")
+                data.extend(base64.b64decode(chunk, validate=True))
+                time.sleep(0)
         except binascii.Error as exc:
             raise ValueError("invalid tensor base64") from exc
     else:

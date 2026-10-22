@@ -291,3 +291,31 @@ def test_reference_resolves_after_frontend_routing_without_bulk_bytes(services: 
         rejected = _chat(services, body)
         assert rejected.status_code == 400, rejected.text
         assert "requires nvext.decode_worker_id" in rejected.text
+
+
+def test_builtin_wire_names_reject_custom_content_at_http_admission(services: int):
+    for kind in ("text", "image_url", "video_url", "audio_url", "input_audio"):
+        for role in ("user", "tool"):
+            message = {
+                "role": role,
+                "content": [
+                    {"type": "custom", "kind": kind, "fields": {"metadata": 1}},
+                    {"type": "image_url", "image_url": {"url": IMAGE_URL}},
+                ],
+            }
+            if role == "tool":
+                # Tool parts support text/custom, so test reservation without a
+                # separate typed image schema error masking it.
+                message["content"].pop()
+                message["tool_call_id"] = "custom-input"
+            response = _chat(
+                services,
+                {
+                    "model": MODEL_NAME,
+                    "messages": [message],
+                    "nvext": {"token_data": [1, 2, 3]},
+                    "max_tokens": 4,
+                },
+            )
+            assert response.status_code == 400, response.text
+            assert "reserved for built-in" in response.text

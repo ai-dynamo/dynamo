@@ -14,8 +14,8 @@ from PIL import Image
 
 import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.multimodal.custom_tensor import ShmTensorPublisher, inline_tensor
 from dynamo.common.multimodal import custom_tensor as transport
+from dynamo.common.multimodal.custom_tensor import ShmTensorPublisher, inline_tensor
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.video_utils import encode_to_video_bytes
 from dynamo.vllm.multimodal_utils import request_processor as mod
