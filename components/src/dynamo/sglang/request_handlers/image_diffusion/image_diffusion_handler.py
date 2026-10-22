@@ -18,24 +18,18 @@ from dynamo._core import Context
 from dynamo.common.http.base import HttpStatusError
 from dynamo.common.http.media_reference import local_media_reference
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
-from dynamo.common.protocols.image_protocol import (
-    ImageData,
-    ImageNvExt,
-    NvCreateImageRequest,
-    NvImagesResponse,
-)
+from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
 from dynamo.common.storage import upload_to_fs
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.args import Config
+from dynamo.sglang.media_protocol import SGLangCreateImageRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
 logger = logging.getLogger(__name__)
 
+# The engine's ceiling on denoising steps; a larger request is clamped.
 MAX_NUM_INFERENCE_STEPS = 50
-DEFAULT_NUM_INFERENCE_STEPS = 50
-DEFAULT_GUIDANCE_SCALE = 7.5
-DEFAULT_RESPONSE_FORMAT = "url"
 
 
 class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
@@ -112,25 +106,22 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # events on the response stream (Annotated::from_err); the frontend
         # folds those into a non-200 HTTP response. Expected validation
         # failures (InvalidArgument) become 400s without traceback noise.
-        req = NvCreateImageRequest(**request)
+        # The SGLang model fills in the defaults for the fields the request
+        # leaves unset. An explicit value is kept as sent.
+        req = SGLangCreateImageRequest(**request)
+        nvext = req.nvext
 
-        nvext = req.nvext or ImageNvExt()
-
-        # Apply SGLang-specific defaults for unset values
-        raw_steps = nvext.num_inference_steps or DEFAULT_NUM_INFERENCE_STEPS
-        if raw_steps > MAX_NUM_INFERENCE_STEPS:
+        if nvext.num_inference_steps > MAX_NUM_INFERENCE_STEPS:
             logger.warning(
-                f"num_inference_steps={raw_steps} exceeds max "
+                f"num_inference_steps={nvext.num_inference_steps} exceeds max "
                 f"{MAX_NUM_INFERENCE_STEPS}, clamping"
             )
-        num_inference_steps = min(raw_steps, MAX_NUM_INFERENCE_STEPS)
-        guidance_scale = nvext.guidance_scale or DEFAULT_GUIDANCE_SCALE
+        num_inference_steps = min(nvext.num_inference_steps, MAX_NUM_INFERENCE_STEPS)
+        guidance_scale = nvext.guidance_scale
 
         width, height = self._parse_size(req.size)
 
-        # The shared model bounds `n` to 1..10 as the frontend does, and
-        # carries no default: an absent `n` means one image.
-        num_images = 1 if req.n is None else req.n
+        num_images = req.n
 
         # The engine produces one image per call, so serve OpenAI `n`
         # semantics as n sequential generations. With an explicit seed use
@@ -161,7 +152,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         context_id = context.id()
         assert context_id is not None
         user_id = req.user or context_id
-        response_format = req.response_format or DEFAULT_RESPONSE_FORMAT
+        response_format = req.response_format
         image_data = []
         uploaded_paths: list[str] = []
         try:

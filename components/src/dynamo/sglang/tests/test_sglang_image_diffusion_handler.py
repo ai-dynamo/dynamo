@@ -268,6 +268,49 @@ class TestImageDiffusionWorkerHandler:
         )
 
     @pytest.mark.asyncio
+    async def test_generate_keeps_an_explicit_value_that_differs_from_the_default(
+        self, handler, mock_context
+    ):
+        """One denoising step and a guidance scale of zero are forwarded as
+        sent. A `value or default` fallback would replace both."""
+        test_image = Image.new("RGB", (256, 256), color="green")
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
+        request = {
+            "prompt": "A green square",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "nvext": {"num_inference_steps": 1, "guidance_scale": 0.0},
+        }
+
+        async for _ in handler.generate(request, mock_context):
+            pass
+
+        sampling = handler.generator.generate.call_args.kwargs["sampling_params_kwargs"]
+        assert (sampling["num_inference_steps"], sampling["guidance_scale"]) == (
+            1,
+            0.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_generate_rejects_zero_inference_steps(self, handler, mock_context):
+        """Zero steps is outside the shared contract, as it is at the frontend."""
+        handler.generator.generate = Mock()
+        request = {
+            "prompt": "A green square",
+            "model": "test-model",
+            "nvext": {"num_inference_steps": 0},
+        }
+
+        with pytest.raises(ValidationError, match="num_inference_steps"):
+            async for _ in handler.generate(request, mock_context):
+                pass
+
+        handler.generator.generate.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_generate_error_propagates(self, handler, mock_context):
         """Generation failures must raise, not be swallowed.
 

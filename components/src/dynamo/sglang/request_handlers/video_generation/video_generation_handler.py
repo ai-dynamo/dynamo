@@ -15,26 +15,14 @@ import torch
 from dynamo._core import Context
 from dynamo.common.http.media_reference import local_media_reference
 from dynamo.common.http.url_validator import UrlValidationPolicy
-from dynamo.common.protocols.video_protocol import (
-    NvCreateVideoRequest,
-    NvVideosResponse,
-    VideoData,
-    VideoNvExt,
-)
+from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
 from dynamo.common.storage import upload_to_fs
 from dynamo.sglang.args import Config
+from dynamo.sglang.media_protocol import SGLangCreateVideoRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
 logger = logging.getLogger(__name__)
-
-# Defaults for the fields a request leaves unset (Wan default size).
-DEFAULT_SIZE = "832x480"
-DEFAULT_SECONDS = 4
-DEFAULT_FPS = 24
-DEFAULT_NUM_INFERENCE_STEPS = 50
-DEFAULT_GUIDANCE_SCALE = 5.0
-DEFAULT_RESPONSE_FORMAT = "url"
 
 
 class VideoGenerationWorkerHandler(BaseGenerativeHandler):
@@ -105,29 +93,21 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             logger.debug(f"Video generation request with trace: {trace_header}")
 
         try:
-            req = NvCreateVideoRequest(**request)
-            nvext = req.nvext or VideoNvExt()
-            size = req.size or DEFAULT_SIZE
-            fps = nvext.fps or DEFAULT_FPS
-            num_inference_steps = (
-                nvext.num_inference_steps or DEFAULT_NUM_INFERENCE_STEPS
-            )
-            guidance_scale = (
-                DEFAULT_GUIDANCE_SCALE
-                if nvext.guidance_scale is None
-                else nvext.guidance_scale
-            )
+            # The SGLang model fills in the defaults for the fields the
+            # request leaves unset. An explicit value is kept as sent.
+            req = SGLangCreateVideoRequest(**request)
+            nvext = req.nvext
 
             logger.info(
                 f"Video generation request: model={req.model}, "
-                f"size={size}, steps={num_inference_steps}"
+                f"size={req.size}, steps={nvext.num_inference_steps}"
             )
 
-            width, height = self._parse_size(size)
+            width, height = self._parse_size(req.size)
 
             # Calculate num_frames if not explicitly provided
             if nvext.num_frames is None:
-                num_frames = fps * (req.seconds or DEFAULT_SECONDS)
+                num_frames = nvext.fps * req.seconds
             else:
                 num_frames = nvext.num_frames
 
@@ -145,9 +125,9 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 width=width,
                 height=height,
                 num_frames=num_frames,
-                fps=fps,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
+                fps=nvext.fps,
+                num_inference_steps=nvext.num_inference_steps,
+                guidance_scale=nvext.guidance_scale,
                 seed=nvext.seed,
                 request_id=context_id,
                 negative_prompt=nvext.negative_prompt,
@@ -155,7 +135,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             )
 
             video_data = []
-            response_format = req.response_format or DEFAULT_RESPONSE_FORMAT
+            response_format = req.response_format
             if response_format == "url":
                 url = await self._upload_to_fs(video_bytes, context_id)
                 video_data.append(VideoData(output_format=output_format, url=url))

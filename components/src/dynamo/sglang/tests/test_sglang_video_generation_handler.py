@@ -131,3 +131,44 @@ async def test_generate_applies_the_defaults_for_unset_fields(handler) -> None:
     assert (kwargs["num_inference_steps"], kwargs["guidance_scale"]) == (50, 5.0)
     assert responses[0]["status"] == "completed"
     assert responses[0]["data"][0]["url"] == "file:///tmp/videos/v.mp4"
+
+
+async def test_generate_keeps_an_explicit_value_that_differs_from_the_default(
+    handler,
+) -> None:
+    """One denoising step and a guidance scale of zero are forwarded as sent.
+    A `value or default` fallback would replace both with the default."""
+    handler._generate_video = AsyncMock(return_value=b"mp4-bytes")
+    handler._upload_to_fs = AsyncMock(return_value="file:///tmp/videos/v.mp4")
+    context = MagicMock()
+    context.id.return_value = "req-1"
+    request = {
+        "prompt": "a cat",
+        "model": "wan",
+        "seconds": 1,
+        "size": "256x256",
+        "nvext": {"fps": 1, "num_inference_steps": 1, "guidance_scale": 0.0},
+    }
+
+    responses = [response async for response in handler.generate(request, context)]
+
+    kwargs = handler._generate_video.call_args.kwargs
+    assert (kwargs["width"], kwargs["height"]) == (256, 256)
+    assert (kwargs["fps"], kwargs["num_frames"]) == (1, 1)
+    assert (kwargs["num_inference_steps"], kwargs["guidance_scale"]) == (1, 0.0)
+    assert responses[0]["status"] == "completed"
+
+
+async def test_generate_rejects_zero_inference_steps(handler) -> None:
+    """Zero steps is outside the shared contract, as it is at the frontend.
+    The engine is not reached and the response reports the failure."""
+    handler._generate_video = AsyncMock()
+    context = MagicMock()
+    context.id.return_value = "req-1"
+    request = {"prompt": "a cat", "model": "wan", "nvext": {"num_inference_steps": 0}}
+
+    responses = [response async for response in handler.generate(request, context)]
+
+    handler._generate_video.assert_not_called()
+    assert responses[0]["status"] == "failed"
+    assert "num_inference_steps" in responses[0]["error"]
