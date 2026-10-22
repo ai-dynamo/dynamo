@@ -12,6 +12,7 @@ pub(crate) enum AdmissionError {
     CapacityExhausted,
 }
 
+/// Reject excess load immediately, matching frontend admission rather than queueing.
 pub(crate) fn acquire_admission(
     admission: Arc<Semaphore>,
     branches: u32,
@@ -57,8 +58,9 @@ pub(crate) enum DispatchWaitError {
     Deadline,
 }
 
-/// The task must observe `parent.kill()` and finish after cancellation.
-/// Shutdown is drained to retain owned permits; non-cancellable work has no hard deadline.
+/// The task must own admission until its work completes and should observe `parent.kill()`.
+/// After a one-second cancellation grace, it is detached with its permits still owned.
+/// Local completion does not establish physical GPU settlement.
 pub(crate) async fn dispatch_with_deadline<T>(
     mut task: tokio::task::JoinHandle<T>,
     deadline: tokio::time::Instant,
@@ -72,8 +74,12 @@ pub(crate) async fn dispatch_with_deadline<T>(
         }
         Err(_) => {
             parent.kill();
-            // Local draining does not acknowledge physical GPU settlement.
-            let _ = task.await;
+            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut task)
+                .await
+                .is_err()
+            {
+                tracing::warn!("Decision task exceeded cancellation grace; detaching task");
+            }
             Err(DispatchWaitError::Deadline)
         }
     }
@@ -117,6 +123,34 @@ mod tests {
         assert!(matches!(result, Err(DispatchWaitError::Deadline)));
         assert!(parent.is_killed());
         assert_eq!(admission.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_deadline_bounds_noncooperative_work_without_releasing_admission() {
+        let parent = Context::new(()).context();
+        let admission = Arc::new(Semaphore::new(1));
+        let permit = admission.clone().acquire_owned().await.unwrap();
+        let (release_tx, release_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            // Dropping the sender also releases the worker if an assertion fails.
+            let _ = release_rx.await;
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            dispatch_with_deadline(task, tokio::time::Instant::now(), parent.clone()),
+        )
+        .await;
+        assert!(matches!(result, Ok(Err(DispatchWaitError::Deadline))));
+        assert!(parent.is_killed());
+        assert_eq!(admission.available_permits(), 0);
+        release_tx.send(()).unwrap();
+        let returned_permit =
+            tokio::time::timeout(Duration::from_secs(2), admission.acquire_owned())
+                .await
+                .unwrap()
+                .unwrap();
+        drop(returned_permit);
     }
 
     #[tokio::test]
