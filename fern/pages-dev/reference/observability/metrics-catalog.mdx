@@ -53,6 +53,18 @@ Emitted by the HTTP frontend at `/metrics` on port 8000 by default. Most carry a
   Requests in the HTTP processing queue. Kept for backward compatibility; the "waiting for first token" window is now the sum of `dynamo_frontend_stage_requests` across the `preprocess`, `route`, and `dispatch` stages.
 </ParamField>
 
+<ParamField path="dynamo_frontend_awaiting_first_token_requests" type="gauge">
+  **Experimental.** Admitted requests that have not produced an output token yet: being tokenized, queued, routed, or prefilled. Requests to endpoints that never stream tokens (embeddings, images, videos, tensors) stay here until they finish. Unit: requests. Labeled by `model`. Requests producing output tokens are `clamp_min(dynamo_frontend_active_requests - dynamo_frontend_awaiting_first_token_requests, 0)`; the clamp covers the two gauges being sampled a moment apart.
+</ParamField>
+
+<ParamField path="dynamo_frontend_inflight_input_tokens" type="gauge">
+  **Experimental.** Known prompt tokens of in-flight requests. Unit: tokens. Labeled by `model` and `state`: `awaiting_first_token` (the requests in `dynamo_frontend_awaiting_first_token_requests`) or `generating`. Summing over `state` gives all in-flight prompt tokens. A request still being tokenized contributes zero.
+</ParamField>
+
+<ParamField path="dynamo_frontend_input_tokens_total" type="counter">
+  **Experimental.** Prompt tokens of admitted requests, counted at tokenization, including requests that fail or are cancelled before producing output. Unit: tokens. Labeled by `model`. Unlike the sum of `dynamo_frontend_input_sequence_tokens`, which is observed at the first output token, this counts every admitted request when it is tokenized.
+</ParamField>
+
 <ParamField path="dynamo_frontend_disconnected_clients" type="gauge">
   Number of disconnected clients.
 </ParamField>
