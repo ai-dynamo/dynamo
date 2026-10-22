@@ -8,13 +8,27 @@ use tracing_subscriber::{Layer, layer::Context, prelude::*, registry::LookupSpan
 #[derive(Clone, Default)]
 pub(super) struct Fields(pub HashMap<String, String>);
 
+impl Fields {
+    /// Keep the last value and count records under `records:<field>`: each
+    /// `record` becomes another OpenTelemetry attribute.
+    fn put(&mut self, name: &str, value: String) {
+        let key = format!("records:{name}");
+        let count = self
+            .0
+            .get(&key)
+            .map_or(0, |count| count.parse::<usize>().unwrap());
+        self.0.insert(key, (count + 1).to_string());
+        self.0.insert(name.into(), value);
+    }
+}
+
 impl tracing::field::Visit for Fields {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.0.insert(field.name().into(), format!("{value:?}"));
+        self.put(field.name(), format!("{value:?}"));
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.0.insert(field.name().into(), value.into());
+        self.put(field.name(), value.into());
     }
 }
 

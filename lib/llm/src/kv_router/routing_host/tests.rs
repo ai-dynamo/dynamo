@@ -58,6 +58,69 @@ fn request() -> PreprocessedRequest {
         .unwrap()
 }
 
+#[test]
+fn request_dispatch_records_phase_and_attempt() {
+    use dynamo_runtime::pipeline::network::egress::route_span::{
+        RouteTraceContext, attach_route_trace_context,
+    };
+    use tracing_subscriber::prelude::*;
+
+    #[derive(Clone, Default)]
+    struct Recorded(Arc<Mutex<HashMap<&'static str, String>>>);
+
+    impl tracing::field::Visit for Recorded {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(field.name(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(field.name(), value.to_owned());
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorded {
+        fn on_record(
+            &self,
+            _: &tracing::Id,
+            values: &tracing::span::Record<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            values.record(&mut self.clone());
+        }
+    }
+
+    let recorded = Recorded::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(recorded.clone()));
+
+    let mut traced = Context::new(request());
+    traced.insert(LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleTrace::new(true));
+    attach_route_trace_context(&mut traced, RouteTraceContext::new(1, None, None, 0));
+    let span = start_request_dispatch(&traced, RequestPhase::Decode);
+    assert!(!span.is_none());
+    let fields = recorded.0.lock().unwrap().clone();
+    assert_eq!(fields["dynamo.dispatch.phase"], "decode");
+    assert_eq!(fields["dynamo.request.attempt"], "1");
+
+    // The prefill leg has no route trace context, only the copied attempt.
+    let mut prefill = Context::new(request());
+    prefill.insert(LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleTrace::new(true));
+    prefill.insert(DISPATCH_ATTEMPT_CONTEXT_KEY, DispatchAttempt(3));
+    let _prefill_span = start_request_dispatch(&prefill, RequestPhase::Prefill);
+    let fields = recorded.0.lock().unwrap().clone();
+    assert_eq!(fields["dynamo.dispatch.phase"], "prefill");
+    assert_eq!(fields["dynamo.request.attempt"], "3");
+
+    // Without a lifecycle root there is no span, whatever the route context says.
+    assert!(start_request_dispatch(&Context::new(request()), RequestPhase::Decode).is_none());
+}
+
 async fn test_load_context(client: &Client) -> Arc<RoutingLoadContext> {
     RoutingLoadContext::start(
         client.clone(),

@@ -262,6 +262,7 @@ impl LifecycleStage {
                 "dynamo.dispatch.destination.worker.id" = tracing::field::Empty,
                 "dynamo.dispatch.destination.dp.rank" = tracing::field::Empty,
                 "dynamo.dispatch.phase" = tracing::field::Empty,
+                "dynamo.request.attempt" = tracing::field::Empty,
                 "dynamo.dispatch.route" = tracing::field::Empty,
                 "dynamo.dispatch.result" = tracing::field::Empty,
             ),

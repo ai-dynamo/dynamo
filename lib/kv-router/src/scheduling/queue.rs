@@ -81,7 +81,7 @@ struct QueuedRequest {
     due_at: Option<Instant>,
     block_hashes: Option<Vec<LocalBlockHash>>,
     lifecycle: RouterLifecycle,
-    lifecycle_span: tracing::Span,
+    queue_span: QueueSpan,
 }
 
 /// The request's lifecycle trace and current span, captured on the request task
@@ -116,16 +116,49 @@ fn router_span(stage: LifecycleStage) -> tracing::Span {
     LifecycleTrace::scoped().map_or_else(tracing::Span::none, |trace| trace.start(stage))
 }
 
-fn finish_queue_span(
+/// `router.queue` evidence for one queued request. Deferral is recorded once,
+/// when the span finishes: each `record` appends an OpenTelemetry attribute,
+/// and a head blocked for many drain passes would otherwise push the outcome
+/// past the SDK's attribute limit.
+struct QueueSpan {
     span: tracing::Span,
-    depth: usize,
-    outcome: &'static str,
-    reason: Option<&'static str>,
-) {
-    span.record("dynamo.router.queue.depth.out", depth as u64);
-    span.record("dynamo.router.queue.outcome", outcome);
-    if let Some(reason) = reason {
-        span.record("dynamo.router.queue.reason", reason);
+    /// Actor turn in which the request entered the queue.
+    enqueue_turn: u64,
+    /// Whether a drain pass found every eligible worker prefill-busy.
+    capacity_blocked: AtomicBool,
+}
+
+impl QueueSpan {
+    fn new(span: tracing::Span, enqueue_turn: u64) -> Self {
+        Self {
+            span,
+            enqueue_turn,
+            capacity_blocked: AtomicBool::new(false),
+        }
+    }
+
+    fn mark_capacity_blocked(&self) {
+        self.capacity_blocked.store(true, AtomicOrdering::Relaxed);
+    }
+
+    /// `deferred` means the request left the queue in a later actor turn than
+    /// it entered. `reason` explains that wait unless the exit has its own.
+    fn finish(self, turn: u64, depth: usize, outcome: &'static str, reason: Option<&'static str>) {
+        let deferred = turn != self.enqueue_turn;
+        let wait_reason = deferred.then(|| {
+            if self.capacity_blocked.load(AtomicOrdering::Relaxed) {
+                "prefill_capacity"
+            } else {
+                "class_backlog"
+            }
+        });
+        let span = self.span;
+        span.record("dynamo.router.queue.depth.out", depth as u64);
+        span.record("dynamo.router.queue.outcome", outcome);
+        span.record("dynamo.router.queue.deferred", deferred);
+        if let Some(reason) = reason.or(wait_reason) {
+            span.record("dynamo.router.queue.reason", reason);
+        }
     }
 }
 
@@ -578,6 +611,8 @@ struct SchedulerQueueActor<
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     projected_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    /// Counts actor events; a queued request that leaves in a later turn waited.
+    turn: u64,
     block_size: u32,
     selector: Sel,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
@@ -755,6 +790,7 @@ impl<
             slots,
             workers_with_configs: workers_with_configs.clone(),
             projected_loads: FxHashMap::default(),
+            turn: 0,
             block_size,
             selector,
             prefill_load_estimator,
@@ -1225,6 +1261,7 @@ impl<
                         if drain_cleanup {
                             commands_since_cleanup = 0;
                         }
+                        self.turn = self.turn.wrapping_add(1);
                         self.handle_capacity_updates(drain_cleanup).await;
                         continue;
                     }
@@ -1233,12 +1270,14 @@ impl<
                             tokio::time::sleep_until(due_at).await;
                         }
                     }, if due_at.is_some() => {
+                        self.turn = self.turn.wrapping_add(1);
                         self.handle_update().await;
                         continue;
                     }
                 }
             };
             let Some(command) = command else { break };
+            self.turn = self.turn.wrapping_add(1);
             commands_since_cleanup += 1;
             let drain_cleanup = rx.is_empty() || commands_since_cleanup == 256;
             if drain_cleanup {
@@ -1332,8 +1371,8 @@ impl<
                 .fetch_sub(snapshot.cached_tokens, AtomicOrdering::Relaxed);
 
             let queued = entry.into_payload();
-            finish_queue_span(
-                queued.lifecycle_span,
+            queued.queue_span.finish(
+                self.turn,
                 self.pending_count.load(AtomicOrdering::Relaxed),
                 "failed",
                 Some("subscriber_shutdown"),
@@ -1409,18 +1448,6 @@ impl<
             tracing::field::display(class.queue_policy),
         );
         lifecycle_span.record("dynamo.router.queue.depth.in", queue_depth_in as u64);
-        // Policy-queue membership alone does not mean capacity deferred the
-        // request: ordinary arrivals can drain in the same actor turn.
-        let backlog = self.pending.has_backlog(class_index);
-        lifecycle_span.record("dynamo.router.queue.deferred", backlog);
-        lifecycle_span.record(
-            "dynamo.router.queue.reason",
-            if backlog {
-                "class_backlog"
-            } else {
-                "policy_ordering"
-            },
-        );
         let priority_jump = request.priority_jump;
         let strict_priority = request.strict_priority;
         let placement = request
@@ -1435,7 +1462,7 @@ impl<
             block_hashes,
             // Runs under the caller scope entered by the actor; keep it for admission.
             lifecycle: RouterLifecycle::capture(),
-            lifecycle_span,
+            queue_span: QueueSpan::new(lifecycle_span, self.turn),
         };
         let worker_count = self.workers_with_configs.borrow().len();
         if let Err((rejection, queued)) = self.pending.enqueue_with_due_at(
@@ -1446,8 +1473,8 @@ impl<
             placement,
             queued,
         ) {
-            finish_queue_span(
-                queued.lifecycle_span,
+            queued.queue_span.finish(
+                self.turn,
                 queue_depth_in,
                 "rejected",
                 Some(match rejection.limit_kind {
@@ -1482,8 +1509,8 @@ impl<
             let class_index = entry.class_index();
             self.subtract_pending_counters(class_index, entry.snapshot());
             let mut queued = entry.into_payload();
-            finish_queue_span(
-                queued.lifecycle_span,
+            queued.queue_span.finish(
+                self.turn,
                 self.pending_count.load(AtomicOrdering::Relaxed),
                 "timed_out",
                 Some("deadline_expired"),
@@ -1586,9 +1613,9 @@ impl<
                 for entry in removed {
                     self.subtract_pending_counters(class_index, entry.snapshot());
                     let depth = self.pending_count.load(AtomicOrdering::Relaxed);
-                    let span = entry.into_payload().lifecycle_span;
                     let reason = Some("request_lifecycle_ended_before_admission");
-                    finish_queue_span(span, depth, "cancelled", reason);
+                    let span = entry.into_payload().queue_span;
+                    span.finish(self.turn, depth, "cancelled", reason);
                 }
             }
         }
@@ -1720,9 +1747,7 @@ impl<
                             .with_available_workers(available.as_deref()),
                     );
                     if blocked {
-                        let span = &queued.lifecycle_span;
-                        span.record("dynamo.router.queue.deferred", true);
-                        span.record("dynamo.router.queue.reason", "prefill_capacity");
+                        queued.queue_span.mark_capacity_blocked();
                     }
                     !blocked
                 })
@@ -1772,8 +1797,8 @@ impl<
                 // the class deficit; the credit is intentionally not refunded,
                 // matching every other post-pop terminal outcome.
                 let mut queued = popped.into_payload();
-                finish_queue_span(
-                    queued.lifecycle_span,
+                queued.queue_span.finish(
+                    self.turn,
                     self.pending_count.load(AtomicOrdering::Relaxed),
                     "timed_out",
                     Some("deadline_expired"),
@@ -1799,8 +1824,8 @@ impl<
             let class_index = popped.class_index();
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
-            finish_queue_span(
-                queued.lifecycle_span,
+            queued.queue_span.finish(
+                self.turn,
                 self.pending_count.load(AtomicOrdering::Relaxed),
                 "dequeued",
                 None,
@@ -3651,6 +3676,7 @@ policy_classes:
             slots: Arc::clone(slots),
             workers_with_configs: queue.workers_with_configs.clone(),
             projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
+            turn: 0,
             block_size: 16,
             selector: DefaultWorkerSelector::new(None, "test"),
             prefill_load_estimator: None,
@@ -4220,6 +4246,95 @@ policy_classes:
         }
     }
 
+    /// As the routing host does: scope the request's trace around a caller span.
+    #[cfg(feature = "runtime-protocols")]
+    fn traced<F: std::future::Future>(
+        id: &str,
+        future: F,
+    ) -> impl std::future::Future<Output = F::Output> {
+        use dynamo_runtime::telemetry::LifecycleTrace;
+        use tracing::Instrument;
+        let trace = Arc::new(LifecycleTrace::frontend_request_without_session(id));
+        LifecycleTrace::scope(
+            Some(trace),
+            future.instrument(tracing::info_span!("caller")),
+        )
+    }
+
+    #[cfg(feature = "runtime-protocols")]
+    #[tokio::test(start_paused = true)]
+    async fn lifecycle_queue_deferral_reflects_waiting() {
+        use crate::plugins::worker_selection::{
+            WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+        };
+        use crate::scheduling::selector::WorkerSelectionPolicy;
+        use crate::scheduling::test_capture::{Capture, isolated};
+        if isolated("scheduling::queue::tests::lifecycle_queue_deferral_reflects_waiting") {
+            return;
+        }
+        let capture = Capture::install();
+        struct FirstPicker;
+        impl WorkerPicker for FirstPicker {
+            fn pick(
+                &mut self,
+                _: &WorkerSelectionContext<'_>,
+                _: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(0)
+            }
+        }
+        let policy =
+            WorkerSelectionPolicy::new(Default::default(), "test", vec![], Box::new(FirstPicker));
+        let (queue, slots) = make_queue_with_custom_selector(2, 16, 64, Some(0.0), policy);
+        let request = |id: &str, worker| {
+            let (mut request, rx) = make_request(id, 64);
+            request.pinned_worker = Some(WorkerWithDpRank::new(worker, 0));
+            (request, rx)
+        };
+        let (active, active_rx) = request("active", 0);
+        traced("active", queue.enqueue(active)).await;
+        active_rx.await.unwrap().unwrap();
+
+        // `blocked` waits behind the busy worker for several actor turns.
+        let (blocked, blocked_rx) = request("blocked", 0);
+        traced("blocked", queue.enqueue(blocked)).await;
+        for _ in 0..5 {
+            queue.update().await;
+        }
+        assert_eq!(queue.pending_count(), 1);
+
+        // `bypass` targets the free worker and is admitted in its enqueue turn,
+        // although its class has a backlog.
+        let (bypass, bypass_rx) = request("bypass", 1);
+        traced("bypass", queue.enqueue(bypass)).await;
+        tokio::time::timeout(Duration::from_secs(1), bypass_rx)
+            .await
+            .expect("bypass is admitted in its enqueue turn")
+            .unwrap()
+            .unwrap();
+
+        slots.free(&"active".to_string(), Instant::now()).unwrap();
+        queue.update().await;
+        blocked_rx.await.unwrap().unwrap();
+
+        let blocked = capture.fields("router.queue", "blocked");
+        assert_eq!(blocked["dynamo.router.queue.outcome"], "dequeued");
+        assert_eq!(blocked["dynamo.router.queue.deferred"], "true");
+        assert_eq!(blocked["dynamo.router.queue.reason"], "prefill_capacity");
+        // Recorded once, however many drain passes found the head blocked.
+        assert_eq!(blocked["records:dynamo.router.queue.deferred"], "1");
+        assert_eq!(blocked["records:dynamo.router.queue.reason"], "1");
+        let bypass = capture.fields("router.queue", "bypass");
+        assert_eq!(bypass["dynamo.router.queue.outcome"], "dequeued");
+        assert_eq!(bypass["dynamo.router.queue.deferred"], "false");
+        assert!(!bypass.contains_key("dynamo.router.queue.reason"));
+
+        for id in ["blocked", "bypass"] {
+            slots.free(&id.to_string(), Instant::now()).unwrap();
+        }
+        slots.assert_completely_drained(Instant::now());
+    }
+
     #[cfg(feature = "runtime-protocols")]
     #[tokio::test(start_paused = true)]
     async fn lifecycle_concurrent_queue_outcomes() {
@@ -4228,23 +4343,10 @@ policy_classes:
         };
         use crate::scheduling::selector::WorkerSelectionPolicy;
         use crate::scheduling::test_capture::{Capture, isolated};
-        use dynamo_runtime::telemetry::LifecycleTrace;
-        use tracing::Instrument;
         if isolated("scheduling::queue::tests::lifecycle_concurrent_queue_outcomes") {
             return;
         }
         let capture = Capture::install();
-        // As the routing host does: scope the request's trace around a caller span.
-        fn traced<F: std::future::Future>(
-            id: &str,
-            future: F,
-        ) -> impl std::future::Future<Output = F::Output> {
-            let trace = Arc::new(LifecycleTrace::frontend_request_without_session(id));
-            LifecycleTrace::scope(
-                Some(trace),
-                future.instrument(tracing::info_span!("caller")),
-            )
-        }
         struct FirstPicker;
         impl WorkerPicker for FirstPicker {
             fn pick(
