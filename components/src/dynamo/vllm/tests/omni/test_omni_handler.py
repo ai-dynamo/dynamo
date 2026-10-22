@@ -1543,14 +1543,17 @@ class TestImageReferenceInputs:
             )
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("with_reference", [False, True], ids=["t2i", "edit"])
+    @pytest.mark.parametrize(
+        "image_count", [0, 1, 2], ids=["t2i", "edit", "multi-image-edit"]
+    )
     async def test_engine_inputs_carry_image_accounting_to_the_formatter(
-        self, image_request_handler, with_reference
+        self, image_request_handler, image_count
     ):
         """The handler, not the engine output, knows the accounting inputs:
         the reference image it loaded and the step count the request asked
         for. Both reach the formatter through `EngineInputs`."""
         handler = image_request_handler
+        handler.engine_client.engine.od_config.model_class_name = "Flux2KleinPipeline"
         handler.output_formatter = AsyncMock()
         handler.output_formatter.format.return_value = {"data": []}
         stage_output = SimpleNamespace(final_output_type="image", images=[])
@@ -1558,17 +1561,26 @@ class TestImageReferenceInputs:
             stage_output
         ]
         request = {"prompt": "a teapot", "nvext": {"num_inference_steps": 4}}
-        if with_reference:
-            request["input_reference"] = self._reference_data_url()
+        if image_count:
+            reference = self._reference_data_url()
+            request["input_reference"] = (
+                reference if image_count == 1 else [reference] * image_count
+            )
 
-        chunks = [
-            chunk
-            async for chunk in handler._generate_openai_mode(request, None, "req-1")
-        ]
+        with patch(
+            "dynamo.vllm.omni.image_edit.get_diffusion_model_metadata",
+            return_value=SimpleNamespace(
+                supports_multimodal_inputs=True, max_multimodal_image_inputs=4
+            ),
+        ):
+            chunks = [
+                chunk
+                async for chunk in handler._generate_openai_mode(request, None, "req-1")
+            ]
 
         assert chunks == [{"data": []}]
         kwargs = handler.output_formatter.format.call_args.kwargs
-        assert kwargs["input_images"] == (1 if with_reference else 0)
+        assert kwargs["input_images"] == image_count
         assert kwargs["num_inference_steps"] == 4
 
     @pytest.mark.asyncio
