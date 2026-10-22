@@ -129,6 +129,22 @@ func SetupDynamoGraphDeploymentRequest(mgr ctrl.Manager, opts DynamoGraphDeploym
 	return nil
 }
 
+// SetupDynamoGraphDeploymentRequestV1beta2 registers the controller that turns native v1beta2 Requests
+// into Runs. It fails at startup, with a clear message, when the cluster does not serve the v1beta2 APIs.
+func SetupDynamoGraphDeploymentRequestV1beta2(mgr ctrl.Manager, opts SetupOptions) error {
+	if err := requireDGDRV1beta2API(mgr); err != nil {
+		return err
+	}
+	if err := (&DynamoGraphDeploymentRequestV1beta2Reconciler{
+		Client:        mgr.GetClient(),
+		Config:        opts.Config,
+		RuntimeConfig: opts.RuntimeConfig,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest v1beta2 controller: %w", err)
+	}
+	return nil
+}
+
 func SetupDynamoModel(mgr ctrl.Manager, opts DynamoModelSetupOptions) error {
 	if err := (&DynamoModelReconciler{
 		Client:         mgr.GetClient(),
