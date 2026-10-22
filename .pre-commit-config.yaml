@@ -38,6 +38,9 @@ repos:
   - id: clang-format
     types_or: [c, c++, cuda, proto, textproto, java]
     args: ["-fallback-style=none", "-style=file", "-i"]
+    # clang-format 16 reads `.txtpb` as C++ and would corrupt this protobuf
+    # text golden, whose bytes the repositories that vendor the proto check.
+    exclude: ^lib/sidecar/lpx/proto/testdata/.*\.txtpb$
 - repo: https://github.com/codespell-project/codespell
   rev: v2.2.4
   hooks:
