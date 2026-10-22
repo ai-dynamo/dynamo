@@ -21,7 +21,10 @@ use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
 use super::metrics;
-use super::metrics::{register_lora_allocation_metrics, register_model_ready_metric};
+use super::metrics::{
+    register_lora_allocation_metrics, register_model_ready_metric,
+    register_process_start_time_metric,
+};
 use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
@@ -1314,6 +1317,7 @@ impl HttpServiceConfigBuilder {
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
+        register_process_start_time_metric(&registry)?;
         state.metrics_clone().register(&registry)?;
 
         // Readiness is evaluated from the live routing catalog at scrape time.
