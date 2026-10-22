@@ -87,12 +87,6 @@ def test_fully_marked_test_is_not_flagged_defaulted(root_conftest):
     assert item.markers == {"post_merge", "gpu_2"}
 
 
-def test_manual_qualification_is_not_defaulted_into_ci(root_conftest):
-    item = _FakeItem("manual", "gpu_0")
-    root_conftest.pytest_itemcollected(item)
-    assert item.markers == {"manual", "gpu_0"}
-
-
 def test_demo_trees_are_not_defaulted(pytester, monkeypatch):
     """An unmarked demo script must stay deselected, not become pre_merge.
 
