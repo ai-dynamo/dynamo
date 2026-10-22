@@ -111,6 +111,30 @@ func captureUpgrade(t *testing.T, env *clusterenv.TestEnv) []unstructured.Unstru
 	return objects
 }
 
+// Capture a graph only if no candidate child call overlapped the API reads.
+func captureUpgradeComponent(t *testing.T, env *clusterenv.TestEnv, completed *upgradeComponentReconciles, components int) ([]unstructured.Unstructured, error) {
+	t.Helper()
+
+	// Record the candidate call revision before reading the resource graph.
+	completed.mu.Lock()
+	revision := completed.revision
+	completed.mu.Unlock()
+
+	// Validate the same graph that the caller will compare against the golden or predecessor.
+	objects := captureUpgrade(t, env)
+	if err := completed.graphReady(objects, components); err != nil {
+		return nil, err
+	}
+
+	// A call that started or finished during capture invalidates these observations.
+	completed.mu.Lock()
+	defer completed.mu.Unlock()
+	if revision != completed.revision {
+		return nil, fmt.Errorf("candidate component reconciliation overlapped capture")
+	}
+	return objects, nil
+}
+
 func TestClusterOperatorUpgrade(t *testing.T) {
 	historical, err := upgradeInputs("history")
 	require.NoError(t, err)
@@ -199,6 +223,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 					restored, ok := ids[old.GetKind()+"/"+old.GetName()]
 					require.True(t, ok)
 					old.SetUID(restored.GetUID())
+					old.SetGeneration(restored.GetGeneration())
 					before = append(before, *old)
 				}
 			}
@@ -213,6 +238,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 					t.Error("operator-only takeover requests a new worker generation")
 				}
 			}
+			completed := &upgradeComponentReconciles{}
 			baseline := completedUpgradeReconciles(t)
 			// Render valid MPI Secret references without starting model-serving Pods.
 			operatorConfig := clusterTestRestrictedConfig(namespace)
@@ -224,7 +250,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				if err := SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{SetupOptions: opts}); err != nil {
 					return err
 				}
-				return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: opts})
+				return setupUpgradeComponentController(mgr, opts, completed)
 			})
 			t.Log("Wait for a completed production reconcile, then compare the full owned resource graph")
 			require.Eventually(t, func() bool { return completedUpgradeReconciles(t) >= baseline+1 }, 90*time.Second, 200*time.Millisecond, "candidate did not complete a successful reconciliation")
@@ -236,7 +262,17 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 					return err == nil && live.Status.ObservedGeneration == live.Generation && live.Annotations[consts.AnnotationCurrentWorkerHashV2] == want
 				}, 90*time.Second, 200*time.Millisecond)
 			}
-			after := captureUpgrade(t, env)
+			var after []unstructured.Unstructured
+			if dgd.Annotations[consts.KubeAnnotationEnableGrove] == "false" {
+				t.Log("Wait for each DCD and its immediate workload without requiring serving Pods")
+				require.Eventually(t, func() bool {
+					var err error
+					after, err = captureUpgradeComponent(t, env, completed, len(dgd.Spec.Components))
+					return err == nil
+				}, 90*time.Second, 200*time.Millisecond, "component workload graph did not converge")
+			} else {
+				after = captureUpgrade(t, env)
+			}
 			checkUpgradeGroveMatrix(t, relative, getOnlyClusterDGD(t, ctx, env.Client(), namespace), after)
 			if isHistory {
 				if err := upgradeSafetyError(transition.hashChanged, before, after); err != nil {
@@ -258,6 +294,39 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				path := filepath.Join(root, relative, "input.yaml")
 				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
 				require.NoError(t, golden.WriteManifests(path, after))
+			}
+			if !isHistory && !item.promote && strings.HasSuffix(relative, "/component") && !t.Failed() {
+				t.Log("An intentional worker edit must reach a newly rendered Deployment even while Pods are blocked")
+				current := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
+				for i := range current.Spec.Components {
+					if current.Spec.Components[i].ComponentType == api.ComponentTypeFrontend {
+						continue
+					}
+					container := &current.Spec.Components[i].PodTemplate.Spec.Containers[0]
+					container.Env = append(container.Env, corev1.EnvVar{Name: "WORKER_REVISION", Value: "2"})
+				}
+				require.NoError(t, env.Client().Update(ctx, current))
+				require.Eventually(t, func() bool {
+					for _, object := range captureUpgrade(t, env) {
+						if object.GetKind() != "Deployment" {
+							continue
+						}
+						containers, _, err := unstructured.NestedSlice(object.Object, "spec", "template", "spec", "containers")
+						if err != nil {
+							return false
+						}
+						for _, container := range containers {
+							for _, variable := range container.(map[string]any)["env"].([]any) {
+								v := variable.(map[string]any)
+								if v["name"] == "WORKER_REVISION" && v["value"] == "2" {
+									return true
+								}
+							}
+						}
+					}
+					return false
+				}, 60*time.Second, 200*time.Millisecond, "worker edit did not reach a Deployment")
+				require.Error(t, upgradeSafetyError(false, after, captureUpgrade(t, env)))
 			}
 			if isHistory && strings.HasSuffix(relative, "/sglang-1.5") && !t.Failed() {
 				t.Log("A real worker environment edit must still request and persist a new generation")
@@ -304,6 +373,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 			}
 		})
 	}
+	t.Run("component-history-barrier", testUpgradeComponentHistoryBarrier)
 }
 
 // Upgrade capture and replay use the same version source as production admission.
