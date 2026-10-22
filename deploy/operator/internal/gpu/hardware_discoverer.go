@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -53,7 +54,10 @@ func (d *Discoverer) Discover(ctx context.Context, filterSKU nvidiacomv1beta1.GP
 
 	var dcgmErr error
 	if d.DCGM != nil {
-		info, err := d.DCGM.DiscoverGPUsFromDCGMFiltered(ctx, d.Reader, d.Cache, filterSKU)
+		// A slow exporter must not leave the node-label fallback with an expired context.
+		dcgmCtx, cancel := dcgmPhaseContext(ctx, d.NodeLabels != nil && d.NodeLabels())
+		info, err := d.DCGM.DiscoverGPUsFromDCGMFiltered(dcgmCtx, d.Reader, d.Cache, filterSKU)
+		cancel()
 		if err == nil {
 			return info, nil
 		}
@@ -127,7 +131,7 @@ func DiscoveryFailureReason(err error) string {
 		return "failed to parse dcgm Prometheus metrics (invalid format)"
 	case strings.Contains(errMsg, "no gpus detected"):
 		return "no GPUs detected in dcgm metrics (GPU model or metrics missing)"
-	case strings.Contains(errMsg, "dcgm is not enabled in the GPU Operator"):
+	case strings.Contains(errMsg, "dcgm is not enabled in the gpu operator"):
 		return "DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)"
 	case strings.Contains(errMsg, "failed to scrape any dcgm exporter pod"):
 		return "failed to scrape any dcgm exporter pod (check DCGM exporter pod status and network connectivity)"
@@ -137,4 +141,20 @@ func DiscoveryFailureReason(err error) string {
 		return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
 	}
 	return unknownReason
+}
+
+// dcgmPhaseContext bounds the DCGM phase of discovery. When the node-label fallback is enabled
+// and ctx has a deadline, the DCGM phase gets half of what remains, so a slow exporter cannot
+// consume the whole admission budget and leave the fallback with an expired context. Otherwise
+// ctx is returned unchanged. The returned cancel function must be called.
+func dcgmPhaseContext(ctx context.Context, reserveForFallback bool) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok || !reserveForFallback {
+		return ctx, func() {}
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, remaining/2)
 }

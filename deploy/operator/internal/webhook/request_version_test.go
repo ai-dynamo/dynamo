@@ -25,9 +25,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-func requestWithKinds(kind string, requestKind string) admission.Request {
+// requestWithKinds returns a request whose stored kind is v1beta1, the version every webhook
+// receives after conversion, and whose original request kind is requestKind (empty for none).
+func requestWithKinds(requestKind string) admission.Request {
 	req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
-		Kind: metav1.GroupVersionKind{Group: "nvidia.com", Version: kind, Kind: "DynamoGraphDeploymentRequest"},
+		Kind: metav1.GroupVersionKind{Group: "nvidia.com", Version: "v1beta1", Kind: "DynamoGraphDeploymentRequest"},
 	}}
 	if requestKind != "" {
 		req.RequestKind = &metav1.GroupVersionKind{Group: "nvidia.com", Version: requestKind, Kind: "DynamoGraphDeploymentRequest"}
@@ -41,9 +43,9 @@ func TestRequestedVersion(t *testing.T) {
 		req  admission.Request
 		want string
 	}{
-		{"no conversion uses Kind", requestWithKinds("v1beta1", ""), "v1beta1"},
-		{"RequestKind wins after conversion", requestWithKinds("v1beta1", "v1beta2"), "v1beta2"},
-		{"RequestKind wins over a matching Kind", requestWithKinds("v1beta1", "v1alpha1"), "v1alpha1"},
+		{"no conversion uses Kind", requestWithKinds(""), "v1beta1"},
+		{"RequestKind wins after conversion", requestWithKinds("v1beta2"), "v1beta2"},
+		{"RequestKind wins over a matching Kind", requestWithKinds("v1alpha1"), "v1alpha1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -61,12 +63,12 @@ func TestRequestIsNative(t *testing.T) {
 		carrier bool
 		want    bool
 	}{
-		{"native v1beta2 create", requestWithKinds("v1beta1", "v1beta2"), true, true},
-		{"native v1beta1 create", requestWithKinds("v1beta1", ""), false, true},
-		{"native v1alpha1 create", requestWithKinds("v1beta1", "v1alpha1"), false, true},
-		{"carrier written through v1beta1", requestWithKinds("v1beta1", ""), true, false},
-		{"carrier written through v1alpha1", requestWithKinds("v1beta1", "v1alpha1"), true, false},
-		{"v1beta1 payload written through v1beta2", requestWithKinds("v1beta1", "v1beta2"), false, false},
+		{"native v1beta2 create", requestWithKinds("v1beta2"), true, true},
+		{"native v1beta1 create", requestWithKinds(""), false, true},
+		{"native v1alpha1 create", requestWithKinds("v1alpha1"), false, true},
+		{"carrier written through v1beta1", requestWithKinds(""), true, false},
+		{"carrier written through v1alpha1", requestWithKinds("v1alpha1"), true, false},
+		{"v1beta1 payload written through v1beta2", requestWithKinds("v1beta2"), false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
