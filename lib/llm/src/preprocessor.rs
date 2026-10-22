@@ -3078,7 +3078,10 @@ impl OpenAIPreprocessor {
             .ok_or_else(|| anyhow::anyhow!("chat template did not produce a text prompt"))?;
         if Self::prompt_injected_reasoning_start_for_parsers(
             self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
+            self.runtime_config
+                .reasoning_parser
+                .as_deref()
+                .or(self.tool_call_parser.as_deref()),
             Some(prompt.as_str()),
         ) {
             return Err(SystemOneModelIncompatible(
