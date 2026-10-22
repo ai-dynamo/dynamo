@@ -839,7 +839,6 @@ async fn trtllm_malformed_terminal_fails_then_recovers() {
 fn http_request() -> PreprocessedRequest {
     let mut req = request("mocker-model", vec![11, 22, 33], 2);
     req.extra_args = Some(json!({"sglang_tito": {"sampling_params": {"max_new_tokens": 2}}}));
-    req.annotations.push("sglang_private_rid".to_string());
     req
 }
 

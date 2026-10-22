@@ -70,17 +70,7 @@ pub(crate) fn request(
         ));
     }
 
-    // Only a frontend that restores public response IDs may opt into private
-    // dispatch IDs. Keep old-frontend/new-worker rolling upgrades wire-compatible.
-    let rid = if request
-        .annotations
-        .iter()
-        .any(|a| a == dynamo_sglang_generate::PRIVATE_RID_ANNOTATION)
-    {
-        format!("{request_id}-{:08x}", rand::random::<u32>())
-    } else {
-        request_id.to_string()
-    };
+    let rid = format!("{request_id}-{:08x}", rand::random::<u32>());
     body.insert("input_ids".into(), serde_json::json!(request.token_ids));
     body.insert("rid".into(), Value::String(rid.clone()));
     body.insert("stream".into(), Value::Bool(true));
@@ -762,10 +752,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(native.body["input_ids"], json!([1, 2, 3]));
-        assert_eq!(
-            native.rid, "actual-rid",
-            "older frontends retain public IDs"
-        );
+        assert!(native.rid.starts_with("actual-rid-"));
         assert_eq!(native.body["rid"], native.rid.as_str());
         assert_eq!(native.body["stream"], true);
         assert_eq!(native.body["priority"], -5);
@@ -1456,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn private_dispatch_ids_require_frontend_opt_in() {
+    fn each_dispatch_has_a_private_request_id() {
         let mut canonical = canonical_request();
         canonical.extra_args = Some(json!({"sglang_tito": {}}));
         let dispatch = |request: &PreprocessedRequest| {
@@ -1471,10 +1458,6 @@ mod tests {
             .unwrap()
             .rid
         };
-        assert_eq!(dispatch(&canonical), "public");
-        canonical
-            .annotations
-            .push(dynamo_sglang_generate::PRIVATE_RID_ANNOTATION.to_string());
         let first = dispatch(&canonical);
         let second = dispatch(&canonical);
         assert!(first.starts_with("public-") && second.starts_with("public-"));

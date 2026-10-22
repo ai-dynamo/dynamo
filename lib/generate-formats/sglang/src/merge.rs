@@ -210,8 +210,6 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             input_tokens,
             validation,
             bind: Box::new(move |worker| {
-                let mut annotations = prefill_annotations(prefill_need, stream);
-                annotations.push(crate::PRIVATE_RID_ANNOTATION.to_string());
                 let request = PreprocessedRequest::builder()
                     .model(worker.model.to_string())
                     .token_ids(input_ids)
@@ -232,7 +230,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
                         ..Default::default()
                     }))
                     .extra_args(Some(json!({ PAYLOAD_KEY: body })))
-                    .annotations(annotations)
+                    .annotations(prefill_annotations(prefill_need, stream))
                     .build()
                     .map_err(|error| ClientError::new(error.to_string()))?;
                 Ok(Bound {

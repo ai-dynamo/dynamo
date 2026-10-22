@@ -16,7 +16,7 @@ use anyhow::Result;
 use base64::Engine as _;
 use dynamo_protocols::types::ChatCompletionTokenLogprob;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PromptLogprobs};
@@ -159,10 +159,11 @@ macro_rules! sampling_params {
     ($($field:ident: $ty:ty),* $(,)?) => {
         /// Typed routing/validation fields backed by the original sampling JSON.
         #[allow(dead_code)]
-        #[derive(Debug, Clone)]
+        #[derive(Debug, Clone, Serialize)]
+        #[serde(transparent)]
         pub struct SamplingParams {
             raw: Value,
-            $($field: $ty,)*
+            $(#[serde(skip)] $field: $ty,)*
         }
 
         impl<'de> Deserialize<'de> for SamplingParams {
@@ -275,15 +276,6 @@ fn project_logprob_count(value: Option<i32>, field: &str) -> Result<Option<u32>,
         Some(_) => Err(format!(
             "sampling_params.{field} must be non-negative or -1."
         )),
-    }
-}
-
-impl Serialize for SamplingParams {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.raw.serialize(serializer)
     }
 }
 

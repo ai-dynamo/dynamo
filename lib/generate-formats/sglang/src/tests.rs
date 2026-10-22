@@ -48,13 +48,6 @@ fn catalog_format_owns_client_shape_and_reuses_native_exchange() {
         })
         .unwrap();
     let mut bound = (opened.bind)(&crate::testkit::worker()).unwrap();
-    assert!(
-        bound
-            .request
-            .annotations
-            .iter()
-            .any(|a| a == crate::PRIVATE_RID_ANNOTATION)
-    );
     assert_eq!(bound.request.token_ids.as_slice(), &[1]);
     for (ids, finish) in [
         (json!([2]), Value::Null),
