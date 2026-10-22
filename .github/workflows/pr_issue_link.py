@@ -233,6 +233,47 @@ def verify_linear_issue(identifier: str, api_key: str) -> tuple[bool, bool]:
     return False, False
 
 
+def linear_issue_has_project(identifier: str, api_key: str) -> tuple[bool, bool]:
+    """Return (has_project, api_ok) for a Linear issue that already verified."""
+    if not api_key:
+        return False, False
+    status, body = http_json(
+        "https://api.linear.app/graphql",
+        payload={
+            "query": "query($id: String!) { issue(id: $id) { project { id } } }",
+            "variables": {"id": identifier},
+        },
+        headers={"Authorization": api_key, "Content-Type": "application/json"},
+    )
+    issue = (body.get("data") or {}).get("issue") if status == 200 else None
+    if not issue:
+        return False, False
+    return bool(issue.get("project")), True
+
+
+def project_warning(identifier: str, api_key: str) -> list[str]:
+    """Warn, never block, when the linked Linear issue sits in no project.
+
+    Release tracking reads feature progress from Linear projects, so an issue
+    outside one never reaches its feature. An outage stays silent: the warning
+    is advisory and must not depend on the API being up.
+    """
+    has_project, api_ok = linear_issue_has_project(identifier, api_key)
+    if has_project or not api_ok:
+        return []
+    print(
+        f"::warning title=Linear issue has no project::{identifier} is in no Linear "
+        "project. Put it in the feature project for its feature, or the "
+        "workstream project."
+    )
+    return [
+        "",
+        f"Warning: Linear issue {identifier} is in no project. Put it in the feature",
+        "project for its feature, or the workstream project for bugs, tests and",
+        "non-feature work. This warning does not block the merge.",
+    ]
+
+
 def main() -> int:
     title = os.environ.get("PR_TITLE", "")
     body = os.environ.get("PR_BODY", "") or ""
@@ -375,6 +416,7 @@ def main() -> int:
         and has_repo_write_permission(repo, author, gh_token)
     )
     fork_linear_ids: list[str] = []
+    verified_linear = ""
     decided_linear = False
     for identifier in all_linear_ids[:MAX_CANDIDATES]:
         if verified:
@@ -393,6 +435,7 @@ def main() -> int:
         exists, api_ok = verify_linear_issue(identifier, linear_key)
         if exists:
             verified.append(f"Linear issue {identifier}")
+            verified_linear = identifier
         elif not api_ok:
             unverified.append(f"Linear reference {identifier} (not verified)")
         else:
@@ -414,7 +457,12 @@ def main() -> int:
                 f.write(text_out + "\n")
 
     if verified:
-        summarize(["### PR issue link: found", ""] + [f"- {v}" for v in verified])
+        warning = (
+            project_warning(verified_linear, linear_key) if verified_linear else []
+        )
+        summarize(
+            ["### PR issue link: found", ""] + [f"- {v}" for v in verified] + warning
+        )
         return 0
 
     if unverified:

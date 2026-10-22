@@ -76,6 +76,7 @@ class FakeApi:
         default_github: tuple[bool, bool] = (False, True),
         default_linear: tuple[bool, bool] = (False, True),
         write_access: bool = False,
+        projects: dict[str, tuple[bool, bool]] | None = None,
     ) -> None:
         self.github = github or {}
         self.deps = set(deps or ())
@@ -89,6 +90,8 @@ class FakeApi:
         self.repo_calls: list[str] = []
         self.linear_calls: list[str] = []
         self.permission_calls: list[str] = []
+        self.projects = projects or {}
+        self.project_calls: list[str] = []
 
     def verify_github_issue(
         self, repo: str, number: str, token: str
@@ -106,6 +109,12 @@ class FakeApi:
         self.linear_calls.append(identifier)
         return self.linear.get(identifier, self.default_linear)
 
+    def linear_issue_has_project(
+        self, identifier: str, api_key: str
+    ) -> tuple[bool, bool]:
+        self.project_calls.append(identifier)
+        return self.projects.get(identifier, (True, True))
+
     def has_repo_write_permission(self, repo: str, username: str, token: str) -> bool:
         self.permission_calls.append(f"{repo}:{username}")
         return self.write_access
@@ -119,6 +128,9 @@ def run(
     monkeypatch.setattr(pr_issue_link, "verify_github_issue", api.verify_github_issue)
     monkeypatch.setattr(pr_issue_link, "repo_visible", api.repo_visible)
     monkeypatch.setattr(pr_issue_link, "verify_linear_issue", api.verify_linear_issue)
+    monkeypatch.setattr(
+        pr_issue_link, "linear_issue_has_project", api.linear_issue_has_project
+    )
     monkeypatch.setattr(
         pr_issue_link, "has_repo_write_permission", api.has_repo_write_permission
     )
@@ -796,3 +808,45 @@ def test_the_failure_says_when_candidates_went_unchecked(
     assert expected in out
     assert "before reaching the rest." in out
     assert "are Dynamo Enhancement Proposals" in out
+
+
+def test_linear_issue_with_no_project_warns_and_passes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    api = FakeApi(linear={"DYN-42": (True, True)}, projects={"DYN-42": (False, True)})
+    code, _ = run(monkeypatch, api, PR_BODY="Closes DYN-42")
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "::warning title=Linear issue has no project::DYN-42" in out
+    assert "does not block the merge" in out
+
+
+def test_linear_issue_in_a_project_does_not_warn(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    api = FakeApi(linear={"DYN-42": (True, True)})
+    code, _ = run(monkeypatch, api, PR_BODY="Closes DYN-42")
+
+    assert code == 0
+    assert "::warning" not in capsys.readouterr().out
+
+
+def test_project_lookup_outage_stays_silent(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    api = FakeApi(linear={"DYN-42": (True, True)}, projects={"DYN-42": (False, False)})
+    code, _ = run(monkeypatch, api, PR_BODY="Closes DYN-42")
+
+    assert code == 0
+    assert "::warning" not in capsys.readouterr().out
+
+
+def test_github_issue_link_skips_the_project_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeApi(github={f"{REPO}#7": (True, True)})
+    code, api = run(monkeypatch, api, PR_BODY="Fixes #7")
+
+    assert code == 0
+    assert api.project_calls == []
