@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -34,7 +34,7 @@ use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_c
 use dynamo_sidecar_common::SidecarStartupError;
 use futures::stream::{BoxStream, StreamExt};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
 
@@ -44,6 +44,30 @@ use crate::errors::{http_like_error_to_dynamo, py_exception_to_backend_error};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
+
+/// `DYN_TOKEN_IDS_AS_BYTES=1`: hand `token_ids` to the Python engine as one packed
+/// little-endian int32 `bytes`, the form the msgpack request plane gives Python
+/// workers, instead of `pythonize`'s one Python int per token. Converting a long
+/// prompt that way holds the GIL for milliseconds per request. Every Python reader
+/// accepts both forms (`dynamo.common.utils.token_ids`).
+static TOKEN_IDS_AS_BYTES: LazyLock<bool> = LazyLock::new(|| {
+    rs::config::env_is_truthy(rs::config::environment_names::request_plane::DYN_TOKEN_IDS_AS_BYTES)
+});
+
+/// Take the prompt out of `request` as packed int32 bytes when
+/// `DYN_TOKEN_IDS_AS_BYTES` is on; `None` leaves it to `pythonize`. Ids above
+/// `i32::MAX` keep the sequence form, as on the request plane.
+fn take_packed_token_ids(request: &mut PreprocessedRequest, packed: bool) -> Option<Vec<u8>> {
+    if !packed || request.token_ids.iter().any(|&id| id > i32::MAX as u32) {
+        return None;
+    }
+    let ids = std::mem::take(&mut request.token_ids);
+    let mut buf = Vec::with_capacity(ids.len() * 4);
+    for id in ids.iter() {
+        buf.extend_from_slice(&id.to_le_bytes());
+    }
+    Some(buf)
+}
 
 fn sidecar_startup_to_pyerr(error: SidecarStartupError) -> PyErr {
     match error {
@@ -734,6 +758,7 @@ impl PyEngineCore {
     async fn dispatch_generate<T: serde::Serialize + Send + 'static>(
         &self,
         request: T,
+        packed_token_ids: Option<Vec<u8>>,
         ctx: dynamo_backend_common::GenerateContext,
     ) -> Result<(BoxStream<'static, PyResult<PyObject>>, RequestStateGuard), DynamoError> {
         let engine = self.engine.clone();
@@ -783,6 +808,11 @@ impl PyEngineCore {
         let stream = tokio::task::spawn_blocking(move || -> PyResult<_> {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
+                if let Some(packed) = packed_token_ids {
+                    py_request
+                        .downcast::<PyDict>()?
+                        .set_item("token_ids", PyBytes::new(py, &packed))?;
+                }
                 let py_ctx = Py::new(
                     py,
                     PyContext::new(
@@ -1312,10 +1342,12 @@ impl LLMEngine for PyLLMEngine {
 
     async fn generate(
         &self,
-        request: PreprocessedRequest,
+        mut request: PreprocessedRequest,
         ctx: dynamo_backend_common::GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let (stream, request_state_guard) = self.core.dispatch_generate(request, ctx).await?;
+        let packed = take_packed_token_ids(&mut request, *TOKEN_IDS_AS_BYTES);
+        let (stream, request_state_guard) =
+            self.core.dispatch_generate(request, packed, ctx).await?;
 
         let mapped = async_stream::stream! {
             let _request_state_guard = request_state_guard;
@@ -1471,7 +1503,7 @@ impl RawEngine for PyRawEngine {
         request: serde_json::Value,
         ctx: dynamo_backend_common::GenerateContext,
     ) -> Result<BoxStream<'static, Result<serde_json::Value, DynamoError>>, DynamoError> {
-        let (stream, request_state_guard) = self.core.dispatch_generate(request, ctx).await?;
+        let (stream, request_state_guard) = self.core.dispatch_generate(request, None, ctx).await?;
 
         let mapped = async_stream::stream! {
             let _request_state_guard = request_state_guard;
@@ -1710,4 +1742,45 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
             .message(err.to_string())
             .build()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+
+    use super::*;
+
+    fn request(token_ids: Vec<u32>) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("m".to_string())
+            .token_ids(token_ids)
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("build request")
+    }
+
+    #[test]
+    fn packed_token_ids_are_little_endian_int32() {
+        let mut req = request(vec![1, 256, i32::MAX as u32]);
+        let packed = take_packed_token_ids(&mut req, true).expect("packed");
+        let mut expected = Vec::new();
+        for id in [1i32, 256, i32::MAX] {
+            expected.extend_from_slice(&id.to_le_bytes());
+        }
+        assert_eq!(packed, expected);
+        assert!(req.token_ids.is_empty(), "the prompt moves into the bytes");
+    }
+
+    #[test]
+    fn token_ids_stay_a_sequence_when_off_or_out_of_int32_range() {
+        let mut req = request(vec![1, 2]);
+        assert!(take_packed_token_ids(&mut req, false).is_none());
+        assert_eq!(*req.token_ids, vec![1, 2]);
+
+        let mut req = request(vec![1, i32::MAX as u32 + 1]);
+        assert!(take_packed_token_ids(&mut req, true).is_none());
+        assert_eq!(*req.token_ids, vec![1, i32::MAX as u32 + 1]);
+    }
 }
