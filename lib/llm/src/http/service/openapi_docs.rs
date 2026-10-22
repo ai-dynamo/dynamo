@@ -586,16 +586,24 @@ fn add_request_body_for_route(
     use utoipa::openapi::request_body::RequestBodyBuilder;
 
     let (description, schema, example) = match kind {
-        Some(OpenApiRouteKind::SystemOne) => (
-            "Jev text evaluation; unsupported controls are rejected; unknown top-level fields are ignored",
-            <decisions_jev::Request as utoipa::PartialSchema>::schema(),
-            serde_json::json!({
-                "model": "Qwen/Qwen3.8-27B", "state": "The payment failed.",
-                "questions": {"route": {"type": "choice", "criteria": {
-                    "billing": "Payment issues", "technical": "Integration failures"
-                }}}
-            }),
-        ),
+        Some(OpenApiRouteKind::SystemOne) => {
+            let mut schema = <decisions_jev::Request as utoipa::PartialSchema>::schema();
+            if let RefOr::T(utoipa::openapi::schema::Schema::Object(object)) = &mut schema {
+                object.additional_properties = Some(Box::new(
+                    utoipa::openapi::schema::AdditionalProperties::FreeForm(true),
+                ));
+            }
+            (
+                "Jev text evaluation; unsupported controls are rejected; unknown top-level fields are ignored",
+                schema,
+                serde_json::json!({
+                    "model": "Qwen/Qwen3.8-27B", "state": "The payment failed.",
+                    "questions": {"route": {"type": "choice", "criteria": {
+                        "billing": "Payment issues", "technical": "Integration failures"
+                    }}}
+                }),
+            )
+        }
         Some(OpenApiRouteKind::Decisions) => (
             "OpenAI Decisions text evaluation; unsupported fields and controls are rejected",
             <decisions_oai::Request as utoipa::PartialSchema>::schema(),
@@ -1275,6 +1283,10 @@ mod tests {
                 .contains("unknown top-level fields are ignored")
         );
         assert!(operation["requestBody"]["content"]["application/json"]["schema"].is_object());
+        assert_eq!(
+            operation["requestBody"]["content"]["application/json"]["schema"]["additionalProperties"],
+            true
+        );
         assert!(operation["responses"]["200"]["content"]["application/json"]["schema"].is_object());
         for status in [
             "400", "404", "413", "415", "422", "429", "499", "500", "502", "503", "504", "529",
