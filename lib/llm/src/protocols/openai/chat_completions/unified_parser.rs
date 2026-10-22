@@ -134,7 +134,15 @@ pub(crate) fn selected_family(
     let configured = configured_family(tool_call_parser, reasoning_parser);
     let selection = super::tool_parser_v2::selected_version()
         .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    let selected = selected_family_for_selection(configured, selection);
+    // Qwen3 thinking models also use this reasoning name with Hermes tool syntax.
+    let selected = if tool_call_parser.is_none()
+        && reasoning_parser == Some("qwen3")
+        && selection == dynamo_runtime::config::ParserVersion::Auto
+    {
+        None
+    } else {
+        selected_family_for_selection(configured, selection)
+    };
     tracing::debug!(
         target: "dynamo_unified",
         ?tool_call_parser,
@@ -11158,6 +11166,10 @@ pub(crate) mod tests {
             selected_family(Some("qwen3_coder"), Some("qwen3")),
             expected
         );
+        assert_eq!(
+            selected_family(None, Some("qwen3")),
+            (selection == "2").then_some(QWEN3_UNIFIED_FAMILY)
+        );
         for &parser in FAMILY_NAMES.iter() {
             let family = canonical_family(parser).unwrap();
             for (tool, reasoning) in [
@@ -11165,7 +11177,9 @@ pub(crate) mod tests {
                 (Some(parser), None),
                 (None, Some(parser)),
             ] {
-                let expected = (selection != "1").then_some(family);
+                let reasoning_only_qwen3 = tool.is_none() && reasoning == Some("qwen3");
+                let expected = (selection != "1" && (selection == "2" || !reasoning_only_qwen3))
+                    .then_some(family);
                 assert_eq!(
                     selected_family(tool, reasoning),
                     expected,
