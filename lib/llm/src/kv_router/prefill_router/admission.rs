@@ -25,6 +25,12 @@ impl PrefillRouter {
         task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     ) -> Result<PrefillCompletion, PrefillError> {
         let Some(first_output) = prefill_response.next().await else {
+            // The egress ends the response stream as soon as the request context is
+            // stopped, before the worker's final item can arrive. Once a decode
+            // rejection has stopped this prefill, an empty stream is that cancellation.
+            if prefill_response.context().is_stopped() {
+                return Err(PrefillError::Cancelled);
+            }
             return Err(PrefillError::PrefillError(
                 "Prefill router returned no output (stream ended)".to_string(),
                 None,
@@ -243,13 +249,25 @@ mod tests {
                     continue;
                 }
                 for stopped in [true, false] {
-                    for tail in [
-                        Annotated::from_data(LLMEngineOutput::cancelled()),
-                        Annotated::from_data(LLMEngineOutput::error("prefill failed".to_string())),
-                        Annotated::from_error("prefill transport failed"),
-                    ] {
-                        let cancelled = tail.data.as_ref().is_some_and(|data| {
-                            data.finish_reason == Some(FinishReason::Cancelled)
+                    // `None` ends the stream without a tail item, as the egress does
+                    // once the context is stopped; it only reaches the observer when
+                    // no bootstrap item arrived first.
+                    let mut tails = vec![
+                        Some(Annotated::from_data(LLMEngineOutput::cancelled())),
+                        Some(Annotated::from_data(LLMEngineOutput::error(
+                            "prefill failed".to_string(),
+                        ))),
+                        Some(Annotated::from_error("prefill transport failed")),
+                    ];
+                    if !bootstrap {
+                        tails.push(None);
+                    }
+                    for tail in tails {
+                        let ended = tail.is_none();
+                        let cancelled = tail.as_ref().is_some_and(|tail| {
+                            tail.data.as_ref().is_some_and(|data| {
+                                data.finish_reason == Some(FinishReason::Cancelled)
+                            })
                         });
                         let levels = Arc::new(Mutex::new(Vec::new()));
                         let subscriber =
@@ -263,8 +281,10 @@ mod tests {
                                 ..Default::default()
                             });
                             let (tx, rx) = tokio::sync::oneshot::channel();
-                            let stream = stream::iter(bootstrap.then_some(first))
-                                .chain(stream::once(async move { rx.await.unwrap() }));
+                            let stream = stream::iter(bootstrap.then_some(first)).chain(
+                                stream::once(async move { rx.await.unwrap() })
+                                    .filter_map(|tail| async move { tail }),
+                            );
                             let response = ResponseStream::new(Box::pin(stream), context.clone());
                             let task = if wrapped {
                                 let router = super::super::tests::active_conditional_router();
@@ -304,7 +324,7 @@ mod tests {
                             );
                         };
                         tracing::subscriber::with_default(subscriber, || runtime.block_on(run));
-                        let expected = if stopped && cancelled {
+                        let expected = if stopped && (cancelled || ended) {
                             tracing::Level::DEBUG
                         } else {
                             tracing::Level::WARN
@@ -312,7 +332,7 @@ mod tests {
                         assert_eq!(
                             *levels.lock().unwrap(),
                             vec![expected],
-                            "wrapped={wrapped}, bootstrap={bootstrap}, stopped={stopped}, cancelled={cancelled}"
+                            "wrapped={wrapped}, bootstrap={bootstrap}, stopped={stopped}, cancelled={cancelled}, ended={ended}"
                         );
                     }
                 }
