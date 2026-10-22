@@ -1401,6 +1401,11 @@ impl ModelDeploymentCard {
                 ) {
                     bytes_to_hash.extend_from_slice(b"\0custom_tensor_shm_v1\0true");
                 }
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::CUSTOM_NIXL_CAPABILITY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0custom_tensor_nixl_v1\0true");
+                }
 
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
@@ -3662,9 +3667,13 @@ mod ownership_tests {
     #[test]
     fn json_capability_isolates_opted_in_workers_only() {
         use crate::local_model::runtime_config::{
-            CUSTOM_SHM_CAPABILITY, JSON_MULTIMODAL_CAPABILITY,
+            CUSTOM_NIXL_CAPABILITY, CUSTOM_SHM_CAPABILITY, JSON_MULTIMODAL_CAPABILITY,
         };
-        for capability in [JSON_MULTIMODAL_CAPABILITY, CUSTOM_SHM_CAPABILITY] {
+        for capability in [
+            JSON_MULTIMODAL_CAPABILITY,
+            CUSTOM_SHM_CAPABILITY,
+            CUSTOM_NIXL_CAPABILITY,
+        ] {
             let missing = ModelDeploymentCard::with_name_only("model");
             let mut disabled = ModelDeploymentCard::with_name_only("model");
             disabled

@@ -152,6 +152,7 @@ pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_gener
 /// Absence means unsupported, including workers predating this transport.
 pub const JSON_MULTIMODAL_CAPABILITY: &str = "custom_json_v1";
 pub const CUSTOM_SHM_CAPABILITY: &str = "custom_tensor_shm_v1";
+pub const CUSTOM_NIXL_CAPABILITY: &str = "custom_tensor_nixl_v1";
 
 /// Worker-reported Qwen3 video prompt-expansion contract used by vLLM.
 ///

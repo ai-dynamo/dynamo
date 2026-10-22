@@ -22,6 +22,7 @@ VLLM_GENERATE_CAPABILITY = "vllm_inference_v1_generate"
 VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY = "vllm_enable_tower_connector_lora"
 JSON_MULTIMODAL_CAPABILITY = "custom_json_v1"
 CUSTOM_SHM_CAPABILITY = "custom_tensor_shm_v1"
+CUSTOM_NIXL_CAPABILITY = "custom_tensor_nixl_v1"
 DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
 
 
@@ -39,6 +40,10 @@ def publish_json_multimodal_capability(
         runtime_config.set_engine_specific(JSON_MULTIMODAL_CAPABILITY, json.dumps(True))
         if sys.platform == "linux" and os.access("/dev/shm", os.R_OK):
             runtime_config.set_engine_specific(CUSTOM_SHM_CAPABILITY, json.dumps(True))
+        from dynamo.common.multimodal.custom_tensor_nixl import nixl_available
+
+        if nixl_available():
+            runtime_config.set_engine_specific(CUSTOM_NIXL_CAPABILITY, json.dumps(True))
 
 
 def publish_engine_generate_capability(

@@ -100,8 +100,19 @@ class ShmTensor(TensorSpec):
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class NixlTensor(TensorSpec):
+    """One request-scoped CPU READ; create a fresh publisher for each retry."""
+
+    transport: Literal["nixl"]
+    size: Annotated[StrictInt, Field(gt=0, le=MAX_TENSOR_BYTES)]
+    worker_id: Annotated[StrictInt, Field(ge=0, le=2**64 - 1)]
+    expires_at: float = Field(allow_inf_nan=False)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    serialized_request: dict[str, Any]
+
+
 _SPEC = TypeAdapter(
-    Annotated[InlineTensor | ShmTensor, Field(discriminator="transport")]
+    Annotated[InlineTensor | ShmTensor | NixlTensor, Field(discriminator="transport")]
 )
 
 
@@ -212,6 +223,7 @@ def _plan_custom_tensors(
     """
     specs: list[tuple[TensorSpec, int]] = []
     total_bytes = 0
+    nixl_reads: set[str] = set()
 
     def visit(item: Any) -> None:
         nonlocal total_bytes
@@ -240,12 +252,21 @@ def _plan_custom_tensors(
                     raise ValueError(
                         "inline tensor byte count does not match shape and dtype"
                     )
-            else:
+            elif isinstance(spec, ShmTensor):
                 _validate_reference(spec, worker_id)
                 if spec.size != size:
                     raise ValueError(
                         "tensor reference size does not match shape and dtype"
                     )
+            else:
+                from .custom_tensor_nixl import validate_nixl_reference
+
+                metadata = validate_nixl_reference(spec, size, worker_id)
+                # A passive operation acknowledges one READ, not a reusable lease.
+                key = metadata.notification_key
+                if key in nixl_reads:
+                    raise ValueError("request-scoped NIXL reference cannot be repeated")
+                nixl_reads.add(key)
             specs.append((spec, size))
 
     visit(value)
@@ -275,7 +296,7 @@ def _resolve_tensor(spec: TensorSpec, size: int, worker_id: int | None) -> torch
                 time.sleep(0)
         except binascii.Error as exc:
             raise ValueError("invalid tensor base64") from exc
-    else:
+    elif isinstance(spec, ShmTensor):
         # Earlier tensors may take time to decode; recheck the lease immediately
         # before opening each segment. Producer release during a read is safe:
         # unlink does not invalidate the reader's already-open mapping.
@@ -288,6 +309,10 @@ def _resolve_tensor(spec: TensorSpec, size: int, worker_id: int | None) -> torch
             raise ValueError("custom tensor reference is not accessible") from exc
         if hashlib.sha256(data).hexdigest() != spec.sha256:
             raise ValueError("tensor reference checksum mismatch")
+    else:
+        from .custom_tensor_nixl import read_nixl_tensor
+
+        data = read_nixl_tensor(spec, size, worker_id)
     if len(data) != size:
         raise ValueError("tensor byte count does not match shape and dtype")
     dtype = getattr(torch, spec.dtype)

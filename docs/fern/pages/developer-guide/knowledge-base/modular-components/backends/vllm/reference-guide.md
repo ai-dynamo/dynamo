@@ -210,57 +210,34 @@ LoRA registrations. Custom P/D, encoder disaggregation, speculative prefill,
 custom caching/KVBM, SGLang, TensorRT-LLM and native vLLM sidecars are unsupported.
 Existing typed media paths and their transports remain unchanged.
 
-#### NIXL Lifecycle Dependency
+#### NIXL References
 
-Public custom NIXL tensors remain explicitly rejected. Workers do not advertise
-`custom_tensor_nixl_v1`. The raw CPU prototype calls the maintained
-`NixlReadEmbeddingSender` and `NixlReadEmbeddingReceiver` directly. These own
-NIXL registration, descriptors, READ operations, completion notifications, and
-buffer release. The adapter transfers a flat `uint8` buffer through the existing
-`TransferRequest`, copies the completed receive buffer into model-owned storage,
-and calls `release_tensor`. The outer Custom descriptor preserves the original
-tensor shape and dtype for reconstruction, including scalar tensors. It does not
-use the processed vLLM `mm_kwargs` codec or media descriptors.
+NIXL references use the same maintained sender, receiver, registration and
+completion machinery as embedding transfers. Multimodal aggregated vLLM workers
+with NIXL installed advertise `custom_tensor_nixl_v1`; no additional opt-in is
+required. Discover a compatible worker and pin the request to its ID:
 
-Source ownership follows the existing encoder's send-completion queue: retain
-the source until the READ completion awaitable finishes. Cancelling the caller
-does not cancel that waiter. Reference expiry is checked before admission; it
-does not authorize releasing a buffer while a transfer might still access it.
+```python
+from dynamo.common.multimodal.custom_tensor_nixl import NixlTensorPublisher
 
-The blocking case is **timeout or peer failure after a READ might have started**.
-In NIXL 1.5.0, releasing the native handle requests cancellation and releases the
-request, but does not establish that an RMA GET has stopped. Current UCX request
-cancellation does not cancel RMA GETs. Consumer context exit can therefore
-release destination storage while a GET remains active. Producer deadline
-cleanup has the corresponding source-lifetime problem: deregistration alone
-is not proof that an asynchronous software GET has stopped reading its source.
-See the [NIXL release implementation](https://github.com/ai-dynamo/nixl/blob/v1.5.0/src/plugins/ucx/ucx_backend_req.h),
-[UCX cancellation implementation](https://github.com/openucx/ucx/blob/v1.23.x/src/ucp/core/ucp_request.c),
-and [software GET implementation](https://github.com/openucx/ucx/blob/v1.23.x/src/ucp/rma/rma_sw.c).
+async with NixlTensorPublisher(tensor, worker_id=worker_id, ttl=60) as publisher:
+    part = {"type": "custom", "kind": "chemistry", "fields": {"input": publisher.envelope()}}
+    # Send part with nvext.decode_worker_id = worker_id and check the HTTP response.
+```
 
-This concern also applies to existing transports. The maintained processed
-`MmKwargsNixlSender` bounds its completion wait and releases buffers on timeout;
-that policy does not establish that an already-started READ has stopped. The
-custom adapter adds no separate timeout-release policy. Completion-based
-ownership can retain storage indefinitely if a reader disappears, so it does
-not yet satisfy finite cleanup after failure.
+The envelope contains `transport: "nixl"`, the tensor spec, byte count, checksum,
+worker ID, expiry, and the maintained transfer descriptor in `serialized_request`.
+Bulk bytes travel through NIXL. Producer tensors stage to contiguous CPU bytes;
+the receiver copies into private model storage before calling `release_tensor`.
+The original shape and dtype are restored, including scalars. Plugins retain all
+other JSON fields and own domain interpretation and any subsequent GPU transfer.
 
-Any correction belongs in the shared NIXL transport machinery. Safe finite
-cleanup needs proof that both outbound and inbound accesses have stopped before
-storage is released or reused. An awaited native close-and-drain operation is
-one possible extension; no custom handshake or reusable-reference service is
-implemented by this adapter.
-
-Existing `remove_remote_agent()` does not provide this contract: metadata
-invalidation precedes disconnect, and the asynchronous UCX endpoint close is
-not awaited. See [metadata invalidation](https://github.com/ai-dynamo/nixl/blob/v1.5.0/src/core/nixl_agent.cpp)
-and [endpoint close](https://github.com/ai-dynamo/nixl/blob/v1.5.0/src/plugins/ucx/ucx_utils.cpp).
-
-Qualifying failure cleanup requires real producer and worker hosts, including
-active-transfer cancellation, timeout, lost workers, late descriptors, and
-proof that buffers are not reused before drain. Successful cross-host byte
-parity alone does not establish lifecycle safety. GPU transport, zero-copy GPU
-claims, custom P/D, encoder disaggregation, and caching remain unsupported.
+Each reference permits one READ; use a fresh publisher for retries. Expiry is an
+admission check. Source lifetime follows the existing embedding completion
+waiter, including cancellation and failed-reader limitations; no custom abort or
+reclamation protocol is added. Native connectivity and transport availability
+follow the deployment's existing NIXL configuration. Cross-host CPU transfer over
+UCX/TCP is tested; GPU-direct transport is not claimed.
 
 ## Hashing Consistency for KV Events
 

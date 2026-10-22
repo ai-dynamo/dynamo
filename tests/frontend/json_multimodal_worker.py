@@ -12,6 +12,7 @@ import torch
 import uvloop
 
 from dynamo.common.multimodal.custom_tensor import resolve_custom_tensors_async
+from dynamo.common.multimodal.custom_tensor_nixl import nixl_available
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -105,6 +106,8 @@ async def main():
     runtime_config = ModelRuntimeConfig()
     runtime_config.set_engine_specific("custom_json_v1", json.dumps(True))
     runtime_config.set_engine_specific("custom_tensor_shm_v1", json.dumps(True))
+    if nixl_available():
+        runtime_config.set_engine_specific("custom_tensor_nixl_v1", json.dumps(True))
     await register_model(
         ModelInput.Tokens,
         ModelType.Chat,

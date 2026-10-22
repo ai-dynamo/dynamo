@@ -16,6 +16,10 @@ import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal import custom_tensor as transport
 from dynamo.common.multimodal.custom_tensor import ShmTensorPublisher, inline_tensor
+from dynamo.common.multimodal.custom_tensor_nixl import (
+    NixlTensorPublisher,
+    nixl_available,
+)
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.video_utils import encode_to_video_bytes
 from dynamo.vllm.multimodal_utils import request_processor as mod
@@ -94,6 +98,40 @@ async def test_worker_tensor_preparation_does_not_block_other_async_work(monkeyp
         release.set()
         result = await asyncio.wait_for(task, 3)
     assert torch.equal(result.multi_modal_data["chemistry"]["x"], source)
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(60)
+@pytest.mark.asyncio
+async def test_native_nixl_and_inline_equivalence_at_vllm_boundary():
+    if not nixl_available():
+        pytest.skip("requires NIXL bindings")
+    processor = _processor()
+    source = torch.arange(4096, dtype=torch.float32).reshape(64, 64).t()
+
+    async def prepare(envelope):
+        return await _prepare_prompt(
+            processor,
+            {
+                "token_ids": [1, 2, 3],
+                "routing": {"decode_worker_id": 7},
+                "multi_modal_data": {
+                    "chemistry": [{"Json": {"input": envelope, "units": "angstrom"}}]
+                },
+            },
+            "nixl-boundary",
+            None,
+            DisaggregationMode.AGGREGATED,
+        )
+
+    inline = await prepare(inline_tensor(source))
+    async with NixlTensorPublisher(source, worker_id=7, ttl=10) as publisher:
+        reference = await prepare(publisher.envelope())
+    assert torch.equal(
+        reference.prompt["multi_modal_data"]["chemistry"]["input"],
+        inline.prompt["multi_modal_data"]["chemistry"]["input"],
+    )
+    assert reference.prompt["multi_modal_data"]["chemistry"]["units"] == "angstrom"
 
 
 def _processor(
