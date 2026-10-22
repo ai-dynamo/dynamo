@@ -3,7 +3,6 @@
 #
 # EXPERIMENTAL: engine-primary aggregated SGLang behind Dynamo's KV-aware router
 
-# Requires follower gRPC metadata and compatible attention-DP sidecar support.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -45,14 +44,16 @@ spec:
                 optional: true
           containers:
           - name: main
-            image: lmsysorg/sglang:<multinode-grpc-engine-version>
+            # Multinode DP-attention requires SGLang v0.5.22 or later.
+            image: lmsysorg/sglang:v0.5.22
+            # All probes pass only for HealthCheckResponse.healthy=true;
+            # its raw protobuf encoding is 0x08 0x01.
             startupProbe:
               exec:
                 command:
                 - python3
                 - -c
-                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'',
-                  timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
               periodSeconds: 10
               timeoutSeconds: 5
               failureThreshold: 180
@@ -61,8 +62,7 @@ spec:
                 command:
                 - python3
                 - -c
-                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'',
-                  timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
               periodSeconds: 5
               timeoutSeconds: 5
               failureThreshold: 3
@@ -71,8 +71,9 @@ spec:
                 command:
                 - python3
                 - -c
-                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'',
-                  timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+                # HealthCheckResponse has one bool field: healthy=true encodes as
+                # 0x08 0x01. Fail when the RPC succeeds but reports unhealthy.
+                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
               periodSeconds: 10
               timeoutSeconds: 5
               failureThreshold: 6
@@ -105,10 +106,6 @@ spec:
             - '{"publisher":"zmq","endpoint":"tcp://*:5557","topic":""}'
             - --tp-size
             - '2'
-            - --max-total-tokens
-            - '4096'
-            - --mem-fraction-static
-            - '0.2'
             - --enable-dp-attention
             - --dp-size
             - '2'
@@ -118,16 +115,6 @@ spec:
             - $(DYNAMO_RANK)
             - --dist-init-addr
             - $(DYNAMO_LEADER_ADDRESS):29500
-          affinity:
-            podAntiAffinity:
-              requiredDuringSchedulingIgnoredDuringExecution:
-              - labelSelector:
-                  matchLabels:
-                    sidecar-multinode-example: engine
-                topologyKey: kubernetes.io/hostname
-        metadata:
-          labels:
-            sidecar-multinode-example: engine
     - name: worker
       podTemplate:
         spec:
@@ -146,14 +133,16 @@ spec:
                 optional: true
           containers:
           - name: main
-            image: lmsysorg/sglang:<multinode-grpc-engine-version>
+            # Multinode DP-attention requires SGLang v0.5.22 or later.
+            image: lmsysorg/sglang:v0.5.22
+            # All probes pass only for HealthCheckResponse.healthy=true;
+            # its raw protobuf encoding is 0x08 0x01.
             startupProbe:
               exec:
                 command:
                 - python3
                 - -c
-                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'',
-                  timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
               periodSeconds: 10
               timeoutSeconds: 5
               failureThreshold: 180
@@ -162,8 +151,7 @@ spec:
                 command:
                 - python3
                 - -c
-                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'',
-                  timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
               periodSeconds: 5
               timeoutSeconds: 5
               failureThreshold: 3
@@ -172,8 +160,9 @@ spec:
                 command:
                 - python3
                 - -c
-                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'',
-                  timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+                # HealthCheckResponse has one bool field: healthy=true encodes as
+                # 0x08 0x01. Fail when the RPC succeeds but reports unhealthy.
+                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
               periodSeconds: 10
               timeoutSeconds: 5
               failureThreshold: 6
@@ -206,10 +195,6 @@ spec:
             - '{"publisher":"zmq","endpoint":"tcp://*:5557","topic":""}'
             - --tp-size
             - '2'
-            - --max-total-tokens
-            - '4096'
-            - --mem-fraction-static
-            - '0.2'
             - --enable-dp-attention
             - --dp-size
             - '2'
@@ -219,14 +204,4 @@ spec:
             - $(DYNAMO_RANK)
             - --dist-init-addr
             - $(DYNAMO_LEADER_ADDRESS):29500
-          affinity:
-            podAntiAffinity:
-              requiredDuringSchedulingIgnoredDuringExecution:
-              - labelSelector:
-                  matchLabels:
-                    sidecar-multinode-example: engine
-                topologyKey: kubernetes.io/hostname
-        metadata:
-          labels:
-            sidecar-multinode-example: engine
   backendFramework: sglang
