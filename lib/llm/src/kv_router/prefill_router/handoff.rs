@@ -22,6 +22,9 @@ use crate::protocols::{
 /// Prefill's last `engine_data`.
 pub(super) type PrefillOutput = Option<serde_json::Value>;
 
+// Bound the prefill-first reorder buffer when the prefill stream stalls.
+const MAX_PENDING_DECODE_OUTPUTS: usize = 64;
+
 /// Dropping the observer detaches the task: client disconnects must not abort a
 /// prefill whose KV transfer may still be needed by the decode worker.
 pub(super) struct PrefillTask(JoinHandle<Result<PrefillOutput, PrefillError>>);
@@ -202,7 +205,17 @@ impl PrefillTask {
                             }
                         }
                         match output {
-                            Some(item) if prefill_first && !terminal => buffered.push(item),
+                            Some(item) if prefill_first && !terminal => {
+                                if buffered.len() == MAX_PENDING_DECODE_OUTPUTS {
+                                    request_context.stop_generating();
+                                    stream_context.stop_generating();
+                                    yield Annotated::from_error(
+                                        "Prefill output did not arrive before the decode buffer filled"
+                                    );
+                                    return;
+                                }
+                                buffered.push(item);
+                            },
                             Some(item) => yield item,
                             None => return,
                         }
@@ -308,29 +321,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn before_first_decode_failure_does_not_wait_for_prefill() {
-        let request = Arc::new(Controller::default());
-        let prefill = Arc::new(Controller::default());
-        let (tx, task) = pending_prefill();
-        let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
-            Box::pin(stream::iter([
-                Annotated::from_data(LLMEngineOutput::default()),
-                Annotated::from_error("decode failed"),
-            ])),
-            request.clone(),
-        );
-        let result = task
-            .forward_decode(async { Ok(decode) }, request, PrefillNeed::BeforeFirst)
-            .await;
-        let mut response = cancel_prefill_on_decode_error(prefill.clone(), result).unwrap();
-        let item = response
-            .next()
-            .now_or_never()
-            .expect("do not wait for prefill")
-            .unwrap();
-        assert!(item.err().unwrap().to_string().contains("decode failed"));
-        assert!(prefill.is_stopped());
-        tx.send(Ok(None)).unwrap();
+    async fn before_first_decode_failure_or_overflow_stops_prefill() {
+        for (count, error) in [
+            (MAX_PENDING_DECODE_OUTPUTS, "decode failed"),
+            (MAX_PENDING_DECODE_OUTPUTS + 1, "decode buffer filled"),
+        ] {
+            let request = Arc::new(Controller::default());
+            let prefill = Arc::new(Controller::default());
+            let (tx, task) = pending_prefill();
+            let items = std::iter::repeat_with(|| Annotated::from_data(LLMEngineOutput::default()))
+                .take(count)
+                .chain([Annotated::from_error("decode failed")]);
+            let decode: ManyOut<Annotated<LLMEngineOutput>> =
+                ResponseStream::new(Box::pin(stream::iter(items)), request.clone());
+            let result = task
+                .forward_decode(
+                    async { Ok(decode) },
+                    request.clone(),
+                    PrefillNeed::BeforeFirst,
+                )
+                .await;
+            let mut response = cancel_prefill_on_decode_error(prefill.clone(), result).unwrap();
+            let item = tokio::time::timeout(std::time::Duration::from_secs(1), response.next())
+                .await
+                .expect("do not wait for prefill")
+                .unwrap();
+            assert!(item.err().unwrap().to_string().contains(error));
+            assert!(prefill.is_stopped());
+            assert_eq!(request.is_stopped(), count > MAX_PENDING_DECODE_OUTPUTS);
+            tx.send(Ok(None)).unwrap();
+        }
     }
 
     #[tokio::test]
