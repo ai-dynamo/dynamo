@@ -143,16 +143,20 @@ for ((round = 0; round < ROUNDS; round++)); do
     # prompts that an earlier run left in the prefix caches.
     seed=$((SEED + round * ${#points[@]} + i))
     if [[ $point == rps* ]]; then
+      # DURATION_S and WARMUP_S seconds of arrivals at this rate.
       rate=${point#rps}
-      requests=$(python3 -c "print(max(100, round($rate * $DURATION_S)))")
-      warmup=$(python3 -c "print(max(10, round($rate * $WARMUP_S)))")
+      requests=$(python3 -c "print(max(1, round($rate * $DURATION_S)))")
+      warmup=$(python3 -c "print(round($rate * $WARMUP_S))")
       load=(--request-rate "$rate" --arrival-pattern poisson)
     else
+      # 10 requests per client, at least 500, after 2 warmup requests per client.
       concurrency=${point#c}
       requests=$((concurrency * 10 > 500 ? concurrency * 10 : 500))
       warmup=$((concurrency * 2))
       load=(--concurrency "$concurrency")
     fi
+    warmup_args=()
+    if ((warmup > 0)); then warmup_args=(--warmup-request-count "$warmup"); fi
     run=${point}_r${round}
     dir=$out/$run
     mkdir -p "$dir"
@@ -167,7 +171,7 @@ for ((round = 0; round < ROUNDS; round++)); do
       --header "X-Dynamo-AB-Arm:$ARM_HEADER"
       "${load[@]}"
       --request-count "$requests"
-      --warmup-request-count "$warmup"
+      "${warmup_args[@]}"
       # One dataset entry per request: aiperf reuses entries, and a reused
       # prompt would hit the prefix cache as a whole.
       --num-dataset-entries $((requests + warmup))

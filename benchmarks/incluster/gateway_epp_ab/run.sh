@@ -8,10 +8,10 @@
 # results back. README.md describes every setting below.
 #
 # Usage:
-#   run.sh all                  deploy, benchmark and tear down each arm in $ORDER
+#   run.sh all                  measure each arm in $ORDER, with one arm deployed at a time
 #   run.sh deploy <a|b>         apply an arm and wait until all its workers are ready
 #   run.sh bench <a|b>          run the aiperf Job against a deployed arm, then collect
-#   run.sh collect <a|b>        copy the results of a finished aiperf Job again
+#   run.sh collect <a|b>        copy the results of an aiperf pod that still waits to be collected
 #   run.sh teardown <a|b>       delete an arm and its aiperf Job
 #   run.sh plot <results-dir>   aiperf plot of both arms, with A as the baseline
 
@@ -30,8 +30,9 @@ RAMP_STEP=${RAMP_STEP:-512}
 DYNAMO_VERSION=${DYNAMO_VERSION:-1.5.1}
 FRONTEND_IMAGE=${FRONTEND_IMAGE:-nvcr.io/nvidia/ai-dynamo/dynamo-frontend:$DYNAMO_VERSION}
 WORKER_IMAGE=${WORKER_IMAGE:-nvcr.io/nvidia/ai-dynamo/dynamo-planner:$DYNAMO_VERSION}
-# The frontend image ships aiperf. Pin this to keep one aiperf across the builds you compare.
-AIPERF_IMAGE=${AIPERF_IMAGE:-$FRONTEND_IMAGE}
+# Empty means the image of the arm's Frontend or EPP, which ships aiperf. Pin it
+# to keep one aiperf version across the builds you compare.
+AIPERF_IMAGE=${AIPERF_IMAGE:-}
 MODEL_CACHE_PVC=${MODEL_CACHE_PVC:-model-cache}
 IMAGE_PULL_SECRET=${IMAGE_PULL_SECRET:-}
 GATEWAY_NAME=${GATEWAY_NAME:-inference-gateway}
@@ -43,8 +44,8 @@ ORDER=${ORDER:-a,b}
 KEEP=${KEEP:-0}
 RESULTS=${RESULTS:-$REPO_ROOT/benchmarks/results/gateway_epp_ab/$(date -u +%Y%m%dT%H%M%SZ)}
 
-# The workload, identical for both arms.
-REQUEST_RATES=${REQUEST_RATES:-100,200,400}
+# The workload, identical for both arms. An empty REQUEST_RATES leaves only CONCURRENCIES.
+REQUEST_RATES=${REQUEST_RATES-100,200,400}
 CONCURRENCIES=${CONCURRENCIES:-}
 ROUNDS=${ROUNDS:-3}
 ISL=${ISL:-1024}
@@ -58,6 +59,14 @@ SEED=${SEED:-42}
 SMOKE_TIMEOUT_S=${SMOKE_TIMEOUT_S:-600}
 SAMPLE_WORKERS=${SAMPLE_WORKERS:-4}
 SERVER_METRICS_FORMATS=${SERVER_METRICS_FORMATS:-json csv}
+
+# Every setting above. deploy and bench record them with the arm's results.
+SETTINGS=(
+  KUBE_CONTEXT NAMESPACE WORKERS RAMP_STEP DYNAMO_VERSION FRONTEND_IMAGE WORKER_IMAGE AIPERF_IMAGE
+  MODEL_CACHE_PVC IMAGE_PULL_SECRET GATEWAY_NAME GATEWAY_NAMESPACE READY_TIMEOUT SETTLE_SECONDS
+  BENCH_TIMEOUT ORDER KEEP REQUEST_RATES CONCURRENCIES ROUNDS ISL OSL PREFIX_LENGTH NUM_PREFIXES
+  DURATION_S WARMUP_S COOLDOWN_S SEED SMOKE_TIMEOUT_S SAMPLE_WORKERS SERVER_METRICS_FORMATS
+)
 
 FAILED_RUNS=0
 BACKGROUND=()
@@ -73,17 +82,50 @@ die() {
   log "error: $*"
   exit 1
 }
+# Arguments and settings that cannot work stop the run before it touches the cluster.
+invalid() {
+  log "error: $*"
+  exit 2
+}
 k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
 kg() { kubectl --context "$KUBE_CONTEXT" -n "$GATEWAY_NAMESPACE" "$@"; }
 
 # Arm a is the Frontend, arm b the EPP.
-check_arm() { [[ ${1:-} == a || ${1:-} == b ]] || die "the arm is 'a' or 'b', not '${1:-}'"; }
+check_arm() { [[ ${1:-} == a || ${1:-} == b ]] || invalid "the arm is 'a' or 'b', not '${1:-}'"; }
 dgd_of() { echo "qwen-$1"; }
 label_of() { if [[ $1 == a ]]; then echo a-frontend; else echo b-epp; fi; }
 router_of() { if [[ $1 == a ]]; then echo frontend; else echo epp; fi; }
+other_arm() { if [[ $1 == a ]]; then echo b; else echo a; fi; }
 arm_header() { echo "$NAMESPACE/$(dgd_of "$1")"; }
 dgd_pods() { echo "nvidia.com/dynamo-graph-deployment-name=$(dgd_of "$1")"; }
+deployed() { k get dynamographdeployment "$(dgd_of "$1")" >/dev/null 2>&1; }
 job_pod() { k get pods -l "job-name=$(dgd_of "$1")-aiperf" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true; }
+
+validate_settings() {
+  local name value values
+  for name in WORKERS ROUNDS ISL OSL DURATION_S READY_TIMEOUT BENCH_TIMEOUT; do
+    [[ ${!name} =~ ^[1-9][0-9]*$ ]] || invalid "$name must be a positive integer, not '${!name}'"
+  done
+  for name in RAMP_STEP PREFIX_LENGTH NUM_PREFIXES WARMUP_S COOLDOWN_S SEED SETTLE_SECONDS \
+    SMOKE_TIMEOUT_S SAMPLE_WORKERS; do
+    [[ ${!name} =~ ^[0-9]+$ ]] || invalid "$name must be a whole number, not '${!name}'"
+  done
+  if ((PREFIX_LENGTH > 0 && NUM_PREFIXES > 0 && PREFIX_LENGTH >= ISL)); then
+    invalid "PREFIX_LENGTH ($PREFIX_LENGTH) must be shorter than ISL ($ISL), which includes the prefix"
+  fi
+  [[ -n $REQUEST_RATES || -n $CONCURRENCIES ]] || invalid "set REQUEST_RATES or CONCURRENCIES"
+  IFS=, read -ra values <<< "$REQUEST_RATES"
+  for value in "${values[@]}"; do
+    if ! [[ $value =~ ^([0-9]+\.?[0-9]*|\.[0-9]+)$ ]] || ! awk -v rate="$value" 'BEGIN { exit !(rate > 0) }'; then
+      invalid "REQUEST_RATES must be positive numbers, not '$value'"
+    fi
+  done
+  IFS=, read -ra values <<< "$CONCURRENCIES"
+  for value in "${values[@]}"; do
+    [[ $value =~ ^[1-9][0-9]*$ ]] || invalid "CONCURRENCIES must be positive integers, not '$value'"
+  done
+  [[ $KEEP == 0 || $KEEP == 1 ]] || invalid "KEEP must be 0 or 1, not '$KEEP'"
+}
 
 preflight() {
   k get dynamographdeployments,httproutes,inferencepools.inference.networking.k8s.io >/dev/null 2>"$WORK/err" ||
@@ -94,15 +136,14 @@ preflight() {
     die "PVC $MODEL_CACHE_PVC is missing in $NAMESPACE; see Prerequisites in README.md"
 }
 
+# Every setting and the repository commit, as one step of an arm saw them.
 record_settings() {
-  mkdir -p "$RESULTS"
   local name
-  for name in KUBE_CONTEXT NAMESPACE WORKERS RAMP_STEP FRONTEND_IMAGE WORKER_IMAGE AIPERF_IMAGE MODEL_CACHE_PVC \
-    GATEWAY_NAME GATEWAY_NAMESPACE ORDER REQUEST_RATES CONCURRENCIES ROUNDS ISL OSL PREFIX_LENGTH \
-    NUM_PREFIXES DURATION_S WARMUP_S COOLDOWN_S SEED SAMPLE_WORKERS SERVER_METRICS_FORMATS; do
-    printf '%s=%q\n' "$name" "${!name}"
-  done > "$RESULTS/settings.env"
-  git -C "$REPO_ROOT" rev-parse HEAD > "$RESULTS/commit.txt" 2>/dev/null || true
+  mkdir -p "$(dirname "$1")"
+  {
+    for name in "${SETTINGS[@]}"; do printf '%s=%q\n' "$name" "${!name}"; done
+    printf 'REPO_COMMIT=%q\n' "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  } > "$1"
 }
 
 # The arm's DGD and HTTPRoute with this run's settings, as JSON.
@@ -115,22 +156,33 @@ render_arm() {
       --arm-header "$(arm_header "$1")"
 }
 
+# Worker pods as name, Ready status and deletion time. A terminating pod can
+# still be Ready while the arm scales down, so the counts below leave it out.
 worker_readiness() {
   k get pods -l "$(dgd_pods "$1"),nvidia.com/dynamo-component-type=decode" \
-    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="Ready")].status}{"\t"}{.metadata.deletionTimestamp}{"\n"}{end}'
 }
-ready_workers() { worker_readiness "$1" | awk '$2 == "True"' | wc -l; }
-unready_workers() { worker_readiness "$1" | awk '$2 != "True" {print $1}' | head -20 | xargs; }
+ready_workers() { worker_readiness "$1" | awk -F'\t' '$3 == "" && $2 == "True"' | wc -l; }
+unready_workers() { worker_readiness "$1" | awk -F'\t' '$3 == "" && $2 != "True" {print $1}' | head -20 | xargs; }
 
 deploy() {
-  local arm=$1 label replicas ready deadline accepted last since
+  local arm=$1 label replicas current ready deadline accepted last since
   label=$(label_of "$arm")
-  mkdir -p "$RESULTS/$label"
+  if deployed "$(other_arm "$arm")"; then
+    log "warning: $(dgd_of "$(other_arm "$arm")") is also deployed in $NAMESPACE; its workers add discovery load and take capacity from this arm"
+  fi
+  record_settings "$RESULTS/$label/deploy.env"
   render_arm "$arm" "$WORKERS" > "$RESULTS/$label/manifest.json"
   # Workers come up RAMP_STEP at a time: every Dynamo process watches every
-  # worker's discovery record, so a smaller burst spares the API server.
+  # worker's discovery record, so a smaller burst spares the API server. An arm
+  # that is already up starts from its current size instead of shrinking first.
   replicas=$WORKERS
   if ((RAMP_STEP > 0 && RAMP_STEP < WORKERS)); then replicas=$RAMP_STEP; fi
+  current=$(k get dynamographdeployment "$(dgd_of "$arm")" \
+    -o jsonpath='{.spec.components[?(@.type=="decode")].replicas}' 2>/dev/null || true)
+  if [[ $current =~ ^[0-9]+$ ]] && ((current > replicas)); then
+    replicas=$((current < WORKERS ? current : WORKERS))
+  fi
   while :; do
     log "$label: applying with $replicas workers"
     render_arm "$arm" "$replicas" | k apply -f - >&2
@@ -172,6 +224,12 @@ gateway_url() {
   echo "http://$service.$GATEWAY_NAMESPACE.svc.cluster.local:$port"
 }
 
+# The image of the arm's deployed Frontend or EPP.
+router_image() {
+  k get dynamographdeployment "$(dgd_of "$1")" \
+    -o jsonpath="{.spec.components[?(@.type==\"$(router_of "$1")\")].podTemplate.spec.containers[?(@.name==\"main\")].image}"
+}
+
 write_params() {
   local url
   url=$(gateway_url)
@@ -197,11 +255,15 @@ write_params() {
 
 bench() {
   local arm=$1 dgd label inputs
+  local AIPERF_IMAGE=$AIPERF_IMAGE
   dgd=$(dgd_of "$arm")
   label=$(label_of "$arm")
   inputs=$RESULTS/$label/inputs
   mkdir -p "$inputs"
-  k get dynamographdeployment "$dgd" >/dev/null || die "$dgd is not deployed; run: $0 deploy $arm"
+  deployed "$arm" || die "$dgd is not deployed; run: $0 deploy $arm"
+  if [[ -z $AIPERF_IMAGE ]]; then AIPERF_IMAGE=$(router_image "$arm"); fi
+  AIPERF_IMAGE=${AIPERF_IMAGE:-$FRONTEND_IMAGE}
+  record_settings "$RESULTS/$label/bench.env"
   k get pods -l "$(dgd_pods "$arm")" -o json > "$WORK/pods.json"
   kg get pods -l "gateway.networking.k8s.io/gateway-name=$GATEWAY_NAME" -o json > "$WORK/gateway-pods.json"
   python3 "$HERE/render.py" targets --pods "$WORK/pods.json" --gateway-pods "$WORK/gateway-pods.json" \
@@ -224,13 +286,36 @@ bench() {
   collect "$arm"
 }
 
+# Why a pod is not running yet: the scheduler's message, or a container's waiting reason.
+pending_reason() {
+  k get pod "$1" -o jsonpath='{.status.conditions[?(@.reason=="Unschedulable")].message}{" "}{.status.containerStatuses[*].state.waiting.reason}{" "}{.status.containerStatuses[*].state.waiting.message}' 2>/dev/null |
+    sed 's/^ *//; s/ *$//'
+}
+
 # Wait until bench.sh has written /results/DONE in the aiperf pod.
 wait_done() {
-  local arm=$1 label pod phase deadline
+  local arm=$1 label pod phase reason shown="" deadline
   label=$(label_of "$arm")
   deadline=$((SECONDS + READY_TIMEOUT))
-  until pod=$(job_pod "$arm") && [[ -n $pod && $(k get pod "$pod" -o jsonpath='{.status.phase}') == Running ]]; do
-    ((SECONDS < deadline)) || die "the aiperf pod of $label did not start; see: kubectl describe job $(dgd_of "$arm")-aiperf"
+  while :; do
+    pod=$(job_pod "$arm")
+    phase=""
+    if [[ -n $pod ]]; then phase=$(k get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null || true); fi
+    case $phase in
+      Running) break ;;
+      Failed | Succeeded)
+        k logs "$pod" > "$RESULTS/$label/aiperf-job.log" 2>&1 || true
+        die "aiperf pod $pod ended ($phase) before it ran; see $RESULTS/$label/aiperf-job.log"
+        ;;
+    esac
+    reason=""
+    if [[ -n $pod ]]; then reason=$(pending_reason "$pod" || true); fi
+    if [[ -n $reason && $reason != "$shown" ]]; then
+      log "$label: aiperf pod $pod is not running yet: $reason"
+      shown=$reason
+    fi
+    ((SECONDS < deadline)) ||
+      die "the aiperf pod of $label did not start within ${READY_TIMEOUT}s: ${reason:-see kubectl describe job $(dgd_of "$arm")-aiperf}"
     sleep 5
   done
   log "$label: aiperf running in pod $pod; its log goes to $RESULTS/$label/aiperf-job.log"
@@ -246,13 +331,13 @@ wait_done() {
 }
 
 # Copy an arm's results out of its aiperf pod, record what was deployed, and
-# let the pod exit.
+# let the pod exit, which discards its copy.
 collect() {
   local arm=$1 label pod status run
   label=$(label_of "$arm")
   pod=$(job_pod "$arm")
   [[ -n $pod ]] || die "no aiperf pod for $label"
-  k exec "$pod" -- test -e /results/DONE || die "aiperf in pod $pod has not finished"
+  k exec "$pod" -- test -e /results/DONE || die "aiperf in pod $pod has not finished, or its results were already collected"
   mkdir -p "$RESULTS"
   k exec "$pod" -- tar cf - -C /results "$label" | tar xf - -C "$RESULTS"
   record_deployment "$arm"
@@ -307,27 +392,54 @@ teardown() {
 }
 
 all() {
-  local arm arms
+  local arm arms last
   IFS=, read -ra arms <<< "$ORDER"
+  ((${#arms[@]} > 0)) || invalid "ORDER names no arm"
   for arm in "${arms[@]}"; do check_arm "$arm"; done
+  last=${arms[${#arms[@]} - 1]}
   preflight
-  record_settings
   for arm in "${arms[@]}"; do
+    # One arm at a time: the other arm's workers would add discovery load to
+    # this one and take its capacity.
+    if deployed "$(other_arm "$arm")"; then teardown "$(other_arm "$arm")"; fi
     deploy "$arm"
     bench "$arm"
-    if [[ $KEEP != 1 ]]; then teardown "$arm"; fi
+    if [[ $KEEP != 1 || $arm != "$last" ]]; then teardown "$arm"; fi
   done
   log "compare the arms with: $0 plot $RESULTS"
 }
 
+# A Python that imports aiperf: AIPERF_PYTHON, the interpreter on the aiperf
+# script's #! line or in pip's /bin/sh launcher for long paths, or python3.
+# Only names that look like Python are tried.
+aiperf_python() {
+  local script candidate
+  local -a candidates=()
+  script=$(command -v aiperf) || return 1
+  if [[ -n ${AIPERF_PYTHON:-} ]] && "$AIPERF_PYTHON" -c 'import aiperf.plot' 2>/dev/null; then
+    echo "$AIPERF_PYTHON"
+    return 0
+  fi
+  candidates+=("$(sed -n '1s/^#![[:space:]]*\([^[:space:]]*\).*/\1/p' "$script")")
+  candidates+=("$(sed -n "s/^'''exec' \"\{0,1\}\([^\" ]*\).*/\1/p" "$script" | head -n 1)")
+  candidates+=(python3)
+  for candidate in "${candidates[@]}"; do
+    if [[ $(basename "${candidate:-none}") == python* ]] && "$candidate" -c 'import aiperf.plot' 2>/dev/null; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # aiperf's own plots, with arm A as the baseline and arm B as the treatment.
 plot() {
-  local dir=${1:-} aiperf python
-  [[ -d $dir ]] || die "usage: $0 plot <results-dir>"
-  aiperf=$(command -v aiperf) || die "aiperf is not installed; install the version in <arm>/aiperf-version.txt"
-  # The interpreter aiperf runs under, which can import its default plot config.
-  read -r -a python <<< "$(sed -n '1s/^#!//p' "$aiperf")"
-  "${python[@]}" - "$WORK/plot-config.yaml" <<'EOF'
+  local dir=${1:-} python
+  [[ -d $dir ]] || invalid "usage: $0 plot <results-dir>"
+  command -v aiperf >/dev/null || die "aiperf is not installed; install the version in <arm>/aiperf-version.txt"
+  python=$(aiperf_python) ||
+    die "no Python here imports aiperf.plot; set AIPERF_PYTHON to the interpreter aiperf is installed in"
+  "$python" - "$WORK/plot-config.yaml" <<'EOF'
 import pathlib
 import sys
 
@@ -353,12 +465,13 @@ main() {
   local command=${1:-}
   case $command in
     all)
+      validate_settings
       all
       ;;
     deploy | bench)
       check_arm "${2:-}"
+      validate_settings
       preflight
-      record_settings
       "$command" "$2"
       ;;
     collect | teardown)

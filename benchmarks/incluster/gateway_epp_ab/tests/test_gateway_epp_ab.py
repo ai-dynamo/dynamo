@@ -9,7 +9,9 @@ import argparse
 import copy
 import importlib.util
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -315,3 +317,114 @@ def test_metrics_targets_cover_every_component_and_aiperf_samples_workers():
 @pytest.mark.parametrize("script", ["run.sh", "bench.sh"])
 def test_scripts_parse(script):
     subprocess.run(["bash", "-n", str(BENCH_DIR / script)], check=True)
+
+
+def run_script(tmp_path, args, settings=None, extra_env=None):
+    """run.sh with a kubectl that records its calls and fails, and no other cluster."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    calls = tmp_path / "kubectl-calls"
+    kubectl = bin_dir / "kubectl"
+    kubectl.write_text(f"#!/bin/sh\necho \"$*\" >> '{calls}'\nexit 1\n")
+    kubectl.chmod(0o755)
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "HOME": str(tmp_path),
+        "KUBE_CONTEXT": "test-context",
+        "NAMESPACE": "test-namespace",
+        "RESULTS": str(tmp_path / "results"),
+        **({"TMPDIR": os.environ["TMPDIR"]} if "TMPDIR" in os.environ else {}),
+        **(settings or {}),
+        **(extra_env or {}),
+    }
+    result = subprocess.run(
+        ["bash", str(BENCH_DIR / "run.sh"), *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return result, calls
+
+
+@pytest.mark.parametrize(
+    "settings, message",
+    [
+        (
+            {"ISL": "512", "PREFIX_LENGTH": "512"},
+            "PREFIX_LENGTH (512) must be shorter than ISL (512)",
+        ),
+        ({"REQUEST_RATES": "0"}, "REQUEST_RATES must be positive numbers, not '0'"),
+        (
+            {"REQUEST_RATES": "4,fast"},
+            "REQUEST_RATES must be positive numbers, not 'fast'",
+        ),
+        (
+            {"REQUEST_RATES": "", "CONCURRENCIES": ""},
+            "set REQUEST_RATES or CONCURRENCIES",
+        ),
+        ({"CONCURRENCIES": "8,0"}, "CONCURRENCIES must be positive integers, not '0'"),
+        ({"WORKERS": "0"}, "WORKERS must be a positive integer, not '0'"),
+        ({"WARMUP_S": "-1"}, "WARMUP_S must be a whole number, not '-1'"),
+        ({"KEEP": "yes"}, "KEEP must be 0 or 1, not 'yes'"),
+    ],
+)
+def test_run_rejects_settings_that_cannot_work_before_touching_the_cluster(
+    tmp_path, settings, message
+):
+    result, calls = run_script(tmp_path, ["all"], settings)
+    assert result.returncode == 2, result.stderr
+    assert message in result.stderr
+    assert not calls.exists()
+
+
+def test_run_accepts_the_default_settings_and_reaches_preflight(tmp_path):
+    result, calls = run_script(tmp_path, ["deploy", "a"], {"REQUEST_RATES": "0.5,2"})
+    assert result.returncode == 1, result.stderr
+    assert "cannot list DGDs" in result.stderr
+    assert (
+        "--context test-context -n test-namespace get dynamographdeployments"
+        in calls.read_text()
+    )
+
+
+def test_plot_finds_aiperf_behind_pips_sh_launcher(tmp_path):
+    # pip writes a /bin/sh launcher instead of a #! line when the
+    # interpreter's path is too long. A stub aiperf package stands in for aiperf.
+    plot_package = tmp_path / "site" / "aiperf" / "plot"
+    plot_package.mkdir(parents=True)
+    (plot_package.parent / "__init__.py").write_text("")
+    (plot_package / "__init__.py").write_text("")
+    (plot_package / "default_plot_config.yaml").write_text("multi_run_plots: {}\n")
+    record = tmp_path / "aiperf-call.json"
+    launcher = tmp_path / "bin" / "aiperf"
+    launcher.parent.mkdir()
+    launcher.write_text(
+        "#!/bin/sh\n"
+        f"'''exec' {sys.executable} \"$0\" \"$@\"\n"
+        "' '''\n"
+        "import json, sys\n"
+        "args = sys.argv[1:]\n"
+        "config = open(args[args.index('--config') + 1]).read()\n"
+        f"json.dump({{'args': args, 'config': config}}, open('{record}', 'w'))\n"
+    )
+    launcher.chmod(0o755)
+    results = tmp_path / "results"
+    results.mkdir()
+    result, calls = run_script(
+        tmp_path,
+        ["plot", str(results)],
+        extra_env={"PYTHONPATH": str(tmp_path / "site")},
+    )
+    assert result.returncode == 0, result.stderr
+    call = json.loads(record.read_text())
+    assert call["args"][:2] == ["plot", str(results)]
+    assert call["args"][-2:] == ["--output", str(results / "plots")]
+    config = yaml.safe_load(call["config"])
+    assert config["multi_run_plots"] == {}
+    assert config["experiment_classification"] == {
+        "baselines": ["a-frontend", "*/a-frontend/*"],
+        "treatments": ["b-epp", "*/b-epp/*"],
+        "default": "treatment",
+    }
+    assert not calls.exists()

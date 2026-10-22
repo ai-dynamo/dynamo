@@ -32,9 +32,9 @@ commands, aiperf's artifacts, and the Prometheus metrics of every component:
 
 ```text
 benchmarks/results/gateway_epp_ab/<UTC time>/
-├── settings.env                  every setting of the run
-├── commit.txt                    the repository commit
 ├── a-frontend/
+│   ├── deploy.env                every setting and the repository commit when the arm was deployed
+│   ├── bench.env                 the same when it was measured, with the aiperf image it used
 │   ├── manifest.json             the DGD and HTTPRoute that run.sh applied
 │   ├── deployed/                 the DGD with its status, pods, image digests, nodes, operator image
 │   ├── inputs/                   the aiperf Job, its parameters, the list of metrics endpoints
@@ -106,8 +106,10 @@ $B all
 $B plot benchmarks/results/gateway_epp_ab/<UTC time>
 ```
 
-`all` deploys, measures and tears down arm A, then arm B. To keep an arm deployed between
-iterations, run the steps one at a time with the same `RESULTS` directory:
+`all` deploys, measures and tears down arm A, then arm B. It keeps one arm deployed at a time: it
+tears down the other arm first if an earlier run left it up. `KEEP=1` leaves the last arm deployed.
+To keep an arm deployed between iterations, run the steps one at a time with the same `RESULTS`
+directory:
 
 ```bash
 export RESULTS=benchmarks/results/gateway_epp_ab/my-run
@@ -116,9 +118,11 @@ $B bench a     # run the aiperf Job, then copy its results to $RESULTS/a-fronten
 $B teardown a  # delete the DGD, the HTTPRoute and the Job
 ```
 
-`deploy` scales the workers up `RAMP_STEP` at a time and waits for each step to be ready. `bench`
-starts the aiperf Job, waits for it, copies its results out of the pod, and records what was
-deployed. If the copy fails, `$B collect a` copies them again while the Job's pod waits.
+`deploy` scales the workers up `RAMP_STEP` at a time and waits for each step to be ready. An arm
+that is already deployed scales from its current size. `deploy` warns when the other arm is also
+deployed. `bench` starts the aiperf Job, waits for it, copies its results out of the pod, and
+records what was deployed. The pod keeps the results until a copy succeeds, so if `bench` stops
+before that, `$B collect a` copies them.
 
 ## The workload and the aiperf command
 
@@ -148,8 +152,9 @@ Every run writes its own command to `command.txt`. The defaults work like this:
 - **Open-loop load.** Requests arrive as a Poisson process at 100, 200 and 400 requests per second,
   however fast the arm answers. Each load point runs for 60 seconds after a 10-second warmup, and
   the whole sweep repeats in 3 rounds. Set `CONCURRENCIES` for closed-loop points, for example to
-  find where an arm saturates. Closed-loop load is not a good basis for comparing TTFT, because the
-  clients phase-lock with the engines' batching.
+  find where an arm saturates. A closed-loop point sends 10 requests per client, at least 500,
+  after 2 warmup requests per client. Closed-loop load is not a good basis for comparing TTFT,
+  because the clients phase-lock with the engines' batching.
 - **Prompts with shared prefixes.** Each prompt has 1024 tokens. The first 512 come from a pool of
   256 shared prefixes, so the KV router has cached blocks to route on. With unique random prompts, a
   KV router reduces to a load balancer.
@@ -246,6 +251,9 @@ Keep these limits in mind when reading the results:
   watches every worker's discovery record in the namespace. The traffic at startup therefore grows
   with the square of the number of pods. `deploy` adds `RAMP_STEP` workers (512) at a time. Lower it
   if the API server throttles.
+- **Changing a deployed arm.** `deploy` ramps only the worker count. A change to a deployed arm's
+  images, resources or mocker settings makes the operator replace every worker at once, without the
+  ramp. Tear the arm down before you deploy it with a changed spec.
 - **Slow registrations.** A worker writes its discovery record through the API server and holds its
   registration until the write returns. With Dynamo 1.5.1 on minikube, one of 32 workers started
   together waited about 290 seconds for one write, then registered and became ready. `deploy` names
@@ -274,19 +282,19 @@ Keep these limits in mind when reading the results:
 | `DYNAMO_VERSION` | `1.5.1` | tag of the default images |
 | `FRONTEND_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:$DYNAMO_VERSION` | Frontend, EPP and sidecar |
 | `WORKER_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-planner:$DYNAMO_VERSION` | mocker workers |
-| `AIPERF_IMAGE` | `$FRONTEND_IMAGE` | the aiperf Job; the frontend image ships aiperf. Pin it to keep one aiperf version across the builds you compare |
+| `AIPERF_IMAGE` | the image of the arm's Frontend or EPP | the aiperf Job; the frontend image ships aiperf. Pin it to keep one aiperf version across the builds you compare |
 | `MODEL_CACHE_PVC` | `model-cache` | PVC with the model files |
 | `IMAGE_PULL_SECRET` | none | pull secret for every pod |
 | `GATEWAY_NAME`, `GATEWAY_NAMESPACE` | `inference-gateway`, `agentgateway-system` | the Gateway both arms attach to |
 | `ORDER` | `a,b` | the order of the arms in `all` |
-| `KEEP` | `0` | `1` leaves each arm deployed after `all` |
+| `KEEP` | `0` | `1` leaves the last arm deployed after `all` |
 | `RESULTS` | `benchmarks/results/gateway_epp_ab/<UTC time>` | results directory |
-| `REQUEST_RATES` | `100,200,400` | open-loop load points, in requests per second |
+| `REQUEST_RATES` | `100,200,400` | open-loop load points, in requests per second; set it empty to run only `CONCURRENCIES` |
 | `CONCURRENCIES` | none | closed-loop load points, measured after the request rates |
 | `ROUNDS` | `3` | repetitions of the whole sweep |
 | `ISL`, `OSL` | `1024`, `128` | input and output tokens per request |
 | `PREFIX_LENGTH`, `NUM_PREFIXES` | `512`, `256` | shared prefixes: tokens each, and how many; `0` turns them off |
-| `DURATION_S`, `WARMUP_S` | `60`, `10` | seconds of arrivals measured, and of warmup, per open-loop point |
+| `DURATION_S`, `WARMUP_S` | `60`, `10` | seconds of arrivals measured, and of warmup, per open-loop point; `WARMUP_S=0` skips the warmup |
 | `COOLDOWN_S` | `10` | pause after each run |
 | `SEED` | `42` | seed of the first run |
 | `SAMPLE_WORKERS` | `4` | worker pods aiperf scrapes during each run |
@@ -295,6 +303,10 @@ Keep these limits in mind when reading the results:
 | `SETTLE_SECONDS` | `60` | wait after the last worker is ready, so the router discovers it |
 | `SMOKE_TIMEOUT_S` | `600` | how long `bench.sh` retries its first request through the Gateway |
 | `BENCH_TIMEOUT` | `21600` | seconds to wait for the aiperf Job |
+| `AIPERF_PYTHON` | found from the `aiperf` command | `plot` only: a Python that can import aiperf |
+
+`run.sh` checks the workload settings before it touches the cluster, and exits with status 2 when
+one cannot work, such as a `PREFIX_LENGTH` that is not shorter than `ISL`.
 
 To change the model, the block size or the mocker settings, edit both manifests the same way. The
 tests fail if their workers differ.
@@ -304,11 +316,12 @@ tests fail if their workers differ.
 | Symptom | Cause and fix |
 |---|---|
 | `deploy` waits for workers that never become ready | Usually an image pull, a full node, or a missing model cache. Check `kubectl describe pod` on a pending worker. |
+| `bench` reports that the aiperf pod is not running yet | `run.sh` prints the scheduler's or the container's reason. A common one is `Insufficient cpu`: the pod requests 16 CPUs, which must fit on a node next to the workers. |
 | The smoke request fails with HTTP 404 | The HTTPRoute is not attached, or another route takes the request. Check `kubectl get httproute qwen-a -o yaml` for `Accepted`. |
 | The smoke request fails with HTTP 500 or 503 on arm B | The EPP has not found the workers yet. Check `kubectl logs -l nvidia.com/dynamo-component-type=epp`. |
 | A run's `console.log` shows errors or timeouts | The load point is past saturation, or the client ran short of CPU. Lower the rate, or give the aiperf pod a node of its own. |
 | A snapshot reports fewer endpoints than expected | Some pods restarted or were not running. The archive holds an `.err` file for each failed endpoint. |
-| `run.sh` stops before collecting | The Job's pod keeps the results until you collect them: `RESULTS=<dir> $B collect <arm>`. |
+| `run.sh` stops before collecting | The Job's pod keeps the results until a copy succeeds: `RESULTS=<dir> $B collect <arm>`. After that copy the pod exits and its results are gone. |
 
 ## Files
 
