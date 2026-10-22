@@ -467,10 +467,6 @@ fn create_operation_for_route(route: &RouteDoc) -> utoipa::openapi::path::Operat
         for (status, description) in [
             ("413", "Request body exceeds 4 MiB"),
             ("429", "Decision scoring admission capacity is exhausted"),
-            (
-                "422",
-                "Invalid question, unsupported control, or prompt/token budget",
-            ),
             ("499", "Request cancelled"),
             ("500", "Malformed or incomplete native scoring response"),
             ("504", "Decision preflight or execution deadline exceeded"),
@@ -478,6 +474,14 @@ fn create_operation_for_route(route: &RouteDoc) -> utoipa::openapi::path::Operat
             operation = operation.response(
                 status,
                 ResponseBuilder::new().description(description).build(),
+            );
+        }
+        if route.openapi_kind() == Some(OpenApiRouteKind::SystemOne) {
+            operation = operation.response(
+                "422",
+                ResponseBuilder::new()
+                    .description("Invalid question, unsupported control, or prompt/token budget")
+                    .build(),
             );
         }
     }
@@ -1302,6 +1306,8 @@ mod tests {
                 .all(|name| !name.starts_with("DecisionSglang"))
         );
         assert!(operation["responses"].get("429").is_some());
+        assert!(operation["responses"].get("400").is_some());
+        assert!(operation["responses"].get("422").is_none());
     }
 
     #[test]
