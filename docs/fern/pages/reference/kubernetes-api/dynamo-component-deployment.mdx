@@ -164,7 +164,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Complete Pod template for this role. It must include a container named `main` with a non-empty `image`. Role templates do not inherit from each other or from the component-level template.
 
-    An init container named `runtime` is rejected in multinode role templates because Dynamo sidecar mode does not yet support multinode components. LPX components declare it in the role template whose Pods host the engine: `conductor`, or `agent` when the component has no conductor.
+    An init container named `runtime` is rejected in multinode role templates because Dynamo sidecar mode does not yet support multinode components. LPX components declare it in the role template whose Pods host the engine: `conductor`, or `agent` when the component has no conductor. A component that declares it in `conductor` may also declare it in `agent`, which enables [LPX topology discovery](#lpx-topology-discovery) for a hybrid build; that `agent` sidecar serves no endpoint.
 
     For multinode components, supplying complete role templates transfers ownership of backend-specific leader and worker commands and topology arguments to the user; Dynamo skips its vLLM, SGLang, and TensorRT-LLM role-dependent launch rewrites. Common Pod and workload wiring remains operator-owned. For vLLM multiprocessing, Dynamo still injects the shared coordination port `29500`. Multinode role templates cannot currently be combined with GMS or failover. The component remains the lifecycle, rollout, scaling, service, and status boundary.
 
@@ -299,6 +299,32 @@ podTemplate:
 ```
 
 Set the engine launch configuration and sidecar command for your backend. See the [vLLM sidecar manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) for complete examples.
+
+## LPX Topology Discovery
+
+In a hybrid LPX component, each Cyborg conductor can obtain the addresses of its remote Agent partitions from rank 0 of its Agent allocation, through Dynamo discovery, instead of from endpoint files. Pod 0 of the Agent clique in each scaling-group replica is that rank 0: its Agent serves the allocation's partition map, and its `runtime` sidecar publishes the map as a Dynamo endpoint. The `runtime` sidecar of each Cyborg Pod finds that endpoint and serves the map to Cyborg on a local Unix socket.
+
+To enable it, declare the `runtime` init container in both the `conductor` and the `agent` role templates, and use Kubernetes discovery in pod mode: the operator's default discovery backend or the DGD annotation `nvidia.com/dynamo-discovery-backend: kubernetes`, without `nvidia.com/dynamo-kube-discovery-mode: container`. Admission rejects container mode for these two roles, whether the DGD annotation or a role template annotation selects it, because container-mode readers never join the Agent sidecar's registration. Reconciliation accepts the two sidecars only for a hybrid build, and fails when the effective discovery backend is not `kubernetes`. When `localPartitions` selects every partition, the operator renders no Agent clique and adds none of the following. Other workloads render as before.
+
+When topology discovery is enabled, the operator adds the following. Each environment variable is placed before the authored environment and replaces an authored variable of the same name.
+
+| Pod | Container | Environment |
+|---|---|---|
+| Agent and Cyborg | Every container and init container | `LPX_DEPLOYMENT`: the DGD UID |
+| Agent | `main` | `LPX_TOPOLOGY_SOCKET=/run/lpx-topology/agent.sock` |
+| Agent | `runtime` | `DYN_LPX_TOPOLOGY_ROLE=publisher`, `DYN_LPX_TOPOLOGY_AGENT_SOCKET=/run/lpx-topology/agent.sock`, and `DYN_SIDECAR_NODE_RANK` from the Pod label `grove.io/podclique-pod-index` |
+| Cyborg | `runtime` | `DYN_LPX_TOPOLOGY_ROLE=consumer`, `DYN_LPX_TOPOLOGY_SOCKET=/run/lpx-topology/topology.sock` |
+| Cyborg | `main` | `CYBORG_LPU_TOPOLOGY_SOCKET=/run/lpx-topology/topology.sock` |
+
+- An `emptyDir` volume named `lpx-topology`, mounted at `/run/lpx-topology` in `main` and `runtime` of both Pods. Reconciliation fails when a template already defines that volume or mounts that path in `main` or `runtime`.
+- The label `lpx.nvidia.com/topology-publisher: "true"` on the Agent clique.
+- A Service `<prefix>-topology` beside the workload's `<prefix>-serve` Service. It is headless, declares no ports, publishes not-ready addresses, carries the Dynamo discovery labels, and selects Pod 0 of the workload's Agent clique in every scaling-group replica. Readers therefore see the Agent sidecar's registration before the Agent Pod is Ready, while the serving Service keeps Pod readiness gating. The Agent Pods themselves carry no discovery labels. The LPX deployment owns the Service; it is deleted with the deployment, and after the topology roles are removed it selects no Pods.
+
+Unless a template names its own ServiceAccount, both Pods run under the DGD's `<dgd>-k8s-service-discovery` ServiceAccount, as every LPX Pod does with Kubernetes discovery, so no additional RBAC is needed.
+
+The Agent `runtime` sidecar registers no model, so it needs neither `--model-path` nor `--grpc-endpoint`. It follows the host-networking rules for Agent sidecars: declare no `ports`, set `DYN_SYSTEM_PORT` to a free host port, and declare its readiness probe by that port number. Every Agent Pod runs the same template; the operator-owned rank makes only Pod 0 publish, and the other Agent sidecars stand by. Declaring `runtime` in the `agent` template puts that role in [Dynamo sidecar mode](#dynamo-sidecar-mode): Agent `main` keeps its authored and graph-level environment and the LPX bindings, but no longer receives `DYN_COMPONENT`, `DYN_DISCOVERY_BACKEND`, `DYN_NAMESPACE`, `DYN_NAMESPACE_WORKER_SUFFIX`, `DYN_PARENT_DGD_K8S_NAME`, `DYN_PARENT_DGD_K8S_NAMESPACE`, `ETCD_ENDPOINTS`, `NATS_SERVER`, `POD_IP`, `POD_NAME`, `POD_NAMESPACE`, `POD_UID`, or transport TLS settings. Hydra reads none of them; declare any that another Agent image needs, for example `POD_IP` from `status.podIP`.
+
+Topology discovery replaces Cyborg's endpoint files. `CYBORG_LPU_TOPOLOGY_SOCKET` selects it, and Cyborg rejects it together with `--lpu-rdma-addr-file`, `--lpu-rdma-state-ingress-addr-file`, or `--lpu-readiness-addr-file`. Remove those flags, `cyborg-entrypoint --expand-hosts`, `SERVER_HOSTS_FILE`, and host-file renderers from the conductor template. The operator still renders the runtime ConfigMaps described under `localPartitions`: Agents keep reading their partition configuration from the `config` mount, and Cyborg ignores `lpu_servers` in discovery mode. Without the two sidecars, Cyborg keeps using endpoint files, the mode for standalone and emulator runs.
 
 ## Runtime Version Compatibility
 
