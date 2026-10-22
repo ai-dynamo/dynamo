@@ -18,6 +18,12 @@ for many-model serving. It reproduces three experiments on one node with 8x A100
 Scripts, manifests, and results by [@marckarp](https://github.com/marckarp) and
 [@scheckerNV](https://github.com/scheckerNV).
 
+For a bounded two-GPU functionality test, use
+[Reproduce Multi-GPU GPU Fractions](../../docs/fern/pages/use-cases/gpu-sharing/deploy-tp2-gpu-fractions.md).
+The [`tp2/`](tp2/) helpers render one or two TP2 DGDs, render the experimental
+per-device MPS policy, and check communication, memory allocation, and kernel
+execution. They do not run a benchmark sweep or change host configuration.
+
 ## Common Setup
 
 All three experiments share the same workload:
@@ -152,10 +158,13 @@ Also confirm the per-worker caps:
 - **DGD updates hang on a fully packed node.** The operator starts new worker pods
   before it removes the old ones. When every GPU fraction is allocated, the new pods
   stay Pending. Run `kubectl delete dgd --all` and re-apply instead of editing in place.
-- **`--gpu-memory-utilization` differs between experiments on purpose.** HAMi shows the
+- **`--gpu-memory-utilization` differs between experiments on purpose.** In these TP1 runs, HAMi shows the
   pod a virtual ~20 GB GPU, so the KAI + HAMi workers use 0.85. GPU fractions shows the
   physical ~39.5 GiB GPU while enforcing a 19,968 MiB cap, so those workers use 0.40.
-  Both settings give each worker about 16 to 17 GB. Recompute both values for other GPUs.
+  Both settings give each worker about 16 to 17 GB. The newer
+  [TP2 test](../../docs/fern/pages/use-cases/gpu-sharing/deploy-tp2-gpu-fractions.md)
+  measured a different CUDA memory view and used 0.8 against the capped total.
+  Check vLLM's actual snapshot before choosing this value on another stack.
 
 ## Related Documentation
 
