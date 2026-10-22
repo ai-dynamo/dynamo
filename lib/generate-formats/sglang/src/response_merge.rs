@@ -82,6 +82,7 @@ pub struct RuleSet {
     fields: Vec<Field>,
     cumulative: Vec<usize>,
     prefill_flags: PrefillFlags,
+    move_captures: bool,
 }
 
 impl RuleSet {
@@ -106,10 +107,26 @@ impl RuleSet {
         let cumulative = (0..fields.len())
             .filter(|&i| fields[i].class == FieldClass::Cumulative)
             .collect();
+        let captures: Vec<_> = fields
+            .iter()
+            .filter(|field| matches!(field.class, FieldClass::Prompt | FieldClass::FirstAttempt))
+            .collect();
+        let contains = |parent: &str, child: &str| {
+            child
+                .strip_prefix(parent)
+                .is_some_and(|tail| tail.is_empty() || tail.starts_with('/'))
+        };
+        // Overlapping custom snapshots must each retain their original subtree.
+        let move_captures = !captures.iter().enumerate().any(|(i, a)| {
+            captures[i + 1..]
+                .iter()
+                .any(|b| contains(&a.path, &b.path) || contains(&b.path, &a.path))
+        });
         Self {
             fields,
             cumulative,
             prefill_flags,
+            move_captures,
         }
     }
 
@@ -247,17 +264,25 @@ impl RuleSet {
         }
     }
 
-    /// A copy of the `class` values in `from`, or `None` when it has none.
-    fn capture(&self, class: FieldClass, from: &Value) -> Option<Value> {
+    /// Retain snapshot values, moving disjoint fields from a consumed chunk.
+    fn capture(&self, class: FieldClass, from: &mut Value, consume: bool) -> Option<Value> {
         let mut captured = Value::Object(Map::new());
         let mut any = false;
         for field in self.of(class) {
-            let Some(value) = lookup(from, field) else {
+            let Some(value) = object(from, &field.parent).and_then(|o| o.get_mut(&field.key))
+            else {
                 continue;
             };
             object_or_insert(&mut captured, &field.parent)
                 .expect("captured parents are objects")
-                .insert(field.key.clone(), value.clone());
+                .insert(
+                    field.key.clone(),
+                    if consume && self.move_captures {
+                        value.take()
+                    } else {
+                        value.clone()
+                    },
+                );
             any = true;
         }
         any.then_some(captured)
@@ -480,15 +505,14 @@ impl<C: ClientCodec> Assembler<C> {
         self.attempt += 1;
     }
 
-    fn observe(&mut self, chunk: &Value) {
-        self.rules.cumulative_values(chunk, &mut self.seen);
+    fn capture_attempt(&mut self, chunk: &mut Value, consume: bool) {
         // Until a token is delivered, a retry's prompt is the client's.
         if self.capture && self.delivered == 0 {
             if self.first.is_none() {
-                self.first = self.rules.capture(FieldClass::FirstAttempt, chunk);
+                self.first = self.rules.capture(FieldClass::FirstAttempt, chunk, consume);
             }
             if self.prompt.is_none() && self.prefill.is_none() {
-                self.prompt = self.rules.capture(FieldClass::Prompt, chunk);
+                self.prompt = self.rules.capture(FieldClass::Prompt, chunk, consume);
             }
         }
     }
@@ -516,16 +540,26 @@ impl<C: ClientCodec> Assembler<C> {
     /// Streaming: `render` sees `chunk` joined with prefill and earlier
     /// attempts; the joined values are swapped back out afterwards.
     pub fn render<T>(&mut self, mut chunk: Value, render: impl FnOnce(&Value) -> T) -> T {
-        self.observe(&chunk);
+        self.rules.cumulative_values(&chunk, &mut self.seen);
+        // The first aggregated attempt leaves the chunk unchanged while rendering.
+        // Retain its snapshot fields afterwards, when the chunk can be consumed.
+        let consume = self.attempt == 0 && self.prefill.is_none();
+        if !consume {
+            self.capture_attempt(&mut chunk, false);
+        }
         self.apply(&mut chunk, false);
         let rendered = render(&chunk);
         self.apply(&mut chunk, true);
+        if consume {
+            self.capture_attempt(&mut chunk, true);
+        }
         rendered
     }
 
     /// Unary: join `chunk` onto the response so far.
-    pub fn push(&mut self, chunk: Value) {
-        self.observe(&chunk);
+    pub fn push(&mut self, mut chunk: Value) {
+        self.rules.cumulative_values(&chunk, &mut self.seen);
+        self.capture_attempt(&mut chunk, false);
         match &mut self.joined {
             Some(joined) => self.rules.join_step(joined, chunk),
             None => self.joined = Some(chunk),
@@ -574,6 +608,29 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn streamed_snapshots_preserve_nested_custom_fields(
+            values in prop::collection::vec((any::<u32>(), ".{0,20}"), 0..32),
+            overlap in any::<bool>(),
+        ) {
+            let first_path = if overlap { "/meta" } else { "/meta/count" };
+            let rules = RuleSet::new([
+                (first_path.into(), FieldClass::FirstAttempt),
+                ("/meta/prompt".into(), FieldClass::Prompt),
+            ], PrefillFlags::default());
+            let chunk = json!({"meta": {"count": 7, "prompt": values}, "output_ids": [1]});
+            let mut assembler = Assembler::new(Arc::new(rules), true);
+            prop_assert_eq!(assembler.render(chunk.clone(), Clone::clone), chunk.clone());
+            let expected_first = if overlap { json!({"meta": chunk["meta"]}) } else { json!({"meta": {"count": 7}}) };
+            prop_assert_eq!(assembler.first.as_ref(), Some(&expected_first));
+            prop_assert_eq!(assembler.prompt.as_ref(), Some(&json!({"meta": {"prompt": chunk["meta"]["prompt"]}})));
+            assembler.migrate(1);
+            let retry = json!({"meta": {"count": 99, "prompt": []}, "output_ids": [2]});
+            let rendered = assembler.render(retry, Clone::clone);
+            prop_assert_eq!(&rendered["meta"], &chunk["meta"]);
+            prop_assert_eq!(&rendered["output_ids"], &json!([2]));
+        }
 
         #[test]
         fn retry_counters_do_not_wrap(
