@@ -35,6 +35,7 @@ impl traits::Tokenizer for ByteTokenizer {}
 fn preflight_selection(reasoning: Option<&str>) -> SystemOneExecutionSelection {
     let selection = selection(TestEngine::new(EngineBehavior::Success));
     let mut card = selection.card.clone();
+    card.runtime_config.context_length = Some(65_536);
     card.runtime_config.reasoning_parser = reasoning.map(str::to_owned);
     let dynamo_renderer::PromptFormatter::OAI(formatter) =
         crate::preprocessor::prompt::prompt_formatter_from_mdc(&card).unwrap();
