@@ -177,7 +177,6 @@ class ImageLoader:
         self._shared_image_cache = SharedImageCache.from_env()
         self._enable_frontend_decoding = enable_frontend_decoding
         self._url_policy = url_policy or UrlValidationPolicy.from_env()
-        # Warm up NIXL at startup only when frontend decoding is enabled.
         self._nixl_connector = None
         if self._enable_frontend_decoding:
             self._nixl_connector = _create_nixl_connector()
