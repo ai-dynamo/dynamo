@@ -42,10 +42,11 @@ pub struct NvCreateAudioSpeechRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<String>,
 
-    /// Speed factor, 0.25 to 4.0. The frontend fills in 1.0 when the client
-    /// sends none and rejects a value outside the range, so a worker always
-    /// receives a valid speed.
-    #[serde(default = "default_speed")]
+    /// Speed factor, 0.25 to 4.0. An omitted `speed` and an explicit `null`
+    /// both mean 1.0, as they did when this field was an `Option`. The
+    /// frontend rejects a value outside the range and always forwards a
+    /// number, so the worker-side contract is a non-null `speed`.
+    #[serde(default = "default_speed", deserialize_with = "speed_or_default")]
     #[schema(default = default_speed, minimum = 0.25, maximum = 4.0)]
     #[validate(range(min = 0.25, max = 4.0, message = "speed must be between 0.25 and 4.0"))]
     pub speed: f64,
@@ -168,6 +169,15 @@ fn default_speed() -> f64 {
     1.0
 }
 
+/// `null` reads as the default speed. Serde's `default` covers only an
+/// absent key; this covers a present key with a `null` value.
+fn speed_or_default<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<f64>::deserialize(deserializer)?.unwrap_or_else(default_speed))
+}
+
 fn default_object_type() -> String {
     "audio.speech".to_string()
 }
@@ -271,14 +281,39 @@ mod tests {
     }
 
     #[test]
-    fn audio_request_speed_defaults_to_one() {
-        let req: NvCreateAudioSpeechRequest = serde_json::from_str(r#"{"input":"hi"}"#).unwrap();
-        assert_eq!(req.speed, 1.0);
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(
-            json.contains(r#""speed":1.0"#),
-            "expected the worker to receive the default; got: {json}"
-        );
+    fn audio_request_speed_omitted_or_null_is_the_default() {
+        // Both spellings of "no speed" mean 1.0, and the worker receives the
+        // number either way.
+        for json in [r#"{"input":"hi"}"#, r#"{"input":"hi","speed":null}"#] {
+            let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+            assert_eq!(req.speed, 1.0, "for {json}");
+            let out: serde_json::Value = serde_json::to_value(&req).unwrap();
+            assert_eq!(out["speed"], serde_json::json!(1.0), "for {json}");
+        }
+    }
+
+    #[test]
+    fn audio_request_explicit_speed_is_kept() {
+        let req: NvCreateAudioSpeechRequest =
+            serde_json::from_str(r#"{"input":"hi","speed":2.5}"#).unwrap();
+        assert_eq!(req.speed, 2.5);
+        let out: serde_json::Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(out["speed"], serde_json::json!(2.5));
+    }
+
+    #[test]
+    fn audio_request_speed_of_wrong_type_is_rejected() {
+        // `null` is the one non-number `speed` accepts.
+        for json in [
+            r#"{"input":"hi","speed":"1.0"}"#,
+            r#"{"input":"hi","speed":true}"#,
+        ] {
+            let err = serde_json::from_str::<NvCreateAudioSpeechRequest>(json).unwrap_err();
+            assert!(
+                err.to_string().contains("expected f64"),
+                "for {json}: {err}"
+            );
+        }
     }
 
     #[test]

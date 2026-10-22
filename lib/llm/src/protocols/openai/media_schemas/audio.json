@@ -182,7 +182,7 @@
           "speed": {
             "type": "number",
             "format": "double",
-            "description": "Speed factor, 0.25 to 4.0. The frontend fills in 1.0 when the client\nsends none and rejects a value outside the range, so a worker always\nreceives a valid speed.",
+            "description": "Speed factor, 0.25 to 4.0. An omitted `speed` and an explicit `null`\nboth mean 1.0, as they did when this field was an `Option`. The\nfrontend rejects a value outside the range and always forwards a\nnumber, so the worker-side contract is a non-null `speed`.",
             "default": 1.0,
             "maximum": 4,
             "minimum": 0.25

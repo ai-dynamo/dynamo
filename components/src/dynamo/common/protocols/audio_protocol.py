@@ -129,9 +129,10 @@ class NvCreateAudioSpeechRequest(BaseModel):
     """
     speed: confloat(ge=0.25, le=4.0) = 1.0
     """
-    Speed factor, 0.25 to 4.0. The frontend fills in 1.0 when the client
-    sends none and rejects a value outside the range, so a worker always
-    receives a valid speed.
+    Speed factor, 0.25 to 4.0. An omitted `speed` and an explicit `null`
+    both mean 1.0, as they did when this field was an `Option`. The
+    frontend rejects a value outside the range and always forwards a
+    number, so the worker-side contract is a non-null `speed`.
     """
     task_type: str | None = None
     """
