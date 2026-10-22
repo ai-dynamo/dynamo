@@ -47,6 +47,25 @@ pub(super) struct FrontendEvent {
     frame: FrontendLoadFrame,
 }
 
+#[cfg(test)]
+impl FrontendEvent {
+    /// A frame from one ready frontend serving no models.
+    pub(super) fn sample() -> Self {
+        Self {
+            publisher_id: 1,
+            published_at_ms: 0,
+            received_at: Instant::now(),
+            frame: FrontendLoadFrame {
+                frontend_instance_id: 1,
+                incarnation: 1,
+                sequence: 1,
+                is_serving_ready: true,
+                models: Vec::new(),
+            },
+        }
+    }
+}
+
 /// Namespaces the Relay hears frontends in: every namespace that holds a
 /// catalog pool or a served model (the namespace source's view), plus the
 /// Relay's own, where frontends without an exact namespace publish.

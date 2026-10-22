@@ -39,7 +39,7 @@ use self::frontend::{
     FRONTEND_FRESHNESS, FrontendEvent, FrontendReports, frontend_events, frontend_namespaces,
     sync_subscriptions,
 };
-use self::roster::Rosters;
+use self::roster::{RosterEvent, Rosters};
 use super::load::{Coverage, PoolDeployment, PoolSchedulerLoad, SCHEDULER_FRESHNESS};
 use super::pool_registry::PoolRegistry;
 use super::topology::TopologyPublisher;
@@ -138,26 +138,31 @@ impl ServingLoadAggregator {
         let mut reports = FrontendReports::default();
         let mut silent_frontends = SilentStream::new("frontend_load");
         let mut silent_routers = SilentStream::new("scheduler_load");
-        let mut tick = tokio::time::interval(window);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut due = tokio::time::Instant::now();
         loop {
-            // Events first: a slow snapshot must not leave frames undrained.
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return,
-                Some((namespace, event)) = subscriptions.next() => {
+            let wake = next_wake(
+                due,
+                &cancel,
+                &mut subscriptions,
+                &mut frontend_rosters,
+                &mut scheduler_rosters,
+            )
+            .await;
+            match wake {
+                Wake::Cancelled => return,
+                Wake::Frontend(namespace, event) => {
                     reports.record(namespace, event);
                     continue;
                 }
-                Some((namespace, event)) = frontend_rosters.next() => {
+                Wake::FrontendRoster(namespace, event) => {
                     frontend_rosters.apply(namespace, event, Instant::now());
                     continue;
                 }
-                Some((endpoint, event)) = scheduler_rosters.next() => {
+                Wake::SchedulerRoster(endpoint, event) => {
                     scheduler_rosters.apply(endpoint, event, Instant::now());
                     continue;
                 }
-                _ = tick.tick() => {}
+                Wake::Snapshot => {}
             }
             let catalog = self.pools.catalog();
             let topology = self.topology.snapshot();
@@ -220,6 +225,49 @@ impl ServingLoadAggregator {
                 now,
             );
             self.snapshots.send_replace(Some(Arc::new(snapshot)));
+            // From the end of the build, so a slow one cannot crowd out events.
+            due = tokio::time::Instant::now() + window;
+        }
+    }
+}
+
+/// What [`next_wake`] woke the aggregator for.
+enum Wake {
+    Cancelled,
+    Snapshot,
+    Frontend(String, FrontendEvent),
+    FrontendRoster(String, RosterEvent),
+    SchedulerRoster(EndpointId, RosterEvent),
+}
+
+/// The next event, or [`Wake::Snapshot`] once `due` has passed. The deadline
+/// wins over pending events, so however steadily they arrive, a snapshot
+/// starts at most one event's apply time after it is due. This bounds the
+/// aggregator's scheduling only; delivery to subscribers adds executor and
+/// transport delay.
+async fn next_wake(
+    due: tokio::time::Instant,
+    cancel: &CancellationToken,
+    subscriptions: &mut StreamMap<String, BoxStream<'static, FrontendEvent>>,
+    frontend_rosters: &mut Rosters<String>,
+    scheduler_rosters: &mut Rosters<EndpointId>,
+) -> Wake {
+    if cancel.is_cancelled() {
+        return Wake::Cancelled;
+    }
+    if tokio::time::Instant::now() >= due {
+        return Wake::Snapshot;
+    }
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Wake::Cancelled,
+        _ = tokio::time::sleep_until(due) => Wake::Snapshot,
+        Some((namespace, event)) = subscriptions.next() => Wake::Frontend(namespace, event),
+        Some((namespace, event)) = frontend_rosters.next() => {
+            Wake::FrontendRoster(namespace, event)
+        }
+        Some((endpoint, event)) = scheduler_rosters.next() => {
+            Wake::SchedulerRoster(endpoint, event)
         }
     }
 }
@@ -263,5 +311,82 @@ impl SilentStream {
                 "KV DC Relay has no serving-load publishers; set DYN_SERVING_LOAD_PUBLISH=1 on frontends and routers"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    const WINDOW: Duration = Duration::from_secs(1);
+
+    async fn wake(
+        due: tokio::time::Instant,
+        subscriptions: &mut StreamMap<String, BoxStream<'static, FrontendEvent>>,
+    ) -> Wake {
+        wake_with(due, &CancellationToken::new(), subscriptions).await
+    }
+
+    async fn wake_with(
+        due: tokio::time::Instant,
+        cancel: &CancellationToken,
+        subscriptions: &mut StreamMap<String, BoxStream<'static, FrontendEvent>>,
+    ) -> Wake {
+        next_wake(
+            due,
+            cancel,
+            subscriptions,
+            &mut Rosters::default(),
+            &mut Rosters::default(),
+        )
+        .await
+    }
+
+    /// Frames that never stop arriving still yield a snapshot once it is due.
+    #[tokio::test(start_paused = true)]
+    async fn a_due_snapshot_wins_over_a_steady_stream_of_frames() {
+        let mut subscriptions = StreamMap::new();
+        subscriptions.insert(
+            "ns".to_string(),
+            futures::stream::repeat_with(FrontendEvent::sample).boxed(),
+        );
+        let due = tokio::time::Instant::now() + WINDOW;
+
+        assert!(matches!(
+            wake(due, &mut subscriptions).await,
+            Wake::Frontend(..)
+        ));
+        tokio::time::advance(WINDOW).await;
+        assert!(matches!(
+            wake(due, &mut subscriptions).await,
+            Wake::Snapshot
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_events_the_snapshot_comes_on_the_window() {
+        let started = tokio::time::Instant::now();
+        let mut subscriptions = StreamMap::new();
+
+        assert!(matches!(
+            wake(started + WINDOW, &mut subscriptions).await,
+            Wake::Snapshot
+        ));
+        assert_eq!(started.elapsed(), WINDOW);
+    }
+
+    /// Cancellation wins even over an overdue snapshot.
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_wins_over_an_overdue_snapshot() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let mut subscriptions = StreamMap::new();
+
+        assert!(matches!(
+            wake_with(tokio::time::Instant::now(), &cancel, &mut subscriptions).await,
+            Wake::Cancelled
+        ));
     }
 }
