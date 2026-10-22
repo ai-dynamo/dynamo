@@ -833,6 +833,10 @@ pub mod router {
 
     /// Stale active-request cleanup guard in seconds; this is not a request timeout.
     pub const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
+
+    /// Session-affinity binding key: "parent-group" (default) binds a subagent under its parent's
+    /// group; "session" binds every request on its own session id.
+    pub const DYN_ROUTER_SESSION_AFFINITY_BINDING: &str = "DYN_ROUTER_SESSION_AFFINITY_BINDING";
 }
 
 /// Request plane transport environment variables
@@ -1245,6 +1249,7 @@ mod tests {
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            router::DYN_ROUTER_SESSION_AFFINITY_BINDING,
             request_plane::DYN_REQUEST_PLANE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             response_plane::DYN_RESPONSE_PLANE,

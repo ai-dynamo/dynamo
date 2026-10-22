@@ -13,7 +13,7 @@ use futures::{StreamExt, stream};
 
 use super::SessionAffinityMode::{Hard, Soft};
 use super::{
-    AffinityCoordinator, AffinityTarget, Hold, LlmResponse, affinity_id,
+    AffinityCoordinator, AffinityTarget, Hold, LlmResponse, SessionAffinityBinding, affinity_id,
     coordinator::{ReplicaApplyOutcome, tracked_stream},
     explicit_target, subagent_group_affinity_id, to_table,
 };
@@ -891,4 +891,21 @@ fn a_subagent_group_id_is_namespaced_and_fixed_size() {
     let long = subagent_group_affinity_id(&"p".repeat(10_000));
     assert_eq!(long.len(), a.len());
     assert!(long.len() <= MAX_SESSION_AFFINITY_ID_BYTES);
+}
+
+#[test]
+fn session_affinity_binding_defaults_to_parent_group() {
+    let binding =
+        |value: Option<&str>| SessionAffinityBinding::from_lookup(|_| value.map(str::to_owned));
+    assert_eq!(binding(None), SessionAffinityBinding::ParentGroup);
+    assert_eq!(binding(Some("session")), SessionAffinityBinding::Session);
+    assert_eq!(
+        binding(Some(" parent-group ")),
+        SessionAffinityBinding::ParentGroup
+    );
+    assert_eq!(
+        binding(Some("off")),
+        SessionAffinityBinding::ParentGroup,
+        "an unknown value keeps the default"
+    );
 }

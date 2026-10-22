@@ -4460,6 +4460,57 @@ async fn parent_group_binding_offers_siblings_the_committed_worker() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn session_binding_places_siblings_on_their_own_sessions() {
+    let workers = [7u64, 9]
+        .into_iter()
+        .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
+        .collect();
+    let (router, runtime) =
+        router_with_worker_configs(Some(Duration::from_secs(60)), workers).await;
+    let router = router.with_session_affinity_binding(SessionAffinityBinding::Session);
+
+    let offered = async |request: &SingleIn<PreprocessedRequest>| {
+        router
+            .select_with_session_affinity(
+                request,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
+                |target| std::future::ready(Ok(target)),
+            )
+            .await
+            .unwrap()
+    };
+
+    let first = subagent_request("child-1", Some("parent-1"));
+    let (_, hold) = offered(&first).await;
+    let mut stream = router
+        .bind_affinity(
+            hold,
+            AffinityTarget::new(7, Some(0)),
+            ResponseStream::new(
+                Box::pin(stream::iter([Annotated::from_data(
+                    LLMEngineOutput::default(),
+                )])),
+                first.context(),
+            ),
+        )
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    let sibling = subagent_request("child-2", Some("parent-1"));
+    let (offered_sibling, _) = offered(&sibling).await;
+    assert_eq!(offered_sibling, None, "a sibling is placed on its own");
+
+    let next_turn = subagent_request("child-1", Some("parent-1"));
+    let (offered_next_turn, _) = offered(&next_turn).await;
+    assert_eq!(offered_next_turn, Some(AffinityTarget::new(7, Some(0))));
+
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
     let workers = [7u64, 9]
         .into_iter()
