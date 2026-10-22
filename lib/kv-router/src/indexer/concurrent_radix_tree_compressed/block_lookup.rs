@@ -13,9 +13,8 @@ use crate::protocols::ExternalSequenceBlockHash;
 const MIN_CAPACITY: usize = 16;
 const PREFETCH_DISTANCE: usize = 8;
 
-/// A key and its value. The key is kept as two `u32` halves so the slot needs only
-/// 4-byte alignment: with a non-zero 4-byte value, an occupied-or-empty slot is 12
-/// bytes rather than 16.
+/// The key is kept as two `u32` halves so the slot needs only 4-byte alignment: with
+/// a non-zero 4-byte value, `Option<Slot<V>>` is 12 bytes rather than 16.
 pub(super) struct Slot<V> {
     key: [u32; 2],
     value: V,
