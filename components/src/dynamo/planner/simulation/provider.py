@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import os
 import warnings
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
@@ -108,6 +109,11 @@ _PUBLIC_CONFIG_FIELDS = {
     "prefill_min_workers": "prefill_min_endpoint",
     "decode_min_workers": "decode_min_endpoint",
 }
+# Accepted by ``aisimulate predict`` only. ``retune`` is an opaque mapping that
+# ``PlannerConfig`` validates; a recommendation sweep has no use for either.
+_RETUNE = "retune"
+_WARMUP_TRACE = "load_predictor_warmup_trace"
+_PREDICTION_ONLY_FIELDS = (_WARMUP_TRACE, _RETUNE)
 
 
 _HOOK = RuntimeHookSpec(
@@ -663,22 +669,41 @@ class DynamoPlannerSweepConfigProvider:
         config: Mapping[str, JSONValue],
         context: PredictionAdapterContext,
     ) -> AdapterReplaySpec:
-        unknown = set(config) - _PUBLIC_CONFIG_FIELDS.keys() - {"policy"}
+        unknown = (
+            set(config)
+            - _PUBLIC_CONFIG_FIELDS.keys()
+            - {"policy", *_PREDICTION_ONLY_FIELDS}
+        )
         if unknown:
             raise ValueError(f"Extra inputs are not permitted: {sorted(unknown)}")
         policy: Policy = TypeAdapter(Policy).validate_python(
             config.get("policy", "disabled")
         )
         if policy == "disabled":
+            if config.get(_RETUNE) is not None:
+                raise ValueError(
+                    "planner.retune requires planner.policy: enabled; for retune "
+                    "with fixed replicas also set enable_load_scaling: false and "
+                    "enable_throughput_scaling: false"
+                )
             return AdapterReplaySpec(config={"policy": "disabled"})
         raw_sla = context.evaluation.get("sla")
+        sla = raw_sla if isinstance(raw_sla, Mapping) else None
+        candidate_config = dict(config)
+        if config.get(_WARMUP_TRACE) is not None:
+            candidate_config[_WARMUP_TRACE] = _warmup_trace_path(config[_WARMUP_TRACE])
+        if config.get(_RETUNE) is not None:
+            _require_retune_traffic(context.traffic)
+            candidate_config[_RETUNE] = _retune_with_evaluation_sla(
+                config[_RETUNE], sla
+            )
         planner_config = _planner_config_payload(
-            config,
+            candidate_config,
             sample=_prediction_sample(context.engine),
             optimization_target=config.get(
                 "target", PlannerConfig.model_fields["optimization_target"].default
             ),
-            sla=raw_sla if isinstance(raw_sla, Mapping) else None,
+            sla=sla,
             min_endpoint=None,
             prefill_min_endpoint=None,
             decode_min_endpoint=None,
@@ -693,6 +718,12 @@ class DynamoPlannerSweepConfigProvider:
         config: Mapping[str, JSONValue],
         context: RecommendationAdapterContext,
     ) -> AdapterSearchPlan:
+        if _RETUNE in config:
+            raise ValueError(
+                "planner.retune is not supported by aisimulate recommend: each "
+                "candidate replays a static planner configuration. Measure retune "
+                "with aisimulate predict instead"
+            )
         public = PlannerRecommendationConfig.model_validate(config)
         policies = (
             set(public.policy.choices)
@@ -1031,7 +1062,85 @@ def _public_planner_config(
             for public, runtime in _PUBLIC_CONFIG_FIELDS.items()
             if planner_config.get(runtime) is not None
         },
+        **{
+            name: deepcopy(planner_config[name])
+            for name in _PREDICTION_ONLY_FIELDS
+            if planner_config.get(name) is not None
+        },
     }
+
+
+def _warmup_trace_path(value: JSONValue) -> JSONValue:
+    """Resolve the warmup trace like ``traffic.source.paths``: against the
+    working directory. Absolute, so every process of the run reads one file."""
+
+    if not isinstance(value, str):
+        return value  # PlannerConfig reports the type error.
+    path = os.path.abspath(os.path.expanduser(value))
+    if not os.path.isfile(path):
+        raise ValueError(
+            f"planner.load_predictor_warmup_trace {value!r} is not a file "
+            f"(resolved to {path}; relative paths resolve against the working "
+            "directory, like traffic.source.paths)"
+        )
+    return path
+
+
+def _require_retune_traffic(traffic: Mapping[str, JSONValue]) -> None:
+    """Reject traffic that retune cannot replay, in AISimulate terms.
+
+    ``dynamo.replay`` enforces the same open-loop rules with replay-API names.
+    """
+
+    def section(name: str) -> Mapping[str, JSONValue]:
+        value = traffic.get(name)
+        return value if isinstance(value, Mapping) else {}
+
+    source, load, stop = section("source"), section("load"), section("stop")
+    if source.get("type") != "trace" or source.get("format") != "dynamo":
+        raise ValueError(
+            "planner.retune requires traffic.source type: trace with format: dynamo"
+        )
+    if load.get("type") != "trace_timestamps":
+        raise ValueError(
+            "planner.retune replays open-loop traffic and requires "
+            f"traffic.load.type: trace_timestamps; got {load.get('type')!r}"
+        )
+    agentic = sorted(
+        name
+        for name in ("agentic_lanes", "agentic_snapshot", "agentic_profile")
+        if load.get(name) is not None
+    ) + (["agentic_warmup"] if load.get("agentic_warmup") else [])
+    if agentic:
+        raise ValueError(
+            "planner.retune replays open-loop traffic; traffic.load does not "
+            f"accept {agentic}"
+        )
+    if stop.get("max_virtual_time_seconds") is not None:
+        raise ValueError(
+            "planner.retune replays complete windows; remove "
+            "traffic.stop.max_virtual_time_seconds"
+        )
+
+
+def _retune_with_evaluation_sla(
+    retune: JSONValue, sla: Mapping[str, JSONValue] | None
+) -> JSONValue:
+    """Score retune against ``evaluation.sla`` unless it sets its own SLA.
+
+    The Planner's own ``ttft_ms``/``itl_ms`` follow ``evaluation.sla`` only for
+    ``target: sla``; without this default, other targets would score retune
+    against Planner defaults while AISimulate reports goodput against
+    ``evaluation.sla``.
+    """
+
+    if not isinstance(retune, Mapping):
+        return retune  # PlannerConfig reports the type error.
+    merged = deepcopy(dict(retune))
+    for public, field in (("ttft_ms", "sla_ttft_ms"), ("itl_ms", "sla_itl_ms")):
+        if sla is not None and sla.get(public) is not None and field not in merged:
+            merged[field] = _float_value(sla, public)
+    return cast(JSONValue, merged)
 
 
 def _prediction_sample(engine: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
@@ -1078,6 +1187,9 @@ def _planner_config_payload(
         if key in candidate_config and not (
             key.endswith("_interval_seconds") and candidate_config[key] is None
         ):
+            payload[key] = candidate_config[key]
+    for key in _PREDICTION_ONLY_FIELDS:
+        if candidate_config.get(key) is not None:
             payload[key] = candidate_config[key]
     if max_num_gpus is not None:
         payload["max_gpu_budget"] = max_num_gpus
@@ -1154,9 +1266,14 @@ def _planner_config_payload(
             "Planner throughput scaling requires evaluation.sla.ttft_ms and evaluation.sla.itl_ms"
         )
     # Serialize only adapter-owned fields, never environment-derived connection credentials.
-    return resolved.model_dump(
+    dumped = resolved.model_dump(
         mode="json", include=set(payload) | set(_PUBLIC_CONFIG_FIELDS.values())
     )
+    if _RETUNE in payload:
+        # Hand the replay host the validated mapping as written, not the dump
+        # with every RetuneConfig default filled in.
+        dumped[_RETUNE] = deepcopy(payload[_RETUNE])
+    return dumped
 
 
 def create_provider() -> DynamoPlannerSweepConfigProvider:
