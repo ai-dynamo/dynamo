@@ -110,6 +110,12 @@ def systemone_sglang_server(
         yield base_url
 
 
+def _native_prefill_graph_args():
+    if version("sglang").split("+", 1)[0] == "0.5.22":
+        return ["--cuda-graph-backend-prefill", "disabled"]
+    return ["--disable-piecewise-cuda-graph"]
+
+
 @pytest.fixture
 def native_sglang_server(request, dynamo_dynamic_ports, predownload_models):
     with reserved_ports(1, dynamo_dynamic_ports.frontend_port) as ports:
@@ -133,7 +139,7 @@ def native_sglang_server(request, dynamo_dynamic_ports, predownload_models):
                 "2048",
                 "--mem-fraction-static",
                 "0.2",
-                "--disable-piecewise-cuda-graph",
+                *_native_prefill_graph_args(),
                 "--disable-overlap-schedule",
                 "--max-running-requests",
                 "1",
