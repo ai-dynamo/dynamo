@@ -54,8 +54,8 @@ benchmarks/results/gateway_epp_ab/<UTC time>/
 ## Prerequisites
 
 1. **A Dynamo operator, 1.5.0 or later.** The native Rust EPP needs it.
-2. **Gateway API, the Inference Extension CRDs, agentgateway v1.2.0 or later, and a Gateway named
-   `inference-gateway`.** The repository's installer sets them up, with agentgateway v1.6.0:
+2. **Gateway API, the Inference Extension CRDs, agentgateway v1.2.x, and a Gateway named
+   `inference-gateway`.** The repository's installer sets them up, with agentgateway v1.2.1:
 
    ```bash
    NAMESPACE=<namespace> bash deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
@@ -245,12 +245,13 @@ Keep these limits in mind when reading the results:
   `FRONTEND_IMAGE` and `WORKER_IMAGE` to one build of a main commit that includes #16862, so the
   Frontend, the EPP and the workers run the same version. `run.sh` warns when `FRONTEND_IMAGE` is a
   1.5 image.
-- **agentgateway before v1.2.0 fails arm B under load.** Those releases open a new TLS connection to
-  the EPP for every request and keep it idle for 90 to 180 seconds
+- **Arm B needs agentgateway v1.2.x.** Before v1.2.0, agentgateway opens a new TLS connection to
+  the EPP for every request and keeps it idle for 90 to 180 seconds
   ([agentgateway#1528](https://github.com/agentgateway/agentgateway/pull/1528)). The EPP accepts at
   most 1024 connections, so from about 10 requests per second arm B's requests time out at the
-  Gateway and fail with HTTP 500. Arm A is not affected. `run.sh` warns when the Gateway runs such a
-  release.
+  Gateway and fail with HTTP 500. From v1.3.0, agentgateway sends an ext_proc protocol configuration
+  that the EPP rejects, so every arm B request fails with HTTP 500. Arm A is not affected. The
+  installer installs v1.2.1, and `run.sh` warns when the Gateway runs a release before v1.2.0.
 
 ## Running 2048 workers
 
@@ -333,6 +334,7 @@ tests fail if their workers differ.
 | The smoke request fails with HTTP 404 | The HTTPRoute is not attached, or another route takes the request. Check `kubectl get httproute qwen-a -o yaml` for `Accepted`. |
 | The smoke request fails with HTTP 500 or 503 on arm B | The EPP has not found the workers yet. Check `kubectl logs -l nvidia.com/dynamo-component-type=epp`. |
 | Arm B fails with HTTP 500 at higher request rates, and arm A does not | The Gateway runs agentgateway before v1.2.0, which uses up the EPP's connections; see [Comparing the arms](#comparing-the-arms). Upgrade it with the installer. |
+| Every arm B request fails with HTTP 500 `ext_proc failed: no more response messages` | The Gateway runs agentgateway v1.3.0 or later. Its log shows `ext_proc response stream failed` with the EPP's protocol configuration error. Install v1.2.1 with the installer. |
 | A run's `console.log` shows errors or timeouts | The load point is past saturation, or the client ran short of CPU. Lower the rate, or give the aiperf pod a node of its own. |
 | A snapshot reports fewer endpoints than expected | Some pods restarted or were not running. The archive holds an `.err` file for each failed endpoint. |
 | `run.sh` stops before collecting | The Job's pod keeps the results until a copy succeeds: `RESULTS=<dir> $B collect <arm>`. After that copy the pod exits and its results are gone. |
