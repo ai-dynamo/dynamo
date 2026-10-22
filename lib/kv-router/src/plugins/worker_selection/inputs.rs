@@ -3,7 +3,10 @@
 
 //! Worker input groups, stored snapshots, and component-scoped borrowed views.
 
+use std::sync::Arc;
+
 use crate::protocols::{SharedCacheHits, WorkerWithDpRank};
+use std::collections::HashSet;
 use std::ops::BitOr;
 
 /// Host-owned row materialized once for the union of component input requirements.
@@ -13,6 +16,7 @@ pub(crate) struct CandidateData {
     pub(crate) cache: WorkerCacheData,
     pub(crate) load: WorkerLoadInput,
     pub(crate) preferred_taint_multiplier: Option<f64>,
+    pub(crate) taints: Option<Arc<HashSet<String>>>,
 }
 
 /// A borrowed view of one worker, restricted to this component's declared inputs.
@@ -63,6 +67,18 @@ impl<'a> WorkerCandidate<'a> {
     pub fn preferred_taint_multiplier(self) -> Option<f64> {
         if self.inputs.contains(WorkerInputs::PREFERRED_TAINT) {
             self.data.preferred_taint_multiplier
+        } else {
+            None
+        }
+    }
+
+    /// The worker's own taint set, only when this component declared TAINTS.
+    /// None means access was not requested; an empty set means the worker published no
+    /// routing labels. The set is shared, not per-rank: all data-parallel ranks of one
+    /// worker report the same taints.
+    pub fn taints(&self) -> Option<&HashSet<String>> {
+        if self.inputs.contains(WorkerInputs::TAINTS) {
+            self.data.taints.as_deref()
         } else {
             None
         }
@@ -120,11 +136,12 @@ impl<'a> WorkerCandidates<'a> {
 }
 
 /// One eligible worker and its total cost after all scorers run.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ScoredWorkerCandidate {
     pub(crate) worker: WorkerWithDpRank,
     pub(crate) cost: f64,
     pub(crate) preferred_taint_multiplier: Option<f64>,
+    pub(crate) taints: Option<Arc<HashSet<String>>>,
 }
 
 /// Optional worker-signal groups requested by scorers and pickers.
@@ -140,10 +157,13 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
+    /// Request the worker's own taint set (published routing labels).
+    pub const TAINTS: Self = Self(1 << 3);
     /// Request host-owned active-request counts.
     pub const OCCUPANCY: Self = Self(1 << 5);
     #[cfg(any(test, feature = "bench"))]
-    pub(crate) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
+    pub(crate) const ALL: Self =
+        Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0 | Self::TAINTS.0);
 
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -264,6 +284,11 @@ impl CandidateData {
             } else {
                 WorkerLoadInput::default()
             },
+            taints: if inputs.contains(WorkerInputs::TAINTS) {
+                self.taints.clone().or_else(|| additional.taints.clone())
+            } else {
+                None
+            },
             preferred_taint_multiplier: self
                 .preferred_taint_multiplier
                 .or(additional.preferred_taint_multiplier),
@@ -286,6 +311,12 @@ impl ScoredWorkerCandidate {
     /// requested [`WorkerInputs::PREFERRED_TAINT`].
     pub fn preferred_taint_multiplier(&self) -> Option<f64> {
         self.preferred_taint_multiplier
+    }
+
+    /// Return the worker's own taint set when the picker requested [`WorkerInputs::TAINTS`].
+    /// None means access was not requested; an empty set means no published labels.
+    pub fn taints(&self) -> Option<&HashSet<String>> {
+        self.taints.as_deref()
     }
 }
 

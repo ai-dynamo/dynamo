@@ -110,6 +110,7 @@ link no catalog and reject a configured policy type at startup.
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+| `dynamo-uncached-pool-split` | Isolates large cache-miss prefills onto per-tier compute pools. Classifies by effective prefill (prompt length minus device-resident cache overlap) rather than raw input length, so long-but-cached agent turns keep their cache affinity. Tiers are `[min, max)` bands over effective prefill, each bound to a worker taint; members are declared by the workers themselves. A cache-miss request with no eligible tier member fails as overload (529, or 429 via `DYN_HTTP_OVERLOAD_STATUS_CODE`) rather than falling back to warm workers. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -130,6 +131,48 @@ yours to choose; `type` must be one of the policy types above.
 ```bash
 python3 -m dynamo.frontend --router-mode kv --router-policy-config worker-selection.yaml
 ```
+
+#### Split Compute Pools from Uncached Prefills
+
+`dynamo-uncached-pool-split` keeps large cache-miss prefills away from cache-friendly traffic by
+restricting them to tiered compute pools. A request is Cold only when its effective prefill —
+prompt tokens minus the best worker's device-resident cache overlap — falls inside a configured
+band; a long multi-turn prompt whose prefix is cached keeps its cache affinity and selects
+normally. Apply it to the prefill or aggregated stage:
+
+```yaml
+worker_selection:
+  prefill: compute-split
+  instances:
+    - name: compute-split
+      type: dynamo-uncached-pool-split
+      parameters:
+        pools:
+          - min_uncached_tokens: 131072   # 128K
+            max_uncached_tokens: 262144    # 256K, exclusive; omit for unbounded
+            taint: dynamo.topology/worker_pool=cold-1
+          - min_uncached_tokens: 262144   # 256K
+            taint: dynamo.topology/worker_pool=cold-2
+```
+
+Each tier is a `[min_uncached_tokens, max_uncached_tokens)` band over effective prefill bound to
+a worker taint. Bands must be ordered and disjoint; gaps between bands are Warm and select
+normally. Membership is declared by the workers: label the pool pods so they publish the taint
+(for example via `topology_domains` with `DYN_TOPOLOGY_ENABLED=true`, which turns
+`worker_pool: cold-1` into the canonical taint above), and scaling a pool is a deployment
+change rather than a router change. Workers carrying no taint never serve Cold traffic.
+
+For a single-tier deployment without labels, a convenience mode takes the first N candidates
+as the pool (`uncached_threshold_tokens: 100000` plus `compute_workers: 2`). It is mutually
+exclusive with `pools`, and either form must be configured: an instance without one fails at
+startup.
+
+Cold selection is least-loaded among eligible tier members. A Cold request with no eligible
+member — including single-worker selections, which cannot form a pool — surfaces as
+`AllEligibleWorkersOverloaded` and returns the overload status code (529 by default, or 429
+via `DYN_HTTP_OVERLOAD_STATUS_CODE`) with `ServiceOverloaded` semantics; it never silently
+falls back to warm workers. Queue-side admission (`uncached_token_queue_limit_per_worker`)
+bounds waiting independently. Warm and cache-affine traffic is unaffected by the pools.
 
 #### Configure the Default Policy
 
