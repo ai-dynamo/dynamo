@@ -5684,12 +5684,12 @@ impl OpenAIPreprocessor {
                 .filter(|parser| matches!(*parser, "kimi_k3" | "kimi-k3"))
                 .map(str::to_string)
         });
-        let parser_unwraps_all_kimi_k3_responses = effective_tool_call_parser
+        let parser_unwraps_all_responses = effective_tool_call_parser
             .as_deref()
-            .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
+            .is_some_and(Self::parser_unwraps_all_responses);
         let tool_call_parsing_enabled = Self::tool_call_parsing_enabled(request);
         let has_tools = request.inner.has_effective_tools();
-        let should_jail = if tool_call_parsing_enabled || parser_unwraps_all_kimi_k3_responses {
+        let should_jail = if tool_call_parsing_enabled || parser_unwraps_all_responses {
             Self::should_apply_tool_jail(
                 effective_tool_call_parser.as_ref(),
                 request.inner.tool_choice.as_ref(),
@@ -6486,6 +6486,28 @@ impl OpenAIPreprocessor {
         })
     }
 
+    /// Parsers whose wrappers must be decoded on every response, even when the
+    /// request carries no tools.
+    ///
+    /// A model can call a tool that only appears earlier in the conversation, and
+    /// the follow-up request need not repeat `tools`. Without decoding, the call
+    /// is returned as raw wrapper text in `content` instead of `tool_calls`.
+    ///
+    /// Checked both by the caller in `tool_processing_route`, which otherwise
+    /// short-circuits to `PassThrough` when tool parsing is disabled, and by
+    /// `should_apply_tool_jail` itself.
+    fn parser_unwraps_all_responses(parser: &str) -> bool {
+        matches!(
+            parser,
+            "kimi_k3"
+                | "kimi-k3"
+                | "minimax_m3"
+                | "minimax-m3"
+                | "minimax_m3_nom"
+                | "minimax-m3-nom"
+        )
+    }
+
     /// Determine if we should apply the tool calling jail based on configuration
     /// Returns Ok(true) if jail should be applied, Ok(false) if not, or Err if invalid config
     pub fn should_apply_tool_jail(
@@ -6493,11 +6515,11 @@ impl OpenAIPreprocessor {
         tool_choice: Option<&ChatCompletionToolChoiceOption>,
         has_tools: bool,
     ) -> std::result::Result<bool, Error> {
-        // Necessary for now because K3 needs a special parser for XTML channel
-        // parsing on all responses, regardless of tool or reasoning usage.
-        // Keep its parser active so response/message wrappers never leak into
-        // OpenAI `content`, even when the request has no tools.
-        if tool_call_parser.is_some_and(|parser| matches!(parser.as_str(), "kimi_k3" | "kimi-k3")) {
+        // K3 and MiniMax-M3 need their parser on every response, regardless of
+        // tool or reasoning usage. See `parser_unwraps_all_responses`.
+        if tool_call_parser
+            .is_some_and(|parser| Self::parser_unwraps_all_responses(parser.as_str()))
+        {
             return Ok(true);
         }
 
@@ -14201,6 +14223,59 @@ responses_tools: None,
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn test_minimax_m3_jail_applies_without_tools_in_request() {
+        // A model can call a tool that only appears earlier in the conversation,
+        // so the follow-up request carries no `tools`. Without the jail the call
+        // is returned as raw wrapper text in `content` instead of `tool_calls`.
+        for parser in [
+            "minimax_m3",
+            "minimax-m3",
+            "minimax_m3_nom",
+            "minimax-m3-nom",
+        ] {
+            let parser = parser.to_string();
+            assert!(
+                OpenAIPreprocessor::should_apply_tool_jail(Some(&parser), None, false).unwrap(),
+                "{parser} should jail even when the request has no tools"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parser_unwraps_all_responses_covers_both_families() {
+        // The caller in tool_processing_route consults this before deciding to
+        // short-circuit to PassThrough, so a parser missing here never reaches
+        // should_apply_tool_jail at all when the request has no tools.
+        for parser in [
+            "kimi_k3",
+            "kimi-k3",
+            "minimax_m3",
+            "minimax-m3",
+            "minimax_m3_nom",
+            "minimax-m3-nom",
+        ] {
+            assert!(
+                OpenAIPreprocessor::parser_unwraps_all_responses(parser),
+                "{parser} must decode every response"
+            );
+        }
+
+        for parser in ["hermes", "llama3_json", "minimax_m2", "qwen3"] {
+            assert!(
+                !OpenAIPreprocessor::parser_unwraps_all_responses(parser),
+                "{parser} must not decode responses when the request has no tools"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tool_jail_still_skipped_without_parser_and_tools() {
+        assert!(!OpenAIPreprocessor::should_apply_tool_jail(None, None, false).unwrap());
+        let other = "hermes".to_string();
+        assert!(!OpenAIPreprocessor::should_apply_tool_jail(Some(&other), None, false).unwrap());
     }
 
     /// Verifies which force-reasoning parsers use guided-output shape detection.
