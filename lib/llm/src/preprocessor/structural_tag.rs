@@ -145,8 +145,20 @@ fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolCh
     exclude_tools_when_none && matches!(tool_choice, ToolChoice::None)
 }
 
-/// Whether a request is entitled to use a structural tag, bundled with proof the
-/// parser registry can actually build one.
+pub(super) fn uses_gpt_oss_required_array(
+    parser_name: Option<&str>,
+    tool_choice: &ToolChoice,
+    parallel_tool_calls: Option<bool>,
+) -> bool {
+    v2::enabled()
+        && matches!(parser_name, Some("harmony" | "gpt_oss"))
+        && matches!(tool_choice, ToolChoice::Required)
+        && parallel_tool_calls != Some(false)
+}
+
+/// Whether a request uses a native tool-call structural tag, bundled with proof
+/// the parser registry can actually build one. Required GPT-OSS arrays keep their
+/// guided-JSON parser mode even when their JSON payload has a structural envelope.
 ///
 /// This is the single owner of "is a structural tag applicable and available" —
 /// covering model-family/tool-choice intrinsic eligibility, the configured
@@ -195,10 +207,16 @@ pub(crate) fn structural_tag_decision(
     // prompt-level XTML path, but they still need an actual tool to require.
     validate_forced_tool_choice(tool_choice, tools)?;
 
-    // shortcut: Harmony's <|call|> conflicts with XGrammar stop-token handling,
-    // even when workers enable tags. Remove this guard once supported XGrammar
-    // fixes https://github.com/mlc-ai/xgrammar/issues/701.
-    if matches!(parser_name, Some("harmony" | "gpt_oss")) {
+    // A native Harmony handoff stops vLLM after the first call. Required parallel
+    // calls instead share one guided JSON array, parsed as GuidedJsonRequired.
+    if uses_gpt_oss_required_array(parser_name, tool_choice, parallel_tool_calls) {
+        return Ok(StructuralTagDecision::NotApplicable);
+    }
+
+    // shortcut: v1 Harmony's <|call|> conflicts with XGrammar stop-token handling.
+    // Remove once v1 fixes https://github.com/mlc-ai/xgrammar/issues/701.
+    // The v2 grammar completes before the engine-owned stop token.
+    if !v2::enabled() && matches!(parser_name, Some("harmony" | "gpt_oss")) {
         return Ok(StructuralTagDecision::NotApplicable);
     }
 
@@ -269,6 +287,40 @@ pub(crate) fn structural_tag_decision(
 }
 
 impl OpenAIPreprocessor {
+    pub(super) fn apply_gpt_oss_required_array_tag(
+        &self,
+        schema: &serde_json::Value,
+        starts_in_reasoning: bool,
+        request: &mut PreprocessedRequest,
+    ) -> Result<bool, DynamoError> {
+        let Some(config) = self.runtime_config.structural_tag.as_ref() else {
+            return Ok(false);
+        };
+        // The caller gates this path on uses_gpt_oss_required_array, whose v2
+        // Harmony aliases both have registered structural-tag builders.
+        let parser_name = self
+            .tool_call_parser
+            .as_deref()
+            .expect("GPT-OSS parser selected");
+        let builder = SelectedStructuralTagBuilder::for_parser(parser_name)
+            .expect("GPT-OSS v2 structural tag builder is registered");
+        apply_structural_tag(
+            parser_name,
+            builder.build(&StructuralTagBuildRequest {
+                tool_choice: &ToolChoice::None,
+                tools: &[],
+                parallel_tool_calls: None,
+                schema_mode: config.schema,
+                exclude_special_tokens: config.exclude_special_tokens,
+                reasoning_boundary: ResolvedReasoningBoundary::StructuralTag,
+                tool_arguments_any_order: false,
+                starts_in_reasoning,
+                structured_output_schema: Some(schema),
+            }),
+            request,
+        )
+    }
+
     /// Apply structural tag guided decoding when enabled for this request.
     pub(super) fn apply_tool_choice_structural_tag(
         &self,
@@ -438,6 +490,16 @@ pub(super) fn validate_runtime_config(
     let backend_excludes_reasoning = match runtime_config
         .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
     {
+        // GPT-OSS's native reasoner is a Harmony stub, not a delayed grammar gate.
+        Ok(_)
+            if v2::enabled()
+                && matches!(
+                    runtime_config.tool_call_parser.as_deref(),
+                    Some("harmony" | "gpt_oss")
+                ) =>
+        {
+            false
+        }
         Ok(value) => value.unwrap_or(false),
         Err(error) if runtime_config.structural_tag.is_none() => {
             tracing::warn!(

@@ -4130,6 +4130,11 @@ pub(crate) mod tests {
                 "",
             ),
             (
+                "<|channel|>analysis<|message|>plan<|end|><|start|>assistant<|channel|>final<|message|>[{\"name\":\"get_weather\",\"parameters\":{\"city\":\"Tokyo\"}}]<|return|>",
+                GuidedToolConstraint::GuidedJsonRequired,
+                "plan",
+            ),
+            (
                 r#"{"city":"Tokyo"}"#,
                 GuidedToolConstraint::GuidedJsonNamed {
                     tool_name: "get_weather".to_string(),

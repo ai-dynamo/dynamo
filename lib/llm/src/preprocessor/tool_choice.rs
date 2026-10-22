@@ -33,7 +33,7 @@ impl OpenAIPreprocessor {
     /// Align GPT-OSS's prompt with the JSON-array fallback installed below.
     /// Its native template describes separate Harmony messages, which otherwise
     /// encourages a handoff after the first of several independent calls.
-    /// The frontend disables Harmony structural tags even when workers advertise them.
+    /// Required parallel calls keep this format even with reasoning-aware tags.
     pub(super) fn apply_gpt_oss_json_tool_prompt(
         &self,
         request: &mut NvCreateChatCompletionRequest,
@@ -46,6 +46,12 @@ impl OpenAIPreprocessor {
                 request.inner.tool_choice,
                 Some(ChatCompletionToolChoiceOption::Required)
             )
+        {
+            return;
+        }
+        if crate::protocols::openai::chat_completions::tool_parser_v2::enabled()
+            && self.runtime_config.structural_tag.is_some()
+            && request.inner.parallel_tool_calls == Some(false)
         {
             return;
         }
@@ -202,6 +208,22 @@ impl OpenAIPreprocessor {
             request.inner.parallel_tool_calls,
         ) {
             Ok(Some(guidance)) => {
+                if let ToolChoiceGuidance::Json(schema) = &guidance
+                    && super::structural_tag::uses_gpt_oss_required_array(
+                        self.tool_call_parser.as_deref(),
+                        &parser_tool_choice,
+                        request.inner.parallel_tool_calls,
+                    )
+                    && self.apply_gpt_oss_required_array_tag(
+                        schema,
+                        prompt_injected_reasoning,
+                        common_request,
+                    )?
+                {
+                    // The envelope uses structural guidance, but its payload is
+                    // the required-call JSON array rather than native Harmony calls.
+                    return Ok(GuidedToolConstraint::GuidedJsonRequired);
+                }
                 let gd = common_request
                     .sampling_options
                     .guided_decoding
@@ -528,6 +550,7 @@ mod tests {
             ("harmony", StructuralTagMode::Off, "required", false, true),
             ("harmony", StructuralTagMode::On, "required", true, true),
             ("gpt_oss", StructuralTagMode::On, "required", true, true),
+            ("harmony", StructuralTagMode::On, "required", false, false),
             ("harmony", StructuralTagMode::Off, "auto", true, false),
             ("qwen3", StructuralTagMode::Off, "required", true, false),
         ] {
@@ -543,9 +566,32 @@ mod tests {
                     .apply_tool_choice_guided_decoding(&request, &mut common, false)
                     .unwrap();
                 let guided = common.sampling_options.guided_decoding.unwrap();
-                assert_eq!(constraint, GuidedToolConstraint::GuidedJsonRequired);
-                assert!(guided.json.is_some() || guided.regex.is_some());
-                assert!(guided.structural_tag.is_none());
+                if mode == StructuralTagMode::On {
+                    assert_eq!(
+                        constraint,
+                        if parallel {
+                            GuidedToolConstraint::GuidedJsonRequired
+                        } else {
+                            GuidedToolConstraint::StructuralTag
+                        }
+                    );
+                    assert!(guided.structural_tag.is_some());
+                    assert!(guided.json.is_none());
+                    if parallel {
+                        let encoded = guided.structural_tag.unwrap().to_string();
+                        assert!(encoded.contains("analysis"));
+                        assert!(encoded.contains("final"));
+                        assert!(encoded.contains("parameters"));
+                        assert_eq!(
+                            guided_tool_constraint(&request, Some(parser), None, false,).unwrap(),
+                            constraint
+                        );
+                    }
+                } else {
+                    assert_eq!(constraint, GuidedToolConstraint::GuidedJsonRequired);
+                    assert!(guided.json.is_some() || guided.regex.is_some());
+                    assert!(guided.structural_tag.is_none());
+                }
             }
             assert_eq!(request.inner.messages[1], original[1]);
             if changes {
