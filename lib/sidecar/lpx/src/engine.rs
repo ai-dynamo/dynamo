@@ -12,8 +12,6 @@ use dynamo_backend_common::{
     AsyncEngineContext, DynamoError, EngineConfig, GenerateContext, LLMEngine, LLMEngineOutput,
     LLMEngineOutputExt, PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
-use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
 };
@@ -27,7 +25,6 @@ use crate::convert::{
     DispatchFailure, ResponseState, build_generate_request, build_handoff_cleanup_request,
     dispatch_failure, stream_status, trace_headers,
 };
-use crate::health;
 use crate::model::{DiscoveredEngine, engine_label, expected_role, role_name};
 
 const ALREADY_STARTED: &str = "the LPX sidecar has already started";
@@ -376,31 +373,6 @@ impl LLMEngine for LpxSidecarEngine {
                 "Control.Abort failed"
             );
         }
-    }
-
-    /// From here on, the sidecar's readiness follows the engine's
-    /// `grpc.health.v1` status, until `cleanup`. The Worker calls this once,
-    /// after `start` and before it registers the endpoint, so the engine,
-    /// identified by now, has its say before the worker can be discovered.
-    /// Registration itself does not follow this signal. A standby rank builds
-    /// no engine, so it never watches.
-    async fn on_endpoint_ready(&self, endpoint: Endpoint) -> Result<(), DynamoError> {
-        let client = self.connected()?;
-        // Closed until the engine reports that it is serving.
-        let gate = endpoint
-            .drt()
-            .system_health()
-            .lock()
-            .runtime_readiness_gate();
-        tokio::spawn(health::follow(
-            client.health_channel(),
-            gate,
-            Arc::clone(&self.discovered.engine_name),
-            self.endpoint.to_string(),
-            self.transport.retry_interval,
-            self.cancel.child_token(),
-        ));
-        Ok(())
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {

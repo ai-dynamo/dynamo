@@ -17,10 +17,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, OnceLock},
     time::Instant,
 };
 use tokio::sync::mpsc;
@@ -66,55 +63,6 @@ impl Drop for ReadinessHold {
     }
 }
 
-/// One owner's say in readiness under [`SystemProbePolicy::RuntimeOnly`].
-///
-/// That policy reports readiness from runtime dependencies alone. A process
-/// whose readiness must also follow something outside the runtime, such as a
-/// sidecar's engine, takes a gate from
-/// [`SystemHealth::runtime_readiness_gate`] and keeps it closed while that
-/// thing is unavailable. While any gate is closed, the readiness route fails.
-/// Liveness is unaffected, and so is [`SystemProbePolicy::Worker`], whose
-/// readiness the worker publishes through endpoint health.
-///
-/// A gate starts closed. Dropping it opens it, and it never takes the
-/// `SystemHealth` lock.
-///
-/// [`SystemProbePolicy::RuntimeOnly`]: crate::system_status_server::SystemProbePolicy::RuntimeOnly
-/// [`SystemProbePolicy::Worker`]: crate::system_status_server::SystemProbePolicy::Worker
-#[derive(Debug)]
-pub struct RuntimeReadinessGate {
-    closed_gates: Arc<AtomicUsize>,
-    is_closed: bool,
-}
-
-impl RuntimeReadinessGate {
-    /// Withhold readiness. Closing a closed gate does nothing.
-    pub fn close(&mut self) {
-        if !self.is_closed {
-            self.is_closed = true;
-            self.closed_gates.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    /// Stop withholding readiness. Opening an open gate does nothing.
-    pub fn open(&mut self) {
-        if self.is_closed {
-            self.is_closed = false;
-            self.closed_gates.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-
-    pub fn is_closed(&self) -> bool {
-        self.is_closed
-    }
-}
-
-impl Drop for RuntimeReadinessGate {
-    fn drop(&mut self) {
-        self.open();
-    }
-}
-
 /// Health check target containing instance info and payload
 #[derive(Clone, Debug)]
 pub struct HealthCheckTarget {
@@ -137,8 +85,6 @@ pub struct SystemHealth {
     /// Endpoints whose owner publishes readiness itself. Transport registration
     /// does not mark these ready; see [`SystemHealth::hold_endpoint_readiness`].
     readiness_holds: Arc<std::sync::RwLock<HashSet<String>>>,
-    /// How many [`RuntimeReadinessGate`]s are closed.
-    closed_runtime_readiness_gates: Arc<AtomicUsize>,
     /// Channel for new endpoint registrations
     /// This solves the race condition where HealthCheckManager starts before endpoints are registered
     /// Using a channel ensures no registrations are lost.
@@ -180,7 +126,6 @@ impl SystemHealth {
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             readiness_holds: Arc::new(std::sync::RwLock::new(HashSet::new())),
-            closed_runtime_readiness_gates: Arc::new(AtomicUsize::new(0)),
             new_endpoint_tx: tx,
             new_endpoint_rx: Arc::new(parking_lot::Mutex::new(Some(rx))),
             use_endpoint_health_status,
@@ -242,22 +187,6 @@ impl SystemHealth {
     /// [`hold_endpoint_readiness`]: SystemHealth::hold_endpoint_readiness
     pub fn release_endpoint_readiness(&self, endpoint: &str) {
         self.readiness_holds.write().unwrap().remove(endpoint);
-    }
-
-    /// A new [`RuntimeReadinessGate`], closed: readiness under
-    /// `SystemProbePolicy::RuntimeOnly` is withheld until its owner opens it.
-    pub fn runtime_readiness_gate(&self) -> RuntimeReadinessGate {
-        let mut gate = RuntimeReadinessGate {
-            closed_gates: self.closed_runtime_readiness_gates.clone(),
-            is_closed: false,
-        };
-        gate.close();
-        gate
-    }
-
-    /// Whether any [`RuntimeReadinessGate`] is closed.
-    pub fn is_runtime_readiness_withheld(&self) -> bool {
-        self.closed_runtime_readiness_gates.load(Ordering::SeqCst) > 0
     }
 
     pub fn set_health_status(&mut self, status: HealthStatus) {
@@ -537,32 +466,6 @@ mod tests {
             "with no health-check target the endpoint's readiness is ignored and \
              the worker falls back to system_health (NotReady) — this is the 503"
         );
-    }
-
-    /// Runtime-only readiness is withheld while any gate is closed, each gate
-    /// counts once however often it is closed, and dropping a gate opens it.
-    #[test]
-    fn runtime_readiness_follows_every_gate() {
-        let health = system_health(false);
-        assert!(!health.is_runtime_readiness_withheld());
-
-        let mut engine = health.runtime_readiness_gate();
-        assert!(engine.is_closed(), "a new gate withholds readiness");
-        assert!(health.is_runtime_readiness_withheld());
-        engine.open();
-        engine.open();
-        assert!(!health.is_runtime_readiness_withheld());
-
-        let other = health.runtime_readiness_gate();
-        engine.close();
-        engine.close();
-        drop(other);
-        assert!(
-            health.is_runtime_readiness_withheld(),
-            "one gate opening must not release another's hold"
-        );
-        drop(engine);
-        assert!(!health.is_runtime_readiness_withheld());
     }
 
     /// A held endpoint does not become ready on transport registration, so its

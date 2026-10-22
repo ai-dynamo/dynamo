@@ -44,10 +44,6 @@ pub enum SystemProbePolicy {
     #[default]
     Worker,
     /// Static liveness and readiness based on runtime dependencies, not the engine.
-    /// An owner that knows more, such as a sidecar watching its engine, can
-    /// withhold readiness with a [`RuntimeReadinessGate`].
-    ///
-    /// [`RuntimeReadinessGate`]: crate::system_health::RuntimeReadinessGate
     RuntimeOnly,
 }
 
@@ -522,19 +518,12 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     (status_code, response.to_string())
 }
 
-/// Sidecar readiness is independent of model registration, and of engine health
-/// unless the sidecar closes a `RuntimeReadinessGate` for it.
+/// Sidecar readiness is independent of engine health and model registration.
 async fn runtime_health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
-    let withheld = state
-        .drt()
-        .system_health()
-        .lock()
-        .is_runtime_readiness_withheld();
-    let ready = !withheld
-        && matches!(
-            tokio::time::timeout(Duration::from_secs(1), state.drt().check_dependencies()).await,
-            Ok(Ok(()))
-        );
+    let ready = matches!(
+        tokio::time::timeout(Duration::from_secs(1), state.drt().check_dependencies()).await,
+        Ok(Ok(()))
+    );
     let (code, status) = if ready {
         (StatusCode::OK, "ready")
     } else {

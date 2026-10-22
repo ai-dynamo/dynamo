@@ -17,9 +17,8 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
-# `logging::inject_trace_headers_into_map` for the W3C trace metadata, the
-# system server settings a standby rank answers its probes on, and
-# `system_health::RuntimeReadinessGate` for readiness that follows the engine.
+# `logging::inject_trace_headers_into_map` for the W3C trace metadata and the
+# system server settings a standby rank answers its probes on.
 dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 # Generated `openengine.v1` types; see `src/lib.rs`. The Mocker server
@@ -36,7 +35,6 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
-tonic-health = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

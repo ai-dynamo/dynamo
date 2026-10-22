@@ -124,7 +124,6 @@ async fn default_worker_probes_keep_configured_health_and_response() {
                     DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
                         .await
                         .unwrap();
-                let _gate = drt.system_health().lock().runtime_readiness_gate();
                 let info = drt.system_status_server_info().unwrap();
                 let base = format!("http://{}", info.socket_addr);
                 let client = client();
@@ -171,11 +170,6 @@ async fn runtime_shutdown_withdraws_readiness_without_stopping_liveness() {
         let info = drt.system_status_server_info().unwrap();
         let base = format!("http://{}", info.socket_addr);
         let client = client();
-        assert_eq!(status(&client, &base, "/health").await, 200);
-        let gate = drt.system_health().lock().runtime_readiness_gate();
-        assert_eq!(status(&client, &base, "/health").await, 503);
-        assert_eq!(status(&client, &base, "/live").await, 200);
-        drop(gate);
         assert_eq!(status(&client, &base, "/health").await, 200);
         let guard = runtime.graceful_shutdown_tracker().register_task();
         runtime.shutdown();

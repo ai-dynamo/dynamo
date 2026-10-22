@@ -7,17 +7,14 @@
 //! A hybrid GPU+LPU engine serves two roles behind this sidecar: aggregated,
 //! and the decode half of prefill/decode disaggregation, where a vLLM worker
 //! runs prefill and the engine pulls its KV cache over NIXL. An LPU-only
-//! engine serves aggregated requests. Once the engine is identified, the
-//! sidecar's readiness also follows the engine's `grpc.health.v1` status.
-//! When one engine spans several Pods, only the sidecar on rank 0 serves; the
-//! others stand by.
+//! engine serves aggregated requests. When one engine spans several Pods,
+//! only the sidecar on rank 0 serves; the others stand by.
 
 mod args;
 mod client;
 mod convert;
 mod engine;
 mod handoff;
-mod health;
 mod model;
 mod standby;
 

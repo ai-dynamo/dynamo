@@ -64,12 +64,6 @@ impl OpenEngineClient {
         self.pool.len()
     }
 
-    /// A channel for the long-lived health watch. Like every pooled channel, it
-    /// reconnects on its next call after the engine drops the connection.
-    pub(crate) fn health_channel(&self) -> Channel {
-        self.pool.next_channel()
-    }
-
     fn inference(&self) -> InferenceClient<Channel> {
         InferenceClient::new(self.pool.next_channel())
             .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
@@ -148,8 +142,8 @@ impl OpenEngineClient {
 
     /// Polls `GetModelInfo` until the engine answers or `deadline` passes.
     ///
-    /// This wait is the sidecar's readiness gate. It relies on the engine
-    /// answering UNAVAILABLE until it admits requests, as LPX engines do.
+    /// This wait keeps the worker from registering before the engine admits
+    /// requests. It relies on the engine answering UNAVAILABLE until then.
     ///
     /// Transport failures and UNAVAILABLE are retried, and so is a call that
     /// gets no answer within `attempt_timeout`. An answer saying the request

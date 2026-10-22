@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! An in-process fake of an LPX engine's OpenEngine `Inference` and
-//! `Control` services on a loopback port, optionally with tonic-health's
-//! `grpc.health.v1`, which LPX engines serve too.
+//! `Control` services on a loopback port.
 
 use std::collections::BTreeMap;
 use std::pin::Pin;
@@ -17,8 +16,6 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
-use tonic_health::pb::health_server::HealthServer;
-use tonic_health::server::{HealthReporter, HealthService};
 
 use crate::pb;
 
@@ -378,27 +375,20 @@ impl pb::control_server::Control for FakeEngine {
 pub(super) struct FakeServer {
     pub(super) endpoint: String,
     pub(super) fake: FakeEngine,
-    /// Sending or dropping it starts the graceful shutdown: no new
+    /// Dropping it starts the graceful shutdown: no new
     /// connections, and each open one closes once its streams end.
-    shutdown: oneshot::Sender<()>,
-    served: tokio::task::JoinHandle<()>,
+    _shutdown: oneshot::Sender<()>,
 }
 
 impl FakeServer {
-    /// Serves `fake` on a loopback port, with `grpc.health.v1` reporting what
-    /// `health` sets when given. Without it, tonic answers a health watch
-    /// `UNIMPLEMENTED`.
-    pub(super) async fn start(fake: FakeEngine, health: Option<HealthReporter>) -> Self {
+    pub(super) async fn start(fake: FakeEngine) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let address = listener.local_addr().expect("address");
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let health =
-            health.map(|reporter| HealthServer::new(HealthService::from_health_reporter(reporter)));
         let router = tonic::transport::Server::builder()
             .add_service(pb::inference_server::InferenceServer::new(fake.clone()))
-            .add_service(pb::control_server::ControlServer::new(fake.clone()))
-            .add_optional_service(health);
-        let served = tokio::spawn(async move {
+            .add_service(pb::control_server::ControlServer::new(fake.clone()));
+        tokio::spawn(async move {
             router
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown_rx.await;
@@ -409,20 +399,7 @@ impl FakeServer {
         Self {
             endpoint: format!("http://{address}"),
             fake,
-            shutdown,
-            served,
+            _shutdown: shutdown,
         }
-    }
-
-    /// Shuts the server down gracefully, as an engine that has drained stops
-    /// its gRPC server: it accepts no new connections and waits for every open
-    /// stream to end, without ending any health watch itself. Panics unless
-    /// the shutdown finishes within a few seconds.
-    pub(super) async fn shut_down_gracefully(self) {
-        let _ = self.shutdown.send(());
-        tokio::time::timeout(Duration::from_secs(5), self.served)
-            .await
-            .expect("the graceful shutdown waited on a stream that never ended")
-            .expect("the engine's server task");
     }
 }

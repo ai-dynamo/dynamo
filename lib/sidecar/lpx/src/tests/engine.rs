@@ -57,7 +57,7 @@ async fn a_stalled_or_unavailable_model_info_call_is_retried() {
         let fake = FakeEngine::new(AGG);
         *fake.0.model_info_stalls.lock().unwrap() = stalls;
         *fake.0.model_info_status.lock().unwrap() = status;
-        let server = FakeServer::start(fake, None).await;
+        let server = FakeServer::start(fake).await;
         let deadline = startup_deadline(Duration::from_secs(5)).unwrap();
         let info = client(&server)
             .await
@@ -77,7 +77,7 @@ async fn a_stalled_or_unavailable_model_info_call_is_retried() {
 async fn a_stalled_server_info_call_stops_at_the_startup_deadline() {
     let fake = FakeEngine::new(AGG);
     *fake.0.server_info_stalls.lock().unwrap() = 1;
-    let server = FakeServer::start(fake, None).await;
+    let server = FakeServer::start(fake).await;
     let client = client(&server).await;
     let deadline = startup_deadline(Duration::from_millis(100)).unwrap();
     let error = client
@@ -97,7 +97,7 @@ async fn unimplemented_and_not_found_end_the_wait() {
     for code in [tonic::Code::Unimplemented, tonic::Code::NotFound] {
         let fake = FakeEngine::new(AGG);
         *fake.0.model_info_status.lock().unwrap() = Some(code);
-        let server = FakeServer::start(fake, None).await;
+        let server = FakeServer::start(fake).await;
         let Err(error) = discover(argv(&server.endpoint, &[])).await else {
             panic!("the bootstrap must fail");
         };
@@ -111,7 +111,7 @@ async fn unimplemented_and_not_found_end_the_wait() {
 /// against the name the engine reports.
 #[tokio::test]
 async fn the_bootstrap_rejects_a_served_model_name_the_engine_does_not_report() {
-    let server = FakeServer::start(FakeEngine::new(AGG), None).await;
+    let server = FakeServer::start(FakeEngine::new(AGG)).await;
     for name in ["llama32-3b", " "] {
         let error = discover(argv(&server.endpoint, &["--served-model-name", name]))
             .await
@@ -138,7 +138,7 @@ async fn the_bootstrap_rejects_a_served_model_name_the_engine_does_not_report() 
 #[tokio::test]
 async fn an_in_band_error_ends_the_stream() {
     let fake = FakeEngine::new(AGG).with_behavior(Behavior::ErrorAfterFirstToken);
-    let server = FakeServer::start(fake, None).await;
+    let server = FakeServer::start(fake).await;
     let engine = started(&server, AGG).await;
     let outputs = collect(&engine, request()).await;
     let [Ok(token), Err(error)] = outputs.as_slice() else {
@@ -153,7 +153,7 @@ async fn an_in_band_error_ends_the_stream() {
 #[tokio::test]
 async fn a_rejected_decode_leg_still_dispatches_its_handoff() {
     let fake = FakeEngine::new(DECODE).with_behavior(Behavior::HangBeforeFirstToken);
-    let server = FakeServer::start(fake, None).await;
+    let server = FakeServer::start(fake).await;
     let engine = started(&server, DECODE).await;
     let context = dynamo_backend_common::testing::mock_context();
     let mut request = decode_request();
@@ -202,7 +202,7 @@ async fn a_rejected_decode_leg_still_dispatches_its_handoff() {
 
 #[tokio::test]
 async fn abort_is_sent_with_the_request_id() {
-    let server = FakeServer::start(FakeEngine::new(AGG), None).await;
+    let server = FakeServer::start(FakeEngine::new(AGG)).await;
     let engine = started(&server, AGG).await;
     let context = dynamo_backend_common::testing::mock_context();
     let request_id = context.id().to_string();
@@ -225,7 +225,7 @@ async fn abort_is_sent_with_the_request_id() {
 #[tokio::test]
 async fn a_decode_leg_cancelled_before_dispatch_is_still_sent() {
     let fake = FakeEngine::new(DECODE).with_behavior(Behavior::HangBeforeFirstToken);
-    let server = FakeServer::start(fake, None).await;
+    let server = FakeServer::start(fake).await;
     let engine = started(&server, DECODE).await;
     let context = dynamo_backend_common::testing::mock_context();
     context.stop_generating();
@@ -248,7 +248,7 @@ async fn a_decode_leg_cancelled_before_dispatch_is_still_sent() {
 #[tokio::test]
 async fn a_cancelled_decode_dispatch_is_not_abandoned_mid_flight() {
     let fake = FakeEngine::new(DECODE).with_behavior(Behavior::NeverOpens);
-    let server = FakeServer::start(fake, None).await;
+    let server = FakeServer::start(fake).await;
     let engine = Arc::new(started(&server, DECODE).await);
     let context = dynamo_backend_common::testing::mock_context();
     let dispatch = tokio::spawn({
@@ -281,7 +281,7 @@ async fn a_cancelled_decode_dispatch_is_not_abandoned_mid_flight() {
 
 #[tokio::test]
 async fn trace_context_rides_in_generate_metadata() {
-    let server = FakeServer::start(FakeEngine::new(AGG), None).await;
+    let server = FakeServer::start(FakeEngine::new(AGG)).await;
     let engine = started(&server, AGG).await;
     collect(&engine, request()).await;
     let recorded = server.fake.0.metadata.lock().unwrap().pop().unwrap();

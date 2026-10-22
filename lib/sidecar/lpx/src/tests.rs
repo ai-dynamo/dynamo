@@ -23,7 +23,6 @@ mod convert;
 mod engine;
 mod fake;
 mod handoff;
-mod health;
 mod model;
 
 use fake::{FakeEngine, FakeServer};
