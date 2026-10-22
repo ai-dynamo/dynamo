@@ -8,7 +8,7 @@ use futures::StreamExt;
 use tokio::sync::OwnedSemaphorePermit;
 
 use dynamo_runtime::{
-    pipeline::ManyOut,
+    pipeline::{AsyncEngineContextProvider, ManyOut},
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
@@ -25,6 +25,12 @@ impl PrefillRouter {
         task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     ) -> Result<PrefillCompletion, PrefillError> {
         let Some(first_output) = prefill_response.next().await else {
+            // The egress ends the response stream as soon as the request context is
+            // stopped, before the worker's final item can arrive. Once a decode
+            // rejection has stopped this prefill, an empty stream is that cancellation.
+            if prefill_response.context().is_stopped() {
+                return Err(PrefillError::Cancelled);
+            }
             return Err(PrefillError::PrefillError(
                 "Prefill router returned no output (stream ended)".to_string(),
                 None,
@@ -76,18 +82,26 @@ impl PrefillRouter {
             }
             None
         } else {
-            Some(PrefillTask::spawn(async move {
-                let _task_guard = task_guard;
-                while let Some(output) = prefill_response.next().await {
-                    PrefillTask::check_output(&output)?;
-                }
-                // Bootstrap details unblock decode, but do not mean prefill is
-                // complete. Record completion only after its stream finishes.
-                if let Some(tracker) = tracker {
-                    tracker.record_prefill_complete();
-                }
-                Ok(())
-            }))
+            let prefill_context = prefill_response.context();
+            Some(PrefillTask::spawn(
+                async move {
+                    let _task_guard = task_guard;
+                    let mut prefill_output = None;
+                    while let Some(output) = prefill_response.next().await {
+                        PrefillTask::check_output(&output)?;
+                        if let Some(engine_data) = output.data.and_then(|data| data.engine_data) {
+                            prefill_output = Some(engine_data);
+                        }
+                    }
+                    // Bootstrap details unblock decode, but do not mean prefill is
+                    // complete. Record completion only after its stream finishes.
+                    if let Some(tracker) = tracker {
+                        tracker.record_prefill_complete();
+                    }
+                    Ok(prefill_output)
+                },
+                prefill_context,
+            ))
         };
 
         // A CTX request that reaches EOS/stop during its one-token prefill step
@@ -154,26 +168,36 @@ impl PrefillRouter {
         phase_transition_permit: OwnedSemaphorePermit,
     ) -> PrefillTask {
         let task_guard = self.task_guard.clone();
-        PrefillTask::spawn(async move {
+        let prefill_context = prefill_stream.context();
+        PrefillTask::spawn_unlogged(async move {
             drop(phase_transition_permit);
-            match Self::consume_prefill_stream(prefill_stream, tracker, task_guard).await? {
-                PrefillCompletion::Handoff {
-                    completion: Some(task),
-                    ..
-                } => task.wait().await,
-                PrefillCompletion::Terminal { output } => PrefillTask::check_output(&output),
-                _ => Ok(()),
-            }
+            let result =
+                match Self::consume_prefill_stream(prefill_stream, tracker, task_guard).await {
+                    Ok(PrefillCompletion::Handoff {
+                        completion: Some(task),
+                        ..
+                    }) => {
+                        // The inner observer already logs its own failures.
+                        return task.wait().await;
+                    }
+                    Ok(PrefillCompletion::Terminal { output }) => {
+                        PrefillTask::check_output(&output).map(|()| None)
+                    }
+                    Ok(_) => Ok(None),
+                    Err(error) => Err(error),
+                };
+            result.inspect_err(|error| PrefillTask::log_failure(error, prefill_context.as_ref()))
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::protocols::response_merge::PrefillNeed;
     use futures::stream;
     use serde_json::json;
 
-    use dynamo_runtime::pipeline::{ResponseStream, context::Controller};
+    use dynamo_runtime::pipeline::{AsyncEngineContext, ResponseStream, context::Controller};
 
     use super::*;
 
@@ -191,6 +215,129 @@ mod tests {
             disaggregated_params: Some(json!({})),
             ..Default::default()
         })
+    }
+
+    /// Intentional prefill aborts must be quiet without hiding real tail failures.
+    #[test]
+    fn bootstrap_cancellation_logging_distinguishes_expected_abort() {
+        use std::sync::Mutex;
+        use tracing_subscriber::{Layer, layer::SubscriberExt};
+
+        struct Levels(Arc<Mutex<Vec<tracing::Level>>>);
+        impl<S: tracing::Subscriber> Layer<S> for Levels {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event
+                    .metadata()
+                    .target()
+                    .ends_with("prefill_router::handoff")
+                {
+                    self.0.lock().unwrap().push(*event.metadata().level());
+                }
+            }
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for wrapped in [false, true] {
+            for bootstrap in [true, false] {
+                if !wrapped && !bootstrap {
+                    continue;
+                }
+                for stopped in [true, false] {
+                    // `None` ends the stream without a tail item, as the egress does
+                    // once the context is stopped; it only reaches the observer when
+                    // no bootstrap item arrived first.
+                    let mut tails = vec![
+                        Some(Annotated::from_data(LLMEngineOutput::cancelled())),
+                        Some(Annotated::from_data(LLMEngineOutput::error(
+                            "prefill failed".to_string(),
+                        ))),
+                        Some(Annotated::from_error("prefill transport failed")),
+                    ];
+                    if !bootstrap {
+                        tails.push(None);
+                    }
+                    for tail in tails {
+                        let ended = tail.is_none();
+                        let cancelled = tail.as_ref().is_some_and(|tail| {
+                            tail.data.as_ref().is_some_and(|data| {
+                                data.finish_reason == Some(FinishReason::Cancelled)
+                            })
+                        });
+                        let levels = Arc::new(Mutex::new(Vec::new()));
+                        let subscriber =
+                            tracing_subscriber::registry().with(Levels(levels.clone()));
+                        let run = async {
+                            let context = Arc::new(Controller::default());
+                            let first = Annotated::from_data(LLMEngineOutput {
+                                disaggregated_params: Some(json!({
+                                    "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
+                                })),
+                                ..Default::default()
+                            });
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            let stream = stream::iter(bootstrap.then_some(first)).chain(
+                                stream::once(async move { rx.await.unwrap() })
+                                    .filter_map(|tail| async move { tail }),
+                            );
+                            let response = ResponseStream::new(Box::pin(stream), context.clone());
+                            let task = if wrapped {
+                                let router = super::super::tests::active_conditional_router();
+                                let tracker = Arc::new(RequestTracker::new());
+                                let permit = tracker
+                                    .set_phase(
+                                        crate::protocols::common::timing::RequestPhase::Prefill,
+                                    )
+                                    .await;
+                                router.spawn_prefill_task(response, Some(tracker), permit)
+                            } else {
+                                let result =
+                                    PrefillRouter::consume_prefill_stream(response, None, None)
+                                        .await
+                                        .unwrap();
+                                let PrefillCompletion::Handoff {
+                                    completion: Some(task),
+                                    ..
+                                } = result
+                                else {
+                                    panic!("expected bootstrap completion observer");
+                                };
+                                task
+                            };
+                            if stopped {
+                                context.stop_generating();
+                            }
+                            tx.send(tail).unwrap();
+                            assert!(
+                                tokio::time::timeout(
+                                    std::time::Duration::from_secs(1),
+                                    task.wait()
+                                )
+                                .await
+                                .unwrap()
+                                .is_err()
+                            );
+                        };
+                        tracing::subscriber::with_default(subscriber, || runtime.block_on(run));
+                        let expected = if stopped && (cancelled || ended) {
+                            tracing::Level::DEBUG
+                        } else {
+                            tracing::Level::WARN
+                        };
+                        assert_eq!(
+                            *levels.lock().unwrap(),
+                            vec![expected],
+                            "wrapped={wrapped}, bootstrap={bootstrap}, stopped={stopped}, cancelled={cancelled}, ended={ended}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -227,7 +374,12 @@ mod tests {
             let decode: ManyOut<Annotated<LLMEngineOutput>> =
                 ResponseStream::new(Box::pin(stream::pending()), context.clone());
             match completion
-                .forward_decode(async { Ok(decode) }, context)
+                .forward_decode(
+                    async { Ok(decode) },
+                    context,
+                    PrefillNeed::None,
+                    Arc::new(Controller::default()),
+                )
                 .await
             {
                 Err(error) => assert!(error.to_string().contains("Prefill")),

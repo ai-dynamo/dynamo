@@ -51,7 +51,6 @@ from tests.router.helper import (
     generate_random_suffix,
     get_runtime,
     managed_runtime,
-    parse_sse_json_chunks,
     poll_for_worker_instances,
     topology_env,
     wait_for_frontend_ready,
@@ -65,6 +64,7 @@ from tests.router.mocker_process import (
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.router_nvext import parse_sse_json_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -1015,7 +1015,9 @@ async def _wait_for_frontend_to_commit_single_pd_role(
         while asyncio.get_running_loop().time() < deadline:
             try:
                 async with session.get(readiness_url) as response:
-                    if response.status == 200:
+                    # This startup milestone is discovery of one role, not serving readiness.
+                    # The second role starts only after this wait; incomplete topology returns 503.
+                    if response.status in (200, 503):
                         body = await response.json()
                         last_response = body
                         role = (
@@ -1070,7 +1072,7 @@ async def _wait_for_expected_disagg_worker_ids(
                 ) as response:
                     if response.status != 200:
                         await response.read()
-                        await asyncio.sleep(0.25)
+                        await asyncio.sleep(0.05)
                         continue
 
                     body = await response.text()
@@ -1085,6 +1087,16 @@ async def _wait_for_expected_disagg_worker_ids(
             last_worker_ids = worker_ids
             prefill_worker_id = worker_ids["prefill_worker_id"]
             decode_worker_id = worker_ids["decode_worker_id"]
+            # Both roles are registered, so a 200 that decode served as its own
+            # prefill means the prefill hop was skipped (#16529); the activation
+            # window must fail closed with a retryable 503 instead.
+            assert decode_worker_id is None or prefill_worker_id not in (
+                None,
+                decode_worker_id,
+            ), (
+                "Request was served by decode without a prefill hop after the "
+                f"prefill worker registered; worker IDs: {worker_ids}"
+            )
             if (
                 prefill_worker_id is not None
                 and decode_worker_id is not None

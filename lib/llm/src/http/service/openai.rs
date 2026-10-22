@@ -42,7 +42,7 @@ use super::{
     disconnect::{
         ConnectionHandle, StreamErrorSignal, create_connection_monitor,
         monitor_for_disconnects_with_activity_and_error_signal,
-        monitor_for_disconnects_with_error_signal,
+        monitor_for_disconnects_with_error_signal, monitor_for_responses_disconnects,
     },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
@@ -1098,11 +1098,32 @@ where
     T: Send + Sync + 'static,
     F: FnOnce(&T) -> Option<InputTrigger>,
 {
+    let agent_context = agent_context_from_headers(headers);
+    context_from_headers_with_agent_context(
+        request,
+        request_id,
+        headers,
+        agent_context,
+        classify_input_trigger,
+    )
+}
+
+fn context_from_headers_with_agent_context<T, F>(
+    request: T,
+    request_id: String,
+    headers: &HeaderMap,
+    agent_context: Option<AgentContext>,
+    classify_input_trigger: F,
+) -> Result<Context<T>, ErrorResponse>
+where
+    T: Send + Sync + 'static,
+    F: FnOnce(&T) -> Option<InputTrigger>,
+{
     let metadata = extract_metadata_from_http(headers)
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
-    if let Some(mut agent_context) = agent_context_from_headers(headers) {
+    if let Some(mut agent_context) = agent_context {
         agent_context.input_trigger = classify_input_trigger(request.content());
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
@@ -1110,6 +1131,22 @@ where
         request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
     }
     Ok(request)
+}
+
+/// [`context_from_headers`] for handlers that build the [`PreprocessedRequest`] themselves.
+///
+/// The OpenAI routes get `agent_context` copied onto the request by the preprocessor
+/// (`attach_agent_context_from_context`). Native generate routes skip the preprocessor, yet the
+/// router's request classifier (e.g. ThunderAgent) reads the session only from the request field,
+/// so without this every native generate request is classified as session-less.
+pub(super) fn preprocessed_context_from_headers(
+    mut request: crate::preprocessor::PreprocessedRequest,
+    request_id: String,
+    headers: &HeaderMap,
+) -> Result<Context<crate::preprocessor::PreprocessedRequest>, ErrorResponse> {
+    let agent_context = agent_context_from_headers(headers);
+    request.agent_context = agent_context.clone();
+    context_from_headers_with_agent_context(request, request_id, headers, agent_context, |_| None)
 }
 
 fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
@@ -1566,7 +1603,7 @@ async fn completions_batch(
     batch_size: usize,
     n: u8,
 ) -> Result<Response, ErrorResponse> {
-    use crate::protocols::openai::completions::extract_single_prompt;
+    use dynamo_protocols::types::Prompt;
     use futures::stream::{self, StreamExt};
 
     let request_id = request.id().to_string();
@@ -1612,13 +1649,18 @@ async fn completions_batch(
     // id, but every one is linked to the request context: `kill` cascades to
     // linked children, so a client disconnect or a failed preflight stops all
     // of them rather than only the prompt that happened to be first.
-    let mut all_streams = Vec::new();
+    let mut all_streams = Vec::with_capacity(batch_size);
     let parent_ctx = request.context();
+    let prompts: Vec<Prompt> =
+        match std::mem::replace(&mut request.inner.prompt, Prompt::String(String::new())) {
+            Prompt::StringArray(prompts) => prompts.into_iter().map(Prompt::String).collect(),
+            Prompt::ArrayOfIntegerArray(prompts) => {
+                prompts.into_iter().map(Prompt::IntegerArray).collect()
+            }
+            single => vec![single],
+        };
 
-    for prompt_idx in 0..batch_size {
-        // Extract single prompt at this index
-        let single_prompt = extract_single_prompt(&request.inner.prompt, prompt_idx);
-
+    for (prompt_idx, single_prompt) in prompts.into_iter().enumerate() {
         // Create a new request with this single prompt
         let mut single_request = request.content().clone();
         single_request.inner.prompt = single_prompt;
@@ -4448,7 +4490,7 @@ async fn responses(
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
-        let stream = monitor_for_disconnects_with_error_signal(
+        let stream = monitor_for_responses_disconnects(
             full_stream,
             ctx,
             inflight_guard,
@@ -4974,8 +5016,6 @@ async fn get_model_openai(
     State(state): State<Arc<service_v2::State>>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> Result<Response, ErrorResponse> {
-    check_ready(&state)?;
-
     let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
 
     // The retrieve route (`/v1/models/{*model_id}`) is a catch-all, so model
@@ -4990,6 +5030,7 @@ async fn get_model_openai(
     // wins over the readiness sub-resource of a sibling `foo`.
     // `get_model_retrieve` applies the readiness gate itself (503 if not ready).
     if state.manager().get_committed_model(model_id).is_some() {
+        check_ready(&state)?;
         return get_model_retrieve(&state, model_id);
     }
 
@@ -5003,6 +5044,7 @@ async fn get_model_openai(
         return get_model_readiness(&state, base);
     }
 
+    check_ready(&state)?;
     Err(ErrorMessage::model_not_found())
 }
 
@@ -5047,11 +5089,13 @@ fn get_model_retrieve(
     .into_response())
 }
 
-/// `GET /v1/models/{model}/ready` — structured per-namespace worker readiness
-/// detail (Mechanism 4). Deliberately *not* readiness-gated: it exists to
-/// diagnose models that are not yet ready, so it returns 200 with the full
-/// breakdown regardless of whether the model would be served.
-fn get_model_readiness(
+/// `GET /v1/models/{model}/ready` — model-specific HTTP serving readiness.
+/// Returns 200 only when topology, a usable engine, and HTTP routes are ready;
+/// otherwise returns 503 with the same diagnostic shape. Namespace details
+/// continue to describe worker topology; the top-level ready/reason also
+/// account for local frontend serving state. Unknown models remain 404.
+/// No inference request is dispatched by this check.
+pub(super) fn get_model_readiness(
     state: &Arc<service_v2::State>,
     model_id: &str,
 ) -> Result<Response, ErrorResponse> {
@@ -5059,7 +5103,28 @@ fn get_model_readiness(
         .manager()
         .get_committed_model(model_id)
         .ok_or_else(ErrorMessage::model_not_found)?;
-    Ok(Json(model.namespace_readiness()).into_response())
+    let mut readiness = model.namespace_readiness();
+    if readiness.ready {
+        let serving_reason = if !state.is_ready() {
+            Some(format!("frontend is {}", state.service_stage()))
+        } else if !model.is_ready_to_serve() {
+            Some("model has no usable serving engine".to_string())
+        } else if !state.model_http_routes_ready(&model) {
+            Some("model HTTP inference routes are not ready".to_string())
+        } else {
+            None
+        };
+        if let Some(reason) = serving_reason {
+            readiness.ready = false;
+            readiness.reason = Some(reason);
+        }
+    }
+    let status = if readiness.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    Ok((status, Json(readiness)).into_response())
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoints
@@ -6565,6 +6630,60 @@ mod tests {
     }
 
     #[test]
+    fn test_preprocessed_context_from_headers_attaches_agent_context_to_request() {
+        let request = || {
+            crate::preprocessor::PreprocessedRequest::builder()
+                .model("test-model".to_string())
+                .token_ids(vec![1])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .build()
+                .unwrap()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
+        headers.insert("x-dynamo-parent-session-id", "parent-456".parse().unwrap());
+        headers.insert("x-dynamo-session-final", "true".parse().unwrap());
+        let context =
+            preprocessed_context_from_headers(request(), "request-1".to_string(), &headers)
+                .unwrap();
+
+        // The router reads the request field; the context key must carry the same identity.
+        let on_request = context
+            .content()
+            .agent_context
+            .clone()
+            .expect("request agent_context");
+        assert_eq!(on_request.session_id, "session-123");
+        assert_eq!(on_request.parent_session_id.as_deref(), Some("parent-456"));
+        assert_eq!(on_request.session_final, Some(true));
+        let in_context = context
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .expect("context agent_context");
+        assert_eq!(in_context.session_id, on_request.session_id);
+        assert!(
+            Arc::ptr_eq(&in_context.agent_headers, &on_request.agent_headers),
+            "headers are parsed once and the captured map is shared"
+        );
+        assert!(
+            context
+                .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+                .is_ok(),
+            "session affinity still keyed from the same headers"
+        );
+
+        let context = preprocessed_context_from_headers(
+            request(),
+            "request-2".to_string(),
+            &HeaderMap::new(),
+        )
+        .unwrap();
+        assert!(context.content().agent_context.is_none());
+    }
+
+    #[test]
     fn test_context_from_headers_classifies_only_agent_requests() {
         let calls = std::cell::Cell::new(0);
         let classify = |_: &()| {
@@ -6961,6 +7080,53 @@ mod tests {
                 "client response must not include the underlying engine message"
             );
         }
+
+        // A worker's refusal as the request plane delivers it — decoded from
+        // its prologue, then the cause of a pre-stream `CannotConnect` — is the
+        // same rejected overload whether it is the whole worker's or one DP
+        // rank's.
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let delivered_refusal = |error_type: ErrorType| -> anyhow::Error {
+            let refusal = DynamoError::builder()
+                .error_type(error_type)
+                .message("Server overloaded")
+                .build();
+            let delivered: DynamoError =
+                serde_json::from_value(serde_json::to_value(refusal).unwrap()).unwrap();
+            pre_stream_failure_error(StreamPrologueError::new("Server overloaded", delivered))
+                .into()
+        };
+        for error_type in [
+            ErrorType::WorkerOverloaded,
+            ErrorType::WorkerRankOverloaded(4),
+        ] {
+            let err = delivered_refusal(error_type);
+            assert!(
+                crate::http::service::metrics::request_was_rejected(err.as_ref()),
+                "{error_type:?}"
+            );
+            let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+            assert_eq!(response.0.as_u16(), 529, "{error_type:?}");
+            assert_eq!(response.1.error_type, "Overloaded");
+        }
+
+        // A rank's refusal as the last failure recorded, as the routing host
+        // records it, for a request migration has no untried worker left for:
+        // the exhaustion error is an overload too.
+        let migration = crate::protocols::common::preprocessor::MigrationState::default();
+        migration.record_failure(
+            7,
+            delivered_refusal(ErrorType::WorkerRankOverloaded(4))
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned()),
+        );
+        let exhausted = migration.exhausted_error().expect("a failure was recorded");
+        assert_eq!(exhausted.error_type(), ErrorType::ResourceExhausted);
+        let response = ErrorMessage::from_anyhow(anyhow::anyhow!(exhausted), BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(response.1.error_type, "Overloaded");
     }
 
     #[test]
@@ -8331,7 +8497,7 @@ mod tests {
     // 9. Invalid or Out of range temperature: Done
     // 10.Invalid or out of range top_p: Done
     // 11. Repetition Penalty: Should be a float between 0.0 and 2.0 : Done
-    // 12. Logprobs: Should be a positive integer between 0 and 5 : Done
+    // 12. Logprobs: Should be a positive integer between 0 and 20 : Done
     // invalid or non existing user : Only empty string is not allowed validation is there. How can we check non-extisting user ?
     // Unknown fields : Done (rejected via extra_fields catch-all)
     // guided_whitespace_pattern null or invalid : Not Done
@@ -8465,13 +8631,12 @@ mod tests {
             );
         }
 
-        // Logprobs: Should be a positive integer between 0 and 5
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
-                logprobs: Some(6),
+                logprobs: Some(21),
                 ..Default::default()
             },
             common: Default::default(),
@@ -8486,7 +8651,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Logprobs must be between 0 and 5, got 6")
+                format!("{VALIDATION_PREFIX}Logprobs must be between 0 and 20, got 21")
             );
         }
     }
@@ -9075,6 +9240,10 @@ mod tests {
             ),
             (DynamoErrorType::ResourceExhausted, ErrorType::Overload),
             (DynamoErrorType::WorkerOverloaded, ErrorType::Overload),
+            (
+                DynamoErrorType::WorkerRankOverloaded(4),
+                ErrorType::Overload,
+            ),
             (DynamoErrorType::Unavailable, ErrorType::Unavailable),
             (DynamoErrorType::WorkerUnavailable, ErrorType::Unavailable),
             (DynamoErrorType::InvalidArgument, ErrorType::Validation),

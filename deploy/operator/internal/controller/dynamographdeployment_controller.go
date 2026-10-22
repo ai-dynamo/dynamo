@@ -416,10 +416,12 @@ func isDGDManagedWorkerPod(obj client.Object) bool {
 	if !ok || pod == nil {
 		return false
 	}
+
+	// Native LWS pods carry a worker hash instead of the DCD selector.
 	labels := pod.GetLabels()
 	return labels[consts.KubeLabelDynamoGraphDeploymentName] != "" &&
 		labels[consts.KubeLabelDynamoComponent] != "" &&
-		labels[consts.KubeLabelDynamoSelector] != "" &&
+		(labels[consts.KubeLabelDynamoSelector] != "" || labels[consts.KubeLabelDynamoWorkerHash] != "") &&
 		dynamo.IsWorkerComponent(labels[consts.KubeLabelDynamoComponentType])
 }
 
@@ -444,7 +446,7 @@ func dgdComponentPodIndexValue(dgdName, componentName string) string {
 }
 
 // dgdWorkerPodEventPredicate admits only events that can change whether a
-// Recreate rollout is blocked by an old pod. Creation and deletion change pod
+// worker rollout is blocked by an old pod. Creation and deletion change pod
 // membership; updates matter only when membership or terminality changes. A
 // deletion timestamp alone leaves the pod non-terminal and does not enqueue.
 func dgdWorkerPodEventPredicate() predicate.Predicate {
@@ -468,7 +470,8 @@ func dgdWorkerPodEventPredicate() predicate.Predicate {
 			newPod := e.ObjectNew.(*corev1.Pod)
 			if oldPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] != newPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] ||
 				oldPod.Labels[consts.KubeLabelDynamoComponent] != newPod.Labels[consts.KubeLabelDynamoComponent] ||
-				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] {
+				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] ||
+				oldPod.Labels[consts.KubeLabelDynamoWorkerHash] != newPod.Labels[consts.KubeLabelDynamoWorkerHash] {
 				return true
 			}
 			return isTerminalPhase(oldPod.Status.Phase) != isTerminalPhase(newPod.Status.Phase)

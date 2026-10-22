@@ -82,7 +82,6 @@ spec:
               description: Spec defines the desired state for this deployment request.
               properties:
                 autoApply:
-                  default: false
                   description: |-
                     AutoApply indicates whether to automatically create a DynamoGraphDeployment
                     after profiling completes. If false, only the spec is generated and stored in status.
@@ -135,7 +134,6 @@ spec:
                       type: string
                   type: object
                 enableGpuDiscovery:
-                  default: true
                   description: |-
                     EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.
                     DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always
@@ -323,7 +321,6 @@ spec:
                   pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
                   type: string
                 useMocker:
-                  default: false
                   description: |-
                     UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of
                     a real backend deployment. When true, the deployment uses simulated engines that
@@ -331,11 +328,24 @@ spec:
                     Mocker is available in all backend images and useful for large-scale experiments.
                     Profiling still runs against the real backend (specified above) to collect performance data.
                   type: boolean
-              required:
-                - backend
-                - model
-                - profilingConfig
+                v1beta2:
+                  description: |-
+                    V1Beta2 losslessly preserves a native v1beta2 spec while this object is
+                    represented through v1alpha1. It is mutually exclusive with native fields.
+                    This field is a read-only conversion view; modify the request through the
+                    native v1beta2 API.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
               type: object
+              x-kubernetes-validations:
+                - message: exactly one of native v1alpha1 fields or v1beta2 must be specified
+                  rule: has(self.v1beta2) != has(self.model)
+                - message: native v1alpha1 requests require backend and profilingConfig
+                  rule: has(self.v1beta2) || (has(self.backend) && has(self.profilingConfig))
+                - message: v1beta2 is mutually exclusive with native v1alpha1 fields
+                  rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.useMocker) || has(self.profilingConfig) || has(self.runtimeVersionOverride) || has(self.enableGpuDiscovery) || has(self.autoApply) || has(self.deploymentOverrides))'
+                - message: the conversion carrier is immutable
+                  rule: has(self.v1beta2) == has(oldSelf.v1beta2) && (!has(self.v1beta2) || self.v1beta2 == oldSelf.v1beta2)
             status:
               description: Status reflects the current observed state of this deployment request.
               properties:
@@ -455,7 +465,6 @@ spec:
                     Format: "configmap/\<name\>"
                   type: string
                 state:
-                  default: Initializing
                   description: State is a high-level textual status of the deployment request lifecycle.
                   enum:
                     - Initializing
@@ -466,10 +475,20 @@ spec:
                     - DeploymentDeleted
                     - Failed
                   type: string
-              required:
-                - state
+                v1beta2:
+                  description: |-
+                    V1Beta2 losslessly preserves a native v1beta2 status while this object is
+                    represented through v1alpha1.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
               type: object
+              x-kubernetes-validations:
+                - message: v1beta2 is mutually exclusive with native v1alpha1 status fields
+                  rule: '!has(self.v1beta2) || !(has(self.state) || has(self.backend) || has(self.observedGeneration) || has(self.conditions) || has(self.profilingResults) || has(self.generatedDeployment) || has(self.deployment))'
           type: object
+          x-kubernetes-validations:
+            - message: nonempty status must use the representation selected by spec
+              rule: '!has(self.status) || !(has(self.status.v1beta2) || has(self.status.state) || has(self.status.backend) || has(self.status.observedGeneration) || has(self.status.conditions) || has(self.status.profilingResults) || has(self.status.generatedDeployment) || has(self.status.deployment)) || has(self.spec.v1beta2) == has(self.status.v1beta2)'
       served: true
       storage: false
       subresources:
@@ -537,7 +556,6 @@ spec:
               description: Spec defines the desired state for this deployment request.
               properties:
                 autoApply:
-                  default: true
                   description: |-
                     AutoApply indicates whether to automatically create a DynamoGraphDeployment
                     after profiling completes. If false, the generated spec is stored in status
@@ -555,7 +573,6 @@ spec:
                         - sglang
                         - trtllm
                         - vllm
-                  default: auto
                   description: Backend specifies the inference backend to use for profiling and deployment.
                   type: string
                 features:
@@ -9302,7 +9319,6 @@ spec:
                     - enum:
                         - rapid
                         - thorough
-                  default: rapid
                   description: |-
                     SearchStrategy controls the profiling search depth.
                     "rapid" performs a fast sweep; "thorough" explores more configurations.
@@ -9330,6 +9346,14 @@ spec:
                       description: TTFT is the Time To First Token target in milliseconds.
                       type: number
                   type: object
+                v1beta2:
+                  description: |-
+                    V1Beta2 losslessly preserves a native v1beta2 spec while this object is
+                    represented through v1beta1. It is mutually exclusive with native fields.
+                    This field is a read-only conversion view; modify the request through the
+                    native v1beta2 API.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
                 workload:
                   description: Workload defines the expected workload characteristics for SLA-based profiling.
                   properties:
@@ -9356,9 +9380,14 @@ spec:
                         planner is disabled, the profiler uses its default maximum-throughput selection.
                       type: number
                   type: object
-              required:
-                - model
               type: object
+              x-kubernetes-validations:
+                - message: exactly one of native v1beta1 fields or v1beta2 must be specified
+                  rule: has(self.v1beta2) != has(self.model)
+                - message: v1beta2 is mutually exclusive with native v1beta1 fields
+                  rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.image) || has(self.runtimeVersionOverride) || has(self.modelCache) || has(self.hardware) || has(self.workload) || has(self.sla) || has(self.overrides) || has(self.features) || has(self.searchStrategy) || has(self.autoApply))'
+                - message: the conversion carrier is immutable
+                  rule: has(self.v1beta2) == has(oldSelf.v1beta2) && (!has(self.v1beta2) || self.v1beta2 == oldSelf.v1beta2)
             status:
               description: Status reflects the current observed state of this deployment request.
               properties:
@@ -9501,10 +9530,411 @@ spec:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                   type: object
+                v1beta2:
+                  description: |-
+                    V1Beta2 losslessly preserves a native v1beta2 status while this object is
+                    represented through v1beta1.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
               type: object
+              x-kubernetes-validations:
+                - message: v1beta2 is mutually exclusive with native v1beta1 status fields
+                  rule: '!has(self.v1beta2) || !(has(self.phase) || has(self.profilingPhase) || has(self.dgdName) || has(self.profilingJobName) || has(self.conditions) || has(self.profilingResults) || has(self.deploymentInfo) || has(self.observedGeneration))'
           type: object
+          x-kubernetes-validations:
+            - message: nonempty status must use the representation selected by spec
+              rule: '!has(self.status) || !(has(self.status.v1beta2) || has(self.status.phase) || has(self.status.profilingPhase) || has(self.status.dgdName) || has(self.status.profilingJobName) || has(self.status.conditions) || has(self.status.profilingResults) || has(self.status.deploymentInfo) || has(self.status.observedGeneration)) || has(self.spec.v1beta2) == has(self.status.v1beta2)'
       served: true
       storage: true
+      subresources:
+        status: {}
+    - additionalPrinterColumns:
+        - jsonPath: .spec.model.name
+          name: Model
+          type: string
+        - jsonPath: .status.activeRunRef.name
+          name: Active Run
+          type: string
+        - jsonPath: .status.conditions[?(@.type=="Accepted")].status
+          name: Accepted
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1beta2
+      schema:
+        openAPIV3Schema:
+          description: DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: |-
+                DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+                Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
+              properties:
+                aisimulate:
+                  description: AISimulate selects the execution artifact and supplies native AISimulate input.
+                  properties:
+                    image:
+                      description: |-
+                        Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
+                        and execution defaults are resolved outside this API.
+                      minLength: 1
+                      type: string
+                    parameters:
+                      description: |-
+                        Parameters contains native AISimulate input. Field names and nesting use
+                        the upstream AISimulate JSON contract, including snake_case names.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    versionOverride:
+                      description: |-
+                        VersionOverride declares the AISimulate compatibility version when it
+                        cannot be inferred from the effective image.
+                      minLength: 1
+                      type: string
+                  type: object
+                backends:
+                  description: Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+                  items:
+                    description: Backend identifies an inference backend searched by AISimulate and used by generated candidates.
+                    enum:
+                      - vllm
+                      - sglang
+                      - trtllm
+                    type: string
+                  minItems: 1
+                  type: array
+                hardware:
+                  description: |-
+                    Hardware bounds the accelerator configurations evaluated by the search.
+                    Admission discovers any omitted hardware values from the cluster.
+                  properties:
+                    gpu:
+                      description: |-
+                        GPU describes accelerator identity and the maximum allocation per candidate.
+                        Omitted fields are resolved independently by admission.
+                      properties:
+                        budget:
+                          description: |-
+                            Budget is the maximum total number of GPUs one candidate may use.
+                            When omitted, admission derives the available GPU budget from the cluster.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        sku:
+                          description: |-
+                            SKU identifies the accelerator using the AISimulate hardware catalog name.
+                            When omitted, admission discovers the accelerator from the cluster.
+                          minLength: 1
+                          type: string
+                      type: object
+                  type: object
+                model:
+                  description: Model identifies the model whose deployment configurations are evaluated.
+                  properties:
+                    name:
+                      description: Name identifies the model in the syntax accepted by the selected backend.
+                      minLength: 1
+                      type: string
+                  required:
+                    - name
+                  type: object
+                objective:
+                  description: |-
+                    Objective defines scalar optimization or a multi-objective Pareto search.
+                    When omitted, the schema supplies the default Optimize mode and SLA;
+                    admission supplies the conditional scalar metric.
+                  properties:
+                    metric:
+                      description: |-
+                        Metric is the scalar target when mode is Optimize.
+                        When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
+                      enum:
+                        - Throughput
+                        - ThroughputPerGPU
+                        - ThroughputPerUser
+                        - TTFT
+                        - E2ELatency
+                        - Goodput
+                        - GoodputPerGPU
+                      type: string
+                    metrics:
+                      description: Metrics lists two or more distinct scalar targets when mode is Pareto.
+                      items:
+                        description: ObjectiveMetric is a metric optimized by AISimulate.
+                        enum:
+                          - Throughput
+                          - ThroughputPerGPU
+                          - ThroughputPerUser
+                          - TTFT
+                          - E2ELatency
+                          - Goodput
+                          - GoodputPerGPU
+                        type: string
+                      maxItems: 7
+                      minItems: 2
+                      type: array
+                      x-kubernetes-list-type: set
+                    mode:
+                      default: Optimize
+                      description: Mode selects scalar optimization or a Pareto search.
+                      enum:
+                        - Optimize
+                        - Pareto
+                      type: string
+                    sla:
+                      default:
+                        itlMs: 30
+                        ttftMs: 2000
+                      description: SLA defines per-request latency bounds used to calculate goodput.
+                      properties:
+                        e2eMs:
+                          description: E2EMs is an alternative end-to-end bound in milliseconds.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                        itlMs:
+                          description: ITLMs is the Inter-Token Latency bound in milliseconds.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                        ttftMs:
+                          description: TTFTMs is the Time To First Token bound in milliseconds.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                      type: object
+                      x-kubernetes-validations:
+                        - message: e2eMs cannot be combined with ttftMs or itlMs
+                          rule: '!has(self.e2eMs) || (!has(self.ttftMs) && !has(self.itlMs))'
+                  type: object
+                  x-kubernetes-validations:
+                    - message: Optimize accepts only metric; Pareto requires metrics
+                      rule: '!has(self.mode) || (self.mode == ''Optimize'' && !has(self.metrics)) || (self.mode == ''Pareto'' && !has(self.metric) && has(self.metrics))'
+                    - message: Goodput and GoodputPerGPU require at least one SLA bound
+                      rule: '!(has(self.metric) && self.metric in [''Goodput'', ''GoodputPerGPU'']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
+                    - message: Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound
+                      rule: '!(has(self.metrics) && self.metrics.exists(m, m in [''Goodput'', ''GoodputPerGPU''])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
+                recommendation:
+                  description: Recommendation controls bounded projection into DGDC resources.
+                  properties:
+                    maxCandidates:
+                      default: 1
+                      description: |-
+                        MaxCandidates is the maximum number of DGDCs owned by one run. Scalar
+                        candidates are ordered best first; Pareto candidates have no scalar rank.
+                        This field does not limit internal trials.
+                      format: int32
+                      maximum: 100
+                      minimum: 1
+                      type: integer
+                  type: object
+                v1beta1:
+                  description: |-
+                    V1Beta1 losslessly preserves a native v1beta1 spec while this object is
+                    represented through v1beta2. It is mutually exclusive with native fields.
+                    This field is a read-only conversion view; modify the request through the
+                    native v1beta1 API.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                workload:
+                  description: Workload defines the synthetic traffic model used for every candidate evaluation.
+                  properties:
+                    static:
+                      default:
+                        isl: 4000
+                        kvLoadRatio:
+                          - 0
+                          - 1
+                        osl: 1000
+                      description: |-
+                        Static defines one of AISimulate's synthetic workload shapes. When omitted,
+                        it searches the full KV-load ratio range at ISL 4000 and OSL 1000.
+                        An explicit empty object opts out of this underlay.
+                      properties:
+                        concurrency:
+                          description: Concurrency is a fixed closed-loop in-flight request cap.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        isl:
+                          description: ISL is the input sequence length in tokens.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        kvLoadRatio:
+                          description: |-
+                            KVLoadRatio derives concurrency from candidate KV capacity. A two-value
+                            range requires a bounded AISimulate sweep.
+                          items:
+                            maximum: 1
+                            minimum: 0
+                            type: number
+                          maxItems: 2
+                          minItems: 1
+                          type: array
+                        numRequestRatio:
+                          description: NumRequestRatio sets request count relative to the selected load.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                        osl:
+                          description: OSL is the output sequence length in tokens.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        requestRate:
+                          description: RequestRate is a fixed open-loop arrival rate in requests per second.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                      type: object
+                      x-kubernetes-validations:
+                        - message: at most one of requestRate, concurrency, or kvLoadRatio may be specified
+                          rule: '(has(self.requestRate) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvLoadRatio) ? 1 : 0) <= 1'
+                  type: object
+              type: object
+              x-kubernetes-validations:
+                - message: exactly one of native v1beta2 fields or v1beta1 must be specified
+                  rule: has(self.v1beta1) != has(self.model)
+                - message: v1beta1 is mutually exclusive with native v1beta2 fields
+                  rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))'
+                - message: the conversion carrier is immutable
+                  rule: has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)
+            status:
+              description: DynamoGraphDeploymentRequestStatus represents reconciliation of persistent search intent.
+              properties:
+                activeRunRef:
+                  description: ActiveRunRef identifies the one non-terminal run.
+                  properties:
+                    name:
+                      default: ""
+                      description: |-
+                        Name of the referent.
+                        This field is effectively required, but due to backwards compatibility is
+                        allowed to be empty. Instances of this type with an empty value here are
+                        almost certainly wrong.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                  type: object
+                  x-kubernetes-map-type: atomic
+                conditions:
+                  description: Conditions reports reconciliation of the persistent request, not run execution outcomes.
+                  items:
+                    description: Condition contains details for one aspect of the current state of this API Resource.
+                    properties:
+                      lastTransitionTime:
+                        description: |-
+                          lastTransitionTime is the last time the condition transitioned from one status to another.
+                          This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                        format: date-time
+                        type: string
+                      message:
+                        description: |-
+                          message is a human readable message indicating details about the transition.
+                          This may be an empty string.
+                        maxLength: 32768
+                        type: string
+                      observedGeneration:
+                        description: |-
+                          observedGeneration represents the .metadata.generation that the condition was set based upon.
+                          For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                          with respect to the current state of the instance.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      reason:
+                        description: |-
+                          reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                          Producers of specific condition types may define expected values and meanings for this field,
+                          and whether the values are considered a guaranteed API.
+                          The value should be a CamelCase string.
+                          This field may not be empty.
+                        maxLength: 1024
+                        minLength: 1
+                        pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                        type: string
+                      status:
+                        description: status of the condition, one of True, False, Unknown.
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                        type: string
+                      type:
+                        description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                        maxLength: 316
+                        pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                        type: string
+                    required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                    type: object
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - type
+                  x-kubernetes-list-type: map
+                observedGeneration:
+                  description: ObservedGeneration is the most recent DGDR generation accepted by the controller.
+                  format: int64
+                  type: integer
+                recentRunRefs:
+                  description: RecentRunRefs identifies retained terminal runs in newest-first order.
+                  items:
+                    description: |-
+                      LocalObjectReference contains enough information to let you locate the
+                      referenced object inside the same namespace.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  type: array
+                v1beta1:
+                  description: |-
+                    V1Beta1 losslessly preserves a native v1beta1 status while this object is
+                    represented through v1beta2.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+              type: object
+              x-kubernetes-validations:
+                - message: v1beta1 is mutually exclusive with native v1beta2 status fields
+                  rule: '!has(self.v1beta1) || !(has(self.observedGeneration) || has(self.activeRunRef) || has(self.recentRunRefs) || has(self.conditions))'
+          required:
+            - spec
+          type: object
+          x-kubernetes-validations:
+            - message: nonempty status must use the representation selected by spec
+              rule: '!has(self.status) || !(has(self.status.v1beta1) || has(self.status.observedGeneration) || has(self.status.activeRunRef) || has(self.status.recentRunRefs) || has(self.status.conditions)) || has(self.spec.v1beta1) == has(self.status.v1beta1)'
+      served: true
+      storage: false
       subresources:
         status: {}
   conversion:
