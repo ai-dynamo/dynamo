@@ -5,6 +5,7 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -39,17 +40,23 @@ func upgradeComponentWorkerEditError(dgd *api.DynamoGraphDeployment, objects []u
 					return fmt.Errorf("%s/%s missing containers at %v: %v", kind, object.GetName(), path, err)
 				}
 				edited := false
-				for _, container := range containers {
-					c := container.(map[string]any)
+				for containerIndex, container := range containers {
+					c, ok := container.(map[string]any)
+					if !ok {
+						return fmt.Errorf("%s/%s has non-object container at %s[%d]: %T", kind, object.GetName(), strings.Join(path, "."), containerIndex, container)
+					}
 					if c["name"] != "main" {
 						continue
 					}
 					variables, _, err := unstructured.NestedSlice(c, "env")
 					if err != nil {
-						return err
+						return fmt.Errorf("%s/%s invalid env at %s[%d].env: %w", kind, object.GetName(), strings.Join(path, "."), containerIndex, err)
 					}
-					for _, variable := range variables {
-						v := variable.(map[string]any)
+					for variableIndex, variable := range variables {
+						v, ok := variable.(map[string]any)
+						if !ok {
+							return fmt.Errorf("%s/%s has non-object env entry at %s[%d].env[%d]: %T", kind, object.GetName(), strings.Join(path, "."), containerIndex, variableIndex, variable)
+						}
 						edited = edited || (v["name"] == "WORKER_REVISION" && v["value"] == "2")
 					}
 				}
@@ -78,6 +85,7 @@ func TestUpgradeComponentWorkerEdit(t *testing.T) {
 	for _, role := range []string{"leaderTemplate", "workerTemplate"} {
 		require.NoError(t, unstructured.SetNestedSlice(lws.Object, container, "spec", "leaderWorkerTemplate", role, "spec", "containers"))
 	}
+	deployment.SetName("prefill")
 	deployment.SetLabels(map[string]string{"nvidia.com/dynamo-component": "prefill", "nvidia.com/dynamo-worker-hash": "new"})
 	lws.SetLabels(map[string]string{"nvidia.com/dynamo-component": "decode", "nvidia.com/dynamo-worker-hash": "new"})
 	require.NoError(t, upgradeComponentWorkerEditError(dgd, []unstructured.Unstructured{deployment, lws}, "new"))
@@ -91,4 +99,20 @@ func TestUpgradeComponentWorkerEdit(t *testing.T) {
 		require.Error(t, upgradeComponentWorkerEditError(dgd, []unstructured.Unstructured{deployment, *stale}, "new"))
 	}
 	require.Error(t, upgradeComponentWorkerEditError(dgd, []unstructured.Unstructured{deployment}, "new"))
+
+	t.Log("Malformed container and env entries return workload-specific errors instead of panicking")
+	for _, tc := range []struct {
+		name       string
+		containers []any
+		want       string
+	}{
+		{"container", []any{"invalid"}, "Deployment/prefill has non-object container at spec.template.spec.containers[0]: string"},
+		{"env", []any{map[string]any{"name": "main", "env": []any{"invalid"}}}, "Deployment/prefill has non-object env entry at spec.template.spec.containers[0].env[0]: string"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			malformed := deployment.DeepCopy()
+			require.NoError(t, unstructured.SetNestedSlice(malformed.Object, tc.containers, "spec", "template", "spec", "containers"))
+			require.ErrorContains(t, upgradeComponentWorkerEditError(dgd, []unstructured.Unstructured{*malformed, lws}, "new"), tc.want)
+		})
+	}
 }
