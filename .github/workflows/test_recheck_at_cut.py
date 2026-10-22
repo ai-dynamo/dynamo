@@ -56,6 +56,7 @@ class FakeGitHub:
         self.publish_status = publish_status
         self.issues = issues
         self.published: list[dict] = []
+        self.publish_headers: list[dict] = []
         self.other_calls: list[str] = []
 
     def http_json(
@@ -67,6 +68,7 @@ class FakeGitHub:
         if url.endswith("/check-runs"):
             assert payload is not None
             self.published.append(payload)
+            self.publish_headers.append(headers or {})
             return self.publish_status, {}
         self.other_calls.append(url)
         return 500, {}
@@ -122,6 +124,7 @@ def test_linkless_pr_with_a_45_day_old_green_check_gets_a_fresh_failure(
     assert run["name"] == "Require an issue link"
     assert run["status"] == "completed"
     assert "missing" in run["output"]["summary"]
+    assert fake.publish_headers[0]["Content-Type"] == "application/json"
     assert not any("actions/runs" in url for url in fake.other_calls)
 
 

@@ -115,7 +115,7 @@ def publish(
         status, _ = pr_issue_link.http_json(
             f"https://api.github.com/repos/{repo}/check-runs",
             payload=payload,
-            headers=headers(token),
+            headers={**headers(token), "Content-Type": "application/json"},
         )
         if status == 201:
             return True
