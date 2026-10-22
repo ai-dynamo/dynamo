@@ -46,6 +46,8 @@ struct PreparedRequest {
     min_prefill: usize,
     block_size: IntegerDivisor,
     request_blocks: IntegerDivisor,
+    /// Unclamped prompt block count; the affinity penalty charges zero for an empty prompt.
+    prompt_blocks: f64,
     overlap_credit: f64,
     needs_decay: bool,
     needs_decode_subtraction: bool,
@@ -116,6 +118,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             // An empty prompt (e.g. embeddings-only input) has no overlap to decay;
             // clamp so a worker at the load floor does not compute 0/0.
             request_blocks: IntegerDivisor::new(context.request_blocks().max(1)),
+            prompt_blocks: context.request_blocks() as f64,
             overlap_credit: self.overlap_score_credit,
             needs_decay: context.tracks_prefill_tokens() && self.overlap_score_credit_decay > 0.0,
             needs_decode_subtraction: self.is_decode && !context.tracks_prefill_tokens(),
@@ -187,7 +190,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             // disaggregation, or aggregated serving without prefill tracking) does: the
             // credit here only offsets decode load, so it has the same cap as below.
             if self.prefix_affinity_weight != 0.0 && self.prepared.overlap_credit > 0.0 {
-                let missing = (self.prepared.request_blocks.value - device_blocks).max(0.0);
+                let missing = (self.prepared.prompt_blocks - device_blocks).max(0.0);
                 logit + self.prefix_affinity_weight * missing
             } else {
                 logit
@@ -208,7 +211,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 // Charge each prompt block this worker lacks. The overlap credit above is
                 // capped at the request's own prefill, so it cannot outweigh transient
                 // decode load on the worker that already holds a resumed prefix.
-                let missing = (self.prepared.request_blocks.value - device_blocks).max(0.0);
+                let missing = (self.prepared.prompt_blocks - device_blocks).max(0.0);
                 logit + self.prefix_affinity_weight * missing
             } else {
                 logit

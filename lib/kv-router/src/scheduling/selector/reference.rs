@@ -351,7 +351,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             // prefill path below; charge missing prefix blocks the same way.
             if kv_router_config.prefix_affinity_weight != 0.0 {
                 let missing_prefix_blocks =
-                    (context.request_blocks.max(1) as f64 - device_overlap_blocks).max(0.0);
+                    (context.request_blocks as f64 - device_overlap_blocks).max(0.0);
                 logit += kv_router_config.prefix_affinity_weight * missing_prefix_blocks;
             }
             // Stamped for the same reason as the two rows below: this row is emitted from the
@@ -395,7 +395,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             // request's own prefill, so it alone cannot outweigh transient decode load on the
             // worker that already holds a resumed prefix.
             let missing_prefix_blocks =
-                (context.request_blocks.max(1) as f64 - device_overlap_blocks).max(0.0);
+                (context.request_blocks as f64 - device_overlap_blocks).max(0.0);
             logit += kv_router_config.prefix_affinity_weight * missing_prefix_blocks;
         }
 

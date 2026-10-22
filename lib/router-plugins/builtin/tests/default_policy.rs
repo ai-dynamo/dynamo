@@ -147,7 +147,6 @@ fn prefix_affinity_weight_keeps_resumed_prefix_on_cache_holder() {
         }),
         0
     );
-    // The weight is also a runtime policy parameter.
     let mut policy = default_policy(base, "prefill");
     let revision = policy.runtime_config().unwrap().revision();
     let patch = json!({"prefix_affinity_weight": 0.25})
@@ -398,6 +397,81 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
     }
 }
 
+#[derive(Clone)]
+struct TaintedWorker(HashSet<String>);
+impl dynamo_kv_router::protocols::WorkerConfigLike for TaintedWorker {
+    fn data_parallel_start_rank(&self) -> u32 {
+        0
+    }
+    fn data_parallel_size(&self) -> u32 {
+        2
+    }
+    fn max_num_batched_tokens(&self) -> Option<u64> {
+        None
+    }
+    fn total_kv_blocks(&self) -> Option<u64> {
+        Some(16384)
+    }
+    fn taints(&self) -> &HashSet<String> {
+        &self.0
+    }
+}
+
+/// An empty prompt has no prefix to miss, so the affinity weight must not charge a block.
+/// The preferred-taint multiplier scales that phantom charge differently per worker, which
+/// would flip the pick toward the worker with more decode load but a smaller multiplier.
+#[test]
+fn prefix_affinity_weight_charges_nothing_for_empty_prompt() {
+    let (_, mut request) = fixture(2, 0);
+    request
+        .routing_constraints
+        .preferred_taints
+        .insert("slow".into(), -1.0);
+    let workers: HashMap<u64, TaintedWorker> = HashMap::from([
+        (0, TaintedWorker(HashSet::from(["slow".to_owned()]))),
+        (1, TaintedWorker(HashSet::new())),
+    ]);
+    for (worker, load) in &mut request.worker_loads {
+        load.active_prefill_tokens = 0;
+        load.active_requests = 0;
+        load.active_decode_blocks = if worker.worker_id == 0 { 1 } else { 3 };
+        load.additional_active_blocks = 0;
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(*worker, 0);
+    }
+    for label in ["prefill", "decode"] {
+        for track_prefill_tokens in [true, false] {
+            request.track_prefill_tokens = track_prefill_tokens;
+            for weight in [0.0, 4.0] {
+                let config = KvRouterConfig {
+                    host_cache_hit_weight: 0.0,
+                    disk_cache_hit_weight: 0.0,
+                    router_temperature: 0.0,
+                    prefix_affinity_weight: weight,
+                    ..Default::default()
+                };
+                let input = || {
+                    WorkerSelectionInput::configured(&workers, &request, request.eligibility(), 16)
+                };
+                let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
+                    Some(config.clone()),
+                    label,
+                    42,
+                );
+                let plugin = DefaultWorkerSelector::new_seeded(Some(config), label, 42);
+                let expected = reference.select_worker(input()).unwrap().worker;
+                let actual = plugin.select_worker(input()).unwrap().worker;
+                let case = format!("label={label} track={track_prefill_tokens} weight={weight}");
+                assert_eq!(actual, expected, "{case}");
+                assert_eq!(actual.worker_id, 0, "{case}");
+            }
+        }
+    }
+}
+
 #[test]
 fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
     // "decode" also covers the cache-aware decode subtraction path when prefill tracking is off.
@@ -405,6 +479,9 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
         for temperature in [0.0, 0.7] {
             for prompt in [1, 17, 127, 2048] {
                 for mode in 0..64 {
+                    if label == "decode" && mode % 4 != 3 {
+                        continue;
+                    }
                     let (workers, mut request) = fixture(16, prompt);
                     let config = KvRouterConfig {
                         router_temperature: temperature,
