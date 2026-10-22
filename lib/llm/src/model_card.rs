@@ -1264,6 +1264,7 @@ impl ModelDeploymentCard {
                 .runtime_config
                 .supports_runtime_capability(SGLANG_SYSTEMONE_SERIAL_V1)
             && self.runtime_config.max_num_seqs == Some(1)
+            && self.runtime_config.data_parallel_size == 1
             && self.worker_type == Some(crate::worker_type::WorkerType::Aggregated)
             && self.needs.is_empty()
             && self.lora.is_none()
@@ -3708,7 +3709,7 @@ mod ownership_tests {
 
         let enabled = card(|_| {});
         assert!(enabled.is_systemone_serial_eligible());
-        let unsupported: [fn(&mut ModelDeploymentCard); 9] = [
+        let unsupported: [fn(&mut ModelDeploymentCard); 11] = [
             |card| {
                 card.runtime_config
                     .runtime_data
@@ -3716,6 +3717,8 @@ mod ownership_tests {
             },
             |card| card.runtime_config.max_num_seqs = None,
             |card| card.runtime_config.max_num_seqs = Some(2),
+            |card| card.runtime_config.data_parallel_size = 0,
+            |card| card.runtime_config.data_parallel_size = 2,
             |card| {
                 card.runtime_config
                     .runtime_data
