@@ -23,6 +23,11 @@ KV routing events are advisory:
 - Outbound IDs remain monotonic and are never reused.
 - Do not add per-event or per-chunk acknowledgements or publication retries.
 
+Sources that opt into replay recovery (`zmq_recovery.rs`) are the exception:
+DEP #14897 requires a verified local index before registration, so recovering
+batches wait until the index has applied them. Bad events are still handled as
+on the live path.
+
 `Cleared` is different: it is an ordering barrier and must complete across every
 affected physical tier before publication.
 

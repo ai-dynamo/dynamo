@@ -17,11 +17,14 @@ use super::batching::BatchingState;
 use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::{RouterEventBatchSink, emit};
 
-pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
+pub(super) async fn run_event_processor_loop<
+    P: RouterEventBatchSink + 'static,
+    I: Into<super::PublisherInput> + Send,
+>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    mut rx: mpsc::UnboundedReceiver<Vec<PlacementEvent>>,
+    mut rx: mpsc::UnboundedReceiver<I>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     timeout_ms: Option<u64>,
     max_batch_blocks: usize,
@@ -46,6 +49,10 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                     batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
                     publish_output(&publisher, worker_id, &output).await;
                     break;
+                };
+                let (event_batch, recovery_done) = match event_batch.into() {
+                    super::PublisherInput::Events(events) => (events, None),
+                    super::PublisherInput::Recovery(events, done) => (events, Some(done)),
                 };
                 let mut output = Vec::new();
 
@@ -144,12 +151,29 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                 // Without a timeout, flush the compatible tail at the native-list
                 // boundary. With a timeout, retain it for possible cross-list batching.
                 if batching_state.has_pending()
-                    && match timeout_ms {
+                    && (recovery_done.is_some() || match timeout_ms {
                         None => true,
                         Some(ms) => batching_state.is_timeout_elapsed(ms),
-                    }
+                    })
                 {
                     batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
+                }
+                if let Some(done) = recovery_done {
+                    // Recovery applies events like live ingestion, then waits for the index to finish them.
+                    let result = tokio::select! {
+                        biased;
+                        _ = cancellation_token.cancelled() => Err(anyhow::anyhow!("KV event publisher cancelled during recovery")),
+                        result = flush_local_indexer(&local_indexer) => result,
+                    };
+                    if let Err(error) = &result {
+                        tracing::error!(%error, "KV recovery application failed; stopping KV event publisher");
+                    }
+                    let has_failed = result.is_err();
+                    let _ = done.send(result);
+                    if has_failed {
+                        // Keep the shared token alive so the listener can report the failure.
+                        break;
+                    }
                 }
                 publish_output(&publisher, worker_id, &output).await;
             }
@@ -164,6 +188,13 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
             }
         }
     }
+}
+
+async fn flush_local_indexer(local_indexer: &Option<Arc<LocalKvIndexer>>) -> anyhow::Result<()> {
+    let indexer = local_indexer
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("KV recovery requires a local indexer"))?;
+    Ok(indexer.flush_and_wait().await?)
 }
 
 async fn publish_output<P: RouterEventBatchSink>(
@@ -184,11 +215,14 @@ async fn publish_output<P: RouterEventBatchSink>(
     }
 }
 
-pub(super) async fn start_event_processor<P: RouterEventBatchSink + 'static>(
+pub(super) async fn start_event_processor<
+    P: RouterEventBatchSink + 'static,
+    I: Into<super::PublisherInput> + Send,
+>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    rx: mpsc::UnboundedReceiver<Vec<PlacementEvent>>,
+    rx: mpsc::UnboundedReceiver<I>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_ms: Option<u64>,
 ) {
