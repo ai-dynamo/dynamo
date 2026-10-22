@@ -566,6 +566,97 @@ fn a_minimum_within_the_derived_budget_is_served() {
     assert_eq!(stopping.max_tokens, Some(64));
 }
 
+// Anonymous requests must not allocate native per-conversation cache state
+// unless the rank-hint contract requires an ID. Only this worker's leg counts.
+#[test]
+fn conversation_identity_follows_session_or_transmitted_rank_hint() {
+    use dynamo_backend_common::engine::RoutingHints;
+
+    for (mode, allow_dp_rank, dp_rank, prefill_dp_rank, expected) in [
+        (AGG, false, None, None, None),
+        (AGG, false, Some(0), None, None),
+        (AGG, true, None, None, None),
+        (AGG, true, Some(0), None, Some("req")),
+        (
+            DisaggregationMode::Prefill,
+            true,
+            None,
+            Some(1),
+            Some("req"),
+        ),
+        (
+            DisaggregationMode::Prefill,
+            true,
+            Some(1),
+            None,
+            Some("req"),
+        ),
+        (DisaggregationMode::Decode, true, None, Some(1), None),
+        (DisaggregationMode::Decode, true, Some(1), None, Some("req")),
+    ] {
+        for session_id in [None, Some(" "), Some(" session ")] {
+            let mut req = request();
+            req.routing = Some(RoutingHints {
+                dp_rank,
+                prefill_dp_rank,
+                ..Default::default()
+            });
+            req.agent_context = session_id.map(|session_id| {
+                serde_json::from_value(json!({"session_id": session_id})).unwrap()
+            });
+            let proto =
+                build_generate_request_with_routing(req, "req", "model", None, mode, allow_dp_rank)
+                    .expect("build request");
+            let expected = if session_id == Some(" session ") {
+                Some("session")
+            } else {
+                expected
+            };
+            assert_eq!(
+                proto
+                    .extra
+                    .as_ref()
+                    .unwrap()
+                    .fields
+                    .get("conversation_id")
+                    .and_then(|value| value.kind.as_ref()),
+                expected
+                    .map(|value| prost_types::value::Kind::StringValue(value.to_string()))
+                    .as_ref(),
+                "mode={mode:?}, targeting={allow_dp_rank}, rank={dp_rank:?}, prefill_rank={prefill_dp_rank:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn image_requests_preserve_rank_hint_conversation_identity() {
+    use dynamo_backend_common::engine::RoutingHints;
+
+    for mode in [AGG, DisaggregationMode::Prefill, DisaggregationMode::Decode] {
+        let mut req = request();
+        add_images(&mut req, ["https://example.com/image.png"]);
+        req.routing = Some(RoutingHints {
+            dp_rank: Some(1),
+            ..Default::default()
+        });
+        let proto = build_generate_request_with_routing(
+            req,
+            "image-req",
+            "model",
+            image_limits(4096),
+            mode,
+            true,
+        )
+        .expect("image request with rank targeting");
+        assert_eq!(proto.media.len(), 1);
+        assert_eq!(
+            proto.extra.unwrap().fields["conversation_id"].kind,
+            Some(prost_types::value::Kind::StringValue("image-req".into())),
+        );
+    }
+}
+
 /// Applies `mutate` to a baseline request and asserts `build_generate_request`
 /// rejects it with a message mentioning `expect`.
 fn assert_rejected(mutate: impl FnOnce(&mut PreprocessedRequest), expect: &str) {

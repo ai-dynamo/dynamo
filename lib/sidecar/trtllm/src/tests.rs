@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{
@@ -30,6 +30,7 @@ use crate::proto as pb;
 use crate::test_fixtures::*;
 
 mod e2e;
+mod kv_routing;
 
 // ---------------------------------------------------------------------------
 // Fake TensorRT-LLM OpenEngine services
@@ -38,6 +39,8 @@ mod e2e;
 #[derive(Clone, Default)]
 struct FakeTrtllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
+    target_dp_ranks: Arc<Mutex<Vec<Option<String>>>>,
+    affinity_headers: Arc<Mutex<Vec<(String, String)>>>,
     aborts: Arc<Mutex<Vec<String>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     hang: Arc<AtomicBool>,
@@ -56,6 +59,15 @@ struct FakeTrtllm {
     advertises_image: Arc<AtomicBool>,
     advertises_video: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
+    kv_routing: Arc<AtomicBool>,
+    server_info_error: Arc<Mutex<Option<tonic::Code>>>,
+    kv_sources_error: Arc<Mutex<Option<tonic::Code>>>,
+    subagent_affinity: Arc<AtomicBool>,
+    disable_events: Arc<AtomicBool>,
+    disable_load: Arc<AtomicBool>,
+    dp_size: Arc<AtomicU32>,
+    hang_load: Arc<AtomicBool>,
+    node_metadata: Arc<Mutex<Option<crate::node::NodeMetadata>>>,
 }
 
 fn prompt_len(request: &pb::GenerateRequest) -> u32 {
@@ -81,9 +93,29 @@ impl pb::inference_server::Inference for FakeTrtllm {
         &self,
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
+        if let Some(parent) = request.metadata().get("x-trtllm-subagent-affinity-id") {
+            let auth = request
+                .metadata()
+                .get("x-trtllm-subagent-affinity-auth")
+                .expect("signed parent affinity")
+                .to_str()
+                .expect("ASCII signature")
+                .to_string();
+            self.affinity_headers
+                .lock()
+                .await
+                .push((parent.to_str().expect("valid parent ID").to_string(), auth));
+        }
         if let Some(peer) = request.remote_addr() {
             self.peers.lock().await.push(peer);
         }
+        self.target_dp_ranks.lock().await.push(
+            request
+                .metadata()
+                .get("openengine-target-dp-rank")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string),
+        );
         let request = request.into_inner();
         self.requests.lock().await.push(request.clone());
 
@@ -252,14 +284,92 @@ impl pb::control_server::Control for FakeTrtllm {
         &self,
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
-        Err(Status::unimplemented("GetServerInfo is not used"))
+        if let Some(code) = *self.server_info_error.lock().await {
+            return Err(Status::new(code, "temporary metadata failure"));
+        }
+        if !self.kv_routing.load(Ordering::SeqCst) {
+            return Err(Status::unimplemented("GetServerInfo is not used"));
+        }
+        let mut fields = [
+            (
+                "trtllm_supports_dp_rank_targeting".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::BoolValue(true)),
+                },
+            ),
+            (
+                "kv_event_heartbeat_interval_ms".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::NumberValue(5000.0)),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+        if self.subagent_affinity.load(Ordering::SeqCst) {
+            fields.insert(
+                "trtllm_supports_subagent_affinity".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::BoolValue(true)),
+                },
+            );
+        }
+        if let Some(node) = self.node_metadata.lock().await.as_ref() {
+            fields.extend(
+                dynamo_sidecar_common::json_to_struct(json!({"trtllm_node": node}), "test")
+                    .unwrap()
+                    .fields,
+            );
+        }
+        Ok(Response::new(pb::ServerInfo {
+            extra: Some(prost_types::Struct { fields }),
+            parallelism: Some(pb::ParallelismInfo {
+                data_parallel_size: Some(self.dp_size.load(Ordering::SeqCst).max(1)),
+                ..Default::default()
+            }),
+            capacity: Some(pb::DeploymentCapacity {
+                kv_block_size: Some(32),
+                total_kv_blocks: Some(100),
+                max_running_requests: Some(16),
+                max_batched_tokens: Some(2048),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
     }
 
     async fn get_load(
         &self,
         _request: Request<pb::GetLoadRequest>,
     ) -> Result<Response<pb::LoadInfo>, Status> {
-        Err(Status::unimplemented("GetLoad is not used"))
+        if !self.kv_routing.load(Ordering::SeqCst) {
+            return Err(Status::unimplemented("GetLoad is not used"));
+        }
+        if self.disable_load.load(Ordering::SeqCst) {
+            return Ok(Response::new(pb::LoadInfo::default()));
+        }
+        if self.hang_load.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos() as u64;
+        let dp_size = self.dp_size.load(Ordering::SeqCst).max(1);
+        Ok(Response::new(pb::LoadInfo {
+            timestamp_unix_nanos: Some(timestamp),
+            used_kv_blocks: Some(10),
+            total_kv_blocks: Some(100),
+            ranks: (0..dp_size)
+                .map(|rank| pb::RankLoadInfo {
+                    data_parallel_rank: Some(rank),
+                    used_kv_blocks: Some(10 + rank as u64),
+                    total_kv_blocks: Some(100),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }))
     }
 
     async fn health(
@@ -294,7 +404,33 @@ impl pb::control_server::Control for FakeTrtllm {
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
-        Err(Status::unimplemented("GetKvEventSources is not used"))
+        if let Some(code) = *self.kv_sources_error.lock().await {
+            return Err(Status::new(code, "temporary metadata failure"));
+        }
+        if !self.kv_routing.load(Ordering::SeqCst) {
+            return Err(Status::unimplemented("GetKvEventSources is not used"));
+        }
+        if self.disable_events.load(Ordering::SeqCst) {
+            return Ok(Response::new(pb::GetKvEventSourcesResponse::default()));
+        }
+        let dp_size = self.dp_size.load(Ordering::SeqCst).max(1);
+        Ok(Response::new(pb::GetKvEventSourcesResponse {
+            sources: (0..dp_size)
+                .map(|rank| pb::KvEventSource {
+                    transport: "zmq".to_string(),
+                    endpoint_addr: Some(pb::KvEndpoint {
+                        host: "127.0.0.1".to_string(),
+                        port: 5557 + rank,
+                        protocol: "tcp".to_string(),
+                    }),
+                    topic: "kv-events".to_string(),
+                    data_parallel_rank: Some(rank),
+                    encoding: "msgpack".to_string(),
+                    schema_version: Some(1),
+                    ..Default::default()
+                })
+                .collect(),
+        }))
     }
 
     type SubscribeKvEventsStream =
@@ -396,8 +532,22 @@ fn engine_with(
         ConfiguredModel {
             source: "model-source".to_string(),
             context_length,
+            ..Default::default()
         },
         mode,
+    )
+}
+
+fn engine_with_kv_routing(endpoint: &str) -> TrtllmSidecarEngine {
+    TrtllmSidecarEngine::new(
+        GrpcEndpoint::parse(endpoint, "--grpc-endpoint").expect("valid test endpoint"),
+        transport(1),
+        ConfiguredModel {
+            source: "model-source".to_string(),
+            context_length: Some(4096),
+            ..Default::default()
+        },
+        AGG,
     )
 }
 
@@ -426,9 +576,14 @@ async fn prefill_ready_is_the_terminal_handoff() {
     let mut req = request();
     req.routing = Some(dynamo_backend_common::engine::RoutingHints {
         prefill_dp_rank: Some(0),
+        dp_rank: Some(7),
         ..Default::default()
     });
     let outputs = collect(&engine, req).await;
+    assert_eq!(
+        server.service.target_dp_ranks.lock().await.as_slice(),
+        [None]
+    );
     let terminal = outputs
         .iter()
         .find(|output| output.finish_reason.is_some())
@@ -475,11 +630,20 @@ async fn decode_request_replays_the_prefill_session() {
     let decode = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Decode);
     decode.start(0).await.expect("start decode");
     let mut req = agent_request;
+    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        dp_rank: Some(0),
+        prefill_dp_rank: Some(7),
+        ..Default::default()
+    });
     req.prefill_result = Some(dynamo_backend_common::PrefillResult {
         disaggregated_params: handoff,
         prompt_tokens_details: None,
     });
     let outputs = collect(&decode, req).await;
+    assert_eq!(
+        server.service.target_dp_ranks.lock().await.as_slice(),
+        [None, None]
+    );
     assert!(
         outputs.iter().any(|output| !output.token_ids.is_empty()),
         "the decode worker streams the completion"
@@ -854,14 +1018,18 @@ async fn pool_uses_each_configured_connection() {
 
     for index in 0..4 {
         let mut stream = client
-            .generate(pb::GenerateRequest {
-                request_id: format!("request-{index}"),
-                model: "model-source".to_string(),
-                input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
-                    ids: vec![1, 2],
-                })),
-                ..Default::default()
-            })
+            .generate(
+                pb::GenerateRequest {
+                    request_id: format!("request-{index}"),
+                    model: "model-source".to_string(),
+                    input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
+                        ids: vec![1, 2],
+                    })),
+                    ..Default::default()
+                },
+                None,
+                None,
+            )
             .await
             .expect("start stream");
         while stream.message().await.expect("message").is_some() {}

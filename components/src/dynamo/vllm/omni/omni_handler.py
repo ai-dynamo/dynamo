@@ -447,6 +447,8 @@ class OmniHandler(BaseOmniHandler):
                     speed=inputs.speed,
                     audio_stream_state=audio_stream_state,
                     audio_aggregate_state=audio_aggregate_state,
+                    input_images=inputs.input_images,
+                    num_inference_steps=inputs.num_inference_steps,
                 )
                 previous_text = update_previous_text(stage_output, previous_text)
                 yield {"stage_output": stage_output, "formatted_chunk": chunk}
@@ -620,6 +622,7 @@ class OmniHandler(BaseOmniHandler):
                     # Keep URLs and inline image data out of the client error.
                     raise ValueError("Failed to load input_reference") from e
             if image is not None:
+                inputs.input_images = 1
                 inputs.prompt.update(
                     build_image_to_image_prompt(
                         model_class_name=get_model_class_name(self.engine_client),
@@ -847,6 +850,9 @@ class OmniHandler(BaseOmniHandler):
             response_format=req.response_format,
             output_format=output_format,
             lora_request=lora_request,
+            # The engine output does not carry the step count back, so the
+            # accounting reports the count the request asked for.
+            num_inference_steps=sp.num_inference_steps,
         )
 
     def _engine_inputs_from_video(
