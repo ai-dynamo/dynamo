@@ -155,7 +155,7 @@ use super::RouteDoc;
 /// Worker type label values for Prometheus timing metrics
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
-const ITL_LOCAL_FLUSH_TOKENS: u64 = 64;
+const LOCAL_FLUSH_TOKENS: u64 = 64;
 
 const MODEL_READY_HELP: &str = "Whether the frontend can route at least one inference request for the model (1 = ready, 0 = not ready)";
 
@@ -757,7 +757,7 @@ pub(crate) struct RequestMetrics {
     // out of order across pipeline tasks, so gauges are signed and samples clamp.
     state: AtomicU64,
     // Output tokens not yet added to `output_tokens`, published every
-    // `ITL_LOCAL_FLUSH_TOKENS` and when the request finishes: the per-model counter
+    // `LOCAL_FLUSH_TOKENS` and when the request finishes: the per-model counter
     // is one atomic shared by every in-flight request, and adding to it on every
     // token bounces its cache line between cores.
     pending_output_tokens: AtomicU64,
@@ -851,7 +851,7 @@ impl RequestMetrics {
         }
         let tokens = tokens as u64;
         let pending = self.pending_output_tokens.fetch_add(tokens, Relaxed) + tokens;
-        if pending >= ITL_LOCAL_FLUSH_TOKENS {
+        if pending >= LOCAL_FLUSH_TOKENS {
             self.flush_output_tokens();
         }
         if state & GENERATING != 0 {
@@ -1064,7 +1064,6 @@ pub struct ResponseMetricCollector {
     // so observations are equivalent.
     time_to_first_token: prometheus::Histogram,
     inter_token_latency: Option<prometheus::local::LocalHistogram>,
-    itl_pending_tokens: u64,
     input_sequence_length: prometheus::Histogram,
     cached_tokens: prometheus::Histogram,
     // Per-model multimodal count histogram handles, resolved once at construction.
@@ -2393,7 +2392,6 @@ impl ResponseMetricCollector {
             model,
             time_to_first_token,
             inter_token_latency: None,
-            itl_pending_tokens: 0,
             input_sequence_length,
             cached_tokens,
             images_per_request,
@@ -2627,21 +2625,14 @@ impl ResponseMetricCollector {
             let itl = response_duration.as_secs_f64() / num_tokens as f64;
             self.itl_sum_secs += itl * num_tokens as f64;
             self.itl_count += num_tokens as u64;
-            self.itl_pending_tokens = self.itl_pending_tokens.saturating_add(num_tokens as u64);
-            let should_flush = self.itl_pending_tokens >= ITL_LOCAL_FLUSH_TOKENS;
-            {
-                // Resolve the request-local histogram on the first ITL only, then reuse
-                // it without re-hashing the model label for each output token.
-                let histogram = self.local_inter_token_latency();
-                for _ in 0..num_tokens {
-                    histogram.observe(itl);
-                }
-                if should_flush {
-                    histogram.flush();
-                }
+            // Resolve the request-local histogram on the first ITL only, then reuse
+            // it without re-hashing the model label for each output token.
+            let histogram = self.local_inter_token_latency();
+            for _ in 0..num_tokens {
+                histogram.observe(itl);
             }
-            if should_flush {
-                self.itl_pending_tokens = 0;
+            if histogram.get_sample_count() >= LOCAL_FLUSH_TOKENS {
+                histogram.flush();
             }
 
             // Update per-worker ITL gauge - attributed to decode worker.
@@ -2684,7 +2675,6 @@ impl Drop for ResponseMetricCollector {
         if let Some(histogram) = &self.inter_token_latency {
             histogram.flush();
         }
-        self.itl_pending_tokens = 0;
 
         if !self.detokenize_latency_total.is_zero() && self.detokenize_count_total > 0 {
             let avg_detokenize_latency_ms = (self.detokenize_latency_total.as_secs_f64() * 1000.0)
@@ -3598,7 +3588,7 @@ mod tests {
     }
 
     #[test]
-    fn test_output_tokens_counter_increments() {
+    fn test_output_tokens_counter_flushes_at_threshold_and_drop() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
         metrics.register(&registry).unwrap();
@@ -3618,12 +3608,12 @@ mod tests {
         collector.observe_response(100, 1);
         assert_eq!(
             global.get(),
-            ITL_LOCAL_FLUSH_TOKENS,
+            LOCAL_FLUSH_TOKENS,
             "the 64th pending output token must flush the local counter"
         );
 
         collector.observe_response(100, 7);
-        assert_eq!(global.get(), ITL_LOCAL_FLUSH_TOKENS);
+        assert_eq!(global.get(), LOCAL_FLUSH_TOKENS);
         drop(collector);
         assert_eq!(global.get(), 71, "drop must publish the remaining tokens");
     }
@@ -4123,14 +4113,14 @@ mod tests {
         collector.observe_response(10, 1);
         assert_eq!(
             global.get_sample_count(),
-            ITL_LOCAL_FLUSH_TOKENS,
+            LOCAL_FLUSH_TOKENS,
             "the 64th pending ITL sample must flush the local histogram"
         );
 
         collector.observe_response(10, 7);
         assert_eq!(
             global.get_sample_count(),
-            ITL_LOCAL_FLUSH_TOKENS,
+            LOCAL_FLUSH_TOKENS,
             "the next partial batch must remain local"
         );
         drop(collector);
@@ -4303,18 +4293,7 @@ mod tests {
 
         let model = "test-model";
         let mut collector = response_collector(&metrics, model);
-
-        // Simulate chunk with zero tokens (should not increment)
         collector.observe_response(100, 0);
-
-        // Verify counter remains 0
-        let counter_value = metrics
-            .output_tokens_counter
-            .with_label_values(&[model])
-            .get();
-        assert_eq!(counter_value, 0);
-
-        // Add some tokens, then zero tokens again (should not change counter)
         collector.observe_response(100, 5);
         collector.observe_response(100, 0);
         drop(collector);
@@ -4335,8 +4314,6 @@ mod tests {
 
         let model1 = "model-1";
         let model2 = "model-2";
-
-        // Create collectors for different models
         let mut collector1 = response_collector(&metrics, model1);
         let mut collector2 = response_collector(&metrics, model2);
 
@@ -4346,7 +4323,6 @@ mod tests {
         drop(collector1);
         drop(collector2);
 
-        // Each model's counter receives only its own collector's tokens
         assert_eq!(
             metrics
                 .output_tokens_counter
