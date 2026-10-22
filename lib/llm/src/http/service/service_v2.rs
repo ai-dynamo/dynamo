@@ -17,7 +17,7 @@ use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
-use super::forward::ForwardRoutes;
+use super::forward::{ForwardRoutes, WorkerDiscovery};
 use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
@@ -27,6 +27,7 @@ use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_metrics};
+use crate::namespace::NamespaceFilter;
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::{Context, Result};
@@ -810,10 +811,16 @@ pub struct HttpServiceConfig {
     #[builder(default)]
     frontend_route_extensions: Vec<FrontendRouteExtension>,
 
-    /// Path prefixes reverse-proxied to upstream servers, as `PREFIX=URL`
-    /// entries. `None` falls back to `DYN_HTTP_FORWARD_ROUTES`.
+    /// Path prefixes reverse-proxied to upstream servers, as `PREFIX=URL` or
+    /// `PREFIX=session-owner` entries. `None` falls back to
+    /// `DYN_HTTP_FORWARD_ROUTES`.
     #[builder(default)]
     forward_routes: Option<Vec<String>>,
+
+    /// Namespaces whose workers this frontend serves; session-owner forward
+    /// routes reach only those. `None` means every namespace.
+    #[builder(default)]
+    namespace_filter: Option<NamespaceFilter>,
 
     #[builder(default = "false")]
     enable_chat_endpoints: bool,
@@ -1398,6 +1405,15 @@ impl HttpServiceConfigBuilder {
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
+        // Session-owner forward routes find workers through real discovery only.
+        let forward_workers = config.discovery.clone().map(|discovery| WorkerDiscovery {
+            discovery,
+            namespaces: config
+                .namespace_filter
+                .clone()
+                .unwrap_or(NamespaceFilter::Global),
+            cancel: cancel_token.child_token(),
+        });
         // Use the provided discovery client, or fall back to a no-op memory-backed one
         // (for in-process modes that don't need discovery)
         let discovery_client = config.discovery.unwrap_or_else(|| {
@@ -1607,8 +1623,11 @@ impl HttpServiceConfigBuilder {
                         .unwrap_or_else(|_| super::anthropic::DEFAULT_MESSAGES_PATH.to_string())
                         .into()
                 }),
-                forward_routes: ForwardRoutes::from_config(config.forward_routes.as_deref())?
-                    .map(Arc::new),
+                forward_routes: ForwardRoutes::from_config(
+                    config.forward_routes.as_deref(),
+                    forward_workers,
+                )?
+                .map(Arc::new),
                 service: state.clone(),
             })
             .layer(

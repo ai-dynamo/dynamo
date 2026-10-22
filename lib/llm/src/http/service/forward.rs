@@ -4,11 +4,15 @@
 //! Reverse proxy for operator-configured path prefixes (`--forward-route`, or
 //! `DYN_HTTP_FORWARD_ROUTES` when none is configured), for backend-specific
 //! HTTP APIs the frontend does not implement. Built-in routes always win: a request is forwarded only
-//! when no frontend route matched it. WebSocket upgrades are tunnelled: on the
+//! when no frontend route matched it. A route forwards to one fixed upstream,
+//! or, as `PREFIX=session-owner`, to the worker holding the session the path
+//! names (see [`sessions`]). WebSocket upgrades are tunnelled: on the
 //! upstream's `101`, both connections are spliced together. Other upgrade
 //! requests are forwarded as plain requests.
 
-use axum::body::{Body, HttpBody};
+mod sessions;
+
+use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::Request;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode, Uri, header};
@@ -19,6 +23,12 @@ use hyper::upgrade::OnUpgrade;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+pub(crate) use sessions::WorkerDiscovery;
+use sessions::{SessionOwners, WorkerUrls};
+
+/// The upstream of a route whose requests go to the worker holding their
+/// session.
+const SESSION_OWNER: &str = "session-owner";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Below common upstream keep-alive timeouts, so a pooled connection is not
 /// reused just as the upstream closes it.
@@ -40,7 +50,13 @@ const HOP_BY_HOP_HEADERS: [header::HeaderName; 9] = [
 
 struct ForwardRoute {
     prefix: String,
-    upstream: reqwest::Url,
+    upstream: Upstream,
+}
+
+enum Upstream {
+    Fixed(reqwest::Url),
+    /// The worker holding the session the path names.
+    SessionOwner,
 }
 
 /// Path prefixes forwarded to an upstream HTTP server with the request's
@@ -50,28 +66,56 @@ pub(crate) struct ForwardRoutes {
     /// HTTP/1.1 only: an `https` upstream could otherwise negotiate HTTP/2,
     /// which has no `Upgrade`.
     client: reqwest::Client,
+    /// Present when a route forwards to session owners.
+    sessions: Option<SessionOwners>,
 }
 
-/// Where a request is forwarded: its upstream URL, query included, checked to
-/// stay under the route that covers it. Only [`ForwardRoutes::resolve`]
-/// makes one.
-pub(crate) struct ForwardTarget {
-    url: reqwest::Url,
+/// Where a request is forwarded. Only [`ForwardRoutes::resolve`] makes one.
+pub(crate) struct ForwardTarget(Target);
+
+enum Target {
+    /// The upstream URL, query included, checked to stay under the route that
+    /// covers it.
+    Url(reqwest::Url),
+    /// The owner of the session the path names, under the route at this index.
+    SessionOwner(usize),
 }
 
 impl ForwardRoutes {
-    /// Parses `routes` when given, one `PREFIX=URL` entry each (an empty list
-    /// disables forwarding); otherwise falls back to the whitespace-separated
-    /// entries of `DYN_HTTP_FORWARD_ROUTES` (direct Rust entrypoints). `None`
-    /// when the chosen source has no entries.
-    pub(crate) fn from_config(routes: Option<&[String]>) -> anyhow::Result<Option<Self>> {
-        match routes {
-            Some(routes) => Self::parse(routes),
+    /// Parses `routes` when given, one `PREFIX=URL` or `PREFIX=session-owner`
+    /// entry each (an empty list disables forwarding); otherwise falls back to
+    /// the whitespace-separated entries of `DYN_HTTP_FORWARD_ROUTES` (direct
+    /// Rust entrypoints). `None` when the chosen source has no entries.
+    /// Session-owner routes find workers through `workers`, and are refused
+    /// without it.
+    pub(crate) fn from_config(
+        routes: Option<&[String]>,
+        workers: Option<WorkerDiscovery>,
+    ) -> anyhow::Result<Option<Self>> {
+        let parsed = match routes {
+            Some(routes) => Self::parse(routes)?,
             None => match std::env::var(env_llm::DYN_HTTP_FORWARD_ROUTES) {
-                Ok(spec) => Self::parse(spec.split_whitespace()),
-                Err(_) => Ok(None),
+                Ok(spec) => Self::parse(spec.split_whitespace())?,
+                Err(_) => None,
             },
+        };
+        let Some(mut parsed) = parsed else {
+            return Ok(None);
+        };
+        if let Some(route) = parsed
+            .routes
+            .iter()
+            .find(|r| matches!(r.upstream, Upstream::SessionOwner))
+        {
+            let Some(workers) = workers else {
+                anyhow::bail!(
+                    "forward route {:?} needs worker discovery to find session owners",
+                    route.prefix
+                );
+            };
+            parsed.sessions = Some(SessionOwners::new(WorkerUrls::watch(workers)));
         }
+        Ok(Some(parsed))
     }
 
     fn parse(entries: impl IntoIterator<Item = impl AsRef<str>>) -> anyhow::Result<Option<Self>> {
@@ -86,19 +130,14 @@ impl ForwardRoutes {
                 anyhow::bail!("forward route {n}: prefix must start with '/'");
             }
             let prefix = prefix.trim_end_matches('/').to_string();
-            let upstream = reqwest::Url::parse(url)
-                .map_err(|e| anyhow::anyhow!("forward route URL for {prefix:?} is invalid: {e}"))?;
-            if !upstream.username().is_empty() || upstream.password().is_some() {
-                anyhow::bail!("forward route URL for {prefix:?} must not contain credentials");
-            }
-            if !matches!(upstream.scheme(), "http" | "https")
-                || upstream.query().is_some()
-                || upstream.fragment().is_some()
-            {
-                anyhow::bail!(
-                    "forward route URL for {prefix:?} must be http(s) without query or fragment"
-                );
-            }
+            let upstream = if url == SESSION_OWNER {
+                Upstream::SessionOwner
+            } else {
+                Upstream::Fixed(
+                    upstream_base(url)
+                        .map_err(|e| anyhow::anyhow!("forward route URL for {prefix:?} {e}"))?,
+                )
+            };
             if routes.iter().any(|r| r.prefix == prefix) {
                 anyhow::bail!("duplicate forward route prefix {prefix:?}");
             }
@@ -116,25 +155,53 @@ impl ForwardRoutes {
             .http1_only()
             .build()?;
         for route in &routes {
-            tracing::info!(prefix = %route.prefix, upstream = %route.upstream, "forwarding HTTP route");
+            match &route.upstream {
+                Upstream::Fixed(url) => {
+                    tracing::info!(prefix = %route.prefix, upstream = %url, "forwarding HTTP route");
+                }
+                Upstream::SessionOwner => {
+                    tracing::info!(prefix = %route.prefix, "forwarding HTTP route to session owners");
+                }
+            }
         }
-        Ok(Some(Self { routes, client }))
+        Ok(Some(Self {
+            routes,
+            client,
+            sessions: None,
+        }))
     }
 
     /// Where a request for `uri` is forwarded, or `None` when no prefix covers
-    /// its path; see [`Self::upstream_url`].
+    /// its path; see [`Self::route`].
     pub(crate) fn resolve(&self, uri: &Uri) -> Option<ForwardTarget> {
-        let url = self.upstream_url(uri.path(), uri.query())?;
-        Some(ForwardTarget { url })
+        let (index, route) = self.route(uri.path())?;
+        let target = match &route.upstream {
+            Upstream::Fixed(base) => {
+                Target::Url(scoped_url(base, &route.prefix, uri.path(), uri.query())?)
+            }
+            Upstream::SessionOwner => Target::SessionOwner(index),
+        };
+        Some(ForwardTarget(target))
     }
 
-    /// The upstream URL for `path` and `query`, or `None` when no prefix
-    /// covers `path`. Prefixes match whole segments: `/v1/custom` covers
+    /// The upstream URL of a fixed route for `path` and `query`; see
+    /// [`Self::route`].
+    #[cfg(test)]
+    fn upstream_url(&self, path: &str, query: Option<&str>) -> Option<reqwest::Url> {
+        let (_, route) = self.route(path)?;
+        let Upstream::Fixed(base) = &route.upstream else {
+            return None;
+        };
+        scoped_url(base, &route.prefix, path, query)
+    }
+
+    /// The route covering `path` and its index, or `None` when no prefix
+    /// covers it. Prefixes match whole segments: `/v1/custom` covers
     /// `/v1/custom` and `/v1/custom/abc`, not `/v1/customx`. Paths with
     /// backslashes or dot segments, including those separated by an encoded
     /// `/` or `\`, are never forwarded: normalization here or upstream would
     /// let them escape the prefix. Other encoded bytes are forwarded as sent.
-    fn upstream_url(&self, path: &str, query: Option<&str>) -> Option<reqwest::Url> {
+    fn route(&self, path: &str) -> Option<(usize, &ForwardRoute)> {
         let separated = path
             .to_ascii_lowercase()
             .replace("%2f", "/")
@@ -146,20 +213,10 @@ impl ForwardRoutes {
         {
             return None;
         }
-        let route = self.routes.iter().find(|r| {
+        self.routes.iter().enumerate().find(|(_, r)| {
             path.strip_prefix(r.prefix.as_str())
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-        })?;
-        let mut url = route.upstream.clone();
-        let base = url.path().trim_end_matches('/').to_string();
-        url.set_path(&format!("{base}{path}"));
-        url.set_query(query);
-        // Defence in depth: whatever normalization did, stay under the route.
-        let scope = format!("{base}{}", route.prefix);
-        url.path()
-            .strip_prefix(scope.as_str())
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-            .then_some(url)
+        })
     }
 
     /// Forwards `request` to `target`. `permit` lives as long as the forwarded
@@ -172,12 +229,33 @@ impl ForwardRoutes {
         cancel: CancellationToken,
         permit: P,
     ) -> Response {
+        match target.0 {
+            Target::Url(url) => self.forward_to(request, url, cancel, permit).await,
+            Target::SessionOwner(index) => match &self.sessions {
+                Some(owners) => {
+                    let prefix = &self.routes[index].prefix;
+                    self.forward_session(owners, prefix, request, cancel, permit)
+                        .await
+                }
+                None => sessions::no_workers(),
+            },
+        }
+    }
+
+    /// Forwards `request` to `url`; see [`Self::forward`].
+    async fn forward_to<P: Send + Sync + 'static>(
+        &self,
+        request: Request,
+        url: reqwest::Url,
+        cancel: CancellationToken,
+        permit: P,
+    ) -> Response {
         let (mut parts, body) = request.into_parts();
         let body = match prepare_upload(&mut parts, body, &cancel).await {
             Ok(body) => body,
             Err(refused) => return refused,
         };
-        let (request, client_upgrade) = self.upstream_request(parts, &target.url, body);
+        let (request, client_upgrade) = self.upstream_request(parts, &url, body);
         // An upstream that never answers must not outlive the drain window.
         let sent = tokio::select! {
             sent = request.send() => sent,
@@ -186,10 +264,13 @@ impl ForwardRoutes {
             }
         };
         match sent {
-            Ok(upstream) => client_response(upstream, client_upgrade, target.url, cancel, permit),
+            Ok(upstream) => client_response(upstream, client_upgrade, url, cancel, permit),
             Err(err) => {
-                tracing::warn!(url = %target.url, error = %err, "forward route upstream request failed");
-                bad_gateway()
+                tracing::warn!(%url, error = %err, "forward route upstream request failed");
+                error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream for forwarded route is unavailable",
+                )
             }
         }
     }
@@ -236,49 +317,70 @@ impl ForwardRoutes {
 /// upstream, or returns the response to send instead. A known length is
 /// enforced by the server, so that body streams. An unknown one is read
 /// within the limit first, so the upstream never sees a partial body or
-/// answers before the limit is decided; a stalled upload must not outlive
-/// the drain window either.
+/// answers before the limit is decided.
 async fn prepare_upload(
     parts: &mut Parts,
     body: Body,
     cancel: &CancellationToken,
 ) -> Result<Option<reqwest::Body>, Response> {
-    let limit = super::openai::get_body_limit();
-    let declared = parts
-        .headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok()?.parse::<u64>().ok());
     let exact = HttpBody::size_hint(&body).exact();
-    if declared
-        .or(exact)
-        .is_some_and(|length| length > limit as u64)
-    {
+    if over_body_limit(parts, exact) {
         return Err(super::openai::payload_too_large_error().into_response());
     }
     match exact {
         Some(0) => Ok(None),
         Some(_) => Ok(Some(reqwest::Body::wrap_stream(body.into_data_stream()))),
         None => {
-            let collected = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    return Err(super::openai::ErrorMessage::_service_unavailable().into_response());
-                }
-                collected = http_body_util::BodyExt::collect(http_body_util::Limited::new(body, limit)) => collected,
-            };
-            match collected {
-                Ok(collected) => {
-                    // The length now comes from the bytes read, not from a
-                    // Content-Length that disagreed with the chunked framing.
-                    parts.headers.remove(header::CONTENT_LENGTH);
-                    Ok(Some(reqwest::Body::from(collected.to_bytes())))
-                }
-                Err(err) if err.is::<http_body_util::LengthLimitError>() => {
-                    Err(super::openai::payload_too_large_error().into_response())
-                }
-                Err(_) => Err(super::openai::failed_to_read_request_body_error().into_response()),
-            }
+            let collected = collect_upload(body, cancel).await?;
+            // The length now comes from the bytes read, not from a
+            // Content-Length that disagreed with the chunked framing.
+            parts.headers.remove(header::CONTENT_LENGTH);
+            Ok(Some(reqwest::Body::from(collected)))
         }
+    }
+}
+
+/// The whole request body, read within the body limit, or the response to
+/// send instead.
+async fn read_upload(
+    parts: &Parts,
+    body: Body,
+    cancel: &CancellationToken,
+) -> Result<Bytes, Response> {
+    if over_body_limit(parts, HttpBody::size_hint(&body).exact()) {
+        return Err(super::openai::payload_too_large_error().into_response());
+    }
+    collect_upload(body, cancel).await
+}
+
+/// Whether the declared or `exact` body length exceeds the body limit.
+fn over_body_limit(parts: &Parts, exact: Option<u64>) -> bool {
+    let declared = parts
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok()?.parse::<u64>().ok());
+    declared
+        .or(exact)
+        .is_some_and(|length| length > super::openai::get_body_limit() as u64)
+}
+
+/// Reads `body` within the body limit. A stalled upload must not outlive the
+/// drain window.
+async fn collect_upload(body: Body, cancel: &CancellationToken) -> Result<Bytes, Response> {
+    let limit = super::openai::get_body_limit();
+    let collected = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            return Err(super::openai::ErrorMessage::_service_unavailable().into_response());
+        }
+        collected = http_body_util::BodyExt::collect(http_body_util::Limited::new(body, limit)) => collected,
+    };
+    match collected {
+        Ok(collected) => Ok(collected.to_bytes()),
+        Err(err) if err.is::<http_body_util::LengthLimitError>() => {
+            Err(super::openai::payload_too_large_error().into_response())
+        }
+        Err(_) => Err(super::openai::failed_to_read_request_body_error().into_response()),
     }
 }
 
@@ -392,11 +494,46 @@ fn strip_hop_by_hop(mut headers: HeaderMap) -> HeaderMap {
     headers
 }
 
-fn bad_gateway() -> Response {
-    let code = StatusCode::BAD_GATEWAY;
+/// A forwarded route's base URL, checked: http(s), without credentials,
+/// query or fragment. Errors never echo the URL, which may hold credentials.
+fn upstream_base(url: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(url).map_err(|e| format!("is invalid: {e}"))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("must not contain credentials".to_string());
+    }
+    if !matches!(url.scheme(), "http" | "https")
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("must be http(s) without query or fragment".to_string());
+    }
+    Ok(url)
+}
+
+/// `path` and `query` under `base`, or `None` when normalization took the
+/// result out from under the route at `prefix`.
+fn scoped_url(
+    base: &reqwest::Url,
+    prefix: &str,
+    path: &str,
+    query: Option<&str>,
+) -> Option<reqwest::Url> {
+    let mut url = base.clone();
+    let base = url.path().trim_end_matches('/').to_string();
+    url.set_path(&format!("{base}{path}"));
+    url.set_query(query);
+    // Defence in depth: whatever normalization did, stay under the route.
+    let scope = format!("{base}{prefix}");
+    url.path()
+        .strip_prefix(scope.as_str())
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        .then_some(url)
+}
+
+fn error_response(code: StatusCode, message: &str) -> Response {
     let body = serde_json::json!({
-        "message": "upstream for forwarded route is unavailable",
-        "type": "Bad Gateway",
+        "message": message,
+        "type": code.canonical_reason().unwrap_or_default(),
         "code": code.as_u16(),
     });
     (code, axum::Json(body)).into_response()

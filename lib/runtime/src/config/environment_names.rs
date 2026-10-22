@@ -379,7 +379,9 @@ pub mod llm {
 
     /// Path prefixes the frontend reverse-proxies to upstream HTTP servers:
     /// whitespace-separated `PREFIX=URL` entries, e.g.
-    /// `/v1/custom=http://127.0.0.1:8080`. Built-in routes take precedence.
+    /// `/v1/custom=http://127.0.0.1:8080`, or `PREFIX=session-owner` entries
+    /// forwarded to the worker holding the named session. Built-in routes take
+    /// precedence.
     pub const DYN_HTTP_FORWARD_ROUTES: &str = "DYN_HTTP_FORWARD_ROUTES";
 
     /// Batch file upload limit in MiB, including multipart framing (default 202).

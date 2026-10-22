@@ -522,18 +522,22 @@ fn from_config_prefers_explicit_routes() {
         Some("/v1/env=http://env:9000 /v1/env2=http://env:9001"),
         || {
             let explicit = ["/v1/custom=http://up:8080".to_string()];
-            let routes = ForwardRoutes::from_config(Some(&explicit))
+            let routes = ForwardRoutes::from_config(Some(&explicit), None)
                 .unwrap()
                 .unwrap();
             assert!(url(&routes, "/v1/custom/x", None).is_some());
             assert_eq!(url(&routes, "/v1/env/x", None), None);
             // An explicit empty list disables forwarding despite the environment.
-            assert!(ForwardRoutes::from_config(Some(&[])).unwrap().is_none());
+            assert!(
+                ForwardRoutes::from_config(Some(&[]), None)
+                    .unwrap()
+                    .is_none()
+            );
             // An explicit entry is one route: it is never split on whitespace.
             let joined = ["/v1/custom=http://up:8080 /v1/other=http://up:8081".to_string()];
-            assert!(ForwardRoutes::from_config(Some(&joined)).is_err());
+            assert!(ForwardRoutes::from_config(Some(&joined), None).is_err());
             // Without explicit routes, the environment's entries apply.
-            let routes = ForwardRoutes::from_config(None).unwrap().unwrap();
+            let routes = ForwardRoutes::from_config(None, None).unwrap().unwrap();
             assert!(url(&routes, "/v1/env/x", None).is_some());
             assert!(url(&routes, "/v1/env2/x", None).is_some());
         },
@@ -599,4 +603,279 @@ fn upstream_url_matches_whole_segments_longest_first() {
     );
     assert_eq!(url(&routes, "/v1/customx", None), None);
     assert_eq!(url(&routes, "/v1/models", None), None);
+}
+
+mod session_owner {
+    use super::*;
+    use crate::namespace::NamespaceFilter;
+    use dynamo_runtime::discovery::{
+        Discovery, DiscoveryInstance, DiscoverySpec, MockDiscovery, SharedMockRegistry,
+    };
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    /// A worker's session API: sessions are created under the body's `id`,
+    /// and every answer names the worker.
+    async fn session_worker(name: &'static str) -> String {
+        use axum::extract::Path;
+        use axum::routing::{get, post};
+
+        let sessions = Arc::new(parking_lot::Mutex::new(HashSet::<String>::new()));
+        let held = move |sessions: &parking_lot::Mutex<HashSet<String>>, id: &str| {
+            if sessions.lock().contains(id) {
+                (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({"id": id, "worker": name})),
+                )
+            } else {
+                (
+                    StatusCode::NOT_FOUND,
+                    axum::Json(serde_json::json!({"worker": name})),
+                )
+            }
+        };
+        let app = axum::Router::new()
+            .route(
+                "/v1/sessions",
+                post({
+                    let sessions = sessions.clone();
+                    move |body: Bytes| async move {
+                        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let id = body["id"]
+                            .as_str()
+                            .expect("the frontend names every session");
+                        if !sessions.lock().insert(id.to_string()) {
+                            return (
+                                StatusCode::CONFLICT,
+                                axum::Json(serde_json::json!({"worker": name})),
+                            );
+                        }
+                        (
+                            StatusCode::OK,
+                            axum::Json(serde_json::json!({"id": id, "worker": name})),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/v1/sessions/{id}",
+                get({
+                    let sessions = sessions.clone();
+                    move |Path(id): Path<String>| async move { held(&sessions, &id) }
+                })
+                .delete({
+                    let sessions = sessions.clone();
+                    move |Path(id): Path<String>| async move {
+                        let answer = held(&sessions, &id);
+                        sessions.lock().remove(&id);
+                        answer
+                    }
+                }),
+            )
+            .route(
+                "/v1/sessions/{id}/warm",
+                post({
+                    let sessions = sessions.clone();
+                    move |Path(id): Path<String>| async move { held(&sessions, &id) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// Registers worker `id`'s model card in `namespace`, advertising `url`.
+    async fn register(
+        registry: &SharedMockRegistry,
+        id: u64,
+        namespace: &str,
+        url: &str,
+    ) -> (MockDiscovery, DiscoveryInstance) {
+        let discovery = MockDiscovery::new(Some(id), registry.clone());
+        let card = serde_json::json!({
+            "display_name": "model",
+            "runtime_config": {"runtime_data": {"forward_url": url}},
+        });
+        let spec = DiscoverySpec::from_model(
+            namespace.to_string(),
+            "backend".to_string(),
+            "generate".to_string(),
+            &card,
+        )
+        .unwrap();
+        let instance = discovery.register(spec).await.unwrap();
+        (discovery, instance)
+    }
+
+    /// A frontend's session-owner route at `/v1/sessions`, once it sees
+    /// `workers` workers.
+    async fn frontend(
+        registry: &SharedMockRegistry,
+        namespaces: NamespaceFilter,
+        workers: usize,
+    ) -> ForwardRoutes {
+        let routes = ForwardRoutes::from_config(
+            Some(&["/v1/sessions=session-owner".to_string()]),
+            Some(WorkerDiscovery {
+                discovery: Arc::new(MockDiscovery::new(None, registry.clone())),
+                namespaces,
+                cancel: CancellationToken::new(),
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        wait_for_workers(&routes, workers).await;
+        routes
+    }
+
+    async fn wait_for_workers(routes: &ForwardRoutes, count: usize) {
+        let owners = routes.sessions.as_ref().unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            owners.workers().wait_for_count(count),
+        )
+        .await
+        .expect("the frontend sees the workers");
+    }
+
+    async fn call(
+        routes: &ForwardRoutes,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = forward(routes, request, CancellationToken::new(), ()).await;
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap_or_default())
+    }
+
+    #[test]
+    fn session_owner_routes_need_worker_discovery() {
+        let routes = ["/v1/sessions=session-owner".to_string()];
+        assert!(ForwardRoutes::parse(&routes).unwrap().is_some());
+        let err = ForwardRoutes::from_config(Some(&routes), None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("worker discovery"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn requests_follow_the_session_to_its_worker() {
+        let registry = SharedMockRegistry::new();
+        register(&registry, 1, "ns", &session_worker("a").await).await;
+        register(&registry, 2, "ns", &session_worker("b").await).await;
+        let first = frontend(&registry, NamespaceFilter::Global, 2).await;
+        let second = frontend(&registry, NamespaceFilter::Global, 2).await;
+
+        // Created without an id: the frontend mints one, so it knows the owner.
+        let (status, created) = call(&first, "POST", "/v1/sessions", "").await;
+        assert_eq!(status, StatusCode::OK);
+        let id = created["id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("sess_"), "{id}");
+        let owner = created["worker"].clone();
+        for _ in 0..3 {
+            let (status, warmed) =
+                call(&first, "POST", &format!("/v1/sessions/{id}/warm"), "").await;
+            assert_eq!((status, &warmed["worker"]), (StatusCode::OK, &owner));
+        }
+        // Another frontend asks the workers.
+        let (status, warmed) = call(&second, "POST", &format!("/v1/sessions/{id}/warm"), "").await;
+        assert_eq!((status, &warmed["worker"]), (StatusCode::OK, &owner));
+
+        // A chosen id lands on one worker whichever frontend creates it.
+        let (status, chosen) = call(&first, "POST", "/v1/sessions", r#"{"id": "agent-1"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, again) = call(&second, "POST", "/v1/sessions", r#"{"id": "agent-1"}"#).await;
+        assert_eq!(
+            (status, &again["worker"]),
+            (StatusCode::CONFLICT, &chosen["worker"])
+        );
+
+        // Deleted through one frontend, gone through the other, which held its owner.
+        let (status, _) = call(&second, "DELETE", &format!("/v1/sessions/{id}"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        for _ in 0..2 {
+            let (status, _) = call(&first, "GET", &format!("/v1/sessions/{id}"), "").await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+        let (status, missing) = call(&second, "GET", "/v1/sessions/nope", "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(missing["message"], "no worker holds this session");
+
+        let (status, _) = call(&first, "GET", "/v1/sessions", "").await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        for bad in [r#"{"id": 7}"#, r#"{"id": "a/b"}"#, "[]"] {
+            let (status, _) = call(&first, "POST", "/v1/sessions", bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_whose_worker_left_is_not_found() {
+        let registry = SharedMockRegistry::new();
+        let a = register(&registry, 1, "ns", &session_worker("a").await).await;
+        let b = register(&registry, 2, "ns", &session_worker("b").await).await;
+        let routes = frontend(&registry, NamespaceFilter::Global, 2).await;
+
+        let (status, created) = call(&routes, "POST", "/v1/sessions", "").await;
+        assert_eq!(status, StatusCode::OK);
+        let id = created["id"].as_str().unwrap().to_string();
+        let (discovery, card) = if created["worker"] == "a" { a } else { b };
+        discovery.unregister(card).await.unwrap();
+        wait_for_workers(&routes, 1).await;
+
+        let (status, _) = call(&routes, "POST", &format!("/v1/sessions/{id}/warm"), "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_worker_that_cannot_answer_makes_a_lookup_unavailable() {
+        let registry = SharedMockRegistry::new();
+        register(&registry, 1, "ns", &session_worker("a").await).await;
+        let routes = frontend(&registry, NamespaceFilter::Global, 1).await;
+        let (status, created) = call(&routes, "POST", "/v1/sessions", "").await;
+        assert_eq!(status, StatusCode::OK);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        register(&registry, 2, "ns", "http://127.0.0.1:1").await;
+        let other = frontend(&registry, NamespaceFilter::Global, 2).await;
+        // The owner answers, so the silent worker does not matter.
+        let (status, warmed) = call(&other, "POST", &format!("/v1/sessions/{id}/warm"), "").await;
+        assert_eq!(
+            (status, &warmed["worker"]),
+            (StatusCode::OK, &created["worker"])
+        );
+        // Without an owner, the silent worker might hold it: not a 404.
+        let (status, _) = call(&other, "GET", "/v1/sessions/nope", "").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn only_workers_in_the_served_namespaces_take_sessions() {
+        let registry = SharedMockRegistry::new();
+        register(&registry, 1, "ns", &session_worker("a").await).await;
+        register(&registry, 2, "other", &session_worker("b").await).await;
+        let routes = frontend(&registry, NamespaceFilter::Exact("ns".to_string()), 1).await;
+        for _ in 0..8 {
+            let (status, created) = call(&routes, "POST", "/v1/sessions", "").await;
+            assert_eq!(
+                (status, &created["worker"]),
+                (StatusCode::OK, &serde_json::json!("a"))
+            );
+        }
+
+        let empty = frontend(&SharedMockRegistry::new(), NamespaceFilter::Global, 0).await;
+        let (status, _) = call(&empty, "POST", "/v1/sessions", "").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
 }
