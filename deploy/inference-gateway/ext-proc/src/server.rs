@@ -328,21 +328,31 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             result.selected_prefill_endpoint.as_deref(),
         ));
 
-        // Inject routing extensions into the request body JSON.
-        // `nvext.token_data` lets the backend skip redundant tokenization.
-        // `cache_salt` is written only under the `NativeVllm` forwarding
-        // policy (see `CacheSaltForwarding`); `Preserve` leaves the body
-        // untouched. Only the injection path allocates a new body — otherwise
+        // Rewrite the request body JSON for the backend.
+        // `strip_nvext` removes the client's Dynamo-only `nvext` (standalone,
+        // raw engines). `nvext.token_data` lets a Dynamo backend skip redundant
+        // tokenization. `cache_salt` is written only under the `NativeVllm`
+        // forwarding policy (see `CacheSaltForwarding`); `Preserve` leaves the
+        // body untouched. Only the rewrite path allocates a new body — otherwise
         // the unchanged body is a cheap `Bytes` clone (no copy).
         let cache_salt = match result.cache_salt_forwarding {
             CacheSaltForwarding::NativeVllm => result.cache_namespace.as_deref(),
             CacheSaltForwarding::Preserve => None,
         };
-        let forwarded_body: Bytes = if result.token_ids.is_some() || cache_salt.is_some() {
-            match inject_body_extensions(&raw_body, result.token_ids.as_deref(), cache_salt) {
+        let forwarded_body: Bytes = if result.strip_nvext
+            || result.token_ids.is_some()
+            || cache_salt.is_some()
+        {
+            match rewrite_forwarded_body(
+                &raw_body,
+                result.strip_nvext,
+                result.token_ids.as_deref(),
+                cache_salt,
+            ) {
                 Ok(modified) => {
                     tracing::trace!(
                         request_id = %ctx.request_id,
+                        strip_nvext = result.strip_nvext,
                         has_cache_namespace = result.cache_namespace.is_some(),
                         cache_salt_forwarding = ?result.cache_salt_forwarding,
                         "Forwarded body with routing extensions"
@@ -350,7 +360,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
                     Bytes::from(modified)
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "Failed to inject routing extensions, forwarding original body");
+                    tracing::warn!(error = %e, "Failed to rewrite request body, forwarding original body");
                     raw_body.clone()
                 }
             }
@@ -849,14 +859,19 @@ fn validate_protocol_config(
     Err(Status::failed_precondition(detail))
 }
 
-/// Inject routing helpers into the request body JSON:
-/// - `nvext.token_data`: lets the backend skip re-tokenization.
+/// Rewrite the request body JSON for the backend, in this order:
+/// - remove the client's top-level `nvext` when `strip_nvext` is set (see
+///   [`PickResult::strip_nvext`]): raw engines never read it and TensorRT-LLM
+///   rejects requests that carry it;
+/// - `nvext.token_data`: lets a Dynamo backend skip re-tokenization (re-creates
+///   `nvext` with only that field after a strip);
 /// - top-level `cache_salt` = `dynamo-cache-salt:` + namespace, only under
-///   [`CacheSaltForwarding::NativeVllm`]. Native vLLM reads the top-level
+///   [`CacheSaltForwarding::NativeVllm`]. Raw engines read the top-level
 ///   field; `Preserve` backends (Dynamo runtime) skip this rewrite because
 ///   their handler applies the tag itself.
-fn inject_body_extensions(
+fn rewrite_forwarded_body(
     body: &[u8],
+    strip_nvext: bool,
     token_ids: Option<&[u32]>,
     cache_salt: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
@@ -865,6 +880,10 @@ fn inject_body_extensions(
     let obj = parsed
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("body is not a JSON object"))?;
+
+    if strip_nvext {
+        obj.remove("nvext");
+    }
 
     if let Some(token_ids) = token_ids {
         let nvext = obj
@@ -1635,7 +1654,7 @@ mod tests {
     #[test]
     fn inject_body_extensions_adds_cache_salt() {
         let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
-        let modified = inject_body_extensions(body, None, Some("salt-a")).unwrap();
+        let modified = rewrite_forwarded_body(body, false, None, Some("salt-a")).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
         assert_eq!(
             parsed.get("cache_salt").and_then(|v| v.as_str()),
@@ -1647,7 +1666,8 @@ mod tests {
     #[test]
     fn inject_body_extensions_preserves_existing_fields() {
         let body = br#"{"model":"m","nvext":{"extra_fields":["engine_data"]}}"#;
-        let modified = inject_body_extensions(body, Some(&[10, 20, 30]), Some("salt-b")).unwrap();
+        let modified =
+            rewrite_forwarded_body(body, false, Some(&[10, 20, 30]), Some("salt-b")).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
 
         assert_eq!(
@@ -1677,8 +1697,8 @@ mod tests {
     #[test]
     fn inject_body_extensions_isolates_salts() {
         let body = br#"{}"#;
-        let a = inject_body_extensions(body, None, Some("salt-a")).unwrap();
-        let b = inject_body_extensions(body, None, Some("salt-b")).unwrap();
+        let a = rewrite_forwarded_body(body, false, None, Some("salt-a")).unwrap();
+        let b = rewrite_forwarded_body(body, false, None, Some("salt-b")).unwrap();
         let parsed_a: serde_json::Value = serde_json::from_slice(&a).unwrap();
         let parsed_b: serde_json::Value = serde_json::from_slice(&b).unwrap();
         assert_eq!(parsed_a["cache_salt"], "dynamo-cache-salt:salt-a");
@@ -1693,7 +1713,7 @@ mod tests {
     fn inject_body_extensions_leaves_nvext_cache_salt_untouched() {
         let body = br#"{"nvext":{"cache_salt":"body-salt","extra_fields":["engine_data"]}}"#;
         let modified =
-            inject_body_extensions(body, Some(&[10, 20, 30]), Some("header-salt")).unwrap();
+            rewrite_forwarded_body(body, false, Some(&[10, 20, 30]), Some("header-salt")).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
 
         assert_eq!(parsed["cache_salt"], "dynamo-cache-salt:header-salt");
@@ -1712,13 +1732,59 @@ mod tests {
     #[test]
     fn inject_body_extensions_rejects_non_object_body() {
         let body = br#"["not", "an", "object"]"#;
-        assert!(inject_body_extensions(body, Some(&[1]), Some("salt")).is_err());
+        assert!(rewrite_forwarded_body(body, false, Some(&[1]), Some("salt")).is_err());
     }
 
     /// A body with a non-object `nvext` cannot accept token_data.
     #[test]
     fn inject_body_extensions_rejects_non_object_nvext() {
         let body = br#"{"nvext": "bad"}"#;
-        assert!(inject_body_extensions(body, Some(&[1]), None).is_err());
+        assert!(rewrite_forwarded_body(body, false, Some(&[1]), None).is_err());
+    }
+
+    /// Standalone raw-engine forwarding: the consumed `nvext` is removed (an
+    /// explicit `null` too, since `extra="forbid"` engines see the key), every
+    /// other field survives byte-for-byte in value, and the native salt is
+    /// still written at the top level.
+    #[test]
+    fn rewrite_forwarded_body_strips_nvext_for_raw_engines() {
+        for body in [
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":8,"nvext":{"agent_hints":{"osl":32},"cache_salt":"tenant-a"}}"#.as_slice(),
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":8,"nvext":null}"#.as_slice(),
+        ] {
+            let modified = rewrite_forwarded_body(body, true, None, Some("tenant-a")).unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
+            let obj = parsed.as_object().unwrap();
+
+            assert!(!obj.contains_key("nvext"), "{parsed}");
+            assert_eq!(parsed["model"], "m");
+            assert_eq!(parsed["messages"][0]["content"], "hi");
+            assert_eq!(parsed["max_tokens"], 8);
+            assert_eq!(parsed["cache_salt"], "dynamo-cache-salt:tenant-a");
+        }
+    }
+
+    /// Stripping happens first, so a later token_data injection re-creates
+    /// `nvext` holding only the EPP's own field, never the client's.
+    #[test]
+    fn rewrite_forwarded_body_strip_then_token_data_leaves_only_epp_fields() {
+        let body = br#"{"model":"m","nvext":{"agent_hints":{"osl":32},"extra_fields":["x"]}}"#;
+        let modified = rewrite_forwarded_body(body, true, Some(&[7, 8]), None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
+
+        let nvext = parsed["nvext"].as_object().expect("nvext re-created");
+        assert_eq!(nvext.len(), 1, "{parsed}");
+        assert_eq!(parsed["nvext"]["token_data"], serde_json::json!([7, 8]));
+    }
+
+    /// `strip_nvext` on a body without `nvext` changes nothing but the
+    /// requested extensions (the standalone picker only sets it when the key
+    /// was present, so this is the defensive path).
+    #[test]
+    fn rewrite_forwarded_body_strip_without_nvext_is_a_no_op() {
+        let body = br#"{"model":"m","messages":[]}"#;
+        let modified = rewrite_forwarded_body(body, true, None, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
+        assert_eq!(parsed, serde_json::json!({"model":"m","messages":[]}));
     }
 }
