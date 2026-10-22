@@ -131,6 +131,7 @@ def decode_cancellation_case(monkeypatch):
     handler._routed_experts_kwargs = {}
     handler._enable_frontend_decoding = False
     handler._mm_hashes_supported = False
+    handler._mm_routing_labels_supported = False
     handler._get_input_param = lambda request: {"input_ids": [1]}
     handler._build_sampling_params = lambda request: {"max_new_tokens": 1}
     handler._build_logprob_kwargs = lambda request: {}
