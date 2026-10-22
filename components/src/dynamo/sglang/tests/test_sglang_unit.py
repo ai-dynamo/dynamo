@@ -35,6 +35,7 @@ from dynamo.sglang._compat import (
     resolved_server_args,
     sglang_uses_mla_backend,
     supports_external_mm_hashes,
+    supports_mm_routing_labels,
 )
 from dynamo.sglang.args import (
     CUDA_COREDUMP_WAIT_ENV,
@@ -1137,6 +1138,19 @@ def test_external_mm_hashes_are_disabled_for_engine_owned_mm_identity(monkeypatc
             return None
 
     assert not supports_external_mm_hashes(MmHashEngine())
+
+
+def test_routing_labels_follow_the_async_generate_signature():
+    class LabelEngine:
+        async def async_generate(self, mm_hashes=None, mm_routing_labels=None):
+            return None
+
+    class MmHashEngine:
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    assert supports_mm_routing_labels(LabelEngine())
+    assert not supports_mm_routing_labels(MmHashEngine())
 
 
 @pytest.mark.parametrize(

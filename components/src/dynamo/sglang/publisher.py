@@ -418,8 +418,8 @@ class DynamoSglangPublisher:
 
             if sglang_uses_engine_owned_mm_identity():
                 # Event tokens carry SGLang's own multimodal pad values. Tell
-                # the publisher's normalizer to exclude them instead of
-                # indexing them as text.
+                # the publisher's normalizer to map labeled spans and exclude
+                # the rest instead of indexing them as text.
                 os.environ.setdefault("DYN_KV_EVENTS_ENGINE_OWNED_MM_IDENTITY", "1")
 
             # Determine DP attention configuration
