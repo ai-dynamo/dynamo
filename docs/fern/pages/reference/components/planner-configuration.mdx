@@ -383,6 +383,102 @@ curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
 
 PATCH is atomic. Malformed JSON, unknown fields, and empty patches return HTTP `400`. `null`, a negative `min_endpoint`, component-specific minimums below `1`, fields that are inactive for the current mode, and minimums that exceed the configured GPU or power budget return HTTP `422` without changing the active configuration.
 
+### System-port reconfiguration API
+
+<ParamField path="enable_runtime_reconfiguration" type="boolean" default="false">
+  Enable the Planner control API on the existing `DYN_SYSTEM_PORT` listener.
+  The runtime must have a system listener enabled. Kubernetes Planner deployments
+  configure this port as `9090`.
+</ParamField>
+
+<ParamField path="runtime_warmup_trace_dir" type="string" default="null">
+  Directory containing permitted runtime warmup traces. Required when submitting
+  `warmup_trace`; paths must remain inside this directory, and symlinks are rejected.
+  This setting cannot be changed through the runtime API.
+</ParamField>
+
+<Warning>
+  This API changes scaling behavior and has no application authentication. Restrict
+  access to the system listener to trusted controllers and operators before enabling it.
+  The existing localhost `9086` API remains available with its original configuration.
+</Warning>
+
+| Method and path | Response |
+| --- | --- |
+| `GET /engine/planner/config` | Applied settings, `instance_id`, `revision`, and `supported_fields`. |
+| `PATCH /engine/planner/config` | `202` with an operation ID after validation and admission. |
+| `GET /engine/planner/operations/{request_id}` | Operation state: `preparing`, `warming`, `applied`, or `failed`. |
+
+The supported configuration groups are:
+
+| Group | Fields |
+| --- | --- |
+| Endpoint floors and GPU budgets | Mode-specific minimum endpoint fields from the table above, `min_gpu_budget`, `max_gpu_budget`. |
+| SLA targets | `ttft_ms`, `itl_ms`. |
+| Scaling policy | `max_throughput_scaling_replicas`, `load_scaling_down_sensitivity`, `prefill_scale_up_queue_tokens`, `prefill_scale_down_queue_tokens`, `decode_scale_up_kv_rate`, `decode_scale_down_kv_rate`. |
+| Load prediction | `load_predictor`, `load_predictor_log1p`, `prophet_window_size`, `kalman_q_level`, `kalman_q_trend`, `kalman_r`, `kalman_min_points`. |
+
+Fields retain their normal mode-specific meaning. For example, the explicit queue/KV
+thresholds are used by `optimization_target: load`. Predictor replacement requires
+`optimization_target: sla` with throughput scaling enabled. Scheduling intervals,
+AIS performance models, deployment topology, and other fields are rejected by this API.
+
+Use the instance ID and revision returned by GET when submitting an update:
+
+```json
+{
+  "instance_id": "<instance_id from GET>",
+  "expected_revision": 0,
+  "request_id": "sweep-42",
+  "config": {
+    "ttft_ms": 800,
+    "load_predictor": "kalman",
+    "kalman_min_points": 5
+  },
+  "warmup_trace": "recent-traffic.jsonl"
+}
+```
+
+`config` is a nonempty partial update. A predictor change requires either `warmup_trace`
+or explicit `cold_start: true`. The trace must be a single regular Dynamo/Mooncake JSONL
+or JSONL.GZ file inside `runtime_warmup_trace_dir`. Relative paths are resolved from
+that directory; absolute paths must also be inside it. Runtime warmup accepts at most
+16 MiB of stored data and 16 MiB after decompression, and at most 4,096 aggregation
+intervals (including idle gaps). Directories and globs remain supported by the startup
+`load_predictor_warmup_trace` option but are rejected by runtime reconfiguration.
+Observations use the unchanged throughput adjustment interval. Warmup must provide enough
+effective samples for request count, ISL, and OSL and complete a successful forecast.
+SLA/budget-only updates do not require warmup. Supplying a trace explicitly also allows rewarming an unchanged predictor.
+
+The active configuration continues serving while a candidate is prepared. Preparation
+has a 120-second deadline and only one preparation can run at a time. If a background
+fit outlives its deadline, its result cannot activate and further preparations are
+rejected until that work exits; updates that do not replace the predictor remain available.
+Invalid data, failed fitting, or a changed revision leave the active settings unchanged.
+Successful activation occurs between decisions and increments the revision. Updates preserve
+the existing prediction and scaling cadence, including changes to SLA targets,
+`max_throughput_scaling_replicas`, and predictor settings. The next scheduled throughput
+decision uses the active settings and the full trailing traffic window; predictor replacement
+does not delay that decision. Performance models, worker state, and already-admitted
+scaling operations are retained. `applied` means the
+configuration is active; it does not mean the deployment has finished scaling.
+
+A successful write through the legacy minimum-endpoint API also changes the revision
+reported here. If it happens during preparation, the pending update fails with
+`error_type: conflict`.
+Updates are process-local and are not written to the Planner ConfigMap. A restart creates
+a new `instance_id` and restores startup settings. Address the intended Planner instance
+directly rather than distributing a conditional write across replicas.
+
+Retry the identical request with the same `request_id` to retrieve its retained operation
+without applying it twice. The last 32 operations are retained in memory. Reusing an ID
+for different content returns `409`; an evicted operation returns `404`, so inspect the applied revision before submitting another update.
+
+Malformed JSON returns `400`; invalid or unsupported updates return `422`; instance,
+revision, idempotency, and concurrent-update conflicts return `409`; unavailable control
+returns `503`. Requests exceeding 64 KiB return `413`. Preparation failures after `202`
+are reported by the operation's `state`, `error`, and `error_type` fields.
+
 ## Scheduling and plugin pipeline
 
 The Planner runs the builtin plugin pipeline by default. `scheduling` controls pipeline cadence; `plugin_registration` controls how plugins register, authenticate, and communicate. For the pipeline model, see the [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md#scheduling--plugin-pipeline).
