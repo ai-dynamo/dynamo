@@ -18,7 +18,7 @@ The policy builds on published work: per-step admission of extra decodes against
 
 Agentic workloads, such as coding, research and browsing agents, keep many long-context sessions in the decode batch at once, and agent frameworks add subagents on top. Each decode step reads every running request's KV cache, so step time grows with the number of running requests and their total context. An interactive request that joins this batch gets its first token on time but then waits for every step:
 
-- In a 24-agent Claude Code workload on MiniMax-M2, 81–85% of interactive requests that missed a 3× unloaded inter-token-latency deadline had an on-time first token. Their inter-token latency was 30–35 ms against an 18.5 ms budget.
+- In a 24-agent Claude Code workload on MiniMax-M2.7, 81–85% of interactive requests that missed a 3× unloaded inter-token-latency deadline had an on-time first token. Their inter-token latency was 30–35 ms against an 18.5 ms budget.
 - Request priority does not help. Router and engine priority order requests that are waiting; they do not change which running requests decode in a step. See [Priority Scheduling](priority-scheduling.md).
 
 ## How It Works
@@ -56,7 +56,7 @@ Interactive requests are identified by priority. Clients send `nvext.agent_hints
 
 ```json
 {
-    "model": "MiniMaxAI/MiniMax-M2",
+    "model": "MiniMaxAI/MiniMax-M2.7",
     "messages": [
         { "role": "user", "content": "Explain the difference between a mutex and a semaphore." }
     ],
@@ -78,7 +78,7 @@ export DYN_DECODE_REGULATION_MODE=class_blind
 export DYN_DECODE_REGULATION_PRIORITY_MIN=1
 export DYN_DECODE_REGULATION_DEADLINE=500,18.48
 export DYN_DECODE_REGULATION_COEFFS=6.4013,0.227066,0.000016055   # fit for your deployment
-python3 -m dynamo.vllm --model MiniMaxAI/MiniMax-M2 --tensor-parallel-size 4
+python3 -m dynamo.vllm --model MiniMaxAI/MiniMax-M2.7 --tensor-parallel-size 4
 ```
 
 Setting `DYN_DECODE_REGULATION_MODE` selects Dynamo's `DecodeRegulationScheduler`. Do not also pass a different `--scheduler-cls`; the worker refuses to start with both.
@@ -87,7 +87,7 @@ Choose the deadline from the unloaded latency of the model on your hardware. A p
 
 ## Calibrate the Step-Time Model
 
-The coefficients above were fitted for MiniMax-M2 with tensor parallelism 4 and an FP8 KV cache on H200. Fit your own for any other model, GPU or parallelism:
+The coefficients above were fitted for MiniMax-M2.7 with tensor parallelism 4 and an FP8 KV cache on H200. Fit your own for any other model, GPU or parallelism:
 
 1. Run the worker in observe mode with a trace under representative load. Observe mode makes every decision but skips nothing:
 
@@ -122,7 +122,7 @@ Set these on the vLLM worker.
 | `DYN_DECODE_REGULATION_TAU_INTERACTIVE_MS` | `18.48` | Fixed per-token target, used when `DYN_DECODE_REGULATION_DEADLINE` is unset. |
 | `DYN_DECODE_REGULATION_K` | `4` | A regulated request decodes at least once every `K` steps. |
 | `DYN_DECODE_REGULATION_RHO` | `0.8` | Share of the remaining step budget that regulated requests may fill. |
-| `DYN_DECODE_REGULATION_COEFFS` | MiniMax-M2, TP4, H200 | `a,b,c` of the step-time model, in ms, with `L` in tokens. |
+| `DYN_DECODE_REGULATION_COEFFS` | MiniMax-M2.7, TP4, H200 | `a,b,c` of the step-time model, in ms, with `L` in tokens. |
 | `DYN_DECODE_REGULATION_PREFILL_COEFFS` | `0,0` | `q,p`: a step that also carries `P` prefill tokens takes `q + p × P` ms longer. |
 | `DYN_DECODE_REGULATION_FAILSAFE_STEPS` | `200` | Decode-only steps with the bias at its limit before regulation turns off. `0` disables the guard. |
 | `DYN_DECODE_REGULATION_TRACE` | unset | Path for a per-step JSONL trace. |
@@ -171,7 +171,7 @@ The worker's `/metrics` endpoint exposes the same counts, labeled by `model` and
 
 ## Measured Effect
 
-Measured so far with coding agents only. MiniMax-M2 on 4 H200 GPUs (tensor parallelism 4, FP8 KV cache), 24 or 28 Claude Code agents on 64 SWE-bench Verified tasks, and one interactive request every 2 s on average with `max_tokens` 64. Deadline: 500 ms plus 18.48 ms per token after the first. Regulation used `DYN_DECODE_REGULATION_MODE=class_blind` and `DYN_DECODE_REGULATION_DEADLINE=500,18.48`.
+Measured so far with coding agents only. MiniMax-M2.7 on 4 H200 GPUs (tensor parallelism 4, FP8 KV cache), 24 or 28 Claude Code agents on 64 SWE-bench Verified tasks, and one interactive request every 2 s on average with `max_tokens` 64. Deadline: 500 ms plus 18.48 ms per token after the first. Regulation used `DYN_DECODE_REGULATION_MODE=class_blind` and `DYN_DECODE_REGULATION_DEADLINE=500,18.48`.
 
 | Agents | Configuration (runs) | Interactive requests on deadline | Agent tasks per hour | Agent task time, p90 |
 |---|---|---|---|---|
