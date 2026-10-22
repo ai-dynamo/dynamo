@@ -127,9 +127,20 @@ class GMSModelLoader(BaseModelLoader):
         model = self._create_meta_model(model_config, device_config)
 
         materialize_module_from_gms(allocator, model, device_index=device_index)
+        # Two distinct values, used in different contexts:
+        #
+        #   impl.preloaded_weights_bytes (GMSMemorySaverImpl)
+        #       Bytes imported outside this engine's torch allocator (0 for a
+        #       writer). The XPU probe patch subtracts these from reported free
+        #       memory; on SGLang < 0.5.19 the legacy patch_model_runner()
+        #       add-back also reads it.
+        #   self.preloaded_weights_bytes (GMSModelLoader)
+        #       Bytes SGLang (>= 0.5.19) should add to its pre-load baseline
+        #       when calculating headroom. Platform dependent; see below.
         impl.imported_weights_bytes = allocator.total_bytes
         impl.preloaded_weights_bytes = allocator.total_bytes
-        # Sglang reads this off the loader to restore the KV baseline:
+        # SGLang reads self.preloaded_weights_bytes off the loader to restore
+        # the KV baseline:
         # ModelRunner.account_preloaded_weights() adds it to
         # pre_model_load_memory. That add-back exists to undo a *pre-load*
         # memory reading that was depressed by weights the GMS server already
