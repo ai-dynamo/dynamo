@@ -333,6 +333,22 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 
 		clique.Labels[commonconsts.KubeLabelDynamoComponentType] = string(v1beta1.ComponentTypeLPX)
 		input.Cyborg = clique
+
+		// Agent Pod 0 publishes the allocation's topology when both roles declare the runtime sidecar.
+		placed := slices.ContainsFunc(plan.Agents, func(agent dynamolpx.ExpectedAgent) bool { return agent.Replicas > 0 })
+		if !dynamolpx.PublishesTopology(component) || !placed {
+			continue
+		}
+		agentMode := controller_common.GetKubeDiscoveryMode(lpuRole.PodTemplate.Annotations)
+		cyborgMode := controller_common.GetKubeDiscoveryMode(role.PodTemplate.Annotations)
+		if p.discoveryBackend != configv1alpha1.DiscoveryBackendKubernetes ||
+			agentMode != configv1alpha1.KubeDiscoveryModePod || cyborgMode != configv1alpha1.KubeDiscoveryModePod {
+			return nil, fmt.Errorf(
+				"component %q declares the LPX topology roles, which require Kubernetes discovery in pod mode; got backend %q, agent mode %q, conductor mode %q",
+				component.ComponentName, p.discoveryBackend, agentMode, cyborgMode,
+			)
+		}
+		input.TopologyDeployment = string(p.dynamoDeployment.UID)
 	}
 	return input, nil
 }

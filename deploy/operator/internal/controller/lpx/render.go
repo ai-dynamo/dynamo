@@ -103,7 +103,8 @@ func (r *graphReconciler) resolveWorkloads(
 }
 
 // renderPodCliqueSet composes resolved workloads into one Grove envelope with
-// runtime ConfigMaps and, for Kubernetes discovery, serving Services.
+// runtime ConfigMaps and, for Kubernetes discovery, serving Services plus a
+// topology Service for each workload whose Agents publish topology.
 // Inputs must be non-nil except existingPCS, which is nil during creation.
 // Workloads must contain every component group.
 // Plans must have finalized names and use the same keys as workloads.
@@ -176,6 +177,28 @@ func (r *graphReconciler) renderPodCliqueSet(
 			service.Spec.Selector[dynamo.LPXServingLabel] = consts.KubeLabelValueTrue
 			service.Spec.Selector[grovecommon.LabelPartOfKey] = pcs.Name
 			resources = append(resources, service)
+
+			// Pod-mode readers join each Agent leader's topology-only registration before the Agent Pod
+			// is Ready; the Agent Pods themselves carry no discovery labels.
+			if rendered.PublishesTopology {
+				topology, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
+					ServiceName: plan.TopologyServiceName(), Namespace: deployment.Namespace,
+					ComponentType: string(component.ComponentType), ComponentName: component.ComponentName,
+					DynamoNamespace: dgd.GetDynamoNamespaceForComponent(component), IsK8sDiscovery: true,
+					Labels:      dynamo.GetDGDComponentResourceLabels(dgd, component.ComponentName, component),
+					Annotations: dynamo.GetDGDComponentResourceAnnotations(dgd, component.ComponentName, component),
+				})
+				if err != nil {
+					return nil, nil, err
+				}
+				topology.Spec.ClusterIP = corev1.ClusterIPNone
+				topology.Spec.Ports = nil
+				topology.Spec.PublishNotReadyAddresses = true
+				topology.Spec.Selector[lpx.TopologyPublisherLabel] = consts.KubeLabelValueTrue
+				topology.Spec.Selector[grovecommon.LabelPodCliquePodIndex] = "0"
+				topology.Spec.Selector[grovecommon.LabelPartOfKey] = pcs.Name
+				resources = append(resources, topology)
+			}
 		}
 
 	}

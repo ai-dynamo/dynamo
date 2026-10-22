@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -34,6 +35,12 @@ type RenderInput struct {
 	Conductor *corev1.PodTemplateSpec
 	// Cyborg supplies the GPU clique for hybrid pipelines; nil for LPU-only workloads.
 	Cyborg *grovev1alpha1.PodCliqueTemplateSpec
+	// TopologyDeployment enables rank-0 topology discovery when nonempty: it is
+	// the DynamoGraphDeployment UID that every Agent and Cyborg container
+	// receives as LPX_DEPLOYMENT. Set it only for a hybrid workload whose Agents
+	// have replicas and whose Agent and Cyborg templates declare the "runtime"
+	// sidecar; empty leaves the rendering unchanged.
+	TopologyDeployment string
 }
 
 // WorkloadTemplates contains only the templates and resources contributed by one workload.
@@ -41,6 +48,9 @@ type WorkloadTemplates struct {
 	Cliques      []*grovev1alpha1.PodCliqueTemplateSpec
 	ScalingGroup grovev1alpha1.PodCliqueScalingGroupConfig
 	Resources    []client.Object
+	// PublishesTopology reports that Pod 0 of each allocation's Agent clique,
+	// labeled TopologyPublisherLabel, publishes the allocation's topology.
+	PublishesTopology bool
 }
 
 // RenderNodeLocal renders a workload without constructing a PCS. workload
@@ -183,6 +193,14 @@ func RenderNodeLocal(
 
 			// Bind the LPX configuration and scheduling to the Agent and any conductor.
 			configureLPURolePods(&template.Spec, conductorSpec, projection, configMap.Name, allocation)
+
+			// The hybrid Agent's runtime sidecar publishes the allocation's topology from Pod 0.
+			if input.TopologyDeployment != "" {
+				if err := configureTopologyPublisher(&template.Spec, input.TopologyDeployment); err != nil {
+					return nil, fmt.Errorf("stage %s: %w", stage, err)
+				}
+				rendered.PublishesTopology = true
+			}
 		}
 		if agent.Replicas == 0 {
 			continue
@@ -197,10 +215,17 @@ func RenderNodeLocal(
 		annotations[lpxv1alpha1.PodModelAnnotation] = projection.model
 		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = projection.CompilerSnapshotDigest()
 		annotations[WorkloadModeAnnotation] = string(projection.schedulerWorkloadMode())
+		labels := maps.Clone(template.Labels)
+		if input.TopologyDeployment != "" {
+			if labels == nil {
+				labels = make(map[string]string, 1)
+			}
+			labels[TopologyPublisherLabel] = commonconsts.KubeLabelValueTrue
+		}
 		replicas := int32(agent.Replicas)
 		rendered.Cliques = append(rendered.Cliques, &grovev1alpha1.PodCliqueTemplateSpec{
 			Name:        agent.TemplateName,
-			Labels:      maps.Clone(template.Labels),
+			Labels:      labels,
 			Annotations: annotations,
 			Spec: grovev1alpha1.PodCliqueSpec{
 				RoleName:     agent.TemplateName,
@@ -232,6 +257,13 @@ func RenderNodeLocal(
 			cyborgConfigHash,
 		); err != nil {
 			return nil, fmt.Errorf("stage %s conductor: %w", projections[0].stage, err)
+		}
+
+		// Each Cyborg reads the Agent leader's topology through its own runtime sidecar.
+		if input.TopologyDeployment != "" {
+			if err := configureTopologyConsumer(&cyborg.Spec.PodSpec, input.TopologyDeployment); err != nil {
+				return nil, fmt.Errorf("stage %s conductor: %w", projections[0].stage, err)
+			}
 		}
 
 		cyborg.Spec.MinAvailable = ptr.To(int32(1))

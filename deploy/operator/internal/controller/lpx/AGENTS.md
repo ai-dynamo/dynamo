@@ -252,6 +252,10 @@ SPDX-License-Identifier: Apache-2.0
   with its UID. Find obsolete maps by label, verify ownership before deletion,
   and retain desired names. Delete obsolete maps only after readiness, not during
   PCS replacement, so existing pods keep their configuration.
+- Only the serving clique carries discovery labels. The topology Service of a
+  hybrid workload selects Agent Pod 0 and publishes not-ready addresses, so the
+  Pod's whole pod-mode DWM registration is visible before the Pod is Ready: an
+  Agent Pod may host the topology publisher, never an inference registration.
 
 # Tests
 
