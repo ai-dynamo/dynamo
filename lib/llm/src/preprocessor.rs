@@ -3076,7 +3076,8 @@ impl OpenAIPreprocessor {
         let prompt = self
             .apply_template(&request)?
             .ok_or_else(|| anyhow::anyhow!("chat template did not produce a text prompt"))?;
-        if Self::prompt_injected_reasoning_start(
+        if Self::prompt_injected_reasoning_start_for_parsers(
+            self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
             Some(prompt.as_str()),
         ) {
@@ -3107,9 +3108,9 @@ impl OpenAIPreprocessor {
         }
         let flat_prompt_ids = self.tokenize(prompt.as_str())?.token_ids().to_vec();
         if flat_prompt_ids != prompt_ids {
-            return Err(SystemOneModelIncompatible(
-                "/v1/systemone requires a chat prompt whose rendered text round-trips to the same token IDs"
-            ).into());
+            return Err(invalid_argument_error(
+                "/v1/systemone requires a chat prompt whose rendered text round-trips to the same token IDs",
+            ));
         }
 
         let mut label_ids = Vec::with_capacity(labels.len());
@@ -9829,6 +9830,151 @@ mod tests {
             assert!(error.to_string().contains("reasoning disabled"), "{parser}");
             assert_eq!(encodes.load(std::sync::atomic::Ordering::Relaxed), 0);
         }
+    }
+
+    #[test]
+    fn systemone_resolves_labels_at_real_bpe_boundaries() {
+        let mut card =
+            ModelDeploymentCard::load_from_disk("tests/data/sample-models/TinyLlama_v1.1", None)
+                .unwrap();
+        card.runtime_config.tokenizer_backend =
+            Some(crate::local_model::runtime_config::TokenizerBackend::Default);
+        let mut preprocessor = OpenAIPreprocessor::new(card).unwrap();
+        let (prompt_ids, label_ids, _) = preprocessor
+            .render_systemone_question(
+                "test-model",
+                "A decision",
+                None,
+                &["A".into(), " B".into()],
+                (65_536, usize::MAX),
+            )
+            .unwrap();
+        assert_eq!(label_ids, vec![29909, 350]);
+        assert!(!prompt_ids.is_empty());
+
+        for labels in [vec!["not one token".into()], vec![" A".into(), "▁A".into()]] {
+            let error = preprocessor
+                .render_systemone_question(
+                    "test-model",
+                    "A decision",
+                    None,
+                    &labels,
+                    (65_536, usize::MAX),
+                )
+                .unwrap_err();
+            assert!(error.downcast_ref::<SystemOneModelIncompatible>().is_some());
+        }
+
+        Arc::get_mut(&mut preprocessor).unwrap().formatter = test_prompt_formatter("Answer: ");
+        let prompt_ids = preprocessor.tokenize("Answer: ").unwrap();
+        let merged_ids = preprocessor.tokenize("Answer: nswer").unwrap();
+        assert_eq!(
+            merged_ids.token_ids().len(),
+            prompt_ids.token_ids().len() + 1
+        );
+        assert_ne!(
+            &merged_ids.token_ids()[..prompt_ids.token_ids().len()],
+            prompt_ids.token_ids()
+        );
+        let error = preprocessor
+            .render_systemone_question(
+                "test-model",
+                "A decision",
+                None,
+                &["nswer".into()],
+                (65_536, usize::MAX),
+            )
+            .unwrap_err();
+        assert!(error.downcast_ref::<SystemOneModelIncompatible>().is_some());
+    }
+
+    #[test]
+    fn systemone_rejects_tool_only_reasoning_prefixes() {
+        for (family, prefix) in [
+            ("gemma4", "<|channel>thought\n"),
+            ("kimi_k3", "<|open|>think<|sep|>"),
+            ("minimax_m3", "<mm:think>"),
+        ] {
+            let card = ModelDeploymentCard::load_from_disk(
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                None,
+            )
+            .unwrap();
+            let mut preprocessor = OpenAIPreprocessor::new(card).unwrap();
+            let preprocessor = Arc::get_mut(&mut preprocessor).unwrap();
+            preprocessor.tool_call_parser = Some(family.into());
+            preprocessor.formatter = test_prompt_formatter(prefix);
+            let encodes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            preprocessor.tokenizer = Arc::new(SystemOneCountingTokenizer(encodes.clone()));
+            let kwargs = serde_json::Map::from_iter([
+                ("enable_thinking".into(), serde_json::json!(false)),
+                ("thinking_mode".into(), serde_json::json!("disabled")),
+            ]);
+            let error = preprocessor
+                .render_systemone_question(
+                    "test-model",
+                    "A decision",
+                    Some(&kwargs),
+                    &["A".into()],
+                    (65_536, usize::MAX),
+                )
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("closes or disables reasoning"),
+                "{family}: {error}"
+            );
+            assert_eq!(encodes.load(std::sync::atomic::Ordering::Relaxed), 0);
+        }
+    }
+
+    struct SystemOneSegmentedFormatter;
+
+    impl OAIPromptFormatter for SystemOneSegmentedFormatter {
+        fn supports_add_generation_prompt(&self) -> bool {
+            true
+        }
+
+        fn render(&self, request: &dyn OAIChatLikeRequest) -> anyhow::Result<String> {
+            Ok(self.render_prompt(request)?.into_text())
+        }
+
+        fn render_prompt(
+            &self,
+            request: &dyn OAIChatLikeRequest,
+        ) -> anyhow::Result<RenderedPrompt> {
+            let messages = serde_json::to_value(request.messages())?;
+            Ok(RenderedPrompt::segmented(vec![
+                dynamo_renderer::RenderedSegment::new(
+                    messages[0]["content"].as_str().unwrap(),
+                    false,
+                ),
+            ]))
+        }
+    }
+
+    #[test]
+    fn systemone_special_token_text_is_an_input_error() {
+        let mut card =
+            ModelDeploymentCard::load_from_disk("tests/data/sample-models/TinyLlama_v1.1", None)
+                .unwrap();
+        card.runtime_config.tokenizer_backend =
+            Some(crate::local_model::runtime_config::TokenizerBackend::Fastokens);
+        let mut preprocessor = OpenAIPreprocessor::new(card).unwrap();
+        Arc::get_mut(&mut preprocessor).unwrap().formatter = Arc::new(SystemOneSegmentedFormatter);
+        let error = preprocessor
+            .render_systemone_question(
+                "test-model",
+                "literal </s> text",
+                None,
+                &[" A".into()],
+                (65_536, usize::MAX),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("round-trips"), "{error:#}");
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::InvalidArgument
+        );
     }
 
     #[test]
