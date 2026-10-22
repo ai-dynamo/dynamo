@@ -97,26 +97,3 @@ flowchart LR
    This is the same for every engine: vLLM and SGLang would ignore `nvext`,
    TensorRT-LLM would reject the request over it, so every worker receives the
    same plain OpenAI body.
-
-## TensorRT-LLM
-
-`trtllm-agg.yaml` is the same on-ramp for a stock `trtllm-serve` fleet. Two things differ from
-the vLLM manifest:
-
-- **Tokenization** uses TensorRT-LLM's render endpoint (`/v1/chat/completions/render`, added in
-  [NVIDIA/TensorRT-LLM#19964](https://github.com/NVIDIA/TensorRT-LLM/pull/19964)) with
-  `DYN_EPP_TOKENIZER_PROTOCOL=trtllm-render`. The example runs the CPU-only `trtllm-render`
-  process as a native sidecar in the EPP pod (an init container with `restartPolicy: Always`): it
-  loads only the tokenizer and model configuration, starts before the EPP, gates pod readiness,
-  and listens on loopback, so `DYN_EPP_TOKENIZER_SERVICE_URL` is `http://127.0.0.1:8100` and no
-  renderer Service exists. Each EPP replica carries its own renderer. A worker can serve the same
-  endpoint when started with `TRTLLM_ENABLE_RENDER_ENDPOINTS=1` if you prefer the vLLM on-ramp's
-  Service-to-workers shape. The renderer echoes the request body in its response, so leave
-  `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` at or above your largest request.
-- **KV events** come from TensorRT-LLM's native streaming publisher
-  (`kv_cache_config.kv_events_config` in the LLM API options file), which uses the same ZeroMQ
-  wire protocol as vLLM's publisher. `tokens_per_block` plays the role of vLLM's `--block-size`
-  and must equal `DYN_KV_CACHE_BLOCK_SIZE`; `--max_num_tokens` must equal
-  `DYN_EPP_MAX_NUM_BATCHED_TOKENS`.
-
-Use a TensorRT-LLM image that includes the render endpoints; releases up to `1.4.0rc1` do not.
