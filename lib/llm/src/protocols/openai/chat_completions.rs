@@ -12,11 +12,12 @@ use crate::engines::ValidateRequest;
 
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
-    common_ext::{CommonExt, CommonExtProvider},
+    common_ext::{ChatCommonExt, CommonExt, CommonExtProvider},
     validate,
 };
 use crate::protocols::common::extensions::{
     NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
+    validate_metadata_upload_single_choice, validate_metadata_upload_stop_strings,
 };
 
 pub mod aggregator;
@@ -87,10 +88,10 @@ pub(crate) fn tool_call_response_chunk_to_protocol(
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone, Default)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
-    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateChatCompletionRequest,
 
     #[serde(flatten, default)]
+    #[schema(value_type = ChatCommonExt)]
     pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -274,7 +275,7 @@ fn openai_thinking_mode(value: &serde_json::Value) -> anyhow::Result<Option<Open
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
 /// `CreateChatCompletionResponse` with optional NVIDIA extension metadata.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
@@ -294,7 +295,7 @@ pub struct ToolCallCompletion {
 
 /// A response structure for streamed chat completions, embedding OpenAI's
 /// `CreateChatCompletionStreamResponse` with optional NVIDIA extension metadata.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionStreamResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
@@ -302,15 +303,79 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub nvext: Option<serde_json::Value>,
     /// Internal prompt logprobs payload for non-streaming response aggregation.
     /// This must never be serialized to client-facing streams.
-    #[serde(skip)]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "deserialize_prompt_logprobs"
+    )]
     pub prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
     #[serde(default, skip_serializing)]
+    #[schema(ignore)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
     /// Internal transport evidence; the HTTP chat converter removes it before SSE serialization.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(ignore)]
     pub tool_call_completion: Vec<ToolCallCompletion>,
+}
+
+fn deserialize_prompt_logprobs<'de, D>(
+    deserializer: D,
+) -> Result<Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use crate::protocols::common::llm_backend::PromptLogprobEntry;
+
+    #[derive(Deserialize)]
+    #[serde(transparent)]
+    struct Position(
+        #[serde(deserialize_with = "deserialize_position")] HashMap<u32, PromptLogprobEntry>,
+    );
+
+    fn deserialize_position<'de, D>(
+        deserializer: D,
+    ) -> Result<HashMap<u32, PromptLogprobEntry>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct PositionVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for PositionVisitor {
+            type Value = HashMap<u32, PromptLogprobEntry>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a map from string token IDs to prompt logprobs")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut position = HashMap::with_capacity(map.size_hint().unwrap_or(0));
+                // pythonize does not coerce string map keys to integers like serde_json.
+                while let Some(token_id) = map.next_key::<String>()? {
+                    let token_id = token_id.parse().map_err(serde::de::Error::custom)?;
+                    position.insert(token_id, map.next_value()?);
+                }
+                Ok(position)
+            }
+        }
+
+        deserializer.deserialize_map(PositionVisitor)
+    }
+
+    Option::<Vec<Option<Position>>>::deserialize(deserializer).map(|positions| {
+        positions.map(|positions| {
+            Arc::new(
+                positions
+                    .into_iter()
+                    .map(|position| position.map(|position| position.0))
+                    .collect(),
+            )
+        })
+    })
 }
 
 /// Synthetic chunks reuse a real response envelope but consume no backend data.
@@ -645,6 +710,14 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_n(self.inner.n)?;
         validate_completion_token_ids_single_choice(
             self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_single_choice(
+            self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_stop_strings(
+            self.get_stop().is_some_and(|stop| !stop.is_empty()),
             self.nvext.as_ref(),
         )?;
         // none for modalities

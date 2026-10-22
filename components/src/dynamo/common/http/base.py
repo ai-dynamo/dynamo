@@ -128,7 +128,8 @@ class HttpClient(abc.ABC):
         Single-shot: no retries. Raises one of the unified exception
         classes above; callers never see native aiohttp classes.
 
-        ``policy=None``: use the backend's built-in redirect handling.
+        ``policy=None``: follow redirects, up to the backend's limit, without
+        validating each hop against a URL policy.
 
         ``max_bytes`` set: refuse a body larger than that while it is being
         read, so an attacker-chosen URL cannot buffer an unbounded response.
@@ -204,7 +205,7 @@ class HttpClient(abc.ABC):
         policy: Optional[UrlValidationPolicy] = None,
         read_timeout: Optional[float] = None,
     ) -> bytes:
-        """Backend's native redirect-following GET (no SSRF policy applied).
+        """Redirect-following GET with no URL policy on any hop.
 
         ``policy`` is not applied to the URL here. It is passed so a backend
         can honor a request that is stricter than the deployment baseline at

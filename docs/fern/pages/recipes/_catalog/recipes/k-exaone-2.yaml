@@ -4,7 +4,7 @@
 id: k-exaone-2
 title: K-EXAONE 2.0
 page: pages/recipes/model-recipes/k-exaone-2.mdx
-provider: lg-ai-research
+provider: lg
 model:
   name: K-EXAONE 2.0 750B-A37B
   hf_id: LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4

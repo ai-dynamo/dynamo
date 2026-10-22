@@ -3984,6 +3984,74 @@ async fn tool_choice_minimax_m2_required_thinking_disabled_keeps_tool_xml() {
 }
 
 #[tokio::test]
+async fn minimax_m2_disabled_named_json_returns_tool_call() {
+    let preprocessor = build_preprocessor(Some("minimax_m2"), Some("minimax_m2"));
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "MiniMaxAI/MiniMax-M2.7",
+        "messages": [{"role": "user", "content": "Use the calculator tool for 937 * 18 + 42."}],
+        "stream": true,
+        "chat_template_kwargs": {"thinking": false},
+        "tool_choice": {"type": "function", "function": {"name": "calculate"}},
+        "tools": [{"type": "function", "function": {
+            "name": "calculate",
+            "description": "Evaluate a mathematical expression.",
+            "parameters": {"type": "object", "properties": {
+                "expression": {"type": "string"}
+            }, "required": ["expression"]}
+        }}]
+    }))
+    .unwrap();
+
+    for fragmented in [false, true] {
+        let pieces = if fragmented {
+            vec!["{\n  \"expression\":", " \"937 * 18 + 42\"\n}"]
+        } else {
+            vec!["{\n  \"expression\": \"937 * 18 + 42\"\n}"]
+        };
+        let chunks = pieces
+            .into_iter()
+            .map(mock_content_chunk)
+            .chain(std::iter::once(mock_final_chunk()))
+            .map(Annotated::from_data);
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(stream::iter(chunks), &request, false, false)
+            .unwrap()
+            .inspect(|item| assert!(item.error.is_none(), "{item:?}"));
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            finish_reasons,
+        } = drain_stream(output_stream).await;
+
+        assert!(
+            content.is_empty(),
+            "fragmented={fragmented}: content leaked: {content}"
+        );
+        assert!(
+            reasoning.is_empty(),
+            "fragmented={fragmented}: reasoning leaked: {reasoning}"
+        );
+        assert_eq!(tool_calls.len(), 1, "fragmented={fragmented}");
+        assert_eq!(
+            tool_calls[0].name.as_deref(),
+            Some("calculate"),
+            "fragmented={fragmented}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&tool_calls[0].arguments).unwrap(),
+            serde_json::json!({"expression": "937 * 18 + 42"}),
+            "fragmented={fragmented}"
+        );
+        assert_eq!(
+            finish_reasons,
+            vec![FinishReason::ToolCalls],
+            "fragmented={fragmented}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn tool_calls_qwen3_coder_auto_preserves_tool_output_and_finish_reason() {
     let xml = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
     let preprocessor = build_preprocessor(None, Some("qwen3_coder"));

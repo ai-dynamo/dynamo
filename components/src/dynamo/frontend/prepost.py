@@ -1493,13 +1493,11 @@ class StreamingPostProcessor:
         # ------------------------------------------------------------------
         if self._tool_text_buffer is not None:
             self._tool_text_buffer += delta_text
-            buffer_complete = (
-                any(
-                    marker in self._tool_text_buffer
-                    for marker in self._tool_end_markers()
-                )
-            ) or output.finish_reason
-            if buffer_complete:
+            # Parse once at the end: with multi-token steps (e.g. MTP) a chunk
+            # can close one call and open the next, and splitting the response
+            # between this parse and the streaming parser drops or re-indexes
+            # the later calls.
+            if output.finish_reason:
                 buffered_text = self._tool_text_buffer
                 self._tool_text_buffer = None
                 delta_message = self._extract_tool_calls_from_text(buffered_text)
@@ -1522,9 +1520,10 @@ class StreamingPostProcessor:
 
             # When reasoning ends in this chunk, reset accumulated state.
             # If there is post-reasoning content (e.g. <tool_call> markup),
-            # buffer it for non-streaming extraction rather than feeding it
-            # to the streaming tool parser which cannot handle the combined
-            # reasoning-end + tool-start in a single chunk.
+            # an engine-based tool parser streams it; otherwise buffer it for
+            # non-streaming extraction rather than feeding it to a streaming
+            # tool parser that cannot handle the combined reasoning-end +
+            # tool-start in a single chunk.
             if self.reasoning_parser.engine_based_streaming:
                 reasoning_ended = (
                     self.reasoning_parser.has_engine_confirmed_reasoning_end()
@@ -1550,7 +1549,30 @@ class StreamingPostProcessor:
                 current_token_ids = []
 
                 tool_start_markers = self._tool_start_markers()
-                if post_content and any(
+                if (
+                    post_content
+                    and self._should_parse_tools()
+                    and self.tool_parser is not None
+                    and self.tool_parser.engine_based_streaming
+                ):
+                    # An engine-based tool parser holds back an opener split
+                    # across steps, so the text after the reasoning end goes to
+                    # it with its token IDs. Emitting that text as content here
+                    # leaked a partial opener and lost the tool call.
+                    current_text = post_content
+                    current_token_ids = self.reasoning_parser.extract_content_ids(
+                        delta_token_ids
+                    )
+                    delta_message = self._merge_delta_messages(
+                        self._compose_delta_message(saved_reasoning, None),
+                        self._extract_tool_calls_streaming(
+                            current_text=current_text,
+                            delta_text=current_text,
+                            current_token_ids=current_token_ids,
+                            delta_token_ids=current_token_ids,
+                        ),
+                    )
+                elif post_content and any(
                     marker in post_content for marker in tool_start_markers
                 ):
                     # Tool call markup present — buffer for non-streaming

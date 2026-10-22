@@ -19,6 +19,7 @@ use super::{
 };
 use crate::protocols::common::extensions::{
     NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
+    validate_metadata_upload_single_choice, validate_metadata_upload_stop_strings,
 };
 
 mod aggregator;
@@ -30,7 +31,6 @@ pub use delta::DeltaGenerator;
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
-    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateCompletionRequest,
 
     #[serde(flatten)]
@@ -67,10 +67,39 @@ pub struct NvCreateCompletionRequest {
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionResponse {
     #[serde(flatten)]
-    #[schema(value_type = Object)]
+    #[schema(value_type = CompletionResponseSchema)]
     pub inner: dynamo_protocols::types::CreateCompletionResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+}
+
+/// Schema-only import for the wholly re-exported async-openai response type.
+/// Resolve this explicit slot with the version-pinned OpenAPI composer; it is
+/// not a claim that an arbitrary object is the completion response contract.
+struct CompletionResponseSchema;
+
+impl utoipa::PartialSchema for CompletionResponseSchema {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::Schema> {
+        utoipa::openapi::schema::ObjectBuilder::new()
+            .extensions(Some(
+                [(
+                    "x-dynamo-schema-import",
+                    serde_json::json!({
+                        "crate": "async-openai",
+                        "type": "CreateCompletionResponse"
+                    }),
+                )]
+                .into_iter()
+                .collect(),
+            ))
+            .into()
+    }
+}
+
+impl ToSchema for CompletionResponseSchema {
+    fn name() -> std::borrow::Cow<'static, str> {
+        "async_openai.CreateCompletionResponse".into()
+    }
 }
 
 impl ContentProvider for dynamo_protocols::types::Choice {
@@ -481,6 +510,19 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_n(self.inner.n)?;
         validate_completion_token_ids_single_choice(
             get_prompt_batch_size(&self.inner.prompt) * self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_single_choice(
+            get_prompt_batch_size(&self.inner.prompt)
+                * self
+                    .inner
+                    .n
+                    .unwrap_or(1)
+                    .max(self.inner.best_of.unwrap_or(1)) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_stop_strings(
+            self.get_stop().is_some_and(|stop| !stop.is_empty()),
             self.nvext.as_ref(),
         )?;
         // none for stream

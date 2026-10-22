@@ -21,7 +21,6 @@ package v1alpha1
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -65,7 +64,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// component. With apiVersion `grove.io/v1alpha1`, target is
 	// `PodCliqueTemplateSpec` for a single-node component or
 	// `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set
-	// only `topologyConstraint`. Standalone DCD OpenAPI omits this field.
+	// `topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD
+	// OpenAPI omits this field.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
 
@@ -503,18 +503,10 @@ func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
 	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.GetNamespace(), s.GetParentGraphDeploymentName())
 }
 
-// ComputeDynamoNamespace is the single source of truth for computing the Dynamo namespace.
-// If globalDynamoNamespace is true, returns "dynamo" (global constant).
-// Otherwise, returns {k8sNamespace}-{dgdName}.
+// ComputeDynamoNamespace uses the hub API's namespace computation so both API
+// versions preserve the same runtime identity and Kubernetes label value.
 func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName string) string {
-	if globalDynamoNamespace {
-		return commonconsts.GlobalDynamoNamespace
-	}
-	// The dynamo namespace is used as the first segment of endpoint paths
-	// (e.g. "namespace.component.endpoint"). Dots in resource names (from model
-	// version strings like "Qwen3-0.6B") would break that parsing, so replace them.
-	sanitized := strings.ReplaceAll(dgdName, ".", "-")
-	return fmt.Sprintf("%s-%s", k8sNamespace, sanitized)
+	return v1beta1.ComputeDynamoNamespace(globalDynamoNamespace, k8sNamespace, dgdName)
 }
 
 // ModelReference identifies a model served by this component

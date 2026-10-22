@@ -61,6 +61,7 @@ from dynamo.vllm.omni.output_formatter import (
     AudioAggregateState,
     AudioStreamState,
     OutputFormatter,
+    _normalize_image_output_options,
 )
 from dynamo.vllm.omni.utils import (
     audio_output_is_cumulative,
@@ -237,6 +238,7 @@ class OmniHandler(BaseOmniHandler):
             media_fs=media_output_fs,
             media_http_url=media_output_http_url,
             default_fps=getattr(config, "default_video_fps", 16),
+            image_png_compression_level=config.image_png_compression_level,
         )
 
         # Audio/TTS handler — composition, not inheritance.
@@ -347,16 +349,9 @@ class OmniHandler(BaseOmniHandler):
                 image = await self._image_loader.load_image(
                     parsed_request.input_reference
                 )
-            except Exception as e:
-                logger.warning("Failed to load I2V input_reference: %s", e)
-                yield {
-                    "id": request_id,
-                    "object": "video",
-                    "model": self.config.model,
-                    "status": "failed",
-                    "error": f"Failed to load input_reference: {e}",
-                }
-                return
+            except (ValueError, PIL.Image.DecompressionBombError) as e:
+                # Keep URLs and inline image data out of the client error.
+                raise InvalidArgument("Failed to load input_reference") from e
 
         try:
             inputs = await self.build_engine_inputs(
@@ -810,6 +805,12 @@ class OmniHandler(BaseOmniHandler):
         dimensions: tuple[int, int],
     ) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
+        output_format = _normalize_image_output_options(
+            req.output_format,
+            req.response_format,
+            quality=req.quality,
+            background=req.background,
+        )
         width, height = dimensions
         nvext = req.nvext or ImageNvExt()
 
@@ -844,6 +845,7 @@ class OmniHandler(BaseOmniHandler):
             sampling_params_list=sampling_params_list,
             request_type=RequestType.IMAGE_GENERATION,
             response_format=req.response_format,
+            output_format=output_format,
             lora_request=lora_request,
         )
 

@@ -14,9 +14,9 @@ use dynamo_protocols::types::responses::{
     InputTokenDetails, Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem,
     OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
     PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent, ReasoningTextContent,
-    Response, ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTierResponses, Status,
-    SummaryPart, TextResponseFormatConfiguration, Tool, ToolChoiceAllowed, ToolChoiceAllowedMode,
-    ToolChoiceOptions, ToolChoiceParam, Truncation,
+    RefusalContent, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole,
+    ServiceTierResponses, Status, SummaryPart, TextResponseFormatConfiguration, Tool,
+    ToolChoiceAllowed, ToolChoiceAllowedMode, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -1270,10 +1270,25 @@ pub fn chat_completion_to_response(
             }
             None => None,
         };
-        if let Some(content_text) = content_text
-            && !content_text.is_empty()
-        {
-            output.push(make_text_message(message_id.clone(), content_text));
+        let mut content = Vec::new();
+        if let Some(text) = content_text.filter(|text| !text.is_empty()) {
+            content.push(OutputMessageContent::OutputText(OutputTextContent {
+                text,
+                annotations: vec![],
+                logprobs: Some(vec![]),
+            }));
+        }
+        if let Some(refusal) = choice.message.refusal.filter(|refusal| !refusal.is_empty()) {
+            content.push(OutputMessageContent::Refusal(RefusalContent { refusal }));
+        }
+        if !content.is_empty() {
+            output.push(OutputItem::Message(OutputMessage {
+                id: message_id.clone(),
+                role: AssistantRole::Assistant,
+                status: OutputStatus::Completed,
+                phase: None,
+                content,
+            }));
         }
 
         if output.is_empty() {
@@ -1393,11 +1408,16 @@ pub fn chat_completion_to_response(
         usage: chat_resp.usage.map(|u| ResponseUsage {
             input_tokens: u.prompt_tokens,
             input_tokens_details: InputTokenDetails {
-                cache_write_tokens: None,
                 cached_tokens: u
                     .prompt_tokens_details
-                    .map(|d| d.cached_tokens.unwrap_or(0))
+                    .as_ref()
+                    .and_then(|d| d.cached_tokens)
                     .unwrap_or(0),
+                cache_write_tokens: Some(
+                    u.prompt_tokens_details
+                        .and_then(|d| d.cache_write_tokens)
+                        .unwrap_or(0),
+                ),
             },
             output_tokens: u.completion_tokens,
             output_tokens_details: OutputTokenDetails {
@@ -4299,6 +4319,53 @@ mod tests {
         let retention = resp.inner.prompt_cache_retention;
         assert_eq!(retention, Some(PromptCacheRetention::InMemory));
         assert_eq!(resp.inner.safety_identifier.as_deref(), Some("user-abc"));
+    }
+
+    /// Verify serialized unary usage defaults missing cache token counts to zero
+    /// and preserves supplied cached and cache-write token counts.
+    #[test]
+    fn test_response_usage_defaults_and_preserves_cache_write_tokens() {
+        use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails};
+
+        for (prompt_tokens_details, expected_cached_tokens, expected_cache_write_tokens) in [
+            (None, 0, 0),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    ..Default::default()
+                }),
+                3,
+                0,
+            ),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    cache_write_tokens: Some(7),
+                    ..Default::default()
+                }),
+                3,
+                7,
+            ),
+        ] {
+            let mut chat_resp = make_chat_resp_with_text("hello");
+            chat_resp.inner.usage = Some(CompletionUsage {
+                prompt_tokens: 13,
+                completion_tokens: 2,
+                total_tokens: 15,
+                prompt_tokens_details,
+                completion_tokens_details: None,
+            });
+            let response =
+                chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+            let json = serde_json::to_value(&response).unwrap();
+            assert_eq!(
+                json["usage"]["input_tokens_details"],
+                serde_json::json!({
+                    "cached_tokens": expected_cached_tokens,
+                    "cache_write_tokens": expected_cache_write_tokens,
+                }),
+            );
+        }
     }
 
     /// Validate the JSON wire shape of NvResponse matches the OpenResponses

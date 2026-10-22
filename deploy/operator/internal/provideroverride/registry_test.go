@@ -139,6 +139,13 @@ func TestValidateValue(t *testing.T) {
 			target: TargetPodCliqueScalingGroupConfig,
 			value:  `{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"rack"}}}`,
 		},
+		{name: "standalone budget only", target: TargetPodCliqueTemplateSpec, value: `{"rollingUpdate":{"maxUnavailable":2}}`},
+		{name: "scaling group topology and budget", target: TargetPodCliqueScalingGroupConfig, value: `{"topologyConstraint":{},"rollingUpdate":{"maxUnavailable":2}}`},
+		{name: "zero budget", target: TargetPodCliqueTemplateSpec, value: `{"rollingUpdate":{"maxUnavailable":0}}`, wantErr: []string{"must be a positive 32-bit integer"}},
+		{name: "null budget", target: TargetPodCliqueTemplateSpec, value: `{"rollingUpdate":{"maxUnavailable":null}}`, wantErr: []string{"is required"}},
+		{name: "missing budget", target: TargetPodCliqueTemplateSpec, value: `{"rollingUpdate":{}}`, wantErr: []string{"is required"}},
+		{name: "null rolling update", target: TargetPodCliqueTemplateSpec, value: `{"rollingUpdate":null}`, wantErr: []string{"must be a JSON object"}},
+		{name: "other rolling knob rejected", target: TargetPodCliqueTemplateSpec, value: `{"rollingUpdate":{"maxUnavailable":2,"maxSurge":1}}`, wantErr: []string{"maxSurge"}, ownershipViolation: true},
 		{
 			name:               "root structural field is rejected",
 			target:             TargetPodCliqueSet,

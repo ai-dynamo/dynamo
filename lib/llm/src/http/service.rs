@@ -19,8 +19,11 @@
 //! The [`service_v2::HttpService`] can be further extended to host any [`axum::Router`] using the [`service_v2::HttpServiceConfigBuilder`].
 
 mod anthropic;
+mod batch_proxy;
 pub mod metadata;
 mod openai;
+mod server;
+mod write_timeout;
 
 pub mod busy_threshold;
 pub mod disconnect;
@@ -31,6 +34,7 @@ pub mod health;
 pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
+pub mod router_policy;
 pub mod service_v2;
 pub mod sglang_generate;
 mod worker_metrics;
@@ -757,11 +761,21 @@ mod tests {
     }
 }
 
-/// Documentation for a route
+/// Handler contract advertised by a route, independent of its configured URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OpenApiRouteKind {
+    ChatCompletions,
+    Completions,
+    Embeddings,
+    Responses,
+}
+
+/// Documentation for a route, with optional handler-specific schema metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RouteDoc {
     method: axum::http::Method,
     path: String,
+    openapi_kind: Option<OpenApiRouteKind>,
 }
 
 impl std::fmt::Display for RouteDoc {
@@ -771,17 +785,33 @@ impl std::fmt::Display for RouteDoc {
 }
 
 impl RouteDoc {
+    /// Describe a method/path without inferring a handler contract from its URL.
     pub fn new<T: Into<String>>(method: axum::http::Method, path: T) -> Self {
         RouteDoc {
             method,
             path: path.into(),
+            openapi_kind: None,
         }
     }
 
+    /// Associate this route with its handler contract, including at custom paths.
+    /// Only POST operations currently consume this metadata.
+    pub fn with_openapi_kind(mut self, kind: OpenApiRouteKind) -> Self {
+        self.openapi_kind = Some(kind);
+        self
+    }
+
+    /// Return the handler contract, if the registering router supplied one.
+    pub fn openapi_kind(&self) -> Option<OpenApiRouteKind> {
+        self.openapi_kind
+    }
+
+    /// Return the registered HTTP method.
     pub fn method(&self) -> &axum::http::Method {
         &self.method
     }
 
+    /// Return the registered URL path, including any operator override.
     pub fn path(&self) -> &str {
         &self.path
     }

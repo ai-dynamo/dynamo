@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/url"
 	"testing"
@@ -16,6 +17,8 @@ import (
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const registryTestTopology = "test-topology"
@@ -23,15 +26,11 @@ const registryTestTopology = "test-topology"
 const gbuildManifestJSONFile = "manifest.json"
 
 func normalizeRegistryFixtureBuild(ctx context.Context, registry ModelRegistry, id string) (*Build, error) {
-	snapshot, err := registry.AcquireBuildSnapshot(ctx, id)
+	snapshot, err := registry.AcquireBuild(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	normalized, err := normalizeBuildSnapshot(snapshot)
-	if err != nil {
-		return nil, err
-	}
-	return normalized.build, nil
+	return snapshot, nil
 }
 
 type fakeModelServiceClient struct {
@@ -41,9 +40,9 @@ type fakeModelServiceClient struct {
 	filesRequests []*modelpb.ModelFilesRequest
 	filesContext  context.Context
 	fileStreams   []*fakeModelFileStream
+	files         map[string]*fakeModelFileStream
 	filesErr      error
 	listRequests  []*modelpb.ModelFilesRequest
-	list          *modelpb.ModelFileList
 
 	metadataContexts []context.Context
 }
@@ -71,22 +70,38 @@ func (c *fakeModelServiceClient) StreamModelFiles(
 	if c.filesErr != nil {
 		return nil, c.filesErr
 	}
+	if c.files != nil {
+		// Each acquisition must request one candidate; missing paths fail before streaming.
+		paths := request.GetFileSelector().GetPaths()
+		if len(paths) != 1 {
+			return nil, status.Error(codes.InvalidArgument, "expected exactly one selected path")
+		}
+		stream, exists := c.files[paths[0]]
+		if !exists {
+			return nil, status.Errorf(codes.NotFound, "Selected file not found in model directory: %s", paths[0])
+		}
+		return stream, nil
+	}
 	stream := c.fileStreams[0]
 	c.fileStreams = c.fileStreams[1:]
 	return stream, nil
 }
 
+func (c *fakeModelServiceClient) DeleteModel(
+	context.Context,
+	*modelpb.DeleteModelRequest,
+	...grpc.CallOption,
+) (*modelpb.DeleteModelResponse, error) {
+	return nil, errors.New("DeleteModel is not used by LPX")
+}
+
 func (c *fakeModelServiceClient) ListModelFiles(
-	ctx context.Context,
+	_ context.Context,
 	request *modelpb.ModelFilesRequest,
 	_ ...grpc.CallOption,
 ) (*modelpb.ModelFileList, error) {
 	c.listRequests = append(c.listRequests, request)
-	c.metadataContexts = append(c.metadataContexts, ctx)
-	if c.list != nil {
-		return c.list, nil
-	}
-	return &modelpb.ModelFileList{}, nil
+	return nil, status.Error(codes.Unimplemented, "unexpected ListModelFiles call")
 }
 
 type fakeModelDownloadStream struct {
@@ -168,13 +183,10 @@ func newManifestV2ContractFixture(t *testing.T) manifestcapnpv2.Manifest {
 	deployment, err := manifest.NewDeployment()
 	require.NoError(t, err)
 	deployment.SetCompilationMode(manifestcapnpv2.CompilationMode_lpx)
-	deployment.SetNumLpuNodes(1)
-	program, err := deployment.NewProgram()
+	_, err = deployment.NewProgram()
 	require.NoError(t, err)
-	program.SetBatchSize(8)
 	runtimeIO, err := deployment.NewRuntimeIo()
 	require.NoError(t, err)
-	runtimeIO.SetProtocol(runtimeIOProtocolMultiEndpoint)
 	runtimeIO.SetReserved1(2)
 	runtimeIO.SetIoFpgaCount(4)
 	runtimeIO.SetFanoutFactor(2)
