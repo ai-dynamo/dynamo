@@ -6,7 +6,7 @@ use dynamo_sidecar_common::SidecarArgs;
 #[derive(clap::Parser, Clone, Debug)]
 #[command(
     name = "dynamo-lpx-sidecar",
-    about = "Run a Dynamo worker against an LPX engine's OpenEngine gRPC server (hybrid: aggregated or disaggregated decode; LPU-only: aggregated)"
+    about = "Run a Dynamo worker against an LPX engine's OpenEngine gRPC server"
 )]
 pub(crate) struct Args {
     #[command(flatten)]

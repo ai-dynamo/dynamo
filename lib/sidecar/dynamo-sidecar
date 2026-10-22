@@ -12,7 +12,7 @@ Engines:
   vllm     Run the vLLM sidecar
   sglang   Run the SGLang sidecar
   trtllm   Run the TensorRT-LLM sidecar
-  lpx      Run the LPX sidecar (hybrid or LPU-only engine)
+  lpx      Run the LPX sidecar
 EOF
 }
 

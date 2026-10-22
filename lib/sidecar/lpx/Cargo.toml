@@ -9,7 +9,7 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Dynamo sidecar for an LPX engine's OpenEngine gRPC server (hybrid: aggregated or disaggregated decode; LPU-only: aggregated)."
+description = "Dynamo LPX sidecar for an out-of-process engine exposed through its OpenEngine gRPC service."
 
 [[bin]]
 name = "dynamo-lpx-sidecar"
