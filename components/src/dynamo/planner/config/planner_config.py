@@ -18,11 +18,13 @@ import logging
 import math
 import os
 import re
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import asdict
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Protocol, cast
+from typing import Annotated, Any, Dict, Literal, Optional, Protocol, cast
 from urllib.parse import parse_qsl, urlsplit
 
 import yaml
@@ -31,8 +33,13 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     SecretStr,
+    SerializerFunctionWrapHandler,
+    TypeAdapter,
+    ValidationError,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -702,6 +709,372 @@ class BatchSchedulingConfig(BaseModel):
         )
 
 
+# Router values reject strings and bools; ints are accepted as floats.
+RetuneRouterValue = Annotated[float, Field(strict=True)]
+RetunePlannerValue = int | float | str | bool
+
+
+class RetuneEngineSpec(BaseModel):
+    """Pinned engine that every retune candidate replay runs against.
+
+    A typed allowlist of ``dynamo.replay.run_trace_replay`` keyword arguments.
+    The replay host derives it from the outer run; a live planner reads it from
+    ``retune.live.engine``. ``router_config`` is the startup ``KvRouterConfig``
+    snapshot in its JSON (serde) form, so it can cross process boundaries.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    extra_engine_args: dict[str, Any] | None = Field(
+        default=None,
+        description="Aggregated engine args (mode='agg').",
+    )
+    prefill_engine_args: dict[str, Any] | None = Field(
+        default=None,
+        description="Prefill engine args (mode='disagg'); set with decode_engine_args.",
+    )
+    decode_engine_args: dict[str, Any] | None = Field(
+        default=None,
+        description="Decode engine args (mode='disagg'); set with prefill_engine_args.",
+    )
+    router_mode: Literal["round_robin", "kv_router"] = "kv_router"
+    router_config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Startup KvRouterConfig JSON. Every candidate replay uses this "
+            "snapshot merged with the candidate's router parameters."
+        ),
+    )
+    ais_perf_config: dict[str, Any] | None = Field(
+        default=None,
+        description="AisPerfConfig.to_dict() of the deployed engine, if any.",
+    )
+    performance_model_metadata: dict[str, Any] | None = None
+    model_name: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Served model name; also the live GET /router_policy filter.",
+    )
+    kv_event_lag_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    benchmark_granularity: int = Field(default=8, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_engine_shape(self) -> "RetuneEngineSpec":
+        if (self.prefill_engine_args is None) != (self.decode_engine_args is None):
+            raise ValueError(
+                "prefill_engine_args and decode_engine_args must be set together"
+            )
+        if self.is_disagg and self.extra_engine_args is not None:
+            raise ValueError(
+                "extra_engine_args (agg) cannot be combined with "
+                "prefill_engine_args/decode_engine_args (disagg)"
+            )
+        return self
+
+    @property
+    def is_disagg(self) -> bool:
+        """True when the spec pins a disaggregated prefill/decode engine."""
+
+        return self.prefill_engine_args is not None
+
+    def replay_kwargs(
+        self, router_overrides: Mapping[str, float] | None = None
+    ) -> dict[str, Any]:
+        """Return ``run_trace_replay`` engine kwargs for one candidate.
+
+        ``router_config`` is ``KvRouterConfig.from_json`` of the startup
+        snapshot merged with ``router_overrides``; ``ais_perf_config`` is
+        rebuilt as ``AisPerfConfig``. Called inside sweep worker processes,
+        because the native objects cannot be pickled.
+        """
+
+        # Planner config validation and schema generation must not load the
+        # native extension; only replay workers construct these objects.
+        from dynamo.llm import AisPerfConfig, KvRouterConfig
+
+        overrides = dict(router_overrides or {})
+        router_config = None
+        if self.router_config is not None or overrides:
+            router_config = KvRouterConfig.from_json(
+                json.dumps({**(self.router_config or {}), **overrides})
+            )
+        ais_perf_config = (
+            None
+            if self.ais_perf_config is None
+            else AisPerfConfig(config=deepcopy(self.ais_perf_config))
+        )
+        return {
+            "extra_engine_args": deepcopy(self.extra_engine_args),
+            "prefill_engine_args": deepcopy(self.prefill_engine_args),
+            "decode_engine_args": deepcopy(self.decode_engine_args),
+            "router_mode": self.router_mode,
+            "router_config": router_config,
+            "ais_perf_config": ais_perf_config,
+            "performance_model_metadata": deepcopy(self.performance_model_metadata),
+            "model_name": self.model_name,
+            "kv_event_lag_ms": self.kv_event_lag_ms,
+            "benchmark_granularity": self.benchmark_granularity,
+        }
+
+
+class RetuneLiveConfig(BaseModel):
+    """Live-only retune inputs. The replay host ignores this section."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    trace_paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Frontend request-trace segment prefixes, globs, or directories "
+            "read for each retune window."
+        ),
+    )
+    engine: RetuneEngineSpec | None = Field(
+        default=None,
+        description="Engine snapshot of the deployment; required live.",
+    )
+    frontend_urls: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Frontend base URLs for router updates when the connector cannot "
+            "discover frontends, e.g. http://10.0.0.5:8000."
+        ),
+    )
+    reconcile_interval_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Cadence for reconciling frontend router parameters. Changes are "
+            "also pushed immediately."
+        ),
+    )
+
+    @field_validator("trace_paths")
+    @classmethod
+    def _validate_trace_paths(cls, value: list[str]) -> list[str]:
+        if any(not path for path in value):
+            raise ValueError("trace_paths entries must be non-empty")
+        return value
+
+    @field_validator("frontend_urls")
+    @classmethod
+    def _validate_frontend_urls(cls, value: list[str]) -> list[str]:
+        return [
+            _validate_http_url(url, field_name="retune.live.frontend_urls")
+            for url in value
+        ]
+
+
+class RetuneConfig(BaseModel):
+    """Periodic replay-based retune of router and planner runtime parameters.
+
+    Every ``interval_seconds`` the planner replays the previous window of
+    recorded traffic against a grid of candidate parameters and applies the
+    best point by SLA goodput per GPU. ``router`` keys are PATCH
+    ``/router_policy`` parameter names; ``planner`` keys are runtime-changeable
+    ``PlannerConfig`` fields. Either domain may be the literal ``"default"``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    interval_seconds: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Window length and decision cadence. Must be a multiple of "
+            "scheduling.scale_interval_seconds."
+        ),
+    )
+    grace_seconds: float = Field(
+        default=60.0,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Delay after a window ends before its sweep launches; must cover "
+            "p99 request latency plus the trace flush interval."
+        ),
+    )
+    history_seconds: Optional[float] = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Trace history before each window used to warm planner predictors. "
+            "None resolves to the minimum the planner's predictors need "
+            "(0 when throughput scaling is off)."
+        ),
+    )
+    decision_latency_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Minimum delay from sweep launch to decision. The floor is one "
+            "planner tick."
+        ),
+    )
+    timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Wall-clock sweep deadline after which sweep workers are killed. "
+            "None means interval_seconds."
+        ),
+    )
+    sla_ttft_ms: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description="Scoring TTFT SLA. None uses the planner's ttft_ms.",
+    )
+    sla_itl_ms: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description="Scoring ITL SLA. None uses the planner's itl_ms.",
+    )
+    min_improvement_percentage: float = Field(
+        default=3.0,
+        ge=0,
+        lt=100,
+        allow_inf_nan=False,
+        description=(
+            "Apply a candidate only if its score exceeds the current point's "
+            "score on the same window by more than this percentage."
+        ),
+    )
+    max_candidates: int = Field(
+        default=512,
+        ge=1,
+        description="Upper bound on the expanded grid size.",
+    )
+    max_parallel: int = Field(
+        default=2,
+        ge=1,
+        description="Number of sweep worker processes.",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="Decide and record without actuating.",
+    )
+    router: Literal["default"] | dict[str, list[RetuneRouterValue]] = Field(
+        default_factory=dict,
+        description=(
+            "Router PolicyParameters name -> candidate values, or 'default' "
+            "for the Dynamo router simulation default domain."
+        ),
+    )
+    planner: Literal["default"] | dict[str, list[RetunePlannerValue]] = Field(
+        default_factory=dict,
+        description=(
+            "Runtime PlannerConfig field -> candidate values, or 'default' for "
+            "the relevant Dynamo planner simulation default domain. ttft_ms "
+            "and itl_ms are never searched."
+        ),
+    )
+    live: RetuneLiveConfig = Field(
+        default_factory=RetuneLiveConfig,
+        description="Live-only inputs; ignored by the replay host.",
+    )
+
+    # Set by PlannerConfig validation, which resolves history_seconds=None.
+    _effective_history_seconds: float | None = PrivateAttr(default=None)
+
+    @field_validator("router")
+    @classmethod
+    def _validate_router_domain(
+        cls, value: Literal["default"] | dict[str, list[float]]
+    ) -> Literal["default"] | dict[str, list[float]]:
+        if value == "default":
+            return value
+        for key, choices in value.items():
+            if not key:
+                raise ValueError("retune.router keys must be non-empty")
+            if not choices:
+                raise ValueError(f"retune.router.{key} must list at least one value")
+            if any(not math.isfinite(choice) or choice < 0 for choice in choices):
+                raise ValueError(
+                    f"retune.router.{key} values must be finite and non-negative"
+                )
+            if len(set(choices)) != len(choices):
+                raise ValueError(f"retune.router.{key} values must be distinct")
+        return value
+
+    @field_validator("planner")
+    @classmethod
+    def _validate_planner_domain(
+        cls, value: Literal["default"] | dict[str, list[RetunePlannerValue]]
+    ) -> Literal["default"] | dict[str, list[RetunePlannerValue]]:
+        if value == "default":
+            return value
+        for key, choices in value.items():
+            if not choices:
+                raise ValueError(f"retune.planner.{key} must list at least one value")
+            if any(
+                isinstance(choice, float) and not math.isfinite(choice)
+                for choice in choices
+            ):
+                raise ValueError(f"retune.planner.{key} values must be finite")
+            # Pair with the bool flag so True and 1 stay distinct.
+            if len({(isinstance(c, bool), c) for c in choices}) != len(choices):
+                raise ValueError(f"retune.planner.{key} values must be distinct")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_timing(self) -> "RetuneConfig":
+        timeout = self.effective_timeout_seconds
+        if not (self.decision_latency_seconds <= timeout <= self.interval_seconds):
+            raise ValueError(
+                "retune requires decision_latency_seconds <= timeout_seconds "
+                "<= interval_seconds (timeout_seconds defaults to "
+                f"interval_seconds); got {self.decision_latency_seconds}, "
+                f"{timeout}, {self.interval_seconds}"
+            )
+        return self
+
+    @property
+    def effective_history_seconds(self) -> float:
+        """History before each window that warms predictors.
+
+        ``PlannerConfig`` validation resolves ``history_seconds=None`` to the
+        minimum its predictors need; a standalone section reports its own
+        value, or 0 when unset.
+        """
+
+        if self._effective_history_seconds is not None:
+            return self._effective_history_seconds
+        return self.history_seconds or 0.0
+
+    @property
+    def effective_timeout_seconds(self) -> float:
+        """Sweep deadline, defaulting to ``interval_seconds``."""
+
+        if self.timeout_seconds is None:
+            return self.interval_seconds
+        return self.timeout_seconds
+
+    def scoring_sla(self, ttft_ms: float, itl_ms: float) -> tuple[float, float]:
+        """Return the scoring ``(ttft_ms, itl_ms)``; unset values use the planner's."""
+
+        return (
+            ttft_ms if self.sla_ttft_ms is None else self.sla_ttft_ms,
+            itl_ms if self.sla_itl_ms is None else self.sla_itl_ms,
+        )
+
+
+@lru_cache(maxsize=None)
+def _strict_field_adapter(name: str) -> TypeAdapter[Any]:
+    """Validate one value exactly as strict runtime reconfiguration would."""
+
+    field = PlannerConfig.model_fields[name]
+    if not field.metadata:
+        return TypeAdapter(field.annotation)
+    return TypeAdapter(Annotated[(field.annotation, *field.metadata)])
+
+
 class PlannerConfig(BaseModel):
     """Pydantic configuration for the Dynamo Planner.
 
@@ -1178,6 +1551,27 @@ class PlannerConfig(BaseModel):
         ),
     )
 
+    retune: RetuneConfig | None = Field(
+        default=None,
+        description=(
+            "Opt-in periodic replay-based retune of router and planner runtime "
+            "parameters. Replay-only in this release. Setting both "
+            "enable_load_scaling and enable_throughput_scaling explicitly to "
+            "false with retune set runs retune-only with fixed replicas."
+        ),
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_retune(self, handler: SerializerFunctionWrapHandler):
+        # Keep serialized configs without retune (profiler output, replay
+        # digests) identical to those written before the section existed.
+        # No return annotation: pydantic then keeps the full field-level
+        # serialization JSON schema instead of a generic object.
+        data = handler(self)
+        if self.retune is None:
+            data.pop("retune", None)
+        return data
+
     @model_validator(mode="before")
     @classmethod
     def _default_scale_interval_from_builtin_intervals(cls, data: object) -> object:
@@ -1370,7 +1764,19 @@ class PlannerConfig(BaseModel):
                 "Please specify the namespace where GlobalPlanner is running."
             )
 
-        if self.optimization_target == "load":
+        # Retune-only mode needs both flags explicitly false, so a config that
+        # relies on easy-mode forcing keeps autoscaling when retune is added.
+        retune_only = (
+            self.retune is not None
+            and {"enable_load_scaling", "enable_throughput_scaling"}
+            <= self.model_fields_set
+            and not self.enable_load_scaling
+            and not self.enable_throughput_scaling
+        )
+
+        # A retune-only planner never runs load scaling, so its thresholds
+        # are not required.
+        if self.optimization_target == "load" and not retune_only:
             if self.mode in ("disagg", "prefill"):
                 if (
                     self.prefill_scale_up_queue_tokens is None
@@ -1406,7 +1812,7 @@ class PlannerConfig(BaseModel):
                     )
 
         # Easy mode: force load scaling on, throughput scaling off
-        if self.optimization_target != "sla":
+        if self.optimization_target != "sla" and not retune_only:
             if self.optimization_target == "load" and self.enable_throughput_scaling:
                 logger.warning(
                     "optimization_target='load' disables throughput-based scaling; "
@@ -1424,12 +1830,22 @@ class PlannerConfig(BaseModel):
                     self.optimization_target,
                 )
 
-        # At least one scaling mode must be enabled
-        if not self.enable_throughput_scaling and not self.enable_load_scaling:
-            raise ValueError(
+        # At least one scaling mode must be enabled, except in retune-only mode
+        if (
+            not self.enable_throughput_scaling
+            and not self.enable_load_scaling
+            and not retune_only
+        ):
+            message = (
                 "At least one scaling mode must be enabled "
                 "(enable_throughput_scaling or enable_load_scaling)"
             )
+            if self.retune is not None:
+                message += (
+                    "; retune-only mode requires both flags to be set "
+                    "explicitly to false"
+                )
+            raise ValueError(message)
 
         if self.enable_throughput_scaling:
             if (
@@ -1496,7 +1912,167 @@ class PlannerConfig(BaseModel):
                         "slow predictive loop."
                     )
 
+        if self.retune is not None:
+            self.retune = self._validate_retune(self.retune)
+
         return self
+
+    def _validate_retune(self, retune: RetuneConfig) -> RetuneConfig:
+        """Check ``retune`` against the rest of the planner configuration.
+
+        Returns a validated copy, so a ``RetuneConfig`` instance shared by
+        several configs is never modified: planner domain values are stored as
+        their field types and the effective history is resolved, while
+        ``history_seconds`` keeps its configured value (``None`` stays auto).
+        """
+
+        retune = retune.model_copy(deep=True)
+
+        # Both modules import this one at module scope; import them on use.
+        from dynamo.planner.reconfiguration import PREDICTOR_FIELDS, RUNTIME_FIELDS
+        from dynamo.planner.retune.domains import (
+            expand_planner_domain,
+            expand_router_domain,
+            grid_size,
+            required_history_seconds,
+        )
+
+        if self.mode not in ("agg", "disagg"):
+            raise ValueError(
+                f"retune requires mode='agg' or mode='disagg', got {self.mode!r}"
+            )
+        if not _is_multiple_of(
+            retune.interval_seconds, self.scheduling.scale_interval_seconds
+        ):
+            raise ValueError(
+                "retune.interval_seconds must be a multiple of "
+                "scheduling.scale_interval_seconds "
+                f"({self.scheduling.scale_interval_seconds}s)"
+            )
+        engine = retune.live.engine
+        if engine is not None and engine.is_disagg != (self.mode == "disagg"):
+            raise ValueError(
+                "retune.live.engine must set prefill_engine_args and "
+                "decode_engine_args for mode='disagg', and neither for mode='agg'"
+            )
+
+        if retune.planner != "default":
+            # Store values as their field types (e.g. kalman_r 1 -> 1.0) so
+            # candidates compare equal to the live config by canonical key.
+            planner = self._validate_retune_planner_keys(
+                retune.planner, PREDICTOR_FIELDS, RUNTIME_FIELDS
+            )
+            if planner:
+                retune.planner = planner
+        planner_domain = expand_planner_domain(self)
+        router_domain = expand_router_domain(retune)
+
+        history_seconds = retune.history_seconds
+        if self.enable_throughput_scaling:
+            required = required_history_seconds(self, planner_domain)
+            if history_seconds is None:
+                history_seconds = required
+            elif history_seconds < required:
+                raise ValueError(
+                    f"retune.history_seconds must be >= {required:g}s "
+                    "(throughput_adjustment_interval_seconds x "
+                    "max(prophet_window_size, kalman_min_points) over the "
+                    "current and candidate values) to warm throughput "
+                    "predictors"
+                )
+        retune._effective_history_seconds = history_seconds or 0.0
+
+        if not router_domain and planner_domain.empty:
+            raise ValueError(
+                "retune requires a non-empty router or planner search domain"
+            )
+        size = grid_size(router_domain, planner_domain.grid)
+        if size > retune.max_candidates:
+            raise ValueError(
+                f"retune grid has {size} candidates, exceeding "
+                f"retune.max_candidates={retune.max_candidates}"
+            )
+        return retune
+
+    def _validate_retune_planner_keys(
+        self,
+        domain: Mapping[str, list[RetunePlannerValue]],
+        predictor_fields: frozenset[str],
+        runtime_fields: frozenset[str],
+    ) -> dict[str, list[RetunePlannerValue]]:
+        """Reject planner search keys that are unknown, fixed, or inert.
+
+        Each value must pass the field's strict validation, as a runtime
+        reconfiguration would. Returns the domain with validated values.
+        """
+
+        if domain and not self.scaling_enabled():
+            raise ValueError(
+                "retune.planner requires load or throughput scaling; "
+                "retune-only mode searches router parameters only"
+            )
+        active_endpoints = (
+            {"min_endpoint"}
+            if self.mode == "agg"
+            else {"prefill_min_endpoint", "decode_min_endpoint"}
+        )
+        validated: dict[str, list[RetunePlannerValue]] = {}
+        for key, values in domain.items():
+            if key in ("ttft_ms", "itl_ms"):
+                raise ValueError(
+                    f"retune.planner.{key} is not searchable; ttft_ms and itl_ms "
+                    "define the fixed SLA (use retune.sla_ttft_ms/sla_itl_ms to "
+                    "override the scoring SLA)"
+                )
+            if key not in runtime_fields:
+                raise ValueError(
+                    f"retune.planner.{key} is not a runtime-changeable planner field"
+                )
+            if key in predictor_fields:
+                relevant = (
+                    self.optimization_target == "sla" and self.enable_throughput_scaling
+                )
+                requirement = "optimization_target='sla' with throughput scaling"
+            elif key in ("min_endpoint", "prefill_min_endpoint", "decode_min_endpoint"):
+                relevant = key in active_endpoints
+                requirement = f"an endpoint field active in mode={self.mode!r}"
+            elif key == "max_throughput_scaling_replicas":
+                relevant = self.enable_throughput_scaling
+                requirement = "enable_throughput_scaling"
+            elif key == "load_scaling_down_sensitivity":
+                relevant = self.enable_load_scaling
+                requirement = "enable_load_scaling"
+            elif key in (
+                "prefill_scale_up_queue_tokens",
+                "prefill_scale_down_queue_tokens",
+            ):
+                relevant = self.optimization_target == "load" and self.mode != "agg"
+                requirement = "optimization_target='load' with a prefill role"
+            elif key in ("decode_scale_up_kv_rate", "decode_scale_down_kv_rate"):
+                relevant = self.optimization_target == "load"
+                requirement = "optimization_target='load'"
+            else:
+                # min_gpu_budget / max_gpu_budget apply to any scaling mode.
+                relevant = True
+                requirement = ""
+            if not relevant:
+                raise ValueError(
+                    f"retune.planner.{key} has no effect here; it requires "
+                    f"{requirement}"
+                )
+            adapter = _strict_field_adapter(key)
+            validated[key] = []
+            for value in values:
+                try:
+                    validated[key].append(adapter.validate_python(value, strict=True))
+                except ValidationError as error:
+                    message = "; ".join(
+                        item["msg"] for item in error.errors(include_input=False)
+                    )
+                    raise ValueError(
+                        f"retune.planner.{key} value {value!r} is invalid: {message}"
+                    ) from None
+        return validated
 
     @classmethod
     def from_config_arg(cls, config_arg: str) -> "PlannerConfig":

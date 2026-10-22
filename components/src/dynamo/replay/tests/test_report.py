@@ -69,3 +69,18 @@ def test_replay_report_to_dict_preserves_summary_only_shape() -> None:
     assert payload["planner"]["total_ticks"] == 4
     assert payload["planner"]["ticks"] == []
     assert payload["planner"]["lifecycle_operations"] == []
+
+
+def test_planner_details_to_dict_adds_retune_events_only_when_present() -> None:
+    event = {
+        "decision_id": "retune-0-w0",
+        "outcome": "applied",
+        "chosen": {"router": {"router_temperature": 0.0}, "planner": {}},
+        "top": [["candidate", 1.5]],
+    }
+
+    assert "retune_events" not in PlannerReplayDetails(total_ticks=2).to_dict()
+    payload = PlannerReplayDetails(total_ticks=2, retune_events=[event]).to_dict()
+
+    assert payload["retune_events"] == [event]
+    assert payload["retune_events"][0] is not event

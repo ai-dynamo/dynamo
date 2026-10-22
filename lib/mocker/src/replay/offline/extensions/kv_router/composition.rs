@@ -8,13 +8,14 @@ use aisimulate_core::replay::{
     ReplayComposition, ReplayDeterminism, ReplayScalingPolicy, ReplaySpec, WorkerTopology,
 };
 use anyhow::{Context, Result, bail};
+use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
 use std::collections::HashSet;
 
 use super::{KvReplayMetadata, KvRouterPlacement};
 use crate::common::protocols::MockerConfig;
-use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventObservation;
+use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterControls};
 
 /// Round-robin placement with an optional Dynamo Planner scaling policy.
 pub(in crate::replay) struct RoundRobinReplayComposition {
@@ -99,6 +100,9 @@ pub(in crate::replay) struct KvReplayComposition {
     determinism: ReplayDeterminism,
     /// Captured from [`crate::replay::with_kv_event_lag_ms`] at construction.
     kv_event_lag_ms: f64,
+    /// Captured from [`crate::replay::with_replay_router_controls`] at construction. Each
+    /// placement registers its selector control here under its worker type.
+    router_controls: Option<ReplayRouterControls>,
 }
 
 impl KvReplayComposition {
@@ -121,6 +125,7 @@ impl KvReplayComposition {
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
             kv_event_lag_ms: crate::replay::kv_event_lag_ms(),
+            router_controls: crate::replay::replay_router_controls(),
         }
     }
 
@@ -147,6 +152,15 @@ impl KvReplayComposition {
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
             kv_event_lag_ms: crate::replay::kv_event_lag_ms(),
+            router_controls: crate::replay::replay_router_controls(),
+        }
+    }
+}
+
+impl KvReplayComposition {
+    fn register_router_control(&self, worker_type: WorkerType, placement: &KvRouterPlacement) {
+        if let Some(controls) = &self.router_controls {
+            controls.register(worker_type, placement.selector_control());
         }
     }
 }
@@ -177,14 +191,16 @@ impl ReplayComposition for KvReplayComposition {
             bail!("disaggregated Router composition used for aggregated replay");
         };
         validate_runtime_topology("aggregated", args, *num_workers, dp_size, &topology)?;
-        KvRouterPlacement::new_with_selector_seed(
+        let placement = KvRouterPlacement::new_with_selector_seed(
             args,
             self.router_config.take(),
             self.prefill_load_estimator.take(),
             topology.len(),
             self.determinism.selector_seed(),
         )?
-        .with_kv_event_lag_ms(self.kv_event_lag_ms)
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)?;
+        self.register_router_control(WorkerType::Aggregated, &placement);
+        Ok(placement)
     }
 
     fn create_disaggregated_placements(
@@ -239,6 +255,8 @@ impl ReplayComposition for KvReplayComposition {
         )
         .context("constructing decode KV Router placement")?
         .with_kv_event_lag_ms(self.kv_event_lag_ms)?;
+        self.register_router_control(WorkerType::Prefill, &prefill);
+        self.register_router_control(WorkerType::Decode, &decode);
         Ok((prefill, decode))
     }
 
@@ -590,6 +608,306 @@ mod tests {
             .unwrap();
         assert_eq!(prefill.router.kv_event_lag_ms, 25.0);
         assert_eq!(decode.router.kv_event_lag_ms, 25.0);
+    }
+
+    fn retune_router_config() -> KvRouterConfig {
+        KvRouterConfig {
+            overlap_score_credit: 1.5,
+            overlap_score_credit_decay: 0.3,
+            prefill_load_scale: 2.0,
+            decode_active_request_weight: 0.4,
+            host_cache_hit_weight: 0.5,
+            disk_cache_hit_weight: 0.2,
+            shared_cache_multiplier: Some(0.3),
+            router_temperature: 0.7,
+            ..KvRouterConfig::default()
+        }
+    }
+
+    fn single_worker_topology() -> Vec<WorkerTopology> {
+        vec![WorkerTopology {
+            worker_id: 0,
+            scheduler_ids: vec![0],
+        }]
+    }
+
+    fn registered_parameters(
+        registry: &ReplayRouterControls,
+    ) -> Vec<(WorkerType, serde_json::Map<String, serde_json::Value>)> {
+        registry
+            .runtime_configs()
+            .unwrap()
+            .into_iter()
+            .map(|(worker_type, config)| {
+                assert_eq!(config.revision(), 0);
+                (worker_type, config.parameters().clone())
+            })
+            .collect()
+    }
+
+    /// The registered replay selectors start from the same resolved parameters a live router
+    /// reports for each role, so a desired map computed with `startup_policy_parameters` is a
+    /// no-op at the first tick.
+    #[test]
+    fn registered_router_controls_match_startup_policy_parameters() {
+        use dynamo_custom_policy_builtin::startup_policy_parameters;
+
+        let config = retune_router_config();
+        let registry = ReplayRouterControls::new();
+        let mut composition =
+            crate::replay::with_replay_router_controls(Some(registry.clone()), || {
+                KvReplayComposition::aggregated(
+                    MockerConfig::default(),
+                    1,
+                    Some(config.clone()),
+                    None,
+                    None,
+                )
+            });
+        assert!(registry.is_empty(), "registration happens at placement");
+        composition
+            .create_aggregated_placement(1, single_worker_topology())
+            .unwrap();
+        assert_eq!(
+            registered_parameters(&registry),
+            [(
+                WorkerType::Aggregated,
+                startup_policy_parameters(&config, WorkerType::Aggregated)
+            )]
+        );
+
+        let registry = ReplayRouterControls::new();
+        let mut composition =
+            crate::replay::with_replay_router_controls(Some(registry.clone()), || {
+                KvReplayComposition::disaggregated(
+                    MockerConfig::default(),
+                    MockerConfig::default(),
+                    1,
+                    1,
+                    Some(config.clone()),
+                    None,
+                    None,
+                )
+            });
+        composition
+            .create_disaggregated_placements(
+                1,
+                single_worker_topology(),
+                1,
+                single_worker_topology(),
+            )
+            .unwrap();
+        let registered = registered_parameters(&registry);
+        assert_eq!(
+            registered,
+            [
+                (
+                    WorkerType::Prefill,
+                    startup_policy_parameters(&config, WorkerType::Prefill)
+                ),
+                (
+                    WorkerType::Decode,
+                    startup_policy_parameters(&config, WorkerType::Decode)
+                ),
+            ]
+        );
+        // Plain decode exposes zero cache credits, as a live decode router does.
+        for name in [
+            "overlap_score_credit",
+            "host_cache_hit_weight",
+            "disk_cache_hit_weight",
+            "shared_cache_multiplier",
+        ] {
+            assert_eq!(registered[1].1[name], 0.0, "{name}");
+        }
+    }
+
+    #[test]
+    fn composition_outside_a_registry_scope_registers_nothing() {
+        let registry = ReplayRouterControls::new();
+        let mut composition =
+            crate::replay::with_replay_router_controls(Some(registry.clone()), || {
+                // A nested replay hides the outer registry.
+                crate::replay::with_replay_router_controls(None, || {
+                    KvReplayComposition::disaggregated(
+                        MockerConfig::default(),
+                        MockerConfig::default(),
+                        1,
+                        1,
+                        None,
+                        None,
+                        None,
+                    )
+                })
+            });
+        composition
+            .create_disaggregated_placements(
+                1,
+                single_worker_topology(),
+                1,
+                single_worker_topology(),
+            )
+            .unwrap();
+        assert!(registry.is_empty());
+
+        let mut composition =
+            KvReplayComposition::aggregated(MockerConfig::default(), 1, None, None, None);
+        crate::replay::with_replay_router_controls(Some(registry.clone()), || {
+            composition
+                .create_aggregated_placement(1, single_worker_topology())
+                .unwrap();
+        });
+        assert!(
+            registry.is_empty(),
+            "the registry is captured at construction, not at placement"
+        );
+    }
+
+    /// A Rust scaling policy patches the aggregated router through the registry between two
+    /// arrivals. The later request's routing must reflect the update.
+    #[test]
+    fn router_parameters_applied_at_a_scaling_tick_change_later_routing() {
+        use aisimulate_core::replay::{ReplayScalingDecision, ReplayScalingSnapshot};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        const UPDATE_AT_MS: f64 = 250.0;
+        const SECOND_ARRIVAL_MS: f64 = 1_000.0;
+
+        struct RetuneOnce {
+            registry: ReplayRouterControls,
+            desired: crate::replay::ReplayRouterParameters,
+            updated: Rc<RefCell<Vec<usize>>>,
+        }
+        impl ReplayScalingPolicy for RetuneOnce {
+            fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+                Ok(UPDATE_AT_MS)
+            }
+            fn on_tick(
+                &mut self,
+                _snapshot: ReplayScalingSnapshot,
+            ) -> anyhow::Result<ReplayScalingDecision> {
+                let updated =
+                    crate::replay::apply_router_parameters(&self.registry, &self.desired)?;
+                self.updated.borrow_mut().push(updated);
+                Ok(ReplayScalingDecision {
+                    target_prefill: None,
+                    target_decode: None,
+                    next_tick_ms: None,
+                })
+            }
+        }
+
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "num_gpu_blocks": 1024,
+                "max_num_seqs": 8,
+                "max_num_batched_tokens": 4096,
+            },
+        }))
+        .unwrap();
+        let router_config = KvRouterConfig {
+            overlap_score_credit: 100.0,
+            overlap_score_credit_decay: 0.0,
+            router_temperature: 0.0,
+            ..KvRouterConfig::default()
+        };
+        // Request 1 (four blocks) is still decoding when request 2 arrives. Request 2 shares
+        // request 1's first two blocks and adds 30 more. Both workers then project request 2's 32
+        // blocks of prefill, and request 1's worker also carries request 1's two unshared decode
+        // blocks. With credit 100, the shared prefix cancels that worker's prefill cost, so it
+        // wins; with credit 0, its extra decode load makes the idle worker strictly cheaper.
+        let mut first_prompt = vec![7; 128];
+        first_prompt.extend(std::iter::repeat_n(5, 128));
+        let mut second_prompt = vec![7; 128];
+        second_prompt.extend(std::iter::repeat_n(9, 1_920));
+        let requests = vec![
+            DirectRequest {
+                tokens: first_prompt,
+                max_output_tokens: 4_000,
+                uuid: Some(uuid::Uuid::from_u128(1)),
+                arrival_timestamp_ms: Some(0.0),
+                ..DirectRequest::default()
+            },
+            DirectRequest {
+                tokens: second_prompt,
+                max_output_tokens: 2,
+                uuid: Some(uuid::Uuid::from_u128(2)),
+                arrival_timestamp_ms: Some(SECOND_ARRIVAL_MS),
+                ..DirectRequest::default()
+            },
+        ];
+        let run = |desired: &[(&str, f64)]| {
+            let registry = ReplayRouterControls::new();
+            let updated = Rc::new(RefCell::new(Vec::new()));
+            let policy = RetuneOnce {
+                registry: registry.clone(),
+                desired: [(
+                    "aggregated".to_owned(),
+                    desired
+                        .iter()
+                        .map(|(name, value)| ((*name).to_owned(), *value))
+                        .collect(),
+                )]
+                .into_iter()
+                .collect(),
+                updated: Rc::clone(&updated),
+            };
+            let report = crate::replay::with_replay_router_controls(Some(registry.clone()), || {
+                crate::replay::offline::entrypoints::simulate_trace_with_scaling_policy(
+                    args.clone(),
+                    Some(router_config.clone()),
+                    None,
+                    requests.clone(),
+                    2,
+                    1.0,
+                    ReplayRouterMode::KvRouter,
+                    true,
+                    None,
+                    Default::default(),
+                    Some(Box::new(policy)),
+                    None,
+                )
+            })
+            .unwrap();
+            let [first, second] = [1, 2].map(|uuid| {
+                report
+                    .per_request
+                    .iter()
+                    .find(|record| record.uuid == uuid::Uuid::from_u128(uuid).to_string())
+                    .unwrap()
+            });
+            // Request 1 must still be running when request 2 is routed, so its worker carries
+            // decode load and the credit-0 case is not a tie.
+            assert!(
+                first.terminal_time_ms > SECOND_ARRIVAL_MS,
+                "request 1 finished at {} ms",
+                first.terminal_time_ms
+            );
+            let revisions: Vec<_> = registry
+                .runtime_configs()
+                .unwrap()
+                .into_iter()
+                .map(|(worker_type, config)| (worker_type, config.revision()))
+                .collect();
+            let route = |record: &aisimulate_core::replay::PerRequestRecord| {
+                record.routing_history.first().unwrap().logical_worker_id
+            };
+            let updated = updated.borrow().clone();
+            (route(first), route(second), revisions, updated)
+        };
+
+        // The startup value is a no-op: no revision, same routing as a fixed router.
+        let (first, second, revisions, updated) = run(&[("overlap_score_credit", 100.0)]);
+        assert_eq!(second, first, "credit 100 keeps the cached prefix's worker");
+        assert_eq!(revisions, [(WorkerType::Aggregated, 0)]);
+        assert_eq!(updated, [0]);
+
+        let (first, second, revisions, updated) = run(&[("overlap_score_credit", 0.0)]);
+        assert_ne!(second, first, "credit 0 routes away from the loaded worker");
+        assert_eq!(revisions, [(WorkerType::Aggregated, 1)]);
+        assert_eq!(updated, [1]);
     }
 
     #[cfg(feature = "replay-bench")]

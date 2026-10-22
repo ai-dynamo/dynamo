@@ -11,8 +11,11 @@ an optional scaling component. Rust owns the drive loop:
       per ScalingTick:
         adapter.on_tick(metrics)     -> _build_tick_input() -> TickInput
                                         EngineProtocol.tick() -> PlannerEffects
-                                        -> {target_prefill, target_decode, next_tick_ms}
-        # Rust applies the scaling decision and re-arms the next tick itself
+                                        -> retune planner_changes applied
+                                        -> {target_prefill, target_decode,
+                                            next_tick_ms, router_parameters}
+        # Rust applies the scaling decision and the desired router policy
+        # parameters, and re-arms the next tick itself
       adapter.finalize() -> PlannerReplayDetails
 
 The tick engine is the builtin orchestrator path:
@@ -34,7 +37,8 @@ import asyncio
 import hashlib
 import json
 import logging
-from dataclasses import asdict, dataclass
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Literal, Optional
 
 import msgspec
@@ -45,10 +49,15 @@ from dynamo.common.forward_pass_metrics import (
     ScheduledRequestMetrics,
 )
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.core.engine_protocol import EngineProtocol
+from dynamo.planner.core.engine_protocol import (
+    EngineProtocol,
+    ReconfigurableEngineProtocol,
+)
 from dynamo.planner.core.types import (
     FpmObservations,
     PlannerEffects,
+    RetuneDecision,
+    RetuneInputs,
     ScheduledTick,
     TickInput,
     TrafficObservation,
@@ -59,6 +68,12 @@ from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.traffic_metrics import Metrics
 from dynamo.planner.plugins.clock import VirtualClock
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
+from dynamo.planner.reconfiguration import (
+    PREDICTOR_FIELDS,
+    candidate_config,
+    prepare_predictor,
+    runtime_candidate_errors,
+)
 from dynamo.replay.report import PlannerReplayDetails
 
 logger = logging.getLogger(__name__)
@@ -191,8 +206,53 @@ def _merge_traffic(
     return merged
 
 
+# Outcomes whose ``planner_changes`` the host must apply (DESIGN §3.4).
+_ACTUATED_RETUNE_OUTCOMES = frozenset({"applied", "rolled_back"})
+
+
+def _retune_decision_tick_record(decision: RetuneDecision) -> dict[str, Any]:
+    """Compact per-tick record of a retune decision.
+
+    ``RetuneDecision.to_dict`` already replaces ``predictor_warmup`` with its
+    length. The per-preset pre-sweep ``losses`` are dropped here too; the
+    full record is kept once in ``PlannerReplayDetails.retune_events``.
+    """
+    record = decision.to_dict()
+    presweep = record["predictor_presweep"]
+    if presweep is not None:
+        record["predictor_presweep"] = {
+            key: value for key, value in presweep.items() if key != "losses"
+        }
+    return record
+
+
+def _effects_tick_record(effects: PlannerEffects, *, retune: bool) -> dict[str, Any]:
+    """Tick-capture form of ``PlannerEffects``.
+
+    ``asdict`` would expand every retune decision's ``predictor_warmup``
+    (thousands of observations per predictor swap) into each tick, so the
+    decisions are serialized compactly. Every other field keeps its
+    ``asdict`` form. Without ``retune`` the retune fields are omitted, so
+    tick captures of planners without retune keep their previous shape.
+    """
+    record = asdict(replace(effects, retune_decisions=[]))
+    if not retune:
+        del record["router_parameters"], record["retune_decisions"]
+        return record
+    record["retune_decisions"] = [
+        _retune_decision_tick_record(decision) for decision in effects.retune_decisions
+    ]
+    return record
+
+
 class ReplayPlannerAdapter:
     """Context-managed planner scaling policy for offline replay."""
+
+    # Set by ``start()``. Class-level immutable defaults keep partially
+    # constructed adapters finalizable: ``finalize`` then reports no retune
+    # events and digests the current config.
+    _start_config_dump: Optional[dict[str, Any]] = None
+    _retune_decisions: tuple[RetuneDecision, ...] = ()
 
     def __init__(
         self,
@@ -310,8 +370,12 @@ class ReplayPlannerAdapter:
     def start(self) -> None:
         """Bootstrap the orchestrator and compute the first tick. Idempotent."""
         self._bootstrap_orchestrator_if_needed()
+        # Retune mutates the shared config during the run; the reported
+        # config digest identifies the configuration the replay started with.
+        self._start_config_dump = self._planner_config_dump()
         self._pending_tick: ScheduledTick = self._engine.initial_tick(0.0)
         self._scaling_events: list[ScalingEvent] = []
+        self._retune_decisions = ()
         self._ticks: list[dict[str, Any]] = []
         self._total_ticks = 0
 
@@ -323,11 +387,13 @@ class ReplayPlannerAdapter:
 
     def on_tick(self, result: dict[str, Any]) -> dict[str, Any]:
         """Drive one planner tick from the runtime snapshot. Returns the scaling
-        decision (absolute targets, ``None`` = unchanged) + the next tick time in ms
-        (``None`` = stop) for the Rust loop to apply and re-arm."""
+        decision (absolute targets, ``None`` = unchanged), the next tick time in ms
+        (``None`` = stop) and the desired router policy parameters (``None`` =
+        unchanged) for the Rust loop to apply and re-arm."""
         tick = self._pending_tick
         tick_input = self._build_tick_input(tick, result)
         effects: PlannerEffects = self._run_sync(self._engine.tick(tick, tick_input))
+        self._apply_retune_decisions(effects.retune_decisions)
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
         self._total_ticks += 1
         if self._capture_details:
@@ -366,21 +432,80 @@ class ReplayPlannerAdapter:
             "target_prefill": target_prefill,
             "target_decode": target_decode,
             "next_tick_ms": next_tick_ms,
+            # Level-triggered desired state; Rust patches only the diff
+            # against each replay router at this tick's virtual time.
+            "router_parameters": effects.router_parameters,
         }
         tick_ordinal = int(result["tick_ordinal"])
         if self._capture_details:
-            self._ticks.append(
-                {
-                    "ordinal": tick_ordinal,
-                    "at_ms": tick.at_s * 1000.0,
-                    "scheduled_tick": asdict(tick),
-                    "input": self._tick_input_record(tick_input),
-                    "topology": self._topology_record(result),
-                    "effects": asdict(effects),
-                    "runtime_decision": decision,
-                }
-            )
+            retune = self._config.retune is not None
+            tick_record = {
+                "ordinal": tick_ordinal,
+                "at_ms": tick.at_s * 1000.0,
+                "scheduled_tick": asdict(tick),
+                "input": self._tick_input_record(tick_input),
+                "topology": self._topology_record(result),
+                "effects": _effects_tick_record(effects, retune=retune),
+                "runtime_decision": decision,
+            }
+            router_policies = result.get("router_policies")
+            if retune and router_policies is not None:
+                # Replay router state (revision and parameters per worker
+                # type) before this tick's router update.
+                tick_record["router_policies"] = [
+                    {
+                        "worker_type": policy["worker_type"],
+                        "revision": policy["revision"],
+                        "parameters": dict(policy["parameters"]),
+                    }
+                    for policy in router_policies
+                ]
+            self._ticks.append(tick_record)
         return decision
+
+    def _apply_retune_decisions(self, decisions: Sequence[RetuneDecision]) -> None:
+        """Record retune decisions and apply their planner changes.
+
+        Planner changes take effect from the next tick, as live. Candidates
+        were validated when the controller built its candidate set, so any
+        error here is a bug and fails the replay.
+        """
+        if not decisions:
+            return
+        # Decisions are rare (at most a few per retune window).
+        self._retune_decisions = (*self._retune_decisions, *decisions)
+        capabilities = self._capabilities or WorkerCapabilities()
+        for decision in decisions:
+            changes = decision.planner_changes
+            if decision.outcome not in _ACTUATED_RETUNE_OUTCOMES or not changes:
+                continue
+            engine = self._engine
+            if not isinstance(engine, ReconfigurableEngineProtocol):
+                raise TypeError(
+                    "retune planner changes require a reconfigurable replay engine"
+                )
+            candidate = candidate_config(self._config, dict(changes))
+            errors = runtime_candidate_errors(candidate, capabilities)
+            if errors:
+                raise ValueError(
+                    f"retune decision {decision.decision_id} produced an invalid "
+                    f"planner configuration: {'; '.join(errors)}"
+                )
+            predictor = None
+            if any(
+                getattr(candidate, field) != getattr(self._config, field)
+                for field in PREDICTOR_FIELDS
+            ):
+                predictor = prepare_predictor(
+                    candidate, capabilities, decision.predictor_warmup
+                )
+            engine.apply_runtime_configuration(candidate, changes.keys(), predictor)
+            logger.info(
+                "Retune %s (%s) applied planner changes %s",
+                decision.decision_id,
+                decision.outcome,
+                changes,
+            )
 
     def finalize(
         self, lifecycle_operations: list[dict[str, Any]] | None = None
@@ -388,7 +513,7 @@ class ReplayPlannerAdapter:
         """Finalize planner-owned replay details after successful execution."""
         html_report_path = self._recorder.finalize() if self._capture_details else None
         return PlannerReplayDetails(
-            metadata=self._planner_metadata(),
+            metadata=self._planner_metadata(self._start_config_dump),
             ticks=self._ticks if self._capture_details else [],
             scaling_events=self._scaling_events,
             lifecycle_operations=(
@@ -396,6 +521,10 @@ class ReplayPlannerAdapter:
             ),
             total_ticks=self._total_ticks,
             html_report_path=html_report_path,
+            # Full decision records, including the predictor pre-sweep losses
+            # that the per-tick capture omits. Recorded like scaling events,
+            # independent of ``capture_details``.
+            retune_events=[decision.to_dict() for decision in self._retune_decisions],
         )
 
     @staticmethod
@@ -461,7 +590,14 @@ class ReplayPlannerAdapter:
         }
         return record
 
-    def _planner_metadata(self) -> dict[str, Any]:
+    def _planner_config_dump(self) -> dict[str, Any]:
+        return self._config.model_dump(mode="json", by_alias=True)
+
+    def _planner_metadata(
+        self, config: Optional[dict[str, Any]] = None
+    ) -> dict[str, Any]:
+        """Planner identity metadata; digests ``config`` (a config dump)
+        when given, else the current config."""
         excluded_fields = [
             "report_output_dir",
             "report_filename",
@@ -481,7 +617,8 @@ class ReplayPlannerAdapter:
             "scheduling.external_plugins.auth_token",
             "scheduling.gateway",
         ]
-        config = self._config.model_dump(mode="json", by_alias=True)
+        if config is None:
+            config = self._planner_config_dump()
         decision_config = dict(config)
         for field in (name for name in excluded_fields if "." not in name):
             decision_config.pop(field, None)
@@ -824,12 +961,17 @@ def create_replay_planner_adapter(
     warmup_observations: Optional[list[TrafficObservation]] = None,
     benchmark_granularity: Optional[int] = None,
     capture_details: bool = True,
+    retune_inputs: Optional[RetuneInputs] = None,
 ) -> ReplayPlannerAdapter:
-    """Create a replay adapter backed by the builtin planner orchestrator."""
+    """Create a replay adapter backed by the builtin planner orchestrator.
+
+    ``retune_inputs`` is required when ``planner_config.retune`` is set.
+    """
     engine = OrchestratorEngineAdapter(
         planner_config,
         capabilities or WorkerCapabilities(),
         clock=VirtualClock(),
+        retune_inputs=retune_inputs,
     )
     adapter = ReplayPlannerAdapter(
         planner_config=planner_config,

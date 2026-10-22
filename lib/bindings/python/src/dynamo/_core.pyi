@@ -1961,6 +1961,42 @@ class KvRouterConfig:
 
     def copy(self) -> "KvRouterConfig": ...
 
+    def to_json(self) -> str:
+        """
+        Serialize this configuration as JSON that `from_json` accepts.
+
+        The serialization is lossy: the process-local fields
+        `router_approximate_cache_policy`, `router_prefill_policy` and
+        `router_decode_policy` are not serialized, so `from_json` restores
+        their defaults. Re-serializing the parsed result yields the same JSON:
+        `KvRouterConfig.from_json(config.to_json()).to_json() == config.to_json()`.
+        """
+        ...
+
+    def policy_parameters(self, worker_type: str) -> Dict[str, float]:
+        """
+        Resolved default-policy parameters a router built from this
+        configuration starts with for one worker type.
+
+        Args:
+            worker_type: "aggregated", "prefill" or "decode".
+
+        Returns:
+            The 8 runtime policy parameters, keyed by their `PATCH /router_policy`
+            names: overlap_score_credit, overlap_score_credit_decay,
+            prefill_load_scale, decode_active_request_weight,
+            host_cache_hit_weight, disk_cache_hit_weight,
+            shared_cache_multiplier and router_temperature. Plain decode workers
+            (decode without conditional disaggregation) report zero cache credits.
+
+        Raises:
+            ValueError: worker_type is not one of the accepted values, or the
+                configuration (or DYN_ROUTER_WORKER_SELECTION_POLICY) selects a
+                worker-selection policy instance for it, whose parameters this
+                method does not resolve.
+        """
+        ...
+
     @property
     def overlap_score_credit(self) -> float: ...
 
@@ -2406,7 +2442,18 @@ def run_mocker_trace_replay(
 
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
-    policy in online mode raises ``ValueError``.
+    policy in online mode raises ``ValueError``. The ``on_tick`` result must
+    carry ``target_prefill``, ``target_decode`` and ``next_tick_ms``, and may
+    carry ``router_parameters``: ``None`` or a missing key leaves the KV
+    routers unchanged, while a ``dict[str, dict[str, float]]`` keyed by worker
+    type (``"aggregated"``, ``"prefill"`` or ``"decode"``) and then by
+    ``KvRouterConfig.policy_parameters`` name updates every router of that
+    worker type at the tick's simulated time. Values equal to the current
+    parameters are a no-op. A worker type this replay has no KV router for
+    (for example under ``router_mode="round_robin"``) or an invalid value
+    raises ``ValueError``. With KV routers, each snapshot also reports
+    ``router_policies``: one ``{"worker_type", "revision", "parameters"}``
+    entry per router, taken before that tick's decision is applied.
 
     Replay telemetry is independent from ``scaling_policy``. Set
     ``capture_telemetry`` to retain samples on the offline result, provide
@@ -2496,7 +2543,9 @@ def run_mocker_synthetic_trace_replay(
 
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
-    policy in online mode raises ``ValueError``.
+    policy in online mode raises ``ValueError``. Synthetic replay has no router
+    control: a non-empty ``router_parameters`` decision key raises
+    ``ValueError``.
 
     Replay telemetry uses the same policy-neutral capture, callback, and JSONL
     options as ``run_mocker_trace_replay``. Its cadence is simulated time and

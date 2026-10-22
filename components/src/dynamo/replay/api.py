@@ -3,14 +3,18 @@
 
 """Compatibility entry points spanning shared offline and Dynamo online replay."""
 
+import functools
 import json
+import logging
+import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, TypedDict, overload
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, overload
 
 from typing_extensions import Unpack
 
+from dynamo._core import KvRouterConfig
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
@@ -20,6 +24,12 @@ from dynamo.replay.report import (
     ReplayReport,
     ReplayTelemetryDetails,
 )
+
+if TYPE_CHECKING:
+    from dynamo.planner.config.planner_config import PlannerConfig, RetuneEngineSpec
+    from dynamo.planner.core.types import RetuneInputs
+
+logger = logging.getLogger(__name__)
 
 _AGENTIC_MODEL_PROJECTION_POLICY = "project_to_configured_target"
 
@@ -105,6 +115,159 @@ def _normalize_trace_files(trace_files):
     if isinstance(trace_files, (str, os.PathLike)):
         return [trace_files]
     return list(trace_files)
+
+
+def _retune_inputs(
+    config: "PlannerConfig",
+    *,
+    trace_files: Sequence[str | os.PathLike[str]],
+    trace_format: str,
+    replay_concurrency: int | None,
+    agentic_lanes: int | None,
+    agentic_snapshot: dict[str, Any] | None,
+    agentic_warmup: bool,
+    agentic_profile: dict[str, Any] | None,
+    max_sim_time_ms: float | None,
+    extra_engine_args: Any,
+    prefill_engine_args: Any,
+    decode_engine_args: Any,
+    router_mode: Literal["round_robin", "kv_router"],
+    router_config: KvRouterConfig | None,
+    ais_perf_config: Any,
+    performance_model_metadata: dict[str, Any] | None,
+    model_name: str | None,
+    kv_event_lag_ms: float | None,
+    benchmark_granularity: int,
+    arrival_speedup_ratio: float,
+) -> "RetuneInputs":
+    """Derive planner retune inputs from this ``run_trace_replay`` call.
+
+    Every retune candidate replays one recorded window against the engine of
+    the outer replay, so the engine is pinned from the outer kwargs and the
+    trace time axis from the outer trace. Retune is open-loop and reads
+    ``dynamo.request.trace.v1`` files only, so it rejects the agentic replay
+    options and a trace whose requests carry ``agent_context`` (an agentic
+    Dynamo trace). ``execution_model`` is not an input: it only names the
+    target model of agentic rows, and ``DynamoReplayRunner`` sets it for every
+    performance-model engine, agentic or not.
+    """
+
+    if trace_format != "dynamo":
+        raise ValueError(
+            f"planner.retune requires trace_format='dynamo'; got {trace_format!r}"
+        )
+    if replay_concurrency is not None:
+        raise ValueError(
+            "planner.retune replays open-loop traffic; "
+            "replay_concurrency is not supported"
+        )
+    agentic_options = {
+        "agentic_lanes": agentic_lanes is not None,
+        "agentic_snapshot": agentic_snapshot is not None,
+        "agentic_warmup": bool(agentic_warmup),
+        "agentic_profile": agentic_profile is not None,
+    }
+    if rejected := sorted(name for name, used in agentic_options.items() if used):
+        raise ValueError(
+            "planner.retune replays open-loop traffic; agentic replay options "
+            f"are not supported: {rejected}"
+        )
+    if max_sim_time_ms is not None:
+        raise ValueError(
+            "planner.retune replays complete windows; "
+            "max_sim_time_ms is not supported"
+        )
+
+    # Lazy imports: the planner and replay-config modules import
+    # ``dynamo.mocker``, whose package initializer imports this module (see
+    # ``_planner_replay_adapter``).
+    from dynamo.planner.config.planner_config import RetuneEngineSpec
+    from dynamo.planner.core.types import RetuneInputs
+    from dynamo.planner.retune.window import read_trace_history, trace_origin_ms
+    from dynamo.replay.config import load_engine_args
+
+    # Pin the engine shape the outer replay runs (prefill and decode args make
+    # it disaggregated whatever the planner mode); the controller rejects a
+    # shape that does not match the planner mode (E5).
+    engine = RetuneEngineSpec(
+        extra_engine_args=load_engine_args(extra_engine_args),
+        prefill_engine_args=load_engine_args(prefill_engine_args),
+        decode_engine_args=load_engine_args(decode_engine_args),
+        router_mode=router_mode,
+        router_config=json.loads((router_config or KvRouterConfig()).to_json()),
+        ais_perf_config=(
+            None if ais_perf_config is None else ais_perf_config.to_dict()
+        ),
+        performance_model_metadata=performance_model_metadata,
+        model_name=model_name,
+        kv_event_lag_ms=kv_event_lag_ms,
+        benchmark_granularity=benchmark_granularity,
+    )
+    if config.retune is not None and config.retune.live.engine is not None:
+        _warn_live_engine_mismatch(config.retune.live.engine, engine)
+
+    trace_paths = tuple(os.fspath(path) for path in trace_files)
+    row_counts: dict[str, int] = {}
+    origin_ms = trace_origin_ms(trace_paths, row_counts=row_counts)
+    if agentic_requests := row_counts["agent_context_stripped"]:
+        # Retune windows drop agent_context, so candidates would replay
+        # open-loop traffic that the outer agentic replay never ran.
+        raise ValueError(
+            "planner.retune replays open-loop traffic; the trace has "
+            f"{agentic_requests} requests with agent_context (an agentic "
+            "Dynamo trace)"
+        )
+    history_paths: tuple[str, ...] = ()
+    if config.load_predictor_warmup_trace is not None:
+        history_paths = (config.load_predictor_warmup_trace,)
+        # History and windows are read on one time axis; an overlapping
+        # history would count requests twice in predictor warmup.
+        overlap = read_trace_history(
+            history_paths,
+            origin_ms,
+            math.inf,
+            math.inf,
+            None,
+            prune_by_mtime=False,
+        )
+        if overlap.num_requests:
+            raise ValueError(
+                "planner.retune history (load_predictor_warmup_trace) must end "
+                "at or before the first replayed request on the same absolute "
+                f"time axis; {overlap.num_requests} history requests arrive at "
+                f"or after {origin_ms:.0f} ms"
+            )
+    return RetuneInputs(
+        engine=engine,
+        trace_paths=trace_paths,
+        history_paths=history_paths,
+        trace_origin_ms=origin_ms,
+        arrival_speedup_ratio=arrival_speedup_ratio,
+        # File modification times say nothing about row times in replay.
+        prune_by_mtime=False,
+    )
+
+
+def _warn_live_engine_mismatch(
+    live: "RetuneEngineSpec", derived: "RetuneEngineSpec"
+) -> None:
+    """Log where ``retune.live.engine`` differs from the replayed engine.
+
+    The replay host ignores ``retune.live``; the comparison makes a replay of
+    a deployment's config a check of its live engine snapshot.
+    """
+
+    live_fields = live.model_dump()
+    derived_fields = derived.model_dump()
+    differing = sorted(
+        name for name in derived_fields if live_fields[name] != derived_fields[name]
+    )
+    if differing:
+        logger.warning(
+            "planner.retune.live.engine differs from the engine this replay "
+            "runs in fields %s; retune candidates replay the replay engine",
+            differing,
+        )
 
 
 def _planner_config_arg(planner_config):
@@ -367,6 +530,28 @@ def run_trace_replay(
                 "planner_config replay with trace_format='dynamo' "
                 "requires at least one trace file"
             )
+        retune_inputs_factory = functools.partial(
+            _retune_inputs,
+            trace_files=trace_files,
+            trace_format=trace_format,
+            replay_concurrency=replay_concurrency,
+            agentic_lanes=agentic_lanes,
+            agentic_snapshot=agentic_snapshot,
+            agentic_warmup=agentic_warmup,
+            agentic_profile=agentic_profile,
+            max_sim_time_ms=max_sim_time_ms,
+            extra_engine_args=extra_engine_args,
+            prefill_engine_args=prefill_engine_args,
+            decode_engine_args=decode_engine_args,
+            router_mode=router_mode,
+            router_config=router_config,
+            ais_perf_config=ais_perf_config,
+            performance_model_metadata=performance_model_metadata,
+            model_name=model_name,
+            kv_event_lag_ms=kv_event_lag_ms,
+            benchmark_granularity=benchmark_granularity,
+            arrival_speedup_ratio=arrival_speedup_ratio,
+        )
         adapter_scope = _planner_replay_adapter()(
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
@@ -375,6 +560,7 @@ def run_trace_replay(
             performance_model_metadata=performance_model_metadata,
             benchmark_granularity=benchmark_granularity,
             capture_details=capture_planner_details,
+            retune_inputs_factory=retune_inputs_factory,
         )
         with adapter_scope as adapter:
             native = _run_mocker_trace_replay(

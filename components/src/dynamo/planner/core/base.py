@@ -29,7 +29,6 @@ from dynamo.planner.control_api import (
     _start_control_api,
 )
 from dynamo.planner.core import util
-from dynamo.planner.core.budget import minimum_power_footprint_fits
 from dynamo.planner.core.engine_protocol import (
     EngineProtocol,
     ReconfigurableEngineProtocol,
@@ -52,7 +51,11 @@ from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
-from dynamo.planner.reconfiguration import PlannerReconfiguration
+from dynamo.planner.reconfiguration import (
+    PlannerReconfiguration,
+    runtime_candidate_errors,
+    runtime_configuration_errors,
+)
 from dynamo.runtime import DistributedRuntime
 
 if TYPE_CHECKING:
@@ -128,6 +131,8 @@ class NativePlannerBase:
         config: PlannerConfig,
         environment: PlannerEnvironment,
     ) -> None:
+        if config.retune is not None:
+            raise ValueError("planner.retune is replay-only in this release")
         self.runtime = runtime
         self.config = config
         self.environment = environment
@@ -281,67 +286,14 @@ class NativePlannerBase:
         max_gpu_budget: int,
     ) -> list[str]:
         capabilities = self._build_worker_capabilities()
-        errors: list[str] = []
-
-        if (
-            min_gpu_budget >= 0
-            and max_gpu_budget >= 0
-            and min_gpu_budget > max_gpu_budget
-        ):
-            errors.append(
-                f"min_gpu_budget={min_gpu_budget} exceeds "
-                f"max_gpu_budget={max_gpu_budget}"
-            )
-
-        required_gpus = 0
-        if prefill_min_endpoint is not None and capabilities.prefill is not None:
-            p_gpu = capabilities.prefill.resolved_gpu_cost_per_replica
-            if p_gpu is not None:
-                required_gpus += prefill_min_endpoint * p_gpu
-        if decode_min_endpoint is not None and capabilities.decode is not None:
-            d_gpu = capabilities.decode.resolved_gpu_cost_per_replica
-            if d_gpu is not None:
-                required_gpus += decode_min_endpoint * d_gpu
-        if max_gpu_budget >= 0 and required_gpus > max_gpu_budget:
-            errors.append(
-                "minimum endpoint footprint requires "
-                f"{required_gpus} GPUs, exceeding max_gpu_budget="
-                f"{max_gpu_budget}"
-            )
-
-        power_budget = self.config.total_gpu_power_limit
-        if power_budget is not None:
-            p_watts = (
-                capabilities.prefill.power_watts_per_replica
-                if capabilities.prefill is not None
-                else None
-            )
-            d_watts = (
-                capabilities.decode.power_watts_per_replica
-                if capabilities.decode is not None
-                else None
-            )
-            power_known = (prefill_min_endpoint is None or p_watts is not None) and (
-                decode_min_endpoint is None or d_watts is not None
-            )
-            prefill_floor = prefill_min_endpoint or 0
-            decode_floor = decode_min_endpoint or 0
-            if power_known and not minimum_power_footprint_fits(
-                total_budget=power_budget,
-                prefill_min_endpoint=prefill_floor,
-                decode_min_endpoint=decode_floor,
-                p_watts=p_watts,
-                d_watts=d_watts,
-            ):
-                required_watts = prefill_floor * (p_watts or 0) + decode_floor * (
-                    d_watts or 0
-                )
-                errors.append(
-                    "minimum endpoint footprint requires "
-                    f"{required_watts}W, exceeding total_gpu_power_limit="
-                    f"{power_budget}W"
-                )
-        return errors
+        return runtime_configuration_errors(
+            prefill_min_endpoint,
+            decode_min_endpoint,
+            min_gpu_budget,
+            max_gpu_budget,
+            self.config.total_gpu_power_limit,
+            capabilities,
+        )
 
     def _validate_min_endpoint_budgets_at_startup(self) -> None:
         prefill_min_endpoint, decode_min_endpoint = self.config.active_min_endpoints()
@@ -390,10 +342,7 @@ class NativePlannerBase:
             return self._min_endpoint_response()
 
     def validate_runtime_candidate(self, candidate: PlannerConfig) -> None:
-        p_min, d_min = candidate.active_min_endpoints()
-        errors = self._runtime_configuration_errors(
-            p_min, d_min, candidate.min_gpu_budget, candidate.max_gpu_budget
-        )
+        errors = runtime_candidate_errors(candidate, self._build_worker_capabilities())
         if errors:
             raise ValueError("; ".join(errors))
         self._reconfigurable_engine()

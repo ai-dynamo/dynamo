@@ -6,6 +6,7 @@ mod artifacts;
 mod entrypoints;
 pub(crate) mod offline;
 mod online;
+mod router_controls;
 mod router_shared;
 mod validate;
 
@@ -155,6 +156,11 @@ pub use entrypoints::{
 };
 #[doc(hidden)]
 pub use offline::run_offline_handoff_conformance;
+pub(crate) use router_controls::replay_router_controls;
+pub use router_controls::{
+    ReplayRouterControls, ReplayRouterParameters, apply_router_parameters,
+    parse_router_worker_type, with_replay_router_controls,
+};
 pub use validate::validate_replay_args_mode;
 
 thread_local! {

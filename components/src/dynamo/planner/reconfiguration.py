@@ -16,6 +16,7 @@ import stat
 import uuid
 import weakref
 from collections import OrderedDict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.control_api import _MinimumEndpointUnavailableError
+from dynamo.planner.core.budget import minimum_power_footprint_fits
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_bytes
 
 if TYPE_CHECKING:
@@ -82,7 +84,13 @@ class ReconfigureRequest(BaseModel):
     cold_start: bool = False
 
 
-def _candidate_config(config: PlannerConfig, updates: dict[str, Any]) -> PlannerConfig:
+def candidate_config(config: PlannerConfig, updates: dict[str, Any]) -> PlannerConfig:
+    """Validate ``config`` with runtime ``updates`` applied, strictly.
+
+    Rejects unknown or mode-inactive fields and re-runs every
+    ``PlannerConfig`` validator on the full merged config.
+    """
+
     if not updates or (unknown := updates.keys() - RUNTIME_FIELDS):
         raise ValueError(
             f"provide supported runtime fields; unknown fields: {sorted(unknown) if updates else []}"
@@ -115,14 +123,125 @@ def _candidate_config(config: PlannerConfig, updates: dict[str, Any]) -> Planner
     return candidate
 
 
+# Backward-compatible private name.
+_candidate_config = candidate_config
+
+
+def runtime_configuration_errors(
+    prefill_min_endpoint: int | None,
+    decode_min_endpoint: int | None,
+    min_gpu_budget: int,
+    max_gpu_budget: int,
+    power_budget: int | None,
+    capabilities: WorkerCapabilities,
+) -> list[str]:
+    """Return why endpoint floors and budgets cannot run on ``capabilities``.
+
+    Checks budget ordering, the GPU footprint of the minimum endpoints against
+    ``max_gpu_budget`` and, when ``power_budget`` is set and per-replica watts
+    are known, their power footprint. An empty list means the values fit.
+    """
+
+    errors: list[str] = []
+
+    if min_gpu_budget >= 0 and max_gpu_budget >= 0 and min_gpu_budget > max_gpu_budget:
+        errors.append(
+            f"min_gpu_budget={min_gpu_budget} exceeds "
+            f"max_gpu_budget={max_gpu_budget}"
+        )
+
+    required_gpus = 0
+    if prefill_min_endpoint is not None and capabilities.prefill is not None:
+        p_gpu = capabilities.prefill.resolved_gpu_cost_per_replica
+        if p_gpu is not None:
+            required_gpus += prefill_min_endpoint * p_gpu
+    if decode_min_endpoint is not None and capabilities.decode is not None:
+        d_gpu = capabilities.decode.resolved_gpu_cost_per_replica
+        if d_gpu is not None:
+            required_gpus += decode_min_endpoint * d_gpu
+    if max_gpu_budget >= 0 and required_gpus > max_gpu_budget:
+        errors.append(
+            "minimum endpoint footprint requires "
+            f"{required_gpus} GPUs, exceeding max_gpu_budget="
+            f"{max_gpu_budget}"
+        )
+
+    if power_budget is not None:
+        p_watts = (
+            capabilities.prefill.power_watts_per_replica
+            if capabilities.prefill is not None
+            else None
+        )
+        d_watts = (
+            capabilities.decode.power_watts_per_replica
+            if capabilities.decode is not None
+            else None
+        )
+        power_known = (prefill_min_endpoint is None or p_watts is not None) and (
+            decode_min_endpoint is None or d_watts is not None
+        )
+        prefill_floor = prefill_min_endpoint or 0
+        decode_floor = decode_min_endpoint or 0
+        if power_known and not minimum_power_footprint_fits(
+            total_budget=power_budget,
+            prefill_min_endpoint=prefill_floor,
+            decode_min_endpoint=decode_floor,
+            p_watts=p_watts,
+            d_watts=d_watts,
+        ):
+            required_watts = prefill_floor * (p_watts or 0) + decode_floor * (
+                d_watts or 0
+            )
+            errors.append(
+                "minimum endpoint footprint requires "
+                f"{required_watts}W, exceeding total_gpu_power_limit="
+                f"{power_budget}W"
+            )
+    return errors
+
+
+def runtime_candidate_errors(
+    candidate: PlannerConfig, capabilities: WorkerCapabilities
+) -> list[str]:
+    """``runtime_configuration_errors`` for a full candidate configuration."""
+
+    prefill_min_endpoint, decode_min_endpoint = candidate.active_min_endpoints()
+    return runtime_configuration_errors(
+        prefill_min_endpoint,
+        decode_min_endpoint,
+        candidate.min_gpu_budget,
+        candidate.max_gpu_budget,
+        candidate.total_gpu_power_limit,
+        capabilities,
+    )
+
+
+def prepare_predictor(
+    config: PlannerConfig,
+    capabilities: WorkerCapabilities,
+    observations: Sequence[TrafficObservation] | None,
+) -> BuiltinLoadPredict:
+    """Build ``config``'s load predictor, warmed with ``observations``.
+
+    ``None`` cold-starts the predictor. A sequence warms it and raises when it
+    has too few effective points, so a predictor is never swapped in cold by
+    accident.
+    """
+
+    # Preserve the core's lazy plugin-loading boundary.
+    from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
+
+    predictor = BuiltinLoadPredict(config, capabilities)
+    if observations is not None:
+        predictor.prepare_reconfiguration(list(observations))
+    return predictor
+
+
 def _prepare_predictor(
     config: PlannerConfig,
     capabilities: WorkerCapabilities,
     trace: str | None,
 ) -> BuiltinLoadPredict:
-    # Preserve the core's lazy plugin-loading boundary.
-    from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
-
     observations = None
     if trace is not None:
         observations = _load_runtime_warmup(
@@ -130,10 +249,7 @@ def _prepare_predictor(
             config.throughput_adjustment_interval_seconds,
             config.runtime_warmup_trace_dir,
         )
-    predictor = BuiltinLoadPredict(config, capabilities)
-    if observations is not None:
-        predictor.prepare_reconfiguration(observations)
-    return predictor
+    return prepare_predictor(config, capabilities, observations)
 
 
 def _load_runtime_warmup(
@@ -251,7 +367,7 @@ class PlannerReconfiguration:
                 raise ConfigurationConflict(
                     "another configuration update is still preparing"
                 )
-            candidate = _candidate_config(self.planner.config, request.config)
+            candidate = candidate_config(self.planner.config, request.config)
             self.planner.validate_runtime_candidate(candidate)
             changed_predictor = (
                 any(

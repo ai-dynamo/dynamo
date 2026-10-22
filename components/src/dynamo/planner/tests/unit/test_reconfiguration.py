@@ -19,16 +19,25 @@ from dynamo.planner.core.engine_protocol import (
 )
 from dynamo.planner.core.load.predictors import ARIMAPredictor, KalmanPredictor
 from dynamo.planner.core.types import (
+    EngineCapabilities,
     FpmObservations,
     ScheduledTick,
     TickInput,
     TrafficObservation,
+    WorkerCapabilities,
     WorkerCounts,
 )
 from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
 from dynamo.planner.plugins.clock import VirtualClock
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
-from dynamo.planner.reconfiguration import ConfigurationConflict, ReconfigureRequest
+from dynamo.planner.reconfiguration import (
+    ConfigurationConflict,
+    ReconfigureRequest,
+    candidate_config,
+    prepare_predictor,
+    runtime_candidate_errors,
+    runtime_configuration_errors,
+)
 from dynamo.planner.tests.unit.test_control_api import _planner
 
 pytestmark = [
@@ -601,3 +610,130 @@ async def test_http_contract_rejects_unsupported_or_invalid_updates(changes):
     assert result["status"] == 422
     assert await controller.get_config() == initial["body"]
     await planner._shutdown_runtime()
+
+
+def test_candidate_config_is_public_with_private_alias():
+    assert reconfiguration._candidate_config is candidate_config
+
+
+_CAPABILITIES = WorkerCapabilities(
+    prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
+    decode=EngineCapabilities(
+        num_gpu=4, gpu_cost_per_replica=1, power_watts_per_replica=350
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ((1, 1, -1, 20, 2000), []),
+        ((None, 2, -1, -1, None), []),
+        (
+            (3, 2, 30, 20, 2000),
+            [
+                "min_gpu_budget=30 exceeds max_gpu_budget=20",
+                "minimum endpoint footprint requires 2800W, exceeding "
+                "total_gpu_power_limit=2000W",
+            ],
+        ),
+        (
+            (10, 1, -1, 15, None),
+            [
+                "minimum endpoint footprint requires 21 GPUs, exceeding "
+                "max_gpu_budget=15"
+            ],
+        ),
+    ],
+)
+def test_runtime_configuration_errors_are_pure_scalar_checks(args, expected):
+    assert runtime_configuration_errors(*args, _CAPABILITIES) == expected
+
+
+def test_runtime_configuration_errors_skip_unknown_power():
+    capabilities = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=1), decode=EngineCapabilities(num_gpu=1)
+    )
+    assert runtime_configuration_errors(100, 100, -1, -1, 1, capabilities) == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [(1, 1, -1, 20), (3, 2, 30, 20), (10, 1, -1, 15), (None, 4, 2, 3)],
+)
+async def test_planner_runtime_errors_delegate_to_pure_function(args):
+    planner = _planner(
+        "disagg",
+        prefill_gpu_cost=2,
+        decode_gpu_cost=1,
+        prefill_watts=700,
+        decode_watts=350,
+        total_gpu_power_limit=2000,
+    )
+    expected = runtime_configuration_errors(
+        *args,
+        planner.config.total_gpu_power_limit,
+        planner._build_worker_capabilities(),
+    )
+    assert planner._runtime_configuration_errors(*args) == expected
+    await planner._shutdown_runtime()
+
+
+async def test_runtime_candidate_errors_match_runtime_validation():
+    planner = _planner(
+        "disagg", prefill_gpu_cost=2, decode_gpu_cost=1, total_gpu_power_limit=2000
+    )
+    capabilities = planner._build_worker_capabilities()
+    candidate = candidate_config(
+        planner.config, {"prefill_min_endpoint": 8, "max_gpu_budget": 16}
+    )
+    errors = runtime_candidate_errors(candidate, capabilities)
+    assert errors == [
+        "minimum endpoint footprint requires 17 GPUs, exceeding max_gpu_budget=16"
+    ]
+    with pytest.raises(ValueError) as error:
+        planner.validate_runtime_candidate(candidate)
+    assert str(error.value) == errors[0]
+    fitting = candidate_config(planner.config, {"max_gpu_budget": 24})
+    assert runtime_candidate_errors(fitting, capabilities) == []
+    await planner._shutdown_runtime()
+
+
+async def test_prepare_predictor_warms_from_observations_like_the_trace_path(tmp_path):
+    planner = sla_planner(runtime_warmup_trace_dir=str(tmp_path))
+    candidate = candidate_config(planner.config, {"load_predictor": "kalman"})
+    capabilities = planner._build_worker_capabilities()
+    source = trace(tmp_path)
+    observations = reconfiguration._load_runtime_warmup(
+        source,
+        candidate.throughput_adjustment_interval_seconds,
+        candidate.runtime_warmup_trace_dir,
+    )
+
+    from_trace = reconfiguration._prepare_predictor(candidate, capabilities, source)
+    warmed = prepare_predictor(candidate, capabilities, tuple(observations))
+    for name in ("_num_req_predictor", "_isl_predictor", "_osl_predictor"):
+        predictor = getattr(warmed, name)
+        assert isinstance(predictor, KalmanPredictor)
+        assert predictor.data_buffer == getattr(from_trace, name).data_buffer
+        assert len(predictor.data_buffer) >= predictor.minimum_data_points
+    assert warmed._last_observed_isl == from_trace._last_observed_isl
+
+    cold = prepare_predictor(candidate, capabilities, None)
+    assert cold._num_req_predictor.data_buffer == []
+    with pytest.raises(ValueError, match="effective warmup points"):
+        prepare_predictor(candidate, capabilities, observations[:1])
+    await planner._shutdown_runtime()
+
+
+def test_native_planner_rejects_retune_config():
+    with pytest.raises(ValueError, match="planner.retune is replay-only"):
+        _planner(
+            "disagg",
+            enable_load_scaling=False,
+            enable_throughput_scaling=False,
+            retune={
+                "interval_seconds": 600,
+                "router": {"overlap_score_credit": [0.0, 1.0]},
+            },
+        )
