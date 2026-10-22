@@ -13,6 +13,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.pre_merge,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
 ]
 
