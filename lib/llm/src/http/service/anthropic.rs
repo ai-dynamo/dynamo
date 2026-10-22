@@ -51,7 +51,7 @@ use crate::protocols::anthropic::types::{
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
     apply_cache_salt_header_override, apply_header_routing_overrides,
-    has_non_cache_salt_routing_headers, session_affinity_from_headers,
+    has_non_cache_salt_routing_headers, record_session_span_fields, session_affinity_from_headers,
 };
 use crate::protocols::common::input_trigger::classify_anthropic_request;
 use crate::protocols::openai::chat_completions::{
@@ -290,7 +290,7 @@ impl AnthropicHandlerError {
             message,
             metric_error_type,
         } = self;
-        inflight_guard.mark_error(metric_error_type.clone());
+        inflight_guard.mark_error_with_status(metric_error_type.clone(), status);
         anthropic_error(class, status, anthropic_error_type, &message)
     }
 }
@@ -425,11 +425,16 @@ async fn handler_anthropic_messages(
     })?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, &headers);
-    if let Some(mut agent_context) = agent_context_from_headers(&headers) {
+    let agent_context = agent_context_from_headers(&headers).map(|mut agent_context| {
         agent_context.input_trigger = Some(classify_anthropic_request(request.content()));
+        agent_context
+    });
+    let session_affinity = session_affinity_from_headers(&headers);
+    record_session_span_fields(agent_context.as_ref(), session_affinity.as_ref());
+    if let Some(agent_context) = agent_context {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
-    if let Some(session_affinity) = session_affinity_from_headers(&headers) {
+    if let Some(session_affinity) = session_affinity {
         request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
     }
     let context = request.context();
@@ -761,9 +766,7 @@ async fn anthropic_messages(
             // response carries rather than letting `into_marked_response`
             // re-derive it from the status.
             super::openai::log_pre_commit_error(&request_id, &error_response);
-            inflight_guard.mark_error(super::openai::extract_error_type_from_response(
-                &error_response,
-            ));
+            inflight_guard.mark_error_response(&error_response);
             anthropic_backend_error_response(error_response)
         })?;
 
@@ -902,9 +905,7 @@ async fn anthropic_messages(
         let stream_with_check = super::openai::check_for_backend_error(engine_stream, check)
             .await
             .map_err(|error_response| {
-                inflight_guard.mark_error(super::openai::extract_error_type_from_response(
-                    &error_response,
-                ));
+                inflight_guard.mark_error_response(&error_response);
                 anthropic_backend_error_response(error_response)
             })?;
 

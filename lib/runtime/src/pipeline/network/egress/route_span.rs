@@ -276,8 +276,10 @@ fn error_outcome(error_type: ErrorType) -> &'static str {
 
 fn finish_success(span: &tracing::Span) {
     span.record("request.outcome", "success");
-    tracing::info!(
-        target: "request_span",
+    // The span attribute above already carries the success outcome into OTel.
+    // Cancelled and error outcomes below stay on the always-on `request_span`
+    // target so exceptional paths remain visible at the default log level.
+    tracing::debug!(
         parent: span,
         { { "request.outcome" } = "success" },
         "route request completed"

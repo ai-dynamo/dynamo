@@ -553,6 +553,7 @@ fn build_llm_metric_annotation(
         tokenize_latency: tracker.and_then(|t| t.tokenize_latency()),
         detokenize_total_latency: tracker.and_then(|t| t.detokenize_total_latency()),
         detokenize_count: tracker.map(|t| t.detokenize_count()),
+        timing: None,
     }
 }
 
@@ -5913,7 +5914,7 @@ impl OpenAIPreprocessor {
                             .prompt_tokens_details
                             .as_ref()
                             .and_then(|d| d.cached_tokens.map(|c| c as usize));
-                        let llm_metrics = build_llm_metric_annotation(
+                        let mut llm_metrics = build_llm_metric_annotation(
                             tracker,
                             usage.prompt_tokens as usize,
                             usage.completion_tokens as usize,
@@ -5922,6 +5923,8 @@ impl OpenAIPreprocessor {
                             inner.mm_counts,
                             inner.image_tokens,
                         );
+                        // Only this final chunk carries timing; per-token chunks would serialize it for nothing.
+                        llm_metrics.timing = tracker.map(|t| t.get_timing_info());
                         if inner.trace_tokens_enabled {
                             crate::request_trace::record_llm_metric_tokens(
                                 tracker,

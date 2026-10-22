@@ -655,6 +655,18 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
         avg_itl_ms = tracing::field::Empty,
         prefill_worker_id = tracing::field::Empty,
         decode_worker_id = tracing::field::Empty,
+        prefill_dp_rank = tracing::field::Empty,
+        decode_dp_rank = tracing::field::Empty,
+        cached_tokens = tracing::field::Empty,
+        prefill_wait_ms = tracing::field::Empty,
+        prefill_ms = tracing::field::Empty,
+        decode_ms = tracing::field::Empty,
+        kv_hit_rate = tracing::field::Empty,
+        router_queue_depth = tracing::field::Empty,
+        http_status = tracing::field::Empty,
+        session_id = tracing::field::Empty,
+        agent_session_id = tracing::field::Empty,
+        parent_session_id = tracing::field::Empty,
     );
 
     if let Some(context) = otel_context {
@@ -941,6 +953,18 @@ pub fn make_client_request_span(
     }
 }
 
+/// Span fields the trace-context layer reads. Everything else is skipped so the
+/// per-span cost stays flat as request spans gain fields.
+const TRACE_CONTEXT_FIELDS: [&str; 7] = [
+    "trace_id",
+    "span_id",
+    "parent_id",
+    "trace_flags",
+    "tracestate",
+    "x_request_id",
+    "request_id",
+];
+
 #[derive(Debug, Default)]
 pub struct FieldVisitor {
     pub fields: HashMap<String, String>,
@@ -948,13 +972,17 @@ pub struct FieldVisitor {
 
 impl Visit for FieldVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
-        self.fields
-            .insert(field.name().to_string(), value.to_string());
+        if TRACE_CONTEXT_FIELDS.contains(&field.name()) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.fields
-            .insert(field.name().to_string(), format!("{:?}", value).to_string());
+        if TRACE_CONTEXT_FIELDS.contains(&field.name()) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
     }
 }
 
@@ -1085,8 +1113,9 @@ where
         }
     }
 
-    // Finalizes the DistributedTraceContext when span is entered
-    // At this point, OtelData should have valid trace_id and span_id
+    // Finalizes the DistributedTraceContext when span is entered. Ids come from
+    // inbound headers, then OtelData when the OpenTelemetry layer is installed,
+    // then are minted locally.
     fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
         if let Some(span) = ctx.span(id) {
             // Check if already initialized (e.g., span re-entered)
@@ -1149,15 +1178,30 @@ where
                 trace_flags = current_otel_trace_flags();
             }
 
-            // Panic if we still don't have required IDs
-            if trace_id.is_none() {
-                panic!(
-                    "trace_id is not set in on_enter - OtelData may not be properly initialized"
-                );
-            }
-
-            if span_id.is_none() {
-                panic!("span_id is not set in on_enter - OtelData may not be properly initialized");
+            // Without the OpenTelemetry layer (readable console mode) there is no
+            // OtelData to derive ids from. Inherit the parent's trace so spans of one
+            // request share a trace id, otherwise start a new one; this keeps the
+            // request id and trace context readable by handlers and workers.
+            let mut parent_id = parent_id;
+            if trace_id.is_none() || span_id.is_none() {
+                let inherited = span.parent().and_then(|parent| {
+                    parent
+                        .extensions()
+                        .get::<DistributedTraceContext>()
+                        .map(|context| (context.trace_id.clone(), context.span_id.clone()))
+                });
+                if trace_id.is_none() {
+                    trace_id = Some(match &inherited {
+                        Some((parent_trace_id, _)) => parent_trace_id.clone(),
+                        None => Uuid::new_v4().simple().to_string(),
+                    });
+                    if parent_id.is_none() {
+                        parent_id = inherited.map(|(_, parent_span_id)| parent_span_id);
+                    }
+                }
+                if span_id.is_none() {
+                    span_id = Some(Uuid::new_v4().simple().to_string()[..16].to_string());
+                }
             }
 
             let span_level = span.metadata().level();
@@ -1379,7 +1423,13 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let l = console_layer(console_format, span_events, fmt_filter_layer);
 
-        tracing_subscriber::registry().with(l).init();
+        // Handlers read the request span's id back through this layer's
+        // DistributedTraceContext; without it they mint a second id and
+        // frontend lines cannot be joined to worker lines by request id.
+        tracing_subscriber::registry()
+            .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
+            .with(l)
+            .init();
     }
 
     Ok(())
@@ -3120,6 +3170,71 @@ pub mod tests {
             "Subprocess test failed with exit code: {:?}",
             output.status.code()
         );
+    }
+
+    #[test]
+    fn test_readable_console_propagates_request_id() {
+        use std::process::Command;
+
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "dynamo-runtime",
+                "logging::tests::test_readable_console_propagates_request_id_subprocess",
+                "--",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("DYN_TEST_LOGGING_READABLE_REQUEST_ID", "1")
+            .env("DYN_LOGGING_CONSOLE_FORMAT", "readable")
+            .env_remove("DYN_LOGGING_JSONL")
+            .env_remove("OTEL_EXPORT_ENABLED")
+            .env("DYN_LOG", "info")
+            .output()
+            .expect("Failed to execute subprocess test");
+
+        if !output.status.success() {
+            eprintln!(
+                "=== STDOUT ===\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "=== STDERR ===\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        assert!(
+            output.status.success(),
+            "Subprocess test failed with exit code: {:?}",
+            output.status.code()
+        );
+    }
+
+    /// Readable console mode without OTLP must still expose the request span's id
+    /// through the context, or handlers fall back to minting a second request id.
+    #[tokio::test]
+    async fn test_readable_console_propagates_request_id_subprocess() -> Result<()> {
+        if std::env::var("DYN_TEST_LOGGING_READABLE_REQUEST_ID").is_err() {
+            return Ok(());
+        }
+
+        init();
+        let request_id = "11111111-2222-3333-4444-555555555555";
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("request-id", request_id)
+            .body(())
+            .unwrap();
+        let span = make_inference_request_span(&req);
+        let _enter = span.enter();
+
+        let context = get_distributed_tracing_context()
+            .expect("request span must carry a DistributedTraceContext in readable mode");
+        assert_eq!(context.request_id.as_deref(), Some(request_id));
+        Ok(())
     }
 
     #[tokio::test]

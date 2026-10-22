@@ -489,7 +489,7 @@ impl RoutingHost {
         guard.retarget_worker(target.worker_id);
         if let Some(telemetry) = device_aware_telemetry {
             let selection_survived_transport = target.worker_id == initial_worker;
-            tracing::info!(
+            tracing::debug!(
                 router_mode = "device-aware-weighted",
                 worker_id = target.worker_id,
                 candidate_count,
@@ -503,7 +503,7 @@ impl RoutingHost {
                 "Selected worker"
             );
         } else if uses_occupancy {
-            tracing::info!(
+            tracing::debug!(
                 router_mode = self.inner.router_mode().telemetry_label(),
                 worker_id = target.worker_id,
                 candidate_count,

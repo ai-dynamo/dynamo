@@ -63,7 +63,8 @@ use crate::preprocessor::{
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
     SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, agent_context_from_headers,
-    apply_frontend_nvext_policy, has_non_cache_salt_routing_headers, session_affinity_from_headers,
+    apply_frontend_nvext_policy, has_non_cache_salt_routing_headers, record_session_span_fields,
+    session_affinity_from_headers,
 };
 use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
@@ -1123,11 +1124,16 @@ where
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
-    if let Some(mut agent_context) = agent_context {
+    let agent_context = agent_context.map(|mut agent_context| {
         agent_context.input_trigger = classify_input_trigger(request.content());
+        agent_context
+    });
+    let session_affinity = session_affinity_from_headers(headers);
+    record_session_span_fields(agent_context.as_ref(), session_affinity.as_ref());
+    if let Some(agent_context) = agent_context {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
-    if let Some(session_affinity) = session_affinity_from_headers(headers) {
+    if let Some(session_affinity) = session_affinity {
         request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
     }
     Ok(request)
@@ -1338,7 +1344,7 @@ async fn completions_single(
         .get_completions_engine_with_parsing(&model)
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            inflight_guard.mark_error_response(&err_response);
             err_response
         })?;
 
@@ -1357,7 +1363,7 @@ async fn completions_single(
                 .inc_rejection(&model, super::metrics::Endpoint::Completions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_response(&err_response);
         err_response
     })?;
 
@@ -1395,7 +1401,7 @@ async fn completions_single(
         .await
         .inspect_err(|error_response| {
             log_pre_commit_error(&request_id, error_response);
-            inflight_guard.mark_error(extract_error_type_from_response(error_response));
+            inflight_guard.mark_error_response(error_response);
         })?;
 
         // For streaming, we'll drop the http_queue_guard on the first token
@@ -1466,7 +1472,7 @@ async fn completions_single(
             .await
             .map_err(|error_response| {
                 tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                inflight_guard.mark_error_response(&error_response);
                 error_response
             })?;
 
@@ -1477,7 +1483,7 @@ async fn completions_single(
                     e,
                     &format!("Failed to fold completions stream for {request_id}"),
                 );
-                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                inflight_guard.mark_error_response(&err_response);
                 err_response
             })?;
 
@@ -1632,7 +1638,7 @@ async fn completions_batch(
         .get_completions_engine_with_parsing(&model)
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            inflight_guard.mark_error_response(&err_response);
             err_response
         })?;
 
@@ -1677,7 +1683,7 @@ async fn completions_batch(
                     .inc_rejection(&model, super::metrics::Endpoint::Completions);
             }
             let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            inflight_guard.mark_error_response(&err_response);
             err_response
         })?;
 
@@ -1710,7 +1716,7 @@ async fn completions_batch(
     .await
     .inspect_err(|error_response| {
         log_pre_commit_error(&request_id, error_response);
-        inflight_guard.mark_error(extract_error_type_from_response(error_response));
+        inflight_guard.mark_error_response(error_response);
         // One prompt's error abandons the whole batch, so stop the siblings
         // still running behind it instead of leaving them to generate for a
         // response that will never be sent.
@@ -1813,7 +1819,7 @@ async fn completions_batch(
                     e,
                     &format!("Failed to fold completions stream for {request_id}"),
                 );
-                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                inflight_guard.mark_error_response(&err_response);
                 err_response
             })?;
 
@@ -1904,7 +1910,7 @@ async fn embeddings(
     // todo - error handling should be more robust
     let engine = state.manager().get_embeddings_engine(model).map_err(|e| {
         let err_response = ErrorMessage::from_model_error(&e);
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error_response(&err_response);
         err_response
     })?;
 
@@ -1921,7 +1927,7 @@ async fn embeddings(
                 .inc_rejection(&model_name, super::metrics::Endpoint::Embeddings);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error_response(&err_response);
         err_response
     })?;
 
@@ -1943,7 +1949,7 @@ async fn embeddings(
         .map_err(|e| {
             let err_response =
                 non_streaming_aggregation_error_response(e, "Failed to fold embeddings stream");
-            inflight.mark_error(extract_error_type_from_response(&err_response));
+            inflight.mark_error_response(&err_response);
             err_response
         })?;
 
@@ -1966,7 +1972,7 @@ async fn embeddings(
                         let err_response = ErrorMessage::internal_server_error(
                             "Failed to decode embedding payload",
                         );
-                        inflight.mark_error(extract_error_type_from_response(&err_response));
+                        inflight.mark_error_response(&err_response);
                         return Err(err_response);
                     }
                 }
@@ -2048,7 +2054,7 @@ async fn classify(
 
     let engine = state.manager().get_classify_engine(model).map_err(|e| {
         let err_response = ErrorMessage::from_model_error(&e);
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error_response(&err_response);
         err_response
     })?;
 
@@ -2065,7 +2071,7 @@ async fn classify(
                 .inc_rejection(&model_name, super::metrics::Endpoint::Classify);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate classification");
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error_response(&err_response);
         err_response
     })?;
 
@@ -2087,7 +2093,7 @@ async fn classify(
                 anyhow::Error::new(e),
                 "Failed to fold classification stream",
             );
-            inflight.mark_error(extract_error_type_from_response(&err_response));
+            inflight.mark_error_response(&err_response);
             err_response
         })?;
 
@@ -2139,7 +2145,7 @@ async fn rerank(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
     let engine = state.manager().get_rerank_engine(model).map_err(|error| {
         let response = ErrorMessage::from_model_error(&error);
-        inflight.mark_error(extract_error_type_from_response(&response));
+        inflight.mark_error_response(&response);
         response
     })?;
     let mut response_collector = state
@@ -2153,7 +2159,7 @@ async fn rerank(
                 .inc_rejection(&model_name, Endpoint::Rerank);
         }
         let response = ErrorMessage::from_anyhow(error, "Failed to generate reranking");
-        inflight.mark_error(extract_error_type_from_response(&response));
+        inflight.mark_error_response(&response);
         response
     })?;
 
@@ -2172,7 +2178,7 @@ async fn rerank(
                 anyhow::Error::new(error),
                 "Failed to fold rerank stream",
             );
-            inflight.mark_error(extract_error_type_from_response(&response));
+            inflight.mark_error_response(&response);
             response
         })?;
 
@@ -2418,7 +2424,7 @@ async fn pooling(
 
     let engine = state.manager().get_pooling_engine(model).map_err(|e| {
         let err_response = ErrorMessage::from_model_error(&e);
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error_response(&err_response);
         err_response
     })?;
 
@@ -2435,7 +2441,7 @@ async fn pooling(
                 .inc_rejection(&model_name, super::metrics::Endpoint::Pooling);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate pooling output");
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error_response(&err_response);
         err_response
     })?;
 
@@ -2455,7 +2461,7 @@ async fn pooling(
         .map_err(|e| {
             let err_response =
                 ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold pooling stream");
-            inflight.mark_error(extract_error_type_from_response(&err_response));
+            inflight.mark_error_response(&err_response);
             err_response
         })?;
 
@@ -2473,7 +2479,7 @@ async fn pooling(
             .map_err(|e| {
                 let err_response =
                     ErrorMessage::from_anyhow(e, "Failed to build pooling binary response");
-                inflight.mark_error(extract_error_type_from_response(&err_response));
+                inflight.mark_error_response(&err_response);
                 err_response
             })?
         }
@@ -3544,7 +3550,7 @@ async fn chat_completions(
     );
 
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_response(&err_response);
         return Err(err_response);
     }
 
@@ -3553,25 +3559,25 @@ async fn chat_completions(
     // then a field was used that is unsupported. We will log an error message
     // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
     if let Err(err_response) = validate_chat_completion_unsupported_fields(&request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_response(&err_response);
         return Err(err_response);
     }
 
     // Handle required fields like messages shouldn't be empty.
     if let Err(err_response) = validate_chat_completion_required_fields(&request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_response(&err_response);
         return Err(err_response);
     }
 
     // Validate stream_options is only used when streaming (NVBug 5662680)
     if let Err(err_response) = validate_chat_completion_stream_options(&request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_response(&err_response);
         return Err(err_response);
     }
 
     // Handle Rest of Validation Errors
     if let Err(err_response) = validate_chat_completion_fields_generic(&request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_response(&err_response);
         return Err(err_response);
     }
 
@@ -3590,7 +3596,7 @@ async fn chat_completions(
         .get_chat_completions_engine_with_parsing(&model)
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            inflight_guard.mark_error_response(&err_response);
             err_response
         })?;
 
@@ -3600,7 +3606,7 @@ async fn chat_completions(
     let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
         .map_err(|e| {
             let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            inflight_guard.mark_error_response(&err_response);
             err_response
         })?;
 
@@ -3638,7 +3644,7 @@ async fn chat_completions(
                 .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_response(&err_response);
         err_response
     })?;
 
@@ -3683,7 +3689,7 @@ async fn chat_completions(
         .await
         .inspect_err(|err_response| {
             log_pre_commit_error(&request_id, err_response);
-            inflight_guard.mark_error(extract_error_type_from_response(err_response));
+            inflight_guard.mark_error_response(err_response);
         })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
@@ -3863,7 +3869,7 @@ async fn chat_completions(
             .await
             .map_err(|error_response| {
                 tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                inflight_guard.mark_error_response(&error_response);
                 error_response
             })?;
 
@@ -3875,7 +3881,7 @@ async fn chat_completions(
                         e,
                         "Failed to parse chat completion response",
                     );
-                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                    inflight_guard.mark_error_response(&err_response);
                     err_response
                 })?;
 
@@ -4210,7 +4216,7 @@ async fn responses(
 
     // Validate sampling and output parameters
     if let Err(err_response) = validate_responses_fields(&request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_response(&err_response);
         return Err(err_response);
     }
 
@@ -4259,7 +4265,7 @@ async fn responses(
             "Failed to convert NvCreateResponse to UnifiedRequest",
         );
         let err_response = responses_conversion_error_response(e);
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_response(&err_response);
         err_response
     })?;
     // Extract the API context before consuming the UnifiedRequest — this
@@ -4268,7 +4274,7 @@ async fn responses(
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_response(&err_response);
         return Err(err_response);
     }
     if let Err(error) = chat_request.validate() {
@@ -4301,7 +4307,7 @@ async fn responses(
         .get_chat_completions_engine_with_parsing(&model)
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            inflight_guard.mark_error_response(&err_response);
             err_response
         })?;
 
@@ -4310,7 +4316,7 @@ async fn responses(
     let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
         .map_err(|e| {
             let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            inflight_guard.mark_error_response(&err_response);
             err_response
         })?;
 
@@ -4361,7 +4367,7 @@ async fn responses(
                 .inc_rejection(&model, super::metrics::Endpoint::Responses);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_response(&err_response);
         err_response
     })?;
 
@@ -4380,7 +4386,7 @@ async fn responses(
         .await
         .inspect_err(|err_response| {
             log_pre_commit_error(&request_id, err_response);
-            inflight_guard.mark_error(extract_error_type_from_response(err_response));
+            inflight_guard.mark_error_response(err_response);
         })?;
 
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
@@ -4519,7 +4525,7 @@ async fn responses(
             .await
             .map_err(|error_response| {
                 tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                inflight_guard.mark_error_response(&error_response);
                 error_response
             })?;
 
@@ -4531,7 +4537,7 @@ async fn responses(
                         e,
                         "Failed to fold responses stream",
                     );
-                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                    inflight_guard.mark_error_response(&err_response);
                     err_response
                 })?;
 
@@ -4546,7 +4552,7 @@ async fn responses(
                     );
                     let err_response =
                         ErrorMessage::internal_server_error("Failed to convert internal response");
-                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                    inflight_guard.mark_error_response(&err_response);
                     err_response
                 })?;
 
@@ -5223,7 +5229,7 @@ async fn images_with_request(
                 .inc_rejection(&model, super::metrics::Endpoint::Images);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error_response(&err_response);
         err_response
     })?;
 
@@ -5251,7 +5257,7 @@ async fn images_with_request(
             // expected 400s would show up at error level.
             let err_response =
                 ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to generate images");
-            inflight.mark_error(extract_error_type_from_response(&err_response));
+            inflight.mark_error_response(&err_response);
             err_response
         })?;
 
@@ -5348,7 +5354,7 @@ async fn videos(
                 .inc_rejection(&model, super::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error_response(&err_response);
         err_response
     })?;
 
@@ -5419,7 +5425,7 @@ async fn videos(
             .map_err(|e| {
                 let err_response =
                     non_streaming_aggregation_error_response(e, "Failed to fold videos stream");
-                inflight.mark_error(extract_error_type_from_response(&err_response));
+                inflight.mark_error_response(&err_response);
                 err_response
             })?;
 
@@ -5472,7 +5478,7 @@ async fn video_stream(
                 .inc_rejection(&model, super::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error_response(&err_response);
         err_response
     })?;
 
@@ -5769,14 +5775,14 @@ async fn audio_speech(
                 .inc_rejection(&metric_model, super::metrics::Endpoint::Audios);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error_response(&err_response);
         err_response
     })?;
 
     let stream = check_for_backend_error(stream, BackendErrorCheck::UntilFirstEvent)
         .await
         .inspect_err(|error_response| {
-            inflight.mark_error(extract_error_type_from_response(error_response));
+            inflight.mark_error_response(error_response);
         })?;
 
     let mut http_queue_guard = Some(http_queue_guard);
@@ -5795,7 +5801,7 @@ async fn audio_speech(
                 let err_response = ErrorMessage::internal_server_error(
                     "Audio stream ended without producing data",
                 );
-                inflight.mark_error(extract_error_type_from_response(&err_response));
+                inflight.mark_error_response(&err_response);
                 return Err(err_response);
             };
             let annotated = annotated.ok().map_err(|e| {
@@ -5803,7 +5809,7 @@ async fn audio_speech(
                     "Audio stream failed before producing data",
                     e.to_string(),
                 );
-                inflight.mark_error(extract_error_type_from_response(&err_response));
+                inflight.mark_error_response(&err_response);
                 err_response
             })?;
             let Some(response) = annotated.data else {
@@ -5828,13 +5834,13 @@ async fn audio_speech(
                 "Failed to decode audio stream",
                 e,
             );
-            inflight.mark_error(extract_error_type_from_response(&err_response));
+            inflight.mark_error_response(&err_response);
             err_response
         })?;
         if first_chunks.is_empty() {
             let err_response =
                 ErrorMessage::internal_server_error("Audio response did not contain data");
-            inflight.mark_error(extract_error_type_from_response(&err_response));
+            inflight.mark_error_response(&err_response);
             return Err(err_response);
         }
 
@@ -5915,7 +5921,7 @@ async fn audio_speech(
         .map_err(|e| {
             let err_response =
                 ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold audio stream");
-            inflight.mark_error(extract_error_type_from_response(&err_response));
+            inflight.mark_error_response(&err_response);
             err_response
         })?;
 
@@ -5938,13 +5944,13 @@ async fn audio_speech(
                 "Failed to decode audio response",
                 e,
             );
-            inflight.mark_error(extract_error_type_from_response(&err_response));
+            inflight.mark_error_response(&err_response);
             err_response
         })?;
         if chunks.is_empty() {
             let err_response =
                 ErrorMessage::internal_server_error("Audio response did not contain data");
-            inflight.mark_error(extract_error_type_from_response(&err_response));
+            inflight.mark_error_response(&err_response);
             return Err(err_response);
         }
 
@@ -5962,7 +5968,7 @@ async fn audio_speech(
                     "Failed to build audio response",
                     e.to_string(),
                 );
-                inflight.mark_error(extract_error_type_from_response(&err_response));
+                inflight.mark_error_response(&err_response);
                 err_response
             })?;
         inflight.mark_ok();

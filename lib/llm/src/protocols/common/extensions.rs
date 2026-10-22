@@ -368,6 +368,39 @@ pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffin
     session_affinity_header_value(headers).map(SessionAffinityId::new)
 }
 
+/// Record the request's session identities on the enclosing HTTP request span so the
+/// per-request completion log carries them.
+pub fn record_session_span_fields(
+    agent_context: Option<&AgentContext>,
+    session_affinity: Option<&SessionAffinityId>,
+) {
+    let span = tracing::Span::current();
+    if let Some(id) = session_affinity.and_then(|id| loggable_id(id.as_str())) {
+        span.record("session_id", id);
+    }
+    if let Some(agent_context) = agent_context {
+        if let Some(id) = loggable_id(&agent_context.session_id) {
+            span.record("agent_session_id", id);
+        }
+        if let Some(parent) = agent_context
+            .parent_session_id
+            .as_deref()
+            .and_then(loggable_id)
+        {
+            span.record("parent_session_id", parent);
+        }
+    }
+}
+
+/// Session ids are client supplied. The readable log formatter splits span fields on
+/// whitespace, so only compact printable values may reach the span.
+fn loggable_id(value: &str) -> Option<&str> {
+    (!value.is_empty()
+        && value.len() <= 128
+        && value.chars().all(|c| c.is_ascii_graphic() && c != '"'))
+    .then_some(value)
+}
+
 /// Apply HTTP routing header overrides to nvext.
 ///
 /// Header mappings:

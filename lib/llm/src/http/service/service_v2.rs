@@ -1360,7 +1360,7 @@ impl HttpServiceConfigBuilder {
             if status.is_server_error() || status.is_client_error() {
                 tracing::error!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
             } else {
-                tracing::info!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
+                tracing::debug!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
             }
         };
 

@@ -986,7 +986,7 @@ where
     {
         let (instance_id, candidate_count) =
             self.select_untracked_worker(self.round_robin_picker.as_ref())?;
-        tracing::info!(
+        tracing::debug!(
             router_mode = "round-robin",
             worker_id = instance_id,
             candidate_count,
@@ -1014,7 +1014,7 @@ where
     {
         let (instance_id, candidate_count) =
             self.select_untracked_worker(self.random_picker.as_ref())?;
-        tracing::info!(
+        tracing::debug!(
             router_mode = "random",
             worker_id = instance_id,
             candidate_count,
@@ -1058,7 +1058,7 @@ where
                 candidates.len(),
             )
         };
-        tracing::info!(
+        tracing::debug!(
             router_mode = "power-of-two-choices",
             worker_id = instance_id,
             candidate_count,
@@ -1076,7 +1076,7 @@ where
         request: SingleIn<T>,
         instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
-        tracing::info!(
+        tracing::debug!(
             router_mode = "direct",
             worker_id = instance_id,
             "Selected worker"
@@ -1188,7 +1188,7 @@ where
                 },
             )
             .await?;
-        tracing::info!(
+        tracing::debug!(
             router_mode = self.router_mode.telemetry_label(),
             worker_id = resolved_instance_id,
             "Selected worker"
@@ -1381,7 +1381,7 @@ where
         let is_cpu = selection.candidates.iter().any(|candidate| {
             candidate.target.worker_id == instance_id && candidate.device == RouteDevice::Cpu
         });
-        tracing::info!(
+        tracing::debug!(
             router_mode = "device-aware-weighted",
             worker_id = instance_id,
             candidate_count = selection.candidates.len(),
@@ -1494,7 +1494,7 @@ where
             instance_id,
             counter.expect("least-loaded selection always requests occupancy admission"),
         );
-        tracing::info!(
+        tracing::debug!(
             router_mode = "least-loaded",
             worker_id = instance_id,
             candidate_count = instance_ids.len(),

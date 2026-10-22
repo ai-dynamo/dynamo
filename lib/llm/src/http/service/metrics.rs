@@ -28,6 +28,7 @@ use std::{
 use crate::discovery::ModelManager;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
+use crate::protocols::common::timing::TimingInfo;
 use crate::protocols::{
     common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation},
     openai::chat_completions::NvCreateChatCompletionStreamResponse,
@@ -688,6 +689,8 @@ pub struct InflightGuard {
     status: Status,
     error_type: ErrorType,
     timer: Instant,
+    started_at: std::time::SystemTime,
+    http_status: Option<u16>,
     request_id: String,
     span: tracing::Span,
 }
@@ -836,8 +839,6 @@ pub struct ResponseMetricCollector {
     ttft_ms: Option<f64>,
     itl_sum_secs: f64,
     itl_count: u64,
-    // we track if cached_tokens has been observed to ensure we only increment once per request
-    cached_tokens_observed: bool,
     // we track if tokenize latency has been observed to ensure we only increment once per request
     tokenize_latency_observed: bool,
     // latest accumulated detokenize latency and sample count reported by tracker
@@ -853,6 +854,9 @@ pub struct ResponseMetricCollector {
     decode_dp_rank: Option<u32>,
     // Decode worker type for Prometheus labeling - stored at routing time to avoid MDC lookup
     decode_worker_type: Option<String>,
+    // Latest router-side timing and cached-token count, recorded on the span in `Drop`.
+    timing: Option<TimingInfo>,
+    cached_tokens_val: Option<usize>,
     // Cached per-worker ITL gauge handle. The decode-worker labels are latched once at
     // routing time (`set_worker_info` only sets when unset), so this GaugeVec handle is
     // resolved a single time and reused — the per-token observe path then does no label
@@ -1729,12 +1733,13 @@ impl InflightGuard {
         request_id: String,
     ) -> Self {
         let timer = Instant::now();
+        let started_at = std::time::SystemTime::now();
         metrics.inc_inflight_gauge(&model);
         metrics.inc_request_started_counter(&model, &endpoint, &request_type);
 
         tracing::Span::current().record("model", model.as_str());
 
-        tracing::info!(
+        tracing::debug!(
             request_id = %request_id,
             model = %model,
             endpoint = %endpoint,
@@ -1750,6 +1755,8 @@ impl InflightGuard {
             status: Status::Error,
             error_type: ErrorType::Internal,
             timer,
+            started_at,
+            http_status: None,
             request_id,
             span: tracing::Span::current(),
         }
@@ -1777,6 +1784,23 @@ impl InflightGuard {
     pub(crate) fn mark_ok(&mut self) {
         self.status = Status::Success;
         self.error_type = ErrorType::None;
+        self.http_status = Some(200);
+    }
+
+    /// Record the failure for metrics together with the HTTP status the handler returns.
+    /// Called before the handler returns, so the completion log can carry the status;
+    /// tower's `on_response` runs only after the handler has already dropped this guard.
+    pub(crate) fn mark_error_response(&mut self, response: &super::openai::ErrorResponse) {
+        self.mark_error_with_status(
+            super::openai::extract_error_type_from_response(response),
+            response.0,
+        );
+    }
+
+    /// Record a typed failure together with the HTTP status the handler returns.
+    pub(crate) fn mark_error_with_status(&mut self, error_type: ErrorType, status: StatusCode) {
+        self.http_status = Some(status.as_u16());
+        self.mark_error(error_type);
     }
 
     pub(crate) fn mark_error(&mut self, error_type: ErrorType) {
@@ -1791,6 +1815,10 @@ impl InflightGuard {
             (Status::Error, _) => RequestCompletion::Error,
         }
     }
+}
+
+fn rfc3339_micros(time: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
 
 impl Drop for InflightGuard {
@@ -1811,10 +1839,20 @@ impl Drop for InflightGuard {
             .observe(duration);
 
         let completion = self.request_completion();
+        if let Some(http_status) = self.http_status {
+            self.span.record("http_status", http_status);
+        }
         self.span.record("request.outcome", completion.as_str());
 
         let elapsed_ms = (duration * 1000.0) as u64;
         let status_str = self.status.as_str();
+        let start_time = rfc3339_micros(self.started_at);
+        let end_time = rfc3339_micros(std::time::SystemTime::now());
+        // The request span carries request_id and model for HTTP handlers; only
+        // span-less callers such as the gRPC services need them on the event.
+        let detached = self.span.is_disabled();
+        let log_request_id = detached.then_some(self.request_id.as_str());
+        let log_model = detached.then_some(self.model.as_str());
         match completion {
             RequestCompletion::Error => {
                 let detail = match self.error_type {
@@ -1832,10 +1870,12 @@ impl Drop for InflightGuard {
                     ErrorType::None | ErrorType::Cancelled => "unknown error",
                 };
                 tracing::error!(
-                    request_id = %self.request_id,
-                    model = %self.model,
+                    request_id = log_request_id,
+                    model = log_model,
                     endpoint = %self.endpoint,
                     request_type = %self.request_type,
+                    start_time = %start_time,
+                    end_time = %end_time,
                     status = %status_str,
                     error_type = %self.error_type,
                     error_detail = %detail,
@@ -1845,10 +1885,12 @@ impl Drop for InflightGuard {
             }
             RequestCompletion::Cancelled => {
                 tracing::info!(
-                    request_id = %self.request_id,
-                    model = %self.model,
+                    request_id = log_request_id,
+                    model = log_model,
                     endpoint = %self.endpoint,
                     request_type = %self.request_type,
+                    start_time = %start_time,
+                    end_time = %end_time,
                     status = %completion.as_str(),
                     error_type = %self.error_type,
                     error_detail = "cancelled before completion",
@@ -1858,10 +1900,12 @@ impl Drop for InflightGuard {
             }
             RequestCompletion::Success => {
                 tracing::info!(
-                    request_id = %self.request_id,
-                    model = %self.model,
+                    request_id = log_request_id,
+                    model = log_model,
                     endpoint = %self.endpoint,
                     request_type = %self.request_type,
+                    start_time = %start_time,
+                    end_time = %end_time,
                     status = %status_str,
                     elapsed_ms = %elapsed_ms,
                     "request completed"
@@ -1996,7 +2040,6 @@ impl ResponseMetricCollector {
             ttft_ms: None,
             itl_sum_secs: 0.0,
             itl_count: 0,
-            cached_tokens_observed: false,
             tokenize_latency_observed: false,
             detokenize_latency_total: Duration::ZERO,
             detokenize_count_total: 0,
@@ -2006,6 +2049,8 @@ impl ResponseMetricCollector {
             decode_worker_id: None,
             decode_dp_rank: None,
             decode_worker_type: None,
+            timing: None,
+            cached_tokens_val: None,
             decode_itl_gauge: None,
         }
     }
@@ -2088,10 +2133,17 @@ impl ResponseMetricCollector {
     /// Observe cached tokens (prefix cache hits), observing only once per request when value is available
     pub fn observe_cached_tokens(&mut self, cached_tokens: Option<usize>) {
         if let Some(tokens) = cached_tokens
-            && !self.cached_tokens_observed
+            && self.cached_tokens_val.is_none()
         {
-            self.cached_tokens_observed = true;
+            self.cached_tokens_val = Some(tokens);
             self.cached_tokens.observe(tokens as f64);
+        }
+    }
+
+    /// Keep the latest router-side timing snapshot; later chunks carry more complete values.
+    pub fn observe_timing(&mut self, timing: Option<&TimingInfo>) {
+        if let Some(timing) = timing {
+            self.timing = Some(timing.clone());
         }
     }
 
@@ -2292,11 +2344,14 @@ impl Drop for ResponseMetricCollector {
                 .observe(self.osl as f64);
         }
 
-        // Record request summary on the enclosing span.
-        // InflightGuard::Drop and on_response logs will inherit these.
+        // Record request summary on the enclosing span. Recorded in display order:
+        // tokens, then phase timing, then routing. InflightGuard::Drop inherits these.
         let span = tracing::Span::current();
         span.record("input_tokens", self.isl as u32);
         span.record("output_tokens", self.osl as u32);
+        if let Some(cached) = self.cached_tokens_val {
+            span.record("cached_tokens", cached as u64);
+        }
         // Only record once observed, so requests that never carried a metrics
         // annotation (e.g. errored before the first chunk) don't stamp a false zero.
         if self.multimodal_counts_observed {
@@ -2304,8 +2359,22 @@ impl Drop for ResponseMetricCollector {
             span.record("video_count", self.video_count_val as u32);
             span.record("audio_count", self.audio_count_val as u32);
         }
+        if let Some(timing) = &self.timing {
+            if let Some(wait) = timing.prefill_wait_time_ms {
+                span.record("prefill_wait_ms", format!("{wait:.2}").as_str());
+            }
+            if let Some(prefill) = timing.prefill_time_ms {
+                span.record("prefill_ms", format!("{prefill:.2}").as_str());
+            }
+        }
         if let Some(ttft_ms) = self.ttft_ms {
             span.record("ttft_ms", format!("{:.2}", ttft_ms).as_str());
+            // Decode time is the stream duration after the first token, measured here.
+            let total_ms = self.start_time.elapsed().as_secs_f64() * 1000.0;
+            span.record(
+                "decode_ms",
+                format!("{:.2}", (total_ms - ttft_ms).max(0.0)).as_str(),
+            );
         }
         if self.itl_count > 0 {
             let avg_ms = (self.itl_sum_secs / self.itl_count as f64) * 1000.0;
@@ -2314,8 +2383,22 @@ impl Drop for ResponseMetricCollector {
         if let Some(worker_id) = self.prefill_worker_id {
             span.record("prefill_worker_id", worker_id);
         }
+        if let Some(dp_rank) = self.prefill_dp_rank {
+            span.record("prefill_dp_rank", dp_rank);
+        }
         if let Some(worker_id) = self.decode_worker_id {
             span.record("decode_worker_id", worker_id);
+        }
+        if let Some(dp_rank) = self.decode_dp_rank {
+            span.record("decode_dp_rank", dp_rank);
+        }
+        if let Some(timing) = &self.timing {
+            if let Some(hit_rate) = timing.kv_hit_rate {
+                span.record("kv_hit_rate", format!("{hit_rate:.3}").as_str());
+            }
+            if let Some(depth) = timing.router_queue_depth {
+                span.record("router_queue_depth", depth as u64);
+            }
         }
     }
 }
@@ -2390,6 +2473,7 @@ fn observe_llm_metrics(
         metrics.detokenize_count,
     );
     response_collector.set_worker_info_from_metrics(metrics);
+    response_collector.observe_timing(metrics.timing.as_ref());
 
     if response_collector.is_first_token()
         && metrics.chunk_tokens > 0
