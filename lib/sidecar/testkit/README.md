@@ -52,6 +52,7 @@ lib/sidecar/
     │       ├── sglang.rs      # SGLang gRPC/HTTP peers, discovery, health and child-command adapter
     │       ├── trtllm.rs      # OpenEngine peer, context limits and child-command adapter
     │       ├── lpx.rs         # LPX peer and child-command adapter
+    │       ├── topology.rs    # LPX Agent topology service and the conductor's topology client
     │       └── process.rs     # Local discovery, worker processes and TCP routing
     └── README.md              # This guide
 ```
@@ -184,7 +185,7 @@ clients. That makes peer-loss tests deterministic.
 | Suite | Scope | Execution |
 | --- | --- | --- |
 | `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM, SGLang and TensorRT-LLM; native rejection, malformed responses and shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
-| `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
+| `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery, native tracing and changed-role startup; LPX topology publisher and consumer: live relay read to its end, answers before engine readiness, unchanged model card, absent authorities, ambiguous OK answers, a terminating leader or a crashed publisher's stale registration beside its replacement, immediate failure for another build, concurrent allocations, authority loss while serving and serving despite a failed topology role | CPU, ordinary pre-merge Cargo tests |
 | `tests/serve/test_sidecar.py` | vLLM/SGLang: real engine logprobs, structured output, cancellation/recovery, KV transfer and routing, where the `*_kv_router` configs warm two caches and require cache-based selection, plus a completed transfer to decode when disaggregated; TensorRT-LLM: basic aggregated/disaggregated chat | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.

@@ -109,6 +109,77 @@ port `9090`. These probes do not track engine loading, so keep the engine's own
 probes on `main`. Sidecar mode supports worker, prefill, and decode components;
 multinode deployments are not yet supported.
 
+## LPX Partition Topology
+
+An LPX deployment executes compiler partitions on Agent pods. The leader of each
+Agent allocation, Grove pod index 0, is the only authority for where that
+allocation's partitions execute. Its Agent serves `TopologyService` from the
+[`lpx.topology.v1` protocol](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/lpx/proto/lpx/topology/v1/topology.proto)
+on a pod-local Unix socket. The LPX sidecar relays that service through Dynamo
+discovery to the conductor pods, so that each conductor reads a live answer from
+the authority when it starts. A sidecar's topology role is independent of
+inference serving:
+
+| Role | Runs beside | Behavior |
+|---|---|---|
+| `publisher` | The Agent allocation's leader | Waits for the Agent's first valid snapshot, then registers the endpoint `lpx-topology/snapshot-<allocation scope>-<build scope>` with no model card and answers each request on it with a live answer from the Agent |
+| `consumer` | Each conductor | Serves `TopologyService` on a Unix socket. Each request lists the `lpx-topology` endpoints, asks every authority registered for the identity the request expects at the same time, and validates the one `OK` answer |
+
+| Flag | Environment variable | Default | Meaning |
+|---|---|---|---|
+| `--topology-role` | `DYN_LPX_TOPOLOGY_ROLE` | Unset | `publisher` or `consumer`. Unset: no topology work |
+| `--topology-agent-socket` | `DYN_LPX_TOPOLOGY_AGENT_SOCKET` | `/run/lpx-topology/agent.sock` | The publisher reads the Agent's service on this socket |
+| `--topology-socket` | `DYN_LPX_TOPOLOGY_SOCKET` | `/run/lpx-topology/topology.sock` | The consumer serves on this socket |
+| `--node-rank` | `DYN_SIDECAR_NODE_RANK` | `0` | The pod's rank in its engine or Agent allocation |
+
+| Role | Rank | Behavior |
+|---|---|---|
+| Unset | 0 | Serves the engine |
+| Unset | Above 0 | Stands by: answers its probes only |
+| `publisher` | 0 | Publishes topology and serves no engine; `--grpc-endpoint` and `--model-path` are not required |
+| `publisher` | Above 0 | Stands by and publishes nothing |
+| `consumer` | 0 | Serves the engine and the topology API. The API starts before the sidecar waits for the engine to be ready, because a conductor needs topology to become ready |
+| `consumer` | Above 0 | Serves the topology API only and registers nothing |
+
+A sidecar that runs a topology role connects to Dynamo before anything else,
+with `/live` and `/health` probes that check only Dynamo's own dependencies. A
+topology failure never stops inference serving, and no hop caches a snapshot.
+
+The endpoint name scopes discovery by the whole identity. The allocation scope
+is the first 16 lowercase hex digits of the SHA-256 of the bytes
+`lpx.topology.v1` NUL *deployment* NUL *allocation*. The build scope is the
+same over `lpx.topology.v1` NUL *deployment* NUL *allocation* NUL *build*. All
+authorities of one allocation share the prefix `snapshot-<allocation scope>-`,
+so the consumer can tell an allocation that serves another build, which is a
+configuration error, from one that is not published yet. Both sidecars use
+their effective Dynamo namespace, `DYN_NAMESPACE` plus
+`DYN_NAMESPACE_WORKER_SUFFIX`, so the publisher and its consumers must share it.
+
+Exactly one authority must answer `OK`. A leader that is shutting down answers
+`UNAVAILABLE`, and the registration of a publisher that crashed stays until
+discovery expires it. Neither one hides a replacement that answers. A
+conductor retries `UNAVAILABLE`, which covers these cases:
+
+- No authority is registered for the allocation yet.
+- More than one authority answers `OK`.
+- No authority answers `OK` and none refuses the request. The message gives
+  each authority's reason. If the publisher cannot reach the Agent, the reason
+  names the Agent's socket.
+
+A conductor fails at once on any other error. `FAILED_PRECONDITION` means
+that the allocation's authority serves another build, that an authority
+refuses the expected identity, or that the snapshot is invalid or has another
+identity. `INVALID_ARGUMENT` means that the request has no complete expected
+identity.
+
+The consumer's socket has mode `0660`. Put it in a volume that the conductor
+and sidecar containers share, such as an `emptyDir`, and run both containers
+with the same user or group.
+
+> [!NOTE]
+> With Kubernetes discovery, use pod discovery mode. Container mode never treats
+> a native sidecar as ready, so the publisher's endpoint would stay invisible.
+
 ## Topologies
 
 Each engine page shows its single-node TP, multi-node TP, and multi-node DP
