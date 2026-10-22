@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::{RouteDoc, metrics::ErrorType};
+use super::super::{OpenApiRouteKind, RouteDoc, metrics::ErrorType};
 use super::*;
 use axum::{
     Router,
@@ -18,8 +18,10 @@ pub fn router(state: Arc<service_v2::State>, path: Option<String>) -> (Vec<Route
     let path = path.unwrap_or_else(|| DEFAULT_PATH.to_string());
     (
         vec![
-            RouteDoc::new(axum::http::Method::POST, &path),
-            RouteDoc::new(axum::http::Method::POST, DECISIONS_PATH),
+            RouteDoc::new(axum::http::Method::POST, &path)
+                .with_openapi_kind(OpenApiRouteKind::SystemOne),
+            RouteDoc::new(axum::http::Method::POST, DECISIONS_PATH)
+                .with_openapi_kind(OpenApiRouteKind::Decisions),
         ],
         Router::new()
             .route(&path, post(handler))
