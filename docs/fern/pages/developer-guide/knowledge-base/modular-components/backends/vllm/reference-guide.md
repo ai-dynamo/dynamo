@@ -83,9 +83,8 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 
 ### Custom JSON Content
 
-**Experimental.** Start an aggregated Python vLLM worker with `--enable-multimodal` to
-accept arbitrary modality payloads through `/v1/chat/completions`. Use a content
-part whose `type` matches its payload field:
+**Experimental, unreleased.** Aggregated Python vLLM token workers started with
+`--enable-multimodal` accept explicit custom parts in user and tool messages:
 
 ```json
 {
@@ -94,46 +93,128 @@ part whose `type` matches its payload field:
     "role": "user",
     "content": [
       {"type": "text", "text": "Predict this: <chemistry>"},
-      {"type": "chemistry", "chemistry": {"data_base64": "..."}}
+      {"type": "custom", "kind": "chemistry", "fields": {
+        "chemistry": {"data_base64": "..."}, "units": "angstrom"
+      }}
     ]
   }],
   "max_tokens": 64
 }
 ```
 
-Dynamo forwards the JSON payload through the existing `multi_modal_data`
-field. The vLLM processor receives `{"chemistry": {"data_base64": "..."}}`.
-Install or mount your model's vLLM plugin in the worker environment; no
-modality-specific Dynamo registration or custom Dynamo image is required.
-The processor owns payload validation, decoding, and placeholder expansion.
-Custom payloads are excluded from the chat template. Put any placeholder the
-processor expects, such as `<chemistry>`, in a text content part.
-A single content part retains its payload value; repeated parts of the same
-modality become a list of payload values in request order.
-Part boundaries are not retained: one array-valued payload and repeated scalar
-payloads may produce the same engine value. Put processor metadata inside the
-matching payload field. Other sibling fields round-trip through the HTTP
-protocol but are not forwarded to the model processor; custom `uuid` does not
-provide a Dynamo cache identity.
+`kind` is a non-empty string. `fields` is a JSON object whose values may be any
+JSON, including arrays and null. Dynamo passes the **complete fields object** as
+`multi_modal_data[kind]`: the example plugin receives
+`{"chemistry": {"data_base64": "..."}, "units": "angstrom"}` under the chemistry
+modality. It does **not** select `fields[kind]`. This deliberately revises the
+previous draft's matching-field forwarding contract; update draft clients to the
+explicit envelope. Repeated parts of one kind become an ordered list of fields
+objects. Built-in image, video and audio parts retain their existing typed schema
+and validation. They may share requests with custom parts when their engine
+modality names do not collide.
 
-Existing media tags keep their built-in validation and serving behavior. This
-extension does not add support for previously unsupported `input_audio` paths.
-Custom JSON can accompany
-built-in media when the model supports both. Inputs that resolve to the same
-engine modality are rejected rather than overwriting one another. Dynamo does
-not fetch URLs found inside arbitrary JSON payloads.
+The model plugin owns domain validation and interpretation. Install or mount it
+in the worker environment. Dynamo excludes custom parts before serializing chat
+templates and auxiliary messages, keeping the payload in `multi_modal_data` only.
+Put processor placeholders such as `<chemistry>` in text parts. For a pre-rendered
+prompt, set `nvext.use_raw_prompt: true` and provide exactly one user message;
+Dynamo concatenates its text parts without another chat template. For token IDs,
+use `nvext.token_data`. Engine token IDs/logprobs remain available through
+`nvext.engine_data` independently of parser-rewritten choice text.
 
-For a prompt already rendered by a training client, set
-`nvext.use_raw_prompt: true` and provide exactly one user message. Dynamo
-concatenates its text parts without applying another chat template. To supply
-pre-tokenized prompts, use `nvext.token_data`.
+#### Raw Tensor Adapter
 
-The frontend requires the selected worker set to advertise `json_multimodal`
-support. Missing capability, including older workers, produces a request error.
-Opted-in workers have a separate discovery identity from unsupported workers.
-Custom JSON requires aggregated Python vLLM serving. Disaggregated serving,
-KVBM, SGLang, TensorRT-LLM, and the native vLLM sidecar are unsupported.
-Speculative prefill and the frontend encoder hop are skipped for these requests.
+Arbitrary JSON does not require tensors. To use Dynamo's raw tensor adapter,
+place a reserved `{"$dynamo_tensor": {...}}` object anywhere inside `fields`.
+The adapter replaces only these objects with CPU PyTorch tensors before the
+model's vLLM processor runs. Other JSON and item boundaries remain intact.
+The reserved object cannot have sibling keys. Tensor descriptors use version 1,
+little-endian bytes, C order, at most 32 non-negative dimensions, and at most
+64 MiB per tensor. Supported dtypes are `float16`, `bfloat16`, `float32`,
+`float64`, `int8`, `uint8`, `int16`, `int32`, `int64` and `bool`.
+
+Inline representation (two float32 values):
+
+```json
+{"$dynamo_tensor": {
+  "version": 1, "transport": "inline", "dtype": "float32", "shape": [2],
+  "order": "C", "data_base64": "AACAPwAAAEA="
+}}
+```
+
+For shared-memory references, use the producer API and retain the lease across
+the HTTP request and any retries:
+
+```python
+from dynamo.common.multimodal.custom_tensor import ShmTensorPublisher, inline_tensor
+
+# tensor is a PyTorch tensor; worker_id is the discovered aggregated worker ID.
+with ShmTensorPublisher(tensor, worker_id=worker_id, ttl=60) as lease:
+    part = {"type": "custom", "kind": "chemistry", "fields": {"input": lease.envelope()}}
+    # Send part in messages, with nvext.decode_worker_id = worker_id.
+    # Wait for the response (or handle cancellation/failure) inside this context.
+
+# The equivalent inline input uses {"input": inline_tensor(tensor)}.
+```
+
+The emitted reference contains `version`, `transport: "shm"`, `dtype`, `shape`,
+`order`, `name`, `size`, `placement`, `worker_id`, `expires_at` (Unix seconds),
+and `sha256`. It contains no bulk bytes or inline fallback. Unknown descriptor
+fields, unsupported transports, invalid dimensions, mismatched byte counts,
+placement, checksum, and expired/released references produce explicit errors.
+
+Shared-memory mode requires Linux, the **same host boot, IPC namespace and
+shared-memory mount** for producer and worker, and permission to read the segment.
+Containers require an explicitly shared IPC namespace/mount. The frontend need
+not share that placement: it forwards the descriptor only. Set
+`nvext.decode_worker_id` to the descriptor's worker ID; the frontend rejects a
+missing/mismatched pin and workers without `custom_tensor_shm_v1`. Routing validates
+the worker is discovered; a missing/unavailable target must fail, not select a
+remote replacement. The worker rechecks placement and expiry before reading.
+Header routing overrides that also set `backend_instance_id` are unsupported for
+custom content; use the body field. Request migration is unsupported for these
+leases. Retry against the pinned worker before expiry or create a fresh lease.
+
+The producer owns close/unlink on response, failure and cancellation through the
+context manager. A daemon timer unlinks abandoned leases at TTL (default 60 s,
+maximum 3600 s). Multiple readers/retries are valid while the lease is alive.
+Readers copy to private writable memory and close their mappings before returning;
+producer release cannot invalidate a consumed model input. Process crashes rely
+on Python's producer resource tracker; no worker unlinks producer allocations.
+
+This reuses the shared-memory byte transfer used by processed `mm_kwargs` without
+using that vLLM-specific serializer. GPU producer tensors stage to CPU; noncontiguous
+inputs become contiguous; tensor bytes are copied into SHM, copied into private
+worker storage, then moved by the plugin/engine if GPU input is needed. Inline
+mode adds base64 encoding, JSON serialization and decoding. Neither path claims
+zero-copy GPU transport.
+
+#### Capability and Transport Limits
+
+Selected workers must advertise `custom_json_v1`; missing capability yields an
+explicit request error. Enabled capabilities partition discovery cohorts, including
+LoRA registrations. Custom P/D, encoder disaggregation, speculative prefill,
+custom caching/KVBM, SGLang, TensorRT-LLM and native vLLM sidecars are unsupported.
+Existing typed media paths and their transports remain unchanged.
+
+Custom **NIXL references are unsupported** and explicitly rejected. Existing
+frontend-decoded `RdmaMediaDataDescriptor` inputs are internal media descriptors,
+not public raw-tensor inputs. `mm_kwargs_transfer.py` uses a typed vLLM serializer
+for processed `MultiModalKwargsItem` objects; `embedding_transfer.py` carries
+embeddings and model-specific handoffs. Neither is an arbitrary raw-input codec.
+The current custom-encoder handoff supplies processed feature rows/EmbedsPrompt,
+not raw plugin-owned JSON.
+
+The smallest NIXL follow-up is a raw-byte adapter around existing
+`nixl_connect.Connector.create_readable`/`begin_read`, preserving tensor specs and
+item order separately. Before exposing those descriptors over HTTP, it needs a
+qualified producer lease/revocation contract: `ReadableOperation` currently
+signals completion of a read, but does not define public multi-attempt leases,
+expiry/release races, worker capability negotiation, or bounded errors for stale
+external registrations. Reuse its registration and byte movement; qualify those
+lifecycle rules with real concurrent NIXL reads, retries and cancellation before
+advertising support. Do not pass raw inputs through the processed kwargs decoder
+or disguise them as images.
 
 ## Hashing Consistency for KV Events
 
