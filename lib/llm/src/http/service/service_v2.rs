@@ -122,12 +122,7 @@ impl InferenceReadinessState {
         );
         let mut response = (unavailable.0, axum::Json(error.response_body())).into_response();
         let request_id = super::openai::get_or_create_request_id(request.headers());
-        let value = axum::http::HeaderValue::from_str(&request_id)
-            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("invalid"));
-        response.headers_mut().insert("x-request-id", value.clone());
-        response
-            .headers_mut()
-            .insert("x-typesafe-request-id", value);
+        super::systemone::attach_request_ids(&mut response, &request_id);
         response
     }
 }
@@ -3907,6 +3902,7 @@ mod tests {
                             axum::http::StatusCode::SERVICE_UNAVAILABLE
                         );
                         if path != "/v1/responses" {
+                            assert_eq!(response.headers()["x-dynamo-systemone-version"], "1");
                             let canonical_id = &response.headers()["x-typesafe-request-id"];
                             assert!(uuid::Uuid::parse_str(canonical_id.to_str().unwrap()).is_ok());
                             if let Some(client_id) = client_id {

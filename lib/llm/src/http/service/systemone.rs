@@ -47,7 +47,8 @@ mod abort;
 mod backend_error;
 #[path = "systemone/response.rs"]
 mod response;
-use response::{attach_request_ids, decision_error, error};
+pub(super) use response::attach_request_ids;
+use response::{decision_error, error};
 
 #[path = "systemone/http.rs"]
 mod http;
