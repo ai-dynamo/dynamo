@@ -1603,9 +1603,6 @@ test_selection:
   - lib/data-gen/**
   - lib/gpu_memory_service/**
   shared_full:
-  - lib/runtime/**
-  - lib/bindings/**
-  - lib/llm/**
   - lib/**
   - components/src/dynamo/common/**
   - container/**
