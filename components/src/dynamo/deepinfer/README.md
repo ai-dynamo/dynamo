@@ -97,8 +97,10 @@ python -m dynamo.deepinfer \
 python -m dynamo.frontend --http-port 8000
 
 # Terminal 3: once registration and readiness succeed.
-curl http://localhost:8000/v1/models
-curl http://localhost:8000/v1/completions \
+# Set DYNAMO_FRONTEND_URL to the reachable Dynamo frontend endpoint.
+export DYNAMO_FRONTEND_URL="<frontend-endpoint>"
+curl "$DYNAMO_FRONTEND_URL/v1/models"
+curl "$DYNAMO_FRONTEND_URL/v1/completions" \
   -H 'Content-Type: application/json' \
   -d '{"model":"deepinfer-model","prompt":"Hello","max_tokens":16,"stream":true}'
 ```
