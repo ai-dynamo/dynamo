@@ -43,11 +43,14 @@ use crate::{
 
 #[path = "systemone/abort.rs"]
 mod abort;
+#[path = "systemone/backend_error.rs"]
+mod backend_error;
 #[path = "systemone/response.rs"]
 mod response;
 use response::{attach_request_ids, decision_error, error};
 
-const MAX_TOKENIZATION_WORK: usize = 1_048_576;
+// The configured input ceiling and deployment candidate ceiling bound amplification.
+const MAX_TOKENIZATION_WORK: usize = 1_048_576 * (255 + 2);
 const MAX_TOKENIZATION_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONCURRENT_SIBLINGS: usize = 4;
 
@@ -70,6 +73,7 @@ struct StartedBranch {
     prepared: PreparedBranch,
     tracker: Arc<RequestTracker>,
     stream: ManyOut<Annotated<LLMEngineOutput>>,
+    is_pinned: bool,
 }
 
 struct BranchResult {
@@ -121,41 +125,6 @@ impl DispatchError {
             retry_after: false,
         }
     }
-
-    fn backend(cause: &(dyn std::error::Error + 'static)) -> Self {
-        if super::metrics::request_was_cancelled(cause) {
-            return Self::cancelled();
-        }
-        if super::metrics::request_was_rejected(cause) {
-            return Self {
-                status: StatusCode::TOO_MANY_REQUESTS,
-                public_message: "SGLang scoring worker capacity is exhausted",
-                detail: "backend capacity exhausted".to_string(),
-                retry_after: true,
-            };
-        }
-        if let Some(error) = super::error::find_canonical_error_in_chain(cause)
-            && let super::error::ClientErrorAction::Respond {
-                status,
-                public_message,
-            } = super::error::http_action_for_error(error)
-        {
-            return Self {
-                status: if error.class().normalized()
-                    == dynamo_runtime::error::ErrorClass::CapacityExhausted
-                {
-                    StatusCode::TOO_MANY_REQUESTS
-                } else {
-                    status
-                },
-                public_message,
-                detail: error.reason().as_str().to_string(),
-                retry_after: error.class().normalized()
-                    == dynamo_runtime::error::ErrorClass::CapacityExhausted,
-            };
-        }
-        Self::unavailable("native scoring engine failed")
-    }
 }
 
 fn acquire_admission(
@@ -176,7 +145,7 @@ fn acquire_admission(
             decision_lifecycle::AdmissionError::CapacityExhausted => {
                 let mut response = error(
                     dialect,
-                    StatusCode::TOO_MANY_REQUESTS,
+                    super::error::overload_status_code(),
                     "System One request capacity is exhausted",
                 );
                 response.headers_mut().insert(
@@ -208,6 +177,12 @@ fn add_input_tokens(total: usize, next: usize, limit: usize) -> Result<usize, St
 
 fn encoding_prompt_limit(remaining_work: usize, candidates: usize) -> usize {
     remaining_work / (candidates + 2)
+}
+
+fn tokenization_work_limit(input_tokens: usize, candidates: usize) -> Option<usize> {
+    input_tokens
+        .checked_mul(candidates.checked_add(2)?)
+        .filter(|work| *work <= MAX_TOKENIZATION_WORK)
 }
 
 fn pin_to_placement(preprocessed: &mut PreprocessedRequest, placement: Placement) {
@@ -285,7 +260,7 @@ async fn handle_request(
         Err(_) => {
             let mut response = error(
                 dialect,
-                StatusCode::TOO_MANY_REQUESTS,
+                super::error::overload_status_code(),
                 "System One preprocessing capacity is exhausted",
             );
             response.headers_mut().insert(
@@ -382,7 +357,16 @@ fn prepare_branches(
 ) -> Result<Vec<PreparedBranch>, (StatusCode, String)> {
     let context_length = selection.card.effective_context_length() as usize;
     let mut total_input_tokens = 0_usize;
-    let mut remaining_tokenization_work = MAX_TOKENIZATION_WORK;
+    let mut remaining_tokenization_work = tokenization_work_limit(
+        max_input_tokens,
+        selection.decision_capabilities().max_candidates,
+    )
+    .ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "System One tokenization work configuration exceeds its supported limit".to_string(),
+        )
+    })?;
     let mut remaining_encoding_bytes = MAX_TOKENIZATION_TEXT_BYTES;
     let mut branches = Vec::with_capacity(request.questions.len());
     for question in &request.questions {
@@ -647,7 +631,7 @@ async fn run_branch(
     let stream = run_until_killed(parent_context.as_ref(), selection.engine.generate(context))
         .await
         .ok_or_else(DispatchError::cancelled)?
-        .map_err(|cause| DispatchError::backend(cause.as_ref()))?;
+        .map_err(|cause| backend_error::classify(cause.as_ref(), pinned.is_some()))?;
     let stream_context = stream.context();
     parent_context.link_child(stream_context.clone());
     if parent_context.is_killed() {
@@ -659,6 +643,7 @@ async fn run_branch(
             prepared,
             tracker,
             stream,
+            is_pinned: pinned.is_some(),
         },
         selection.card.runtime_config.data_parallel_start_rank,
         selection.card.runtime_config.data_parallel_size,
@@ -700,6 +685,7 @@ async fn read_branch(
         prepared,
         tracker,
         stream,
+        is_pinned,
     } = started;
     let responses = SglangGenerateStream::from_annotated_stream(
         stream,
@@ -714,12 +700,10 @@ async fn read_branch(
             .ok_or_else(DispatchError::cancelled)?;
         let Some(frame) = frame else { break };
         let frame = frame.map_err(|cause| {
-            if super::metrics::request_was_rejected(&cause)
-                || super::error::find_canonical_error_in_chain(&cause).is_some()
-            {
-                DispatchError::backend(&cause)
-            } else {
+            if cause.class() == dynamo_runtime::error::ErrorClass::BackendProtocol {
                 DispatchError::malformed("invalid native scoring stream")
+            } else {
+                backend_error::classify(&cause, is_pinned)
             }
         })?;
         let finish = frame

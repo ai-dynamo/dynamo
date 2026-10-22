@@ -49,6 +49,8 @@ pub(crate) async fn run_until_killed<T>(
     }
 }
 
+/// Cancellation abandons the waiter, not the blocking work; its permit stays owned
+/// until the blocking closure finishes.
 pub(crate) async fn spawn_blocking_with_permit<T, E, F>(
     permit: OwnedSemaphorePermit,
     task: F,

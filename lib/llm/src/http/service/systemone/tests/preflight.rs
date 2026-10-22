@@ -75,8 +75,44 @@ fn question_names_do_not_enter_scoring_prompts() {
 }
 
 #[test]
+fn configured_input_limit_allows_candidate_tokenization_amplification() {
+    let selection = preflight_selection(None);
+    let criteria: serde_json::Map<String, Value> = (0..26)
+        .map(|index| (format!("candidate-{index}"), json!("A candidate")))
+        .collect();
+    let request = dynamo_decisions::parse_request(
+        &serde_json::to_vec(&json!({
+            "model": "test-model", "state": "x".repeat(45_000),
+            "questions": {"choice": {"type": "choice", "criteria": criteria}}
+        }))
+        .unwrap(),
+        dynamo_decisions::Route::SystemOne,
+    )
+    .unwrap();
+    let branches =
+        super::super::prepare_branches(&request, &selection, 65_536).unwrap_or_else(|error| {
+            panic!("configured input budget should accept this prompt: {error:?}")
+        });
+    assert!(branches[0].prompt_ids.len() > 40_000);
+    assert!(branches[0].prompt_ids.len() < 65_536);
+    assert_eq!(branches[0].label_ids.len(), 26);
+}
+
+#[test]
+fn candidate_tokenization_work_bounds_prompt_size() {
+    use super::super::{encoding_prompt_limit, tokenization_work_limit};
+    assert_eq!(encoding_prompt_limit(120, 10), 10);
+    assert_eq!(encoding_prompt_limit(11, 10), 0);
+    assert_eq!(tokenization_work_limit(65_536, 255), Some(16_842_752));
+    assert_eq!(tokenization_work_limit(usize::MAX, 255), None);
+    assert_eq!(tokenization_work_limit(65_536, usize::MAX), None);
+    assert_eq!(tokenization_work_limit(1_048_577, 255), None);
+}
+
+#[test]
 fn incompatible_model_warning_preserves_safe_reason_not_input() {
     let selection = preflight_selection(Some("deepseek_r1"));
+    let _keep = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let mut capture = tempfile::tempfile().unwrap();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
