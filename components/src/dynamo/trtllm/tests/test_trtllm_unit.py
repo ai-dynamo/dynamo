@@ -4,6 +4,7 @@
 """Unit tests for TRTLLM backend components."""
 
 import asyncio
+import json
 import os
 import re
 import warnings
@@ -28,7 +29,6 @@ from dynamo.trtllm.workers.llm_worker import (
     _populate_kv_cache_capacity,
     _resolve_streaming_kv_events_config,
     _strip_postprocess_workers,
-    _validate_streaming_kv_events_backend,
     init_llm_worker,
 )
 
@@ -499,17 +499,54 @@ def test_resolve_streaming_kv_events_config_uses_nested_kv_cache_config():
     }
 
 
-def test_streaming_kv_events_require_python_v2_cache_manager(monkeypatch):
-    monkeypatch.delenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", raising=False)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache_manager_backend", [None, "cpp", "python"])
+async def test_init_llm_worker_preserves_native_streaming_kv_events(
+    monkeypatch, cache_manager_backend
+):
+    """Native ZMQ streaming reaches engine startup without forcing Python or polling."""
+    backend_env = "TLLM_KV_CACHE_MANAGER_V2_BACKEND"
+    if cache_manager_backend is None:
+        monkeypatch.delenv(backend_env, raising=False)
+    else:
+        monkeypatch.setenv(backend_env, cache_manager_backend)
+    streaming_config = {
+        "enable_kv_cache_events": True,
+        "publisher": "zmq",
+        "endpoint": "tcp://*:6000",
+        "topic": "kv-events",
+    }
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-kv-events",
+            "--override-engine-args",
+            json.dumps({"kv_cache_config": {"kv_events_config": streaming_config}}),
+        ]
+    )
 
-    with pytest.raises(ValueError, match="TLLM_KV_CACHE_MANAGER_V2_BACKEND=python"):
-        _validate_streaming_kv_events_backend()
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
 
-
-def test_streaming_kv_events_accept_python_v2_cache_manager(monkeypatch):
-    monkeypatch.setenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", "python")
-
-    _validate_streaming_kv_events_backend()
+    kv_config = exc_info.value.engine_args["kv_cache_config"]
+    assert kv_config["kv_events_config"] == streaming_config
+    assert not kv_config.get("event_buffer_max_size")
+    assert os.environ.get(backend_env) == cache_manager_backend
 
 
 @pytest.mark.parametrize(
