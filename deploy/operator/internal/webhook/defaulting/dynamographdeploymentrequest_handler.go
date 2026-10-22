@@ -59,6 +59,7 @@ func NewDGDRDefaulter(operatorVersion, defaultImage string) *DGDRDefaulter {
 
 // WithV1beta2 sets the defaults of v1beta2 Requests and returns the defaulter.
 func (d *DGDRDefaulter) WithV1beta2(options DGDRV1beta2Options) *DGDRDefaulter {
+	options.AISimulateImage = defaultPlannerImageFor(d.OperatorVersion, options.AISimulateImage)
 	d.v1beta2 = options
 	return d
 }
@@ -94,9 +95,22 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 
 	defaultDynamoGraphDeploymentRequest(dgdr, dynamoGraphDeploymentRequestDefaultOptions{
 		operation: req.Operation,
-		image:     d.defaultImageFor(),
+		image:     defaultPlannerImageFor(d.OperatorVersion, d.DefaultImage),
 	})
 	return nil
+}
+
+// defaultPlannerImageFor returns explicitImage when set, else the planner image with a
+// canonical operator-version tag, or an empty string when the version cannot be parsed.
+func defaultPlannerImageFor(operatorVersion, explicitImage string) string {
+	if explicitImage != "" {
+		return explicitImage
+	}
+	version, err := semver.NewVersion(operatorVersion)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%s:%s", defaultImage, version.String())
 }
 
 // RegisterWithManager registers the DGDR defaulting webhook with the manager.
