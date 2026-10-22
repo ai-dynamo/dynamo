@@ -106,11 +106,9 @@ async fn handle_http(
     let mut response = handle_request(state.clone(), request_id.clone(), request).await;
     attach_request_ids(&mut response, &request_id);
     match response.status().as_u16() {
-        status
-            if status == StatusCode::TOO_MANY_REQUESTS.as_u16()
-                && response
-                    .headers()
-                    .contains_key(axum::http::header::RETRY_AFTER) =>
+        _ if response
+            .headers()
+            .contains_key(axum::http::header::RETRY_AFTER) =>
         {
             state.metrics_clone().inc_rejection(&metric_model, endpoint);
             guard.mark_error(ErrorType::Overload);
