@@ -401,45 +401,114 @@ def load_event_payload(path: str) -> dict | None:
 
 
 def write_summary(path: Path, selection: dict[str, Any]) -> None:
+    def escape_path(value: object) -> str:
+        return str(value).replace("|", "\\|").replace("`", "\\`")
+
+    def count_label(count: int, noun: str) -> str:
+        return f"{count} {noun}" + ("" if count == 1 else "s")
+
+    def format_paths(values: set[str] | list[str], limit: int) -> str:
+        sorted_values = sorted(values)
+        shown = ", ".join(f"`{escape_path(value)}`" for value in sorted_values[:limit])
+        remaining = len(sorted_values) - limit
+        if remaining > 0:
+            shown += f" and {remaining} more"
+        return shown
+
+    frameworks = selection["frameworks"]
     lines = [
-        "### Pre-merge GPU test selection",
+        f"### GPU test selection (`{selection['mode']}`)",
         "",
-        f"Mode: `{selection['mode']}`",
-        "",
-        "| Framework | Decision | Feature markers | Reasons |",
-        "| --- | --- | --- | --- |",
+        "| Framework | Decision | Runs |",
+        "| --- | --- | --- |",
     ]
-    for framework, decision in selection["frameworks"].items():
-        markers = ", ".join(decision["markers"]) or "—"
-        reasons = ", ".join(decision["reasons"]) or "—"
-        escaped_reasons = reasons.replace("|", "\\|")
-        lines.append(
-            f"| {framework} | {decision['decision']} | {markers} | "
-            f"{escaped_reasons} |"
-        )
+    for framework, decision in frameworks.items():
+        if decision["decision"] == "full":
+            runs = "all tests"
+        else:
+            runs = "smoke"
+            markers = decision.get("markers", [])
+            if markers:
+                runs += " + " + ", ".join(markers)
+            changed_test_files = decision.get("changed_test_files", [])
+            if changed_test_files:
+                runs += (
+                    f" + {count_label(len(changed_test_files), 'changed test file')}"
+                )
+        lines.append(f"| {framework} | {decision['decision']} | {runs} |")
+
+    full_frameworks = {
+        framework: decision
+        for framework, decision in frameworks.items()
+        if decision["decision"] == "full"
+    }
+    if full_frameworks:
+        shared_full_paths: set[str] = set()
+        unmapped_paths: set[str] = set()
+        framework_paths: dict[str, set[str]] = {}
+        bare_reasons: set[str] = set()
+        for framework, decision in full_frameworks.items():
+            for reason in decision.get("reasons", []):
+                if reason.startswith(("feature:", "test_file:")):
+                    continue
+                prefix, separator, reason_path = reason.partition(":")
+                if separator and reason_path and prefix == "shared_full":
+                    shared_full_paths.add(reason_path)
+                elif separator and reason_path and prefix == "unmapped":
+                    unmapped_paths.add(reason_path)
+                elif separator and reason_path and prefix == "framework":
+                    framework_paths.setdefault(reason_path, set()).add(framework)
+                else:
+                    bare_reasons.add(reason)
+
+        why_full: list[str] = []
+        if shared_full_paths:
+            why_full.append(
+                f"- `shared_full` "
+                f"({count_label(len(shared_full_paths), 'path')}): "
+                f"{format_paths(shared_full_paths, 5)}"
+            )
+        if framework_paths:
+            applicable_frameworks = sorted(
+                framework
+                for frameworks_for_path in framework_paths.values()
+                for framework in frameworks_for_path
+            )
+            framework_names = ", ".join(sorted(set(applicable_frameworks)))
+            why_full.append(
+                f"- `framework` ({framework_names}, "
+                f"{count_label(len(framework_paths), 'path')}): "
+                f"{format_paths(set(framework_paths), 5)}"
+            )
+        if unmapped_paths:
+            why_full.append(
+                f"- `unmapped` ({count_label(len(unmapped_paths), 'path')}): "
+                f"{format_paths(unmapped_paths, 5)}"
+            )
+        why_full.extend(f"- `{escape_path(reason)}`" for reason in sorted(bare_reasons))
+        lines.extend(["", "**Why full**", *why_full])
+
     paths = selection.get("paths", {})
     if isinstance(paths, dict) and paths:
-        sorted_paths = sorted(paths.items())
-        shown_paths = sorted_paths[:200]
+        grouped_paths: dict[str, list[str]] = {}
+        for changed_path, classification in paths.items():
+            grouped_paths.setdefault(str(classification), []).append(str(changed_path))
         lines.extend(
             [
                 "",
-                f"#### Changed-path classifications ({len(paths)} paths)",
+                f"<details><summary>Changed paths ({len(paths)})</summary>",
                 "",
-                "| Path | Classification |",
-                "| --- | --- |",
             ]
         )
-        for changed_path, classification in shown_paths:
-            escaped_path = str(changed_path).replace("|", "\\|").replace("`", "\\`")
-            escaped_classification = str(classification).replace("|", "\\|")
-            lines.append(f"| `{escaped_path}` | `{escaped_classification}` |")
-        if len(sorted_paths) > len(shown_paths):
+        for classification in sorted(grouped_paths):
+            changed_paths = grouped_paths[classification]
             lines.append(
-                f"\nShowing first {len(shown_paths)} of {len(sorted_paths)} paths."
+                f"- `{escape_path(classification)}` ({len(changed_paths)}): "
+                f"{format_paths(changed_paths, 20)}"
             )
+        lines.extend(["", "</details>"])
     else:
-        lines.extend(["", "No changed paths to classify."])
+        lines.extend(["", "No changed paths."])
     with path.open("a", encoding="utf-8") as stream:
         stream.write("\n".join(lines) + "\n")
 
