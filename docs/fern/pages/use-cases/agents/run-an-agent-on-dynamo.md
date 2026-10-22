@@ -28,7 +28,7 @@ This serves `zai-org/GLM-4.7-Flash` with SGLang at TP2 on port 8000. It also tur
 
 With one worker, KV routing has nothing to choose between. It starts to matter when you add workers.
 
-The script writes request traces to one uncompressed file and prints its path at startup, for example `/tmp/dynamo-request-trace-<timestamp>-<pid>.jsonl`.
+The script enables request tracing with the default gzip sink. It writes segments named `/tmp/dynamo-request-trace.NNNNNN.jsonl.gz`, or uses `DYN_REQUEST_TRACE_FILE_PATH` as the prefix if you set it, and prints the prefix at startup.
 
 Check that the endpoint is up:
 
@@ -65,14 +65,15 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Check the Trace
 
-List the requests by session, using the path the launch script printed:
+List the requests by session:
 
 ```bash
-jq -c 'select(.event_type=="request_end")
+gzip -cd "${DYN_REQUEST_TRACE_FILE_PATH:-/tmp/dynamo-request-trace}".*.jsonl.gz \
+  | jq -c 'select(.event_type=="request_end")
        | {session: .agent_context.session_id,
           input_tokens: .request.input_tokens,
           output_tokens: .request.output_tokens,
-          cached_tokens: .request.cached_tokens}' /tmp/dynamo-request-trace-*.jsonl
+          cached_tokens: .request.cached_tokens}'
 ```
 
 Each line is one LLM request. A coding agent produces many lines per session. `cached_tokens` is the number of input tokens served from KV cache, so it is the number to watch as a session grows. If you see requests with a null `session`, the harness is not sending a session header. See [Identify agent sessions](session-ids.mdx).

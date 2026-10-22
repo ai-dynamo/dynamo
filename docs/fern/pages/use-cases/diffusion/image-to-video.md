@@ -107,11 +107,13 @@ python3 -m dynamo.sglang \
   --model-path Wan-AI/Wan2.1-I2V-14B-480P-Diffusers \
   --served-model-name Wan-AI/Wan2.1-I2V-14B-480P-Diffusers \
   --video-generation-worker \
+  --tp 2 \
   --media-output-fs-url file:///tmp/dynamo_media \
   --trust-remote-code \
   --skip-tokenizer-init
 ```
 
+The 14B checkpoint needs two GPUs here, the same `--tp 2` that `text-to-video-diffusion.sh` uses for the 14B Wan model.
 `Wan-AI/Wan2.1-I2V-14B-480P-Diffusers` is an image-to-video checkpoint in
 SGLang's [diffusion model list](https://docs.sglang.io/diffusion/compatibility_matrix.html).
 To use another checkpoint, pick one that your installed SGLang version supports
@@ -119,21 +121,25 @@ and use the same ID in the launch command and the request.
 
 ### Generate a Video from an Image
 
-Pass the source image URL in `input_reference`. The worker fetches it under
-the same [media URL policy](../image-understanding/overview.md#media-url-policy) as
-image inputs.
+Pass the source image in `input_reference`, as an `https://` URL or a `data:` URI. The
+worker loads it under the same
+[media URL policy](../image-understanding/overview.md#media-url-policy) as image inputs.
+This example encodes a local `cat.png` as a data URI:
 
 ```bash
+jq -n \
+  --arg image "data:image/png;base64,$(base64 < cat.png | tr -d '\n')" \
+  '{
+    model: "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
+    prompt: "The cat slowly turns its head and blinks",
+    input_reference: $image,
+    seconds: 2,
+    size: "832x480",
+    response_format: "url"
+  }' |
 curl http://localhost:8000/v1/videos \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
-    "prompt": "The cat slowly turns its head and blinks",
-    "input_reference": "https://example.com/cat.png",
-    "seconds": 2,
-    "size": "832x480",
-    "response_format": "url"
-  }'
+  -d @-
 ```
 
 ### See Also

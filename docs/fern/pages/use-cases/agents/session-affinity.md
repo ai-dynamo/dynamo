@@ -37,7 +37,7 @@ DYN_ROUTER_SESSION_AFFINITY_TTL_SECS=300 \
   bash examples/backends/sglang/launch/agg_agent.sh
 ```
 
-The The value is the idle timeout in seconds, from `1` through `31536000`. A binding expires when the session has had no active requests for that long, so choose a value longer than the pauses between your agent's turns (tool runs, human review).
+The value is the idle timeout in seconds, from `1` through `31536000`. A binding expires when the session has had no active requests for that long, so choose a value longer than the pauses between your agent's turns (tool runs, human review).
 
 The first successfully dispatched request binds the session to its selected worker and, when available, its data-parallel rank. Later requests from the same session follow that binding.
 
@@ -59,7 +59,7 @@ python -m dynamo.frontend \
 
 ## Check That It Works
 
-Enable [tracing](agent-tracing.md) and list the worker for each request in a session. The default trace sink writes gzip segments:
+Enable [tracing](agent-tracing.md) and list the worker for each request in a session. The default trace sink writes gzip segments, which is also what `agg_agent.sh` produces:
 
 ```bash
 gzip -cd "${DYN_REQUEST_TRACE_FILE_PATH:-/tmp/dynamo-request-trace}".*.jsonl.gz \
@@ -67,8 +67,6 @@ gzip -cd "${DYN_REQUEST_TRACE_FILE_PATH:-/tmp/dynamo-request-trace}".*.jsonl.gz 
            | {session: .agent_context.session_id, worker: .request.worker,
               cached_tokens: .request.cached_tokens}'
 ```
-
-If you started the endpoint with `agg_agent.sh`, it writes plain JSONL instead; use the path it prints at startup with `jq` directly.
 
 This check needs at least two eligible workers. With one worker, every row shows that worker whether or not affinity is on, and KV routing alone can raise `cached_tokens`. To confirm affinity, run the same multi-turn session once without the TTL and once with it. With `hard` affinity, every row for the session shows the same worker. Without it, rows can spread across workers.
 

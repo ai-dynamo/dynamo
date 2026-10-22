@@ -360,6 +360,7 @@ The pipeline type is **auto-detected** from the model's `model_index.json` — n
 ### Launch
 
 ```bash
+python3 -m dynamo.frontend --http-port 8000 &
 python -m dynamo.trtllm \
   --modality video_diffusion \
   --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \

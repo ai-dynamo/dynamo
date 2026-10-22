@@ -251,6 +251,7 @@ The pipeline type is **auto-detected** from the model's `model_index.json` — n
 ### Launch
 
 ```bash
+python3 -m dynamo.frontend --http-port 8000 &
 python -m dynamo.trtllm \
   --modality image_diffusion \
   --model-path black-forest-labs/FLUX.1-dev \

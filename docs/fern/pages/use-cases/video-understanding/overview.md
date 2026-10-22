@@ -37,8 +37,9 @@ container setup, and installing additional decoders.
 
 ## Set up the backend
 
-Every multimodal worker must be started with `--enable-multimodal`; the
-launchers below set it. Run the commands from the root of a Dynamo repository
+The vLLM and TensorRT-LLM launchers below start the worker with
+`--enable-multimodal`. The SGLang aggregated launcher (`agg_vision.sh`) does not
+pass it. Run the commands from the root of a Dynamo repository
 checkout. Each launcher starts a frontend on port 8000 and one aggregated worker.
 
 <Tabs>
@@ -79,6 +80,12 @@ checkout. Each launcher starts a frontend on port 8000 and one aggregated worker
     `"model": "Qwen/Qwen2-VL-7B-Instruct"` in the request below. See
     [TensorRT-LLM Multimodal](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md)
     for other models.
+
+    TensorRT-LLM has no frontend video decoding, and the runtime image ships no
+    software VP8/VP9 decoder. The example clip below is VP8/VP9, so on
+    TensorRT-LLM it needs a software decoder installed as described in
+    [Install Additional Decoders](video-decoding.md#install-additional-decoders),
+    or an H.264 or H.265 clip of your own.
   </Tab>
 </Tabs>
 
@@ -86,7 +93,7 @@ checkout. Each launcher starts a frontend on port 8000 and one aggregated worker
 
 In another terminal, send a chat request with a `video_url` content part. This
 example clip is VP8/VP9 WebM, so it needs `--frontend-decoding` on vLLM and
-SGLang:
+SGLang, or a separately installed software decoder on TensorRT-LLM:
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \

@@ -50,13 +50,11 @@ GPU_MEM_FRACTION=$(build_sglang_gpu_mem_args)
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 DYN_REQUEST_TRACE="${DYN_REQUEST_TRACE:-1}"
-DYN_REQUEST_TRACE_SINKS="${DYN_REQUEST_TRACE_SINKS:-jsonl}"
-DYN_REQUEST_TRACE_OUTPUT_PATH="${DYN_REQUEST_TRACE_OUTPUT_PATH:-/tmp/dynamo-request-trace-$(date +%Y%m%d-%H%M%S)-$$.jsonl}"
 DYNAMO_API_KEY="${DYNAMO_API_KEY:-dummy}"
-export DYN_REQUEST_TRACE DYN_REQUEST_TRACE_SINKS DYN_REQUEST_TRACE_OUTPUT_PATH DYNAMO_API_KEY
+export DYN_REQUEST_TRACE DYNAMO_API_KEY
 
 print_launch_banner "Launching Aggregated Agent Serving" "$MODEL" "$HTTP_PORT"
-echo "Request trace output: $DYN_REQUEST_TRACE_OUTPUT_PATH"
+echo "Request trace segments: ${DYN_REQUEST_TRACE_FILE_PATH:-/tmp/dynamo-request-trace}.NNNNNN.jsonl.gz"
 
 # Frontend with KV routing
 python3 -m dynamo.frontend \
