@@ -124,13 +124,15 @@ router treats CPU-resident prefixes as cache misses.
 **Experimental.** `GPUOffloadingConnector` with `GPUOffloadingSpec` retains sealed
 KV blocks in a dedicated CUDA allocation. Decode-to-prefill reuse copies from
 the decode GPU allocation into a retained allocation on the prefill GPU through
-KVCR and NIXL CUDA IPC. Local model-cache stores and loads use device-to-device
+KVCR and NIXL CUDA IPC, including an opt-in multi-node NVLink (MNNVL) profile.
+Local model-cache stores and loads use device-to-device
 copies. CPU memory carries control messages and pointer/size descriptors; it
 does not hold KV payloads. Budget additional VRAM on both workers.
 
-The initial implementation requires one worker per role, tensor parallel size
-one, identical raw cache layouts and a same-host GPU pair with working CUDA IPC.
-Canonical layouts, replicated layouts, cross-node transport, CPU/disk payload
+The implementation requires one worker per role, tensor parallel size one and
+identical raw cache layouts. The default transport uses a same-host GPU pair
+with working CUDA IPC. The MNNVL profile supports hosts in the same healthy
+NVLink fabric and clique. Canonical layouts, replicated layouts, RDMA, CPU/disk payload
 pools and the versioned state-agent ingress are unsupported. Use the native
 worker event publisher and a compatible vLLM offloading/tiering API.
 
@@ -169,11 +171,38 @@ inventory; retained-cache removals revoke it explicitly. The router requires
 `router_hint_transfer_domain` before emitting `kv.fetch_gpu@1.0`. The domain is
 an operator-supplied layout contract, not automatic model compatibility proof.
 
-Both workers require a native NIXL/UCX implementation of the strict
+With the default same-host profile, both workers require a native NIXL/UCX implementation of the strict
 `NIXL_UCX_CUDA_IPC_ONLY=1` policy with `UCX_TLS=cuda_ipc,posix,self` and actual
 CUDA memory support. A stock installation that rejects this profile is not
 compatible. See the [KVCR GPU endpoint contract](https://github.com/ai-dynamo/kvcr#direct-gpu-memory-endpoints)
 for registration, dependency and lifetime requirements.
+
+### MNNVL Profile
+
+**Experimental.** Set `gpu_transport` to `"mnnvl"` in both the connector's
+`kv_connector_extra_config` and its `GPUKVCRSecondaryTierManager` entry under
+`secondary_tiers`. Set the tier's `ucx_tls` to
+`["cuda_ipc", "tcp", "self"]`. Keep `router_hint_transfer_domain` and the tier's
+`compatibility_domain` equal to the same certified base layout domain. Dynamo
+observes the assigned GPU's completed NVML fabric state and incorporates the
+cluster UUID and clique ID into the effective capability and inventory domain.
+Workers in another fabric or transport profile cannot use that inventory.
+
+The retained banks use physical CUDA VMM allocations with
+`CU_MEM_HANDLE_TYPE_FABRIC`. Torch aliases the allocation and retains its owner;
+local rank imports use FABRIC handles. Both endpoints need an accessible IMEX
+channel and a NIXL/UCX build with KVCR's additive MNNVL dependency patches.
+For Slurm sites using `switch/nvidia_imex`, reserve a shared channel for the job's
+segment. Sites supporting the unique-channel option can use
+`--segment=2 --network=unique-channel-per-segment` for a two-host test; propagate
+the job's private IMEX device namespace into every worker container.
+
+Do not set `NIXL_UCX_CUDA_IPC_ONLY=1` for this profile. KVCR applies the transport
+policy to its dedicated backend context: CUDA IPC FABRIC GPU RMA, TCP control
+messages, and no host-payload fallback. This leaves the separate vLLM
+prefill-to-decode backend's context unchanged. Ordinary CUDA malloc and managed
+allocations are rejected as retained MNNVL banks. Validate actual cross-host
+bytes, CUDA copy activity and quiescent teardown before measuring performance.
 
 Enable the separate GPU router option only after measuring its acquisition,
 transfer, onboarding and prefill costs. CPU coefficients do not qualify it.
@@ -181,7 +210,7 @@ See [Decode-to-Prefill Reuse](../../router/configuration-and-tuning.md#decode-to
 for selection behavior. Missing capabilities or inventory leave the normal
 request path available. A deadline does not cancel native DMA: uncertain source
 pins and target allocations remain retained until actual quiescence. The strict
-IPC profile does not provide native peer-death recovery.
+GPU profiles do not provide native peer-death recovery.
 
 ## Known Limitations
 

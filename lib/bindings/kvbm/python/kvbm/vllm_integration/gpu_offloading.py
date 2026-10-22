@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in TP1 retained-GPU KV cache with CUDA-IPC-only remote delivery.
+"""Opt-in TP1 retained-GPU cache with isolated CUDA IPC or MNNVL delivery.
 
 The primary cache uses vLLM's existing ref-counted cache policy and scheduling
 contract, but its storage is a CUDA allocation, never a host mmap. Local stores
@@ -9,6 +9,7 @@ layout requires an explicit identical model/layout compatibility domain.
 """
 
 import functools
+import importlib
 import logging
 import socket
 import threading
@@ -46,7 +47,7 @@ from vllm.v1.kv_offload.tiering.manager import (
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
-from .gpu_memory import GPUCacheRegion, GPUCacheWorker
+from .gpu_memory import GPUCacheRegion, GPUCacheWorker, GPUFabricCacheRegion
 
 logger = logging.getLogger(__name__)
 _RETAINED_FAILED_GPU_MANAGERS = []
@@ -138,6 +139,9 @@ class GPUKVCRSecondaryTierManager(KVCRSecondaryTierManager):
 
     def __init__(self, spec, region, config):
         SecondaryTierManager.__init__(self, spec, region, "gpu_kvcr")
+        transport = config.get("gpu_transport", "cuda_ipc")
+        if transport != spec.gpu_transport:
+            raise ValueError("GPU tier and retained bank transport profiles differ")
         domain = config.get("compatibility_domain")
         if domain != spec.extra_config.get("router_hint_transfer_domain"):
             raise ValueError(
@@ -162,6 +166,18 @@ class GPUKVCRSecondaryTierManager(KVCRSecondaryTierManager):
             )
         ):
             raise ValueError("GPU KVCR forbids CPU, disk and Guard payload storage")
+        remote_options = {
+            "compatibility_domain": domain,
+            "ucx_tls": tuple(config.get("ucx_tls", ("cuda_ipc", "posix", "self"))),
+        }
+        if transport == "mnnvl":
+            if tuple(config.get("ucx_tls", ())) != ("cuda_ipc", "tcp", "self"):
+                raise ValueError(
+                    "MNNVL requires explicit cuda_ipc,tcp,self context TLS"
+                )
+            remote_options.update(
+                gpu_transport="mnnvl", fabric_domain=spec.fabric_domain
+            )
         self._key_adapter = _VllmKeyAdapter()
         self._framework_pin_adapter = _FrameworkPinAdapter(self)
         self._inventory_events = []
@@ -208,12 +224,7 @@ class GPUKVCRSecondaryTierManager(KVCRSecondaryTierManager):
                             size=region.shape[1],
                         )
                     ],
-                    remote_fw_gpu=RemoteFWGPUOptions(
-                        compatibility_domain=domain,
-                        ucx_tls=tuple(
-                            config.get("ucx_tls", ("cuda_ipc", "posix", "self"))
-                        ),
-                    ),
+                    remote_fw_gpu=RemoteFWGPUOptions(**remote_options),
                 ),
             )
         except BaseException:
@@ -377,6 +388,14 @@ class GPUOffloadingSpec(OffloadingSpec):
             raise ValueError(
                 "GPU KV cache requires an explicit certified layout domain"
             )
+        self.base_domain = domain
+        self.gpu_transport = self.extra_config.get("gpu_transport", "cuda_ipc")
+        if self.gpu_transport not in ("cuda_ipc", "mnnvl"):
+            raise ValueError("GPU transport must be cuda_ipc or mnnvl")
+        if self.gpu_transport == "mnnvl" and "\x00" in self.base_domain:
+            raise ValueError("MNNVL base layout domain must not contain NUL")
+        self.fabric_domain = None
+        self._transport_resolved = False
         self.row_bytes = config.worker_kv_bytes_per_block * self.blocks_per_chunk
         if self.row_bytes <= 0:
             raise ValueError("GPU KV row geometry must be known at startup")
@@ -388,13 +407,67 @@ class GPUOffloadingSpec(OffloadingSpec):
             raise ValueError("GPU cache requires exactly one GPU-only KVCR tier")
         if self.tiers[0].get("type") != "GPUKVCRSecondaryTierManager":
             raise ValueError("GPU cache permits only the GPU-only KVCR tier")
+        if self.tiers[0].get("gpu_transport", "cuda_ipc") != self.gpu_transport:
+            raise ValueError("GPU spec and secondary tier transport profiles differ")
+        if (
+            self.gpu_transport == "mnnvl"
+            and self.tiers[0].get("compatibility_domain") != self.base_domain
+        ):
+            raise ValueError(
+                "MNNVL tier must match its original certified layout domain"
+            )
+        tls = self.tiers[0].get("ucx_tls")
+        if self.gpu_transport == "mnnvl" and (
+            not isinstance(tls, (list, tuple))
+            or tuple(tls) != ("cuda_ipc", "tcp", "self")
+        ):
+            raise ValueError("MNNVL requires explicit cuda_ipc,tcp,self context TLS")
         self._manager = self._worker = None
+
+    def _resolve_gpu_transport(self):
+        if self._transport_resolved:
+            return
+        if self.gpu_transport == "mnnvl":
+            # This optional GPU profile is the only path that initializes the
+            # fabric helper. Default/CPU capability publication stays untouched.
+            fabric = importlib.import_module("kvbm.vllm_integration.gpu_mnnvl")
+            identity = fabric.observe_fabric()
+            expected_fabric = self.tiers[0].get("fabric_domain")
+            if expected_fabric is not None and expected_fabric != identity.domain:
+                raise ValueError(
+                    "Configured fabric constraint differs from actual assigned GPU"
+                )
+            self.fabric_domain = identity.domain
+            domain = fabric.effective_domain(self.base_domain, identity.domain)
+            self.extra_config = dict(
+                self.extra_config, router_hint_transfer_domain=domain
+            )
+            self.tiers = [dict(self.tiers[0], compatibility_domain=domain)]
+        self._transport_resolved = True
 
     def get_manager(self):
         if self._manager is None:
-            region = GPUCacheRegion(
-                self.config.engine_id, self.num_chunks, self.row_bytes
-            )
+            self._resolve_gpu_transport()
+            if self.gpu_transport == "mnnvl":
+                region = GPUFabricCacheRegion(
+                    self.config.engine_id,
+                    self.num_chunks,
+                    self.row_bytes,
+                    self.base_domain,
+                )
+                if (
+                    region.fabric_domain != self.fabric_domain
+                    or region.compatibility_domain
+                    != self.extra_config["router_hint_transfer_domain"]
+                ):
+                    _RETAINED_FAILED_GPU_MANAGERS.append(region)
+                    raise RuntimeError(
+                        "Observed GPU fabric changed before KVCR registration"
+                    )
+            else:
+                region = GPUCacheRegion(
+                    self.config.engine_id, self.num_chunks, self.row_bytes
+                )
             primary = GPUPrimaryManager(self, region)
             tier = GPUKVCRSecondaryTierManager(self, region, self.tiers[0])
             self._manager = GPUTieringManager(primary, tier)
@@ -402,6 +475,7 @@ class GPUOffloadingSpec(OffloadingSpec):
 
     def get_worker(self, kv_caches):
         if self._worker is None:
+            self._resolve_gpu_transport()
             self._worker = GPUCacheWorker(self, kv_caches)
         return self._worker
 

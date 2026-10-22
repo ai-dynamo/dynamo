@@ -6,6 +6,7 @@ The CUDA tests run only on allocated GPUs. They compare GPU tensors directly;
 only scalar verdicts return to the host. Remote KVCR/NIXL tests are separate.
 """
 
+import base64
 import os
 import subprocess
 import sys
@@ -16,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from kvbm.vllm_integration import gpu_memory
+from kvbm.vllm_integration import gpu_memory, gpu_mnnvl, gpu_offloading
 from kvbm.vllm_integration.gpu_memory import GPUCacheRegion, GPUCacheWorker, import_ipc
 from kvbm.vllm_integration.gpu_offloading import (
     GPUOffloadingConnector,
@@ -241,6 +242,7 @@ def test_uniprocess_worker_uses_owned_gpu_storage_without_self_ipc(monkeypatch):
     engine_id = f"uniprocess-test-{uuid.uuid4()}"
     tensor = object()
     owner = SimpleNamespace(
+        gpu_transport="cuda_ipc",
         shape=(8, 384),
         tensor=tensor,
         _closed=False,
@@ -372,3 +374,130 @@ def test_mixed_bank_d2d_roundtrip_preserves_permuted_slots_and_guards():
     finally:
         worker.shutdown()
         region.cleanup()
+
+
+def _mnnvl_tier(**changes):
+    return {
+        "type": "GPUKVCRSecondaryTierManager",
+        "gpu_transport": "mnnvl",
+        "ucx_tls": ["cuda_ipc", "tcp", "self"],
+        "compatibility_domain": "test-gpu-layout-v1",
+        **changes,
+    }
+
+
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"gpu_transport": "invalid"},
+        {"gpu_transport": "mnnvl"},
+        {
+            "gpu_transport": "mnnvl",
+            "secondary_tiers": [_mnnvl_tier(gpu_transport="cuda_ipc")],
+        },
+        {
+            "gpu_transport": "mnnvl",
+            "secondary_tiers": [_mnnvl_tier(compatibility_domain="other-layout")],
+        },
+        {
+            "gpu_transport": "mnnvl",
+            "router_hint_transfer_domain": "bad\x00layout",
+            "secondary_tiers": [_mnnvl_tier(compatibility_domain="bad\x00layout")],
+        },
+        {"gpu_transport": "mnnvl", "secondary_tiers": [_mnnvl_tier(ucx_tls=None)]},
+        {"gpu_transport": "mnnvl", "secondary_tiers": [_mnnvl_tier(ucx_tls=True)]},
+        {
+            "gpu_transport": "mnnvl",
+            "secondary_tiers": [_mnnvl_tier(ucx_tls=["tcp", "cuda_copy", "self"])],
+        },
+    ],
+)
+def test_mnnvl_spec_requires_matching_explicit_gpu_only_transport(changes):
+    with pytest.raises(ValueError):
+        GPUOffloadingSpec(make_config(**changes))
+
+
+@pytest.mark.gpu_0
+def test_mnnvl_spec_resolves_actual_fabric_without_rewriting_original_model_config(
+    monkeypatch,
+):
+    config = make_config(gpu_transport="mnnvl", secondary_tiers=[_mnnvl_tier()])
+    spec = GPUOffloadingSpec(config)
+    observed = SimpleNamespace(domain="mnnvl:" + "1" * 32 + ":0")
+    helper = SimpleNamespace(
+        observe_fabric=lambda: observed,
+        effective_domain=lambda base, fabric: base + "@" + fabric,
+    )
+    monkeypatch.setattr(
+        gpu_offloading, "importlib", SimpleNamespace(import_module=lambda name: helper)
+    )
+    assert not spec._transport_resolved
+    spec._resolve_gpu_transport()
+    expected = "test-gpu-layout-v1@" + observed.domain
+    assert spec.fabric_domain == observed.domain
+    assert spec.extra_config["router_hint_transfer_domain"] == expected
+    assert spec.tiers[0]["compatibility_domain"] == expected
+    assert config.extra_config["router_hint_transfer_domain"] == "test-gpu-layout-v1"
+    assert (
+        config.extra_config["secondary_tiers"][0]["compatibility_domain"]
+        == "test-gpu-layout-v1"
+    )
+    assert spec.base_domain == "test-gpu-layout-v1"
+
+
+@pytest.mark.gpu_0
+def test_local_fabric_descriptor_mismatch_fails_before_importing_any_gpu_handle(
+    monkeypatch,
+):
+    identity = gpu_mnnvl.FabricIdentity(
+        "GPU-00000000-0000-0000-0000-000000000001", "1" * 32, 0
+    )
+    base = "test-gpu-layout-v1"
+    domain = gpu_mnnvl.effective_domain(base, identity.domain)
+    monkeypatch.setattr(gpu_memory.torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(gpu_mnnvl, "observe_fabric", lambda device: identity)
+    monkeypatch.setattr(gpu_memory, "_process_start_ticks", lambda pid: 17)
+    monkeypatch.setattr(
+        gpu_mnnvl,
+        "FabricAllocation",
+        lambda *args, **kwargs: pytest.fail(
+            "Invalid descriptor must not import a handle"
+        ),
+    )
+    original = {
+        "schema": "dynamo-gpu-fabric-v1",
+        "gpu_transport": "mnnvl",
+        "engine_id": "fixture",
+        "owner_pid": os.getpid(),
+        "owner_start_ticks": 17,
+        "gpu_uuid": identity.gpu_uuid,
+        "fabric_domain": identity.domain,
+        "base_domain": base,
+        "compatibility_domain": domain,
+        "shape": [2, 8],
+        "stride": [8, 1],
+        "logical_bytes": 16,
+        "allocation_bytes": 16,
+        "fabric_handle": base64.b64encode(b"x" * 64).decode(),
+    }
+    for change in (
+        {"schema": 1},
+        {"gpu_transport": "cuda_ipc"},
+        {"engine_id": "other"},
+        {"gpu_uuid": "GPU-00000000-0000-0000-0000-000000000002"},
+        {"fabric_domain": "mnnvl:" + "2" * 32 + ":0"},
+        {"base_domain": "other-layout"},
+        {"compatibility_domain": "other-domain"},
+        {"shape": [True, 8]},
+        {"stride": [8, True]},
+        {"owner_start_ticks": 18},
+        {"logical_bytes": True},
+        {"allocation_bytes": True},
+        {"fabric_handle": base64.b64encode(b"x" * 63).decode()},
+        {"unexpected": "value"},
+    ):
+        with pytest.raises(ValueError):
+            gpu_memory.import_fabric(
+                {**original, **change}, "fixture", (2, 8), base, domain, identity.domain
+            )

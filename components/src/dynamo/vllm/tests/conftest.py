@@ -56,13 +56,16 @@ def _can_import_omni() -> bool:
 
 
 def _can_import_gpu_tiering() -> bool:
-    """Omit the optional upstream adapter only when that module is absent.
+    """Omit only absent optional KVCR or upstream adapter modules.
 
     Broken transitive dependencies or other API/import failures remain errors.
     Supported-image qualification separately requires all GPU tests to collect.
     """
     global _gpu_tiering_importable
     if _gpu_tiering_importable is None:
+        if importlib.util.find_spec("kvcr") is None:
+            _gpu_tiering_importable = False
+            return False
         try:
             importlib.import_module("vllm.v1.kv_offload.tiering.kvcr.manager")
             _gpu_tiering_importable = True

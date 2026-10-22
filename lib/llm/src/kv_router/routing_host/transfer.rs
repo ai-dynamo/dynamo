@@ -133,9 +133,7 @@ impl RoutingHost {
         memory_kind: TransferSourceMemoryKind,
         started: Instant,
     ) -> Option<KvHint> {
-        let Some(target_router) = self.kv_router_if_enabled() else {
-            return None;
-        };
+        let target_router = self.kv_router_if_enabled()?;
         let config = target_router.kv_router_config();
         let enabled = |config: &KvRouterConfig| match memory_kind {
             TransferSourceMemoryKind::Host => config.enable_decode_to_prefill_reuse,
@@ -144,9 +142,7 @@ impl RoutingHost {
         if !enabled(config) {
             return None;
         }
-        let Some(source_router) = source_host.and_then(RoutingHost::kv_router_if_enabled) else {
-            return None;
-        };
+        let source_router = source_host.and_then(RoutingHost::kv_router_if_enabled)?;
         if !enabled(source_router.kv_router_config()) {
             return None;
         }
@@ -155,16 +151,11 @@ impl RoutingHost {
             return None;
         }
         let block_size = target_router.block_size();
-        let Some((mut local_prefix, mut baseline_prefix)) =
-            baseline_prefix_blocks(selection, block_size)
-        else {
-            return None;
-        };
+        let (mut local_prefix, mut baseline_prefix) =
+            baseline_prefix_blocks(selection, block_size)?;
         let (target_snapshot, target_domain) = {
             let configs = target_router.workers_with_configs.borrow();
-            let Some(target) = configs.get(&selection.worker.worker_id) else {
-                return None;
-            };
+            let target = configs.get(&selection.worker.worker_id)?;
             let metadata = match memory_kind {
                 TransferSourceMemoryKind::Host => {
                     target.kv_hint_transfer_metadata_for_dp_rank(selection.worker.dp_rank)
@@ -173,15 +164,11 @@ impl RoutingHost {
                     target.kv_hint_gpu_transfer_metadata_for_dp_rank(selection.worker.dp_rank)
                 }
             };
-            let Some(metadata) = metadata else {
-                return None;
-            };
+            let metadata = metadata?;
             if metadata.worker_type != "prefill" {
                 return None;
             }
-            let Some(domain) = target.router_hint_transfer_domain() else {
-                return None;
-            };
+            let domain = target.router_hint_transfer_domain()?;
             (target.clone(), domain.to_owned())
         };
         let routing = request.routing.as_ref();

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import ipaddress
 import json
 import os
@@ -321,6 +322,15 @@ def publish_kv_hint_capabilities(
     publish_source_endpoints: bool = True,
 ) -> None:
     """Publish each versioned KV hint capability that vLLM supports."""
+    # The runtime domain key is shared by legacy CPU and GPU hints. MNNVL
+    # deliberately uses its own effective domain, so never partially advertise
+    # an incompatible CPU provider under that same key.
+    if any(
+        tier.get("gpu_transport") == "mnnvl"
+        and KV_HINT_GPU_DIRECT_CAPABILITY_KEY in (tier.get("router_capabilities") or ())
+        for tier in _secondary_tiers(engine_args)
+    ) and _transfer_hint_tiers(engine_args):
+        raise ValueError("MNNVL GPU reuse cannot share the CPU-hint runtime domain")
     _publish_kv_transfer_hint_capability(
         runtime_config,
         engine_args,
@@ -376,6 +386,28 @@ def _publish_gpu_transfer_hint_capability(
         raise ValueError(
             "Direct GPU KV transfer does not support CacheOwner attachments"
         )
+    transport = tier.get("gpu_transport", "cuda_ipc")
+    if transport not in ("cuda_ipc", "mnnvl"):
+        raise ValueError("GPU transport must be cuda_ipc or mnnvl")
+    if transport == "mnnvl":
+        tls = tier.get("ucx_tls")
+        if not isinstance(tls, (list, tuple)) or tuple(tls) != (
+            "cuda_ipc",
+            "tcp",
+            "self",
+        ):
+            raise ValueError("MNNVL requires explicit cuda_ipc,tcp,self context TLS")
+        # KVBM/NIXL are optional on ordinary backend paths. Load this stdlib-only
+        # helper only for the explicitly selected MNNVL profile after engine
+        # startup; its device/NVML observation is never a configured attestation.
+        fabric = importlib.import_module("kvbm.vllm_integration.gpu_mnnvl")
+        identity = fabric.observe_fabric()
+        expected_fabric = tier.get("fabric_domain")
+        if expected_fabric is not None and expected_fabric != identity.domain:
+            raise ValueError(
+                "Configured fabric constraint differs from actual assigned GPU"
+            )
+        domain = fabric.effective_domain(domain, identity.domain)
     for key, value in (
         (KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, role),
         (KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY, domain),

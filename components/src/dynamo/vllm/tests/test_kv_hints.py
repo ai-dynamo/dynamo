@@ -12,6 +12,7 @@ from dynamo.common.constants import (
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
 from dynamo.llm import WorkerType
+from dynamo.vllm import kv_hints
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 
 pytestmark = [
@@ -618,5 +619,121 @@ def test_gpu_hint_does_not_advertise_an_unsupported_cache_owner_source():
             ),
             WorkerType.Decode,
             (0, 1),
+        )
+    runtime.set_engine_specific.assert_not_called()
+
+
+def test_mnnvl_capability_uses_observed_fabric_effective_domain_without_mutating_config(
+    monkeypatch,
+):
+    observed = SimpleNamespace(domain="mnnvl:" + "1" * 32 + ":0")
+    helper = SimpleNamespace(
+        observe_fabric=MagicMock(return_value=observed),
+        effective_domain=MagicMock(return_value="mnnvl-sha256:observed-layout-fabric"),
+    )
+    loader = MagicMock(return_value=helper)
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
+    args = _wrapped_engine_args(
+        "PdConnector",
+        [_gpu_connector(gpu_transport="mnnvl", ucx_tls=["cuda_ipc", "tcp", "self"])],
+        router_hint_transfer_domain="gpu-certified-layout-v1",
+    )
+    runtime = MagicMock()
+    publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
+    fields = {
+        call.args[0]: json.loads(call.args[1])
+        for call in runtime.set_engine_specific.call_args_list
+    }
+    assert (
+        fields["router_hint_transfer_domain"] == "mnnvl-sha256:observed-layout-fabric"
+    )
+    assert fields["router_hint_gpu_direct"] is True
+    assert KV_HINT_TRANSFER_CAPABILITY_KEY not in fields
+    loader.assert_called_once_with("kvbm.vllm_integration.gpu_mnnvl")
+    helper.effective_domain.assert_called_once_with(
+        "gpu-certified-layout-v1", observed.domain
+    )
+    assert (
+        args.kv_transfer_config.kv_connector_extra_config["router_hint_transfer_domain"]
+        == "gpu-certified-layout-v1"
+    )
+    assert (
+        args.kv_transfer_config.kv_connector_extra_config["connectors"][0][
+            "kv_connector_extra_config"
+        ]["secondary_tiers"][0]["compatibility_domain"]
+        == "gpu-certified-layout-v1"
+    )
+
+
+def test_default_gpu_profile_does_not_load_mnnvl_or_native_dependencies(monkeypatch):
+    loader = MagicMock(
+        side_effect=AssertionError("Default profile must not load MNNVL")
+    )
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
+    runtime = MagicMock()
+    publish_kv_hint_capabilities(
+        runtime,
+        _wrapped_engine_args(
+            "PdConnector",
+            [_gpu_connector()],
+            router_hint_transfer_domain="gpu-certified-layout-v1",
+        ),
+        WorkerType.Decode,
+    )
+    loader.assert_not_called()
+    runtime.set_engine_specific.assert_any_call(
+        "router_hint_transfer_domain", '"gpu-certified-layout-v1"'
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"gpu_transport": "unknown"},
+        {"gpu_transport": "mnnvl"},
+        {"gpu_transport": "mnnvl", "ucx_tls": True},
+        {"gpu_transport": "mnnvl", "ucx_tls": ["cuda_ipc", "posix", "self"]},
+    ],
+)
+def test_mnnvl_capability_rejects_unknown_or_nonexplicit_profile_before_native_import(
+    monkeypatch, changes
+):
+    loader = MagicMock(side_effect=AssertionError("Invalid policy must fail first"))
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
+    runtime = MagicMock()
+    with pytest.raises(ValueError):
+        publish_kv_hint_capabilities(
+            runtime,
+            _wrapped_engine_args(
+                "PdConnector",
+                [_gpu_connector(**changes)],
+                router_hint_transfer_domain="gpu-certified-layout-v1",
+            ),
+            WorkerType.Decode,
+        )
+    loader.assert_not_called()
+    runtime.set_engine_specific.assert_not_called()
+
+
+def test_mnnvl_and_cpu_hint_providers_cannot_partially_publish_a_shared_domain():
+    runtime = MagicMock()
+    with pytest.raises(ValueError, match="CPU-hint"):
+        publish_kv_hint_capabilities(
+            runtime,
+            _wrapped_engine_args(
+                "PdConnector",
+                [
+                    _gpu_connector(
+                        gpu_transport="mnnvl", ucx_tls=["cuda_ipc", "tcp", "self"]
+                    ),
+                    _kvcr_connector(
+                        control_ports=_gpu_connector()["kv_connector_extra_config"][
+                            "secondary_tiers"
+                        ][0]["control_ports"]
+                    ),
+                ],
+                router_hint_transfer_domain="gpu-certified-layout-v1",
+            ),
+            WorkerType.Decode,
         )
     runtime.set_engine_specific.assert_not_called()
