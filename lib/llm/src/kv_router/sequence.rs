@@ -416,8 +416,6 @@ pub(crate) async fn host_replica_channels(
 pub(crate) struct ReplicaIngress {
     endpoint: Endpoint,
     inbound_tx: mpsc::Sender<ActiveSequenceEvent>,
-    /// This replica's own outbound publisher; the direct-ZMQ fan-in skips it
-    /// rather than receiving and decoding events it would discard as echoes.
     local_publisher_id: Option<u64>,
     cancellation_token: CancellationToken,
 }
@@ -817,8 +815,6 @@ mod tests {
         Ok(())
     }
 
-    /// A publishing replica does not subscribe to its own outbound stream, but
-    /// still receives events from other publishers on the endpoint.
     #[tokio::test]
     #[serial_test::serial]
     async fn replica_ingress_skips_own_outbound_publisher() -> Result<()> {
@@ -843,8 +839,11 @@ mod tests {
 
         let peer = ActiveSequenceEventPublisher::for_endpoint(&endpoint, 16).await?;
         let mut received = Vec::new();
+        // Keep sending own events after the peer is live, so a late own
+        // subscription would still surface.
+        let mut rounds_after_peer = 0;
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !received.iter().any(|id| id == "peer-mark") {
+            while rounds_after_peer < 5 {
                 outbound.try_send(ActiveSequenceEvent {
                     request_id: "own-event".to_string(),
                     worker: WorkerWithDpRank::new(42, 0),
@@ -857,19 +856,13 @@ mod tests {
                 while let Ok(event) = channels.inbound_rx.try_recv() {
                     received.push(event.request_id);
                 }
+                if received.iter().any(|id| id == "peer-mark") {
+                    rounds_after_peer += 1;
+                }
             }
             Ok::<_, anyhow::Error>(())
         })
         .await??;
-        // Give late own events 250ms of silence to arrive before judging.
-        while let Ok(Some(event)) = tokio::time::timeout(
-            std::time::Duration::from_millis(250),
-            channels.inbound_rx.recv(),
-        )
-        .await
-        {
-            received.push(event.request_id);
-        }
         assert!(
             received.iter().all(|id| id == "peer-mark"),
             "replica received its own outbound events: {received:?}"
