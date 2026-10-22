@@ -88,14 +88,15 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-const SGLANG_SIDECAR_PROGRAM_NAME: &str = "dynamo-sglang-sidecar";
-
-fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
+/// Prefix the program name clap's `try_parse_from` expects at index zero.
+fn sidecar_argv(program: &str, argv: Vec<String>) -> Vec<String> {
     let mut cli_argv = Vec::with_capacity(argv.len() + 1);
-    cli_argv.push(SGLANG_SIDECAR_PROGRAM_NAME.to_string());
+    cli_argv.push(program.to_string());
     cli_argv.extend(argv);
     cli_argv
 }
+
+const SGLANG_SIDECAR_PROGRAM_NAME: &str = "dynamo-sglang-sidecar";
 
 /// Run the native SGLang sidecar in the current process.
 ///
@@ -105,19 +106,12 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyfunction]
 #[pyo3(signature = (argv=None))]
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
-    let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
+    let cli_argv = sidecar_argv(SGLANG_SIDECAR_PROGRAM_NAME, argv.unwrap_or_default());
     py.allow_threads(move || dynamo_sglang_sidecar::run(cli_argv))
         .map_err(sidecar_run_to_pyerr)
 }
 
 const VLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-vllm-sidecar";
-
-fn vllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
-    let mut cli_argv = Vec::with_capacity(argv.len() + 1);
-    cli_argv.push(VLLM_SIDECAR_PROGRAM_NAME.to_string());
-    cli_argv.extend(argv);
-    cli_argv
-}
 
 /// Run the native vLLM sidecar in the current process.
 ///
@@ -127,7 +121,7 @@ fn vllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyfunction]
 #[pyo3(signature = (argv=None))]
 fn _run_vllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
-    let cli_argv = vllm_sidecar_argv(argv.unwrap_or_default());
+    let cli_argv = sidecar_argv(VLLM_SIDECAR_PROGRAM_NAME, argv.unwrap_or_default());
     let bootstrap = dynamo_vllm_sidecar::VllmSidecarEngine::try_from_args_async(cli_argv)
         .map_err(sidecar_startup_to_pyerr)?;
 
@@ -137,13 +131,6 @@ fn _run_vllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> 
 
 const TRTLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-trtllm-sidecar";
 
-fn trtllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
-    let mut cli_argv = Vec::with_capacity(argv.len() + 1);
-    cli_argv.push(TRTLLM_SIDECAR_PROGRAM_NAME.to_string());
-    cli_argv.extend(argv);
-    cli_argv
-}
-
 /// Run the native TensorRT-LLM sidecar in the current process.
 ///
 /// Python's module launcher passes only option arguments, while clap's
@@ -152,14 +139,8 @@ fn trtllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyfunction]
 #[pyo3(signature = (argv=None))]
 fn _run_trtllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
-    let cli_argv = trtllm_sidecar_argv(argv.unwrap_or_default());
-    py.allow_threads(move || dynamo_trtllm_sidecar::run(cli_argv))
-        .map_err(
-            |err| match err.downcast::<dynamo_sidecar_common::SidecarStartupError>() {
-                Ok(startup) => sidecar_startup_to_pyerr(startup),
-                Err(error) => pyo3::exceptions::PyRuntimeError::new_err(error.to_string()),
-            },
-        )
+    let cli_argv = sidecar_argv(TRTLLM_SIDECAR_PROGRAM_NAME, argv.unwrap_or_default());
+    py.allow_threads(move || dynamo_trtllm_sidecar::run(cli_argv)).map_err(sidecar_run_to_pyerr)
 }
 
 // ---------------------------------------------------------------------------

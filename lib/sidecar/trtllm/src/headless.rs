@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
-use dynamo_backend_common::{DisaggregationMode, DynamoError, KvEventSource};
+use dynamo_backend_common::{DynamoError, KvEventSource};
 use dynamo_llm::discovery::{RuntimeConfigWatch, runtime_config_watch};
 use dynamo_llm::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig};
 use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
@@ -63,11 +63,9 @@ pub(crate) async fn relay(
             "Local publisher has no KV block size"
         );
         let common = &args.sidecar.common;
-        let component = if common.disaggregation_mode == DisaggregationMode::Aggregated {
-            common.component.as_str()
-        } else {
-            common.disaggregation_mode.discovery_component()
-        };
+        let component = common
+            .disaggregation_mode
+            .registration_component(&common.component);
         let endpoint = drt
             .namespace(&common.namespace)?
             .component(component)?
