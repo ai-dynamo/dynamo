@@ -67,17 +67,34 @@ func aisimulateImageOf(t *testing.T, raw []byte) string {
 }
 
 func TestDGDRDefaulter_RoutesByRequestedVersion(t *testing.T) {
-	d := NewDGDRDefaulter("1.1.0", "").WithV1beta2(DGDRV1beta2Options{AISimulateImage: "aisim:1"})
+	for _, tt := range []struct {
+		name    string
+		options DGDRV1beta2Options
+		want    string
+	}{
+		{
+			name: "an omitted image is derived from the operator version",
+			want: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.6.0",
+		},
+		{
+			name:    "an explicit default image overrides derivation",
+			options: DGDRV1beta2Options{AISimulateImage: "registry.example/aisimulate:custom"},
+			want:    "registry.example/aisimulate:custom",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := NewDGDRDefaulter("1.6.0", "").WithV1beta2(tt.options)
+			dgdr := carrierRequest()
+			if err := d.Default(ctxForRequest(admissionv1.Create, "v1beta2"), dgdr); err != nil {
+				t.Fatalf("Default() error = %v", err)
+			}
+			if got := aisimulateImageOf(t, dgdr.Spec.V1Beta2.Raw); got != tt.want {
+				t.Fatalf("aisimulate.image = %q, want %q", got, tt.want)
+			}
+		})
+	}
 
-	t.Run("a native v1beta2 request is defaulted from its carrier", func(t *testing.T) {
-		dgdr := carrierRequest()
-		if err := d.Default(ctxForRequest(admissionv1.Create, "v1beta2"), dgdr); err != nil {
-			t.Fatalf("Default() error = %v", err)
-		}
-		if got := aisimulateImageOf(t, dgdr.Spec.V1Beta2.Raw); got != "aisim:1" {
-			t.Fatalf("aisimulate.image = %q, want aisim:1", got)
-		}
-	})
+	d := NewDGDRDefaulter("1.6.0", "").WithV1beta2(DGDRV1beta2Options{})
 
 	t.Run("RequestKind decides, not the converted Kind", func(t *testing.T) {
 		dgdr := carrierRequest()

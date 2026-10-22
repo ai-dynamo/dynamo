@@ -76,6 +76,7 @@ func NewDGDRDefaulter(operatorVersion, defaultImage string) *DGDRDefaulter {
 
 // WithV1beta2 sets the defaults of v1beta2 Requests and returns the defaulter.
 func (d *DGDRDefaulter) WithV1beta2(options DGDRV1beta2Options) *DGDRDefaulter {
+	options.AISimulateImage = defaultPlannerImageFor(d.OperatorVersion, options.AISimulateImage)
 	d.v1beta2 = options
 	return d
 }
@@ -127,7 +128,7 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	// Image derivation remains create-only so updates do not rewrite an
 	// intentionally cleared image.
 	if req.Operation == admissionv1.Create && dgdr.Spec.Image == "" {
-		if img := d.defaultImageFor(); img != "" {
+		if img := defaultPlannerImageFor(d.OperatorVersion, d.DefaultImage); img != "" {
 			dgdr.Spec.Image = img
 			logger.Info("defaulted spec.image from operator version",
 				"name", dgdr.Name,
@@ -140,14 +141,13 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	return nil
 }
 
-// defaultImageFor returns the profiler image for spec.image: DefaultImage when
-// set, else the derived image with a canonical semver tag, or an empty string
-// when the operator version cannot be parsed.
-func (d *DGDRDefaulter) defaultImageFor() string {
-	if d.DefaultImage != "" {
-		return d.DefaultImage
+// defaultPlannerImageFor returns explicitImage when set, else the planner image with a
+// canonical operator-version tag, or an empty string when the version cannot be parsed.
+func defaultPlannerImageFor(operatorVersion, explicitImage string) string {
+	if explicitImage != "" {
+		return explicitImage
 	}
-	version, err := semver.NewVersion(d.OperatorVersion)
+	version, err := semver.NewVersion(operatorVersion)
 	if err != nil {
 		return ""
 	}

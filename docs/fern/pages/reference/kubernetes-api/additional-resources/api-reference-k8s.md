@@ -3242,7 +3242,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `image` _string_ | Image selects a Dynamo-compatible AISimulate runner. When omitted, admission<br />persists the operator's configured image. |  | MinLength: 1 <br />Optional: \{\} <br /> |
+| `image` _string_ | Image selects a Dynamo-compatible AISimulate runner. When omitted, admission<br />persists the configured override or a version-matched Dynamo planner image. |  | MinLength: 1 <br />Optional: \{\} <br /> |
 | `versionOverride` _string_ | VersionOverride declares the AISimulate compatibility version as three numeric parts<br />(for example 0.13.0), not a semver version: no v prefix, pre-release or build suffix. It is required<br />when the image tag is not a version and wins over a version in the tag. |  | MinLength: 1 <br />Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `parameters` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Parameters contains native AISimulate input. Field names and nesting use<br />the upstream AISimulate JSON contract, including snake_case names. |  | Type: object <br />Optional: \{\} <br /> |
 

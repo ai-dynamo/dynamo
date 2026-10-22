@@ -185,7 +185,7 @@ type ObjectiveSpec struct {
 // AISimulateSpec selects the AISimulate execution artifact and supplies native input.
 type AISimulateSpec struct {
 	// Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
-	// persists the operator's configured image.
+	// persists the configured override or a version-matched Dynamo planner image.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image,omitempty"`

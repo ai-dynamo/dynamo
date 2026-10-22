@@ -4531,7 +4531,7 @@ AISimulateSpec selects the AISimulate execution artifact and supplies native inp
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="image" type="string">
-Image selects a Dynamo-compatible AISimulate runner. When omitted, admission persists the operator's configured image.
+Image selects a Dynamo-compatible AISimulate runner. When omitted, admission persists the configured override or a version-matched Dynamo planner image.
 **Validation:** MinLength: 1  Optional: \&#123;\&#125;
 </ParamField>
 

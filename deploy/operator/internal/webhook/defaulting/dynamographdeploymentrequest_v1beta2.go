@@ -95,7 +95,7 @@ func defaultDynamoGraphDeploymentRequestV1beta2(
 type dynamoGraphDeploymentRequestV1beta2DefaultOptions struct {
 	// hardware is the GPU identity and budget discovered from the cluster.
 	hardware hardwareDefaultsV1beta2
-	// aisimulateImage is the operator's configured AISimulate image.
+	// aisimulateImage is the operator's resolved AISimulate image.
 	aisimulateImage string
 }
 

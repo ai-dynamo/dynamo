@@ -57,9 +57,8 @@ type HardwareDiscoverer interface {
 
 // DGDRV1beta2Options configures the defaults of v1beta2 Requests.
 type DGDRV1beta2Options struct {
-	// AISimulateImage is the operator's AISimulate runner image, persisted into
-	// spec.aisimulate.image when the caller omits it. Empty persists nothing, and
-	// validation then requires the image to be spelled out.
+	// AISimulateImage overrides the version-matched Dynamo planner image persisted
+	// into spec.aisimulate.image when the caller omits it.
 	AISimulateImage string
 	// Hardware discovers the cluster's GPUs. Nil disables hardware defaulting, and
 	// validation then requires the hardware to be spelled out.

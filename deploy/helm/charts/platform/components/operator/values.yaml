@@ -116,7 +116,7 @@ controllerManager:
     # releases.
     dgdrDefaultImage: ""
     # AISimulate runner image put into v1beta2 DGDR spec.aisimulate.image when unset.
-    # Empty leaves it unset, and v1beta2 Requests without an image are rejected.
+    # Empty derives nvcr.io/nvidia/ai-dynamo/dynamo-planner:<operator-version>.
     dgdrAISimulateDefaultImage: ""
     resources:
       limits:
