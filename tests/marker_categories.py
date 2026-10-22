@@ -9,9 +9,7 @@ none. Keeping one definition means the default and the gate cannot drift apart.
 """
 
 REQUIRED_CATEGORIES: dict[str, frozenset[str]] = {
-    "Lifecycle": frozenset(
-        {"pre_merge", "post_merge", "nightly", "weekly", "release", "manual"}
-    ),
+    "Lifecycle": frozenset({"pre_merge", "post_merge", "nightly", "weekly", "release"}),
     "Test Type": frozenset(
         {
             "unit",
