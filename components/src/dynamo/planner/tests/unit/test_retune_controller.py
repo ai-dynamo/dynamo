@@ -832,18 +832,21 @@ async def test_planner_rollback_reverts_an_applied_change(sweeps):
 # ---------------------------------------------------------------------------
 
 
+# Engines are built inside the test: _engine() calls the native bindings, which
+# test collection (e.g. the pytest marker report hook) may stub out.
 @pytest.mark.parametrize(
-    ("engine", "match"),
+    ("engine_args", "engine_kwargs", "match"),
     [
-        (_engine(router_mode="round_robin"), "kv_router"),
-        (_engine(router_policy_config={"name": "custom"}), "default router policy"),
-        (_engine(overlap_score_weight=2.0), "overlap_score_weight"),
-        (_engine(conditional_disagg_enabled=True), "conditional disaggregation"),
-        (_engine("disagg"), "prefill_engine_args"),
+        ((), {"router_mode": "round_robin"}, "kv_router"),
+        ((), {"router_policy_config": {"name": "custom"}}, "default router policy"),
+        ((), {"overlap_score_weight": 2.0}, "overlap_score_weight"),
+        ((), {"conditional_disagg_enabled": True}, "conditional disaggregation"),
+        (("disagg",), {}, "prefill_engine_args"),
     ],
     ids=["round-robin", "custom-policy", "overlap-weight", "cond-disagg", "e5"],
 )
-def test_router_domain_engine_requirements(engine, match):
+def test_router_domain_engine_requirements(engine_args, engine_kwargs, match):
+    engine = _engine(*engine_args, **engine_kwargs)
     with pytest.raises(ValueError, match=match):
         _controller(_s1(), engine=engine)
 

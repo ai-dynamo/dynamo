@@ -638,6 +638,10 @@ def test_presweep_warms_history_without_forecasting(monkeypatch):
 # 17-26 s measured on a loaded 24-core host, mostly Prophet fits; contended
 # CI runners (arm64) fit Prophet slower.
 @pytest.mark.timeout(120)
+# Prophet/pandas emit this on newer NumPy; CI turns warnings into errors.
+@pytest.mark.filterwarnings(
+    "ignore:The 'generic' unit for NumPy timedelta is deprecated:DeprecationWarning"
+)
 def test_presweep_ranking_matches_evaluate_preset():
     _predictors_module()
     from dynamo.planner.simulation.load_predictor import (
