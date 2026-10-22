@@ -6,6 +6,7 @@
 use std::{future::Future, sync::Arc};
 
 use dynamo_runtime::{
+    error::{DynamoError, ErrorClass},
     pipeline::{AsyncEngineContext, AsyncEngineContextProvider, ManyOut, ResponseStream},
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -22,35 +23,43 @@ use crate::protocols::{
 /// Prefill's last `engine_data`.
 pub(super) type PrefillOutput = Option<serde_json::Value>;
 
-// Bound the prefill-first reorder buffer when the prefill stream stalls.
-const MAX_PENDING_DECODE_OUTPUTS: usize = 64;
-
 /// Dropping the observer detaches the task: client disconnects must not abort a
 /// prefill whose KV transfer may still be needed by the decode worker.
 pub(super) struct PrefillTask(JoinHandle<Result<PrefillOutput, PrefillError>>);
 
-/// Decode failure makes the paired prefill unnecessary. Signal its independent
-/// context, leaving the background task alive to drain the response and clean up.
+/// Admission refusal makes the paired prefill unnecessary. Other failures may
+/// leave a decode receiver needing KV, so preserve the independent prefill task.
 pub(super) fn cancel_prefill_on_decode_error(
     prefill_context: Arc<dyn AsyncEngineContext>,
     decode_result: anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>>,
 ) -> anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> {
-    let response = decode_result.inspect_err(|_| prefill_context.stop_generating())?;
+    let response = decode_result.inspect_err(|error| {
+        if decode_rejected(error.as_ref()) {
+            prefill_context.stop_generating();
+        }
+    })?;
     let context = response.context();
     let stream = response.inspect(move |output| {
-        if output.err().is_some()
-            || matches!(
-                output
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.finish_reason.as_ref()),
-                Some(FinishReason::Error(_) | FinishReason::Cancelled)
-            )
-        {
+        if output.err().is_some_and(|error| decode_rejected(&error)) {
             prefill_context.stop_generating();
         }
     });
     Ok(ResponseStream::new(Box::pin(stream), context))
+}
+
+fn decode_rejected(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if error
+            .downcast_ref::<DynamoError>()
+            .is_some_and(|error| error.class() == ErrorClass::CapacityExhausted)
+        {
+            return true;
+        }
+        match error.source() {
+            Some(source) => error = source,
+            None => return false,
+        }
+    }
 }
 
 /// Prefill's output as a stream item tagged with [`PREFILL_OUTPUT_ANNOTATION`].
@@ -149,7 +158,6 @@ impl PrefillTask {
         let context = response.context();
         let stream_context = context.clone();
         let stream = async_stream::stream! {
-            let mut buffered = Vec::new();
             loop {
                 tokio::select! {
                     biased;
@@ -164,9 +172,6 @@ impl PrefillTask {
                                 yield Annotated::from_err(error);
                                 return;
                             }
-                        }
-                        for output in buffered.drain(..) {
-                            yield output;
                         }
                         while let Some(output) = response.next().await {
                             yield output;
@@ -186,7 +191,9 @@ impl PrefillTask {
                         let terminal = output.as_ref().is_none_or(|output| {
                             output.data.as_ref().is_some_and(|data| data.finish_reason.is_some())
                         });
-                        if terminal {
+                        // Admission refusals precede decode data. Hold at most one
+                        // ordinary item while waiting for prefill-first metadata.
+                        if terminal || prefill_first {
                             match completion.as_mut().await {
                                 Ok(prefill) => if emit && let Some(item) = output_item(prefill) {
                                     yield item;
@@ -199,27 +206,17 @@ impl PrefillTask {
                                 }
                             }
                         }
-                        if terminal {
-                            for output in buffered.drain(..) {
-                                yield output;
-                            }
-                        }
                         match output {
-                            Some(item) if prefill_first && !terminal => {
-                                if buffered.len() == MAX_PENDING_DECODE_OUTPUTS {
-                                    request_context.stop_generating();
-                                    stream_context.stop_generating();
-                                    yield Annotated::from_error(
-                                        "Prefill output did not arrive before the decode buffer filled"
-                                    );
-                                    return;
-                                }
-                                buffered.push(item);
-                            },
                             Some(item) => yield item,
                             None => return,
                         }
                         if terminal {
+                            return;
+                        }
+                        if prefill_first {
+                            while let Some(item) = response.next().await {
+                                yield item;
+                            }
                             return;
                         }
                     }
@@ -235,6 +232,7 @@ mod tests {
     use super::*;
     use dynamo_runtime::pipeline::context::Controller;
     use futures::{FutureExt, stream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::oneshot;
 
     fn pending_prefill() -> (
@@ -254,12 +252,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decode_failures_stop_paired_prefill_and_preserve_the_error() {
+    async fn ambiguous_decode_failures_preserve_prefill_and_the_error() {
         for observe in [false, true] {
             for kind in ["dispatch", "annotation", "error", "cancelled"] {
                 let request = Arc::new(Controller::default());
                 let prefill = Arc::new(Controller::default());
                 let (tx, task) = pending_prefill();
+                if kind == "cancelled" {
+                    request.stop_generating();
+                }
                 let reason = match kind {
                     "error" => Some(FinishReason::Error("decode failed".into())),
                     "cancelled" => Some(FinishReason::Cancelled),
@@ -312,8 +313,53 @@ mod tests {
                         assert_eq!(data.finish_reason, reason);
                     }
                 }
-                assert!(prefill.is_stopped(), "{kind}, observer={observe}");
+                assert!(!prefill.is_stopped(), "{kind}, observer={observe}");
                 assert!(!prefill.is_killed());
+                assert_eq!(request.is_stopped(), kind == "cancelled");
+                tx.send(Ok(None)).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn decode_admission_refusals_stop_prefill_before_its_output() {
+        for (mode, class) in [
+            (PrefillNeed::None, ErrorClass::CapacityExhausted),
+            (PrefillNeed::BeforeLast, ErrorClass::WorkerOverloaded),
+            (PrefillNeed::BeforeFirst, ErrorClass::ResourceExhausted),
+        ] {
+            for streamed in [false, true] {
+                let request = Arc::new(Controller::default());
+                let prefill = Arc::new(Controller::default());
+                let (tx, task) = pending_prefill();
+                let error = DynamoError::builder()
+                    .class(class)
+                    .message("decode refused")
+                    .build();
+                let decode: anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> = if streamed {
+                    Ok(ResponseStream::new(
+                        Box::pin(stream::iter([Annotated::from_err(error)])),
+                        request.clone(),
+                    ))
+                } else {
+                    Err(anyhow::Error::new(error).context("dispatch"))
+                };
+                let result = task
+                    .forward_decode(async { decode }, request.clone(), mode)
+                    .await;
+                let result = cancel_prefill_on_decode_error(prefill.clone(), result);
+                if streamed {
+                    let item = result
+                        .unwrap()
+                        .next()
+                        .now_or_never()
+                        .expect("do not wait for prefill")
+                        .unwrap();
+                    assert_eq!(item.err().unwrap().class(), ErrorClass::CapacityExhausted);
+                } else {
+                    assert!(format!("{:#}", result.unwrap_err()).contains("decode refused"));
+                }
+                assert!(prefill.is_stopped());
                 assert!(!request.is_stopped());
                 tx.send(Ok(None)).unwrap();
             }
@@ -321,36 +367,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn before_first_decode_failure_or_overflow_stops_prefill() {
-        for (count, error) in [
-            (MAX_PENDING_DECODE_OUTPUTS, "decode failed"),
-            (MAX_PENDING_DECODE_OUTPUTS + 1, "decode buffer filled"),
-        ] {
-            let request = Arc::new(Controller::default());
-            let prefill = Arc::new(Controller::default());
-            let (tx, task) = pending_prefill();
-            let items = std::iter::repeat_with(|| Annotated::from_data(LLMEngineOutput::default()))
-                .take(count)
-                .chain([Annotated::from_error("decode failed")]);
-            let decode: ManyOut<Annotated<LLMEngineOutput>> =
-                ResponseStream::new(Box::pin(stream::iter(items)), request.clone());
-            let result = task
-                .forward_decode(
-                    async { Ok(decode) },
-                    request.clone(),
-                    PrefillNeed::BeforeFirst,
-                )
-                .await;
-            let mut response = cancel_prefill_on_decode_error(prefill.clone(), result).unwrap();
-            let item = tokio::time::timeout(std::time::Duration::from_secs(1), response.next())
-                .await
-                .expect("do not wait for prefill")
-                .unwrap();
-            assert!(item.err().unwrap().to_string().contains(error));
-            assert!(prefill.is_stopped());
-            assert_eq!(request.is_stopped(), count > MAX_PENDING_DECODE_OUTPUTS);
-            tx.send(Ok(None)).unwrap();
-        }
+    async fn before_first_keeps_decode_backpressure_until_prefill_completes() {
+        let request = Arc::new(Controller::default());
+        let prefill = Arc::new(Controller::default());
+        let (tx, task) = pending_prefill();
+        let polled = Arc::new(AtomicUsize::new(0));
+        let count = polled.clone();
+        let items = stream::iter(0..65).map(move |_| {
+            count.fetch_add(1, Ordering::Relaxed);
+            Annotated::from_data(LLMEngineOutput::default())
+        });
+        let decode: ManyOut<Annotated<LLMEngineOutput>> =
+            ResponseStream::new(Box::pin(items), request.clone());
+        let result = task
+            .forward_decode(
+                async { Ok(decode) },
+                request.clone(),
+                PrefillNeed::BeforeFirst,
+            )
+            .await;
+        let mut response = cancel_prefill_on_decode_error(prefill.clone(), result).unwrap();
+        assert!(response.next().now_or_never().is_none());
+        assert_eq!(polled.load(Ordering::Relaxed), 1);
+        assert!(!prefill.is_stopped());
+        assert!(!request.is_stopped());
+        tx.send(Ok(Some(serde_json::json!({"prompt_logprobs": []}))))
+            .unwrap();
+        assert_eq!(
+            response.next().await.unwrap().event.as_deref(),
+            Some(PREFILL_OUTPUT_ANNOTATION)
+        );
+        assert_eq!(response.count().await, 65);
     }
 
     #[tokio::test]
@@ -369,7 +416,13 @@ mod tests {
         });
         let result = task
             .forward_decode(
-                async { Err(anyhow::anyhow!("decode failed")) },
+                async {
+                    Err(DynamoError::builder()
+                        .class(ErrorClass::CapacityExhausted)
+                        .message("decode refused")
+                        .build()
+                        .into())
+                },
                 Arc::new(Controller::default()),
                 PrefillNeed::None,
             )
