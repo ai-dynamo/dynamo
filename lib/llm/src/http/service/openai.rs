@@ -7075,6 +7075,53 @@ mod tests {
                 "client response must not include the underlying engine message"
             );
         }
+
+        // A worker's refusal as the request plane delivers it — decoded from
+        // its prologue, then the cause of a pre-stream `CannotConnect` — is the
+        // same rejected overload whether it is the whole worker's or one DP
+        // rank's.
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let delivered_refusal = |error_type: ErrorType| -> anyhow::Error {
+            let refusal = DynamoError::builder()
+                .error_type(error_type)
+                .message("Server overloaded")
+                .build();
+            let delivered: DynamoError =
+                serde_json::from_value(serde_json::to_value(refusal).unwrap()).unwrap();
+            pre_stream_failure_error(StreamPrologueError::new("Server overloaded", delivered))
+                .into()
+        };
+        for error_type in [
+            ErrorType::WorkerOverloaded,
+            ErrorType::WorkerRankOverloaded(4),
+        ] {
+            let err = delivered_refusal(error_type);
+            assert!(
+                crate::http::service::metrics::request_was_rejected(err.as_ref()),
+                "{error_type:?}"
+            );
+            let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+            assert_eq!(response.0.as_u16(), 529, "{error_type:?}");
+            assert_eq!(response.1.error_type, "Overloaded");
+        }
+
+        // A rank's refusal as the last failure recorded, as the routing host
+        // records it, for a request migration has no untried worker left for:
+        // the exhaustion error is an overload too.
+        let migration = crate::protocols::common::preprocessor::MigrationState::default();
+        migration.record_failure(
+            7,
+            delivered_refusal(ErrorType::WorkerRankOverloaded(4))
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned()),
+        );
+        let exhausted = migration.exhausted_error().expect("a failure was recorded");
+        assert_eq!(exhausted.error_type(), ErrorType::ResourceExhausted);
+        let response = ErrorMessage::from_anyhow(anyhow::anyhow!(exhausted), BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(response.1.error_type, "Overloaded");
     }
 
     #[test]
@@ -9188,6 +9235,10 @@ mod tests {
             ),
             (DynamoErrorType::ResourceExhausted, ErrorType::Overload),
             (DynamoErrorType::WorkerOverloaded, ErrorType::Overload),
+            (
+                DynamoErrorType::WorkerRankOverloaded(4),
+                ErrorType::Overload,
+            ),
             (DynamoErrorType::Unavailable, ErrorType::Unavailable),
             (DynamoErrorType::WorkerUnavailable, ErrorType::Unavailable),
             (DynamoErrorType::InvalidArgument, ErrorType::Validation),

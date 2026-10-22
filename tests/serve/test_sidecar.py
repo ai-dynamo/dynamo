@@ -26,8 +26,6 @@ from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import (
     chat_logprobs_and_structured_output_payloads,
-    chat_payload_default,
-    disaggregated_chat_payload,
     disaggregated_kv_routing_payload,
     disaggregated_token_count_payload,
     http_cancellation_payloads,
@@ -228,6 +226,7 @@ sidecar_configs = {
         marks=[
             pytest.mark.trtllm,
             pytest.mark.gpu_1,
+            pytest.mark.requested_trtllm_kv_tokens(4096),
             pytest.mark.timeout(780),
             pytest.mark.post_merge,
             pytest.mark.skipif(
@@ -242,8 +241,11 @@ sidecar_configs = {
             "TLLM_ALLOW_N_GREEDY_DECODING": "1",
             "PYTHONUNBUFFERED": "1",
         },
+        # The Dynamo TensorRT-LLM sidecar does not support prompt logprobs yet.
         request_payloads=[
-            chat_payload_default(),
+            *chat_logprobs_and_structured_output_payloads(prompt_logprobs=None),
+            # Public disconnect/recovery only: no native scheduler observations.
+            *http_cancellation_payloads(None, max_tokens=CANCELLATION_MAX_TOKENS),
         ],
     ),
     "trtllm_disaggregated": SidecarConfig(
@@ -291,7 +293,7 @@ sidecar_configs = {
             "PRTE_ALLOW_RUN_AS_ROOT": "1",
             "PRTE_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
         },
-        request_payloads=[disaggregated_chat_payload()],
+        request_payloads=[disaggregated_token_count_payload(logprobs=True)],
     ),
     "vllm_disaggregated": SidecarConfig(
         name="vllm_disaggregated",
