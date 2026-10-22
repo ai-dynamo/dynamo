@@ -1259,6 +1259,7 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: sglang and (gpu_1 or gpu_2) and not sidecar
       gpu_test_timeout_minutes: 240
+      job_timeout_minutes: 180
       # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '80'
@@ -1338,6 +1339,7 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: trtllm and (gpu_1 or gpu_2) and not sidecar
       gpu_test_timeout_minutes: 240
+      job_timeout_minutes: 180
       # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '80'
