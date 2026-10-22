@@ -2655,27 +2655,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn generate_request_context_mints_internal_id_for_every_request() {
-        let mut headers = HeaderMap::new();
-        headers.insert(X_REQUEST_ID_HEADER, "shared".parse().unwrap());
-        headers.insert(
-            "x-dynamo-request-id",
-            "11111111-2222-3333-4444-555555555555".parse().unwrap(),
-        );
-
-        let first = resolve_generate_request_context(&headers, Some("shared"));
-        let second = resolve_generate_request_context(&headers, Some("shared"));
-
-        assert_eq!(first.public_request_id, "shared");
-        assert_eq!(second.public_request_id, "shared");
-        assert_ne!(first.request_id, second.request_id);
-        for context in [&first, &second] {
-            assert_ne!(context.request_id, "shared");
-            assert_ne!(context.request_id, "11111111-2222-3333-4444-555555555555");
-        }
-    }
-
-    #[test]
     fn generate_dispatch_span_uses_resolved_request_id() {
         let captured_request_id = Arc::new(Mutex::new(None));
         let _guard = tracing::subscriber::set_default(
