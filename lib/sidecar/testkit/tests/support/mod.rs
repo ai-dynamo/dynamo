@@ -14,6 +14,7 @@ use dynamo_sidecar_testkit::fixtures::Outputs;
 
 pub mod lpx;
 pub mod sglang;
+pub mod topology;
 pub mod trtllm;
 pub mod vllm;
 

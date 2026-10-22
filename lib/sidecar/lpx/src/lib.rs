@@ -9,6 +9,9 @@
 //! runs prefill and the engine pulls its KV cache over NIXL. An LPU-only
 //! engine serves aggregated requests. When one engine spans several Pods,
 //! only the sidecar on rank 0 serves; the others stand by.
+//!
+//! Independently of serving, the sidecar can take an LPX partition-topology
+//! role: see [`topology`].
 
 mod args;
 mod client;
@@ -16,6 +19,7 @@ mod convert;
 mod engine;
 mod handoff;
 mod model;
+mod run;
 mod standby;
 pub mod topology;
 
@@ -29,6 +33,7 @@ pub mod topology;
 pub(crate) use dynamo_trtllm_sidecar::proto as pb;
 
 pub use engine::{Launch, LpxSidecarEngine};
+pub use run::{Topology, run};
 pub use standby::run_standby;
 
 #[cfg(test)]

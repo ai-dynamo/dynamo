@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::path::PathBuf;
-use std::process::{Child, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 pub type Router = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
-use crate::support::ProcessFixture;
+use crate::support::{ProcessFixture, sidecar_command};
 
 pub struct Environment {
     root: TempDir,
@@ -71,6 +71,33 @@ impl Environment {
             namespace,
             runtime,
         }
+    }
+
+    /// A path in the environment's scratch directory.
+    pub fn path(&self, name: &str) -> PathBuf {
+        self.root.path().join(name)
+    }
+
+    /// Every endpoint registered in the namespace, as `component/endpoint`.
+    pub async fn endpoints(&self) -> Vec<String> {
+        let mut endpoints: Vec<String> = self
+            .runtime
+            .discovery()
+            .list(DiscoveryQuery::NamespacedEndpoints {
+                namespace: self.namespace.clone(),
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|instance| match instance {
+                DiscoveryInstance::Endpoint(instance) => {
+                    format!("{}/{}", instance.component, instance.endpoint)
+                }
+                other => panic!("not an endpoint: {other:?}"),
+            })
+            .collect();
+        endpoints.sort();
+        endpoints
     }
 
     pub fn endpoint(&self, component: &str) -> Endpoint {
@@ -155,7 +182,7 @@ impl Environment {
         mode: DisaggregationMode,
         deadline: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, deadline, false, 0)
+        Process::spawn::<F>(self, endpoint, mode, deadline, false, 0, None, &[])
     }
 
     pub fn spawn_with_grace<F: ProcessFixture>(
@@ -163,7 +190,7 @@ impl Environment {
         endpoint: &str,
         mode: DisaggregationMode,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, 5, false, 1)
+        Process::spawn::<F>(self, endpoint, mode, 5, false, 1, None, &[])
     }
 
     pub fn spawn_env<F: ProcessFixture>(
@@ -172,8 +199,42 @@ impl Environment {
         mode: DisaggregationMode,
         deadline: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, deadline, true, 0)
+        Process::spawn::<F>(self, endpoint, mode, deadline, true, 0, None, &[])
     }
+
+    /// An aggregated worker named `name`, with `extra` arguments.
+    pub fn spawn_named<F: ProcessFixture>(
+        &self,
+        name: &str,
+        endpoint: &str,
+        deadline: u64,
+        extra: &[&str],
+    ) -> Process {
+        let mode = DisaggregationMode::Aggregated;
+        Process::spawn::<F>(self, endpoint, mode, deadline, false, 0, Some(name), extra)
+    }
+
+    /// An LPX sidecar named `name` that runs only a topology role, with
+    /// `args` and `envs`: no engine, no model path.
+    pub fn spawn_topology(&self, name: &str, args: &[&str], envs: &[(&str, &str)]) -> Process {
+        let mut command = scrubbed(sidecar_command("dynamo-lpx-sidecar", "DYNAMO_LPX_SIDECAR"));
+        command.args(args).envs(envs.iter().copied());
+        Process::start(self, name, command, 0)
+    }
+}
+
+/// `command` without the Dynamo, NATS and etcd settings of the test process.
+fn scrubbed(mut command: Command) -> Command {
+    for (key, _) in std::env::vars_os() {
+        let key_text = key.to_string_lossy();
+        if key_text.starts_with("DYN_")
+            || key_text.starts_with("NATS_")
+            || key_text.starts_with("ETCD_")
+        {
+            command.env_remove(key);
+        }
+    }
+    command
 }
 
 impl Drop for Environment {
@@ -275,6 +336,7 @@ pub struct Process {
 }
 
 impl Process {
+    #[allow(clippy::too_many_arguments)]
     fn spawn<F: ProcessFixture>(
         env: &Environment,
         endpoint: &str,
@@ -282,31 +344,43 @@ impl Process {
         deadline: u64,
         from_env: bool,
         grace_secs: u64,
+        name: Option<&str>,
+        extra: &[&str],
     ) -> Self {
-        use std::os::unix::process::CommandExt;
         let role = match mode {
             DisaggregationMode::Aggregated => "agg",
             DisaggregationMode::Prefill => "prefill",
             DisaggregationMode::Decode => "decode",
             DisaggregationMode::Encode => "encode",
         };
-        let stdout = env.root.path().join(format!("{role}.stdout"));
-        let stderr = env.root.path().join(format!("{role}.stderr"));
-        let mut command = F::command(&env.model);
-        for (key, _) in std::env::vars_os() {
-            let key_text = key.to_string_lossy();
-            if key_text.starts_with("DYN_")
-                || key_text.starts_with("NATS_")
-                || key_text.starts_with("ETCD_")
-            {
-                command.env_remove(key);
-            }
-        }
+        let mut command = scrubbed(F::command(&env.model));
         if from_env {
             command.env("DYN_SIDECAR_GRPC_ENDPOINT", endpoint);
         } else {
             command.args(["--grpc-endpoint", endpoint]);
         }
+        command
+            .args([
+                "--grpc-connections",
+                "1",
+                "--grpc-connect-attempt-timeout-secs",
+                "1",
+                "--grpc-startup-deadline-secs",
+                &deadline.to_string(),
+                "--component",
+                "backend",
+                "--disaggregation-mode",
+                role,
+            ])
+            .args(extra);
+        Self::start(env, name.unwrap_or(role), command, grace_secs)
+    }
+
+    /// Starts `command` against the environment's discovery and transports.
+    fn start(env: &Environment, name: &str, mut command: Command, grace_secs: u64) -> Self {
+        use std::os::unix::process::CommandExt;
+        let stdout = env.root.path().join(format!("{name}.stdout"));
+        let stderr = env.root.path().join(format!("{name}.stderr"));
         #[cfg(target_os = "linux")]
         {
             let parent_pid = std::process::id() as libc::pid_t;
@@ -325,18 +399,8 @@ impl Process {
         }
         let child = command
             .args([
-                "--grpc-connections",
-                "1",
-                "--grpc-connect-attempt-timeout-secs",
-                "1",
-                "--grpc-startup-deadline-secs",
-                &deadline.to_string(),
                 "--namespace",
                 &env.namespace,
-                "--component",
-                "backend",
-                "--disaggregation-mode",
-                role,
                 "--discovery-backend",
                 "file",
                 "--request-plane",

@@ -36,6 +36,7 @@ use envelope::{RelayRequest, RelayResponse};
 use identity::{
     allocation_prefix, check_expected, check_identity, endpoint_name, require_expected,
 };
+pub(crate) use socket::check_socket_path;
 use validate::check_snapshot;
 
 /// The Dynamo component of every topology endpoint. Never a model component,

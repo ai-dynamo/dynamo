@@ -12,7 +12,7 @@ use dynamo_backend_common::{
 };
 use dynamo_runtime::metrics::prometheus_names::labels;
 
-use crate::args::Args;
+use crate::args::ServeArgs;
 use crate::client::{UNIDENTIFIED_PEER, invalid_argument};
 use crate::pb;
 
@@ -167,7 +167,7 @@ impl DiscoveredEngine {
 
     /// The model path stays the tokenizer source; the served name is left to
     /// `EngineConfig`, which carries the engine's, and labels the metrics.
-    pub(crate) fn worker_config(&self, args: Args) -> WorkerConfig {
+    pub(crate) fn worker_config(&self, args: ServeArgs) -> WorkerConfig {
         let common = args.sidecar.common;
         let mode = common.disaggregation_mode;
         WorkerConfig {

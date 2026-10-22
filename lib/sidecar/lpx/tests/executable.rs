@@ -3,7 +3,8 @@
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::process::Command;
+use std::os::unix::net::UnixListener;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn sidecar() -> Command {
@@ -126,6 +127,33 @@ fn wait_for_log(child: &mut Sidecar, logs: &std::path::Path, message: &str) -> s
 /// arguments rank 0 would take, and with ones rank 0 would reject.
 #[test]
 fn a_nonzero_node_rank_stands_by() {
+    stands_by(&[]);
+}
+
+/// The topology publisher runs beside the Agent allocation's leader only. On
+/// any other rank it stands by and never asks its Agent.
+#[test]
+fn a_publisher_on_a_nonzero_rank_stands_by() {
+    let dir = tempfile::tempdir().expect("socket directory");
+    let agent = dir.path().join("agent.sock");
+    let listener = UnixListener::bind(&agent).expect("bind the Agent socket");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking Agent listener");
+    let agent = agent.to_str().expect("UTF-8 path");
+    stands_by(&[
+        "--topology-role",
+        "publisher",
+        "--topology-agent-socket",
+        agent,
+    ]);
+    match listener.accept() {
+        Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+        accepted => panic!("a standby publisher asked its Agent: {accepted:?}"),
+    }
+}
+
+fn stands_by(extra: &[&str]) {
     // The engine, etcd and NATS all point at one listener that no one may dial.
     let peer = TcpListener::bind("127.0.0.1:0").expect("bind the peer listener");
     peer.set_nonblocking(true)
@@ -134,6 +162,7 @@ fn a_nonzero_node_rank_stands_by() {
     let logs = tempfile::NamedTempFile::new().expect("log file");
     let mut child = Sidecar(
         sidecar()
+            .args(extra)
             .args([
                 "--grpc-endpoint",
                 &format!("http://{peer_address}"),
@@ -229,4 +258,191 @@ fn an_empty_node_rank_fails() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--node-rank"), "{stderr}");
+}
+
+/// Serving inference needs the engine and the tokenizer source, with or
+/// without the topology consumer beside it.
+#[test]
+fn serving_needs_an_engine_endpoint_and_a_model_path() {
+    for (args, missing) in [
+        (&["--model-path", "model-source"][..], "--grpc-endpoint"),
+        (
+            &["--grpc-endpoint", "http://127.0.0.1:1"][..],
+            "--model-path",
+        ),
+        (
+            &[
+                "--model-path",
+                "model-source",
+                "--topology-role",
+                "consumer",
+            ][..],
+            "--grpc-endpoint",
+        ),
+    ] {
+        let output = sidecar()
+            .args(args)
+            .env("ETCD_ENDPOINTS", "://invalid")
+            .output()
+            .expect("run the sidecar");
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(missing), "{args:?}: {stderr}");
+    }
+}
+
+/// An unusable topology role or socket fails before anything starts.
+#[test]
+fn invalid_topology_arguments_fail_at_startup() {
+    let long = format!("/{}", "d".repeat(107));
+    for (args, envs, expect) in [
+        (
+            &["--topology-role", "observer"][..],
+            &[][..],
+            "--topology-role",
+        ),
+        (
+            &["--topology-role", "consumer"][..],
+            &[("DYN_LPX_TOPOLOGY_SOCKET", "topology.sock")][..],
+            "must be absolute",
+        ),
+        (
+            &[
+                "--topology-role",
+                "publisher",
+                "--topology-agent-socket",
+                &long,
+            ][..],
+            &[][..],
+            "must be absolute",
+        ),
+    ] {
+        let output = sidecar()
+            .args(args)
+            .envs(envs.iter().copied())
+            .output()
+            .expect("run the sidecar");
+        assert_eq!(output.status.code(), Some(2), "{args:?} {envs:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expect), "{args:?} {envs:?}: {stderr}");
+    }
+}
+
+/// Beside the Agent allocation's leader, the publisher alone runs: it needs
+/// neither an engine endpoint nor a model path, keeps asking an Agent that
+/// is not listening yet, answers its probes meanwhile, and stops cleanly.
+#[test]
+fn a_publisher_runs_without_an_engine_until_sigterm() {
+    let dir = tempfile::tempdir().expect("scratch directory");
+    let logs = dir.path().join("sidecar.log");
+    let mut child = Sidecar(
+        sidecar()
+            .args(["--namespace", "lpx-topology-executable"])
+            .args(["--discovery-backend", "file", "--request-plane", "tcp"])
+            .args(["--event-plane", "zmq"])
+            .env("DYN_LPX_TOPOLOGY_ROLE", "publisher")
+            .env(
+                "DYN_LPX_TOPOLOGY_AGENT_SOCKET",
+                dir.path().join("agent.sock"),
+            )
+            .env("DYN_FILE_KV", dir.path().join("discovery"))
+            .env("DYN_SYSTEM_HOST", "127.0.0.1")
+            .env("DYN_SYSTEM_PORT", "0")
+            .env("DYN_LOG", "info")
+            .env("DYN_LOGGING_CONSOLE_FORMAT", "jsonl")
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&logs).expect("log file"))
+            .spawn()
+            .expect("start the sidecar"),
+    );
+    let event = wait_for_log(&mut child, &logs, "System HTTP listener started");
+    let address: SocketAddr = event["address"]
+        .as_str()
+        .and_then(|address| address.parse().ok())
+        .unwrap_or_else(|| panic!("no bound address in {event}"));
+    let waiting = wait_for_log(
+        &mut child,
+        &logs,
+        "Waiting for the Agent's first LPX topology snapshot",
+    );
+    let error = waiting["error"].as_str().unwrap_or_default();
+    // The log escapes the apostrophe of "the Agent's".
+    let unreachable = format!(
+        "topology socket {} is unreachable",
+        dir.path().join("agent.sock").display()
+    );
+    assert!(
+        error.contains(&unreachable) && error.contains("No such file or directory"),
+        "{waiting}"
+    );
+    assert_eq!(get(address, "/live").0, 200);
+
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &child.0.id().to_string()])
+            .status()
+            .expect("run kill")
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().expect("poll the sidecar") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "SIGTERM did not stop the publisher"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(status.success(), "publisher shutdown failed: {status}");
+}
+
+/// A consumer on a rank that serves no inference runs only the local topology
+/// API, so failing to serve it fails the process. It leaves what holds the
+/// socket path alone.
+#[test]
+fn a_consumer_on_a_nonzero_rank_fails_when_its_socket_is_taken() {
+    let dir = tempfile::tempdir().expect("scratch directory");
+    let socket = dir.path().join("topology.sock");
+    std::fs::write(&socket, b"not a socket").expect("a regular file at the socket path");
+    let logs = dir.path().join("sidecar.log");
+    let mut child = Sidecar(
+        sidecar()
+            .args(["--namespace", "lpx-topology-executable"])
+            .args(["--discovery-backend", "file", "--request-plane", "tcp"])
+            .args(["--event-plane", "zmq"])
+            .args(["--node-rank", "1", "--topology-role", "consumer"])
+            .arg("--topology-socket")
+            .arg(&socket)
+            .env("DYN_FILE_KV", dir.path().join("discovery"))
+            .env("DYN_SYSTEM_HOST", "127.0.0.1")
+            .env("DYN_SYSTEM_PORT", "0")
+            .env("DYN_LOG", "info")
+            .env("DYN_LOGGING_CONSOLE_FORMAT", "jsonl")
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&logs).expect("log file"))
+            .spawn()
+            .expect("start the sidecar"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().expect("poll the sidecar") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the consumer kept running without its socket: {}",
+            std::fs::read_to_string(&logs).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let log = std::fs::read_to_string(&logs).expect("read the sidecar log");
+    // Not 0, and not 2, which is a command-line error.
+    assert!(
+        !status.success() && status.code() != Some(2),
+        "{status}: {log}"
+    );
+    assert!(log.contains("is not a socket"), "{log}");
+    assert_eq!(std::fs::read(&socket).unwrap(), b"not a socket");
 }

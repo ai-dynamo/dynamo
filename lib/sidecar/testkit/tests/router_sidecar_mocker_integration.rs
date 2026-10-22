@@ -28,6 +28,9 @@ mod process;
 mod support;
 
 use process::{Environment, Frontend, Gate, outputs};
+use support::topology::{
+    Agent, ENDPOINT_0, acquire, ask, assert_status, identity, serving, snapshot,
+};
 use support::{
     DiscoveryFixture, FixtureConfig, HandoffFixture, ProcessFixture, Rejection, SidecarFixture,
     lpx, sglang, vllm,
@@ -1383,6 +1386,581 @@ async fn vllm_lpx_prefill_router_preserves_handoff_failure_and_cancellation() {
         Duration::from_secs(60),
         prefill_router_preserves_handoff_failure_and_cancellation::<vllm::Fixture, lpx::Fixture>(),
     )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+fn path_arg(path: &std::path::Path) -> &str {
+    path.to_str().expect("a UTF-8 test path")
+}
+
+/// Starts the publisher beside the Agent whose topology socket is `agent`.
+fn spawn_publisher(env: &Environment, name: &str, agent: &std::path::Path) -> process::Process {
+    env.spawn_topology(
+        name,
+        &[
+            "--topology-role",
+            "publisher",
+            "--topology-agent-socket",
+            path_arg(agent),
+        ],
+        &[],
+    )
+}
+
+/// Starts a consumer on a conductor rank that serves no inference.
+fn spawn_consumer(env: &Environment, socket: &std::path::Path) -> process::Process {
+    env.spawn_topology(
+        "consumer",
+        &[
+            "--node-rank",
+            "1",
+            "--topology-role",
+            "consumer",
+            "--topology-socket",
+            path_arg(socket),
+        ],
+        &[],
+    )
+}
+
+/// The instances registered as the authority of [`identity`]`(0)`.
+async fn authorities_0(env: &Environment) -> Vec<u64> {
+    env.runtime
+        .discovery()
+        .list(dynamo_runtime::discovery::DiscoveryQuery::Endpoint {
+            namespace: env.namespace.clone(),
+            component: "lpx-topology".to_string(),
+            endpoint: ENDPOINT_0.to_string(),
+        })
+        .await
+        .unwrap()
+        .iter()
+        .map(|instance| instance.instance_id())
+        .collect()
+}
+
+/// Waits until `count` authorities of [`identity`]`(0)` are registered.
+async fn registered_0(env: &Environment, count: usize) -> Vec<u64> {
+    bounded("the authorities' registrations", async {
+        loop {
+            let authorities = authorities_0(env).await;
+            if authorities.len() == count {
+                break authorities;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+}
+
+async fn withdrawn_topology(env: &Environment) {
+    bounded("topology endpoint withdrawal", async {
+        while !env.endpoints().await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+}
+
+/// The publisher beside an Agent allocation's leader and a consumer on a
+/// conductor rank that serves no inference relay the Agent's live answers,
+/// register nothing but the allocation's topology endpoint, and stop cleanly.
+#[tokio::test]
+async fn lpx_topology_publisher_and_consumer_relay_live_snapshots() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let env = Environment::new().await;
+        let agent = Agent::start(env.path("agent.sock"), snapshot(identity(0), 19877)).await;
+        let mut publisher = spawn_publisher(&env, "publisher", &agent.socket);
+        let socket = env.path("topology.sock");
+        let mut consumer = env.spawn_topology(
+            "consumer",
+            &[
+                "--node-rank",
+                "1",
+                "--topology-role",
+                "consumer",
+                "--topology-socket",
+                path_arg(&socket),
+            ],
+            &[],
+        );
+        assert_eq!(
+            acquire(&socket, identity(0)).await.unwrap(),
+            snapshot(identity(0), 19877)
+        );
+
+        // No model card, no inference endpoint, and nothing from the consumer.
+        assert_eq!(
+            env.endpoints().await,
+            [format!("lpx-topology/{ENDPOINT_0}")]
+        );
+        assert!(env.cards().await.is_empty());
+        assert!(
+            env.runtime
+                .discovery()
+                .list(dynamo_runtime::discovery::DiscoveryQuery::AllModels)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Every answer is the Agent's, live.
+        let calls = agent.calls();
+        assert_eq!(
+            ask(&socket, Some(identity(0))).await.unwrap(),
+            snapshot(identity(0), 19877)
+        );
+        assert_eq!(agent.calls(), calls + 1);
+        agent.answer(snapshot(identity(0), 19878));
+        assert_eq!(
+            ask(&socket, Some(identity(0))).await.unwrap(),
+            snapshot(identity(0), 19878)
+        );
+        assert_eq!(agent.calls(), calls + 2);
+
+        // A request the consumer cannot scope never reaches the Agent; a
+        // broken answer fails at once.
+        let partial = dynamo_lpx_sidecar::topology::proto::Identity {
+            build: String::new(),
+            ..identity(0)
+        };
+        assert_status(
+            ask(&socket, Some(partial)).await,
+            tonic::Code::InvalidArgument,
+            "build",
+        );
+        assert_eq!(agent.calls(), calls + 2);
+        let mut invalid = snapshot(identity(0), 19877);
+        invalid.partitions.clear();
+        agent.answer_unchecked(invalid);
+        assert_status(
+            ask(&socket, Some(identity(0))).await,
+            tonic::Code::FailedPrecondition,
+            "partitions",
+        );
+        agent.answer_unchecked(snapshot(identity(1), 19877));
+        assert_status(
+            ask(&socket, Some(identity(0))).await,
+            tonic::Code::FailedPrecondition,
+            "allocation",
+        );
+        // The consumer reads each relayed answer to its end, so the request
+        // plane records completed requests rather than dropped ones.
+        let logs = consumer.logs();
+        assert!(
+            logs.contains("route request completed") && !logs.contains("route request cancelled"),
+            "{logs}"
+        );
+
+        consumer.shutdown().await;
+        assert!(!socket.exists(), "the consumer removes its socket");
+        publisher.shutdown().await;
+        withdrawn_topology(&env).await;
+        agent.shutdown().await;
+    })
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// A card without the URLs its worker serves the model's files at, which
+/// are the worker's own.
+fn card_contents(card: &dynamo_llm::model_card::ModelDeploymentCard) -> Value {
+    let mut card = serde_json::to_value(card).unwrap();
+    for artifact in ["model_info", "tokenizer", "prompt_formatter"] {
+        for file in card[artifact]
+            .as_object_mut()
+            .into_iter()
+            .flat_map(|files| files.values_mut())
+        {
+            file.as_object_mut().unwrap().remove("path");
+        }
+    }
+    card
+}
+
+/// A conductor needs topology to become ready, so the consumer beside a
+/// serving conductor answers while the engine bootstrap still waits for the
+/// engine. The topology role leaves the worker's model card unchanged.
+#[tokio::test]
+async fn lpx_topology_consumer_answers_before_the_engine_is_ready() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let env = Environment::new().await;
+        let control = Controller::default();
+        let mut peer = lpx::Fixture::start(
+            control.clone(),
+            FixtureConfig {
+                model: env.model.clone(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let agent = Agent::start(env.path("agent.sock"), snapshot(identity(0), 19877)).await;
+        let mut publisher = spawn_publisher(&env, "publisher", &agent.socket);
+        let mut gate = Gate::new(&peer.endpoint()).await;
+        let socket = env.path("topology.sock");
+        let mut conductor = env.spawn_named::<lpx::Fixture>(
+            "conductor",
+            &gate.endpoint,
+            30,
+            &[
+                "--topology-role",
+                "consumer",
+                "--topology-socket",
+                path_arg(&socket),
+            ],
+        );
+        gate.accepted().await;
+        assert_eq!(
+            acquire(&socket, identity(0)).await.unwrap(),
+            snapshot(identity(0), 19877)
+        );
+        assert!(env.cards().await.is_empty());
+        assert!(env.registrations("backend").await.is_empty());
+        gate.release();
+        let router = env.ready("backend").await;
+        healthy::<lpx::Fixture>(&env, &router, &control, "after-topology").await;
+
+        let mut plain = env.spawn_named::<lpx::Fixture>("plain", &peer.endpoint(), 5, &[]);
+        let cards = bounded("both workers' model cards", async {
+            loop {
+                let cards = env.cards().await;
+                if cards.len() == 2 {
+                    break cards;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert_eq!(cards[0].mdcsum(), cards[1].mdcsum());
+        assert_eq!(card_contents(&cards[0]), card_contents(&cards[1]));
+
+        plain.shutdown().await;
+        conductor.shutdown().await;
+        assert!(
+            !socket.exists(),
+            "the conductor's sidecar removes its socket"
+        );
+        publisher.shutdown().await;
+        agent.shutdown().await;
+        gate.shutdown().await;
+        peer.shutdown().await;
+    })
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// Without an authority for the expected identity, or when more than one of
+/// its authorities answers OK, the consumer answers UNAVAILABLE, which a
+/// conductor retries.
+#[tokio::test]
+async fn lpx_topology_without_exactly_one_answering_authority_is_unavailable() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let env = Environment::new().await;
+        let socket = env.path("topology.sock");
+        let mut consumer = spawn_consumer(&env, &socket);
+        serving(&socket).await;
+        assert_status(
+            ask(&socket, Some(identity(0))).await,
+            tonic::Code::Unavailable,
+            "no topology authority",
+        );
+
+        let first = Agent::start(env.path("agent-a.sock"), snapshot(identity(0), 19877)).await;
+        let second = Agent::start(env.path("agent-b.sock"), snapshot(identity(0), 19877)).await;
+        let mut publisher_a = spawn_publisher(&env, "publisher-a", &first.socket);
+        let mut publisher_b = spawn_publisher(&env, "publisher-b", &second.socket);
+        registered_0(&env, 2).await;
+        let (calls_a, calls_b) = (first.calls(), second.calls());
+        assert_status(
+            ask(&socket, Some(identity(0))).await,
+            tonic::Code::Unavailable,
+            "2 topology authorities",
+        );
+        assert_eq!(
+            (first.calls(), second.calls()),
+            (calls_a + 1, calls_b + 1),
+            "both are asked"
+        );
+
+        // Once one withdraws, the other is the only authority.
+        publisher_b.shutdown().await;
+        assert_eq!(
+            acquire(&socket, identity(0)).await.unwrap(),
+            snapshot(identity(0), 19877)
+        );
+
+        consumer.shutdown().await;
+        publisher_a.shutdown().await;
+        first.shutdown().await;
+        second.shutdown().await;
+    })
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// A leader that is shutting down answers UNAVAILABLE while its replacement
+/// registers beside it, and the consumer answers with the replacement's
+/// snapshot at once.
+#[tokio::test]
+async fn lpx_topology_a_terminating_leader_never_hides_its_replacement() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let env = Environment::new().await;
+        let old = Agent::start(env.path("agent-old.sock"), snapshot(identity(0), 19877)).await;
+        let mut publisher_old = spawn_publisher(&env, "publisher-old", &old.socket);
+        let socket = env.path("topology.sock");
+        let mut consumer = spawn_consumer(&env, &socket);
+        assert_eq!(
+            acquire(&socket, identity(0)).await.unwrap(),
+            snapshot(identity(0), 19877)
+        );
+
+        old.answer_status(tonic::Code::Unavailable, "shutting down");
+        let new = Agent::start(env.path("agent-new.sock"), snapshot(identity(0), 29877)).await;
+        let mut publisher_new = spawn_publisher(&env, "publisher-new", &new.socket);
+        registered_0(&env, 2).await;
+        let calls = old.calls();
+        assert_eq!(
+            ask(&socket, Some(identity(0))).await.unwrap(),
+            snapshot(identity(0), 29877)
+        );
+        assert_eq!(old.calls(), calls + 1, "the old leader is asked too");
+
+        consumer.shutdown().await;
+        publisher_old.shutdown().await;
+        publisher_new.shutdown().await;
+        old.shutdown().await;
+        new.shutdown().await;
+    })
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// A crashed publisher's registration outlives it until discovery expires
+/// it. Its replacement's snapshot is the answer at once, while the stale
+/// registration is still listed.
+#[tokio::test]
+async fn lpx_topology_a_crashed_publisher_never_hides_its_replacement() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let env = Environment::new().await;
+        let old = Agent::start(env.path("agent-old.sock"), snapshot(identity(0), 19877)).await;
+        let mut publisher_old = spawn_publisher(&env, "publisher-old", &old.socket);
+        let socket = env.path("topology.sock");
+        let mut consumer = spawn_consumer(&env, &socket);
+        assert_eq!(
+            acquire(&socket, identity(0)).await.unwrap(),
+            snapshot(identity(0), 19877)
+        );
+        let stale = registered_0(&env, 1).await;
+
+        publisher_old.signal(libc::SIGKILL);
+        publisher_old.exit().await;
+        old.shutdown().await;
+        let new = Agent::start(env.path("agent-new.sock"), snapshot(identity(0), 29877)).await;
+        let mut publisher_new = spawn_publisher(&env, "publisher-new", &new.socket);
+        let both = registered_0(&env, 2).await;
+        assert!(both.contains(&stale[0]), "{both:?} lacks {stale:?}");
+        assert_eq!(
+            ask(&socket, Some(identity(0))).await.unwrap(),
+            snapshot(identity(0), 29877)
+        );
+        assert!(
+            authorities_0(&env).await.contains(&stale[0]),
+            "the stale registration has not expired yet"
+        );
+
+        consumer.shutdown().await;
+        publisher_new.shutdown().await;
+        new.shutdown().await;
+    })
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// A conductor that expects another build than the allocation's authority
+/// serves fails at once, without asking the Agent, instead of retrying until
+/// its deadline. One that expects the served build gets the snapshot.
+#[tokio::test]
+async fn lpx_topology_a_conductor_of_another_build_fails_at_once() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let env = Environment::new().await;
+        let agent = Agent::start(env.path("agent.sock"), snapshot(identity(0), 19877)).await;
+        let mut publisher = spawn_publisher(&env, "publisher", &agent.socket);
+        let socket = env.path("topology.sock");
+        let mut consumer = spawn_consumer(&env, &socket);
+        registered_0(&env, 1).await;
+
+        let other_build = dynamo_lpx_sidecar::topology::proto::Identity {
+            build: "main/llama3_2-1b-lpx-lp20/0ther0000".to_string(),
+            ..identity(0)
+        };
+        let calls = agent.calls();
+        let status = acquire(&socket, other_build)
+            .await
+            .expect_err("another build");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{status:?}");
+        for needle in ["another build", "main/llama3_2-1b-lpx-lp20/0ther0000"] {
+            assert!(status.message().contains(needle), "{status:?}");
+        }
+        assert_eq!(agent.calls(), calls, "the Agent is not asked");
+        assert_eq!(
+            acquire(&socket, identity(0)).await.unwrap(),
+            snapshot(identity(0), 19877)
+        );
+
+        consumer.shutdown().await;
+        publisher.shutdown().await;
+        agent.shutdown().await;
+    })
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// Concurrent allocations of one deployment and build each have their own
+/// authority, and a conductor only ever sees its own allocation's topology.
+#[tokio::test]
+async fn lpx_topology_allocations_are_isolated() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let env = Environment::new().await;
+        let old = Agent::start(env.path("agent-0.sock"), snapshot(identity(0), 19877)).await;
+        let new = Agent::start(env.path("agent-1.sock"), snapshot(identity(1), 29877)).await;
+        let mut publisher_old = spawn_publisher(&env, "publisher-0", &old.socket);
+        let mut publisher_new = spawn_publisher(&env, "publisher-1", &new.socket);
+        let socket = env.path("topology.sock");
+        // The launcher's environment variables, as the operator sets them.
+        let mut consumer = env.spawn_topology(
+            "consumer",
+            &[],
+            &[
+                ("DYN_SIDECAR_NODE_RANK", "2"),
+                ("DYN_LPX_TOPOLOGY_ROLE", "consumer"),
+                ("DYN_LPX_TOPOLOGY_SOCKET", path_arg(&socket)),
+            ],
+        );
+        assert_eq!(
+            acquire(&socket, identity(0)).await.unwrap(),
+            snapshot(identity(0), 19877)
+        );
+        assert_eq!(
+            acquire(&socket, identity(1)).await.unwrap(),
+            snapshot(identity(1), 29877)
+        );
+        assert_status(
+            ask(&socket, Some(identity(2))).await,
+            tonic::Code::Unavailable,
+            "no topology authority",
+        );
+
+        consumer.shutdown().await;
+        publisher_old.shutdown().await;
+        publisher_new.shutdown().await;
+        old.shutdown().await;
+        new.shutdown().await;
+    })
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// A conductor's topology role that cannot start never stops it from serving
+/// inference: the sidecar registers, serves, leaves what holds the socket
+/// path alone, and still shuts down cleanly.
+#[tokio::test]
+async fn lpx_inference_is_served_when_the_topology_role_fails() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let env = Environment::new().await;
+        let control = Controller::default();
+        let mut peer = lpx::Fixture::start(
+            control.clone(),
+            FixtureConfig {
+                model: env.model.clone(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let socket = env.path("topology.sock");
+        std::fs::write(&socket, b"not a socket").unwrap();
+        let mut conductor = env.spawn_named::<lpx::Fixture>(
+            "conductor",
+            &peer.endpoint(),
+            5,
+            &[
+                "--topology-role",
+                "consumer",
+                "--topology-socket",
+                path_arg(&socket),
+            ],
+        );
+        bounded("the topology role to fail", async {
+            while !conductor.logs().contains("is not a socket") {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+
+        let router = env.ready("backend").await;
+        healthy::<lpx::Fixture>(&env, &router, &control, "without-topology").await;
+        assert!(conductor.is_running());
+        assert_eq!(std::fs::read(&socket).unwrap(), b"not a socket");
+
+        conductor.shutdown().await;
+        env.withdrawn("backend", &router).await;
+        peer.shutdown().await;
+    })
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// Losing the topology authority leaves a serving conductor's inference
+/// untouched; only new topology requests are UNAVAILABLE.
+#[tokio::test]
+async fn lpx_inference_continues_when_the_topology_authority_disappears() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let env = Environment::new().await;
+        let control = Controller::default();
+        let mut peer = lpx::Fixture::start(
+            control.clone(),
+            FixtureConfig {
+                model: env.model.clone(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let agent = Agent::start(env.path("agent.sock"), snapshot(identity(0), 19877)).await;
+        let mut publisher = spawn_publisher(&env, "publisher", &agent.socket);
+        let socket = env.path("topology.sock");
+        let mut conductor = env.spawn_named::<lpx::Fixture>(
+            "conductor",
+            &peer.endpoint(),
+            5,
+            &[
+                "--topology-role",
+                "consumer",
+                "--topology-socket",
+                path_arg(&socket),
+            ],
+        );
+        let router = env.ready("backend").await;
+        assert_eq!(
+            acquire(&socket, identity(0)).await.unwrap(),
+            snapshot(identity(0), 19877)
+        );
+        healthy::<lpx::Fixture>(&env, &router, &control, "with-authority").await;
+
+        publisher.signal(libc::SIGKILL);
+        publisher.exit().await;
+        agent.shutdown().await;
+        assert_status(
+            ask(&socket, Some(identity(0))).await,
+            tonic::Code::Unavailable,
+            "topology authority",
+        );
+        healthy::<lpx::Fixture>(&env, &router, &control, "without-authority").await;
+        assert!(conductor.is_running());
+
+        conductor.shutdown().await;
+        env.withdrawn("backend", &router).await;
+        peer.shutdown().await;
+    })
     .await
     .expect("process scenario exceeded its overall deadline");
 }

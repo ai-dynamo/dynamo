@@ -19,21 +19,31 @@ use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
-use crate::args::Args;
+use crate::args::{Args, ServeArgs, TopologyRole};
 use crate::client::{self, OpenEngineClient, engine_shutdown, invalid_argument};
 use crate::convert::{
     DispatchFailure, ResponseState, build_generate_request, build_handoff_cleanup_request,
     dispatch_failure, stream_status, trace_headers,
 };
 use crate::model::{DiscoveredEngine, engine_label, expected_role, role_name};
+use crate::run::Topology;
+use crate::topology::Role;
 
 const ALREADY_STARTED: &str = "the LPX sidecar has already started";
 
-/// What the sidecar executable runs, chosen from its arguments.
+/// What the sidecar executable runs, chosen from its arguments; [`crate::run`]
+/// runs each.
 pub enum Launch<S> {
     /// Serve the engine with the runtime settings and engine bootstrap that
     /// [`dynamo_sidecar_common::run`] takes.
     Serve(S),
+    /// Serve the engine as [`Launch::Serve`] does, with a topology consumer
+    /// that starts before the engine bootstrap waits for the engine: a
+    /// conductor needs topology to become ready.
+    ServeWithTopology(S, Topology),
+    /// Only a topology role, with no engine: the publisher beside the Agent
+    /// allocation's leader, or a consumer on a rank that serves no engine.
+    Topology(Topology),
     /// Stand by as this rank of a multi-Pod engine, through
     /// [`crate::run_standby`]; only rank 0 serves.
     Standby(NonZeroU32),
@@ -79,10 +89,11 @@ impl LpxSidecarEngine {
         }
     }
 
-    /// Parses the process arguments. A nonzero `--node-rank` selects standby;
-    /// only rank 0 serves the engine. On rank 0, engine discovery runs once
-    /// the shared sidecar runner has started its probes and connected the
-    /// runtime.
+    /// Parses the process arguments. A nonzero `--node-rank` selects standby,
+    /// unless the sidecar is a topology consumer; only rank 0 serves the
+    /// engine or publishes topology, and a publisher serves no engine. On
+    /// rank 0, engine discovery runs once the sidecar runner has started its
+    /// probes and connected the runtime. A CLI error exits the process.
     pub fn from_cli() -> Result<
         Launch<(
             RuntimeConfig,
@@ -90,7 +101,10 @@ impl LpxSidecarEngine {
         )>,
         DynamoError,
     > {
-        Self::launch(<Args as clap::Parser>::parse())
+        match Self::launch(<Args as clap::Parser>::parse()) {
+            Err(SidecarStartupError::Cli(error)) => error.exit(),
+            launch => launch.map_err(SidecarStartupError::into_dynamo),
+        }
     }
 
     fn launch(
@@ -100,23 +114,48 @@ impl LpxSidecarEngine {
             RuntimeConfig,
             impl std::future::Future<Output = EngineBootstrapResult<Self>> + Send,
         )>,
-        DynamoError,
+        SidecarStartupError,
     > {
-        // Decided before any other argument is checked, so a standby never
-        // depends on the serving configuration.
-        if let Some(rank) = NonZeroU32::new(args.node_rank) {
-            return Ok(Launch::Standby(rank));
+        let rank = NonZeroU32::new(args.node_rank);
+        let consumer = || {
+            Topology::new(
+                &args.common,
+                Role::Consumer {
+                    socket: args.topology.socket.clone(),
+                },
+            )
+        };
+        // Decided before any serving argument is checked, so neither a
+        // standby nor a topology role alone depends on the serving
+        // configuration.
+        match (args.topology.role, rank) {
+            (None | Some(TopologyRole::Publisher), Some(rank)) => {
+                return Ok(Launch::Standby(rank));
+            }
+            (Some(TopologyRole::Publisher), None) => {
+                return Ok(Launch::Topology(Topology::new(
+                    &args.common,
+                    Role::Publisher {
+                        agent_socket: args.topology.agent_socket.clone(),
+                    },
+                )));
+            }
+            (Some(TopologyRole::Consumer), Some(_)) => return Ok(Launch::Topology(consumer())),
+            (None | Some(TopologyRole::Consumer), None) => {}
         }
+        let topology = (args.topology.role == Some(TopologyRole::Consumer)).then(consumer);
+        let args = args.serve()?;
         validate_args(&args)?;
-        Ok(Launch::Serve((
-            args.sidecar.common.runtime.clone(),
-            discover(args),
-        )))
+        let serve = (args.sidecar.common.runtime.clone(), discover(args));
+        Ok(match topology {
+            None => Launch::Serve(serve),
+            Some(topology) => Launch::ServeWithTopology(serve, topology),
+        })
     }
 
     /// Parses `argv` as the executable does, but only serves: a nonzero
-    /// `--node-rank`, which the executable runs as a standby, is refused.
-    /// Discovery runs when the returned future is polled.
+    /// `--node-rank`, which the executable runs as a standby, and a topology
+    /// role are refused. Discovery runs when the returned future is polled.
     pub fn try_from_args_async(
         argv: Vec<String>,
     ) -> Result<
@@ -128,6 +167,10 @@ impl LpxSidecarEngine {
     > {
         match Self::launch(<Args as clap::Parser>::try_parse_from(argv)?)? {
             Launch::Serve(serve) => Ok(serve),
+            Launch::ServeWithTopology(..) | Launch::Topology(_) => Err(invalid_argument(
+                "a topology role is supported only by the dynamo-lpx-sidecar executable",
+            )
+            .into()),
             Launch::Standby(rank) => Err(invalid_argument(format!(
                 "node-rank {rank} stands by, which only the dynamo-lpx-sidecar executable supports"
             ))
@@ -144,7 +187,7 @@ impl LpxSidecarEngine {
 
 /// Rejects what this sidecar cannot serve before any runtime starts. The
 /// engine is not known yet; its role is checked once it answers.
-fn validate_args(args: &Args) -> Result<(), DynamoError> {
+fn validate_args(args: &ServeArgs) -> Result<(), DynamoError> {
     if args.model_path.trim().is_empty() {
         return Err(invalid_argument("model-path must not be empty"));
     }
@@ -164,7 +207,7 @@ fn validate_args(args: &Args) -> Result<(), DynamoError> {
 ///
 /// It holds one probe connection through the wait and drops it here; `start`
 /// opens the configured pool, named after the identified engine.
-async fn discover(args: Args) -> Result<(LpxSidecarEngine, WorkerConfig), DynamoError> {
+async fn discover(args: ServeArgs) -> Result<(LpxSidecarEngine, WorkerConfig), DynamoError> {
     let endpoint = args.sidecar.grpc_endpoint.clone();
     let transport = args.sidecar.grpc.config();
     let mode = args.sidecar.common.disaggregation_mode;
