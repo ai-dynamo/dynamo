@@ -577,21 +577,19 @@ def _get_registration_mooncake_runtime_data(
         logging.warning("Invalid Mooncake static runtime metadata; disabling L3 lookup")
         return None
     if layout is not None:
-        if (
-            metadata is None
-            or not all(
-                type(metadata[key]) is int and 0 < metadata[key] <= 2**32 - 1
-                for key in ("page_size", "tp_size", "pp_size")
-            )
-            or (
-                metadata["tp_lcm_size"] is not None
-                and not 0 < metadata["tp_lcm_size"] <= 2**32 - 1
-            )
+        if metadata is None or not all(
+            type(metadata[key]) is int and 0 < metadata[key] <= 2**32 - 1
+            for key in ("page_size", "tp_size", "pp_size")
         ):
             logging.warning(
                 "HiCache layout/static metadata mismatch; disabling L3 lookup"
             )
             return None
+        tp_lcm_size = metadata["tp_lcm_size"]
+        if tp_lcm_size is not None and not 0 < tp_lcm_size <= 2**32 - 1:
+            # The advertised layout never reads it, so drop it instead of L3.
+            logging.warning("Ignoring out-of-range Mooncake tp_lcm_size")
+            metadata["tp_lcm_size"] = None
         # Keep legacy fields, including is_mla_model. Physical pools are
         # authoritative even for DSV4's non-MLA model config.
         metadata["hicache_object_layout"] = layout

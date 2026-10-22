@@ -33,6 +33,8 @@ use crate::protocol::{
 };
 
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+/// Same variable `register.py` reads; takes precedence over the extra config.
+const MOONCAKE_KV_EVENTS_ENDPOINT_ENV: &str = "DYN_MOONCAKE_KV_EVENTS_ENDPOINT";
 
 pub struct SglangSidecarEngine {
     endpoint: GrpcEndpoint,
@@ -1073,7 +1075,14 @@ fn hicache_native_offloading_capacity(server_info: &Value, model_info: &Value) -
 }
 
 /// Build only advertised L3 metadata; absent/disabled layouts never guess keys.
-fn mooncake_runtime_data(server_info: &Value) -> Option<Value> {
+///
+/// Unlike `register.py`, there is no static-metadata fallback: engines without a
+/// layout envelope, and layouts SGLang cannot describe (MHA, incomplete PP stages),
+/// publish nothing, so L3 lookup stays off for those workers.
+fn mooncake_runtime_data(
+    server_info: &Value,
+    env_kv_events_endpoint: Option<&str>,
+) -> Option<Value> {
     let envelope = server_info.get("hicache_object_layout")?;
     if envelope.get("enabled").and_then(Value::as_bool) == Some(false) {
         tracing::debug!("SGLang HiCache is disabled; disabling L3 lookup");
@@ -1179,30 +1188,48 @@ fn mooncake_runtime_data(server_info: &Value) -> Option<Value> {
                 .filter(|size| *size > 0)
                 .ok_or("server_info.tp_size")?,
         };
+        // Like register.py, an unreadable extra config (bad JSON, an `@file` reference,
+        // wrong type) is ignored: the layout carries everything the router needs.
         let extra = match server_info.get("hicache_storage_backend_extra_config") {
             None | Some(Value::Null) => serde_json::json!({}),
             Some(Value::String(raw)) => serde_json::from_str::<Value>(raw)
                 .ok()
                 .filter(Value::is_object)
-                .ok_or("server_info.hicache_storage_backend_extra_config")?,
+                .unwrap_or_else(|| {
+                    tracing::warn!("Ignoring unreadable hicache_storage_backend_extra_config");
+                    serde_json::json!({})
+                }),
             Some(value) if value.is_object() => value.clone(),
-            Some(_) => return Err("server_info.hicache_storage_backend_extra_config"),
+            Some(_) => {
+                tracing::warn!("Ignoring unreadable hicache_storage_backend_extra_config");
+                serde_json::json!({})
+            }
         };
         let tp_lcm_size = match extra.get("tp_lcm_size") {
             None | Some(Value::Null) => None,
-            Some(_) => Some(
-                client::json_u32(&extra, "tp_lcm_size")
-                    .filter(|size| *size > 0)
-                    .ok_or("hicache_storage_backend_extra_config.tp_lcm_size")?,
-            ),
+            Some(_) => {
+                let size = client::json_u32(&extra, "tp_lcm_size").filter(|size| *size > 0);
+                if size.is_none() {
+                    tracing::warn!("Ignoring invalid Mooncake tp_lcm_size");
+                }
+                size
+            }
         };
+        let kv_events_endpoint = env_kv_events_endpoint
+            .filter(|endpoint| !endpoint.is_empty())
+            .map(str::to_string)
+            .or_else(|| discovery_string(&extra, "kv_events_endpoint"));
         Ok(serde_json::json!({
-            "backend": "mooncake", "page_size": page_size, "tp_size": tp_size,
-            "pp_size": pp_size, "is_mla_model": is_mla_backend,
-            "is_eagle": sglang_eagle_enabled(server_info), "tp_lcm_size": tp_lcm_size,
+            "backend": "mooncake",
+            "page_size": page_size,
+            "tp_size": tp_size,
+            "pp_size": pp_size,
+            "is_mla_model": is_mla_backend,
+            "is_eagle": sglang_eagle_enabled(server_info),
+            "tp_lcm_size": tp_lcm_size,
             "should_split_heads": false,
             "extra_backend_tag": discovery_string(&extra, "extra_backend_tag"),
-            "kv_events_endpoint": discovery_string(&extra, "kv_events_endpoint"),
+            "kv_events_endpoint": kv_events_endpoint,
             "hicache_object_layout": layout,
         }))
     })();
@@ -1283,7 +1310,10 @@ fn build_engine_config(
         );
     }
 
-    if let Some(metadata) = mooncake_runtime_data(&discovery.server_info) {
+    let env_kv_events_endpoint = std::env::var(MOONCAKE_KV_EVENTS_ENDPOINT_ENV).ok();
+    if let Some(metadata) =
+        mooncake_runtime_data(&discovery.server_info, env_kv_events_endpoint.as_deref())
+    {
         runtime_data.insert("sglang_hicache_mooncake".to_string(), metadata);
     }
 
@@ -1322,7 +1352,8 @@ mod tests {
         Args, DisaggregationMode, DiscoveredKvEventSource, Discovery, EngineConfig,
         SglangSidecarEngine, build_engine_config, combined_token_limit, discover_kv_event_sources,
         discovery_bootstrap_port, hicache_native_offloading_capacity, kv_event_connect_host,
-        omitted_max_tokens_default, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
+        mooncake_runtime_data, omitted_max_tokens_default, resolve_bootstrap_host_with_local,
+        sglang_eagle_enabled,
     };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
@@ -1998,23 +2029,7 @@ mod tests {
         null_window["hicache_object_layout"]["hicache_object_layout"]["pools"][1]["trailing_pages"] =
             json!(null);
         cases.push(null_window);
-        for (field, value) in [
-            ("tp_size", json!(0)),
-            ("pp_size", json!(2)),
-            (
-                "hicache_storage_backend_extra_config",
-                json!("private-invalid-json"),
-            ),
-            ("hicache_storage_backend_extra_config", json!([1])),
-            (
-                "hicache_storage_backend_extra_config",
-                json!({"tp_lcm_size": 0}),
-            ),
-            (
-                "hicache_storage_backend_extra_config",
-                json!({"tp_lcm_size": u64::from(u32::MAX) + 1}),
-            ),
-        ] {
+        for (field, value) in [("tp_size", json!(0)), ("pp_size", json!(2))] {
             let mut info = mooncake_server_info();
             info[field] = value;
             cases.push(info);
@@ -2026,6 +2041,49 @@ mod tests {
             assert!(!config.runtime_data.contains_key("sglang_hicache_mooncake"));
             assert_eq!(config.llm.unwrap().total_kv_blocks, Some(64));
         }
+    }
+
+    #[test]
+    fn unreadable_extra_config_does_not_disable_the_layout() {
+        for extra in [
+            json!("@/private/mooncake.json"),
+            json!("private-invalid-json"),
+            json!([1]),
+            json!({"tp_lcm_size": 0}),
+            json!({"tp_lcm_size": u64::from(u32::MAX) + 1}),
+        ] {
+            let mut info = mooncake_server_info();
+            info["hicache_storage_backend_extra_config"] = extra.clone();
+            let metadata = mooncake_runtime_data(&info, None)
+                .unwrap_or_else(|| panic!("layout dropped for {extra}"));
+            assert_eq!(metadata["tp_lcm_size"], json!(null));
+            assert_eq!(metadata["kv_events_endpoint"], json!(null));
+            assert_eq!(
+                metadata["hicache_object_layout"],
+                info["hicache_object_layout"]["hicache_object_layout"]
+            );
+        }
+    }
+
+    #[test]
+    fn env_kv_events_endpoint_wins_over_extra_config() {
+        let mut info = mooncake_server_info();
+        info["hicache_storage_backend_extra_config"] =
+            json!({"kv_events_endpoint": "ipc:///from-extra-config"});
+        for (env, expected) in [
+            (Some("tcp://from-env:1"), "tcp://from-env:1"),
+            (Some(""), "ipc:///from-extra-config"),
+            (None, "ipc:///from-extra-config"),
+        ] {
+            let metadata = mooncake_runtime_data(&info, env).unwrap();
+            assert_eq!(metadata["kv_events_endpoint"], expected);
+        }
+        let mut info = mooncake_server_info();
+        info.as_object_mut()
+            .unwrap()
+            .remove("hicache_storage_backend_extra_config");
+        let metadata = mooncake_runtime_data(&info, Some("tcp://from-env:1")).unwrap();
+        assert_eq!(metadata["kv_events_endpoint"], "tcp://from-env:1");
     }
 
     #[test]

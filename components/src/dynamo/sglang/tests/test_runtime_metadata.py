@@ -702,13 +702,19 @@ def test_registration_accepts_uint32_trailing_pages_limit(
 
 
 @pytest.mark.parametrize("tp_lcm_size", [0, 2**32])
-def test_registration_rejects_invalid_layout_tp_lcm_size(
-    mooncake_registration, tp_lcm_size
+def test_registration_ignores_invalid_tp_lcm_size_with_layout(
+    mooncake_registration, hicache_layout_envelope, tp_lcm_size
 ):
+    # The layout never reads tp_lcm_size, so a bad value must not disable L3.
     args = mooncake_registration.server_args
     args.hicache_storage_backend_extra_config["tp_lcm_size"] = tp_lcm_size
     config = mooncake_registration.run()
-    assert "sglang_hicache_mooncake" not in config.runtime_data
+    metadata = json.loads(config.runtime_data["sglang_hicache_mooncake"])
+    assert metadata["tp_lcm_size"] is None
+    assert (
+        metadata["hicache_object_layout"]
+        == hicache_layout_envelope["hicache_object_layout"]
+    )
 
 
 def test_registration_rejects_null_window_on_all_pages_pool(
