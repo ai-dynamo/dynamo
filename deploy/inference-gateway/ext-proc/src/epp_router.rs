@@ -74,6 +74,13 @@ impl RenderClient {
     }
 }
 
+fn cache_salt_forwarding(protocol: RendererProtocol) -> CacheSaltForwarding {
+    match protocol {
+        RendererProtocol::VllmRender => CacheSaltForwarding::NativeVllm,
+        RendererProtocol::SglangRenderer => CacheSaltForwarding::NativeSglang,
+    }
+}
+
 /// Standalone endpoint picker backed by the standalone selection service.
 pub struct EppRouter {
     renderer: RenderClient,
@@ -83,6 +90,7 @@ pub struct EppRouter {
     _adapter: TopologyAdapter,
     reflector_ready: Arc<AtomicBool>,
     model_name: String,
+    cache_salt_forwarding: CacheSaltForwarding,
     /// Bounds total concurrent in-flight `pick()`s. HTTP/2 stream multiplexing
     /// means the TCP-connection cap (`MAX_CONCURRENT_CONNECTIONS`) does NOT bound
     /// requests, so without this a burst could fan out unbounded tokenizer/render
@@ -138,6 +146,7 @@ impl EppRouter {
             _adapter: adapter,
             reflector_ready,
             model_name: cfg.model_name,
+            cache_salt_forwarding: cache_salt_forwarding(cfg.renderer_protocol),
             inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
         })
     }
@@ -414,8 +423,7 @@ impl EndpointPicker for EppRouter {
             // Worker re-tokenizes the forwarded request (llm-d parity); no inject.
             token_ids: None,
             cache_namespace,
-            // Native vLLM has no Dynamo handler to tag the salt; the EPP does.
-            cache_salt_forwarding: CacheSaltForwarding::NativeVllm,
+            cache_salt_forwarding: self.cache_salt_forwarding,
             // Booking id for the server's lifecycle callbacks (no shared map).
             reservation_id: Some(reservation_id),
             ..Default::default()
@@ -542,6 +550,18 @@ impl TokenizeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_salt_forwarding_maps_renderer_protocol() {
+        assert_eq!(
+            cache_salt_forwarding(RendererProtocol::VllmRender),
+            CacheSaltForwarding::NativeVllm
+        );
+        assert_eq!(
+            cache_salt_forwarding(RendererProtocol::SglangRenderer),
+            CacheSaltForwarding::NativeSglang
+        );
+    }
 
     #[test]
     fn requested_policy_class_uses_frontend_metadata_extraction() {
