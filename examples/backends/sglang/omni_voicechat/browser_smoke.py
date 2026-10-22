@@ -37,7 +37,7 @@ async def main(args):
         subtype="PCM_16",
     )
     errors, messages, packets, text = [], [], [], []
-    sockets = []
+    sockets, sent = [], []
 
     def frame(payload):
         event = json.loads(payload)
@@ -71,6 +71,7 @@ async def main(args):
         def connected(ws):
             sockets.append(ws.url)
             ws.on("framereceived", frame)
+            ws.on("framesent", lambda payload: sent.append(json.loads(payload)["type"]))
 
         page.on("websocket", connected)
         await page.goto(args.url)
@@ -112,6 +113,7 @@ async def main(args):
         await browser.close()
     summary = {
         "websocket_urls": sockets,
+        "sent_counts": {kind: sent.count(kind) for kind in sorted(set(sent))},
         "audio_chunks": len(packets),
         "text": "".join(text),
         "event_counts": {kind: messages.count(kind) for kind in sorted(set(messages))},
@@ -123,9 +125,10 @@ async def main(args):
     assert not errors, errors
     assert packets, "Browser received no audio"
     assert "".join(text).strip(), "Browser received no spoken text"
-    assert (
-        "sglang.input_audio.accepted" in messages
-    ), "Browser microphone audio was not accepted"
+    assert "input_audio_buffer.append" in sent, "Browser microphone sent no audio"
+    assert sockets and all(
+        url.endswith(":18898/v1/realtime") for url in sockets
+    ), sockets
     playback = meters.get("22050", {})
     assert playback.get("windows", 0) > 0, "No speaker-path samples observed"
     assert playback.get("invalid", 0) == 0, playback

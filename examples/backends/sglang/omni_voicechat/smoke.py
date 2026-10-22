@@ -59,11 +59,11 @@ async def replay(args):
             + "/v1/realtime"
         )
         async with session.ws_connect(url, max_msg_size=4 * 1024 * 1024) as ws:
-            backend = ws._response.headers.get("X-Dynamo-Backend")
-            assert backend, "Connection did not traverse the Dynamo demo gateway"
+            backend = None
+            input_acks = None
 
             async def receive():
-                nonlocal audio_during_input, output_rate
+                nonlocal audio_during_input, backend, input_acks
                 async for message in ws:
                     if message.type != aiohttp.WSMsgType.TEXT:
                         continue
@@ -76,13 +76,18 @@ async def replay(args):
                             {
                                 "type": "session.update",
                                 "event_id": "configure",
-                                "session": {"output_modalities": ["audio", "text"]},
+                                "session": {
+                                    "type": "realtime",
+                                    "model": "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B",
+                                    "output_modalities": ["audio"],
+                                },
                             }
                         )
                     elif kind == "session.updated":
-                        granted = event["session"]["sglang"]["granted"]
-                        assert granted["input_audio_format"]["rate"] == 16000, granted
-                        output_rate = granted["output_audio_format"]["rate"]
+                        assert (
+                            event["session"]["model"]
+                            == "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B"
+                        )
                         configured.set()
                     elif kind == "response.output_audio.delta":
                         packets.append(base64.b64decode(event["delta"]))
@@ -93,7 +98,11 @@ async def replay(args):
                         "response.output_audio_transcript.delta",
                     ):
                         text.append(event["delta"])
-                    elif kind == "sglang.input_audio.drained":
+                    elif kind == "response.done":
+                        metadata = event["response"]["metadata"]
+                        backend = metadata["dynamo_worker_id"]
+                        input_acks = int(metadata["input_acks"])
+                    elif kind == "input_audio_buffer.committed":
                         drained.set()
                     elif kind == "error":
                         raise RuntimeError(event)
@@ -133,7 +142,6 @@ async def replay(args):
                             "audio": base64.b64encode(
                                 pcm[offset : offset + 2560]
                             ).decode(),
-                            "sglang": {"seq": seq, "t_start_ms": seq * 80},
                         }
                     )
                     await asyncio.sleep(
@@ -141,10 +149,10 @@ async def replay(args):
                     )
                 input_finished = True
                 await ws.send_json(
-                    {"type": "sglang.input_audio.end", "event_id": "input-end"}
+                    {"type": "input_audio_buffer.commit", "event_id": "input-end"}
                 )
                 await wait_for(drained, 120)
-                await ws.send_json({"type": "session.close", "event_id": "close"})
+                await ws.close()
                 await asyncio.wait_for(receiver, 30)
             finally:
                 receiver.cancel()
@@ -154,7 +162,7 @@ async def replay(args):
     input_frames = len(caller) // 1280
     expected_samples = input_frames * output_rate * 80 // 1000
     assert len(reply) == expected_samples, (len(reply), expected_samples)
-    input_acks = sum(event["type"] == "sglang.input_audio.accepted" for event in events)
+    assert backend, "No Dynamo worker identity returned through the realtime engine"
     assert input_acks == input_frames, (input_acks, input_frames)
     rms = float(np.sqrt(np.mean((reply.astype(np.float32) / 32768) ** 2)))
     assert rms > 0.0001, f"Reply contains only silence: RMS={rms}"
@@ -192,7 +200,7 @@ async def replay(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", default="http://127.0.0.1:8080")
+    parser.add_argument("--url", default="http://127.0.0.1:18898")
     parser.add_argument("--audio", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seconds", type=float, default=0)

@@ -30,7 +30,8 @@ LABELS = {
     "purpose": "sglang-omni-duplex",
 }
 PYTHON_IMAGE = "python:3.12-slim-bookworm"
-INSTALL_GATEWAY = "pip install --disable-pip-version-check ai-dynamo-runtime==1.6.0 aiohttp==3.14.3 && exec python /demo/gateway.py "
+INSTALL_RUNTIME = "pip install --disable-pip-version-check ai-dynamo-runtime==1.6.0 aiohttp==3.14.3 && exec python /demo/worker.py"
+INSTALL_FRONTEND = "pip install --disable-pip-version-check ai-dynamo==1.6.0 uvloop && exec python -m dynamo.frontend --http-port 8080 --discovery-backend etcd --request-plane tcp --event-plane zmq"
 BOOTSTRAP = f"""#!/usr/bin/env bash
 set -euo pipefail
 git clone --filter=blob:none https://github.com/sgl-project/sglang-omni.git /workspace/omni
@@ -127,13 +128,13 @@ def manifests(args):
         ],
         volumes=[{"name": "data", "emptyDir": {}}],
     )
-    gateway = deployment(
-        "voicechat-gateway",
+    frontend = deployment(
+        "voicechat-frontend",
         [
             {
-                "name": "gateway",
+                "name": "frontend",
                 "image": PYTHON_IMAGE,
-                "command": ["bash", "-lc", INSTALL_GATEWAY + "gateway"],
+                "command": ["bash", "-lc", INSTALL_FRONTEND],
                 "env": common_env,
                 "volumeMounts": [code_mount],
                 "resources": runtime_resources,
@@ -142,7 +143,22 @@ def manifests(args):
                     "periodSeconds": 10,
                     "timeoutSeconds": 8,
                 },
-            }
+            },
+            {
+                "name": "web",
+                "image": PYTHON_IMAGE,
+                "command": [
+                    "bash",
+                    "-lc",
+                    "pip install --disable-pip-version-check aiohttp==3.14.3 && exec python /demo/web.py",
+                ],
+                "volumeMounts": [code_mount],
+                "resources": runtime_resources,
+                "readinessProbe": {
+                    "httpGet": {"path": "/health", "port": 8082},
+                    "timeoutSeconds": 8,
+                },
+            },
         ],
         volumes=[code_volume],
     )
@@ -186,7 +202,7 @@ def manifests(args):
     registrar = {
         "name": "dynamo-worker",
         "image": PYTHON_IMAGE,
-        "command": ["bash", "-lc", INSTALL_GATEWAY + "worker"],
+        "command": ["bash", "-lc", INSTALL_RUNTIME],
         "env": [*common_env, {"name": "OMNI_URL", "value": "http://$(POD_IP):8097"}],
         "volumeMounts": [code_mount],
         "resources": runtime_resources,
@@ -209,8 +225,8 @@ def manifests(args):
         spec=backend_spec,
     )
     for resource, files in (
-        (gateway, ("gateway.py",)),
-        (backend, ("gateway.py", "backend.py", "bootstrap.sh", "playback.patch")),
+        (frontend, ("web.py",)),
+        (backend, ("worker.py", "backend.py", "bootstrap.sh", "playback.patch")),
     ):
         checksum = hashlib.sha256(
             json.dumps(
@@ -224,9 +240,13 @@ def manifests(args):
         config,
         etcd,
         service("voicechat-etcd", 2379),
-        gateway,
-        service("voicechat-gateway", 8080),
+        frontend,
+        service("voicechat-frontend", 8080),
     ]
+    resources[-1]["spec"]["ports"].append(
+        {"name": "web", "port": 8082, "targetPort": 8082}
+    )
+    resources[-1]["spec"]["ports"][0]["name"] = "frontend"
     if not args.control_only:
         resources += [backend, service("voicechat-backend", 8097)]
     for resource in resources:
