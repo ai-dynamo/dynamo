@@ -5,15 +5,20 @@
 
 import json
 import os
+import subprocess
+import sys
+import textwrap
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+import zmq
 
 pytest.importorskip("vllm.usage.usage_lib")
 
 from vllm.usage.usage_lib import UsageContext  # noqa: E402
+from vllm.v1.engine import utils as engine_utils  # noqa: E402
 
 from dynamo.vllm import embedding_worker_processes as processes  # noqa: E402
 
@@ -273,7 +278,7 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch, make_l
     parent_config = _vllm_config()
     monkeypatch.delenv(processes._ROLE_ENV, raising=False)
     monkeypatch.setattr(processes, "_short_rpc_directory", lambda: rpc_directory)
-    monkeypatch.setattr(processes, "get_engine_zmq_addresses", lambda *_: addresses)
+    monkeypatch.setattr(processes, "create_engine_zmq_transport", lambda *_: addresses)
     monkeypatch.setattr(processes, "launch_core_engines", launch_context)
     monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
     monkeypatch.setattr(processes.subprocess, "Popen", create_child)
@@ -336,3 +341,101 @@ def test_child_attaches_without_launching_engine(monkeypatch):
     assert attach.call_args.kwargs["process_index"] == 1
     assert attach.call_args.kwargs["input_address"] == "in1"
     assert attach.call_args.kwargs["output_address"] == "out1"
+
+
+@pytest.mark.timeout(180)
+def test_embedding_child_adopts_supervisor_bound_listeners(monkeypatch):
+    if not hasattr(engine_utils, "bind_engine_zmq_listeners"):
+        pytest.skip("requires the inherited-listener API")
+
+    config = _vllm_config()
+    config.parallel_config = SimpleNamespace(
+        data_parallel_size_local=1,
+        data_parallel_rank_local=None,
+        data_parallel_size=1,
+        data_parallel_master_ip="127.0.0.1",
+        local_engines_only=True,
+        enable_elastic_ep=False,
+    )
+    addresses = None
+
+    @contextmanager
+    def launch_context(_config, _executor, _log_stats, bound_addresses):
+        nonlocal addresses
+        addresses = bound_addresses
+        yield _core_engine_launch_object(Mock(), bound_addresses)
+
+    child_script = textwrap.dedent(
+        """
+        from types import SimpleNamespace
+        import zmq
+        from vllm.utils.network_utils import make_zmq_socket
+        from dynamo.vllm import embedding_worker_processes as processes
+
+        with zmq.Context() as context:
+            def create_client(*, client_addresses, **kwargs):
+                return tuple(
+                    make_zmq_socket(
+                        context, client_addresses[f"{name}_address"], kind,
+                        listener=client_addresses[f"{name}_listener"],
+                    )
+                    for name, kind in (("input", zmq.ROUTER), ("output", zmq.PULL))
+                )
+
+            processes.AsyncLLM.from_vllm_config = create_client
+            sockets, _, group = processes.create_shared_embedding_engine_client(
+                vllm_config=SimpleNamespace(parallel_config=SimpleNamespace()),
+                process_count=2, usage_context=None, stat_loggers=[],
+                enable_log_requests=False, disable_log_stats=True,
+            )
+            assert group is None
+            try:
+                for socket in sockets:
+                    socket.setsockopt(zmq.RCVTIMEO, 30000)
+                assert sockets[1].recv() == b"output"
+                identity, payload = sockets[0].recv_multipart()
+                sockets[0].send_multipart([identity, payload])
+            finally:
+                for socket in sockets:
+                    socket.close(linger=0)
+        """
+    )
+    real_popen = subprocess.Popen
+
+    def launch_child(_command, **kwargs):
+        return real_popen([sys.executable, "-c", child_script], **kwargs)
+
+    monkeypatch.delenv(processes._ROLE_ENV, raising=False)
+    monkeypatch.setattr(processes, "create_engine_zmq_transport", None)
+    monkeypatch.setattr(processes, "launch_core_engines", launch_context)
+    monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
+    monkeypatch.setattr(processes.subprocess, "Popen", launch_child)
+    monkeypatch.setattr(processes.AsyncLLM, "from_vllm_config", Mock())
+    monkeypatch.setattr(
+        processes.EmbeddingWorkerProcessGroup, "start_monitor", lambda _self: None
+    )
+    _, _, group = processes.create_shared_embedding_engine_client(
+        vllm_config=config,
+        process_count=2,
+        usage_context=UsageContext.OPENAI_API_SERVER,
+        stat_loggers=[],
+        enable_log_requests=False,
+        disable_log_stats=True,
+    )
+    assert group is not None
+    try:
+        with zmq.Context() as context, context.socket(
+            zmq.PUSH
+        ) as output, context.socket(zmq.DEALER) as input_socket:
+            for socket in (output, input_socket):
+                socket.setsockopt(zmq.LINGER, 0)
+                socket.setsockopt(zmq.RCVTIMEO, 30000)
+                socket.setsockopt(zmq.SNDTIMEO, 30000)
+            output.connect(addresses.outputs[1])
+            input_socket.connect(addresses.inputs[1])
+            output.send(b"output")
+            input_socket.send(b"input")
+            assert input_socket.recv() == b"input"
+        assert group.children[0][1].wait(timeout=30) == 0
+    finally:
+        group.cleanup()

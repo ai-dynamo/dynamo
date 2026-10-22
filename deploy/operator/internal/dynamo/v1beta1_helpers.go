@@ -146,9 +146,17 @@ func GetMainContainer(component *v1beta1.DynamoComponentDeploymentSharedSpec) *c
 	if component == nil || component.PodTemplate == nil {
 		return nil
 	}
-	for i := range component.PodTemplate.Spec.Containers {
-		if component.PodTemplate.Spec.Containers[i].Name == commonconsts.MainContainerName {
-			return &component.PodTemplate.Spec.Containers[i]
+	return GetMainContainerFromPodSpec(&component.PodTemplate.Spec)
+}
+
+// GetMainContainerFromPodSpec returns main, or nil for an absent PodSpec or container.
+func GetMainContainerFromPodSpec(podSpec *corev1.PodSpec) *corev1.Container {
+	if podSpec == nil {
+		return nil
+	}
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
+			return &podSpec.Containers[i]
 		}
 	}
 	return nil

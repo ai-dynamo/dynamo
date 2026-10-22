@@ -75,8 +75,8 @@ export const CURRENT_WHEEL = "1.5.1";
 
 export const MAIN_TOT: BackendPins = {
   sglang: "0.5.22",
-  trtllm: "1.3.0rc29",
-  vllm: "0.31.0",
+  trtllm: "1.4.0rc0",
+  vllm: "0.32.0",
   nixlSglang: "1.5.0",
   nixlTrtllm: "1.3.1",
   nixlVllm: "1.4.1",
@@ -664,7 +664,7 @@ export interface Artifact {
   badge?: "Preview" | "Experimental" | "Deprecated";
 }
 
-const NGC_C = "https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers";
+const NGC_C = "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers";
 
 export const ARTIFACTS: Artifact[] = [
   {
@@ -1016,7 +1016,7 @@ export const MODEL_EA_BUILDS: ModelEaBuild[] = [
     gaLabel: "Dev-only · v1.4.0 line",
     statusLine: "First build on the v1.4.0 line; targets the next stable release.",
     recipeLabel: "Inkling recipe (main)",
-    recipeHref: "https://github.com/ai-dynamo/dynamo/blob/main/docs/recipes/inkling.mdx",
+    recipeHref: "/dynamo/dev/recipes/inkling",
     github: `${GH}v1.4.0-inkling-dev.1`,
     coverage: MODEL_COVERAGE,
   },

@@ -417,6 +417,11 @@ class TestVllmRendererApi:
                     "model_intermediate_buffer",
                     "payload_sender_info",
                 ),
+                (0, 32): (
+                    "additional_information",
+                    "model_intermediate_buffer",
+                    "payload_sender_info",
+                ),
             }[omni_version]
             expected_output_fields += {
                 (0, 29): (
@@ -430,6 +435,14 @@ class TestVllmRendererApi:
                     "is_segment_finished",
                     "new_prompt_len_snapshot",
                     "num_generation_tokens",
+                ),
+                (0, 32): (
+                    "multimodal_output",
+                    "pooling_output_payload",
+                    "is_segment_finished",
+                    "new_prompt_len_snapshot",
+                    "num_generation_tokens",
+                    "is_coalesced",
                 ),
             }[omni_version]
 
