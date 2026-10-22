@@ -53,7 +53,7 @@ WEIGHT_BYTES = 3 << 30
 _IMPORT_TIME_PATCHES = (
     "patch_torch_memory_saver",
     "patch_model_runner",
-    "patch_kv_cache_sizing_for_gms",
+    "patch_xpu_kv_cache_sizing_for_gms",
     "patch_static_state_for_gms",
 )
 
