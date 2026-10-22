@@ -210,24 +210,52 @@ LoRA registrations. Custom P/D, encoder disaggregation, speculative prefill,
 custom caching/KVBM, SGLang, TensorRT-LLM and native vLLM sidecars are unsupported.
 Existing typed media paths and their transports remain unchanged.
 
-Custom **NIXL references are unsupported** and explicitly rejected. Existing
-frontend-decoded `RdmaMediaDataDescriptor` inputs are internal media descriptors,
-not public raw-tensor inputs. `mm_kwargs_transfer.py` uses a typed vLLM serializer
-for processed `MultiModalKwargsItem` objects; `embedding_transfer.py` carries
-embeddings and model-specific handoffs. Neither is an arbitrary raw-input codec.
-The current custom-encoder handoff supplies processed feature rows/EmbedsPrompt,
-not raw plugin-owned JSON.
+#### NIXL Lifecycle Dependency
 
-The smallest NIXL follow-up is a raw-byte adapter around existing
-`nixl_connect.Connector.create_readable`/`begin_read`, preserving tensor specs and
-item order separately. Before exposing those descriptors over HTTP, it needs a
-qualified producer lease/revocation contract: `ReadableOperation` currently
-signals completion of a read, but does not define public multi-attempt leases,
-expiry/release races, worker capability negotiation, or bounded errors for stale
-external registrations. Reuse its registration and byte movement; qualify those
-lifecycle rules with real concurrent NIXL reads, retries and cancellation before
-advertising support. Do not pass raw inputs through the processed kwargs decoder
-or disguise them as images.
+Public custom NIXL tensors remain explicitly rejected. Workers do not advertise
+`custom_tensor_nixl_v1`. The raw CPU byte-path prototype reuses maintained
+`nixl_connect.Descriptor`, `Connector.create_readable`, `begin_read`, registration,
+and completion notifications. It keeps tensor specs separate from byte movement
+and does not use the processed vLLM `mm_kwargs` codec or media descriptors.
+
+The blocking case is **timeout or peer failure after a READ might have started**.
+In NIXL 1.5.0, releasing the native handle requests cancellation and releases the
+request, but does not establish that an RMA GET has stopped. Current UCX request
+cancellation does not cancel RMA GETs. Consumer context exit can therefore
+release destination storage while a GET remains active. Producer deadline
+cleanup has the corresponding source-lifetime problem: deregistration alone
+is not proof that an asynchronous software GET has stopped reading its source.
+See the [NIXL release implementation](https://github.com/ai-dynamo/nixl/blob/v1.5.0/src/plugins/ucx/ucx_backend_req.h),
+[UCX cancellation implementation](https://github.com/openucx/ucx/blob/v1.23.x/src/ucp/core/ucp_request.c),
+and [software GET implementation](https://github.com/openucx/ucx/blob/v1.23.x/src/ucp/rma/rma_sw.c).
+
+The smallest proposed native extension is an **awaitable request-agent
+close-and-drain operation**, rather than a reusable-reference service. The raw
+adapter can use a dedicated agent for each request. Close-and-drain must:
+
+1. Stop new outbound posts and inbound accesses for that request.
+2. Retain transfer handles, remote keys, registrations, and buffers while
+   progressing native close/flush requests to completion.
+3. Acknowledge quiescence for both producer and consumer before either releases
+   or reuses storage. A timeout/error must not be reported as proof of drain.
+
+Existing `remove_remote_agent()` does not provide this contract: metadata
+invalidation precedes disconnect, and the asynchronous UCX endpoint close is
+not awaited. See [metadata invalidation](https://github.com/ai-dynamo/nixl/blob/v1.5.0/src/core/nixl_agent.cpp)
+and [endpoint close](https://github.com/ai-dynamo/nixl/blob/v1.5.0/src/plugins/ucx/ucx_utils.cpp).
+
+A one-shot claim/grant/abort/completion handshake can use existing native
+notifications and clean up requests rejected before any READ is permitted.
+After a READ may have started, an uncertain failure still requires retaining
+storage and its capacity charge until completion or proven native teardown.
+Bounded quarantine prevents unbounded memory growth but cannot provide finite
+reclamation after a worker disappears. It is not a substitute for close-and-drain.
+
+Qualifying this extension requires real producer and worker hosts, including
+active-transfer cancellation, timeout, lost workers, late descriptors, and
+proof that buffers are not reused before drain. Successful cross-host byte
+parity alone does not establish lifecycle safety. GPU transport, zero-copy GPU
+claims, custom P/D, encoder disaggregation, and caching remain unsupported.
 
 ## Hashing Consistency for KV Events
 
