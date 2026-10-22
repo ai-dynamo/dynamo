@@ -187,6 +187,24 @@ pub mod frontend_service {
     /// Total number of LLM requests accepted by the frontend handler
     pub const REQUESTS_STARTED_TOTAL: &str = "requests_started_total";
 
+    /// Questions per admitted System One request.
+    pub const SYSTEMONE_QUESTIONS: &str = "systemone_questions";
+
+    /// Expanded prompt tokens per admitted System One request.
+    pub const SYSTEMONE_INPUT_TOKENS: &str = "systemone_input_tokens";
+
+    /// Requested candidate token IDs per admitted System One request.
+    pub const SYSTEMONE_CANDIDATE_IDS: &str = "systemone_candidate_ids";
+
+    /// Cached prompt tokens reported by a completed System One branch.
+    pub const SYSTEMONE_CACHED_TOKENS: &str = "systemone_cached_tokens";
+
+    /// Total question branches admitted for System One dispatch.
+    pub const SYSTEMONE_ADMITTED_BRANCHES_TOTAL: &str = "systemone_admitted_branches_total";
+
+    /// Duration of a System One execution phase in seconds.
+    pub const SYSTEMONE_PHASE_SECONDS: &str = "systemone_phase_seconds";
+
     /// Total number of terminal semantic request failures.
     pub const FAILURES_TOTAL: &str = "failures_total";
 

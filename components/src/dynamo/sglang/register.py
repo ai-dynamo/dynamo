@@ -130,7 +130,12 @@ def _supports_systemone_serial(
     output_type: ModelType,
     worker_type: WorkerType,
 ) -> bool:
-    """Require scheduler isolation until SGLang's mixed logprob rows are safe."""
+    """Admit only the qualified SGLang 0.5.19 isolated CUDA profile.
+
+    Serialization and disabled overlap apply to the entire worker, including
+    chat and completions. Use dedicated decision workers for this low-throughput
+    profile; the stock image's newer SGLang release is not yet qualified.
+    """
     # Relax the validated pin only after mixed scoring/decode GPU validation.
     priority_preemption = getattr(
         server_args, "enable_priority_scheduling", False
@@ -256,7 +261,11 @@ async def _register_model_with_runtime_config(
             runtime_config.set_engine_specific(
                 SGLANG_SYSTEMONE_SERIAL_V1, json.dumps(True)
             )
-            logging.info("Published serialized SGLang System One capability")
+            logging.info(
+                "Published SGLang 0.5.19 System One capability: the entire worker, "
+                "including chat and completions, is serialized with overlap disabled; "
+                "use dedicated decision workers for this low-throughput profile"
+            )
     # Configure the Rust frontend's media decoder so it ships pre-decoded
     # media via NIXL RDMA instead of forwarding raw URLs / base64 to us.
     media_decoder = None

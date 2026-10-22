@@ -478,6 +478,8 @@ async fn dispatch(
 ) -> Response {
     let dialect = request.dialect;
     let mut salt_bytes = [0_u8; 16];
+    // Share sibling prefixes, but isolate requests until a trusted tenant scope exists.
+    // Client metadata and request IDs are not authenticated cache identities.
     rand::rng().fill(&mut salt_bytes);
     let cache_salt = URL_SAFE_NO_PAD.encode(salt_bytes);
     let first = branches.remove(0);
