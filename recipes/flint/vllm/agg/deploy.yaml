@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Experimental: requires a Dynamo image containing vLLM's Flint implementation.
+# Replace both image references with the image built using ../../README.md.
+# Target: one B200, B300, or GB200 GPU; BF16 weights and KV cache, TP=1.
+# Pre-populate the shared-model-cache PVC before deploying. No GPU validation yet.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: flint-vllm-agg
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: dynamo-flint-vllm:dev
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              command: [python3]
+              args:
+                - -m
+                - dynamo.frontend
+                - --router-mode
+                - round-robin
+                - --dyn-chat-processor
+                - vllm
+                - --enable-auto-tool-choice
+                - --tool-call-parser
+                - glm47
+                - --reasoning-parser
+                - glm47
+                - --exclude-tools-when-tool-choice-none
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+    - name: Worker
+      type: worker
+      replicas: 1
+      sharedMemorySize: 16Gi
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: dynamo-flint-vllm:dev
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              command: [python3]
+              args:
+                - -m
+                - dynamo.vllm
+                - --model
+                - $(MODEL_NAME)
+                - --served-model-name
+                - $(SERVED_MODEL_NAME)
+                - --tensor-parallel-size
+                - "1"
+                - --dtype
+                - bfloat16
+                - --kv-cache-dtype
+                - auto
+                - --max-model-len
+                - "262144"
+                - --max-num-seqs
+                - "4"
+                - --max-num-batched-tokens
+                - "8192"
+              env:
+                - name: MODEL_NAME
+                  value: RecursiveSI/flint
+                - name: SERVED_MODEL_NAME
+                  value: RecursiveSI/flint
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: HF_HUB_CACHE
+                  value: /shared-model-cache/hub
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+                  readOnly: true
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
