@@ -511,7 +511,7 @@ impl RoutingHost {
                 return Err(error);
             }
         };
-        request_dispatch.finish("accepted");
+        request_dispatch.finish(completed_dispatch_result(request_context.as_ref()));
         guard.retarget_worker(target.worker_id);
         if let Some(telemetry) = device_aware_telemetry {
             let selection_survived_transport = target.worker_id == initial_worker;

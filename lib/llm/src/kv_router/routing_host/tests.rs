@@ -58,6 +58,37 @@ fn request() -> PreprocessedRequest {
         .unwrap()
 }
 
+/// The last value recorded on any span for each field name.
+#[derive(Clone, Default)]
+struct RecordedFields(Arc<Mutex<HashMap<&'static str, String>>>);
+
+impl tracing::field::Visit for RecordedFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(field.name(), format!("{value:?}"));
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(field.name(), value.to_owned());
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecordedFields {
+    fn on_record(
+        &self,
+        _: &tracing::Id,
+        values: &tracing::span::Record<'_>,
+        _: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        values.record(&mut self.clone());
+    }
+}
+
 #[test]
 fn request_dispatch_records_phase_and_attempt() {
     use dynamo_runtime::pipeline::network::egress::route_span::{
@@ -65,37 +96,7 @@ fn request_dispatch_records_phase_and_attempt() {
     };
     use tracing_subscriber::prelude::*;
 
-    #[derive(Clone, Default)]
-    struct Recorded(Arc<Mutex<HashMap<&'static str, String>>>);
-
-    impl tracing::field::Visit for Recorded {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0
-                .lock()
-                .unwrap()
-                .insert(field.name(), format!("{value:?}"));
-        }
-
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.0
-                .lock()
-                .unwrap()
-                .insert(field.name(), value.to_owned());
-        }
-    }
-
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorded {
-        fn on_record(
-            &self,
-            _: &tracing::Id,
-            values: &tracing::span::Record<'_>,
-            _: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            values.record(&mut self.clone());
-        }
-    }
-
-    let recorded = Recorded::default();
+    let recorded = RecordedFields::default();
     let _guard =
         tracing::subscriber::set_default(tracing_subscriber::registry().with(recorded.clone()));
 
@@ -1664,6 +1665,9 @@ async fn router_with_config_and_classifier(
 #[derive(Default)]
 struct PendingThenCompletedDispatch {
     worker_ids: Mutex<Vec<u64>>,
+    /// Stop the request and return an empty stream, as `AddressedRouter` does
+    /// when the response prologue fails after a cancellation.
+    stop_during_handshake: AtomicBool,
 }
 
 #[async_trait]
@@ -1681,6 +1685,13 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
             .lock()
             .unwrap()
             .push(instance.expect("selected worker instance").id());
+        if self.stop_during_handshake.load(Ordering::SeqCst) {
+            context.context().stop();
+            return Ok(ResponseStream::new(
+                Box::pin(stream::empty()),
+                context.context(),
+            ));
+        }
         let output = Annotated::from_data(LLMEngineOutput {
             finish_reason: Some(FinishReason::Stop),
             ..Default::default()
@@ -1799,6 +1810,68 @@ async fn admitted_request_stopped_before_dispatch(
     assert!(request.context().is_stopped());
 
     (request, selection, guard)
+}
+
+/// Run one traced request through `host` and return its dispatch result.
+async fn traced_dispatch_result(
+    host: &RoutingHost,
+    dispatch: &PendingThenCompletedDispatch,
+    stop_during_handshake: bool,
+) -> Option<String> {
+    use tracing_subscriber::prelude::*;
+
+    dispatch
+        .stop_during_handshake
+        .store(stop_during_handshake, Ordering::SeqCst);
+    let recorded = RecordedFields::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(recorded.clone()));
+    let mut request = Context::new(request());
+    request.insert(LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleTrace::new(true));
+    if let Ok(mut stream) = host.generate(request).await {
+        while stream.next().await.is_some() {}
+    }
+    recorded
+        .0
+        .lock()
+        .unwrap()
+        .get("dynamo.dispatch.result")
+        .cloned()
+}
+
+/// A dispatch that returns a stream after the client stopped the request during
+/// the handshake is cancelled, not accepted, on both routing paths.
+#[tokio::test]
+#[serial_test::serial]
+async fn dispatch_cancelled_during_handshake_is_not_accepted() {
+    for (stop, expected) in [(false, "accepted"), (true, "cancelled")] {
+        let (host, dispatch, _, runtime) =
+            router_with_recorded_dispatch(&format!("kv-handshake-cancel-{stop}")).await;
+        assert_eq!(
+            traced_dispatch_result(&host, &dispatch, stop)
+                .await
+                .as_deref(),
+            Some(expected),
+            "kv, stopped during handshake: {stop}"
+        );
+        drop(host);
+        runtime.shutdown();
+
+        let (host, dispatch, _, runtime) = builtin_host_with_recorded_dispatch(
+            &format!("builtin-handshake-cancel-{stop}"),
+            RouterMode::RoundRobin,
+        )
+        .await;
+        assert_eq!(
+            traced_dispatch_result(&host, &dispatch, stop)
+                .await
+                .as_deref(),
+            Some(expected),
+            "builtin, stopped during handshake: {stop}"
+        );
+        drop(host);
+        runtime.shutdown();
+    }
 }
 
 /// Covers the `CancelWhenStopped` arm inside `dispatch_selection` itself. The

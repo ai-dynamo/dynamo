@@ -108,6 +108,17 @@ fn start_request_dispatch(
     span
 }
 
+/// Result of a dispatch that returned a stream. `AddressedRouter` returns an
+/// empty stream when the response prologue fails after the request was stopped
+/// or killed, so, as in `Migration::new_stream`, that return is a cancellation.
+fn completed_dispatch_result(context: &dyn AsyncEngineContext) -> &'static str {
+    if context.is_stopped() || context.is_killed() {
+        "cancelled"
+    } else {
+        "accepted"
+    }
+}
+
 pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
 }
