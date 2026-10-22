@@ -436,6 +436,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn harmony_ignores_advertised_structural_tags_when_reconstructing_tool_constraints() {
+        for parser in ["harmony", "gpt_oss"] {
+            for (choice, expected) in [
+                (json!("auto"), GuidedToolConstraint::None),
+                (json!("none"), GuidedToolConstraint::None),
+                (json!("required"), GuidedToolConstraint::GuidedJsonRequired),
+                (
+                    json!({"type":"function","function":{"name":"get_weather"}}),
+                    GuidedToolConstraint::GuidedJsonNamed {
+                        tool_name: "get_weather".to_string(),
+                    },
+                ),
+            ] {
+                let options = ParsingOptions {
+                    tool_call_parser: Some(parser.to_string()),
+                    structural_tag: Some(Default::default()),
+                    ..Default::default()
+                };
+                let result =
+                    apply_request_tool_call_parsing_options(options, &request(choice)).unwrap();
+                assert_eq!(result.guided_tool_constraint, expected, "{parser}");
+            }
+        }
+    }
+
     // The low-level ParsingOptions default remains conservative. Regular
     // workers explicitly publish the deployment-facing On/Always policy;
     // native sidecars without an operator configuration retain optional tags OFF.

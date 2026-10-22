@@ -41,46 +41,6 @@ def test_structural_tags_default_on_for_supported_parsers(monkeypatch):
     assert config.structural_tag["schema"] == "auto"
 
 
-@pytest.mark.parametrize(
-    "parser_option", ["--dyn-tool-call-parser", "--dyn-reasoning-parser"]
-)
-@pytest.mark.parametrize("parser_name", ["harmony", "gpt_oss"])
-def test_gpt_oss_structural_tags_default_off(monkeypatch, parser_option, parser_name):
-    _clear_structural_tag_env(monkeypatch)
-
-    config, _ = _parse_runtime_args([parser_option, parser_name])
-
-    assert config.structural_tag is None
-
-
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["--dyn-structural-tag"],
-        ["--dyn-structural-tag", "true"],
-        ["--dyn-structural-tag", "{}"],
-        ["--dyn-enable-structural-tag"],
-        ["--dyn-structural-tag-scope", "auto"],
-        ["--dyn-structural-tag-schema", "strict"],
-    ],
-)
-def test_gpt_oss_structural_tags_preserve_explicit_opt_in(monkeypatch, argv):
-    _clear_structural_tag_env(monkeypatch)
-
-    config, _ = _parse_runtime_args(["--dyn-tool-call-parser", "harmony", *argv])
-
-    assert config.structural_tag is not None
-
-
-def test_gpt_oss_structural_tags_preserve_environment_opt_in(monkeypatch):
-    _clear_structural_tag_env(monkeypatch)
-    monkeypatch.setenv("DYN_STRUCTURAL_TAG", "true")
-
-    config, _ = _parse_runtime_args(["--dyn-tool-call-parser", "harmony"])
-
-    assert config.structural_tag is not None
-
-
 def test_structural_tag_schema_help_describes_omitted_strict(monkeypatch):
     _clear_structural_tag_env(monkeypatch)
 

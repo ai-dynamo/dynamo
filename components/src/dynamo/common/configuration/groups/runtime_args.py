@@ -362,8 +362,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Configure default-on structural tag guided decoding with a JSON object, "
             "or pass false to disable optional guidance. Rust retains native tags for "
             "Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang "
-            "respect the opt-out. GPT-OSS/Harmony defaults off; pass true to opt in. "
-            "Schema auto enforces strict omitted or true; schema "
+            "respect the opt-out. Schema auto enforces strict omitted or true; schema "
             "strict enforces every tool, overriding strict=false. Unsupported schema "
             "constructs can cause backend grammar compilation errors.",
         )
@@ -640,15 +639,6 @@ def resolve_structural_tag_config(
         return msgspec.to_builtins(structural_tag_setting)
 
     if legacy_enable is False:
-        return None
-
-    if not legacy_options and (
-        runtime_config.dyn_tool_call_parser in {"harmony", "gpt_oss"}
-        or runtime_config.dyn_reasoning_parser in {"harmony", "gpt_oss"}
-    ):
-        # shortcut: Harmony's <|call|> is both a grammar terminal and a stop token;
-        # restore the default once the supported XGrammar includes the fix for
-        # https://github.com/mlc-ai/xgrammar/issues/701.
         return None
 
     return msgspec.to_builtins(

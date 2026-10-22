@@ -33,6 +33,7 @@ impl OpenAIPreprocessor {
     /// Align GPT-OSS's prompt with the JSON-array fallback installed below.
     /// Its native template describes separate Harmony messages, which otherwise
     /// encourages a handoff after the first of several independent calls.
+    /// The frontend disables Harmony structural tags even when workers advertise them.
     pub(super) fn apply_gpt_oss_json_tool_prompt(
         &self,
         request: &mut NvCreateChatCompletionRequest,
@@ -41,7 +42,6 @@ impl OpenAIPreprocessor {
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
         ) != Some("gpt_oss")
-            || self.runtime_config.structural_tag.is_some()
             || !matches!(
                 request.inner.tool_choice,
                 Some(ChatCompletionToolChoiceOption::Required)
@@ -526,7 +526,8 @@ mod tests {
         for (parser, mode, choice, parallel, changes) in [
             ("harmony", StructuralTagMode::Off, "required", true, true),
             ("harmony", StructuralTagMode::Off, "required", false, true),
-            ("harmony", StructuralTagMode::On, "required", true, false),
+            ("harmony", StructuralTagMode::On, "required", true, true),
+            ("gpt_oss", StructuralTagMode::On, "required", true, true),
             ("harmony", StructuralTagMode::Off, "auto", true, false),
             ("qwen3", StructuralTagMode::Off, "required", true, false),
         ] {
@@ -536,21 +537,15 @@ mod tests {
             );
             let original = request.inner.messages.clone();
             preprocessor.apply_gpt_oss_json_tool_prompt(&mut request);
-            if parser == "harmony" && choice == "required" {
+            if matches!(parser, "harmony" | "gpt_oss") && choice == "required" {
                 let mut common = preprocessed_request();
                 let constraint = preprocessor
                     .apply_tool_choice_guided_decoding(&request, &mut common, false)
                     .unwrap();
                 let guided = common.sampling_options.guided_decoding.unwrap();
-                if mode == StructuralTagMode::On {
-                    assert_eq!(constraint, GuidedToolConstraint::StructuralTag);
-                    assert!(guided.structural_tag.is_some());
-                    assert!(guided.json.is_none());
-                } else {
-                    assert_eq!(constraint, GuidedToolConstraint::GuidedJsonRequired);
-                    assert!(guided.json.is_some() || guided.regex.is_some());
-                    assert!(guided.structural_tag.is_none());
-                }
+                assert_eq!(constraint, GuidedToolConstraint::GuidedJsonRequired);
+                assert!(guided.json.is_some() || guided.regex.is_some());
+                assert!(guided.structural_tag.is_none());
             }
             assert_eq!(request.inner.messages[1], original[1]);
             if changes {

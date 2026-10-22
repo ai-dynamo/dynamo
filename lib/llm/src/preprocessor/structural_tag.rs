@@ -195,6 +195,13 @@ pub(crate) fn structural_tag_decision(
     // prompt-level XTML path, but they still need an actual tool to require.
     validate_forced_tool_choice(tool_choice, tools)?;
 
+    // shortcut: Harmony's <|call|> conflicts with XGrammar stop-token handling,
+    // even when workers enable tags. Remove this guard once supported XGrammar
+    // fixes https://github.com/mlc-ai/xgrammar/issues/701.
+    if matches!(parser_name, Some("harmony" | "gpt_oss")) {
+        return Ok(StructuralTagDecision::NotApplicable);
+    }
+
     if config.is_none() && !requires_intrinsic_structural_tag(parser_name, tool_choice) {
         return Ok(StructuralTagDecision::NotApplicable);
     }
