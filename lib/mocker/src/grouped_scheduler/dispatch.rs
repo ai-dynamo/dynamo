@@ -477,16 +477,22 @@ impl RankDispatch {
                 continue;
             }
             let storage_tier = dynamo_storage_tier(event.tier);
-            let (event, block_token_ids) = dynamo_kv_event(event);
+            let (event, block_token_ids, session_id) = dynamo_kv_event(event);
             raw_events.push(RawKvEvent {
                 event,
                 block_token_ids,
                 storage_tier,
+                session_id,
             });
         }
         let normal_events = raw_events
             .iter()
-            .map(|event| (event.event.clone(), event.storage_tier))
+            .map(|event| RawKvEvent {
+                event: event.event.clone(),
+                block_token_ids: None,
+                storage_tier: event.storage_tier,
+                session_id: event.session_id.clone(),
+            })
             .collect();
         // The vLLM wire format needs each block's token IDs, which AISimulate
         // does not carry for G2 residency; those events use only the event sink.
