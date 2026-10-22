@@ -55,8 +55,10 @@ async fn rank_that_loses_continuity_while_another_recovers_cannot_register() {
 }
 
 #[tokio::test]
-async fn missing_history_waits_for_a_replacement_engine() {
-    let server = FakeServer::start(FakeVllm::default()).await;
+async fn missing_history_requests_shutdown_and_accepts_replacement_without_acknowledgement() {
+    let service = FakeVllm::default();
+    *service.shutdown_replacement.lock().await = Some("replacement-instance".into());
+    let server = FakeServer::start(service).await;
     let (engine, controls) = started(&server).await;
     controls[0]
         .status
@@ -66,27 +68,88 @@ async fn missing_history_waits_for_a_replacement_engine() {
         });
     controls[1].status.send_replace(KvStreamStatus::Success);
     assert!(engine.wait_for_startup().await.is_err());
-    let recovered = tokio::spawn({
-        let engine = engine.clone();
-        async move { engine.recover_startup().await }
-    });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!recovered.is_finished());
-    server
-        .service
-        .server_info_override
-        .lock()
+    let config = timeout(Duration::from_secs(5), engine.recover_startup())
         .await
-        .get_or_insert_with(server_info)
-        .instance_id = "replacement-instance".into();
-    let config = timeout(Duration::from_secs(5), recovered)
-        .await
-        .unwrap()
         .unwrap()
         .unwrap()
         .unwrap();
     assert_eq!(config.model, "model-source");
+    assert_eq!(
+        server
+            .service
+            .control_calls
+            .lock()
+            .await
+            .iter()
+            .filter(|(name, _)| name == "shutdown")
+            .count(),
+        1
+    );
+    engine.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_reaches_only_the_verified_instance() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let endpoint = GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").unwrap();
+    assert!(
+        !crate::client::shutdown_instance(&endpoint, "replaced-instance")
+            .await
+            .unwrap()
+    );
     assert!(server.service.control_calls.lock().await.is_empty());
+    let status = crate::client::shutdown_instance(&endpoint, "test-instance")
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        server
+            .service
+            .control_calls
+            .lock()
+            .await
+            .iter()
+            .filter(|(name, _)| name == "shutdown")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn failed_recovery_does_not_shutdown_and_unmanaged_engine_failure_is_explicit() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let (engine, controls) = started(&server).await;
+    controls[0].status.send_replace(KvStreamStatus::Failed {
+        reason: "replay timed out".into(),
+    });
+    assert!(engine.wait_for_startup().await.is_err());
+    assert!(engine.recover_startup().await.is_err());
+    assert!(server.service.control_calls.lock().await.is_empty());
+    let sources = engine.kv_event_sources().await.unwrap();
+    for source in sources {
+        let KvEventSource::Zmq {
+            recovery: Some(recovery),
+            ..
+        } = source
+        else {
+            panic!()
+        };
+        recovery
+            .status
+            .send_replace(KvStreamStatus::MissingHistory {
+                expected: 0,
+                got: 9,
+            });
+    }
+    let error = match engine.recover_startup().await {
+        Ok(_) => panic!("unmanaged engine"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("fake frontend does not own engine")
+    );
     engine.cleanup().await.unwrap();
 }
 
