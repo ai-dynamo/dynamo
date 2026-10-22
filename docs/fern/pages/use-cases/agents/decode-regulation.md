@@ -5,8 +5,8 @@ title: Decode Regulation
 subtitle: Keep interactive requests on deadline while agentic workloads load the same vLLM workers
 ---
 
-> [!WARNING]
-> Decode regulation is experimental and available for vLLM workers only. The environment variables, defaults and metric names can change.
+> [!NOTE]
+> Decode regulation is available for vLLM workers only and is off by default. Its environment variables, defaults and metric names may change in future releases.
 
 Decode regulation is an opt-in vLLM scheduler policy. While agentic workloads and interactive users share a worker, it defers some agent decodes by one step at a time so that each step finishes fast enough for interactive requests to meet an end-to-end deadline. Deferred requests keep their KV cache and their place in the running batch. When the batch already fits the deadline, the policy does nothing.
 
