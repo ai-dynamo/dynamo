@@ -216,9 +216,11 @@ pub struct LLMEngineOutput {
 
     /// If the LLM Engine performs the detokenization, then this will have a Some of the detokenized
     /// text/tokens. If this value is None, then the Backend is responsible for detokenization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Vec<TokenType>>,
 
     // decoded text -
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 
     /// Output type discriminator (text, image, video, audio)
@@ -230,15 +232,19 @@ pub struct LLMEngineOutput {
     pub content_parts: Option<Vec<ContentPart>>,
 
     /// cumulative log probabilities
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cum_log_probs: Option<f64>,
 
     /// Optional log probabilities
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_probs: Option<LogProbs>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_logprobs: Option<TopLogprobs>,
 
     // TODO: Enrich this with more information as can apply our first-level postprocessing
     // logic and return more detailed information
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<FinishReason>,
 
     /// The stop string or token that triggered the stop condition.
@@ -247,6 +253,7 @@ pub struct LLMEngineOutput {
     pub stop_reason: Option<StopReason>,
 
     // Index field for batch requests to match OpenAI format
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<u32>,
 
     /// Disaggregated execution parameters (for prefill/decode separation)
@@ -564,5 +571,47 @@ mod tests {
         assert!(chunk.disaggregated_params.is_none());
         assert!(chunk.worker_trace_link.is_none());
         assert!(chunk.completion_usage.is_none());
+    }
+
+    /// A per-token chunk goes on the request plane without nil keys for its unset
+    /// Options, and frames from producers that still send those nil keys decode to
+    /// the same value.
+    #[test]
+    fn token_chunk_omits_unset_options_on_the_wire() {
+        let chunk = LLMEngineOutput {
+            token_ids: vec![42],
+            ..Default::default()
+        };
+        let bytes = rmp_serde::to_vec_named(&chunk).unwrap();
+        let wire: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["output_type", "token_ids"]);
+        assert_eq!(
+            rmp_serde::from_slice::<LLMEngineOutput>(&bytes).unwrap(),
+            chunk
+        );
+
+        let with_nil_keys = rmp_serde::to_vec_named(&serde_json::json!({
+            "token_ids": [42],
+            "tokens": null,
+            "text": null,
+            "output_type": "text",
+            "cum_log_probs": null,
+            "log_probs": null,
+            "top_logprobs": null,
+            "finish_reason": null,
+            "index": null,
+        }))
+        .unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<LLMEngineOutput>(&with_nil_keys).unwrap(),
+            chunk
+        );
     }
 }
