@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{WorkerId, WorkerWithDpRank};
 use crate::recovery::{CursorObservation, CursorState};
-use crate::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
+use crate::zmq_wire::{ZmqEventNormalizer, decode_event_batch, engine_owned_mm_identity_from_env};
 
 use super::backend::Indexer;
 use super::registry::ListenerRecord;
@@ -177,7 +177,8 @@ impl ListenerLoop {
             live_socket,
             replay_endpoint,
             watermark,
-            normalizer: ZmqEventNormalizer::new(block_size),
+            normalizer: ZmqEventNormalizer::new(block_size)
+                .with_engine_owned_mm_identity(engine_owned_mm_identity_from_env()),
             messages_processed: 0,
         }
     }
