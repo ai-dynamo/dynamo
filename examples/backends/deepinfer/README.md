@@ -132,6 +132,14 @@ CUDA_VISIBLE_DEVICES=2,3 DYN_SYSTEM_PORT=8082 python -m dynamo.deepinfer --model
   --dp-size 2 --master-port 24333 &
 ```
 
+## Run on SLURM with srt-slurm
+
+[`srt-slurm/gb300-disagg-6p1d.yaml`](srt-slurm/gb300-disagg-6p1d.yaml) is an srt-slurm (`srtctl`)
+config for disaggregated serving on 12 GB300 nodes. It runs six DEP2 prefill workers with the
+prefix cache's host tier, and one DEP32 decode worker with expert-parallel load balancing. It is
+tuned for agentic coding traffic at about 3,000 concurrent sessions, and needs an srt-slurm build
+that supports `engine: deepinfer`.
+
 ## Worker Options
 
 `python -m dynamo.deepinfer --help` lists every option. The main ones:

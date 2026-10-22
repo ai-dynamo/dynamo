@@ -1,0 +1,199 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# srt-slurm (srtctl) config: DeepSeek-V4.1-Flash on DeepInfer, disaggregated on GB300, tuned for
+# agentic coding traffic at about 3,000 concurrent sessions.
+#   - 6 prefill workers, DEP2 each, on 3 nodes
+#   - 1 decode worker, DEP32, on 8 nodes
+#   - 1 node for the frontend and etcd
+# 12 nodes and 44 GPUs in total.
+#
+# Needs an srt-slurm build that supports `engine: deepinfer`, and an image built from
+# ../Dockerfile. Set model.path, model.container, the NIC names and the cache mount for your
+# cluster. Benchmark runs of this shape forced MTP acceptance with a DeepInfer patch that
+# ../Dockerfile does not carry; without it, acceptance is the model's own.
+schema: 2
+name: dsv41flash-fp4-gb300-deepinfer-disagg-6p1d-dep2-dep32
+model:
+  path: dsv41flash  # srtslurm.yaml model_paths alias for a deepseek-ai/DeepSeek-V4.1-Flash checkpoint
+  container: deepinfer  # srtslurm.yaml containers alias for an image built from ../Dockerfile
+  precision: fp4
+dynamo:
+  install: false  # the image carries the Dynamo runtime
+  request_plane: tcp
+  event_plane: zmq
+environment:
+  PYTHONHASHSEED: "0"
+health_check:
+  # Loading the checkpoint and JIT warmup take a while, longer with 80 GiB of pinned host memory
+  # per prefill rank.
+  max_attempts: 2160
+  interval_seconds: 10
+resources:
+  gpu_type: gb300
+  gpus_per_node: 4
+services:
+  - name: etcd
+    type: etcd
+    placement:
+      node: infra
+frontend:
+  type: dynamo
+  enable_multiple_frontends: false
+  placement:
+    node: dedicated
+  # No numa_bind: the image has libnuma but no numactl binary.
+  args:
+    router-mode: kv
+    router-session-affinity-ttl-secs: 14400
+    # Keep prefill off the lockstep decode ranks.
+    active-decode-blocks-threshold: None
+    active-prefill-tokens-threshold: None
+    active-prefill-tokens-threshold-frac: None
+  env:
+    # The frontend has its own venv in the image.
+    PATH: /opt/dynamo-frontend/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PYTHONPATH: ""
+    DYN_ROUTER_SESSION_AFFINITY_MODE: soft
+    DYN_ROUTER_TEMPERATURE: "0"
+    DYN_ROUTER_QUEUE_THRESHOLD: None
+    DYN_LOG: warn
+    DYN_TOKENIZER: fastokens
+    DYN_TOKENIZER_CACHE: "1"
+    DYN_TOKENIZER_CACHE_BYTES: "8000000000"
+    DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: "3600"
+    DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT: "10000000"
+    DYN_TCP_CHANNEL_BUFFER: "128"
+    DYN_TCP_REQUEST_TIMEOUT: "60"
+    # token_ids travel as one packed int32 buffer.
+    DYN_TOKEN_IDS_AS_BYTES: "1"
+  # cache_threshold 1.0 selects the active-request cost tier for decode.
+  worker_selection:
+    decode: decode-least-loaded
+    instances:
+      - name: decode-least-loaded
+        type: dynamo-two-tier-cost-fn
+        parameters:
+          cache_threshold: 1.0
+engine: deepinfer
+roles:
+  prefill:
+    nodes: 3
+    workers: 6
+    gpus: 2
+    env:
+      PYTHONUNBUFFERED: "1"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      DEEPINFER_JIT_CACHE_DIR: /cache/jit
+      TRITON_CACHE_DIR: /cache/triton
+      XDG_CACHE_HOME: /cache/xdg
+      # The node's Ethernet interface: NCCL and Gloo bootstrap over it.
+      NCCL_SOCKET_IFNAME: <ethernet-ifname>
+      GLOO_SOCKET_IFNAME: <ethernet-ifname>
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "1"
+      # Part of the KV layout: prefill and decode must agree, or every handoff fails.
+      DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE: compact
+      DEEPINFER_YOCO_PREFILL_KEEP_TOKENS: "140"
+      DEEPINFER_USE_NEXTN_DECODE: "5"
+      # NIXL over UCX: KV crosses nodes over InfiniBand rc with GPUDirect RDMA. MNNVL cuda_ipc
+      # cannot export DeepInfer's cuMemAlloc KV pools across nodes. tcp is left out, so a
+      # missing GPUDirect path fails the transfer instead of staging KV through host memory.
+      UCX_TLS: rc,cuda_copy
+      UCX_IB_GPU_DIRECT_RDMA: "yes"
+      UCX_MEMTYPE_CACHE: "n"
+      UCX_RCACHE_MAX_UNRELEASED: "1024"
+      # The engine gets token_ids as packed int32 bytes, not one Python int per token.
+      DYN_TOKEN_IDS_AS_BYTES: "1"
+      PATH: /opt/venv/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      VIRTUAL_ENV: /opt/venv
+      PYTHONPATH: /opt/dynamo-deepinfer:/opt/DeepInfer
+      DEEPINFER_ACCELERATOR: nvidia
+    args:
+      served-model-name: deepseek-ai/DeepSeek-V4.1-Flash
+      ep-size: 2
+      max-model-len: 1048576
+      # Each handoff holds an SWA state slot (max-num-seqs * 1.2 + 1 per rank) until decode
+      # reads it. At 64, bursts of long prompts held every slot and prefill stalled.
+      max-num-seqs: 128
+      max-num-batched-tokens: 32768
+      kv-cache-manager: prefix
+      # Long agentic prefixes need many SWA snapshot slots. With the host tier on, snapshots
+      # live in host memory (about 46 GB per rank at 32768).
+      prefix-snapshot-slots: 32768
+      # Per rank: pinned host memory for prefix blocks evicted from the GPU.
+      prefix-host-bytes: 80GiB
+      kv-transfer: nixl
+      kv-lease-s: 120
+      # Rank 0 in its own process: the Dynamo process keeps the GIL for requests and lockstep.
+      no-rank0-in-process: true
+      dyn-reasoning-parser: deepseek_v41
+      dyn-tool-call-parser: deepseek_v41
+  decode:
+    nodes: 8
+    workers: 1
+    gpus: 32
+    env:
+      PYTHONUNBUFFERED: "1"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      DEEPINFER_JIT_CACHE_DIR: /cache/jit
+      TRITON_CACHE_DIR: /cache/triton
+      XDG_CACHE_HOME: /cache/xdg
+      NCCL_SOCKET_IFNAME: <ethernet-ifname>
+      GLOO_SOCKET_IFNAME: <ethernet-ifname>
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "1"
+      DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE: compact
+      DEEPINFER_YOCO_PREFILL_KEEP_TOKENS: "140"
+      DEEPINFER_USE_NEXTN_DECODE: "5"
+      # Expert-parallel load balancing, off by default in DeepInfer: 32 redundant experts,
+      # rearranged every 3000 steps from a 1000-step window.
+      DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS: "32"
+      DEEPINFER_EXPERT_REARRANGEMENT_STEP_INTERVAL: "3000"
+      DEEPINFER_EXPERT_COUNT_WINDOW_SIZE: "1000"
+      UCX_TLS: rc,cuda_copy
+      UCX_IB_GPU_DIRECT_RDMA: "yes"
+      UCX_MEMTYPE_CACHE: "n"
+      UCX_RCACHE_MAX_UNRELEASED: "1024"
+      DYN_TOKEN_IDS_AS_BYTES: "1"
+      PATH: /opt/venv/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      VIRTUAL_ENV: /opt/venv
+      PYTHONPATH: /opt/dynamo-deepinfer:/opt/DeepInfer
+      DEEPINFER_ACCELERATOR: nvidia
+    args:
+      served-model-name: deepseek-ai/DeepSeek-V4.1-Flash
+      ep-size: 32
+      max-model-len: 1048576
+      max-num-seqs: 18  # per DP rank
+      max-num-batched-tokens: 180
+      kv-transfer: nixl
+      # With 32 ranks, keeping rank 0 out of the Dynamo process matters most here.
+      no-rank0-in-process: true
+      dyn-reasoning-parser: deepseek_v41
+      dyn-tool-call-parser: deepseek_v41
+extra_mount:
+  # JIT, Triton and Hugging Face caches; reused across runs.
+  - /path/to/cache:/cache
+sbatch_directives:
+  mem: "0"
+  cpus-per-task: "144"
+srun_options:
+  container-remap-root: ""
+benchmark:
+  type: manual
