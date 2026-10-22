@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The aiperf Job of the gateway A/B benchmark (see README.md). run.sh renders
+# one per arm, named <dgd>-aiperf, with the same image, resources, workload and
+# aiperf flags for A and B. bench.sh runs the load; it comes from the arm's
+# ConfigMap (<dgd>-bench) together with the run's parameters and the list of
+# metrics endpoints. Results stay in the pod until run.sh copies them out.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen-ab-aiperf
+spec:
+  backoffLimit: 0
+  # bench.sh waits for run.sh to copy /results before it exits; this caps the wait.
+  activeDeadlineSeconds: 86400
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      # aiperf 0.13 and later discover Prometheus endpoints through the
+      # Kubernetes API when they run in a cluster. Without a token, aiperf
+      # scrapes only the endpoints bench.sh passes with --server-metrics.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 5
+      # Keep the load generator off the router's node when the cluster allows.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values:
+                  - frontend
+                  - epp
+      containers:
+      - name: aiperf
+        # The frontend image ships aiperf, as in benchmarks/incluster/benchmark_job.yaml.
+        image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.1
+        command:
+        - bash
+        - /bench/bench.sh
+        env:
+        # aiperf loads the tokenizer from the shared model cache.
+        - name: HF_HOME
+          value: /opt/models
+        - name: HF_HUB_OFFLINE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        resources:
+          requests:
+            cpu: "16"
+            memory: 16Gi
+        volumeMounts:
+        - name: bench
+          mountPath: /bench
+          readOnly: true
+        - name: results
+          mountPath: /results
+        - name: model-cache
+          mountPath: /opt/models
+      volumes:
+      - name: bench
+        configMap:
+          name: qwen-ab-bench
+      - name: results
+        emptyDir: {}
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache

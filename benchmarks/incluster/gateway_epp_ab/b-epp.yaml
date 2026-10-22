@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Arm B of the gateway A/B benchmark (see README.md):
+#   client -> Gateway -> EPP (KV router, Dynamo runtime mode)
+#          -> Frontend sidecar in direct mode, in the chosen worker pod -> mocker worker
+#
+# This is examples/backends/vllm/deploy/gaie/agg.yaml (Qwen/Qwen3-0.6B,
+# aggregated, EPP plus a direct-mode Frontend sidecar per worker) with each
+# vLLM worker replaced by one mocker worker. The worker component must match
+# the one in a-frontend.yaml, apart from the sidecar; tests/test_gateway_epp_ab.py
+# checks it. run.sh sets the images, the worker count and the model cache claim
+# when it applies this file, and records the applied manifest with the results.
+#
+# The EPP maps each worker it picks to a pod through the worker's pod name, so
+# every mocker runs in its own pod: 2048 workers are 2048 pods, on both arms.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen-b
+spec:
+  components:
+  - name: Epp
+    type: epp
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.1
+          # In Dynamo runtime mode the EPP reads the model and the KV block
+          # size from the workers' model cards, as the Frontend does.
+          env:
+          - name: HF_HOME
+            value: /opt/models
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          resources:
+            requests:
+              cpu: "8"
+              memory: 16Gi
+          volumeMounts:
+          - name: model-cache
+            mountPath: /opt/models
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+  - name: worker
+    type: decode
+    replicas: 2048
+    frontendSidecar: sidecar-frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.5.1
+          command:
+          - python3
+          - -m
+          - dynamo.mocker
+          args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --model-name
+          - Qwen/Qwen3-0.6B
+          - --block-size
+          - "16"
+          - --speedup-ratio
+          - "1.0"
+          env:
+          - name: HF_HOME
+            value: /opt/models
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 4Gi
+          volumeMounts:
+          - name: model-cache
+            mountPath: /opt/models
+        # Same image as arm A's Frontend, so both arms run the same HTTP and
+        # tokenizer code.
+        - name: sidecar-frontend
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.1
+          args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+          env:
+          - name: HF_HOME
+            value: /opt/models
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 4Gi
+          volumeMounts:
+          - name: model-cache
+            mountPath: /opt/models
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+---
+# The Gateway sends arm B's requests to the InferencePool the operator creates
+# for this DGD, so the EPP picks the worker. The matches are the same as arm
+# A's; run.sh sets the arm header to <namespace>/qwen-b.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: qwen-b
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: inference-gateway
+    namespace: agentgateway-system
+    sectionName: http
+  rules:
+  - matches:
+    - headers:
+      - name: X-Gateway-Model-Name
+        type: Exact
+        value: Qwen/Qwen3-0.6B
+      - name: X-Dynamo-AB-Arm
+        type: Exact
+        value: qwen-b
+      path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: qwen-b-pool
+      port: 8000
+    timeouts:
+      request: 300s
