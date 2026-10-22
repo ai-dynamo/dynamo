@@ -82,7 +82,7 @@ use tokio_util::sync::CancellationToken;
 /// serving-readiness fields on the MDC are still optional at the type
 /// level; the compat shim renders missing values via
 /// [`effective_worker_type`] so legacy cards bucket and route correctly.
-fn worker_set_key(
+pub fn worker_set_key(
     endpoint_id: &EndpointId,
     model_type: ModelType,
     worker_type: Option<WorkerType>,
@@ -99,7 +99,7 @@ fn worker_set_key(
     .expect("serializing WorkerSet key strings cannot fail")
 }
 
-fn model_card_endpoint_id(mcid: &ModelCardInstanceId) -> EndpointId {
+pub fn model_card_endpoint_id(mcid: &ModelCardInstanceId) -> EndpointId {
     EndpointId {
         namespace: mcid.namespace.clone(),
         component: mcid.component.clone(),
@@ -107,7 +107,7 @@ fn model_card_endpoint_id(mcid: &ModelCardInstanceId) -> EndpointId {
     }
 }
 
-fn model_card_instance_id(instance: &DiscoveryInstance) -> anyhow::Result<ModelCardInstanceId> {
+pub fn model_card_instance_id(instance: &DiscoveryInstance) -> anyhow::Result<ModelCardInstanceId> {
     match instance {
         DiscoveryInstance::Model {
             namespace,
@@ -209,7 +209,7 @@ pub struct ModelWatcher {
     plugins: RouterPluginBuilder,
 }
 
-pub(crate) struct PreparedWorkerSet {
+pub struct PreparedWorkerSet {
     worker_set: Option<WorkerSet>,
     card: ModelDeploymentCard,
 }

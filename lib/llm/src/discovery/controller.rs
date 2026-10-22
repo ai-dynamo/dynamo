@@ -28,29 +28,29 @@ const DEFAULT_MAX_CONCURRENT_BUILDS: usize = 8;
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub(crate) struct GroupKey {
-    pub(crate) model_name: String,
-    pub(crate) worker_set_key: String,
+pub struct GroupKey {
+    pub model_name: String,
+    pub worker_set_key: String,
 }
 
 impl GroupKey {
-    pub(crate) fn id(&self) -> String {
+    pub fn id(&self) -> String {
         serde_json::to_string(&(&self.model_name, &self.worker_set_key))
             .expect("serializing discovery group keys cannot fail")
     }
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DesiredInstance {
-    pub(crate) key: String,
-    pub(crate) mcid: ModelCardInstanceId,
-    pub(crate) endpoint_id: EndpointId,
-    pub(crate) card: ModelDeploymentCard,
-    pub(crate) group_key: GroupKey,
-    pub(crate) mdc_checksum: String,
-    pub(crate) projection_fingerprint: String,
+pub struct DesiredInstance {
+    pub key: String,
+    pub mcid: ModelCardInstanceId,
+    pub endpoint_id: EndpointId,
+    pub card: ModelDeploymentCard,
+    pub group_key: GroupKey,
+    pub mdc_checksum: String,
+    pub projection_fingerprint: String,
     /// Digest of this worker's Qwen video prompt-expansion contract.
-    pub(crate) video_contract: Option<String>,
+    pub video_contract: Option<String>,
 }
 
 impl DesiredInstance {
@@ -88,18 +88,18 @@ fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>) {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct GroupSpec {
-    pub(crate) key: GroupKey,
-    pub(crate) mdc_checksum: String,
-    pub(crate) fingerprint: String,
-    pub(crate) generation: u64,
-    pub(crate) representative: DesiredInstance,
+pub struct GroupSpec {
+    pub key: GroupKey,
+    pub mdc_checksum: String,
+    pub fingerprint: String,
+    pub generation: u64,
+    pub representative: DesiredInstance,
     /// Contract shared by the cohort, if any.
-    pub(crate) video_contract: Option<String>,
+    pub video_contract: Option<String>,
 }
 
 #[async_trait]
-pub(crate) trait ControllerHost: Send + Sync + 'static {
+pub trait ControllerHost: Send + Sync + 'static {
     type Prepared: Send + 'static;
 
     fn normalize(
@@ -284,7 +284,7 @@ struct ReconciliationResult {
     instances: anyhow::Result<Vec<DiscoveryInstance>>,
 }
 
-pub(crate) struct ModelDiscoveryController<H: ControllerHost> {
+pub struct ModelDiscoveryController<H: ControllerHost> {
     host: Arc<H>,
     desired: HashMap<String, DesiredInstance>,
     groups: HashMap<GroupKey, DesiredGroup>,
@@ -301,7 +301,7 @@ pub(crate) struct ModelDiscoveryController<H: ControllerHost> {
 }
 
 impl<H: ControllerHost> ModelDiscoveryController<H> {
-    pub(crate) fn new(host: Arc<H>) -> Self {
+    pub fn new(host: Arc<H>) -> Self {
         Self::with_max_concurrent_builds(host, DEFAULT_MAX_CONCURRENT_BUILDS)
     }
 
@@ -321,7 +321,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         }
     }
 
-    pub(crate) async fn run(
+    pub async fn run(
         mut self,
         mut discovery_stream: DiscoveryStream,
         namespace_filter: NamespaceFilter,

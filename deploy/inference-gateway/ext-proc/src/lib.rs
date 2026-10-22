@@ -28,6 +28,7 @@ pub mod server;
 pub mod sglang_renderer_client;
 pub mod topology_adapter;
 pub mod vllm_render_client;
+mod worker_generations;
 
 pub use epp::Router;
 pub use epp_router::EppRouter;

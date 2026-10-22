@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod model;
-pub(crate) mod readiness;
+pub mod readiness;
 pub(crate) use model::GenerateEngineSelection;
 pub use model::Model;
 
@@ -23,7 +23,7 @@ mod model_manager;
 pub(crate) mod router_policy;
 pub use model_manager::{ModelManager, ModelManagerError, UNKNOWN_METRIC_MODEL};
 
-mod controller;
+pub mod controller;
 pub(crate) mod worker_inventory;
 
 mod allocator;
@@ -39,7 +39,9 @@ mod endpoint_card;
 pub use endpoint_card::wait_for_endpoint_model_card;
 
 mod watcher;
-pub use watcher::{ModelUpdate, ModelWatcher};
+pub use watcher::{
+    ModelUpdate, ModelWatcher, model_card_endpoint_id, model_card_instance_id, worker_set_key,
+};
 
 mod worker_monitor;
 pub use worker_monitor::{
