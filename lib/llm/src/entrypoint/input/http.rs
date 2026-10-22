@@ -223,8 +223,9 @@ async fn run_with_router_plugins(
     if let Some(http_host) = local_model.http_host() {
         http_service_builder = http_service_builder.host(http_host);
     }
-    http_service_builder =
-        http_service_builder.cancel_token(Some(distributed_runtime.primary_token()));
+    http_service_builder = http_service_builder
+        .cancel_token(Some(distributed_runtime.primary_token()))
+        .force_shutdown_token(distributed_runtime.runtime().shutdown_started_token());
     if let Some(shutdown_token) = shutdown_token {
         http_service_builder = http_service_builder
             .shutdown_token(Some(shutdown_token))
