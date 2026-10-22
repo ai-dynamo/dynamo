@@ -40,6 +40,9 @@ on:
       - ".github/workflows/pr-issue-link.yml"
       - ".github/workflows/pr_issue_link.py"
       - ".github/workflows/test_pr_issue_link.py"
+      - ".github/workflows/release_line.py"
+      - ".github/workflows/test_release_line.py"
+      - ".github/workflows/linear-release-sync.yml"
   # A result recorded before the cut stays on its commit after the cut, and
   # creating a branch fires no pull request event. The cut re-runs those
   # results so that a pull request without a link cannot merge on a green
@@ -109,18 +112,49 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         # A re-run reads the branch state live: a linked pull request passes
-        # again and one without a link now fails.
+        # again and one without a link now fails. The REST list pages through
+        # every open pull request (the repository has well over 1,000), and a
+        # failed list fails the step rather than re-checking nothing. Re-runs
+        # are paced and retried because the cut fires hundreds at once, and a
+        # pull request that still could not be re-run fails the job so it can
+        # be re-run by hand; re-running a passing check again is harmless.
+        shell: bash
         run: |
-          gh pr list --repo "$REPO" --base main --state open --limit 1000 \
-            --json headRefOid,isDraft \
-            --jq '.[] | select(.isDraft | not) | .headRefOid' |
+          set -euo pipefail
+          retry() {
+            local n
+            for n in 1 2 3; do
+              "$@" && return 0
+              sleep $((n * 10))
+            done
+            return 1
+          }
+          shas=$(retry gh api --paginate \
+            "repos/$REPO/pulls?state=open&base=main&per_page=100" \
+            --jq '.[] | select(.draft | not) | .head.sha')
+          echo "Open non-draft pull requests into main: $(grep -c . <<<"$shas" || true)"
+          failed=0
           while read -r sha; do
-            run=$(gh api "repos/$REPO/actions/workflows/pr-issue-link.yml/runs?head_sha=$sha&event=pull_request_target&per_page=1" \
-              --jq '.workflow_runs[0] | select(.conclusion == "success") | .id')
-            if [ -n "$run" ]; then
-              gh run rerun "$run" --repo "$REPO" || echo "::warning::Could not re-run $run for $sha"
+            [ -n "$sha" ] || continue
+            if ! run=$(retry gh api \
+              "repos/$REPO/actions/workflows/pr-issue-link.yml/runs?head_sha=$sha&event=pull_request_target&per_page=1" \
+              --jq '.workflow_runs[0] | select(.conclusion == "success") | .id'); then
+              echo "::warning::Could not look up the check for $sha"
+              failed=$((failed + 1))
+              continue
             fi
-          done
+            [ -n "$run" ] || continue
+            if retry gh run rerun "$run" --repo "$REPO"; then
+              sleep 1
+            else
+              echo "::warning::Could not re-run $run for $sha"
+              failed=$((failed + 1))
+            fi
+          done <<<"$shas"
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::$failed pull requests were not re-checked. Re-run this job."
+            exit 1
+          fi
 
   unit-tests:
     name: Unit tests
@@ -146,9 +180,10 @@ jobs:
       # independent of the root test configuration, which the sparse checkout
       # above cannot satisfy anyway: it brings down the root conftest.py
       # without the tests/ package that conftest imports.
-      - name: Unit tests (issue-link check)
+      - name: Unit tests (issue-link check and release line)
         run: |
-          python -m pytest .github/workflows/test_pr_issue_link.py -v \
+          python -m pytest .github/workflows/test_pr_issue_link.py \
+            .github/workflows/test_release_line.py -v \
             -p no:cacheprovider \
             --confcutdir=.github/workflows \
             --override-ini="addopts=" \

@@ -897,3 +897,39 @@ def test_github_issue_link_skips_the_project_lookup(
 
     assert code == 0
     assert api.project_calls == []
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected", "calls"),
+    [
+        ([200], (True, True), 1),
+        ([404], (False, True), 1),
+        ([429, 200], (True, True), 2),
+        ([503, 0, 404], (False, True), 3),
+        ([403, 429, 502], (False, False), 3),
+    ],
+)
+def test_branch_lookup_retries_before_failing_open(
+    monkeypatch: pytest.MonkeyPatch,
+    statuses: list[int],
+    expected: tuple[bool, bool],
+    calls: int,
+) -> None:
+    seen: list[str] = []
+    replies = iter(statuses)
+
+    def fake_http_json(url: str, **_: object) -> tuple[int, dict]:
+        seen.append(url)
+        return next(replies), {}
+
+    monkeypatch.setattr(pr_issue_link, "http_json", fake_http_json)
+    slept: list[float] = []
+
+    result = pr_issue_link.release_branch_cut(
+        REPO, "release/1.7.0", "token", sleep=slept.append
+    )
+
+    assert result == expected
+    assert len(seen) == calls
+    assert len(slept) == calls - 1
+    assert seen[0].endswith("/git/ref/heads/release/1.7.0")

@@ -40,9 +40,11 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 
 # An owner or repository name is ASCII, starts alphanumeric, and runs to at
 # most 100 characters. Matching the segment on `\w` instead let PR text name a
@@ -275,24 +277,35 @@ def project_warning(identifier: str, api_key: str) -> list[str]:
     ]
 
 
-def release_branch_cut(repo: str, branch: str, token: str) -> tuple[bool, bool]:
+BRANCH_LOOKUP_DELAYS = (2.0, 8.0)
+
+
+def release_branch_cut(
+    repo: str, branch: str, token: str, sleep: Callable[[float], None] = time.sleep
+) -> tuple[bool, bool]:
     """Return (cut, api_ok) for an exact branch name in `repo`.
 
     The `git/ref` endpoint matches the full name only, so the model-launch
     branches cut as `release/1.6.0-<model>-dev.1` never read as `release/1.6.0`.
+    An unknown answer fails open, so a throttled or failed lookup is retried
+    first: the cut re-runs hundreds of checks at once, which is exactly when
+    the API throttles.
     """
-    status, _ = http_json(
-        f"https://api.github.com/repos/{repo}/git/ref/heads/"
-        + urllib.parse.quote(branch, safe="/"),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-        },
-    )
-    if status == 200:
-        return True, True
-    if status in (404, 410):
-        return False, True
+    for delay in (*BRANCH_LOOKUP_DELAYS, None):
+        status, _ = http_json(
+            f"https://api.github.com/repos/{repo}/git/ref/heads/"
+            + urllib.parse.quote(branch, safe="/"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        if status == 200:
+            return True, True
+        if status in (404, 410):
+            return False, True
+        if delay is not None:
+            sleep(delay)
     return False, False
 
 
