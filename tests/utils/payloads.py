@@ -219,9 +219,9 @@ class HttpCancellationPayload(BasePayload):
             response.raise_for_status()
             deadline = time.monotonic() + self.timeout
             content = ""
-            # Read only the first generated fragment, without buffering a full
-            # response. Closing an unread requests stream closes its connection.
-            for line in response.iter_lines(chunk_size=1):
+            # Keep the stream iterator alive until the explicit response.close().
+            lines = response.iter_lines(chunk_size=1)
+            for line in lines:
                 assert time.monotonic() < deadline, "No content before cancellation"
                 if not line.startswith(b"data:"):
                     continue

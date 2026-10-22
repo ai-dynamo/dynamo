@@ -3,7 +3,6 @@
 
 use super::*;
 
-use crate::admission_gate;
 use crate::engine::AsyncEngineContext;
 use crate::error::DynamoError;
 use crate::metrics::prometheus_names::work_handler;
@@ -111,10 +110,6 @@ impl WorkHandlerMetrics {
             "Total number of requests cancelled by work handler",
             metrics_labels,
         )?;
-
-        // The gate admits on this endpoint's behalf, so expose its family here
-        // too. Idempotent: the gate is process-global and every endpoint asks.
-        admission_gate::register_metrics(endpoint.get_metrics_registry());
 
         Ok(Self::new(
             request_counter,
@@ -720,18 +715,12 @@ where
         let request_context = request.context();
         tracing::trace!("calling generate");
         let worker_operation = lifecycle.start_worker_operation();
-        // Route backend generation through the transport-independent admission
-        // boundary. Admission errors follow the existing generate error path.
         let stream = async {
-            admission_gate::global()
-                .admit(
-                    Some(request_context.as_ref()),
-                    self.segment
-                        .get()
-                        .expect("segment not set")
-                        .generate(request)
-                        .instrument(lifecycle.start(LifecycleStage::RequestDispatch)),
-                )
+            self.segment
+                .get()
+                .expect("segment not set")
+                .generate(request)
+                .instrument(lifecycle.start(LifecycleStage::RequestDispatch))
                 .await
         }
         .instrument(worker_operation.clone())
