@@ -150,21 +150,21 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:862210586c5d0029195be06758c5797aa4f63e237d2308049c00eab94f779b63",
+      "baseline_digest": "sha256:589bc3cfcf9e1a00317d7cc4a9333710c11b6bbbabc23b59ec022aa8b08b4b82",
       "baseline_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
-      "baseline_sbom": "vllm-enterprise-base@86221058-amd64.cdx.json",
+      "baseline_sbom": "vllm-enterprise-base@589bc3cf-amd64.cdx.json",
       "baseline_tag": "1.7.0-cuda13",
-      "from_digest": "sha256:862210586c5d0029195be06758c5797aa4f63e237d2308049c00eab94f779b63",
+      "from_digest": "sha256:589bc3cfcf9e1a00317d7cc4a9333710c11b6bbbabc23b59ec022aa8b08b4b82",
       "from_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
       "from_tag": "1.7.0-cuda13",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:862210586c5d0029195be06758c5797aa4f63e237d2308049c00eab94f779b63",
+      "baseline_digest": "sha256:589bc3cfcf9e1a00317d7cc4a9333710c11b6bbbabc23b59ec022aa8b08b4b82",
       "baseline_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
-      "baseline_sbom": "vllm-enterprise-base@86221058-arm64.cdx.json",
+      "baseline_sbom": "vllm-enterprise-base@589bc3cf-arm64.cdx.json",
       "baseline_tag": "1.7.0-cuda13",
-      "from_digest": "sha256:862210586c5d0029195be06758c5797aa4f63e237d2308049c00eab94f779b63",
+      "from_digest": "sha256:589bc3cfcf9e1a00317d7cc4a9333710c11b6bbbabc23b59ec022aa8b08b4b82",
       "from_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
       "from_tag": "1.7.0-cuda13",
       "platform": "linux/arm64"
@@ -182,6 +182,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-10-19T14:32:52+00:00",
+  "generated_at": "2026-10-22T19:14:35+00:00",
   "schema_version": 2
 }

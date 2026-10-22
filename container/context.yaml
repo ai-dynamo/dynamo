@@ -117,7 +117,7 @@ vllm:
       cuda13.0:
         runtime_image: nvcr.io/nim/nvidia/vllm-enterprise-base
         runtime_image_tag: 1.7.0-cuda13
-        baseline_sbom: vllm-enterprise-base@86221058
+        baseline_sbom: vllm-enterprise-base@589bc3cf
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
